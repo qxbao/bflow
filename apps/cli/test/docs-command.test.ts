@@ -144,7 +144,7 @@ describe("bflow docs commands against a shared Gateway", () => {
     expect(envelope(first.stdout).data.lookup.cache).toEqual({ hit: false, stored: false });
     const configPath = join(repo, ".bflow", "config.yml");
     const text = await readFile(configPath, "utf8");
-    await writeFile(configPath, text.replace(/context7:\n(\s+)enabled: true\n(\s+)required: false/, "context7:\n$1enabled: true\n$2required: false\n$1cache:\n$1  enabled: true\n$1  ttlSeconds: 600"));
+    await writeFile(configPath, text.replace(/context7:\n(\s+)enabled: true\n(\s+)required: false(?:\n\s+cache:\n\s+enabled: false\n\s+ttlSeconds: \d+\n\s+allowAuthenticated: false)?/, "context7:\n$1enabled: true\n$2required: false\n$1cache:\n$1  enabled: true\n$1  ttlSeconds: 600"));
     expect(await readFile(configPath, "utf8")).toContain("ttlSeconds: 600");
     const second = await runCli(["docs", "lookup", "react", "--query", "secret internal wording", "--json"], context);
     expect(envelope(second.stdout).data.lookup.cache).toEqual({ hit: false, stored: true });

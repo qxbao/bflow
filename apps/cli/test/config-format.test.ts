@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "../src/config-format.js";
-import { EnvironmentConfigEnvironmentSchema, EnvironmentRoleConfigSchema } from "../src/environment-config.js";
+import {
+  defaultEnvironmentConfig,
+  EnvironmentConfigEnvironmentSchema,
+  EnvironmentRoleConfigSchema
+} from "../src/environment-config.js";
 
 describe("configuration YAML format", () => {
   it("parses ordinary YAML with comments and renders editable roles before policy and storage", () => {
@@ -95,6 +99,57 @@ describe("configuration YAML format", () => {
   it("does not alter values containing config key text when inserting comments", () => {
     const value = { environment: { roles: [{ role: "developer", cli: "codex", model: "literal projectName: value" }], sdd: { minimumLevel: "lightweight", approvalRequired: true } }, projectName: "projectName: stays data" };
     expect(parseConfigYaml(renderEnvironmentConfigYaml(value))).toEqual(value);
+  });
+
+  it("populates all default values in defaultEnvironmentConfig and documents enums clearly in rendered YAML", () => {
+    const repository = {
+      id: "repo-1234567890abcdef12345678",
+      root: "/workspace/demo",
+      sessionName: "bf-1234567890abcdef1234"
+    };
+    const config = defaultEnvironmentConfig(repository, "full-defaults", new Date("2026-10-18T00:00:00.000Z"), "agy");
+    expect(config.environment).toMatchObject({
+      defaults: { codex: {}, claude: {}, agy: {} },
+      sdd: { minimumLevel: "lightweight", approvalRequired: true },
+      tdd: { policy: "conditional" },
+      verification: { maxIterations: 3, onExhausted: "require_human" },
+      concurrency: { maxConcurrency: 2 },
+      startupTimeoutMs: 300_000,
+      shutdownTimeoutMs: 30_000,
+      allowProviderFallback: false,
+      permissions: {
+        mode: "workspace_auto",
+        isolation: "provider_policy",
+        trustedWorkspace: true
+      },
+      tools: {
+        rtk: { enabled: true, required: false },
+        gitnexus: { enabled: true, required: false },
+        mempalace: { enabled: true, required: false },
+        "chrome-devtools-mcp": { enabled: true, required: false }
+      },
+      context7: {
+        enabled: true,
+        required: false,
+        cache: {
+          enabled: false,
+          ttlSeconds: 3_600,
+          allowAuthenticated: false
+        }
+      },
+      skills: {
+        required: false,
+        requiredSkills: []
+      }
+    });
+    const rendered = renderEnvironmentConfigYaml(config);
+    expect(rendered).toContain("enum: `codex` | `claude` | `agy`");
+    expect(rendered).toContain("enum: `minimal` | `low` | `medium` | `high` | `xhigh` | `max`");
+    expect(rendered).toContain("enum: `restricted` | `workspace_auto` | `unattended_isolated`");
+    expect(rendered).toContain("enum: `provider_policy` | `os_sandbox` | `container`");
+    expect(rendered).toContain("enum: `lightweight` | `full`");
+    expect(rendered).toContain("bflow init --update");
+    expect(parseConfigYaml(rendered)).toEqual(config);
   });
 
   it.each([

@@ -88,6 +88,7 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly projectName?: string | undefined;
   readonly provider?: "claude" | "codex" | "agy" | undefined;
   readonly force: boolean;
+  readonly update?: boolean | undefined;
 }
 
 export interface ConfigMigrateCommandArgs extends GlobalCliFlags {
@@ -401,6 +402,7 @@ export interface InitCommandOutput {
   readonly configPath: string;
   readonly config: BflowRepositoryConfig;
   readonly overwritten: boolean;
+  readonly updated?: boolean | undefined;
 }
 
 export interface HighLevelStepRecord {

@@ -1671,7 +1671,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
     }
 
     case "init": {
-      const booleanFlags = new Set(["--force", "-f", "--yes", "-y", "--json", "-j", "--help", "-h"]);
+      const booleanFlags = new Set(["--force", "-f", "--yes", "-y", "--update", "-u", "--json", "-j", "--help", "-h"]);
       const allowedFlags = new Set([
         "--dir",
         "--config",
@@ -1681,6 +1681,8 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "-f",
         "--yes",
         "-y",
+        "--update",
+        "-u",
         "--json",
         "-j",
         "--help",
@@ -1729,6 +1731,9 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         optRes.value.flags.has("-f") ||
         optRes.value.flags.has("--yes") ||
         optRes.value.flags.has("-y");
+      const update =
+        optRes.value.flags.has("--update") ||
+        optRes.value.flags.has("-u");
 
       const value: InitCommandArgs = {
         command: "init",
@@ -1737,6 +1742,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         projectName,
         provider,
         force,
+        ...(update ? { update: true } : {}),
         json,
         help: false
       };

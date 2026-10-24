@@ -89,4 +89,19 @@ describe("Runtime memory tool action policy", () => {
   it("does not infer RTK authority or a generation requirement without repository policy", () => {
     expect(rtkRequirement(undefined, "developer", "unit-test")).toBeUndefined();
   });
+
+  it("matches RTK requirements for any detected runner profile when cliCommandProfiles is omitted, and filters when specified", () => {
+    const wildcardPolicy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: "repo-1",
+      scope: { kind: "repository", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo" }, digest: "d".repeat(64),
+      requirements: [{ toolId: "rtk", kind: "cli_only", operations: ["pipe"], requiredness: "optional",
+        roles: ["developer", "tester", "qa"], triggers: ["routine_command"] }] });
+    expect(rtkRequirement(wildcardPolicy, "developer", "auto-unit")).toMatchObject({ toolId: "rtk", requiredness: "optional" });
+    expect(rtkRequirement(wildcardPolicy, "qa", "auto-integration")).toMatchObject({ toolId: "rtk", requiredness: "optional" });
+    expect(rtkRequirement(wildcardPolicy, "architect", "auto-unit")).toBeUndefined();
+
+    const scopedPolicy = RepositoryToolPolicySchema.parse({ ...wildcardPolicy, digest: "e".repeat(64),
+      requirements: [{ ...wildcardPolicy.requirements[0]!, cliCommandProfiles: ["unit-test"] }] });
+    expect(rtkRequirement(scopedPolicy, "developer", "unit-test")).toMatchObject({ toolId: "rtk" });
+    expect(rtkRequirement(scopedPolicy, "developer", "auto-unit")).toBeUndefined();
+  });
 });

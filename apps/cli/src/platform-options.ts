@@ -77,7 +77,11 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
   const mcpServices = machineConfig.status === "valid" ? machineConfig.config!.mcpServices : [];
   const skills = await loadMachineSkillCatalog();
   const toolInventory = new Map<string, { executablePath: string; version: string; digest: string }>();
-  const cliRequirements = input?.config.environment.toolPolicy?.requirements.filter(requirement => requirement.kind === "cli_only") ?? [];
+  const effectivePolicy = (() => {
+    if (!input) return undefined;
+    try { return resolveRepositoryToolPolicy(input, platform.machineId); } catch { return input.config.environment.toolPolicy; }
+  })();
+  const cliRequirements = effectivePolicy?.requirements.filter(requirement => requirement.kind === "cli_only") ?? [];
   if (cliRequirements.length && machineConfig.status === "valid") {
     const { defaultToolCatalog, ManagedToolInstaller } = await import(
       new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
@@ -101,14 +105,14 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
         digest: receipt.data.value.executableDigest });
     }
   }
-  const serviceRequirements = input?.config.environment.toolPolicy?.requirements.filter(requirement => requirement.kind !== "cli_only") ?? [];
+  const serviceRequirements = effectivePolicy?.requirements.filter(requirement => requirement.kind !== "cli_only") ?? [];
   const requestedServices = new Set(mcpServices.filter(raw => {
     const parsed = MCPServiceDefinitionSchema.safeParse(raw);
     return parsed.success && serviceRequirements.some(requirement => parsed.data.tool.toolId === skills.canonicalToolId(requirement.toolId) &&
       parsed.data.tool.kind === requirement.kind && (requirement.serviceId === undefined || parsed.data.serviceId === requirement.serviceId) &&
       requirement.operations.every(operation => parsed.data.tool.operations.includes(operation)));
   }).map(raw => (raw as { serviceId: string }).serviceId));
-  if (input?.config.environment.context7?.enabled === true) requestedServices.add(CONTEXT7_SERVICE_ID);
+  if (input && input.config.environment.context7?.enabled !== false) requestedServices.add(CONTEXT7_SERVICE_ID);
   const toolInstaller = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
   const serviceReadiness = new Map<string, { status: "ready" | "blocked" | "missing" | "unknown"; discoveredTools: readonly string[]; reason?: string }>();
   for (const serviceId of requestedServices) {
@@ -184,7 +188,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     throw new Error(`Legacy environment.requiredMcpServices cannot be safely mapped to role operations; migrate each service to environment.toolPolicy with explicit role and operation allowlists (services: ${environment.requiredMcpServices!.join(", ")}).`);
   const toolPolicy = resolveRepositoryToolPolicy(input, deps.context.machineId);
   const serviceReadiness = new Map(deps.context.serviceReadiness ?? []);
-  if (environment.context7?.enabled === true && !serviceReadiness.has(CONTEXT7_SERVICE_ID) && deps.context7Ready !== undefined)
+  if (environment.context7?.enabled !== false && !serviceReadiness.has(CONTEXT7_SERVICE_ID) && deps.context7Ready !== undefined)
     serviceReadiness.set(CONTEXT7_SERVICE_ID, { status: deps.context7Ready ? "ready" : "blocked",
       discoveredTools: deps.context7Ready ? [...CONTEXT7_TOOLS] : [] });
   const toolContext = { ...deps.context, serviceReadiness };
@@ -312,14 +316,81 @@ export function resolveRepositoryToolPolicy(input: EnvironmentCompositionInput, 
     }
     return parsed;
   }
+  const requirements: RoleToolRequirement[] = [];
   const context7 = input.config.environment.context7;
-  if (context7?.enabled !== true) return undefined;
-  const roles = ["specifier", "architect", "planner", "developer", "reviewer", "qa"] as const;
-  const requirement: RoleToolRequirement = { toolId: "context7", kind: "native_remote_mcp", serviceId: CONTEXT7_SERVICE_ID,
-    operations: [...CONTEXT7_TOOLS], requiredness: context7.required ? "required" : "optional", roles: [...roles],
-    triggers: ["external_documentation"] };
-  const base = { schemaVersion: 3 as const, repositoryId: input.repository.id,
-    scope: { kind: "repository" as const, machineId, repositoryId: input.repository.id, workspaceRoot: input.repository.root }, requirements: [requirement] };
+  if (context7?.enabled !== false) {
+    const roles = ["specifier", "architect", "planner", "developer", "reviewer", "qa"] as const;
+    requirements.push({
+      toolId: "context7",
+      kind: "native_remote_mcp",
+      serviceId: CONTEXT7_SERVICE_ID,
+      operations: [...CONTEXT7_TOOLS],
+      requiredness: context7?.required ? "required" : "optional",
+      roles: [...roles],
+      triggers: ["external_documentation"]
+    });
+  }
+  const tools = input.config.environment.tools;
+  if (tools?.rtk?.enabled !== false) {
+    requirements.push({
+      toolId: "rtk",
+      kind: "cli_only",
+      operations: ["pipe"],
+      ...(tools?.rtk?.cliCommandProfiles?.length ? { cliCommandProfiles: [...tools.rtk.cliCommandProfiles] } : {}),
+      requiredness: tools?.rtk?.required ? "required" : "optional",
+      roles: ["developer", "reviewer", "tester", "qa"],
+      triggers: ["routine_command"]
+    });
+  }
+  if (tools?.gitnexus?.enabled !== false) {
+    requirements.push({
+      toolId: "gitnexus",
+      kind: "stdio_mcp",
+      operations: ["query", "context", "impact"],
+      requiredness: tools?.gitnexus?.required ? "required" : "optional",
+      roles: ["architect", "developer", "reviewer", "security"],
+      triggers: ["code_relationships"]
+    });
+  }
+  if (tools?.mempalace?.enabled !== false) {
+    const defaultMempalaceServiceId = `mempalace-${createHash("sha256").update(machineId).digest("hex").slice(0, 24)}`;
+    requirements.push({
+      toolId: "mempalace",
+      kind: "stdio_mcp",
+      serviceId: tools?.mempalace?.serviceId ?? defaultMempalaceServiceId,
+      operations: ["mempalace_search"],
+      requiredness: tools?.mempalace?.required ? "required" : "optional",
+      roles: ["developer", "qa", "security"],
+      triggers: ["prior_context"],
+      memoryScope: {
+        wing: tools?.mempalace?.wing ?? input.repository.id,
+        repositoryId: input.repository.id,
+        access: "read_only"
+      }
+    });
+  }
+  if (tools?.["chrome-devtools-mcp"]?.enabled !== false) {
+    requirements.push({
+      toolId: "chrome-devtools-mcp",
+      kind: "stdio_mcp",
+      operations: ["list_pages", "new_page", "navigate_page"],
+      requiredness: tools?.["chrome-devtools-mcp"]?.required ? "required" : "optional",
+      roles: ["tester", "qa"],
+      triggers: ["browser_inspection"]
+    });
+  }
+  if (requirements.length === 0) return undefined;
+  const base = {
+    schemaVersion: 3 as const,
+    repositoryId: input.repository.id,
+    scope: {
+      kind: "repository" as const,
+      machineId,
+      repositoryId: input.repository.id,
+      workspaceRoot: input.repository.root
+    },
+    requirements
+  };
   return RepositoryToolPolicySchema.parse({ ...base, digest: canonicalDigest(base) });
 }
 
@@ -334,7 +405,10 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
       throw new Error("MemPalace requires an explicit repository-bound read-only wing and the mempalace_search operation; configure memoryScope or remove the requirement.");
   }
   const machineServices = (context.mcpServices ?? []).map(service => MCPServiceDefinitionSchema.parse(service));
-  for (const requirement of policy.requirements) for (const role of requirement.roles) {
+  const orderedRequirements = [...policy.requirements].sort(
+    (a, b) => (a.requiredness === "required" ? 0 : 1) - (b.requiredness === "required" ? 0 : 1)
+  );
+  for (const requirement of orderedRequirements) for (const role of requirement.roles) {
     if (role === "conversation") throw new Error("Conversation role cannot receive a tool grant");
     const canonicalToolId = context.skills.canonicalToolId(requirement.toolId);
     let installed: boolean | null = false;

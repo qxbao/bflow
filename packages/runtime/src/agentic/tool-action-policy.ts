@@ -26,7 +26,7 @@ export function nextToolActionInvocationId(baseId: string, existing: readonly To
 export function rtkRequirement(policy: RepositoryToolPolicy | undefined, role: AgentRole, commandId: string) {
   const matches = policy?.requirements.filter(item => item.toolId === "rtk" && item.kind === "cli_only" &&
     item.roles.includes(role) && item.triggers.includes("routine_command") && item.operations.includes("pipe") &&
-    item.cliCommandProfiles?.includes(commandId)) ?? [];
+    (item.cliCommandProfiles === undefined || item.cliCommandProfiles.includes(commandId))) ?? [];
   return matches.length === 1 ? matches[0] : undefined;
 }
 

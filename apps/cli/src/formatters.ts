@@ -459,7 +459,9 @@ function formatRunPage(page: Page<WorkflowRunSnapshot>, useColor = false): strin
 function formatInitOutput(output: InitCommandOutput, useColor = false): string {
   const lines: string[] = [];
   const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
-  if (output.overwritten) {
+  if (output.updated) {
+    lines.push(`${okMarker} bflow repository configuration (updated) at:`);
+  } else if (output.overwritten) {
     lines.push(`${okMarker} bflow repository configuration (overwritten) at:`);
   } else {
     // overwritten: false is either creation OR preservation, cannot say created

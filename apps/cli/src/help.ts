@@ -63,12 +63,14 @@ Options:
   --config <path>       Custom configuration file path (default: .bflow/config.yml)
   --name <name>         Project name
   --provider <kind>     Role provider: claude, codex, or agy (default: codex)
-  -f, --force, -y, --yes  Explicitly replace existing configuration
+  -f, --force, -y, --yes  Explicitly replace existing configuration with fresh defaults
+  -u, --update          Rebuild .bflow/config.yml with fresh comments and new default fields while preserving existing values
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for init command
 
 Examples:
   bflow init
+  bflow init --update
   bflow init --name my-project
   bflow init --provider claude
   bflow init --dir ./subproject --force`;

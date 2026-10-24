@@ -105,7 +105,11 @@ async function probeSelectedCodexProfile(profileName: string, environment: NodeJ
   }
   const checked = await runner.run({ executable: "codex", args: ["login", "status"], cwd,
     env: { ...namedSessionEnvironment("doctor", environment), ...profile.environment }, timeoutMs: 5000 });
-  return { exitCode: checked.exitCode ?? 1, stdout: checked.stdout, stderr: checked.stderr };
+  return {
+    exitCode: checked.exitCode ?? 1,
+    stdout: "",
+    stderr: checked.exitCode === 0 ? "" : "Provider 'codex' is not authenticated in the selected profile. Run codex login in this profile before bflow up."
+  };
 }
 
 function cleanDetailedCheck(check: DoctorDetailedCheck): DoctorDetailedCheck {
@@ -715,7 +719,11 @@ export async function runDoctorDiagnostics(
             role["profile-name"] === undefined && defaultProfileName === undefined);
           if (needsAmbientLogin) {
             const ambient = await runner.run({ executable: "codex", args: ["login", "status"], cwd: repository.root, env, timeoutMs: 5000 });
-            profileResults.push({ exitCode: ambient.exitCode ?? 1, stdout: ambient.stdout, stderr: ambient.stderr });
+            profileResults.push({
+              exitCode: ambient.exitCode ?? 1,
+              stdout: "",
+              stderr: ambient.exitCode === 0 ? "" : "Provider 'codex' is not authenticated. Run codex login in this profile before bflow up."
+            });
           }
           const authRes = { exitCode: profileResults.every(result => result.exitCode === 0) ? 0 : 1,
             stdout: profileResults.filter(result => result.exitCode === 0).map(result => result.stdout).join(" "),
@@ -1076,7 +1084,7 @@ export async function runDoctorDiagnostics(
   });
 
   // context7: the shared documentation service. Required: failures fail the doctor. Optional: failures are warnings (degraded).
-  if (config?.environment?.context7?.enabled === true || dependencies?.context7Health !== undefined) {
+  if ((config?.environment && config.environment.context7?.enabled !== false) || dependencies?.context7Health !== undefined) {
     const required = config?.environment?.context7?.required === true;
     try {
       const { collectContext7Health } = await import("./docs-command.js");
@@ -1230,9 +1238,14 @@ export async function runDoctorDiagnostics(
         remediation: "Correct the strict environment.toolPolicy schema, digest and repository scope before startup." });
     }
   } else {
+    const hasLegacyWithoutPolicy =
+      (config?.environment?.requiredTools?.length ?? 0) > 0 ||
+      (config?.environment?.requiredMcpServices?.length ?? 0) > 0;
     for (const toolId of ["rtk", "gitnexus", "chrome-devtools-mcp", "mempalace"] as const) {
       const visible = toolChecks.find(check => check.checkId === `tool-${toolId}`);
       const foundOnPath = visible?.status === "pass";
+      const explicitlyDisabled = config?.environment?.tools?.[toolId]?.enabled === false;
+      const allowedByDefault = Boolean(config?.environment) && !hasLegacyWithoutPolicy && !explicitlyDisabled;
       const addPolicyState = (stage: "installed" | "allowed" | "granted" | "ready", status: DoctorCheckStatus, reason: string, remediation: string) =>
         toolChecks.push({ checkId: `tool-policy-${toolId}-repository-${stage}`, group: "tools",
           component: `${toolId}:repository:${stage}`, status, detected_version: visible?.detected_version ?? null, reason, remediation });
@@ -1240,12 +1253,19 @@ export async function runDoctorDiagnostics(
         foundOnPath ? `'${toolId}' is visible on PATH, but this probe does not verify its approved managed executable identity.` :
           `No installation of '${toolId}' was observed by the CLI probe.`,
         "Use 'bflow tool status' and the approved machine setup receipt to inspect installation identity.");
-      addPolicyState("allowed", "warning", `Repository tool policy does not allow '${toolId}'.`,
-        "Add an explicit role and operation requirement under environment.toolPolicy to allow this tool.");
-      addPolicyState("granted", "skipped", `No Runtime grant exists for '${toolId}' because the repository has no tool policy.`,
-        "Resolve an explicit repository policy before starting roles that need this tool.");
-      addPolicyState("ready", "skipped", `'${toolId}' is not ready for this repository because it has no resolved tool grant.`,
-        "Resolve the repository grant and verify the machine tool or Gateway service before use.");
+      addPolicyState("allowed", allowedByDefault ? "pass" : "warning",
+        allowedByDefault
+          ? `Repository tool policy allows '${toolId}' by default.`
+          : explicitlyDisabled
+            ? `Repository configuration explicitly disables '${toolId}' (environment.tools.${toolId}.enabled: false).`
+            : `Repository tool policy does not allow '${toolId}'.`,
+        allowedByDefault
+          ? ""
+          : "Enable the tool under environment.tools or add an explicit role and operation requirement under environment.toolPolicy.");
+      addPolicyState("granted", "skipped", `No explicit Runtime grant overrides exist for '${toolId}'; default optional grants are resolved at startup when machine inventory is ready.`,
+        "Verify the machine tool or Gateway service with 'bflow setup --check' or 'bflow tool status'.");
+      addPolicyState("ready", "skipped", `'${toolId}' readiness is evaluated against verified machine inventory and Gateway services during startup.`,
+        "Verify the machine tool or Gateway service before use.");
     }
   }
 

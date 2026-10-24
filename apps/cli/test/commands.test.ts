@@ -235,6 +235,82 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(parsed.projectName).toBe("changed");
     });
 
+    it("updates existing configuration with --update by saving custom values, deleting old file, upserting onto fresh defaults, and resetting comments", async () => {
+      await runCli(["init", "--name", "custom-project", "--provider", "agy"], { cwd: tempDir });
+      const configPath = join(tempDir, ".bflow", "config.yml");
+      const rawBefore = parseConfigYaml(await readFile(configPath, "utf8")) as Record<string, any>;
+
+      // Simulate an older or hand-edited config missing newer default sections (tools, permissions, skills, defaults)
+      // and without comments, while having custom role models, sdd level, and disabled rtk.
+      delete rawBefore.environment.permissions;
+      delete rawBefore.environment.skills;
+      delete rawBefore.environment.defaults;
+      rawBefore.environment.sdd = { minimumLevel: "full", approvalRequired: false };
+      rawBefore.environment.verification = { maxIterations: 5, onExhausted: "require_human" };
+      rawBefore.environment.tools = { rtk: { enabled: false, required: false } };
+      rawBefore.environment.roles = rawBefore.environment.roles.map((r: any) =>
+        r.role === "coordinator"
+          ? { ...r, model: "gemini-3.1-pro-high", "profile-name": "lead-profile" }
+          : r.role === "conversation"
+            ? { ...r, model: "gemini-3-flash-low" }
+            : r
+      );
+      await writeFile(configPath, "# stripped old comment\n" + stringifyConfigYaml(rawBefore), "utf8");
+
+      const updateRes = await runCli(["init", "--update", "--json"], { cwd: tempDir });
+      expect(updateRes.exitCode).toBe(0);
+      expect(updateRes.ok).toBe(true);
+      const envelope = JSON.parse(updateRes.stdout);
+      expect(envelope.data.updated).toBe(true);
+      expect(envelope.data.overwritten).toBe(true);
+
+      const contentAfter = await readFile(configPath, "utf8");
+      expect(contentAfter).not.toContain("# stripped old comment");
+      expect(contentAfter).toContain("# BFLOW REPOSITORY CONFIGURATION (.bflow/config.yml)");
+      expect(contentAfter).toContain("enum: `codex` | `claude` | `agy`");
+
+      const parsedAfter = parseConfigYaml(contentAfter) as Record<string, any>;
+      expect(parsedAfter.projectName).toBe("custom-project");
+      expect(parsedAfter.environment.sdd).toEqual({ minimumLevel: "full", approvalRequired: false });
+      expect(parsedAfter.environment.verification).toEqual({ maxIterations: 5, onExhausted: "require_human" });
+      // Preserved custom disabled tool while populating missing default tools
+      expect(parsedAfter.environment.tools).toEqual({
+        rtk: { enabled: false, required: false },
+        gitnexus: { enabled: true, required: false },
+        mempalace: { enabled: true, required: false },
+        "chrome-devtools-mcp": { enabled: true, required: false }
+      });
+      // Restored missing default sections
+      expect(parsedAfter.environment.permissions).toEqual({
+        mode: "workspace_auto",
+        isolation: "provider_policy",
+        trustedWorkspace: true
+      });
+      expect(parsedAfter.environment.skills).toEqual({
+        required: false,
+        requiredSkills: []
+      });
+      expect(parsedAfter.environment.defaults).toEqual({
+        codex: {},
+        claude: {},
+        agy: {}
+      });
+      // Preserved custom role models and profile-name
+      const coordinator = parsedAfter.environment.roles.find((r: any) => r.role === "coordinator");
+      expect(coordinator).toMatchObject({
+        role: "coordinator",
+        cli: "agy",
+        model: "gemini-3.1-pro-high",
+        "profile-name": "lead-profile"
+      });
+      const conversation = parsedAfter.environment.roles.find((r: any) => r.role === "conversation");
+      expect(conversation).toMatchObject({
+        role: "conversation",
+        cli: "agy",
+        model: "gemini-3-flash-low"
+      });
+    });
+
     it("creates configuration in custom subproject directory with custom name", async () => {
       await mkdir(join(tempDir, "services", "auth"), { recursive: true });
       const result = await runCli(

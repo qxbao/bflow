@@ -434,7 +434,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     const grants = (configuration.platform?.toolGrants ?? []).map(item => ResolvedToolGrantSchema.parse(item)).filter(item =>
       item.toolId === "rtk" && item.kind === "cli_only" && item.role === input.role && item.policyDigest === policy!.digest &&
-      item.operations.includes("pipe") && item.cliCommandProfiles?.includes(input.commandId) && item.triggers.includes("routine_command") &&
+      item.operations.includes("pipe") && (item.cliCommandProfiles === undefined || item.cliCommandProfiles.includes(input.commandId)) &&
+      item.triggers.includes("routine_command") &&
       item.scope.kind === "session" && item.scope.sessionId === configuration.sessionId && item.scope.repositoryId === configuration.platform!.repositoryId &&
       item.scope.workspaceRoot === configuration.repositoryPath);
     const grant = grants.length === 1 ? grants[0] : undefined;

@@ -56,7 +56,13 @@ export async function collectContext7Health(input: {
 }): Promise<Context7Health> {
   const deps = input.deps ?? {};
   const where = deps.stateDirectory !== undefined && deps.machineId !== undefined ? { stateDirectory: deps.stateDirectory, machineId: deps.machineId } : await machine();
-  return evaluateContext7Health({ context7: input.config?.environment.context7, roles: input.config?.environment.roles ?? [],
+  const effectiveContext7 = input.config?.environment
+    ? {
+        enabled: input.config.environment.context7?.enabled !== false,
+        required: input.config.environment.context7?.required === true
+      }
+    : undefined;
+  return evaluateContext7Health({ context7: effectiveContext7, roles: input.config?.environment.roles ?? [],
     grantedRoles: deps.grantedRoles ?? await grantedRoles().catch(() => []), stateDirectory: where.stateDirectory, machineId: where.machineId,
     repository: input.repository, env: input.env, ...(input.probe !== undefined ? { probe: input.probe } : {}),
     ...(input.role !== undefined ? { role: input.role } : {}), ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),

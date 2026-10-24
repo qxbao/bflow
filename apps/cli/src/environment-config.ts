@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { lstatSync } from "node:fs";
-import { mkdir, open, readFile } from "node:fs/promises";
+import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema } from "@bflow/contracts";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, resolveReadableConfigPath } from "./config.js";
@@ -24,6 +24,32 @@ export const EnvironmentProfileDefaultsSchema = z.object({
   claude: z.object({ "profile-name": EnvironmentProfileNameSchema.optional() }).strict().optional(),
   agy: z.object({ "profile-name": EnvironmentProfileNameSchema.optional() }).strict().optional()
 }).strict();
+
+export const EnvironmentIntegratedToolToggleSchema = z.object({
+  enabled: z.boolean().optional(),
+  required: z.boolean().optional()
+}).strict();
+
+export const EnvironmentRtkToolConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  required: z.boolean().optional(),
+  cliCommandProfiles: z.array(z.string().trim().min(1)).optional()
+}).strict();
+
+export const EnvironmentMempalaceToolConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  required: z.boolean().optional(),
+  wing: z.string().trim().min(1).optional(),
+  serviceId: z.string().trim().min(1).optional()
+}).strict();
+
+export const EnvironmentToolsConfigSchema = z.object({
+  rtk: EnvironmentRtkToolConfigSchema.optional(),
+  gitnexus: EnvironmentIntegratedToolToggleSchema.optional(),
+  mempalace: EnvironmentMempalaceToolConfigSchema.optional(),
+  "chrome-devtools-mcp": EnvironmentIntegratedToolToggleSchema.optional()
+}).strict();
+export type EnvironmentToolsConfig = z.infer<typeof EnvironmentToolsConfigSchema>;
 
 export const EnvironmentRoleConfigSchema = z
   .object({
@@ -91,8 +117,9 @@ export const EnvironmentConfigEnvironmentSchema = z
       .optional(),
     requiredMcpServices: z.array(z.string().trim().min(1)).optional(),
     requiredTools: z.array(z.string().trim().min(1)).optional(),
+    tools: EnvironmentToolsConfigSchema.optional(),
     toolPolicy: RepositoryToolPolicySchema.optional(),
-    /** Context7 documentation lookups through the shared Gateway. Absent means off: nothing leaves the machine unless a repository opts in. */
+    /** Context7 documentation lookups through the shared Gateway. Enabled by default unless explicitly set to enabled: false. */
     context7: z
       .object({
         enabled: z.boolean().optional(),
@@ -150,15 +177,148 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
   return {
     ...createDefaultRepositoryConfig({ projectName: name ?? basename(repository.root), runtimeId: `runtime-${repository.id.slice(0, 20)}`, createdAt: now.toISOString() }),
     environment: {
-      repositoryId: repository.id, workspaceRoot: repository.root, sessionName: repository.sessionName,
+      repositoryId: repository.id,
+      workspaceRoot: repository.root,
+      sessionName: repository.sessionName,
       herdrBinary: "herdr",
-      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "developer", "reviewer", "qa"].map((role) => ({ role: AgentRoleSchema.parse(role), cli: provider, required: role !== "developer" })),
-      sdd: { minimumLevel: "lightweight", approvalRequired: true }, tdd: { policy: "conditional" },
-      verification: { maxIterations: 3, onExhausted: "require_human" }, concurrency: { maxConcurrency: 2 },
-      startupTimeoutMs: 300_000, shutdownTimeoutMs: 30_000,
-      context7: { enabled: true, required: false }
+      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "developer", "reviewer", "qa"].map((role) => ({
+        role: AgentRoleSchema.parse(role),
+        cli: provider,
+        required: role !== "developer"
+      })),
+      defaults: {
+        codex: {},
+        claude: {},
+        agy: {}
+      },
+      sdd: { minimumLevel: "lightweight", approvalRequired: true },
+      tdd: { policy: "conditional" },
+      verification: { maxIterations: 3, onExhausted: "require_human" },
+      concurrency: { maxConcurrency: 2 },
+      startupTimeoutMs: 300_000,
+      shutdownTimeoutMs: 30_000,
+      allowProviderFallback: false,
+      permissions: {
+        mode: "workspace_auto",
+        isolation: "provider_policy",
+        trustedWorkspace: true
+      },
+      tools: {
+        rtk: { enabled: true, required: false },
+        gitnexus: { enabled: true, required: false },
+        mempalace: { enabled: true, required: false },
+        "chrome-devtools-mcp": { enabled: true, required: false }
+      },
+      context7: {
+        enabled: true,
+        required: false,
+        cache: {
+          enabled: false,
+          ttlSeconds: 3_600,
+          allowAuthenticated: false
+        }
+      },
+      skills: {
+        required: false,
+        requiredSkills: []
+      }
     }
   };
+}
+
+export function upsertEnvironmentConfig(
+  base: EnvironmentConfig,
+  saved: EnvironmentConfig,
+  options?: {
+    readonly projectName?: string | undefined;
+    readonly provider?: EnvironmentProvider | undefined;
+  }
+): EnvironmentConfig {
+  const baseEnv = base.environment;
+  const savedEnv = saved.environment;
+  const baseRoleNames = new Set(baseEnv.roles.map((r) => r.role));
+  const mergedRoles: EnvironmentRoleConfig[] = [
+    ...baseEnv.roles.map((baseRole) => {
+      const savedRole = savedEnv.roles.find((r) => r.role === baseRole.role);
+      if (!savedRole) return baseRole;
+      const cli = options?.provider ?? savedRole.cli;
+      const mergedRole: Record<string, unknown> = {
+        ...baseRole,
+        ...savedRole,
+        cli
+      };
+      if (cli === "agy") delete mergedRole["effort"];
+      return EnvironmentRoleConfigSchema.parse(mergedRole);
+    }),
+    ...savedEnv.roles
+      .filter((savedRole) => !baseRoleNames.has(savedRole.role))
+      .map((savedRole) => {
+        const cli = options?.provider ?? savedRole.cli;
+        const mergedRole: Record<string, unknown> = {
+          ...savedRole,
+          cli
+        };
+        if (cli === "agy") delete mergedRole["effort"];
+        return EnvironmentRoleConfigSchema.parse(mergedRole);
+      })
+  ];
+
+  const mergedEnv: z.infer<typeof EnvironmentConfigEnvironmentSchema> = {
+    ...baseEnv,
+    ...savedEnv,
+    repositoryId: baseEnv.repositoryId,
+    workspaceRoot: baseEnv.workspaceRoot,
+    sessionName: baseEnv.sessionName,
+    herdrBinary: savedEnv.herdrBinary || baseEnv.herdrBinary,
+    roles: mergedRoles,
+    defaults: {
+      codex: { ...baseEnv.defaults?.codex, ...savedEnv.defaults?.codex },
+      claude: { ...baseEnv.defaults?.claude, ...savedEnv.defaults?.claude },
+      agy: { ...baseEnv.defaults?.agy, ...savedEnv.defaults?.agy }
+    },
+    sdd: { ...baseEnv.sdd, ...savedEnv.sdd },
+    tdd: { ...baseEnv.tdd, ...savedEnv.tdd },
+    verification: { ...baseEnv.verification, ...savedEnv.verification },
+    concurrency: { ...baseEnv.concurrency, ...savedEnv.concurrency },
+    startupTimeoutMs: savedEnv.startupTimeoutMs ?? baseEnv.startupTimeoutMs,
+    shutdownTimeoutMs: savedEnv.shutdownTimeoutMs ?? baseEnv.shutdownTimeoutMs,
+    allowProviderFallback: savedEnv.allowProviderFallback ?? baseEnv.allowProviderFallback,
+    permissions: {
+      ...baseEnv.permissions,
+      ...savedEnv.permissions
+    },
+    tools: {
+      rtk: { ...baseEnv.tools?.rtk, ...savedEnv.tools?.rtk },
+      gitnexus: { ...baseEnv.tools?.gitnexus, ...savedEnv.tools?.gitnexus },
+      mempalace: { ...baseEnv.tools?.mempalace, ...savedEnv.tools?.mempalace },
+      "chrome-devtools-mcp": { ...baseEnv.tools?.["chrome-devtools-mcp"], ...savedEnv.tools?.["chrome-devtools-mcp"] }
+    },
+    context7: {
+      ...baseEnv.context7,
+      ...savedEnv.context7,
+      cache: {
+        ...baseEnv.context7?.cache,
+        ...savedEnv.context7?.cache
+      }
+    },
+    skills: {
+      ...baseEnv.skills,
+      ...savedEnv.skills
+    }
+  };
+
+  return EnvironmentConfigSchema.parse({
+    schemaVersion: base.schemaVersion,
+    projectName: options?.projectName ?? (saved.projectName || base.projectName),
+    runtimeId: saved.runtimeId || base.runtimeId,
+    createdAt: saved.createdAt || base.createdAt,
+    storage: {
+      ...base.storage,
+      ...saved.storage
+    },
+    defaultWorkflow: saved.defaultWorkflow ?? base.defaultWorkflow,
+    environment: mergedEnv
+  });
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -209,8 +369,8 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
 
 export async function initializeEnvironmentConfig(options: {
   readonly cwd: string; readonly dir?: string | undefined; readonly configPath?: string | undefined;
-  readonly projectName?: string | undefined; readonly force?: boolean | undefined; readonly clock?: (() => Date) | undefined;
-  readonly provider?: EnvironmentProvider | undefined;
+  readonly projectName?: string | undefined; readonly force?: boolean | undefined; readonly update?: boolean | undefined;
+  readonly clock?: (() => Date) | undefined; readonly provider?: EnvironmentProvider | undefined;
 }): Promise<InitCommandOutput> {
   const repository = await identifyRepository(resolve(options.cwd, options.dir ?? "."));
   const configPath = resolve(repository.root, ENVIRONMENT_CONFIG_PATH);
@@ -242,6 +402,35 @@ export async function initializeEnvironmentConfig(options: {
     try { await ignore.writeFile(`${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`); } finally { await ignore.close(); }
   }
   const config = defaultEnvironmentConfig(repository, options.projectName, options.clock?.(), options.provider);
+  if (options.update) {
+    let mergedConfig = config;
+    if (configExists) {
+      // 1. Lưu tạm các giá trị config hiện tại trong bộ nhớ (validate trước khi xoá).
+      const savedBase = await loadRepositoryConfig(configPath);
+      if (!savedBase.ok) throw new Error(`Cannot update invalid configuration: ${savedBase.error.message}`);
+      const raw = record(parseConfigYaml(await readFile(configPath, "utf8")));
+      const rawEnv = record(raw["environment"]);
+      const savedConfig = EnvironmentConfigSchema.parse({
+        ...savedBase.value,
+        environment: {
+          ...rawEnv,
+          repositoryId: repository.id,
+          workspaceRoot: repository.root,
+          sessionName: repository.sessionName
+        }
+      });
+      // 2. Xoá file config cũ đi.
+      await unlink(configPath);
+      // 3. Upsert giá trị cũ vào cấu trúc default mới (kèm comment và các trường mới).
+      mergedConfig = upsertEnvironmentConfig(config, savedConfig, {
+        projectName: options.projectName,
+        provider: options.provider
+      });
+    }
+    const file = await open(configPath, "wx", 0o600);
+    try { await file.writeFile(renderEnvironmentConfigYaml(mergedConfig)); } finally { await file.close(); }
+    return { configPath, config: mergedConfig, overwritten: configExists, updated: true };
+  }
   if (options.force) {
     const existed = configExists;
     const file = await open(configPath, "w", 0o600);
@@ -264,6 +453,7 @@ export async function ensureEnvironmentInitialized(
   targetDir: string,
   options?: {
     readonly force?: boolean | undefined;
+    readonly update?: boolean | undefined;
     readonly dir?: string | undefined;
     readonly configPath?: string | undefined;
     readonly projectName?: string | undefined;
@@ -278,6 +468,7 @@ export async function ensureEnvironmentInitialized(
     projectName: options?.projectName,
     provider: options?.provider,
     force: options?.force,
+    update: options?.update,
     clock: options?.clock
   });
 }

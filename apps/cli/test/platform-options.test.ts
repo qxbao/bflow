@@ -426,7 +426,17 @@ describe("Context7 role grants", () => {
   });
 
   it("is on in a repository created by init, as an optional service", () => {
-    expect(base.config.environment.context7).toEqual({ enabled: true, required: false });
+    expect(base.config.environment?.context7).toEqual({
+      enabled: true,
+      required: false,
+      cache: { enabled: false, ttlSeconds: 3_600, allowAuthenticated: false }
+    });
+    expect(base.config.environment?.tools).toEqual({
+      rtk: { enabled: true, required: false },
+      gitnexus: { enabled: true, required: false },
+      mempalace: { enabled: true, required: false },
+      "chrome-devtools-mcp": { enabled: true, required: false }
+    });
   });
 
   it("grants the catalog ID and exact service operations only to policy roles", async () => {
@@ -470,5 +480,50 @@ describe("Context7 role grants", () => {
       expect(options.roles.every(role => role.mcpServiceIds.length === 0)).toBe(true);
       expect(warnings.some(message => /skipped because tool .* has no approved grant/i.test(message))).toBe(true);
     }
+  });
+
+  it("allows all integrated tools by default when omitted from config, and disables only those explicitly set to enabled: false", async () => {
+    const omittedConfig = configure(environment => {
+      delete environment.toolPolicy;
+      delete environment.tools;
+      delete environment.context7;
+    });
+    const defaultPolicy = resolveRepositoryToolPolicy(omittedConfig, context.machineId);
+    expect(defaultPolicy?.requirements.map(item => item.toolId)).toEqual([
+      "context7",
+      "rtk",
+      "gitnexus",
+      "mempalace",
+      "chrome-devtools-mcp"
+    ]);
+    expect(defaultPolicy?.requirements.every(item => item.requiredness === "optional")).toBe(true);
+
+    const selectiveDisable = configure(environment => {
+      delete environment.toolPolicy;
+      environment.context7 = { enabled: false };
+      environment.tools = {
+        rtk: { enabled: false },
+        gitnexus: { enabled: true, required: true },
+        mempalace: { enabled: false },
+        "chrome-devtools-mcp": { enabled: true, required: false }
+      };
+    });
+    const selectivePolicy = resolveRepositoryToolPolicy(selectiveDisable, context.machineId);
+    expect(selectivePolicy?.requirements.map(item => ({ toolId: item.toolId, requiredness: item.requiredness }))).toEqual([
+      { toolId: "gitnexus", requiredness: "required" },
+      { toolId: "chrome-devtools-mcp", requiredness: "optional" }
+    ]);
+
+    const allDisabled = configure(environment => {
+      delete environment.toolPolicy;
+      environment.context7 = { enabled: false };
+      environment.tools = {
+        rtk: { enabled: false },
+        gitnexus: { enabled: false },
+        mempalace: { enabled: false },
+        "chrome-devtools-mcp": { enabled: false }
+      };
+    });
+    expect(resolveRepositoryToolPolicy(allDisabled, context.machineId)).toBeUndefined();
   });
 });

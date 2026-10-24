@@ -341,6 +341,18 @@ describe("CLI Argument Parser - parseCliArgs", () => {
       if (resJ.ok) {
         expect((resJ.value as InitCommandArgs).json).toBe(true);
       }
+
+      const resUpdate = parseCliArgs(["init", "--update"]);
+      expect(resUpdate.ok).toBe(true);
+      if (resUpdate.ok) {
+        expect((resUpdate.value as InitCommandArgs).update).toBe(true);
+      }
+
+      const resU = parseCliArgs(["init", "-u"]);
+      expect(resU.ok).toBe(true);
+      if (resU.ok) {
+        expect((resU.value as InitCommandArgs).update).toBe(true);
+      }
     });
 
     it("parses options using --flag=value syntax", () => {

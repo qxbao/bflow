@@ -124,14 +124,16 @@ export type { RepositoryIdentity } from "./repository.js";
 export {
   readEnvironmentConfig,
   defaultEnvironmentConfig,
+  upsertEnvironmentConfig,
   ENVIRONMENT_CONFIG_PATH,
   EnvironmentProviderSchema,
   DEFAULT_PROVIDER_BY_CLI,
   EnvironmentRoleConfigSchema,
+  EnvironmentToolsConfigSchema,
   EnvironmentConfigEnvironmentSchema,
   EnvironmentConfigSchema
 } from "./environment-config.js";
-export type { EnvironmentConfig, EnvironmentProvider, EnvironmentRoleConfig } from "./environment-config.js";
+export type { EnvironmentConfig, EnvironmentProvider, EnvironmentRoleConfig, EnvironmentToolsConfig } from "./environment-config.js";
 export {
   executeSetupCommand,
   issueSetupApproval,

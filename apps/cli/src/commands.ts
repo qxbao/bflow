@@ -277,6 +277,7 @@ async function executeCommandWithProgress(
       ...(parsed.projectName !== undefined ? { projectName: parsed.projectName } : {}),
       ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
       force: parsed.force,
+      ...(parsed.update !== undefined ? { update: parsed.update } : {}),
       ...(context?.clock !== undefined ? { clock: context.clock } : {}),
       ...(context?.confirmOverwrite !== undefined ? { confirmOverwrite: context.confirmOverwrite } : {})
     });

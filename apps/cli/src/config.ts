@@ -372,6 +372,7 @@ export async function initRepositoryConfig(options: {
   readonly projectName?: string | undefined;
   readonly provider?: "claude" | "codex" | "agy" | undefined;
   readonly force: boolean;
+  readonly update?: boolean | undefined;
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
 }): Promise<OperationResult<InitCommandOutput>> {
@@ -381,6 +382,7 @@ export async function initRepositoryConfig(options: {
       ok: true,
       value: await ensureEnvironmentInitialized(targetDir, {
         force: options?.force,
+        update: options?.update,
         configPath: options?.configPath,
         projectName: options?.projectName,
         provider: options?.provider,

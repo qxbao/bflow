@@ -93,9 +93,9 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     purpose: "Initialize bflow repository configuration and default workflow definition at the repository root.",
     reusedEngines: ["RepositoryConfigService", "DefaultWorkflowDefinition"],
     requiredFlags: [],
-    optionalFlags: ["--dir <path>", "--config <path>", "--name <name>", "--provider <claude|codex>", "-f, --force", "-y, --yes", "-j, --json", "-h, --help"],
+    optionalFlags: ["--dir <path>", "--config <path>", "--name <name>", "--provider <claude|codex|agy>", "-f, --force", "-y, --yes", "-u, --update", "-j, --json", "-h, --help"],
     exitCodes: COMMON_EXIT_CODES,
-    idempotencyAndRetry: "Idempotent. Re-running without --force verifies existing configuration without modifying it.",
+    idempotencyAndRetry: "Idempotent. Re-running without --force or --update verifies existing configuration without modifying it.",
     permissionRequirements: "Requires filesystem write access to the repository directory.",
     skills: ["using-bflow"]
   },
