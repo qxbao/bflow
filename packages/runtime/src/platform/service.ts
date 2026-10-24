@@ -210,11 +210,14 @@ async function checkToolPolicy(identity: PlatformSessionIdentity, requirement: R
       grant.scope.repositoryId === identity.repositoryId && grant.scope.workspaceRoot === identity.workspaceRoot;
     const operationsWithinPolicy = grant.operations.every(operation => expected.operations.includes(operation));
     const operationsComplete = expected.requiredness === "optional" || expected.operations.every(operation => grant.operations.includes(operation));
+    const serviceMatches = expected.kind === "cli_only"
+      ? expected.serviceId === undefined && grant.serviceId === undefined
+      : expected.serviceId === undefined ? grant.serviceId !== undefined : grant.serviceId === expected.serviceId;
     const exactAuthority = operationsWithinPolicy && operationsComplete &&
       grant.triggers.every(trigger => expected.triggers.includes(trigger)) &&
       (grant.capabilityIds ?? []).every(capability => expected.capabilityIds?.includes(capability)) &&
       (grant.cliCommandProfiles ?? []).every(profile => expected.cliCommandProfiles?.includes(profile)) &&
-      grant.serviceId === expected.serviceId &&
+      serviceMatches &&
       grant.memoryScope?.wing === expected.memoryScope?.wing && grant.memoryScope?.repositoryId === expected.memoryScope?.repositoryId &&
       grant.memoryScope?.access === expected.memoryScope?.access;
     if (!scopeMatches || !exactAuthority) return denied(`Tool grant ${expected.toolId} does not match its policy/session scope`);
