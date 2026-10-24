@@ -12,7 +12,7 @@ import { digest, json, record, strings, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
-import { ApprovalNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
+import { ApprovalNoticeSchema, BlockedNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, blockedNoticeFields, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 import { BFLOW_INBOX_NUDGE } from "./conversation-inbox.js";
 import type { AgyNativeAnchor } from "./agy-native-transcript.js";
 
@@ -38,7 +38,9 @@ export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1),
   /** Bounded decision fields for user decisions, independent of the summary cap. Absent on receipts written before this field. */
   userDecision: UserDecisionNoticeSchema.optional(),
   /** Bounded structured fields of a non-decision approval (design, task, gate). Absent on receipts written before this field. */
-  approval: ApprovalNoticeSchema.optional() }).strict();
+  approval: ApprovalNoticeSchema.optional(),
+  /** Bounded blocker fields independent of summary truncation; absent on older receipts. */
+  blocked: BlockedNoticeSchema.optional() }).strict();
 export type ConversationNotice = z.infer<typeof ConversationNoticeSchema>;
 /** Display state of a user-decision notice, for the Runtime watchdog. `since` is when the current wait began. */
 export interface ConversationNoticeState { messageId: string; approvalId?: string; runId?: string; surfaced: boolean; displayed: boolean; resends: number; since: string }
@@ -778,9 +780,11 @@ export class HostReceiptJournal {
     const text = JSON.stringify(parsed.payload) ?? "null", truncated = text.length > NOTICE_SUMMARY_LIMIT;
     const userDecision = parsed.type === "approval.request" ? userDecisionNoticeFields(parsed.payload) : undefined;
     const approval = parsed.type === "approval.request" && userDecision === undefined ? approvalNoticeFields(parsed.payload) : undefined;
+    const blocked = blockedNoticeFields(parsed.payload);
     return this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
       ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
       ...(userDecision === undefined ? {} : { userDecision }), ...(approval === undefined ? {} : { approval }),
+      ...(blocked === undefined ? {} : { blocked }),
       summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
   }
   /** Reserve before the Herdr side effect. A lost acknowledgement consumes the attempt; restart never resets this budget. */

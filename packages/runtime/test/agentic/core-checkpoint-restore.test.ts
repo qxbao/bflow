@@ -21,7 +21,7 @@ async function prepared() {
   const state = await (f.runtime as any).journal.exclusive(async (value: any) => structuredClone(value));
   return { f, checkpoint, state };
 }
-describe.skipIf(process.platform !== "linux")("authoritative Core checkpoint restore", () => {
+describe.skipIf(process.platform === "win32")("authoritative Core checkpoint restore", () => {
   it("restores a complete aggregate plus only its event tail and preserves command outcomes", async () => {
     const { f, checkpoint, state } = await prepared();
     const engine = new DeterministicWorkflowEngine(), recover = vi.spyOn(engine, "recover"), reads = vi.spyOn(f.ports.runStore, "readEvents");

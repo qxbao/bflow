@@ -53,7 +53,7 @@ async function expectActionable(f: LifecycleFixture, label: string) {
   expect(["failed"].includes(current.status) && !current.error, `${label}: failed without a reason`).toBe(false);
 }
 
-describe.skipIf(process.platform !== "linux")("whole-run lifecycle fault matrix (extended)", () => {
+describe.skipIf(process.platform === "win32")("whole-run lifecycle fault matrix (extended)", () => {
   it.each(names)("a Runtime restart after %s resumes the same run to completion without manual help", async last => {
     const f = await lifecycleFixture(cleanups);
     await through(f, last);

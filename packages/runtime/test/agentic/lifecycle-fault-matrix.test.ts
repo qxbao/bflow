@@ -60,7 +60,7 @@ async function watchdogPass(f: LifecycleFixture, idleMs = 10 * 60_000) {
     if (action.kind === "stalled") await f.runtime.reportRunStalled(action.runId, action.episodeKey);
 }
 
-describe.skipIf(process.platform !== "linux")("whole-run lifecycle fault matrix", () => {
+describe.skipIf(process.platform === "win32")("whole-run lifecycle fault matrix", () => {
   it("completes a clean run from intake through specialist, implementation, verification and approval", async () => {
     const f = await lifecycleFixture(cleanups);
     await through(f, "specifying"); expect((await f.run()).status).toBe("specifying");

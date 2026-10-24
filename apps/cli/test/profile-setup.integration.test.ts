@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -57,7 +57,7 @@ function testPlatform(root: string): PlatformProfile {
 describe("approved setup plan with the bundled profile synchronizer", () => {
   it("applies source assets created by an earlier approved step, converges, and preserves profile-local state", async () => {
     expect(existsSync(helperPath), `required helper dependency is missing: ${helperPath}`).toBe(true);
-    tempRoot = await mkdtemp(path.join(os.tmpdir(), "bflow-profile-plan-"));
+    tempRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "bflow-profile-plan-")));
     const sourceHome = path.join(tempRoot, "native");
     const codexHome = path.join(sourceHome, ".codex");
     const stateRoot = path.join(tempRoot, "shared-ai-isolator");

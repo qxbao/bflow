@@ -286,3 +286,13 @@ stop/reconciliation work remains visible. Runtime run reconciliation refreshes s
 projections and closes stale approvals on terminal runs. A terminal label does not establish
 verified completion or prove every process stopped. These guarantees have package-local
 regression coverage; they do not establish live provider/Herdr acceptance.
+
+
+Khi báo blocked/failed, Conversation phải giải thích đầy đủ ngay lần đầu: nguyên nhân đã
+biết, ai cần hành động, hướng đề xuất và nội dung trả lời cụ thể; giải thích thuật ngữ bằng
+tiếng Việt. Thông báo Runtime nguyên văn vẫn được giữ, kèm phần giải thích còn thiếu.
+Lệnh tiếp tục chỉ thử lại, không sửa yêu cầu hay cấp approval. Yêu cầu sửa scope/SDD đi qua
+revision của đúng run và chờ Runtime/Coordinator xác nhận. Prompt chọn `full` cho tính năng
+mới theo bộ phân loại P15 hiện có, kể cả tính năng nhỏ; lựa chọn SDD rõ ràng của người dùng
+vẫn được giữ và báo xung đột nếu cần. Thay đổi prompt cần được role đang chạy nạp lại qua
+lifecycle hiện có; kiểm thử source không chứng minh hành vi của provider live.

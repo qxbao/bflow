@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
 
 async function fixture(role = "conversation", provider = "codex", replies: Record<string, unknown> = {}) {
-  const root = await mkdtemp("/tmp/bf-hook-test-");
+  const root = await realpath(await mkdtemp("/tmp/bf-hook-test-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const socketPath = join(root, "host.sock"), calls: { method: string; params: unknown }[] = [];
   const herdrCalls: Record<string, unknown>[] = [];
@@ -276,7 +276,7 @@ describe.skipIf(process.platform === "win32")("fail-closed PreToolUse hook entry
   it.each([
     ["a missing role configuration", async () => "/tmp/bf-hook-missing-" + process.pid + "/role.json"],
     ["a corrupt role configuration", async () => {
-      const root = await mkdtemp("/tmp/bf-hook-bad-"); cleanup.push(() => rm(root, { recursive: true, force: true }));
+      const root = await realpath(await mkdtemp("/tmp/bf-hook-bad-")); cleanup.push(() => rm(root, { recursive: true, force: true }));
       const path = join(root, "role.json"); await writeFile(path, "{not json", { mode: 0o600 }); return path;
     }]
   ])("denies with exit 2 and a deny JSON on %s", async (_label, configPath) => {
@@ -292,7 +292,7 @@ describe.skipIf(process.platform === "win32")("fail-closed PreToolUse hook entry
   });
   it("maps a crashing hook process to a blocking exit 2 in the launch runner", async () => {
     const { hookRunnerScript } = await import("../../dist/agentic/host.js");
-    const root = await mkdtemp("/tmp/bf-hook-runner-"); cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const root = await realpath(await mkdtemp("/tmp/bf-hook-runner-")); cleanup.push(() => rm(root, { recursive: true, force: true }));
     const crashing = join(root, "crash.mjs"), runner = join(root, "role.sh");
     await writeFile(crashing, "process.exit(1);\n");
     await writeFile(runner, hookRunnerScript(process.execPath, crashing, join(root, "role.json")), { mode: 0o700 });

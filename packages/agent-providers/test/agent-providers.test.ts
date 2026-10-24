@@ -2267,7 +2267,9 @@ describe("@bflow/agent-providers", () => {
       const adopted = join(testStateDir, "agy-home", "developer", ".gemini", "antigravity-cli", "cache", "onboarding.json");
       await rm(adopted, { force: true });
       await chmod(nativeHome, 0o750);
-      await chmod(join(nativeHome, ".gemini"), 0o775);
+      // Linux may use a private per-user group; macOS's shared staff group cannot receive that grant.
+      const privateGroup = typeof process.getgid === "function" && process.getgid() === process.getuid?.();
+      await chmod(join(nativeHome, ".gemini"), privateGroup ? 0o775 : 0o755);
       await chmod(join(nativeHome, ".gemini", "antigravity-cli"), 0o755);
       await chmod(cache, 0o755);
       const receipt = '{"consumerOnboardingComplete":true,"enterpriseOnboardingComplete":false,"onboardingComplete":true}\n';

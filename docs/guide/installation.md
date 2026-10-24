@@ -2,6 +2,15 @@
 
 Nền tảng kiểm chứng chính thức của Bflow là môi trường Linux với Git và hệ thống tệp tin cục bộ. Hệ thống yêu cầu phiên bản **Node.js `>= 22.13`** (nhằm hỗ trợ mô-đun SQLite tích hợp sẵn `node:sqlite` mà không cần cờ thử nghiệm) và công cụ **pnpm** khớp chính xác với khai báo `packageManager` trong `package.json` (hiện tại là `12.5.1`). Lưu ý rằng khai báo `engines >= 22` ở cấp root rộng hơn so với yêu cầu phiên bản SQLite thực tế. Các kịch bản chạy native trên Windows, hệ thống tệp tin mạng (NFS/SMB), phân tán đa máy chủ hoặc khôi phục sau sự cố mất điện đột ngột (power-loss recovery) hiện chưa được kiểm chứng đầy đủ.
 
+Đường chạy Node/TypeScript trên macOS có backend workspace file dùng `openat` và backend
+verification dùng Seatbelt. Cần Apple Command Line Tools (`xcode-select --install`) để Runtime
+biên dịch helper từ source đi kèm, `/usr/bin/sandbox-exec`, và `flock` có hỗ trợ inherited file
+descriptor (ví dụ bản Homebrew). Profile synchronization cần Python 3.11+ có `tomllib` trong PATH
+hoặc `AI_ISOLATOR_PY`; Python do Apple cài sẵn có thể cũ hơn yêu cầu. Cài dependency của project
+trước khi chạy trên macOS: warming có network isolation và native polyglot mounts vẫn chỉ hỗ
+trợ Linux. Các mức bằng chứng source/local/live được phân biệt trong
+[báo cáo macOS](../acceptance/2026-10-24-macos-portability.md).
+
 Hiện tại Bflow và gói `@bflow/cli` được cấu hình ở chế độ riêng tư (`private`); tài liệu này hướng dẫn thao tác trực tiếp trên mã nguồn được clone về, không giả định việc cài đặt toàn cục qua `npm install -g bflow`.
 
 ---

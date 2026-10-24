@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { readDarwinProcessRssBytes } from "./process-memory.js";
 import {
   type BrowserCallerIdentity,
   type BrowserHealthStatus,
@@ -130,6 +131,7 @@ export class DefaultBrowserLauncher implements BrowserLauncher {
         supportsBrowserContexts: true,
         isAlive: () => alive,
         getMemoryRssBytes: async () => {
+          if (process.platform === "darwin" && child.pid) return readDarwinProcessRssBytes(child.pid);
           if (process.platform === "linux" && child.pid) {
             try {
               const statusContent = await fs.readFile(`/proc/${child.pid}/status`, "utf8");

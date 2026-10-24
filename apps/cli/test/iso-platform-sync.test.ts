@@ -1,9 +1,11 @@
+import { testPython } from "../../../tests/helpers/python-runtime.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -20,7 +22,7 @@ const engine = resolve(import.meta.dirname, "../isolation/bin/ai-isolator");
 const roots: string[] = [];
 
 function sandbox() {
-  const root = mkdtempSync(resolve(tmpdir(), "bflow-iso-platform-sync-"));
+  const root = realpathSync(mkdtempSync(resolve(tmpdir(), "bflow-iso-platform-sync-")));
   roots.push(root);
   const sourceHome = resolve(root, "native");
   const stateRoot = resolve(root, "state");
@@ -475,6 +477,7 @@ describe("native platform profile synchronization", () => {
         CODEX_HOME: "",
         CLAUDE_CONFIG_DIR: "",
         BFLOW_HOME: "",
+        AI_ISOLATOR_PY: testPython,
         PATH: `${bin}:/usr/bin:/bin`,
       },
     });

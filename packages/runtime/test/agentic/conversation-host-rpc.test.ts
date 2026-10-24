@@ -59,7 +59,7 @@ async function hostFixture(includeDeveloper = false) {
   return { root, sessionId, hostDirectory, launches, chat, coordinator, developer, at };
 }
 
-describe.skipIf(process.platform !== "linux")("Native role schemas and Conversation through the real host RPC", () => {
+describe.skipIf(process.platform === "win32")("Native role schemas and Conversation through the real host RPC", () => {
   it("serves a source-backed repository survey through the real authenticated assignment_context tool", async () => {
     const f = await hostFixture();
     const { AgenticJournal } = await import("../../src/agentic/journal.js");
