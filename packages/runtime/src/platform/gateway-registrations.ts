@@ -3,11 +3,11 @@ import { lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promi
 import { join } from "node:path";
 import {
   AgentProviderIdSchema, AgentRoleSchema, IsoDateTimeSchema, MCPClientRegistrationSchema, MCPEndpointSchema,
-  MCPServiceObservationSchema, Sha256DigestSchema, TrustScopeSchema
+  MCPResourceLeaseSchema, MCPResourceRequestSchema, MCPServiceObservationSchema, Sha256DigestSchema, TrustScopeSchema
   , MCPToolCallSchema, MCPToolCallResultSchema
 } from "@bflow/contracts";
 import type {
-  AgentProviderId, AgentRole, ContractError, JsonValue, MCPClientRegistration,
+  AgentProviderId, AgentRole, ContractError, JsonValue, MCPClientRegistration, MCPResourceLease,
   MCPServiceObservation, MCPToolCall, MCPToolCallResult, OperationOptions, OperationResult, ScopedOperation, TrustScope
 } from "@bflow/contracts";
 import { fail, failWith, ok } from "./errors.js";
@@ -82,6 +82,8 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
   private readonly now: () => Date;
   private readonly ttlMs: number;
   private readonly tokens = new Map<string, string>();
+  private readonly heldLeases = new Map<string, MCPResourceLease>();
+  private readonly exclusiveServices = new Set<string>();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(options: GatewayRegistrationManagerOptions) {
@@ -245,16 +247,115 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
         item.registration.scope.workspaceRoot === identity.workspaceRoot && item.registration.expiresAt > this.now().toISOString());
       if (!entry?.registration) throw new GatewayPortError({ code: "not_found", retryable: false,
         message: "No current Gateway registration grants this role, task, service and operation" });
-      const call: MCPToolCall = { schemaVersion: 3, callId, registrationId: entry.registrationId, serviceId,
-        tool: operation, input, idempotencyKey: callId };
-      const parsed = MCPToolCallSchema.safeParse(call);
-      if (!parsed.success) reject("validation", "Invalid Gateway tool call");
-      const result = reconcile ? await this.control.reconcileToolCall(parsed.data, options) : await this.control.invokeTool(parsed.data, options);
-      if (!result.ok) throw new GatewayPortError(result.error);
+      const registration = entry.registration;
+      let lease = this.heldLeases.get(callId);
+      if (lease && (lease.registrationId !== entry.registrationId || lease.serviceId !== serviceId)) {
+        lease = undefined;
+      }
+      if (!reconcile && !lease && this.requiresExclusiveLease(serviceId)) {
+        lease = await this.acquireLease(registration, serviceId, callId, options);
+      }
+      let result = await this.dispatchToolCall(entry.registrationId, serviceId, operation, input, callId, lease, reconcile, options);
+      if (!reconcile && !lease && !result.ok && isLeaseRequiredError(result.error) && this.control.acquireResource !== undefined) {
+        this.exclusiveServices.add(serviceId);
+        lease = await this.acquireLease(registration, serviceId, callId, options);
+        result = await this.dispatchToolCall(entry.registrationId, serviceId, operation, input, callId, lease, false, options);
+      }
+      if (!result.ok) {
+        if (lease) {
+          if (isUncertain(result.error.code) || ("retrySafety" in result.error && result.error.retrySafety === "observation_only")) {
+            this.heldLeases.set(callId, lease);
+          } else {
+            this.heldLeases.delete(callId);
+            await this.releaseLeaseBestEffort(lease, registration.scope, options);
+          }
+        }
+        throw new GatewayPortError(result.error);
+      }
       const checked = MCPToolCallResultSchema.safeParse(result.value);
-      if (!checked.success || checked.data.callId !== callId) reject("corruption", "Gateway tool result is malformed or mismatched");
+      if (!checked.success || checked.data.callId !== callId) {
+        if (lease) this.heldLeases.set(callId, lease);
+        reject("corruption", "Gateway tool result is malformed or mismatched");
+      }
+      if (lease) {
+        if (checked.data.status === "unknown") {
+          this.heldLeases.set(callId, lease);
+        } else {
+          this.heldLeases.delete(callId);
+          await this.releaseLeaseBestEffort(lease, registration.scope, options);
+        }
+      }
       return ok(checked.data);
     }));
+  }
+
+  private requiresExclusiveLease(serviceId: string): boolean {
+    return this.control.acquireResource !== undefined &&
+      (this.exclusiveServices.has(serviceId) || serviceId.startsWith("gitnexus-"));
+  }
+
+  private async acquireLease(registration: MCPClientRegistration, serviceId: string, callId: string,
+    options?: OperationOptions): Promise<MCPResourceLease> {
+    if (!this.control.acquireResource) {
+      reject("validation", "Gateway control port does not support resource leases");
+    }
+    const ttlMs = Math.min(Math.max((options?.timeoutMs ?? 30_000) * 2, 30_000), 300_000);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const request = MCPResourceRequestSchema.safeParse({
+        schemaVersion: 3,
+        scope: registration.scope,
+        idempotencyKey: `acquire-${callId}-${attempt}-${randomUUID().slice(0, 8)}`,
+        registrationId: registration.registrationId,
+        serviceId,
+        resourceKey: serviceId,
+        ttlMs
+      });
+      if (!request.success) reject("validation", "Invalid Gateway resource lease request");
+      const acquired = await this.control.acquireResource(request.data, options);
+      if (acquired.ok) {
+        const parsed = MCPResourceLeaseSchema.safeParse(acquired.value);
+        if (!parsed.success || parsed.data.registrationId !== registration.registrationId ||
+            parsed.data.serviceId !== serviceId || parsed.data.resourceKey !== serviceId) {
+          reject("corruption", "Gateway resource lease response is malformed or mismatched");
+        }
+        return parsed.data;
+      }
+      if (attempt < 2 && isResourceBusyError(acquired.error)) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        continue;
+      }
+      throw new GatewayPortError(acquired.error);
+    }
+    throw new Error("unreachable");
+  }
+
+  private async dispatchToolCall(registrationId: string, serviceId: string, operation: string, input: JsonValue,
+    callId: string, lease: MCPResourceLease | undefined, reconcile: boolean,
+    options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    const call: MCPToolCall = {
+      schemaVersion: 3,
+      callId,
+      registrationId,
+      serviceId,
+      tool: operation,
+      input,
+      ...(lease ? { resourceLease: lease } : {}),
+      idempotencyKey: callId
+    };
+    const parsed = MCPToolCallSchema.safeParse(call);
+    if (!parsed.success) reject("validation", "Invalid Gateway tool call");
+    return reconcile
+      ? this.control.reconcileToolCall(parsed.data, options)
+      : this.control.invokeTool(parsed.data, options);
+  }
+
+  private async releaseLeaseBestEffort(lease: MCPResourceLease, scope: TrustScope, options?: OperationOptions): Promise<void> {
+    if (!this.control.releaseResource) return;
+    try {
+      await this.control.releaseResource(lease, scopedOperation(scope, `release-${lease.leaseId}`), options);
+    } catch {
+      // Lease has a bounded TTL; do not mask completed tool results or primary invocation errors.
+    }
   }
 
   private buildRegistration(identity: PlatformSessionIdentity, scope: TrustScope, request: GatewayRoleRequest,
@@ -371,6 +472,12 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
     let failure: ContractError | undefined;
     for (const entry of targets) {
       if (entry.state === "revoked") continue;
+      for (const [callId, lease] of this.heldLeases) {
+        if (lease.registrationId === entry.registrationId) {
+          this.heldLeases.delete(callId);
+          await this.releaseLeaseBestEffort(lease, scope, options);
+        }
+      }
       if (entry.state !== "registered" && listed !== undefined && !listed.has(entry.registrationId)) {
         next[entry.registrationId] = { ...entry, state: "revoked", updatedAt: now };
         this.tokens.delete(entry.registrationId);
@@ -446,6 +553,14 @@ function ledgerPath(identity: PlatformSessionIdentity): string {
 
 function isUncertain(code: ContractError["code"]): boolean {
   return code === "timeout" || code === "transport_unavailable" || code === "unknown_delivery" || code === "cancelled";
+}
+
+function isLeaseRequiredError(error: ContractError): boolean {
+  return error.code === "validation" && isRecord(error.details) && error.details["diagnosticCode"] === "lease_required";
+}
+
+function isResourceBusyError(error: ContractError): boolean {
+  return error.code === "conflict" && isRecord(error.details) && error.details["diagnosticCode"] === "resource_busy";
 }
 
 function unique(values: readonly string[]): string[] {

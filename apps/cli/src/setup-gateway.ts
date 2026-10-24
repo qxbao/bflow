@@ -473,7 +473,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   const gateway = new module.BflowSharedMCPGateway({ policyOverrides: (service: MCPServiceDefinition) => tools.trustedGatewayPolicy(service),
     callLedgerPath: join(configured.paths.state, "gateway-tool-calls.json"),
     requireResolvedToolGrants: (registration: { registrationId: string }) => runtimeGrants.has(registration.registrationId),
-    toolGrantResolver: (registration: { registrationId: string }) => runtimeGrants.get(registration.registrationId) ?? [] });
+    toolGrantResolver: (registration: { registrationId: string }) => runtimeGrants.get(registration.registrationId) });
   // The Context7 key reaches the Gateway only through its in-memory secret store, from a private file or the environment.
   if (configured.approval?.remoteServices.some(item => item.authenticated)) {
     const stored = await readStoredContext7Key(configured.paths);

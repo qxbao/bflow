@@ -2,9 +2,11 @@ import { randomUUID } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
-import { ContractErrorSchema, IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPServiceObservationSchema, MCPToolCallSchema, MCPToolCallResultSchema,
+import { ContractErrorSchema, IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPResourceLeaseSchema,
+  MCPResourceRenewRequestSchema, MCPResourceRequestSchema, MCPServiceObservationSchema, MCPToolCallSchema, MCPToolCallResultSchema,
   ScopedOperationSchema, TrustScopeSchema, ResolvedToolGrantSchema } from "@bflow/contracts";
-import type { ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions, OperationResult,
+import type { ContractError, MCPClientRegistration, MCPResourceLease, MCPResourceRenewRequest, MCPResourceRequest,
+  MCPServiceObservation, OperationOptions, OperationResult,
   MCPToolCall, MCPToolCallResult, ScopedOperation, TrustScope, ResolvedToolGrant } from "@bflow/contracts";
 import { fail, failWith, ok } from "./errors.js";
 import type { GatewayControlPort, GatewayRegistrationGrant } from "./ports.js";
@@ -109,6 +111,39 @@ export class GatewayControlClient implements GatewayControlPort {
     if (!reply.ok) return reply;
     const observed = parseArray(reply.value, "observations", MCPServiceObservationSchema);
     return observed ? ok(observed) : fail("corruption", "Gateway catalog reply is malformed");
+  }
+
+  async acquireResource(request: MCPResourceRequest, options?: OperationOptions): Promise<OperationResult<MCPResourceLease>> {
+    const parsed = MCPResourceRequestSchema.safeParse(request);
+    if (!parsed.success) return fail("validation", "Invalid Gateway resource acquire request");
+    const reply = await this.call("acquire", parsed.data, options);
+    if (!reply.ok) return reply;
+    const lease = MCPResourceLeaseSchema.safeParse(reply.value);
+    return lease.success && lease.data.registrationId === parsed.data.registrationId &&
+      lease.data.serviceId === parsed.data.serviceId && lease.data.resourceKey === parsed.data.resourceKey
+      ? ok(lease.data) : fail("corruption", "Gateway resource lease reply is malformed or mismatched");
+  }
+
+  async renewResource(request: MCPResourceRenewRequest, options?: OperationOptions): Promise<OperationResult<MCPResourceLease>> {
+    const parsed = MCPResourceRenewRequestSchema.safeParse(request);
+    if (!parsed.success) return fail("validation", "Invalid Gateway resource renew request");
+    const reply = await this.call("renew", parsed.data, options);
+    if (!reply.ok) return reply;
+    const lease = MCPResourceLeaseSchema.safeParse(reply.value);
+    return lease.success && lease.data.leaseId === parsed.data.lease.leaseId &&
+      lease.data.registrationId === parsed.data.lease.registrationId &&
+      lease.data.serviceId === parsed.data.lease.serviceId &&
+      lease.data.fencingToken === parsed.data.lease.fencingToken
+      ? ok(lease.data) : fail("corruption", "Gateway resource renew reply is malformed or mismatched");
+  }
+
+  async releaseResource(lease: MCPResourceLease, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<void>> {
+    const parsedLease = MCPResourceLeaseSchema.safeParse(lease);
+    const parsedOperation = ScopedOperationSchema.safeParse(operation);
+    if (!parsedLease.success || !parsedOperation.success) return fail("validation", "Invalid Gateway resource release request");
+    const reply = await this.call("release", { lease: parsedLease.data, operation: parsedOperation.data }, options);
+    if (!reply.ok) return reply;
+    return reply.value === null ? ok(undefined) : fail("corruption", "Gateway resource release reply is malformed");
   }
 
   async invokeTool(call: MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {

@@ -203,6 +203,14 @@ describe("H1 launch-keyed probe plans", () => {
     await expect(stat(join(root, GATEWAY_PROBE_DIRECTORY))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("publishes no provider-process probe plan when Gateway registrations are broker-mediated and excluded from launch.env", async () => {
+    const root = await tempDirectory();
+    const mediated = { ...preparedWithRegistration("reviewer" as AgentRole, "launch-mediated", REGISTRATION_ID),
+      launch: { argv: [], env: {}, launchId: "launch-mediated", launchFingerprint: "b".repeat(64) } } as unknown as PreparedRoleLaunch;
+    expect(await publishLaunchProbe(join(root, GATEWAY_PROBE_DIRECTORY), mediated)).toBeUndefined();
+    await expect(stat(join(root, GATEWAY_PROBE_DIRECTORY))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("keeps concurrent launches of one role in distinct plan files", async () => {
     const root = await tempDirectory();
     const probes = join(root, GATEWAY_PROBE_DIRECTORY);

@@ -344,7 +344,10 @@ export async function writePrivateFileAtomic(path: string, content: string): Pro
 
 /** Builds the token-free probe plan and expectation for one prepared launch; undefined when it has no registrations. */
 function probePlanOf(prepared: PreparedRoleLaunch): { readonly file: GatewayProbeFile; readonly expectation: ReachabilityExpectation } | undefined {
-  const registrations: readonly MCPClientRegistration[] = prepared.gateway.registrations;
+  const registrations: readonly MCPClientRegistration[] = prepared.gateway.registrations.filter(registration => {
+    const envName = tokenEnvironmentName(registration.registrationId);
+    return prepared.gateway.tokenEnvironment[envName] === undefined || prepared.launch.env[envName] !== undefined;
+  });
   if (registrations.length === 0) return undefined;
   const endpoints = new Set<string>();
   for (const registration of registrations) {

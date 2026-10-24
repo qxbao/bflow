@@ -673,7 +673,12 @@ describe("P30 host platform composition", () => {
       serviceIds: ["svc-1"], allowedTools: ["query"], connection: { transport: "streamable_http", endpoint: "http://127.0.0.1:7777/mcp", token: "secret://runtime/reg-conv0001" },
       configDigest: "a".repeat(64), expiresAt: at, idempotencyKey: "key-conv"
     } as unknown as MCPClientRegistration;
-    let launches: PreparedRoleLaunch[] = [{ ...prepared("conversation", "codex", "launch-conv"), gateway: { registrations: [registration], observations: [], tokenEnvironment: {} } } as unknown as PreparedRoleLaunch];
+    const directLaunch = prepared("conversation", "codex", "launch-conv");
+    const tokenEnvironment = { [tokenEnvironmentName(registration.registrationId)]: token };
+    let launches: PreparedRoleLaunch[] = [{ ...directLaunch,
+      gateway: { registrations: [registration], observations: [], tokenEnvironment },
+      launch: { ...directLaunch.launch, env: tokenEnvironment }
+    }];
     const service = fakeService({
       prepareSession: async () => ({ ok: true, value: { report: { ready: true, generation: 1, roles: [], checkedAt: at }, launches } }) as never
     });
@@ -688,6 +693,12 @@ describe("P30 host platform composition", () => {
     expect(plan).not.toContain(token);
     expect(JSON.parse(plan)).toMatchObject({ schemaVersion: 3, launchId: "launch-conv", endpoint: "http://127.0.0.1:7777/mcp" });
     expect((await stat(planPath)).mode & 0o777).toBe(0o600);
+
+    // The next generation keeps the registration behind Runtime's broker, so the
+    // provider receives no token and must not inherit the direct-access probe.
+    launches = [{ ...launches[0]!, launch: { ...directLaunch.launch, env: {} } }];
+    expect((await host.prepare()).reachability.size).toBe(0);
+    await expect(stat(planPath)).rejects.toMatchObject({ code: "ENOENT" });
 
     launches = [];
     await host.prepare();

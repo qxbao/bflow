@@ -85,9 +85,10 @@ export function describeToolActions(role: AgentRole, platform: AgenticHostPlatfo
       grant.scope.sessionId === sessionId && grant.scope.repositoryId === platform.repositoryId && grant.scope.workspaceRoot === repositoryPath);
     const grant = matches.length === 1 ? matches[0] : undefined;
     const needsExclusiveBrowserLease = requirement.triggers.includes("browser_inspection");
+    const serviceId = grant?.serviceId ?? requirement.serviceId;
     return { toolId: requirement.toolId, kind: requirement.kind, requiredness: requirement.requiredness, triggers: requirement.triggers,
       operations: requirement.operations, ...(requirement.capabilityIds ? { capabilityIds: requirement.capabilityIds } : {}),
-      ...(requirement.serviceId ? { serviceId: requirement.serviceId } : {}), ...(requirement.memoryScope ? { memoryScope: requirement.memoryScope } : {}),
+      ...(serviceId ? { serviceId } : {}), ...(requirement.memoryScope ? { memoryScope: requirement.memoryScope } : {}),
       scope: { kind: "session" as const, sessionId, repositoryId: platform.repositoryId, workspaceRoot: repositoryPath },
       status: grant && !needsExclusiveBrowserLease ? "available" as const : requirement.requiredness === "required" ? "blocked" as const : "degraded" as const,
       ...(!grant || needsExclusiveBrowserLease ? { reasonCode: needsExclusiveBrowserLease && grant ? "exclusive_resource_lease_unsupported" : matches.length > 1 ? "ambiguous_grant" : "grant_unavailable" } : {}) };

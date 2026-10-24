@@ -190,3 +190,31 @@ it("refuses a locator with unknown fields", async () => {
   expect(result.ok).toBe(false);
   if (!result.ok) expect(result.error.code).toBe("corruption");
 });
+
+it("acquires, uses and releases exclusive resource leases across roles via GatewayRegistrationManager", async () => {
+  const { GatewayControlClient, GatewayRegistrationManager } = await loadRuntimeModules();
+  const opened = await GatewayControlClient.fromLocator(join(root, "state", "gateway-control.json"));
+  expect(opened.ok).toBe(true);
+  if (!opened.ok) return;
+  const client = opened.value;
+  const manager = new GatewayRegistrationManager({ control: client, endpoint: control!.locator.endpoint });
+
+  const reviewerEnroll = await manager.ensureForRole(identity(), { ...reviewer, serviceIds: [service.serviceId] });
+  const architectEnroll = await manager.ensureForRole(identity(), {
+    role: "architect", provider: "codex", environmentId: "env-architect",
+    serviceIds: [service.serviceId], allowedTools: ["query", "context"], configDigest: "a".repeat(64)
+  });
+  expect(reviewerEnroll.ok).toBe(true);
+  expect(architectEnroll.ok).toBe(true);
+
+  const firstCall = await manager.invokeTool(identity(), "reviewer", undefined, service.serviceId, "query",
+    { query: "auth flow" }, "call-reviewer-1");
+  expect(firstCall.ok).toBe(true);
+  if (firstCall.ok) expect(firstCall.value.status).toBe("completed");
+
+  // Because the lease was released after firstCall completed, architect can immediately acquire and invoke.
+  const secondCall = await manager.invokeTool(identity(), "architect", undefined, service.serviceId, "context",
+    { name: "AuthService" }, "call-architect-1");
+  expect(secondCall.ok).toBe(true);
+  if (secondCall.ok) expect(secondCall.value.status).toBe("completed");
+});
