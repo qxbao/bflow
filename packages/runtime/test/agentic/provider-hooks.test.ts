@@ -366,7 +366,10 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     const f = await fixture("conversation", "claude", { conversation_notices: { notices: [notice] } });
     const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1", stop_hook_active: false }));
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({ decision: "block", reason: expect.stringContaining("Bflow Runtime updates") });
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed).toMatchObject({ decision: "block", reason: expect.stringContaining("còn 1 cập nhật chưa báo người dùng") });
+    expect(parsed.reason).toContain("read_updates");
+    for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(parsed.reason).not.toContain(forbidden);
     expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
     expect(f.calls[2]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
   });
@@ -377,21 +380,23 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(result.stdout).toBe("");
     expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices"]);
   });
-  it("never blocks a non-Claude Stop, leaving notices for the next user turn", async () => {
+  it("never blocks a non-Claude Stop without last_assistant_message, leaving notices for the next user turn", async () => {
     const f = await fixture("conversation", "codex", { conversation_notices: { notices: [notice] } });
     const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1" }));
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
     expect(f.calls.map(call => call.method)).not.toContain("conversation_notices_surfaced");
   });
-  it("answers the inbox nudge without creating a user turn", async () => {
+  it("answers the inbox nudge without creating a user turn or dumping raw JSON", async () => {
     const f = await fixture("conversation", "claude", { conversation_runtime_nudge: { notices: [notice] } });
     const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: BFLOW_INBOX_NUDGE }));
     expect(result.code).toBe(0);
     expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
-    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
     expect(context).toContain("not a user message and not an approval");
-    expect(context).toContain("notice-1");
+    expect(context).toContain("MUST SHOW TO USER VERBATIM:");
+    expect(context).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    for (const forbidden of ['{"', "messageId", "message_id", "payload", "notice-1"]) expect(context).not.toContain(forbidden);
     expect(f.calls[1]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
     expect(f.calls.map(call => call.method)).not.toContain("user_prompt");
     expect(f.calls.map(call => call.method)).not.toContain("conversation_decide");
@@ -421,7 +426,11 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     const f = await fixture("conversation", "claude", { user_prompt: { messageId: "user-1", notices: [notice] } });
     const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" }));
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("notice-1");
+    const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context).toContain("MUST SHOW TO USER VERBATIM:");
+    expect(context).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    expect(context).toContain("dữ liệu nội bộ, không trích ra màn hình");
+    expect(context).not.toContain("notice-1");
     expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced"]);
   });
   it("admits an Agy Conversation user turn via PreInvocation once per transcript anchor", async () => {
@@ -434,7 +443,10 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(first.code).toBe(0);
     const firstInjected = JSON.parse(first.stdout).injectSteps?.[0]?.systemMessage?.systemMessage as string;
     expect(firstInjected).toMatch(/^Trusted Bflow user turn: messageId=user-agy-1; requiresConversationDecision=true\./);
-    expect(firstInjected).toContain("notice-1");
+    expect(firstInjected).toContain("MUST SHOW TO USER VERBATIM:");
+    expect(firstInjected).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    expect(firstInjected).toContain("dữ liệu nội bộ, không trích ra màn hình");
+    expect(firstInjected).not.toContain("notice-1");
     expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced"]);
     const second = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 1, initialNumSteps: 1 }));
     expect(second.code).toBe(0);
@@ -449,7 +461,10 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(first.code).toBe(0);
     const injected = JSON.parse(first.stdout).injectSteps?.[0]?.systemMessage?.systemMessage as string;
     expect(injected).toContain("not a user message and not an approval");
-    expect(injected).toContain("notice-1");
+    expect(injected).toContain("MUST SHOW TO USER VERBATIM:");
+    expect(injected).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    expect(injected).toContain("không chào hỏi");
+    for (const forbidden of ['{"', "messageId", "message_id", "payload", "notice-1"]) expect(injected).not.toContain(forbidden);
     expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
     const second = await f.invoke("PreInvocation", f.agyInput({ invocationNum: 1, initialNumSteps: 1 }));
     expect(second.code).toBe(0);
@@ -462,7 +477,10 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     });
     const first = await f.invoke("Stop", f.agyInput({ executionNum: 0, terminationReason: "NO_TOOL_CALL", fullyIdle: true }));
     expect(first.code).toBe(0);
-    expect(JSON.parse(first.stdout)).toMatchObject({ decision: "continue", reason: expect.stringContaining("Bflow Runtime updates") });
+    const parsed = JSON.parse(first.stdout);
+    expect(parsed).toMatchObject({ decision: "continue", reason: expect.stringContaining("còn 1 cập nhật chưa báo người dùng") });
+    expect(parsed.reason).toContain("read_updates");
+    for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(parsed.reason).not.toContain(forbidden);
     expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
     const second = await f.invoke("Stop", f.agyInput({ executionNum: 1, terminationReason: "NO_TOOL_CALL", fullyIdle: true }));
     expect(second.code).toBe(0);

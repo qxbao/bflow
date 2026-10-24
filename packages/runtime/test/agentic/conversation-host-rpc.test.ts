@@ -170,13 +170,16 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     const decision = { intent: "conversation_only", directReply: "Existing turn recorded" };
     const nudge = execFileSync(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)),
       "hook", join(hostDirectory, "conversation.json"), "UserPromptSubmit"], { input: JSON.stringify({ hook_event_name: "UserPromptSubmit",
-        session_id: "native-chat", prompt: "[bflow] Có cập nhật mới từ Runtime" }),
+        session_id: "native-chat", prompt: "🔔 Bflow có tin mới" }),
       env: { ...process.env, HERDR_PANE_ID: "pane-chat", HERDR_SOCKET_PATH: "" }, encoding: "utf8" });
     await expect(invoke("conversation_decide", { decision })).rejects.toThrow(/Runtime nudge/);
     await expect(invoke("conversation_decide", { messageId: received.messageId, decision })).rejects.toThrow(/Runtime nudge/);
     await expect(invoke("resume_run", { runId: "run-existing" })).rejects.toThrow(/Runtime nudge/);
     await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
       hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).rejects.toThrow(/Runtime nudge/);
+    await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
+      hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__read_updates" } })).resolves.toEqual({ permitted: true });
+    expect(await invoke("read_updates", {})).toEqual({ updates: [], remaining: 0 });
     expect(JSON.parse(nudge).hookSpecificOutput.additionalContext).toContain("requiresConversationDecision=false");
     const fresh = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
       hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "Báo trạng thái trước" } });
@@ -311,5 +314,75 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     expect((await readOutbound()).filter(item => item.message.type === "delegation.request")).toHaveLength(1);
     const calls = (await readFile(join(root, "herdr-calls.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
     expect(calls.some(args => args[0] === "agent" && args[1] === "prompt")).toBe(false);
+  }, 20_000);
+
+  it("serves rendered updates via read_updates only to Conversation, marks surfaced after return, and respects budget", async () => {
+    const { root, sessionId, hostDirectory, chat, coordinator, at } = await hostFixture();
+    const { availableTools } = await import("../../src/agentic/host.js");
+    const { HostReceiptJournal } = await import("../../src/agentic/host-receipts.js");
+    for (const provider of ["claude", "codex", "agy"] as const) {
+      const tool = availableTools("conversation", provider).find(item => item.name === "read_updates");
+      expect(tool).toBeDefined();
+      expect(tool!.description).toMatch(/display-only|never.*approve/i);
+      expect(tool!.inputSchema).toEqual({ type: "object", properties: {}, required: [], additionalProperties: false });
+    }
+    expect(availableTools("coordinator").some(item => item.name === "read_updates")).toBe(false);
+    expect(availableTools("developer").some(item => item.name === "read_updates")).toBe(false);
+
+    await expect(callHost(coordinator.socketPath, coordinator.token, "tool_guard", {
+      paneId: "pane-coordinator",
+      hook: { hook_event_name: "PreToolUse", session_id: "native-coordinator", tool_name: "mcp__bflow__read_updates", tool_input: {} }
+    })).rejects.toThrow(/Conversation/i);
+    await expect(callHost(coordinator.socketPath, coordinator.token, "role_call", {
+      paneId: "pane-coordinator", name: "read_updates", arguments: {}
+    })).rejects.toThrow("Only Conversation reads inbox updates");
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { messageId: "not-allowed" }
+    })).rejects.toThrow();
+
+    const receipts = new HostReceiptJournal(join(hostDirectory, "authentication-receipts"), root, sessionId);
+    const makeNotice = (id: string, type: string, payload: Record<string, unknown>) => RoleMessageSchema.parse({
+      schema_version: 2, message_id: id, correlation_id: "corr-u", run_id: "run-u",
+      sender: { role: "coordinator" }, recipient: { role: "conversation" }, type,
+      payload, artifact_references: [], occurred_at: at, idempotency_key: id
+    });
+    await receipts.appendConversationNotice(makeNotice("upd-plain", "task.status", { status: "working" }));
+    await receipts.appendConversationNotice(makeNotice("upd-blocked", "conversation.progress", {
+      kind: "coordinator_no_response", reason: "Coordinator dừng mà chưa giao bước tiếp"
+    }));
+    await receipts.appendConversationNotice(makeNotice("upd-decision", "approval.request", {
+      approvalId: "apr-read-updates-1", runId: "run-u",
+      metadata: { kind: "user_decision", requestedByRole: "architect", question: "Chọn Postgres hay SQLite?", options: ["Postgres", "SQLite"] }
+    }));
+
+    const first = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: {}
+    }) as { updates: { messageId: string; kind: string; text: string }[]; remaining: number };
+    expect(first.remaining).toBe(0);
+    expect(first.updates.map(item => item.messageId)).toEqual(["upd-decision", "upd-blocked", "upd-plain"]);
+    expect(first.updates.map(item => item.kind)).toEqual(["user_decision", "blocked", "update"]);
+    expect(first.updates[0]!.text).toContain("Chọn Postgres hay SQLite?");
+    expect(first.updates[0]!.text).not.toContain('"metadata"');
+    expect(await receipts.unsurfacedConversationNotices()).toEqual([]);
+
+    // User-facing undisplayed notices remain visible until displayed; plain non-ack updates do not repeat after surfacing.
+    const second = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: {}
+    }) as { updates: { messageId: string; kind: string; text: string }[]; remaining: number };
+    expect(second.updates.map(item => item.messageId)).toEqual(["upd-decision", "upd-blocked"]);
+
+    await receipts.markConversationNoticesDisplayed(["upd-decision", "upd-blocked"]);
+    for (let index = 0; index < 12; index++) {
+      await receipts.appendConversationNotice(makeNotice(`bulk-${index}`, "conversation.progress", {
+        headline: `Bước tiến độ số ${index} ${"dữ liệu ".repeat(120)}`
+      }));
+    }
+    const paged = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: {}
+    }) as { updates: { messageId: string; kind: string; text: string }[]; remaining: number };
+    expect(paged.updates.length).toBeGreaterThan(0);
+    expect(paged.updates.length).toBeLessThan(12);
+    expect(paged.remaining).toBe(12 - paged.updates.length);
+    expect((await receipts.unsurfacedConversationNotices()).length).toBe(paged.remaining);
   }, 20_000);
 });
