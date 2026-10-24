@@ -70,10 +70,13 @@ describe("Runtime tool action ledger", () => {
     await expect(ledger.reconcileUnknown({ ...started, status: "completed" }, {
       schemaVersion: 3, callId: "another-call", status: "completed", output: null, observedAt: new Date().toISOString()
     })).rejects.toThrow(/invocation ID/);
+    await expect(ledger.reconcileUnknown({ ...started, generation: 3, status: "completed" }, {
+      schemaVersion: 3, callId: started.invocationId, status: "completed", output: { ok: true }, observedAt: new Date().toISOString()
+    })).rejects.toThrow(/identity/);
     await ledger.reconcileUnknown({ ...started, status: "completed" }, {
       schemaVersion: 3, callId: started.invocationId, status: "completed", output: { ok: true }, observedAt: new Date().toISOString()
     });
-    expect((await ledger.list())[0]?.status).toBe("completed");
+    expect((await ledger.list())[0]).toMatchObject({ status: "completed", generation: 2, invocationId: started.invocationId });
   });
 
   it("records consumption only after a completed result is linked to stored task evidence", async () => {
@@ -96,5 +99,19 @@ describe("Runtime tool action ledger", () => {
     expect((await ledger.list())[0]?.consumption).toMatchObject({ status: "consumed", source: "host_context" });
     await expect(ledger.put({ ...completed, consumption: { status: "consumed", source: "host_context", evidenceReferences: [evidence] } }))
       .rejects.toThrow(/transition/);
+  });
+
+  it("stores delivery uncertainty as not_used without claiming consumption", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-tool-ledger-not-used-"));
+    roots.push(root);
+    const ledger = new FileToolUsageLedger(join(root, "usage.json"));
+    const started = { schemaVersion: 3 as const, runId: "run-a", taskId: "task-a", role: "developer" as const,
+      sessionId: "session-a", generation: 2, invocationId: "action-delivery-pending", toolId: "memory", serviceId: "memory-service",
+      operation: "search", status: "started" as const, observedAt: new Date().toISOString() };
+    await ledger.begin(started);
+    const completed = { ...started, status: "completed" as const };
+    await ledger.put(completed);
+    await ledger.notUsed({ ...completed, consumption: { status: "not_used", reasonCode: "provider_delivery_unconfirmed" } });
+    expect((await ledger.list())[0]?.consumption).toEqual({ status: "not_used", reasonCode: "provider_delivery_unconfirmed" });
   });
 });

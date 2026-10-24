@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ResolvedToolGrant } from "@bflow/contracts";
-import { validateMemoryActionInput, validateMemoryActionOutput } from "../../src/agentic/tool-action-policy.js";
+import { RepositoryToolPolicySchema, ResolvedToolGrantSchema, ToolUsageRecordSchema, type ResolvedToolGrant } from "@bflow/contracts";
+import { toolActionInvocationId, uninvokedToolDispositions, validateMemoryActionInput, validateMemoryActionOutput,
+  visibleToolUsage } from "../../src/agentic/tool-action-policy.js";
 
 const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "memory-grant", policyDigest: "a".repeat(64), toolId: "mempalace",
   kind: "native_remote_mcp", requiredness: "optional", role: "coordinator",
@@ -35,5 +36,33 @@ describe("Runtime memory tool action policy", () => {
       timestamp: "2026-10-24T00:00:00.000Z", sourceId: "note-1" } }] };
     expect(validateMemoryActionOutput(grant, "mempalace_search", output)).toHaveLength(1);
     expect(validateMemoryActionOutput(grant, "mempalace_search", { results: [{ text: "Unattributed" }] })).toBeNull();
+  });
+
+  it("creates stable per-task skip/degraded/blocked records without invoking optional tools", () => {
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: "repo-1",
+      scope: { kind: "repository", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo" }, digest: "b".repeat(64),
+      requirements: [{ toolId: "mempalace", kind: "native_remote_mcp", serviceId: "memory-service", operations: ["mempalace_search"],
+        requiredness: "optional", roles: ["coordinator"], triggers: ["prior_context"], memoryScope: grant.memoryScope }] });
+    const assignment = { runId: "run-1", taskId: "task-1", attemptId: "attempt-1" };
+    const shared = { policy, role: "coordinator" as const, sessionId: "session-1", repositoryId: "repo-1", repositoryPath: "/repo",
+      generation: 4, assignment, existing: [], observedAt: new Date().toISOString() };
+    const scopedGrant = ResolvedToolGrantSchema.parse({ ...grant, policyDigest: policy.digest });
+    const skipped = uninvokedToolDispositions({ ...shared, grants: [scopedGrant] });
+    expect(skipped).toMatchObject([{ runId: "run-1", taskId: "task-1", role: "coordinator", status: "skipped", reasonCode: "trigger_not_used" }]);
+    expect(skipped[0]?.invocationId).toBe(toolActionInvocationId("session-1", "coordinator", "prior_context", "mempalace", "mempalace_search", assignment));
+    expect(uninvokedToolDispositions({ ...shared, grants: [] })).toMatchObject([{ status: "degraded", reasonCode: "optional_grant_unavailable" }]);
+    const requiredPolicy = RepositoryToolPolicySchema.parse({ ...policy, digest: "c".repeat(64), requirements: policy.requirements.map(item => ({ ...item, requiredness: "required" })) });
+    expect(uninvokedToolDispositions({ ...shared, policy: requiredPolicy, grants: [] })).toMatchObject([{ status: "blocked", reasonCode: "required_grant_unavailable" }]);
+    const used = ToolUsageRecordSchema.parse({ ...skipped[0], status: "completed", reasonCode: undefined,
+      observedAt: new Date().toISOString() });
+    expect(uninvokedToolDispositions({ ...shared, grants: [scopedGrant], existing: [used] })).toEqual([]);
+  });
+
+  it("keeps old-generation unknown usage visible only to the matching authenticated run/task", () => {
+    const record = ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: "run-1", taskId: "task-1", role: "coordinator", sessionId: "session-1",
+      generation: 1, invocationId: "action-old-generation", toolId: "mempalace", serviceId: "memory-service", operation: "mempalace_search",
+      status: "unknown", reasonCode: "unknown_delivery", observedAt: new Date().toISOString() });
+    expect(visibleToolUsage([record], "session-1", "coordinator", { runId: "run-1", taskId: "task-1" })).toEqual([record]);
+    expect(visibleToolUsage([record], "session-1", "coordinator", { runId: "run-2", taskId: "task-1" })).toEqual([]);
   });
 });

@@ -111,6 +111,24 @@ export class FileToolUsageLedger {
     });
   }
 
+  /** Records that forwarding/use was not acknowledged; it must never be promoted to consumed on inference. */
+  async notUsed(record: ToolUsageRecord): Promise<void> {
+    const checked = ToolUsageRecordSchema.parse(record);
+    if (checked.status !== "completed" || checked.consumption?.status !== "not_used")
+      throw new TypeError("Unconfirmed provider delivery requires completed usage and a not_used disposition");
+    await this.exclusive(async () => {
+      const state = await this.read();
+      const index = state.records.findIndex(item => item.invocationId === checked.invocationId);
+      if (index < 0 || state.records[index]!.status !== "completed") throw new Error("Only a completed tool invocation can record not_used");
+      const previous = state.records[index]!;
+      if (!sameImmutableIdentity(previous, checked)) throw new Error("Tool invocation identity cannot change");
+      if (previous.consumption?.status === "not_used" && isDeepStrictEqual(previous, checked)) return;
+      if (previous.consumption !== undefined) throw new Error("Tool invocation consumption is already settled");
+      const records = [...state.records]; records[index] = checked;
+      await this.write({ schemaVersion: VERSION, records });
+    });
+  }
+
   private async read(): Promise<State> {
     try {
       const info = await lstat(this.path);

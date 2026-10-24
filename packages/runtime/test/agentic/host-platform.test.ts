@@ -18,6 +18,7 @@ import {
   HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor,
   createHostProviderFactoryOptions, createHostProviderAdapterFactory
 } from "../../src/agentic/host-platform.js";
+import { describeToolActions } from "../../src/agentic/tool-action-policy.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -44,6 +45,31 @@ describe("profile selection ingress", () => {
       serviceId: "context7", operations: ["query_docs"] });
     expect(AgenticHostPlatformOptionsSchema.parse({ ...platform, toolPolicy: policy, toolGrants: [grant] })).toMatchObject({ toolPolicy: policy, toolGrants: [grant] });
     expect(AgenticHostPlatformOptionsSchema.safeParse({ ...platform, toolGrants: [{ ...grant, operations: [" "] }] }).success).toBe(false);
+  });
+  it("publishes only the authenticated role's scoped action descriptors without bearer or executable material", () => {
+    const scope = { kind: "session" as const, machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "session-1" };
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: "repo-1",
+      scope: { kind: "repository", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo" }, digest: "c".repeat(64),
+      requirements: [{ toolId: "mempalace", kind: "native_remote_mcp", serviceId: "memory-service", operations: ["mempalace_search"],
+        requiredness: "optional", roles: ["coordinator"], triggers: ["prior_context"],
+        memoryScope: { wing: "engineering", repositoryId: "repo-1", access: "read_only" } }] });
+    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "memory-grant", policyDigest: policy.digest, toolId: "mempalace",
+      kind: "native_remote_mcp", requiredness: "optional", role: "coordinator", scope, triggers: ["prior_context"], serviceId: "memory-service",
+      operations: ["mempalace_search"], memoryScope: { wing: "engineering", repositoryId: "repo-1", access: "read_only" } });
+    const descriptors = describeToolActions("coordinator", { ...platform, toolPolicy: policy, toolGrants: [grant] }, "session-1", "/repo");
+    expect(descriptors).toMatchObject([{ toolId: "mempalace", kind: "native_remote_mcp", requiredness: "optional", triggers: ["prior_context"],
+      operations: ["mempalace_search"], serviceId: "memory-service", memoryScope: { wing: "engineering", repositoryId: "repo-1", access: "read_only" },
+      scope: { kind: "session", sessionId: "session-1", repositoryId: "repo-1", workspaceRoot: "/repo" }, status: "available" }]);
+    expect(describeToolActions("developer", { ...platform, toolPolicy: policy, toolGrants: [grant] }, "session-1", "/repo")).toEqual([]);
+    expect(JSON.stringify(descriptors)).not.toContain("bearer");
+    expect(JSON.stringify(descriptors)).not.toContain("executablePath");
+
+    const browserPolicy = RepositoryToolPolicySchema.parse({ ...policy, digest: "d".repeat(64), requirements: [{ ...policy.requirements[0]!,
+      toolId: "browser", serviceId: "chrome-service", operations: ["list_pages"], triggers: ["browser_inspection"] }] });
+    const browserGrant = ResolvedToolGrantSchema.parse({ ...grant, grantId: "browser-grant", toolId: "browser", policyDigest: browserPolicy.digest,
+      serviceId: "chrome-service", operations: ["list_pages"], triggers: ["browser_inspection"] });
+    expect(describeToolActions("coordinator", { ...platform, toolPolicy: browserPolicy, toolGrants: [browserGrant] }, "session-1", "/repo")[0])
+      .toMatchObject({ status: "degraded", reasonCode: "exclusive_resource_lease_unsupported" });
   });
   it("routes pre-run planning memory reads through an activated session grant", async () => {
     const calls: unknown[][] = [];

@@ -1,4 +1,78 @@
-import type { JsonValue, ResolvedToolGrant } from "@bflow/contracts";
+import { RepositoryToolPolicySchema, ResolvedToolGrantSchema, ToolUsageRecordSchema,
+  type AgentRole, type JsonValue, type RepositoryToolPolicy, type ResolvedToolGrant, type ToolUsageRecord } from "@bflow/contracts";
+import type { AgenticHostPlatformOptions } from "../platform/host-options.js";
+import { digest } from "./journal.js";
+
+export interface ToolActionAssignmentIdentity { readonly runId: string; readonly taskId?: string; readonly attemptId?: string; }
+export function toolActionInvocationId(sessionId: string, role: AgentRole, actionId: string, toolId: string, operation: string,
+  assignment?: ToolActionAssignmentIdentity): string {
+  return `tool-${digest([sessionId, assignment?.runId ?? "", assignment?.taskId ?? "", assignment?.attemptId ?? "", role,
+    actionId, toolId, operation]).slice(0, 48)}`;
+}
+
+/** Scoped usage view intentionally spans generations so an unknown receipt remains visible after host restart. */
+export function visibleToolUsage(records: readonly ToolUsageRecord[], sessionId: string, role: AgentRole,
+  assignment?: { readonly runId: string; readonly taskId: string }): ToolUsageRecord[] {
+  return records.filter(item => item.sessionId === sessionId && item.role === role &&
+    (assignment === undefined || item.runId === assignment.runId && item.taskId === assignment.taskId));
+}
+
+/** Creates deterministic per-task evidence for eligible actions a role did not use before its task turn ended. */
+export function uninvokedToolDispositions(input: { policy: RepositoryToolPolicy; grants: readonly ResolvedToolGrant[]; role: AgentRole;
+  sessionId: string; repositoryId: string; repositoryPath: string; generation: number; assignment: ToolActionAssignmentIdentity & { readonly runId: string };
+  existing: readonly ToolUsageRecord[]; observedAt: string }): ToolUsageRecord[] {
+  const result: ToolUsageRecord[] = [];
+  for (const requirement of input.policy.requirements.filter(item => item.roles.includes(input.role))) {
+    const candidates = input.grants.filter(grant => grant.role === input.role && grant.toolId === requirement.toolId && grant.policyDigest === input.policy.digest &&
+      grant.requiredness === requirement.requiredness && requirement.operations.every(operation => grant.operations.includes(operation)) &&
+      requirement.triggers.every(trigger => grant.triggers.includes(trigger)) && (requirement.serviceId === undefined || grant.serviceId === requirement.serviceId) &&
+      grant.scope.kind === "session" && grant.scope.sessionId === input.sessionId && grant.scope.repositoryId === input.repositoryId &&
+      grant.scope.workspaceRoot === input.repositoryPath);
+    const grant = candidates.length === 1 ? candidates[0] : undefined;
+    for (const operation of requirement.operations) {
+      if (input.existing.some(item => item.sessionId === input.sessionId && item.runId === input.assignment.runId &&
+          (input.assignment.taskId === undefined || item.taskId === input.assignment.taskId) && item.role === input.role && item.toolId === requirement.toolId &&
+          item.operation === operation && item.status !== "skipped")) continue;
+      for (const trigger of requirement.triggers) {
+        const invocationId = toolActionInvocationId(input.sessionId, input.role, trigger, requirement.toolId, operation, input.assignment);
+        if (input.existing.some(item => item.invocationId === invocationId)) continue;
+        const exclusiveBrowserUnsupported = Boolean(grant && trigger === "browser_inspection");
+        const status = grant && !exclusiveBrowserUnsupported ? "skipped" as const : requirement.requiredness === "required" ? "blocked" as const : "degraded" as const;
+        const serviceId = grant?.serviceId ?? requirement.serviceId;
+        result.push(ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: input.assignment.runId,
+          ...(input.assignment.taskId ? { taskId: input.assignment.taskId } : {}),
+          role: input.role, sessionId: input.sessionId, generation: input.generation, invocationId, toolId: requirement.toolId,
+          ...(serviceId ? { serviceId } : {}), operation, status, reasonCode: exclusiveBrowserUnsupported ? "exclusive_resource_lease_unsupported" :
+            grant ? "trigger_not_used" : requirement.requiredness === "required" ? "required_grant_unavailable" :
+              candidates.length > 1 ? "ambiguous_grant" : "optional_grant_unavailable", observedAt: input.observedAt }));
+      }
+    }
+  }
+  return result;
+}
+
+/** Safe, role-specific action catalogue for assignment_context; never includes Gateway credentials or CLI identity. */
+export function describeToolActions(role: AgentRole, platform: AgenticHostPlatformOptions | undefined,
+  sessionId: string, repositoryPath: string) {
+  const policy = platform?.toolPolicy === undefined ? undefined : RepositoryToolPolicySchema.parse(platform.toolPolicy);
+  if (!policy || !platform) return [];
+  const grants = (platform.toolGrants ?? []).map(item => ResolvedToolGrantSchema.parse(item));
+  return policy.requirements.filter(requirement => requirement.roles.includes(role)).map(requirement => {
+    const matches = grants.filter(grant => grant.role === role && grant.toolId === requirement.toolId && grant.policyDigest === policy.digest &&
+      grant.requiredness === requirement.requiredness && requirement.operations.every(operation => grant.operations.includes(operation)) &&
+      requirement.triggers.every(trigger => grant.triggers.includes(trigger)) &&
+      (requirement.serviceId === undefined || requirement.serviceId === grant.serviceId) && grant.scope.kind === "session" &&
+      grant.scope.sessionId === sessionId && grant.scope.repositoryId === platform.repositoryId && grant.scope.workspaceRoot === repositoryPath);
+    const grant = matches.length === 1 ? matches[0] : undefined;
+    const needsExclusiveBrowserLease = requirement.triggers.includes("browser_inspection");
+    return { toolId: requirement.toolId, kind: requirement.kind, requiredness: requirement.requiredness, triggers: requirement.triggers,
+      operations: requirement.operations, ...(requirement.capabilityIds ? { capabilityIds: requirement.capabilityIds } : {}),
+      ...(requirement.serviceId ? { serviceId: requirement.serviceId } : {}), ...(requirement.memoryScope ? { memoryScope: requirement.memoryScope } : {}),
+      scope: { kind: "session" as const, sessionId, repositoryId: platform.repositoryId, workspaceRoot: repositoryPath },
+      status: grant && !needsExclusiveBrowserLease ? "available" as const : requirement.requiredness === "required" ? "blocked" as const : "degraded" as const,
+      ...(!grant || needsExclusiveBrowserLease ? { reasonCode: needsExclusiveBrowserLease && grant ? "exclusive_resource_lease_unsupported" : matches.length > 1 ? "ambiguous_grant" : "grant_unavailable" } : {}) };
+  });
+}
 
 /** Host-side memory scope guard; the Gateway independently validates the negotiated upstream input schema. */
 export function validateMemoryActionInput(grant: ResolvedToolGrant, operation: string, raw: JsonValue): void {

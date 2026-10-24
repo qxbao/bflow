@@ -866,6 +866,34 @@ từng launch và pane.
   `released` cho các intent đang mở và xóa các plan/record của chúng; kích hoạt khi đó cần một `bflow up` mới.
 - `platform_status` báo cáo khả năng tiếp cận theo từng launch, lần Gateway check cuối và mọi restart recovery, không có token.
 
+### Tool actions, usage ledger và RTK
+
+`assignment_context` trả về `toolActions` riêng cho role đang được xác thực. Mỗi mục nêu tool ID,
+operation, trigger, mức bắt buộc, scope memory nếu có, và tình trạng `available`, `degraded` hoặc
+`blocked`. Đây là mô tả quyền đã được host resolve; nó không chứa Gateway token, bearer header hay
+identity đường dẫn executable. Role chỉ gọi `invoke_tool_action` khi trigger phù hợp với việc đang làm;
+tool tùy chọn không cần được gọi chỉ để tạo bằng chứng.
+
+Runtime ghi disposition `skipped` cho tool có grant nhưng không được dùng khi role kết thúc turn/task
+được giao, và `degraded`/`blocked` cho grant tùy chọn/bắt buộc không khả dụng. Các entry liên kết với
+run, task và role; `read_tool_usage` giữ lại entry từ generation trước để unknown delivery còn nhìn thấy
+sau restart. Việc reconcile dùng invocation ID ổn định và giữ generation gốc trong ledger. `completed`
+chỉ nói Gateway trả kết quả; khi provider transport không xác nhận đã nhận/kết hợp kết quả, consumption
+được ghi là `not_used` với lý do `provider_delivery_unconfirmed`, không được suy diễn thành consumed.
+Các entry này là chẩn đoán hoạt động, không chứng minh task thành công.
+
+RTK là CLI-only và chỉ chạy qua host runner trên output đã capture. Lệnh gốc chạy một lần; Node TAP,
+Vitest và kiểm tra RGR tiếp tục đọc status/output thô. RTK `auto` có thể giữ nguyên bytes, và Runtime
+không tuyên bố giảm token nếu output không thay đổi. Probe identity/filter diễn ra trước lệnh; RTK tùy
+chọn lỗi được ghi `degraded`, còn RTK bắt buộc lỗi trước lệnh chặn runner. Nếu format RTK bắt buộc lỗi
+sau lệnh, Runtime lưu status/output thô và trả blocker, không chạy lại lệnh.
+
+Giới hạn: Runtime chưa có lifecycle acquire/renew/release cho Gateway resource lease. Các action có
+trigger `browser_inspection` vì vậy được báo `degraded` hoặc `blocked` với
+`exclusive_resource_lease_unsupported`; chúng không được quảng bá là usable khi Gateway có thể từ chối
+vì thiếu lease. Tool MCP và RTK local ở trên chưa chứng minh live provider delivery hoặc full SDLC
+acceptance.
+
 Giới hạn: kế thừa environment của hook, mở rộng header `${VAR}` của Claude và `bearer_token_env_var` của Codex
 chỉ được xác minh bằng các hook spawn cục bộ và config đã render, không phải provider hay Herdr live.
 
