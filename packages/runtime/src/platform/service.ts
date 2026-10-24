@@ -1,7 +1,7 @@
 import { lstat, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  AgentHealthCheckSchema,
+  AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema,
   canonicalReceiptJson,
   type AgentEnvironment,
   type AgentHealthCheck,
@@ -11,6 +11,8 @@ import {
   type AgentProviderId,
   type AgentRole,
   type ContractError,
+  type MCPClientRegistration,
+  type MCPServiceObservation,
   type OperationOptions,
   type OperationResult
 } from "@bflow/contracts";
@@ -102,6 +104,7 @@ interface RoleReady extends RoleAttemptBase {
   readonly preflight: AgentHealthResult;
   readonly skills: ResolvedRoleSkills;
   readonly gateway: RoleGatewayAccess;
+  readonly toolChecks: readonly AgentHealthCheck[];
 }
 
 interface RoleBlocked extends RoleAttemptBase {
@@ -158,6 +161,82 @@ function degradedFailure(): OperationResult<never> {
 
 function withMessage(summary: RolePreflightSummary, extra: string): RolePreflightSummary {
   return { ...summary, message: summary.message ? `${summary.message}; ${extra}` : extra };
+}
+
+function toolCheck(status: AgentHealthCheck["status"], code: string, message: string, check: AgentHealthCheck["check"] = "mcp"): AgentHealthCheck {
+  return AgentHealthCheckSchema.parse({ check, status, code, message,
+    ...(status !== "passed" ? { remediation: "Review repository tool policy and verified machine inventory, then run bflow up again." } : {}) });
+}
+
+async function checkToolPolicy(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement): Promise<{
+  readonly checks: readonly AgentHealthCheck[]; readonly error?: ContractError;
+}> {
+  const rawGrants = requirement.toolGrants ?? [];
+  let policy: ReturnType<typeof RepositoryToolPolicySchema.parse> | undefined;
+  try { policy = requirement.toolPolicy === undefined ? undefined : RepositoryToolPolicySchema.parse(requirement.toolPolicy); }
+  catch { return { checks: [], error: { code: "validation", retryable: false, message: "Repository tool policy is malformed", details: { status: "blocked" } } }; }
+  const grants = rawGrants.map(raw => ResolvedToolGrantSchema.safeParse(raw));
+  if (grants.some(item => !item.success))
+    return { checks: [], error: { code: "validation", retryable: false, message: "Resolved tool grant is malformed", details: { status: "blocked" } } };
+  const resolved = grants.flatMap(item => item.success ? [item.data] : []);
+  if (!policy && resolved.length)
+    return { checks: [], error: { code: "validation", retryable: false, message: "Resolved tool grants require an explicit repository policy", details: { status: "blocked" } } };
+  if (!policy) return { checks: [] };
+  if (policy.scope.kind !== "repository" || policy.repositoryId !== identity.repositoryId || policy.scope.machineId !== identity.machineId ||
+      policy.scope.workspaceRoot !== identity.workspaceRoot)
+    return { checks: [], error: { code: "validation", retryable: false, message: "Repository tool policy does not match the active workspace", details: { status: "blocked" } } };
+  const requirements = policy.requirements.filter(item => item.roles.includes(requirement.role));
+  const checks: AgentHealthCheck[] = [];
+  const denied = (message: string, code = "tool_grant_policy_mismatch", check: AgentHealthCheck["check"] = "mcp") => ({ checks, error: {
+    code: "validation" as const, retryable: false as const, message,
+    details: { status: "blocked" as const, checks: [{ check, status: "failed" as const, code, message }] }
+  } });
+  for (const grant of resolved) if (!requirements.some(item => item.toolId === grant.toolId && item.kind === grant.kind))
+    return denied(`Tool grant ${grant.toolId} has no matching requirement for ${requirement.role}`);
+
+  for (const expected of requirements) {
+    const candidates = resolved.filter(item => item.toolId === expected.toolId && item.role === requirement.role && item.kind === expected.kind);
+    if (candidates.length > 1) return denied(`Tool ${expected.toolId} has ambiguous resolved grants for ${requirement.role}`, "tool_grant_ambiguous");
+    const grant = candidates[0];
+    if (!grant) {
+      if (expected.requiredness === "required") return denied(`Required tool grant ${expected.toolId} is unavailable for ${requirement.role}`,
+        "required_tool_grant_missing", expected.kind === "cli_only" ? "binary" : "mcp");
+      checks.push(toolCheck("unknown", "optional_tool_grant_missing", `Optional tool ${expected.toolId} is not granted for ${requirement.role}`,
+        expected.kind === "cli_only" ? "binary" : "mcp"));
+      continue;
+    }
+    const scopeMatches = grant.policyDigest === policy.digest && grant.requiredness === expected.requiredness &&
+      grant.scope.kind === "session" && grant.scope.sessionId === identity.sessionId && grant.scope.machineId === identity.machineId &&
+      grant.scope.repositoryId === identity.repositoryId && grant.scope.workspaceRoot === identity.workspaceRoot;
+    const operationsWithinPolicy = grant.operations.every(operation => expected.operations.includes(operation));
+    const operationsComplete = expected.requiredness === "optional" || expected.operations.every(operation => grant.operations.includes(operation));
+    const serviceMatches = expected.kind === "cli_only"
+      ? expected.serviceId === undefined && grant.serviceId === undefined
+      : expected.serviceId === undefined ? grant.serviceId !== undefined : grant.serviceId === expected.serviceId;
+    const exactAuthority = operationsWithinPolicy && operationsComplete &&
+      grant.triggers.every(trigger => expected.triggers.includes(trigger)) &&
+      (grant.capabilityIds ?? []).every(capability => expected.capabilityIds?.includes(capability)) &&
+      (grant.cliCommandProfiles ?? []).every(profile => expected.cliCommandProfiles?.includes(profile)) &&
+      serviceMatches &&
+      grant.memoryScope?.wing === expected.memoryScope?.wing && grant.memoryScope?.repositoryId === expected.memoryScope?.repositoryId &&
+      grant.memoryScope?.access === expected.memoryScope?.access;
+    if (!scopeMatches || !exactAuthority) return denied(`Tool grant ${expected.toolId} does not match its policy/session scope`);
+    if (expected.requiredness === "optional" && (expected.operations.some(operation => !grant.operations.includes(operation)) ||
+        expected.triggers.some(trigger => !grant.triggers.includes(trigger)) ||
+        (expected.cliCommandProfiles ?? []).some(profile => !grant.cliCommandProfiles?.includes(profile))))
+      checks.push(toolCheck("unknown", "optional_tool_authority_limited", `Optional tool ${expected.toolId} has a narrower verified operation/profile grant`));
+    if (grant.kind === "cli_only" && grant.cliIdentity) {
+      try {
+        const executable = await resolveAndVerifyExecutable(grant.cliIdentity.executablePath);
+        if (executable.canonicalPath !== grant.cliIdentity.executablePath || executable.digest !== grant.cliIdentity.digest)
+          throw new Error("executable identity drifted");
+      } catch {
+        if (expected.requiredness === "required") return denied(`Required CLI tool ${grant.toolId} executable is unavailable or changed`, "required_cli_identity_unavailable", "binary");
+        checks.push(toolCheck("unknown", "optional_cli_identity_unavailable", `Optional CLI tool ${grant.toolId} executable is unavailable or changed`, "binary"));
+      }
+    }
+  }
+  return { checks };
 }
 
 function profileErrorForRole(requirement: RolePlatformRequirement, error: ContractError): ContractError {
@@ -444,6 +523,24 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     return ok({ checkedAt, healthy: lost.length === 0 && !uncertain, lost, uncertain });
   }
 
+  async invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions) {
+    if (!this.deps.gateway) return fail("transport_unavailable", "Gateway control endpoint unavailable");
+    const current = this.identities.get(identity.stateDirectory);
+    if (!current || current.sessionId !== identity.sessionId || current.generation !== identity.generation || current.repositoryId !== identity.repositoryId)
+      return fail("validation", "Gateway action session is not active in this host");
+    return this.deps.gateway.invokeTool(identity, role, taskId, serviceId, operation, input, callId, options);
+  }
+
+  async reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions) {
+    if (!this.deps.gateway) return fail("transport_unavailable", "Gateway control endpoint unavailable");
+    const current = this.identities.get(identity.stateDirectory);
+    if (!current || current.sessionId !== identity.sessionId || current.generation !== identity.generation || current.repositoryId !== identity.repositoryId)
+      return fail("validation", "Gateway action session is not active in this host");
+    return this.deps.gateway.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, options);
+  }
+
   /**
    * After a host daemon restart nothing from the previous daemon is in memory: revoke every Gateway registration of
    * this session (all generations) and journal `released` for every launch intent left open, so neither a registration
@@ -559,6 +656,10 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       summary: summaryOf(requirement, statusOf(error), checksOf(error), error.message)
     });
 
+    const toolPolicy = await checkToolPolicy(identity, requirement);
+    if (toolPolicy.error) return blocked(toolPolicy.error);
+    const toolChecks = [...toolPolicy.checks];
+
     let isolatorProfile: ResolvedIsolatorProfile | undefined;
     if (requirement.profileName !== undefined) {
       const resolvedProfile = await this.isolatorProfiles.resolve(requirement.provider, requirement.profileName, options);
@@ -580,22 +681,82 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         });
       }
       gatewayTouched = true;
-      const granted = await this.deps.gateway.ensureForRole(identity, {
-        role: requirement.role,
-        provider: requirement.provider,
-        ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
-        environmentId,
-        serviceIds: [...requirement.mcpServiceIds],
-        allowedTools: [...requirement.toolIds],
-        configDigest: sha256Hex(canonicalReceiptJson(requirement))
-      }, options);
-      if (!granted.ok) return blocked(granted.error);
-      gateway = granted.value;
+      const configDigest = sha256Hex(canonicalReceiptJson(requirement));
+      const grants = requirement.toolGrants;
+      if (grants !== undefined) {
+        const groups = new Map<string, typeof grants[number][]>();
+        for (const grant of grants.filter(item => item.kind !== "cli_only")) {
+          if (grant.role !== requirement.role || grant.scope.kind !== "session" ||
+              grant.scope.sessionId !== identity.sessionId || grant.scope.repositoryId !== identity.repositoryId ||
+              grant.scope.workspaceRoot !== identity.workspaceRoot || grant.serviceId === undefined ||
+              !requirement.mcpServiceIds.includes(grant.serviceId))
+            return blocked({ code: "validation", retryable: false, message: "Resolved tool grant does not match the active role/session/service" });
+          const bucket = groups.get(grant.serviceId) ?? [];
+          bucket.push(grant); groups.set(grant.serviceId, bucket);
+        }
+        if ([...groups.keys()].sort().join("\0") !== [...new Set(requirement.mcpServiceIds)].sort().join("\0"))
+          return blocked({ code: "validation", retryable: false, message: "Every required Gateway service must have an exact resolved tool grant" });
+        const registrations: MCPClientRegistration[] = [];
+        const observations: MCPServiceObservation[] = [];
+        const tokenEnvironment: Record<string, string> = {};
+        for (const [serviceId, serviceGrants] of groups) {
+          const operations = [...new Set(serviceGrants.flatMap(grant => grant.operations))].sort();
+          const granted = await this.deps.gateway.ensureForRole(identity, {
+            role: requirement.role,
+            provider: requirement.provider,
+            ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
+            environmentId,
+            serviceIds: [serviceId],
+            allowedTools: operations,
+            toolGrants: serviceGrants,
+            configDigest
+          }, options);
+          if (!granted.ok) {
+            const uncertain = granted.error.code === "timeout" || granted.error.code === "unknown_delivery" || granted.error.code === "cancelled" ||
+              ("retrySafety" in granted.error && granted.error.retrySafety === "observation_only");
+            if (!uncertain && serviceGrants.every(grant => grant.requiredness === "optional")) {
+              toolChecks.push(toolCheck("unknown", "optional_gateway_service_unavailable", `Optional Gateway service ${serviceId} is unavailable: ${granted.error.message}`));
+              continue;
+            }
+            return blocked(granted.error);
+          }
+          registrations.push(...granted.value.registrations);
+          observations.push(...granted.value.observations);
+          Object.assign(tokenEnvironment, granted.value.tokenEnvironment);
+        }
+        gateway = { registrations, observations, tokenEnvironment };
+      } else {
+        // Legacy host config has no resolved grants. Preserve its existing readiness behavior; no mediated
+        // action broker accepts it because Runtime action ingress requires an explicit resolved grant.
+        // A multi-service legacy registration would cross-product every operation across every service, so it fails closed.
+        if (requirement.mcpServiceIds.length > 1)
+          return blocked({ code: "validation", retryable: false, message: "Multiple Gateway services require exact resolved per-service grants" });
+        const granted = await this.deps.gateway.ensureForRole(identity, {
+          role: requirement.role,
+          provider: requirement.provider,
+          ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
+          environmentId,
+          serviceIds: [...requirement.mcpServiceIds],
+          allowedTools: [...(requirement.mcpOperations ?? requirement.toolIds)],
+          configDigest
+        }, options);
+        if (!granted.ok) return blocked(granted.error);
+        gateway = granted.value;
+      }
     }
 
+    const readyServiceIds = [...new Set(gateway.registrations.flatMap(registration => registration.serviceIds))];
+    const mediated = requirement.toolGrants !== undefined;
+    const effectiveRequirement = requirement.toolGrants === undefined ? requirement : {
+      ...requirement,
+      // Mediated tools are reachable only through Runtime's broker. Provider-side MCP
+      // visibility would let the process bypass grant checks and the usage ledger.
+      mcpServiceIds: mediated ? [] : requirement.mcpServiceIds.filter(serviceId => readyServiceIds.includes(serviceId)),
+      mcpOperations: requirement.toolGrants.filter(grant => grant.kind !== "cli_only" && readyServiceIds.includes(grant.serviceId!)).flatMap(grant => grant.operations)
+    };
     const environmentRequirement = isolatorProfile === undefined
-      ? requirement
-      : { ...requirement, isolatorProfileIdentity: isolatorProfile.identity };
+      ? effectiveRequirement
+      : { ...effectiveRequirement, isolatorProfileIdentity: isolatorProfile.identity };
     const environment = this.deps.environments.resolve(identity, environmentRequirement, {
       skillManifestDigest: skills.value.manifest.digest
     });
@@ -644,15 +805,15 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       ...(launchEnvironment !== undefined ? { launchEnvironment: { ...launchEnvironment } } : {}),
       ...(isolatorProfile !== undefined ? { isolatorEnvironment: { ...isolatorProfile.environment } } : {}),
       ...(isolatorProfile?.backendUrl !== undefined ? { codexBackendUrl: isolatorProfile.backendUrl } : {}),
-      mcpRegistrations: gateway.registrations,
-      mcpObservations: gateway.observations,
+      mcpRegistrations: mediated ? [] : gateway.registrations,
+      mcpObservations: mediated ? [] : gateway.observations,
       skillManifest: skills.value.manifest,
       renderedSkillsContent: skills.value.rendered.instructionText,
       ...(hookCommand !== undefined ? { nativeSessionHookCommand: hookCommand } : {}),
       trustedIssuerKeys: { [this.deps.signer.issuerId]: this.deps.signer.publicKeyPem },
       ...(extras?.mcpServers !== undefined ? { hostMcpServers: extras.mcpServers } : {}),
       ...(extras?.hooks !== undefined ? { hostHooks: extras.hooks } : {}),
-      ...(gateway.registrations.length > 0 ? { mcpTokenEnvironmentNames: tokenNames } : {})
+      ...(!mediated && gateway.registrations.length > 0 ? { mcpTokenEnvironmentNames: tokenNames } : {})
     };
 
     return {
@@ -664,19 +825,20 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       context,
       ...(isolatorProfile !== undefined ? { isolatorProfile } : {}),
       skills: skills.value,
-      gateway
+      gateway,
+      toolChecks
     };
   }
 
   private blockedRole(prepared: RoleEnvironmentReady, error: ContractError): RoleBlocked {
     return { identity: prepared.identity, requirement: prepared.requirement, gatewayTouched: prepared.gatewayTouched,
-      ready: false, error, summary: summaryOf(prepared.requirement, statusOf(error), checksOf(error), error.message) };
+      ready: false, error, summary: summaryOf(prepared.requirement, statusOf(error), [...prepared.toolChecks, ...checksOf(error)], error.message) };
   }
 
   private async checkPreparedRole(prepared: RoleEnvironmentReady, options?: OperationOptions): Promise<RoleAttempt> {
     const preflight = await this.deps.providers.preflight(prepared.environment, prepared.context, options);
     return preflight.ok ? { ...prepared, preflight: preflight.value,
-      summary: summaryOf(prepared.requirement, "ready", preflight.value.checks) } : this.blockedRole(prepared, preflight.error);
+      summary: summaryOf(prepared.requirement, "ready", [...preflight.value.checks, ...prepared.toolChecks]) } : this.blockedRole(prepared, preflight.error);
   }
 
   /** Records the launch intent (journaled by readiness) and retains material for later activation. */
@@ -699,7 +861,8 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       gateway: attempt.gateway,
       launch: {
         argv: profile.value.argv,
-        env: { ...(attempt.context.launchEnvironment ?? {}), ...attempt.gateway.tokenEnvironment,
+        env: { ...(attempt.context.launchEnvironment ?? {}),
+          ...(attempt.requirement.toolGrants === undefined ? attempt.gateway.tokenEnvironment : {}),
           ...providerSessionEnvironment(requirement.provider) },
         launchId: profile.value.launchId,
         launchFingerprint: profile.value.launchFingerprint

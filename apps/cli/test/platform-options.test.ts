@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AgenticHostPlatformOptionsSchema } from "@bflow/runtime";
+import { MCPServiceDefinitionSchema, RepositoryToolPolicySchema } from "@bflow/contracts";
+import { digest } from "@bflow/machine-setup";
+import { EnvironmentConfigEnvironmentSchema } from "../src/environment-config.js";
 import { identifyRepository, readEnvironmentConfig, runCli, type EnvironmentCompositionInput } from "../src/index.js";
-import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, resolveIsolatorStateRoot, type HostPlatformContext } from "../src/platform-options.js";
+import { parseConfigYaml, renderEnvironmentConfigYaml } from "../src/config-format.js";
+import { buildHostPlatformOptions, formatPlatformNotReady, resolveCodexTrustPaths, resolveIsolatorStateRoot, resolveRepositoryToolPolicy, resolveToolGrants, type HostPlatformContext } from "../src/platform-options.js";
 import { loadMachineSkillCatalog } from "../src/skill-catalog.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "../src/gateway-control.js";
 
@@ -36,6 +40,28 @@ function configure(edit: (environment: EnvironmentCompositionInput["config"]["en
 const absent = () => false;
 
 describe("buildHostPlatformOptions", () => {
+  it("resolves an explicitly scoped memory grant from a ready service before validating retrieved provenance", () => {
+    const scope = { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root };
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: base.repository.id, scope,
+      digest: "a".repeat(64), requirements: [{ toolId: "mempalace", kind: "native_remote_mcp", serviceId: "memory",
+        operations: ["mempalace_search"], requiredness: "required", roles: ["developer"], triggers: ["prior_context"],
+        memoryScope: { wing: "approved-wing", repositoryId: base.repository.id, access: "read_only" } }] });
+    const service = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "memory", revision: 1,
+      scope: { kind: "machine", machineId: context.machineId },
+      tool: { schemaVersion: 3, toolId: "mempalace", kind: "native_remote_mcp", version: "3.11.0",
+        operations: ["mempalace_search"], required: true, resource: { sharing: "concurrent", maxConcurrency: 1 } },
+      connection: { kind: "native_remote_mcp", endpoint: "https://memory.example.test/mcp", ownership: "external" },
+      authentication: { mode: "none" }, healthTimeoutMs: 1000, idleTimeoutMs: 60000, restartLimit: 0 });
+    const grants = resolveToolGrants(policy, { ...context, mcpServices: [service], serviceReadiness:
+      new Map([["memory", { status: "ready", discoveredTools: ["mempalace_search"] }]]) }, base);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ toolId: "mempalace", operations: ["mempalace_search"],
+      memoryScope: { wing: "approved-wing", repositoryId: base.repository.id, access: "read_only" } });
+  });
+  it("rejects configured custom skill catalog and binding paths with remediation", () => {
+    const input = configure(environment => { environment.skills = { catalogDir: "./custom", bindingsPath: "./bindings.json" }; });
+    expect(() => resolveRepositoryToolPolicy(input, context.machineId)).toThrow(/catalogDir\/bindingsPath are not supported.*Remove these overrides/i);
+  });
   it("derives the isolator root only from trusted machine environment", () => {
     expect(resolveIsolatorStateRoot({ AI_ISOLATOR_HOME: "/machine/isolator" }, "/home/native")).toBe("/machine/isolator");
     expect(resolveIsolatorStateRoot({ AI_ISOLATOR_REAL_HOME: "/home/real" }, "/home/isolated-profile"))
@@ -139,20 +165,155 @@ describe("buildHostPlatformOptions", () => {
     await expect(buildHostPlatformOptions(missing, { context, fileExists: absent })).rejects.toThrow("no-such-skill");
   });
 
-  it("applies environment-wide required skills to every role the skill allows and carries MCP services, tools and permissions", async () => {
+  it("keeps production role skills while denying tools unless repository policy and inventory authorize them", async () => {
+    const options = await buildHostPlatformOptions(base, { context, fileExists: absent, context7Ready: true });
+    const developer = options.roles.find(role => role.role === "developer")!;
+    expect(developer.skillSelections.map(item => item.skill.skillId)).toContain("using-bflow");
+    expect(developer.toolIds).toEqual([]);
+    expect(developer.mcpServiceIds).toEqual([]);
+    expect(options).not.toHaveProperty("toolGrants");
+  });
+
+  it("does not turn a legacy Context7 opt-in or its skill into a tool grant", async () => {
+    const input = configure(environment => { environment.context7 = { enabled: true, required: false }; });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent, context7Ready: true });
+    const developer = options.roles.find(role => role.role === "developer")!;
+    expect(developer.skillSelections.map(item => item.skill.skillId)).not.toContain("use-context7");
+    expect(developer.toolIds).toEqual([]);
+    expect(developer.mcpServiceIds).toEqual([]);
+  });
+
+  it("refuses cross-role legacy tool broadening and reports a deterministic policy migration", async () => {
+    const input = configure(environment => { environment.requiredTools = ["rtk"]; });
+    await expect(buildHostPlatformOptions(input, { context, fileExists: absent }))
+      .rejects.toThrow(/requiredTools.*allowlist.*toolPolicy/i);
+  });
+
+  it("rejects a repository policy whose digest does not bind its canonical contents", async () => {
     const input = configure(environment => {
-      environment.requiredMcpServices = ["gitnexus"];
-      environment.requiredTools = ["rtk"];
+      delete environment.context7;
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "optional" as const,
+          roles: ["developer" as const], triggers: ["routine_command" as const] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: "0".repeat(64) });
+    });
+    await expect(buildHostPlatformOptions(input, { context, fileExists: absent })).rejects.toThrow(/digest.*canonical contents/i);
+  });
+
+  it("round-trips a strict repository tool policy through the editable YAML config", async () => {
+    const input = configure(environment => {
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "context7", kind: "native_remote_mcp" as const, serviceId: "context7",
+          operations: ["resolve-library-id", "query-docs"], requiredness: "optional" as const,
+          roles: ["specifier" as const, "architect" as const], triggers: ["external_documentation" as const] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    const rendered = renderEnvironmentConfigYaml(input.config);
+    const parsed = EnvironmentConfigEnvironmentSchema.parse(parseConfigYaml(rendered).environment);
+    expect(parsed.toolPolicy).toEqual(input.config.environment.toolPolicy);
+  });
+
+  it("blocks required CLI grants without a verified managed executable identity", async () => {
+    const input = configure(environment => {
+      delete environment.context7;
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "required" as const,
+          roles: ["developer" as const], triggers: ["routine_command" as const], capabilityIds: ["repo-forged-capability"] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    await expect(buildHostPlatformOptions(input, { context: { ...context, toolInventory: new Map() }, fileExists: absent }))
+      .rejects.toThrow(/Required tool 'rtk'.*no verified machine executable identity/i);
+  });
+
+  it("does not copy repository requested capability IDs into a resolved grant", async () => {
+    const input = configure(environment => {
+      delete environment.context7;
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "optional" as const,
+          roles: ["developer" as const], triggers: ["routine_command" as const], capabilityIds: ["repo-forged-capability"] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    const inventory = new Map([["rtk", { executablePath: "/machine/tools/rtk", version: "0.42.0", digest: "a".repeat(64) }]]);
+    const grants = resolveToolGrants(input.config.environment.toolPolicy, { ...context, toolInventory: inventory }, input);
+    expect(grants[0]?.capabilityIds).toBeUndefined();
+  });
+
+  it("degrades exclusive browser resources until the Runtime can acquire their lease", async () => {
+    const service = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "chrome-session", revision: 1,
+      scope: { kind: "machine", machineId: context.machineId },
+      tool: { schemaVersion: 3, toolId: "chrome-devtools-mcp", kind: "stdio_mcp", version: "1",
+        operations: ["list_pages", "new_page", "navigate_page"], required: true,
+        resource: { sharing: "exclusive", resourceKey: "chrome-session" } },
+      connection: { kind: "stdio_mcp", executable: "/machine/chrome-mcp", argv: [], environmentBindings: {},
+        executableDigest: "b".repeat(64), ownership: "bflow", bridgeRequired: true },
+      authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0 });
+    const input = configure(environment => {
+      delete environment.context7;
+      environment.roles.push({ role: "tester", cli: "codex" });
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "browser", kind: "stdio_mcp" as const, serviceId: service.serviceId, operations: ["list_pages"],
+          requiredness: "optional" as const, roles: ["tester" as const], triggers: ["browser_inspection" as const] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    const statuses: Parameters<NonNullable<import("../src/platform-options.js").HostPlatformDeps["onToolStatus"]>>[0][] = [];
+    const options = await buildHostPlatformOptions(input, { context: { ...context, mcpServices: [service],
+      serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent,
+      onToolStatus: status => statuses.push(status) });
+    const tester = options.roles.find(role => role.role === "tester")!;
+    expect(tester.toolIds).toEqual([]);
+    expect(tester.skillSelections.map(selection => selection.skill.skillId)).not.toContain("browser-inspection");
+    expect(options.toolGrants?.find(grant => grant.role === "tester")).toBeUndefined();
+    expect(statuses.find(status => status.toolId === "browser")).toMatchObject({ granted: false, ready: false,
+      reason: expect.stringContaining("exclusive MCP resources are not yet supported") });
+    const requiredInput = configure(environment => {
+      delete environment.context7;
+      environment.roles.push({ role: "tester", cli: "codex" });
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "browser", kind: "stdio_mcp" as const, serviceId: service.serviceId, operations: ["list_pages"],
+          requiredness: "required" as const, roles: ["tester" as const], triggers: ["browser_inspection" as const] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    await expect(buildHostPlatformOptions(requiredInput, { context: { ...context, mcpServices: [service],
+      serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent }))
+      .rejects.toThrow(/Required tool 'browser'.*exclusive MCP resources are not yet supported/i);
+  });
+
+  it("reports installed, allowed, granted and ready as separate policy observations", async () => {
+    const input = configure(environment => {
+      delete environment.context7;
+      const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
+        scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
+        requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "required" as const,
+          roles: ["developer" as const], triggers: ["routine_command" as const] }] };
+      environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
+    });
+    const statuses: Parameters<NonNullable<Parameters<typeof resolveToolGrants>[5]>>[0][] = [];
+    const grants = resolveToolGrants(input.config.environment.toolPolicy, { ...context, toolInventory: new Map() }, input,
+      undefined, undefined, status => statuses.push(status), false);
+    expect(grants).toEqual([]);
+    expect(statuses).toEqual([{ role: "developer", toolId: "rtk", requiredness: "required", installed: false,
+      allowed: true, granted: false, ready: false, reason: "no verified machine executable identity is available" }]);
+  });
+
+  it("applies environment-wide required skills and permissions without creating tool grants", async () => {
+    const input = configure(environment => {
       environment.permissions = { mode: "restricted" };
       environment.skills = { requiredSkills: ["inspect-repository"] };
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
     for (const role of options.roles) {
       expect(role.permissionMode).toBe("restricted");
-      expect(role.mcpServiceIds).toEqual(["gitnexus"]);
-      expect(role.toolIds).toEqual(["rtk"]);
-      // The Conversation role is not an allowed role for this skill, so the environment-wide pin does not apply to it.
-      expect(role.skillSelections.map(item => item.skill.skillId)).toEqual(role.role === "conversation" ? [] : ["inspect-repository"]);
+      expect(role.mcpServiceIds).toEqual([]);
+      expect(role.toolIds).toEqual([]);
+      const skillIds = role.skillSelections.map(item => item.skill.skillId);
+      expect(skillIds).toContain("using-bflow");
+      expect(skillIds.includes("inspect-repository")).toBe(role.role !== "conversation");
     }
   });
 
@@ -177,6 +338,12 @@ describe("buildHostPlatformOptions", () => {
     });
   });
 
+  it("keeps native Codex hook authority anchored to the real home inside an isolator shell", () => {
+    expect(resolveCodexTrustPaths({ environment: { AI_ISOLATOR: "1", AI_ISOLATOR_REAL_HOME: "/home/native" },
+      homeDirectory: "/isolator/profiles/codex--personal/home", processHomeDirectory: "/isolator/profiles/codex--personal/home",
+      machineStateDirectory: "/temporary/state/bflow" })).toMatchObject({ codexHomeDirectory: "/home/native/.codex",
+      codexHookApprovalPath: "/home/native/.local/state/bflow/codex-hook-approvals.json" });
+  });
   it("keeps Codex hook state under BFLOW_HOME and otherwise follows CODEX_HOME", () => {
     expect(resolveCodexTrustPaths({ environment: { BFLOW_HOME: "/isolated", CODEX_HOME: "/actual/.codex" },
       homeDirectory: "/actual", processHomeDirectory: "/isolated/providers/home", machineStateDirectory: "/isolated/state" })).toEqual({
@@ -247,51 +414,51 @@ describe("formatPlatformNotReady", () => {
 describe("Context7 role grants", () => {
   const roleMap = (options: Awaited<ReturnType<typeof buildHostPlatformOptions>>) => Object.fromEntries(options.roles.map(role => [role.role, role]));
   const enabled = (extra: Record<string, unknown> = {}) => configure(environment => { environment.context7 = { enabled: true, ...extra }; });
+  const readyContext = () => ({
+    ...context,
+    mcpServices: [MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "context7", revision: 1,
+      scope: { kind: "machine", machineId: context.machineId },
+      tool: { schemaVersion: 3, toolId: "context7", kind: "native_remote_mcp", version: "1", operations: ["resolve-library-id", "query-docs"],
+        required: true, resource: { sharing: "concurrent", maxConcurrency: 8 } },
+      connection: { kind: "native_remote_mcp", endpoint: "https://mcp.context7.com/mcp", ownership: "external" },
+      authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0 })],
+    serviceReadiness: new Map([["context7", { status: "ready" as const, discoveredTools: ["resolve-library-id", "query-docs"] }]])
+  });
 
   it("is on in a repository created by init, as an optional service", () => {
     expect(base.config.environment.context7).toEqual({ enabled: true, required: false });
   });
 
-  it("grants the service and its two tools only to the roles whose approved skill allows documentation lookup", async () => {
-    const options = await buildHostPlatformOptions(enabled(), { context, fileExists: absent, context7Ready: true });
+  it("grants the catalog ID and exact service operations only to policy roles", async () => {
+    const options = await buildHostPlatformOptions(enabled(), { context: readyContext(), fileExists: absent });
     const roles = roleMap(options);
     for (const role of ["specifier", "architect", "planner", "developer", "reviewer", "qa"]) {
       expect(roles[role]?.mcpServiceIds, role).toEqual(["context7"]);
-      expect(roles[role]?.toolIds, role).toEqual(["resolve-library-id", "query-docs"]);
+      expect(roles[role]?.toolIds, role).toEqual(["context7"]);
     }
     for (const role of ["conversation", "coordinator"]) {
       expect(roles[role]?.mcpServiceIds, role).toEqual([]);
       expect(roles[role]?.toolIds, role).toEqual([]);
     }
+    expect(options.toolGrants?.filter(grant => grant.toolId === "context7").every(grant =>
+      grant.serviceId === "context7" && grant.operations.join(",") === "resolve-library-id,query-docs")).toBe(true);
     expect(AgenticHostPlatformOptionsSchema.parse(options)).toEqual(options);
   });
 
-  it("adds to the repository's own MCP services and tools without duplicating them", async () => {
-    const input = configure(environment => {
-      environment.context7 = { enabled: true };
-      environment.requiredMcpServices = ["gitnexus", "context7"];
-      environment.requiredTools = ["query", "query-docs"];
-    });
-    const developer = roleMap(await buildHostPlatformOptions(input, { context, fileExists: absent, context7Ready: true }))["developer"]!;
-    expect(developer.mcpServiceIds).toEqual(["gitnexus", "context7"]);
-    expect(developer.toolIds).toEqual(["query", "query-docs", "resolve-library-id"]);
-  });
-
-  it("starts roles without it, and warns once, when it is optional and the Gateway does not report it ready", async () => {
+  it("starts without an optional legacy Context7 tool and records its degraded reason", async () => {
     const warnings: string[] = [];
     const options = await buildHostPlatformOptions(enabled({ required: false }), { context, fileExists: absent, context7Ready: false, warn: message => warnings.push(message) });
     expect(options.roles.every(role => role.mcpServiceIds.length === 0 && role.toolIds.length === 0)).toBe(true);
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toMatch(/degraded/);
+    expect(warnings.some(message => /Context7.*degraded|Optional tool 'context7'.*degraded/i.test(message))).toBe(true);
     const unknown = await buildHostPlatformOptions(enabled(), { context, fileExists: absent, warn: message => warnings.push(message) });
     expect(roleMap(unknown)["developer"]?.mcpServiceIds).toEqual([]);
-    expect(warnings).toHaveLength(2);
+    expect(warnings.length).toBeGreaterThan(1);
   });
 
-  it("still requests it for every allowed role when required, so a missing service blocks startup instead of degrading", async () => {
+  it("blocks a required legacy Context7 policy when its service is missing", async () => {
     const warnings: string[] = [];
-    const options = await buildHostPlatformOptions(enabled({ required: true }), { context, fileExists: absent, context7Ready: false, warn: message => warnings.push(message) });
-    expect(roleMap(options)["developer"]?.mcpServiceIds).toEqual(["context7"]);
+    await expect(buildHostPlatformOptions(enabled({ required: true }), { context, fileExists: absent, context7Ready: false, warn: message => warnings.push(message) }))
+      .rejects.toThrow(/Required tool 'context7'.*unavailable/i);
     expect(warnings).toEqual([]);
   });
 
@@ -301,7 +468,7 @@ describe("Context7 role grants", () => {
       const warnings: string[] = [];
       const options = await buildHostPlatformOptions(configure(edit), { context, fileExists: absent, context7Ready: true, warn: message => warnings.push(message) });
       expect(options.roles.every(role => role.mcpServiceIds.length === 0)).toBe(true);
-      expect(warnings).toEqual([]);
+      expect(warnings.some(message => /skipped because tool .* has no approved grant/i.test(message))).toBe(true);
     }
   });
 });

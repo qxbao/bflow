@@ -8,8 +8,9 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentEnvironment, AgentHealthRequest, AgentHealthResult, AgentLaunchProfile, AgentProviderAdapter, AgentProviderDescriptor,
-  ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions, OperationResult, ScopedOperation, TrustScope
+  ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions, OperationResult, ResolvedToolGrant, ScopedOperation, TrustScope
 } from "@bflow/contracts";
+import { RepositoryToolPolicySchema } from "@bflow/contracts";
 import { createFakeProviderRunner, type ProviderCommandInvocation, type ProviderCommandRunner } from "@bflow/agent-providers";
 import { SkillFileStore, SkillManager, bundleDigest, type BundleFiles } from "@bflow/skills";
 import { failWith, ok } from "../../src/platform/errors.js";
@@ -41,9 +42,12 @@ class FakeGatewayControl implements GatewayControlPort {
   readonly registrations = new Map<string, { registration: MCPClientRegistration; bearerToken: string }>();
   services: MCPServiceObservation[] = [];
   failNextRegister: ContractError | undefined;
+  registerCalls = 0;
+  inspectCalls = 0;
 
   async register(registration: MCPClientRegistration, _options?: OperationOptions):
     Promise<OperationResult<GatewayRegistrationGrant>> {
+    this.registerCalls++;
     if (this.failNextRegister) {
       const failure = this.failNextRegister;
       this.failNextRegister = undefined;
@@ -70,6 +74,7 @@ class FakeGatewayControl implements GatewayControlPort {
 
   async inspectServices(_operation: ScopedOperation, _options?: OperationOptions):
     Promise<OperationResult<readonly MCPServiceObservation[]>> {
+    this.inspectCalls++;
     return ok(this.services);
   }
 
@@ -386,6 +391,188 @@ describe("DefaultPlatformReadinessService", () => {
     expect(Date.parse(resumed.value.preflight.checkedAt)).toBe(now);
     expect(gatewayControl.tokens()).toEqual(tokens);
     expect(await journalKinds(journal)).toEqual(kinds);
+  });
+
+  it("registers each resolved service with only its own exact operations", async () => {
+    gatewayControl.services = [observation("svc-search"), observation("svc-read")];
+    const grant = (grantId: string, toolId: string, serviceId: string, operation: string): ResolvedToolGrant => ({
+      schemaVersion: 3, grantId, policyDigest: "a".repeat(64), toolId, kind: "native_remote_mcp", requiredness: "optional",
+      role: "developer", scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["prior_context"], serviceId, operations: [operation]
+    });
+    const searchGrant = grant("grant-search", "code-search", "svc-search", "search");
+    const readGrant = grant("grant-read", "memory-read", "svc-read", "read");
+    const toolPolicy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "a".repeat(64), requirements: [
+        { toolId: "code-search", kind: "native_remote_mcp" as const, serviceId: "svc-search", operations: ["search"], requiredness: "optional" as const,
+          roles: ["developer" as const], triggers: ["prior_context" as const] },
+        { toolId: "memory-read", kind: "native_remote_mcp" as const, serviceId: "svc-read", operations: ["read"], requiredness: "optional" as const,
+          roles: ["developer" as const], triggers: ["prior_context" as const] }
+      ] };
+    const contexts: ProviderAdapterContext[] = [];
+    const { service } = buildService({ providerFactory: contextProviderFactory((_provider, context) => contexts.push(context)) });
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy, mcpServiceIds: ["svc-search", "svc-read"],
+      mcpOperations: ["search", "read"], toolGrants: [searchGrant, readGrant] })]);
+
+    expect(result.ok && result.value.report.ready).toBe(true);
+    const registrations = [...gatewayControl.registrations.values()].map(item => item.registration);
+    expect(registrations).toHaveLength(2);
+    expect(registrations.map(item => ({ serviceIds: item.serviceIds, allowedTools: item.allowedTools })))
+      .toEqual(expect.arrayContaining([
+        { serviceIds: ["svc-search"], allowedTools: ["search"] },
+        { serviceIds: ["svc-read"], allowedTools: ["read"] }
+      ]));
+    expect(contexts[0]?.mcpRegistrations).toEqual([]);
+    expect(contexts[0]?.mcpObservations).toEqual([]);
+    expect(contexts[0]?.mcpTokenEnvironmentNames).toBeUndefined();
+    expect(result.ok && result.value.launches[0]?.environment.requiredMcpServiceIds).toEqual([]);
+    const launchEnv = result.ok ? result.value.launches[0]?.launch.env ?? {} : {};
+    for (const token of gatewayControl.tokens()) expect(Object.values(launchEnv)).not.toContain(token);
+  });
+
+  it("accepts one verified grant service when the policy omits serviceId and binds Gateway to that service", async () => {
+    gatewayControl.services = [observation("svc-search")];
+    const toolPolicy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "e".repeat(64), requirements: [{ toolId: "code-search", kind: "native_remote_mcp" as const,
+        operations: ["search"], requiredness: "required" as const, roles: ["developer" as const], triggers: ["code_relationships" as const] }] };
+    const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-selected-search", policyDigest: toolPolicy.digest,
+      toolId: "code-search", kind: "native_remote_mcp", requiredness: "required", role: "developer",
+      scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["code_relationships"], serviceId: "svc-search", operations: ["search"] };
+    const { service } = buildService();
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy, toolGrants: [grant],
+      mcpServiceIds: ["svc-search"], mcpOperations: ["search"] })]);
+
+    expect(result.ok && result.value.report.ready).toBe(true);
+    expect([...gatewayControl.registrations.values()].map(item => ({
+      serviceIds: item.registration.serviceIds, allowedTools: item.registration.allowedTools
+    }))).toEqual([{ serviceIds: ["svc-search"], allowedTools: ["search"] }]);
+  });
+
+  it("still denies an explicit service mismatch before Gateway registration", async () => {
+    const toolPolicy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "f".repeat(64), requirements: [{ toolId: "code-search", kind: "native_remote_mcp" as const, serviceId: "svc-search",
+        operations: ["search"], requiredness: "required" as const, roles: ["developer" as const], triggers: ["code_relationships" as const] }] };
+    const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-wrong-search", policyDigest: toolPolicy.digest,
+      toolId: "code-search", kind: "native_remote_mcp", requiredness: "required", role: "developer",
+      scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["code_relationships"], serviceId: "svc-read", operations: ["search"] };
+    const { service } = buildService();
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy, toolGrants: [grant],
+      mcpServiceIds: ["svc-read"], mcpOperations: ["search"] })]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.ready).toBe(false);
+    expect(result.value.report.roles[0]?.status).toBe("blocked");
+    expect(gatewayControl.registerCalls).toBe(0);
+  });
+
+  it("does not infer a service from ambiguous resolved grants", async () => {
+    gatewayControl.services = [observation("svc-search"), observation("svc-read")];
+    const toolPolicy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "1".repeat(64), requirements: [{ toolId: "code-search", kind: "native_remote_mcp" as const,
+        operations: ["search"], requiredness: "required" as const, roles: ["developer" as const], triggers: ["code_relationships" as const] }] };
+    const grant = (grantId: string, serviceId: string): ResolvedToolGrant => ({ schemaVersion: 3, grantId,
+      policyDigest: toolPolicy.digest, toolId: "code-search", kind: "native_remote_mcp", requiredness: "required",
+      role: "developer", scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["code_relationships"], serviceId, operations: ["search"] });
+    const { service } = buildService();
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy,
+      toolGrants: [grant("grant-search", "svc-search"), grant("grant-read", "svc-read")],
+      mcpServiceIds: ["svc-search", "svc-read"], mcpOperations: ["search"] })]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.ready).toBe(false);
+    expect(result.value.report.roles[0]?.message).toContain("ambiguous resolved grants");
+    expect(gatewayControl.registerCalls).toBe(0);
+  });
+
+  it("continues to require an explicit serviceId for memory scope policy", async () => {
+    const unscopedMemoryPolicy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "2".repeat(64), requirements: [{ toolId: "mempalace", kind: "native_remote_mcp" as const,
+        operations: ["mempalace_search"], requiredness: "required" as const, roles: ["developer" as const],
+        triggers: ["prior_context" as const], memoryScope: { wing: "engineering", repositoryId: identity.repositoryId, access: "read_only" as const } }] };
+    const { service } = buildService();
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy: unscopedMemoryPolicy as never,
+      toolGrants: [], mcpServiceIds: [] })]);
+
+    expect(RepositoryToolPolicySchema.safeParse(unscopedMemoryPolicy).success).toBe(false);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.ready).toBe(false);
+    expect(gatewayControl.registerCalls).toBe(0);
+  });
+
+  it("blocks a required missing grant before Gateway, skill, provider, or launch side effects", async () => {
+    const policy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "b".repeat(64), requirements: [{ toolId: "code-search", kind: "stdio_mcp" as const, serviceId: "svc-search",
+        operations: ["search"], requiredness: "required" as const, roles: ["developer" as const], triggers: ["code_relationships" as const] }] };
+    const { service } = buildService();
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy: policy, toolGrants: [], mcpServiceIds: [] })]);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.ready).toBe(false);
+    expect(result.value.report.roles[0]).toMatchObject({ status: "blocked", message: expect.stringContaining("Required tool grant") });
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect(gatewayControl.inspectCalls).toBe(0);
+  });
+
+  it("keeps an optional missing grant visible as degraded while allowing the unrelated role to launch", async () => {
+    const policy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "c".repeat(64), requirements: [{ toolId: "context7", kind: "native_remote_mcp" as const, serviceId: "svc-docs",
+        operations: ["query_docs"], requiredness: "optional" as const, roles: ["developer" as const], triggers: ["external_documentation" as const] }] };
+    const { service } = buildService();
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy: policy, toolGrants: [], mcpServiceIds: [] })]);
+
+    expect(result.ok && result.value.report.ready).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.roles[0]?.checks).toContainEqual(expect.objectContaining({ status: "unknown", code: "optional_tool_grant_missing" }));
+    expect(result.value.launches).toHaveLength(1);
+    expect(gatewayControl.registrations.size).toBe(0);
+  });
+
+  it("keeps an optional unready MCP service out of the provider launch and reports the degraded reason", async () => {
+    gatewayControl.services = [observation("svc-docs", { status: "unavailable", diagnosticCode: "missing_process" })];
+    const policy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
+      scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
+      digest: "d".repeat(64), requirements: [{ toolId: "context7", kind: "native_remote_mcp" as const, serviceId: "svc-docs",
+        operations: ["query_docs"], requiredness: "optional" as const, roles: ["developer" as const], triggers: ["external_documentation" as const] }] };
+    const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-docs", policyDigest: policy.digest,
+      toolId: "context7", kind: "native_remote_mcp", requiredness: "optional", role: "developer",
+      scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
+      triggers: ["external_documentation"], serviceId: "svc-docs", operations: ["query_docs"] };
+    const { service } = buildService();
+
+    const result = await service.prepareSession(identity, [requirement({ toolPolicy: policy, toolGrants: [grant],
+      mcpServiceIds: ["svc-docs"], mcpOperations: ["query_docs"] })]);
+
+    expect(result.ok && result.value.report.ready).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.report.roles[0]?.checks).toContainEqual(expect.objectContaining({ status: "unknown", code: "optional_gateway_service_unavailable" }));
+    expect(result.value.launches[0]?.gateway.registrations).toEqual([]);
+    expect(gatewayControl.registerCalls).toBe(0);
   });
 
   it.each(["expired", "missing-skills", "gateway-lost", "released", "binary-changed", "config-changed"] as const)("refuses %s retained startup material without replacing it", async condition => {

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { lstatSync } from "node:fs";
 import { mkdir, open, readFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
-import { AgentRoleSchema, WorkflowDefinitionSchema } from "@bflow/contracts";
+import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema } from "@bflow/contracts";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
@@ -91,6 +91,7 @@ export const EnvironmentConfigEnvironmentSchema = z
       .optional(),
     requiredMcpServices: z.array(z.string().trim().min(1)).optional(),
     requiredTools: z.array(z.string().trim().min(1)).optional(),
+    toolPolicy: RepositoryToolPolicySchema.optional(),
     /** Context7 documentation lookups through the shared Gateway. Absent means off: nothing leaves the machine unless a repository opts in. */
     context7: z
       .object({

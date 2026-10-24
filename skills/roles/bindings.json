@@ -76,5 +76,42 @@
       "review-code",
       "run-verification"
     ]
+  },
+  "conditionalBindings": {
+    "specifier": [
+      { "toolId": "context7", "skillId": "use-context7" }
+    ],
+    "architect": [
+      { "toolId": "gitnexus", "skillId": "use-gitnexus" },
+      { "toolId": "context7", "skillId": "use-context7" }
+    ],
+    "planner": [
+      { "toolId": "context7", "skillId": "use-context7" }
+    ],
+    "developer": [
+      { "toolId": "rtk", "skillId": "use-rtk" },
+      { "toolId": "gitnexus", "skillId": "use-gitnexus" },
+      { "toolId": "context7", "skillId": "use-context7" },
+      { "toolId": "mempalace", "skillId": "use-mempalace" }
+    ],
+    "reviewer": [
+      { "toolId": "gitnexus", "skillId": "use-gitnexus" },
+      { "toolId": "rtk", "skillId": "use-rtk" },
+      { "toolId": "context7", "skillId": "use-context7" }
+    ],
+    "tester": [
+      { "toolId": "rtk", "skillId": "use-rtk" },
+      { "toolId": "browser", "skillId": "browser-inspection" }
+    ],
+    "qa": [
+      { "toolId": "rtk", "skillId": "use-rtk" },
+      { "toolId": "browser", "skillId": "browser-inspection" },
+      { "toolId": "context7", "skillId": "use-context7" },
+      { "toolId": "mempalace", "skillId": "use-mempalace" }
+    ],
+    "security": [
+      { "toolId": "gitnexus", "skillId": "use-gitnexus" },
+      { "toolId": "mempalace", "skillId": "use-mempalace" }
+    ]
   }
 }

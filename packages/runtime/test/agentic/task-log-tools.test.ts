@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PaneBinding } from "@bflow/contracts";
 import { TaskActivityLog } from "../../src/agentic/task-activity-log.js";
-import { handleTaskLogTool, taskLogAssignmentContext } from "../../src/agentic/task-log-tools.js";
+import { handleTaskLogTool, taskLogAssignmentContext, toolActionHolderCandidates } from "../../src/agentic/task-log-tools.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -75,6 +75,17 @@ describe("authenticated task activity log tools", () => {
   it("provides native tool-log context only for the exact bound pane and session", () => {
     expect(taskLogAssignmentContext(state(), binding())).toEqual({ runId: "run-1", taskId: "task-1", attemptId: "attempt-1" });
     expect(taskLogAssignmentContext(state(), binding("old-native"))).toBeUndefined();
+  });
+
+  it("selects only one currently accepted handoff holder for mediated tool actions", () => {
+    const pane = binding();
+    const holder = { status: "accepted", message: { type: "verification.requested", recipient: { role: "developer", agent_id: "dev-1", pane_id: "pane-1" } },
+      request: { requestId: "request-1" }, lease: { leaseId: "lease-1" },
+      handle: { target: { paneId: "pane-1", agentId: "dev-1", workspaceId: "workspace-1", tabId: "tab-1", session: pane.session } } };
+    expect(toolActionHolderCandidates({ outbound: [holder, { ...holder, status: "released" }] }, pane)).toEqual([holder]);
+    expect(toolActionHolderCandidates({ outbound: [{ ...holder, status: "unknown_delivery" }] }, pane)).toEqual([]);
+    expect(toolActionHolderCandidates({ outbound: [holder, { ...holder, request: { requestId: "request-2" } }] }, pane)).toHaveLength(2);
+    expect(toolActionHolderCandidates({ outbound: [holder] }, binding("stale-native"))).toEqual([]);
   });
 
   it.each(["phase-task-1-red", "check-review-1"])("groups verification assignment %s by its business task", async transportTaskId => {

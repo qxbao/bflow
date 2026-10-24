@@ -2,7 +2,8 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import {
   AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
-  NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema
+  NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema,
+  RepositoryToolPolicySchema, ResolvedToolGrantSchema
 } from "@bflow/contracts";
 
 /**
@@ -58,7 +59,11 @@ export const AgenticHostPlatformOptionsSchema = z.object({
    */
   supportedCommands: z.array(NonEmptyArgumentSchema).optional(),
   /** Private locator written by the Gateway daemon; absent means no Gateway (roles needing MCP are blocked). */
-  gatewayLocatorPath: NonEmptyArgumentSchema.optional()
+  gatewayLocatorPath: NonEmptyArgumentSchema.optional(),
+  /** Explicit repository policy snapshot; absent remains default-deny for tool actions. */
+  toolPolicy: RepositoryToolPolicySchema.optional(),
+  /** Host-resolved grants bound to exact roles, operations and session scope. */
+  toolGrants: z.array(ResolvedToolGrantSchema).optional()
 }).strict().superRefine((options, ctx) => {
   const roles = options.roles.map(role => role.role);
   if (new Set(roles).size !== roles.length) ctx.addIssue({ code: "custom", message: "platform roles must be unique" });
