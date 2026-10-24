@@ -325,6 +325,12 @@ describe("buildHostPlatformOptions", () => {
     });
   });
 
+  it("keeps native Codex hook authority anchored to the real home inside an isolator shell", () => {
+    expect(resolveCodexTrustPaths({ environment: { AI_ISOLATOR: "1", AI_ISOLATOR_REAL_HOME: "/home/native" },
+      homeDirectory: "/isolator/profiles/codex--personal/home", processHomeDirectory: "/isolator/profiles/codex--personal/home",
+      machineStateDirectory: "/temporary/state/bflow" })).toMatchObject({ codexHomeDirectory: "/home/native/.codex",
+      codexHookApprovalPath: "/home/native/.local/state/bflow/codex-hook-approvals.json" });
+  });
   it("keeps Codex hook state under BFLOW_HOME and otherwise follows CODEX_HOME", () => {
     expect(resolveCodexTrustPaths({ environment: { BFLOW_HOME: "/isolated", CODEX_HOME: "/actual/.codex" },
       homeDirectory: "/actual", processHomeDirectory: "/isolated/providers/home", machineStateDirectory: "/isolated/state" })).toEqual({

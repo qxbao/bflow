@@ -91,8 +91,8 @@ describe("profile selection ingress", () => {
     expect(required.mcpOperations).toEqual(["query_docs"]);
     expect(required.mcpServiceIds).toEqual(["context7"]);
     const legacyWithoutPolicy = requirementFor({ ...roleOption("coordinator", "codex"), mcpServiceIds: ["legacy-service"], toolIds: ["legacy-tool"] }, {}, "/repo");
-    expect(legacyWithoutPolicy.mcpServiceIds).toEqual([]);
-    expect(legacyWithoutPolicy.toolGrants).toEqual([]);
+    expect(legacyWithoutPolicy.mcpServiceIds).toEqual(["legacy-service"]);
+    expect(legacyWithoutPolicy.toolGrants).toBeUndefined();
   });
   it("accepts safe profile names and rejects path/control characters", () => {
     expect(PlatformRoleOptionSchema.safeParse({ ...roleOption("coordinator", "codex"), profileName: "lead-1" }).success).toBe(true);

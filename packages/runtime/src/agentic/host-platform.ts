@@ -139,7 +139,7 @@ export function requirementFor(
   hostCapabilities: Readonly<Record<string, readonly string[]>>,
   cwd: string,
   taskId?: string,
-  toolGrants: AgenticHostPlatformOptions["toolGrants"] = [],
+  toolGrants: AgenticHostPlatformOptions["toolGrants"] = undefined,
   toolPolicy: AgenticHostPlatformOptions["toolPolicy"] = undefined
 ): RolePlatformRequirement {
   const declared = hostCapabilities[option.role] ?? [];
@@ -156,7 +156,7 @@ export function requirementFor(
     ...(taskId !== undefined ? { taskId } : {}),
     capabilityIds: [...new Set([...option.capabilityIds, ...declared])],
     mcpServiceIds: toolGrants === undefined
-      ? []
+      ? [...option.mcpServiceIds]
       : [...new Set(roleGrants.filter(grant => grant.kind !== "cli_only").map(grant => grant.serviceId!))],
     ...(toolGrants !== undefined ? { mcpOperations: [...new Set(roleGrants.filter(grant => grant.kind !== "cli_only").flatMap(grant => grant.operations))] } : {}),
     ...(toolGrants !== undefined ? { toolGrants: roleGrants } : {}),

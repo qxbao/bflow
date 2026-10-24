@@ -149,12 +149,16 @@ export function resolveCodexTrustPaths(input: {
   readonly machineStateDirectory: string;
 }): { readonly codexHomeDirectory: string; readonly codexProcessHomeDirectory: string; readonly codexHookApprovalPath: string } {
   const isolatedRoot = input.environment.BFLOW_HOME;
+  const nativeHome = input.environment.AI_ISOLATOR === "1" && input.environment.AI_ISOLATOR_REAL_HOME
+    ? resolve(input.environment.AI_ISOLATOR_REAL_HOME) : input.homeDirectory;
+  const nestedProfile = nativeHome !== input.homeDirectory;
+  const codexOverride = input.environment.CODEX_HOME;
   const codexHomeDirectory = isolatedRoot
     ? resolve(isolatedRoot, "providers", "codex")
-    : input.environment.CODEX_HOME
-      ? resolve(input.environment.CODEX_HOME)
-      : join(input.homeDirectory, ".codex");
-  const stateDirectory = isolatedRoot ? resolve(isolatedRoot, "state") : input.machineStateDirectory;
+    : codexOverride && (!nestedProfile || resolve(codexOverride) !== resolve(input.homeDirectory, ".codex"))
+      ? resolve(codexOverride) : join(nativeHome, ".codex");
+  const stateDirectory = isolatedRoot ? resolve(isolatedRoot, "state")
+    : nestedProfile ? join(nativeHome, ".local/state/bflow") : input.machineStateDirectory;
   return {
     codexHomeDirectory,
     codexProcessHomeDirectory: input.processHomeDirectory,
