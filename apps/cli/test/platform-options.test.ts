@@ -268,7 +268,7 @@ describe("buildHostPlatformOptions", () => {
     expect(tester.toolIds).toEqual(["chrome-devtools-mcp"]);
     expect(tester.skillSelections.map(selection => selection.skill.skillId)).toContain("browser-inspection");
     expect(options.toolGrants?.find(grant => grant.role === "tester")?.toolId).toBe("chrome-devtools-mcp");
-    expect(statuses.find(status => status.toolId === "browser")?.installed).toBe(false);
+    expect(statuses.find(status => status.toolId === "browser")?.installed).toBeNull();
   });
 
   it("reports installed, allowed, granted and ready as separate policy observations", async () => {

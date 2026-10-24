@@ -53,7 +53,7 @@ export interface ToolPolicyResolutionStatus {
   readonly role: string;
   readonly toolId: string;
   readonly requiredness: "required" | "optional";
-  readonly installed: boolean;
+  readonly installed: boolean | null;
   readonly allowed: true;
   readonly granted: boolean;
   readonly ready: boolean;
@@ -333,7 +333,7 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
   for (const requirement of policy.requirements) for (const role of requirement.roles) {
     if (role === "conversation") throw new Error("Conversation role cannot receive a tool grant");
     const canonicalToolId = context.skills.canonicalToolId(requirement.toolId);
-    let installed = false;
+    let installed: boolean | null = false;
     let ready = false;
     let granted = false;
     let version: string | undefined;
@@ -375,7 +375,7 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
       }
       // A service definition proves configuration, not exact executable installation.
       // Until CLI has verified the managed install identity, report installation as unverified.
-      installed = false;
+      installed = null;
       version = matches[0]!.tool.version;
       serviceId = matches[0]!.serviceId;
       const readiness = context.serviceReadiness?.get(serviceId);

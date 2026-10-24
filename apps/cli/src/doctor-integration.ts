@@ -1174,13 +1174,13 @@ export async function runDoctorDiagnostics(
       const policy = resolveRepositoryToolPolicy(input, context.machineId);
       resolveToolGrants(policy, context, input, undefined, undefined, observed => {
         const missingReason = observed.reason ?? "No matching machine evidence was observed.";
-        const add = (stage: "installed" | "allowed" | "granted" | "ready", pass: boolean, reason: string, remediation: string) => {
+        const add = (stage: "installed" | "allowed" | "granted" | "ready", pass: boolean | null, reason: string, remediation: string) => {
           toolChecks.push({ checkId: `tool-policy-${observed.toolId}-${observed.role}-${stage}`, group: "tools",
             component: `${observed.toolId}:${observed.role}:${stage}`,
-            status: pass ? "pass" : observed.requiredness === "required" ? "fail" : "warning",
+            status: pass ? "pass" : pass === null ? "warning" : observed.requiredness === "required" ? "fail" : "warning",
             detected_version: observed.version ?? null, reason, remediation: pass ? "" : remediation });
         };
-        add("installed", observed.installed, observed.installed ? `Machine inventory verifies '${observed.toolId}' (${observed.version ?? "version unavailable"}).` :
+        add("installed", observed.installed, observed.installed === null ? `Service configuration for '${observed.toolId}' is known; local installation evidence is separate and remains unverified.` : observed.installed ? `Machine inventory verifies '${observed.toolId}' (${observed.version ?? "version unavailable"}).` :
           `Machine inventory does not verify '${observed.toolId}': ${missingReason}`, "Review the pinned tool and its setup receipt with 'bflow tool status'.");
         add("allowed", observed.allowed, `Repository policy explicitly allows '${observed.toolId}' for role '${observed.role}'.`,
           "Add an explicit role and operation requirement to environment.toolPolicy.");
