@@ -1000,7 +1000,7 @@ hạn automatic wake ở ba lần mỗi notice qua restart. Notice và lỗi del
 cạn budget; người dùng có thể mở Conversation và hỏi trạng thái rồi resume/cancel cùng run.
 `host_status` trả các lỗi delivery gần nhất để chẩn đoán. Layout khác fail closed.
 
-Xem `WORKFLOW-LIVENESS-AUDIT.md` và `WORKFLOW-LIVENESS-HANDOFF.md` cho nguồn gốc sự cố và
+Xem `WORKFLOW-LIVENESS-AUDIT.md` cho nguồn gốc sự cố và
 ranh giới nghiệm thu. Có local regression tests; live provider/full SDLC acceptance không được
 suy ra từ fake transport, receipt, hoặc test Herdr native actor.
 
@@ -1132,3 +1132,19 @@ xác định được lưu có kiểu và giới hạn trong notice/receipt đ�
 Notification giữ chỗ cho câu trả lời cần dùng trước phần lý do dài. Xác nhận hiển thị của
 notice sửa yêu cầu phải có nội dung hành động; chỉ nhắc mã notice hoặc headline không đủ.
 Các kiểm tra này không tạo quyền phê duyệt, thay đổi yêu cầu hay bằng chứng thành công.
+
+## Context khảo sát có dẫn chứng
+
+Host `assignment_context` cung cấp khảo sát có giới hạn cho assignment phân tích hiện hành
+của Coordinator/specifier/architect/planner. Runtime tái sử dụng `ProjectContextService`
+để chọn source, dependency tĩnh lân cận, test và tài liệu liên quan; context ghi worktree,
+HEAD, fingerprint, dòng nguồn, mức `observed`/`inferred`/`unknown` và phần bị cắt.
+Đây là dữ liệu chẩn đoán, không phải yêu cầu nghiệp vụ đã được duyệt hoặc bằng chứng task
+thành công. Thiếu bằng chứng về business intent phải giữ `unknown`.
+
+GitNexus chỉ bổ sung khảo sát qua tool action đã cấp quyền khi role xác minh được repository
+và revision index phù hợp, rồi đối chiếu source. Index thiếu/stale/unverified cho phép fallback
+đọc source trong phạm vi được cấp; dependency động và phần chưa đọc vẫn chưa được chứng minh.
+Drift được báo khi context trước thay đổi; không tự sửa spec, replan, chuyển task status,
+hoặc thay approval/lease. Kiểm thử cục bộ không chứng minh live-provider acceptance hay mức
+giảm token/lỗi.

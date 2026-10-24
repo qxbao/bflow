@@ -185,5 +185,4 @@ git status --short
 
 Build đi trước các package test. Package được đăng ký trong TypeScript reference gốc
 và workspace lockfile, nên các lệnh build/typecheck gốc bao gồm P16. Xem
-[REVIEW.md](REVIEW.md) cho các bản sửa review và evidence tích hợp;
-[HANDOFF.md](HANDOFF.md) lưu giữ bản bàn giao triển khai ban đầu.
+[REVIEW.md](REVIEW.md) cho các bản sửa review và evidence tích hợp.

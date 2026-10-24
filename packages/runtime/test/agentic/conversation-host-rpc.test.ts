@@ -60,6 +60,50 @@ async function hostFixture(includeDeveloper = false) {
 }
 
 describe.skipIf(process.platform === "win32")("Native role schemas and Conversation through the real host RPC", () => {
+  it("serves a source-backed repository survey through the real authenticated assignment_context tool", async () => {
+    const f = await hostFixture();
+    const { AgenticJournal } = await import("../../src/agentic/journal.js");
+    const { availableTools } = await import("../../dist/agentic/host.js");
+    const { draft } = await import("../../../specification/test/fixtures.js");
+    await mkdir(join(f.root, "packages/example/src"), { recursive: true });
+    await writeFile(join(f.root, "packages/example/src/behavior.ts"), "export function existingBehavior() { return 'old result'; }\n");
+    const delegation = DelegationRequestSchema.parse({ schemaVersion: 2, delegationId: "survey-delegation", messageId: "survey-assignment",
+      correlationId: "survey-corr", runId: "survey-run", sessionId: "chat-session", requestedBy: "conversation", targetRole: "coordinator",
+      title: "Inspect existing behavior", objective: "Find existingBehavior and related tests", specificationId: "survey-spec", sddLevel: "lightweight",
+      acceptanceCriteria: draft().acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: f.at, idempotencyKey: "survey-assignment",
+      metadata: { affectedPaths: ["packages/example/src"] } });
+    const target = { transport: "herdr", agentId: "coordinator", paneId: "pane-coordinator", workspaceId: "workspace", tabId: "tab",
+      session: { source: "herdr:claude", kind: "id" as const, value: "native-coordinator" } };
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "survey-assignment", correlation_id: "survey-corr", run_id: "survey-run",
+      sender: { role: "conversation" }, recipient: { role: "coordinator", agent_id: "coordinator", pane_id: "pane-coordinator" },
+      type: "delegation.request", payload: delegation, artifact_references: [], occurred_at: f.at, idempotency_key: "survey-assignment" });
+    const journal = new AgenticJournal(join(f.root, ".bflow/state/agentic/journal"), f.root);
+    await expect.poll(async () => { try { await journal.exclusive(async (state, save) => {
+      state.runs.push({ runId: "survey-run", delegation, status: "specifying", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3 });
+      state.outbound.push({ message, status: "accepted", selector: "binding-coordinator", taskId: "survey-task", attemptId: "survey-attempt", capabilities: ["repository.read"],
+        request: { requestId: "survey-request", attemptId: "survey-attempt", runId: "survey-run", taskId: "survey-task", role: "coordinator", target,
+          instruction: "Inspect existing behavior", inputs: [], attempt: 1, retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 60000, onTimeout: "block" }, idempotency: { key: "survey-assignment", scope: "agent-request", fingerprint: "survey" }, createdAt: f.at },
+        lease: { leaseId: "survey-lease", agentId: "coordinator", runId: "survey-run", taskId: "survey-task", attemptId: "survey-attempt", fencingToken: 1, version: 0,
+          acquiredAt: f.at, expiresAt: "2099-01-01T00:00:00.000Z" },
+        handle: { executionId: "survey-execution", requestId: "survey-request", attemptId: "survey-attempt", runId: "survey-run", taskId: "survey-task",
+          idempotencyKey: "survey-assignment", target, correlation: { token: "survey-request", provenance: "orchestrator", verified: false }, acceptedAt: f.at } });
+      await save();
+    }); return true; } catch (error) { if (String(error).includes("runtime busy")) return false; throw error; }
+    }, { timeout: 10_000, interval: 25 }).toBe(true);
+    await callHost(f.coordinator.socketPath, f.coordinator.token, "provider_tools_list", { paneId: "pane-coordinator",
+      toolNames: availableTools("coordinator").map(tool => tool.name) });
+    const result = await callHost(f.coordinator.socketPath, f.coordinator.token, "role_call", { paneId: "pane-coordinator", name: "assignment_context",
+      arguments: { paths: ["/untrusted/role/supplied/path"] } }) as any;
+    expect(result.repositorySurvey).toMatchObject({ status: "prepared", assignmentMessageId: "survey-assignment", runId: "survey-run", taskId: "survey-task" });
+    expect(result.repositorySurvey.context.formattedPromptContext).toContain("packages/example/src/behavior.ts");
+    expect(result.repositorySurvey.context.formattedPromptContext).toContain("old result");
+    expect(result.repositorySurvey.context.baselineFiles).toBeUndefined();
+    expect(JSON.stringify(result.repositorySurvey)).not.toContain("/untrusted/role/supplied/path");
+    expect(f.launches.roleLaunch.coordinator!.systemPrompt).toContain("read repositorySurvey");
+    await expect(callHost(f.chat.socketPath, f.chat.token, "role_call", { paneId: "pane-coordinator", name: "assignment_context", arguments: {} })).rejects.toThrow();
+  }, 20_000);
+
   it("serves Developer policy through authenticated MCP while refusing another role's pane", async () => {
     const f = await hostFixture(true), developer = f.developer!;
     const read = (paneId: string) => callHost(developer.socketPath, developer.token, "role_call", {
