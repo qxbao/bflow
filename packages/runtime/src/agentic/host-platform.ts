@@ -225,6 +225,13 @@ export interface HostPlatformSessionOptions {
   readonly gatewayDiagnostic?: string | undefined;
 }
 
+interface PinnedRoleInstructions {
+  launchId: string;
+  manifest: SkillManifest;
+  instructionText: string;
+  references: readonly { name: string; description: string; entrypoint: string; digest: string }[];
+}
+
 /** One daemon's platform session: generation counter, launch ids for activation, and the Developer launch port. */
 export class HostPlatformSession {
   private identity: PlatformSessionIdentity | undefined;
@@ -233,7 +240,8 @@ export class HostPlatformSession {
   private readonly launches = new Map<AgentRole, { launchId: string; provider: AgentProviderId }>();
   /** Native Agy homes are keyed by launch id and exposed only while the matching launch is active. */
   private readonly nativeAgyHomes = new Map<string, { role: AgentRole; provider: AgentProviderId; home: string }>();
-  private readonly roleInstructions = new Map<AgentRole, { launchId: string; manifest: SkillManifest; instructionText: string; references: readonly { name: string; description: string; entrypoint: string; digest: string }[] }>();
+  private readonly roleInstructions = new Map<AgentRole, PinnedRoleInstructions>();
+  private readonly developerInstructions = new Map<string, PinnedRoleInstructions>();
   private readonly developerLaunches = new Map<string, string>();
   /** Active Developer launches by launch id: the reachability the launch must prove, or null without Gateway registrations. */
   private readonly developerGates = new Map<string, ReachabilityExpectation | null>();
@@ -320,11 +328,16 @@ export class HostPlatformSession {
   }
 
   /** Exact pinned, provider-neutral skills for the current prepared launch; callers receive no storage paths or mutable bundle handles. */
-  async readPinnedInstructions(role: AgentRole, skillId?: string, offset = 0, limit = 8 * 1024): Promise<{ launchId: string; manifestDigest: string; instructionText: string;
+  async readPinnedInstructions(role: AgentRole, skillId?: string, offset = 0, limit = 8 * 1024, expectedLaunchId?: string): Promise<{ launchId: string; manifestDigest: string; instructionText: string;
     references: readonly { name: string; description: string; entrypoint: string; digest: string }[];
     skill?: { skillId: string; version: string; digest: string; offset: number; bytes: number; content: string; truncated: boolean } } | undefined> {
-    const value = this.roleInstructions.get(role), active = this.launches.get(role);
-    if (!value || !active || value.launchId !== active.launchId || !this.skillManager || !this.skillStore) return undefined;
+    const value = role === "developer"
+      ? expectedLaunchId === undefined ? undefined : this.developerInstructions.get(expectedLaunchId)
+      : this.roleInstructions.get(role);
+    const active = role === "developer"
+      ? expectedLaunchId !== undefined && [...this.developerLaunches.values()].includes(expectedLaunchId)
+      : value?.launchId === this.launches.get(role)?.launchId;
+    if (!value || !active || (expectedLaunchId !== undefined && value.launchId !== expectedLaunchId) || !this.skillManager || !this.skillStore) return undefined;
     const manifest = await this.skillManager.verify(value.manifest);
     const common = { launchId: value.launchId, manifestDigest: manifest.digest, instructionText: value.instructionText,
       references: structuredClone(value.references) };
@@ -440,6 +453,9 @@ export class HostPlatformSession {
     }
     this.developerLaunches.set(taskId, launchId);
     this.developerGates.set(launchId, expectation ?? null);
+    if (result.value.skills?.manifest && result.value.skills?.rendered) this.developerInstructions.set(launchId, {
+      launchId, manifest: result.value.skills.manifest, instructionText: result.value.skills.rendered.instructionText,
+      references: result.value.skills.rendered.references.map(reference => ({ ...reference })) });
     this.rememberNativeAgyHome(result.value);
     return launchMaterial(result.value);
   }
@@ -478,6 +494,7 @@ export class HostPlatformSession {
     await this.removeLaunchArtifacts(launchId);
     this.developerLaunches.delete(taskId);
     this.developerGates.delete(launchId);
+    this.developerInstructions.delete(launchId);
     this.nativeAgyHomes.delete(launchId);
   }
 
@@ -491,6 +508,7 @@ export class HostPlatformSession {
     this.launches.clear();
     this.developerLaunches.clear();
     this.developerGates.clear();
+    this.developerInstructions.clear();
     this.nativeAgyHomes.clear();
     await this.persistLaunches();
   }
