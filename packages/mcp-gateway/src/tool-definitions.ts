@@ -191,6 +191,10 @@ export function normalizeUpstreamToolList(raw: unknown): OperationResult<MCPUpst
       return err({ code: "validation", retryable: false,
         message: `Upstream tool definition at index ${index} uses a schema keyword this Gateway cannot enforce` });
     }
+    if (data.outputSchema !== undefined && !isSupportedJsonSchema(data.outputSchema)) {
+      return err({ code: "validation", retryable: false,
+        message: `Upstream tool definition at index ${index} uses an output schema keyword this Gateway cannot enforce` });
+    }
     if (seen.has(data.name)) {
       return err({
         code: "validation",

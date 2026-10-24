@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ContractError, OperationOptions, OperationResult } from "@bflow/contracts";
+import type { ContractError, JsonValue, OperationOptions, OperationResult } from "@bflow/contracts";
 import type { GatewayMetricsCollector } from "./metrics.js";
 import type { GatewaySecretStore } from "./security.js";
 import { normalizeUpstreamToolList } from "./tool-definitions.js";
@@ -499,7 +499,8 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
         body: { jsonrpc: "2.0", id: input.requestId, method: "tools/call", params: { name: input.tool, arguments: input.arguments } } });
       if (!response) return err({ code: "corruption", retryable: false, message: "Upstream tools/call returned no response", details: { kind: "protocol" } });
       if (response.error) return ok({ isError: true, content: response.error.message ?? (response.error as never) });
-      return ok({ isError: Boolean(response.result?.isError), content: response.result?.content ?? response.result ?? null });
+      return ok({ isError: Boolean(response.result?.isError), content: response.result?.content ?? response.result ?? null,
+        ...(response.result?.structuredContent !== undefined ? { structuredContent: response.result.structuredContent as JsonValue } : {}) });
     } catch (error) {
       return this.fail(error);
     }

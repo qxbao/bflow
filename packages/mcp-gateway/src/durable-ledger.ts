@@ -1,8 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { closeSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { hostname } from "node:os";
 import { canonicalReceiptJson, MCPToolCallSchema, type MCPToolCall, type MCPToolCallResult } from "@bflow/contracts";
 import { z } from "zod";
 
@@ -164,59 +164,23 @@ export class DurableGatewayCallLedger {
 
   #withLock<T>(action: () => T): T {
     const lockPath = `${this.path}.lock`;
-    // Publish only a fully-written owner record. A crash before linkSync leaves an
-    // unreferenced temp file; a crash after it leaves a complete, inspectable lock.
-    const ownerPath = `${lockPath}.${process.pid}.${randomUUID()}.owner`;
-    const fd = openSync(ownerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-    const lockBytes = Buffer.from(JSON.stringify({ pid: process.pid, host: hostname(), acquiredAt: new Date().toISOString() }));
+    const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK, 0o600);
     try {
-      writeSync(fd, lockBytes, 0, lockBytes.length);
-      fsyncSync(fd);
-    } finally { closeSync(fd); }
-    try {
-      try { linkSync(ownerPath, lockPath); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !this.#removeProvenStaleLock(lockPath)) throw error;
-        linkSync(ownerPath, lockPath);
-      }
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid()))
+        throw new Error("Gateway call ledger lock must be a private owner-controlled regular file");
+      // flock holds a kernel lock on the shared open-file description. If this
+      // process exits, the kernel releases it; stale file contents are irrelevant.
+      const acquired = spawnSync("flock", ["--exclusive", "--timeout", "5", "3"], {
+        stdio: ["ignore", "ignore", "ignore", fd], timeout: 6000
+      });
+      if (acquired.error || acquired.status !== 0)
+        throw new Error(`Gateway call ledger is busy or flock is unavailable${acquired.error ? `: ${acquired.error.message}` : ""}`);
       return action();
     } finally {
-      try {
-        const owner = lstatSync(ownerPath);
-        const lock = lstatSync(lockPath);
-        if (owner.dev === lock.dev && owner.ino === lock.ino) unlinkSync(lockPath);
-      } catch { /* The lock may have been removed during recovery. */ }
-      unlinkSync(ownerPath);
+      closeSync(fd);
     }
-  }
-
-  #removeProvenStaleLock(lockPath: string): boolean {
-    try {
-      const fd = openSync(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      let owner: { pid: number; host: string };
-      try {
-        const stat = fstatSync(fd);
-        if (!stat.isFile() || stat.size > 4096 || (stat.mode & 0o077) !== 0 ||
-            (typeof process.getuid === "function" && stat.uid !== process.getuid())) return false;
-        const contents = readFileSync(fd, "utf8");
-        let raw: unknown;
-        try { raw = JSON.parse(contents) as unknown; }
-        catch {
-          // New writers publish the owner record atomically. An incomplete lock
-          // can therefore only be a legacy crash artifact or external corruption.
-          unlinkSync(lockPath);
-          return true;
-        }
-        if (typeof raw !== "object" || raw === null || !Number.isSafeInteger((raw as { pid?: unknown }).pid) ||
-            typeof (raw as { host?: unknown }).host !== "string") return false;
-        owner = raw as { pid: number; host: string };
-      } finally { closeSync(fd); }
-      if (owner.host !== hostname() || owner.pid === process.pid) return false;
-      try { process.kill(owner.pid, 0); return false; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return false; }
-      unlinkSync(lockPath);
-      return true;
-    } catch { return false; }
   }
 
   #append(value: z.infer<typeof LedgerLineSchema>): void {

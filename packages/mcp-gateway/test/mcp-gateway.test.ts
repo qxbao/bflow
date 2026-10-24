@@ -1357,6 +1357,32 @@ describe("@bflow/mcp-gateway Verification & Architecture Invariants", () => {
   // Scenario 9: Crash / Recovery & Reconciliation (reconcileCall)
   // --------------------------------------------------------------------------
   describe("Scenario 9: Crash / Recovery & Reconciliation (reconcileCall)", () => {
+    it("does not reconcile a mutating call as completed when structuredContent violates outputSchema", async () => {
+      const outputSchema = { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false };
+      const factory = new ProgrammableDriverFactory(() => ({
+        onInitialize: async () => ok({ protocolVersion: "2025-11-25", discoveredTools: ["query"],
+          toolDefinitions: [{ name: "query", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] }, outputSchema }],
+          defaultedInputSchemaTools: [] }),
+        onCallTool: async () => err({ code: "timeout", retryable: true, message: "simulated lost response" }),
+        onReconcileRequest: async () => ({ status: "completed", output: [{ type: "text", text: "ok" }], structuredContent: { id: 7 } } as never)
+      }));
+      const serviceManager = new DefaultMCPServiceManager({ driverFactory: factory });
+      const gateway = new BflowSharedMCPGateway({ serviceManager });
+      const service = makeServiceDefinition("svc-output-reconcile", { tool: { schemaVersion: 3, toolId: "svc-output-reconcile",
+        kind: "stdio_mcp", version: "1.0.0", operations: ["query"], resource: { sharing: "concurrent", maxConcurrency: 2 }, required: true } });
+      expect(gateway.registry.registerService(service).ok).toBe(true);
+      const scope = makeScope("session", { sessionId: "schema-output-reconcile-session" });
+      const client = makeClientRegistration("schema-output-reconcile-client", service.serviceId, { scope, allowedTools: ["query"] });
+      expect((await gateway.register(client)).ok).toBe(true);
+      const call: MCPToolCall = { schemaVersion: 3, callId: "schema-output-reconcile-call", registrationId: client.registrationId,
+        serviceId: service.serviceId, tool: "query", input: { q: "hello" }, idempotencyKey: "schema-output-reconcile-call" };
+      const uncertain = await gateway.call(call);
+      expect(uncertain.ok && uncertain.value.status).toBe("unknown");
+      const reconciled = await gateway.reconcileCall(call);
+      expect(reconciled.ok).toBe(true);
+      if (reconciled.ok) expect(reconciled.value).toMatchObject({ status: "unknown", output: { diagnosticCode: "upstream_output_schema_invalid" } });
+    });
+
     it("handles unexpected upstream crash during mutating call, quarantines resource, and reconciles cleanly", async () => {
       let activeBridge: StdioToHttpBridge | undefined;
       let reconcileOutcome: MCPUpstreamReconcileResult = { status: "unknown" };
@@ -2095,6 +2121,7 @@ describe("Scenario 13: Upstream tool definitions propagate to Gateway tools/list
 const fs = require('fs');
 const readline = require('readline');
 const payload = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const callResult = process.argv[3] ? JSON.parse(fs.readFileSync(process.argv[3], 'utf8')) : { content: [{ type: 'text', text: 'ok' }] };
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
 rl.on('line', (line) => {
   if (!line.trim()) return;
@@ -2103,23 +2130,27 @@ rl.on('line', (line) => {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'defs-worker', version: '1.0.0' } } }) + '\\n');
   } else if (msg.method === 'tools/list') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: payload } }) + '\\n');
+  } else if (msg.method === 'tools/call') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: callResult }) + '\\n');
   }
 });
 `;
 
-  function setupStdioWorker(tools: unknown, gatewayOptions?: BflowSharedMCPGatewayOptions) {
+  function setupStdioWorker(tools: unknown, gatewayOptions?: BflowSharedMCPGatewayOptions, callResult?: unknown) {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-defs-test-"));
     const scriptPath = path.join(tmpDir, "worker.cjs");
     const payloadPath = path.join(tmpDir, "tools.json");
+    const callResultPath = path.join(tmpDir, "call-result.json");
     fs.writeFileSync(scriptPath, toolDefinitionWorker, { mode: 0o644 });
     fs.writeFileSync(payloadPath, JSON.stringify(tools), { mode: 0o644 });
+    if (callResult !== undefined) fs.writeFileSync(callResultPath, JSON.stringify(callResult), { mode: 0o600 });
     const serviceId = `svc-defs-${randomUUID().slice(0, 8)}`;
     const service = makeServiceDefinition(serviceId, {
       healthTimeoutMs: 30_000,
       connection: {
         kind: "stdio_mcp",
         executable: process.execPath,
-        argv: [scriptPath, payloadPath],
+        argv: [scriptPath, payloadPath, ...(callResult === undefined ? [] : [callResultPath])],
         environmentBindings: {},
         executableDigest: "0".repeat(64),
         ownership: "bflow",
@@ -2181,6 +2212,12 @@ rl.on('line', (line) => {
       { name: "bare", inputSchema: { type: "object" } }
     ]);
     expect(res.value.defaultedInputSchemaTools).toEqual(["bare"]);
+  });
+
+  it("rejects output schemas containing constraints the Gateway cannot enforce", () => {
+    const result = normalizeUpstreamToolList({ tools: [{ name: "query", inputSchema: { type: "object" },
+      outputSchema: { type: "object", patternProperties: { "^id$": { type: "string" } } } }] });
+    expect(result.ok).toBe(false);
   });
 
   it("blocks an explicit grant registration when its real stdio definition omits inputSchema", async () => {
@@ -2291,6 +2328,43 @@ rl.on('line', (line) => {
         makeScopedOp(scope)
       );
       expect(res.ok).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("does not report a mutating call completed when structuredContent violates outputSchema", async () => {
+    const { serviceId, gateway, cleanup } = setupStdioWorker([{
+      name: "query", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+      outputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false }
+    }], undefined, { content: [{ type: "text", text: "completed" }], structuredContent: { id: 42 } });
+    try {
+      const scope = makeScope("session", { sessionId: "schema-output-session" });
+      const client = makeClientRegistration("schema-output-client", serviceId, { scope, allowedTools: ["query"] });
+      expect((await gateway.register(client)).ok).toBe(true);
+      const result = await gateway.call({ schemaVersion: 3, callId: "schema-output-call", registrationId: client.registrationId,
+        serviceId, tool: "query", input: { q: "hello" }, idempotencyKey: "schema-output-call" });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value).toMatchObject({ status: "unknown", output: { diagnosticCode: "upstream_output_schema_invalid" } });
+      expect(JSON.stringify(result)).not.toContain("42");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("accepts structuredContent that satisfies the advertised outputSchema", async () => {
+    const { serviceId, gateway, cleanup } = setupStdioWorker([{
+      name: "query", inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+      outputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: false }
+    }], undefined, { content: [{ type: "text", text: "ok" }], structuredContent: { id: "result-1" } });
+    try {
+      const scope = makeScope("session", { sessionId: "schema-output-valid-session" });
+      const client = makeClientRegistration("schema-output-valid-client", serviceId, { scope, allowedTools: ["query"] });
+      expect((await gateway.register(client)).ok).toBe(true);
+      const result = await gateway.call({ schemaVersion: 3, callId: "schema-output-valid-call", registrationId: client.registrationId,
+        serviceId, tool: "query", input: { q: "hello" }, idempotencyKey: "schema-output-valid-call" });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.status).toBe("completed");
     } finally {
       await cleanup();
     }

@@ -148,11 +148,13 @@ export interface MCPUpstreamToolCallInput {
 export interface MCPUpstreamToolCallOutput {
   readonly isError?: boolean;
   readonly content: JsonValue;
+  readonly structuredContent?: JsonValue;
 }
 
 export interface MCPUpstreamReconcileResult {
   readonly status: "completed" | "failed" | "not_delivered" | "unknown";
   readonly output?: JsonValue;
+  readonly structuredContent?: JsonValue;
 }
 
 export interface MCPUpstreamDriverInstance {

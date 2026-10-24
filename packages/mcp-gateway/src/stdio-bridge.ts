@@ -661,6 +661,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       | {
           isError?: boolean;
           content?: JsonValue;
+          structuredContent?: JsonValue;
         }
       | undefined;
 
@@ -672,18 +673,21 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
     this.reconcileLedger.set(input.requestId, {
       status: isError ? "failed" : "completed",
-      output: content
+      output: content,
+      ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
     });
     if (input.callId) {
       this.reconcileLedger.set(input.callId, {
         status: isError ? "failed" : "completed",
-        output: content
+        output: content,
+        ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
       });
     }
 
     return ok({
       isError,
-      content
+      content,
+      ...(resultObj?.structuredContent !== undefined ? { structuredContent: resultObj.structuredContent } : {})
     });
   }
 

@@ -494,7 +494,8 @@ export class BflowSharedMCPGateway {
             return err({ code: "validation", retryable: false, message: `Operation '${operationName}' is outside service '${serviceId}' configuration` });
           }
           const definition = state.toolDefinitions?.find(tool => tool.name === operationName);
-          if (!definition || state.defaultedInputSchemaTools?.includes(operationName) || !isSupportedJsonSchema(definition.inputSchema)) {
+          if (!definition || state.defaultedInputSchemaTools?.includes(operationName) || !isSupportedJsonSchema(definition.inputSchema) ||
+              definition.outputSchema !== undefined && !isSupportedJsonSchema(definition.outputSchema)) {
             if (grantsForService.some(grant => grant.requiredness === "required" && grant.operations.includes(operationName))) {
               state.status = "blocked";
               state.diagnosticCode = "tool_schema_unavailable";
@@ -1480,6 +1481,27 @@ export class BflowSharedMCPGateway {
         }
       }
 
+      const outputSchema = negotiatedDefinition?.outputSchema;
+      const invalidStructuredOutput = !upstreamRes.value.isError && outputSchema !== undefined &&
+        (upstreamRes.value.structuredContent === undefined || !validateJsonSchema(upstreamRes.value.structuredContent, outputSchema));
+      if (invalidStructuredOutput) {
+        const invalidResult: MCPToolCallResult = MCPToolCallResultSchema.parse({ schemaVersion: 3, callId: request.callId,
+          status: mutating ? "unknown" : "failed",
+          output: { diagnosticCode: "upstream_output_schema_invalid", message: "Upstream structuredContent did not match its advertised output schema" },
+          observedAt: this.now().toISOString() });
+        const status = invalidResult.status;
+        this.metrics.recordCallEnd(request.serviceId, status, durationMs);
+        ledgerEntry.result = invalidResult;
+        this.durableCallLedger?.recordResult(request.callId, invalidResult);
+        if (mutating && isExclusive && resState) resState.quarantinedByCallId = request.callId;
+        this.recordAudit({ action: "tool.call", registrationId: reg.registrationId, serviceId: request.serviceId,
+          callId: request.callId, status: status === "unknown" ? "unknown" : "failed",
+          diagnosticCode: "upstream_output_schema_invalid", message: "Upstream output schema validation failed" });
+        const res = ok(invalidResult);
+        this.recordIdempotency(request.idempotencyKey, request, res);
+        return res;
+      }
+
       const outcomeStatus = upstreamRes.value.isError ? "failed" : "completed";
       this.metrics.recordCallEnd(request.serviceId, outcomeStatus, durationMs);
 
@@ -1636,6 +1658,23 @@ export class BflowSharedMCPGateway {
     if (driver?.reconcileRequest) {
       const rec = await driver.reconcileRequest(request.callId, ledger.requestId);
       if (rec.status === "completed" || rec.status === "failed") {
+        const outputSchema = this.serviceManager.getPartitionState(ledger.partitionKey)?.toolDefinitions?.find(tool => tool.name === request.tool)?.outputSchema;
+        const invalidStructuredOutput = rec.status === "completed" && outputSchema !== undefined &&
+          (rec.structuredContent === undefined || !validateJsonSchema(rec.structuredContent, outputSchema));
+        if (invalidStructuredOutput) {
+          const status = ledger.mutating ? "unknown" : "failed";
+          ledger.result = MCPToolCallResultSchema.parse({ schemaVersion: 3, callId: request.callId, status,
+            output: { diagnosticCode: "upstream_output_schema_invalid", message: "Reconciled structuredContent did not match its advertised output schema" },
+            observedAt: this.now().toISOString() });
+          this.durableCallLedger?.recordResult(request.callId, ledger.result);
+          if (ledger.mutating && ledger.call.resourceLease) {
+            this.getResourceState(request.serviceId, ledger.call.resourceLease.resourceKey).quarantinedByCallId = request.callId;
+          }
+          this.recordAudit({ action: "tool.reconcile", registrationId: request.registrationId, serviceId: request.serviceId,
+            callId: request.callId, status: status === "unknown" ? "unknown" : "failed",
+            diagnosticCode: "upstream_output_schema_invalid", message: "Reconciled output schema validation failed" });
+          return ok(ledger.result);
+        }
         ledger.result = MCPToolCallResultSchema.parse({
           schemaVersion: 3,
           callId: request.callId,
