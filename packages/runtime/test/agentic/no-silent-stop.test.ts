@@ -32,21 +32,20 @@ describe("renderer: design and task approvals carry full content", () => {
     idempotencyKey: "design:run-1", metadata: { bundleFingerprint: "x" } };
   it("renders target, reason, requester, evidence, deadline and numbered approve/reject actions", () => {
     const rendered = renderConversationNotice(notice({ messageId: "p19-1", type: "approval.request", summary: JSON.stringify(payload), truncated: false }));
-    expect(rendered).toMatchObject({ kind: "approval", approvalId: "design-abc", ackToken: "design-abc", runId: "run-1" });
-    expect(rendered.display).toContain("Đối tượng: run");
-    expect(rendered.display).toContain("Lý do: Human design approval required before implementation");
-    expect(rendered.display).toContain("Người yêu cầu: coordinator");
-    expect(rendered.display).toContain("Bằng chứng: 2 artifact — specification artifact://store/spec-1; patch artifact://store/patch-1");
-    expect(rendered.display).toContain("Hạn: 2026-10-21T01:00:00.000Z");
-    expect(rendered.display).toContain("1. design-abc: approve\n2. design-abc: reject <lý do>");
+    expect(rendered).toMatchObject({ kind: "approval", approvalId: "design-abc", ackToken: "#1", runId: "run-1" });
+    expect(rendered.display).toContain("🔔 Cần bạn duyệt · #1");
+    expect(rendered.display).toContain("Cần bạn duyệt: Human design approval required before implementation (do Trưởng nhóm kỹ thuật gửi)");
+    expect(rendered.display).toContain('Kèm 2 tài liệu (gõ "xem chi tiết #1" để xem)');
+    expect(rendered.display).toContain("1. Đồng ý\n  2. Chưa đồng ý (ghi lý do)");
+    expect(rendered.display).toContain('Bạn trả lời: "#1: đồng ý"');
     expect(isUserFacingNotice(rendered)).toBe(true);
   });
   it("uses the bounded structured fields when the raw summary was truncated", () => {
     const rendered = renderConversationNotice(notice({ messageId: "p19-2", type: "approval.request", summary: "{\"approvalId\"", truncated: true,
       approval: { approvalId: "design-abc", target: "run", reason: "Human design approval required", requestedBy: "coordinator", evidence: evidence.slice(0, 1), evidenceCount: 12 } }));
-    expect(rendered).toMatchObject({ kind: "approval", ackToken: "design-abc" });
-    expect(rendered.display).toContain("Lý do: Human design approval required");
-    expect(rendered.display).toContain("Bằng chứng: 12 artifact");
+    expect(rendered).toMatchObject({ kind: "approval", ackToken: "#1" });
+    expect(rendered.display).toContain("Cần bạn duyệt: Human design approval required (do Trưởng nhóm kỹ thuật gửi)");
+    expect(rendered.display).toContain("Kèm 12 tài liệu");
     expect(rendered.display).not.toContain("bị cắt ngắn");
   });
   it("stores structured approval fields with the receipt so truncation cannot hide the approval", async () => {
@@ -56,8 +55,8 @@ describe("renderer: design and task approvals carry full content", () => {
       recipient: participant("conversation"), payload: big, idempotency_key: "approval-big" }));
     const [stored] = await f.journal.unsurfacedConversationNotices();
     expect(stored!.truncated).toBe(true);
-    expect(renderConversationNotice(stored!)).toMatchObject({ kind: "approval", ackToken: "design-abc" });
-    expect(renderConversationNotice(stored!).display).toContain("Bằng chứng: 200 artifact");
+    expect(renderConversationNotice(stored!)).toMatchObject({ kind: "approval", ackToken: "#1" });
+    expect(renderConversationNotice(stored!).display).toContain("Kèm 200 tài liệu");
     await f.journal.markConversationNoticesSurfaced(["p19-big"]);
     expect((await f.journal.undisplayedUserFacingNotices()).map(item => item.messageId)).toEqual(["p19-big"]);
     await f.journal.markConversationNoticesDisplayed(["p19-big"]);
@@ -73,21 +72,23 @@ describe("renderer: stuck states are blocked notices with their reason", () => {
     ["verification_stuck", { kind: "verification_stuck", reason: "Verification waits", options: ["Thử lại"] }]
   ])("%s renders as blocked with reason and acknowledges by message id", (_name, payload) => {
     const rendered = renderConversationNotice(notice({ messageId: "n-1", type: "conversation.progress", summary: JSON.stringify(payload) }));
-    expect(rendered).toMatchObject({ kind: "blocked", ackToken: "n-1" });
+    expect(rendered).toMatchObject({ kind: "blocked", ackToken: "#1" });
     expect(isUserFacingNotice(rendered)).toBe(true);
-    expect(rendered.display).toContain(payload.blockageReason ?? payload.reason);
+    expect(rendered.display).toContain("Chuyện gì xảy ra:");
+    expect(rendered.display).toContain("Ảnh hưởng:");
+    expect(rendered.display).toContain("Bạn cần làm gì:");
   });
   it("shows a Runtime progress blockage instead of only the type and sender", () => {
     const rendered = renderConversationNotice(notice({ messageId: "n-2", type: "conversation.progress",
       summary: JSON.stringify({ sdlcStatus: "implementing", headline: "Run is implementing", blockageReason: "Developer is blocked on the lock" }) }));
     expect(rendered.kind).toBe("update");
-    expect(rendered.display).toContain("Developer is blocked on the lock");
+    expect(rendered.display).toContain("Lập trình viên is blocked on the lock");
     expect(renderConversationNotice(notice({ messageId: "n-3", type: "conversation.progress", summary: JSON.stringify({ headline: "Planning" }) })).display).toContain("Planning");
   });
   it("puts blocked and approval notices before plain updates in the MUST SHOW block", () => {
     const section = mustShowSection([notice({ messageId: "u", type: "conversation.progress", summary: "{}" }),
       notice({ messageId: "b", type: "conversation.progress", summary: JSON.stringify({ kind: "coordinator_no_response", reason: "stuck" }) })]);
-    expect(section.indexOf("stuck")).toBeLessThan(section.indexOf("Cập nhật"));
+    expect(section.indexOf("stuck")).toBeLessThan(section.indexOf("Đã nhận cập nhật tiến độ"));
   });
 });
 
@@ -149,7 +150,7 @@ describe("delivery failure notices", () => {
     expect(await f.journal.appendConversationNotice(deliveryFailureNotice(failed, "Conversation pane unavailable", "again"))).toBe(false);
     const [stored] = await f.journal.unsurfacedConversationNotices();
     const rendered = renderConversationNotice(stored!);
-    expect(rendered).toMatchObject({ kind: "blocked", ackToken: stored!.messageId });
+    expect(rendered).toMatchObject({ kind: "blocked", ackToken: "#1" });
     expect(rendered.display).toContain("Conversation pane unavailable");
     expect(JSON.parse(stored!.summary)).toMatchObject({ kind: "delivery_failure", summary: expect.stringContaining("m-failed") });
   });

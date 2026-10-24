@@ -30,6 +30,12 @@ function extractExplicitId(text: string, prefix: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
+function extractWorkAliasRunId(text: string, context: ConversationContextSnapshot): string | undefined {
+  const match = /\bviệc\s*#([1-9]\d*)/iu.exec(text);
+  if (!match) return undefined;
+  return context.runShortIds?.[`việc #${match[1]}`];
+}
+
 const APPROVAL_TOKEN_REGEX = /(?<![\w-])[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9_-]+/g;
 /**
  * A leading "<id>: <decision>" whose id looks generated (a hyphen and a digit), e.g. `design-1a2b…: approve`.
@@ -39,11 +45,21 @@ const LEADING_APPROVAL_ID_REGEX =
   /^\s*([A-Za-z][A-Za-z0-9]*-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})\s*[:：]\s*(?:\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|từ chối|không duyệt|cần sửa)/iu;
 
 /**
+ * A leading short card alias `#1: ...` or `#2 1` addressing a numbered card.
+ */
+const LEADING_SHORT_ID_REGEX =
+  /^\s*(#[1-9]\d*)(?:\s*[:：)]\s*(?=\S)|(?:\s*[:：,-]\s*|\s+)(?=\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|từ chối|không đồng ý|không duyệt|cần sửa|chọn|lựa chọn|option|choose))/iu;
+
+/**
  * The approval a reply names. Ids the session knows (pending, decided or closed) match exactly whatever their
- * prefix (`apr-…`, `design-…`). An unknown `apr-…` or leading `<id>:` is still returned, so it is refused instead of
- * falling back to another pending approval.
+ * prefix (`apr-…`, `design-…`, or `#n` mapped via `approvalShortIds`). An unknown `apr-…`, `#n`, or leading `<id>:`
+ * is still returned, so it is refused instead of falling back to another pending approval.
  */
 export function namedApprovalId(text: string, context: ConversationContextSnapshot): string | undefined {
+  const shortMatch = LEADING_SHORT_ID_REGEX.exec(text)?.[1];
+  if (shortMatch !== undefined) {
+    return context.approvalShortIds?.[shortMatch] ?? shortMatch;
+  }
   const known = new Set([
     ...Object.keys(context.pendingApprovals),
     ...Object.keys(context.approvalDecisions ?? {}),
@@ -53,10 +69,16 @@ export function namedApprovalId(text: string, context: ConversationContextSnapsh
   return extractExplicitId(text, "apr-") ?? LEADING_APPROVAL_ID_REGEX.exec(text)?.[1];
 }
 
-/** The reply with the named approval id and its separator removed. */
+/** The reply with the named approval id (or leading `#n` short alias) and its separator removed. */
 function withoutApprovalId(text: string, approvalId: string | undefined): string {
   const trimmed = text.trim();
-  return (approvalId === undefined ? trimmed : trimmed.replace(approvalId, "")).replace(/^[\s:：,-]+|[\s:,.!?-]+$/gu, "");
+  if (approvalId === undefined) return trimmed.replace(/^[\s:：,-]+|[\s:,.!?-]+$/gu, "");
+  if (trimmed.includes(approvalId)) {
+    return trimmed.replace(approvalId, "").replace(/^[\s:：),-]+|[\s:,.!?-]+$/gu, "");
+  }
+  const shortPrefix = LEADING_SHORT_ID_REGEX.exec(trimmed)?.[1];
+  const stripped = shortPrefix !== undefined ? trimmed.slice(trimmed.indexOf(shortPrefix) + shortPrefix.length) : trimmed;
+  return stripped.replace(/^[\s:：),-]+|[\s:,.!?-]+$/gu, "");
 }
 
 /** `1` approves; `2 <reason>` rejects. A design/task approval notice numbers its choices this way. */
@@ -143,7 +165,9 @@ function detectCancellation(
   const cancelIndex = spans.findIndex(part => cancelCommand.test(requestBody(part)));
   if (cancelIndex < 0 || /(?:ví dụ|example|e\.g\.)\s*(?:như sau)?\s*:/iu.test(masked.slice(0, masked.indexOf(spans[cancelIndex]!)))) return { matched: false };
   const command = spans[cancelIndex]!;
-  const ids = [...new Set(command.match(/\brun-[a-zA-Z0-9_-]+\b/g) ?? [])];
+  const workAliases = [...command.matchAll(/\bviệc\s*#([1-9]\d*)/giu)]
+    .map(m => context.runShortIds?.[`việc #${m[1]}`] ?? `việc #${m[1]}`);
+  const ids = [...new Set([...(command.match(/\brun-[a-zA-Z0-9_-]+\b/g) ?? []), ...workAliases])];
   const workflows = Object.values(context.workflows).filter(w => !["completed", "failed", "cancelled"].includes(w.sdlcStatus));
   let runId: string | undefined;
   if (ids.length === 1) runId = ids[0];
@@ -319,7 +343,7 @@ function detectUserDecision(
   // A plain status question is routed to the status report (which re-renders the pending decision in
   // full), not treated as an answer or re-asked. An exact option label still counts as the answer.
   const answerCandidate = explicitId !== undefined
-    ? rawContent.replace(explicitId, "").replace(/^[\s:,-]+|[\s:,-]+$/g, "")
+    ? withoutApprovalId(rawContent, explicitId)
     : rawContent;
   const matchesExactOption = pending.some((request) =>
     (optionLabelsOf(request) ?? []).some((option) => normalizeForMatching(option) === normalizeForMatching(answerCandidate)));
@@ -425,7 +449,7 @@ function detectStatusQuery(
   const norm = normalizeForMatching(rawContent);
 
   if (STATUS_KEYWORD_REGEX.test(norm)) {
-    const explicitRunId = extractExplicitId(rawContent, "run-") ?? context.session.activeRunId;
+    const explicitRunId = extractExplicitId(rawContent, "run-") ?? extractWorkAliasRunId(rawContent, context) ?? context.session.activeRunId;
     const explicitCorrelationId =
       extractExplicitId(rawContent, "corr-") ??
       (explicitRunId ? context.runIdToCorrelationId[explicitRunId] : undefined);
@@ -531,8 +555,8 @@ function detectActiveRequirementChange(
 
   if (changeRequirementRegex.test(norm)) {
     // Resolve target active workflow in priority order:
-    // 1. Explicit run-... or corr-... mentioned in input.content or input.runId / input.correlationId
-    const explicitRunId = extractExplicitId(rawContent, "run-") ?? input.runId;
+    // 1. Explicit run-... or việc #... or corr-... mentioned in input.content or input.runId / input.correlationId
+    const explicitRunId = extractExplicitId(rawContent, "run-") ?? extractWorkAliasRunId(rawContent, context) ?? input.runId;
     const explicitCorrId = extractExplicitId(rawContent, "corr-") ?? input.correlationId;
 
     let activeWf: WorkflowRequestContext | undefined;
@@ -827,16 +851,23 @@ export function classifyTrustedApprovalReply(
       normalizeForMatching(label).replace(/[.!?]+$/u, "") === answer.replace(/[.!?]+$/u, ""));
     return exactNumber || exactLabel ? classified : undefined;
   }
-  const content = normalizeForMatching(input.content);
-  const namedId = namedApprovalId(sanitizeInputText(input.content), context);
+  const sanitized = sanitizeInputText(input.content);
+  const content = normalizeForMatching(sanitized);
+  const namedId = namedApprovalId(sanitized, context);
   const namedRequest = namedId ? context.pendingApprovals[namedId] : undefined;
   // Never let an unrecognized id fall back to a different pending approval.
   if (namedId && !namedRequest) return undefined;
+  const shortPrefix = LEADING_SHORT_ID_REGEX.exec(sanitized)?.[1]?.toLowerCase();
   const normalizedId = namedId?.toLowerCase();
-  const namesPendingRequest = normalizedId !== undefined && content.startsWith(normalizedId);
+  const matchedPrefix = shortPrefix !== undefined && content.startsWith(shortPrefix)
+    ? shortPrefix
+    : normalizedId !== undefined && content.startsWith(normalizedId)
+    ? normalizedId
+    : undefined;
+  const namesPendingRequest = matchedPrefix !== undefined;
   const endsWithPendingRequest = normalizedId !== undefined && content.endsWith(normalizedId);
-  const reply = (namesPendingRequest ? content.slice(normalizedId!.length) :
-    endsWithPendingRequest ? content.slice(0, -normalizedId!.length) : content).replace(/^[\s:,-]+|[\s:,.!?-]+$/gu, "");
+  const reply = (matchedPrefix !== undefined ? content.slice(matchedPrefix.length) :
+    endsWithPendingRequest ? content.slice(0, -normalizedId!.length) : content).replace(/^[\s:：,-]+|[\s:,.!?-]+$/gu, "");
 
   // Exact Vietnamese gate labels carry authority for that gate only. Runtime-generated ids
   // distinguish design, task and delivery approvals even though each can target a whole run.

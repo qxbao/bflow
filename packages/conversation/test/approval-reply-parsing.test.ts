@@ -166,6 +166,28 @@ describe("approval reply targeting", () => {
     expect(classifyTrustedApprovalReply(turn("run-123abc: trạng thái thế nào?"), context)).toBeUndefined();
     expect(explainUnrecordedApprovalReply(turn("run-123abc: trạng thái thế nào?"), context)).toBeUndefined();
   });
+
+  it("maps short #n aliases (#1: 1, #2 1, #1: đồng ý, #1: từ chối vì ...) to the exact approvalId", () => {
+    const context = {
+      ...contextWith(designApproval(), userDecision(APR_A)),
+      approvalShortIds: { "#1": DESIGN, "#2": APR_A }
+    } as ConversationContextSnapshot;
+    expect(decided("#1: đồng ý", context)).toMatchObject({ approvalId: DESIGN, decision: "approved" });
+    expect(decided("#1: 1", context)).toMatchObject({ approvalId: DESIGN, decision: "approved" });
+    expect(decided("#1: từ chối vì thiếu kiểm thử", context))
+      .toMatchObject({ approvalId: DESIGN, decision: "rejected", reason: expect.stringContaining("thiếu kiểm thử") });
+    expect(decided("#2: 1", context)).toMatchObject({ approvalId: APR_A, decision: "approved", selectedOption: "Đóng run" });
+    expect(decided("#2 1", context)).toMatchObject({ approvalId: APR_A, decision: "approved", selectedOption: "Đóng run" });
+  });
+
+  it("refuses an unknown #n alias (#99) and never falls back to another pending approval", () => {
+    const context = {
+      ...contextWith(designApproval()),
+      approvalShortIds: { "#1": DESIGN }
+    } as ConversationContextSnapshot;
+    expect(classifyTrustedApprovalReply(turn("#99: đồng ý"), context)).toBeUndefined();
+    expect(classifyTrustedApprovalReply(turn("#99: 1"), context)).toBeUndefined();
+  });
 });
 
 describe("clarifications about a decided approval", () => {

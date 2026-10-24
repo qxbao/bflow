@@ -745,6 +745,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           digest(turn.content) === humanHookProvenance.promptDigest && turn.content.trim() === `fence diagnostic ${authority.operationId}`;
       },
       recoveredHumanDecisions: await receipts.humanDecisions(),
+      noticeAliases: () => receipts.noticeAliases(),
       onNativeRejection: async message => {
         await receipts.recordNativeRejection(message);
         const refusal = await receipts.nativeRejection(message.message_id);

@@ -12,7 +12,7 @@ describe("requirementRevisionGuidance prose fallback", () => {
   it("detects a real SDD level conflict and suggests full", () => {
     const g = prose("SDD lightweight conflicts with policy: full SDD is required for this feature");
     expect(g?.requiredSddLevel).toBe("full");
-    expect(g?.suggestedReply).toContain("full SDD");
+    expect(g?.suggestedReply).toContain("bản đặc tả đầy đủ");
   });
 
   it("detects Vietnamese SDD conflicts", () => {

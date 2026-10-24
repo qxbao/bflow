@@ -142,13 +142,13 @@ describe("bounded automatic resume", () => {
     expect(notification.message.payload).not.toHaveProperty("automaticResume");
     const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1",
       type: notification.message.type, summary: JSON.stringify(notification.message.payload) });
-    expect(rendered.display).toContain("lightweight");
-    expect(rendered.display).toContain("full SDD");
-    expect(rendered.display).toContain("đổi yêu cầu run run-1 sang full SDD");
+    expect(rendered.display).toContain("bản mô tả ngắn gọn");
+    expect(rendered.display).toContain("bản đặc tả đầy đủ");
+    expect(rendered.display).toContain("đổi yêu cầu việc #1 sang bản đặc tả đầy đủ");
     expect(rendered.display).toContain("giữ nguyên phạm vi");
     expect(rendered.display).toContain("không sửa yêu cầu");
     expect(rendered.display).not.toContain("Khắc phục capability");
-    expect(rendered.reply).not.toContain('"tiếp tục run-1" sau khi khắc phục');
+    expect(rendered.reply).not.toContain('"tiếp tục việc #1" sau khi xử lý xong');
     f.restart(); f.advance(10 * 60 * SECOND);
     expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
     expect(await f.resumeWakes()).toEqual([]);

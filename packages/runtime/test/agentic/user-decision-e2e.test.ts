@@ -569,11 +569,11 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => item.messageId === decisionMessageId(approvalId))!;
     const rendered = renderConversationNotice(notice);
     expect(rendered).toMatchObject({ kind: "user_decision", approvalId, requestedByRole: "coordinator" });
-    expect(rendered.display).toContain(`[${approvalId}] Coordinator cần bạn quyết định`);
-    expect(rendered.display).toContain("Which storage backend should we use?");
-    expect(rendered.display).toContain("1. SQLite\n2. Postgres");
-    expect(rendered.display).toMatch(/Hạn: \d{4}-\d{2}-\d{2}T/);
-    expect(rendered.display).toContain(`Trả lời: ${approvalId}: <số lựa chọn>`);
+    expect(rendered.display).toContain("🔔 Cần bạn quyết định · #1");
+    expect(rendered.display).toContain("Trưởng nhóm kỹ thuật hỏi: Which storage backend should we use?");
+    expect(rendered.display).toContain("  1. SQLite\n  2. Postgres");
+    expect(rendered.display).toMatch(/hết hạn lúc \d{2}:\d{2}/);
+    expect(rendered.display).toContain('Bạn trả lời: "#1: 1"');
 
     const response = await reply(host, `${approvalId}: 1`);
     expect(response.ok).toBe(true);
@@ -605,7 +605,7 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     expect(await f.receipts.appendConversationNotice(message)).toBe(true);
     expect(await f.receipts.appendConversationNotice(message)).toBe(false);
     const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => item.messageId === decisionMessageId(approvalId))!;
-    expect(renderConversationNotice(notice).display).toContain("Developer cần bạn quyết định");
+    expect(renderConversationNotice(notice).display).toContain("Lập trình viên hỏi:");
     expect((await reply(host, `${approvalId}: 2`)).ok).toBe(true);
   });
 
@@ -704,7 +704,7 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập runner"))!;
     const rendered = renderConversationNotice(notice);
     expect(rendered.kind).toBe("blocked");
-    expect(rendered.display).toContain("- Coordinator tự thiết lập runner");
+    expect(rendered.display).toContain("- Trưởng nhóm kỹ thuật tự thiết lập runner");
     expect(rendered.display).toContain("- Hủy run");
     expect(rendered.display).not.toContain("<số lựa chọn>");
     expect(rendered.display).not.toContain("verification.json");

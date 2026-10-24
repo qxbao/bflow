@@ -34,6 +34,8 @@ export type TrustedConversationTurn = z.infer<typeof TrustedConversationTurnSche
 const NOTICE_SUMMARY_LIMIT = 4096;
 export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1), type: z.string().min(1), senderRole: z.string().min(1),
   runId: z.string().min(1).optional(), correlationId: z.string().min(1), receivedAt: z.string().datetime(),
+  shortId: z.string().regex(/^#[1-9]\d*$/).optional(),
+  runLabel: z.string().min(1).max(200).optional(),
   summary: z.string(), truncated: z.boolean(),
   /** Bounded decision fields for user decisions, independent of the summary cap. Absent on receipts written before this field. */
   userDecision: UserDecisionNoticeSchema.optional(),
@@ -745,7 +747,13 @@ export class HostReceiptJournal {
         this.conversationBindingIdentity(turn.binding) !== this.conversationBindingIdentity(binding))
       throw new Error("Resume requires the current authenticated Conversation user message");
     const request = parseConversationResumeRequest(turn.content);
-    if (!request || request.runId !== undefined && request.runId !== runId)
+    let requestedRunId = request?.runId;
+    if (requestedRunId && /^việc\s*#[1-9]\d*$/iu.test(requestedRunId)) {
+      const key = requestedRunId.toLowerCase().replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #");
+      const aliases = await this.noticeAliases();
+      requestedRunId = aliases.runShortIds[key] ?? requestedRunId;
+    }
+    if (!request || requestedRunId !== undefined && requestedRunId !== runId)
       throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
     return turn;
   }
@@ -773,6 +781,28 @@ export class HostReceiptJournal {
     if (intent === undefined || digest(record(intent).decision) !== digest(decision)) throw new Error("Conversation result lacks matching intent");
     await this.write("conversation-result", messageId, { messageId, decision, result });
   }
+  private async allConversationNotices(): Promise<ConversationNotice[]> {
+    const notices: ConversationNotice[] = [];
+    for (const id of await this.receiptIds("conversation-notice")) {
+      notices.push(ConversationNoticeSchema.parse(await this.read("conversation-notice", id)));
+    }
+    return notices.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.messageId.localeCompare(b.messageId));
+  }
+  /** Monotonic short aliases (#n -> approvalId, việc #k -> runId) persisted across notices. */
+  async noticeAliases(): Promise<{ approvalShortIds: Record<string, string>; runShortIds: Record<string, string> }> {
+    const notices = await this.allConversationNotices();
+    const approvalShortIds: Record<string, string> = {};
+    const runShortIds: Record<string, string> = {};
+    for (const notice of notices) {
+      const approvalId = notice.userDecision?.approvalId ?? notice.approval?.approvalId;
+      if (notice.shortId && approvalId) approvalShortIds[notice.shortId] = approvalId;
+      if (notice.runId && notice.runLabel) {
+        const workTag = notice.runLabel.split(":")[0]!.trim().toLowerCase().replace(/\s+/gu, " ");
+        if (/^việc #\d+$/iu.test(workTag)) runShortIds[workTag] = notice.runId;
+      }
+    }
+    return { approvalShortIds, runShortIds };
+  }
   /** Idempotent by message ID: a replayed acknowledgement never creates a second notice. */
   async appendConversationNotice(message: RoleMessage): Promise<boolean> {
     const parsed = RoleMessageSchema.parse(message);
@@ -781,8 +811,44 @@ export class HostReceiptJournal {
     const userDecision = parsed.type === "approval.request" ? userDecisionNoticeFields(parsed.payload) : undefined;
     const approval = parsed.type === "approval.request" && userDecision === undefined ? approvalNoticeFields(parsed.payload) : undefined;
     const blocked = blockedNoticeFields(parsed.payload);
+    const existingNotices = await this.allConversationNotices();
+    let maxShortNum = 0;
+    const approvalToShortId = new Map<string, string>();
+    const runWorkTags = new Map<string, string>();
+    const runTitles = new Map<string, string>();
+    for (const existing of existingNotices) {
+      if (existing.shortId) {
+        const num = Number(existing.shortId.slice(1));
+        if (Number.isSafeInteger(num) && num > maxShortNum) maxShortNum = num;
+        const existingApprovalId = existing.userDecision?.approvalId ?? existing.approval?.approvalId;
+        if (existingApprovalId) approvalToShortId.set(existingApprovalId, existing.shortId);
+      }
+      if (existing.runId) {
+        if (!runWorkTags.has(existing.runId)) {
+          const existingTag = existing.runLabel?.split(":")[0]?.trim();
+          runWorkTags.set(existing.runId, existingTag && /^Việc #\d+$/u.test(existingTag) ? existingTag : `Việc #${runWorkTags.size + 1}`);
+        }
+        const existingTitle = existing.runLabel?.includes(":") ? existing.runLabel.split(":").slice(1).join(":").trim() : undefined;
+        if (existingTitle && !runTitles.has(existing.runId)) runTitles.set(existing.runId, existingTitle);
+      }
+    }
+    const approvalId = userDecision?.approvalId ?? approval?.approvalId;
+    const shortId = (userDecision !== undefined || approval !== undefined || blocked !== undefined)
+      ? (approvalId ? approvalToShortId.get(approvalId) : undefined) ?? `#${maxShortNum + 1}`
+      : undefined;
+    let runLabel: string | undefined;
+    if (parsed.run_id !== undefined) {
+      const workTag = runWorkTags.get(parsed.run_id) ?? `Việc #${runWorkTags.size + 1}`;
+      const payloadRecord = parsed.payload && typeof parsed.payload === "object" && !Array.isArray(parsed.payload)
+        ? parsed.payload as Record<string, unknown>
+        : {};
+      const rawTitle = [payloadRecord.title, payloadRecord.specTitle, payloadRecord.specificationTitle]
+        .find((val): val is string => typeof val === "string" && val.trim().length > 0)?.trim() ?? runTitles.get(parsed.run_id);
+      runLabel = rawTitle ? `${workTag}: ${rawTitle.slice(0, 140)}` : workTag;
+    }
     return this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
       ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
+      ...(shortId === undefined ? {} : { shortId }), ...(runLabel === undefined ? {} : { runLabel }),
       ...(userDecision === undefined ? {} : { userDecision }), ...(approval === undefined ? {} : { approval }),
       ...(blocked === undefined ? {} : { blocked }),
       summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
@@ -975,10 +1041,16 @@ export class HostReceiptJournal {
 const RESUME_PREFIX = "(?:(?:ok(?:e|ay)?|được|hãy|vui lòng|please)[\\s,]+){0,2}";
 const RESUME_SUFFIX_WORDS = "đi|nhé|nha|giúp mình|giúp em|giúp tôi|please|pls";
 const RESUME_REQUEST = new RegExp(`^${RESUME_PREFIX}(?:tiếp tục|resume|continue)` +
-  `(?:\\s+(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*))?` +
+  `(?:\\s+(?:(việc\\s*#[1-9]\\d*)|(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*)))?` +
   `(?:[\\s,]+(?:${RESUME_SUFFIX_WORDS})){0,2}\\s*[.!]?$`, "iu");
-/** An explicit user request to resume, optionally naming the exact run: "tiếp tục", "ok tiếp tục nhé", "Continue run-1 please". */
+/** An explicit user request to resume, optionally naming the exact run or work alias: "tiếp tục", "tiếp tục việc #1", "Continue run-1 please". */
 export function parseConversationResumeRequest(content: string): { runId?: string } | undefined {
   const match = RESUME_REQUEST.exec(content.trim());
-  return match ? (match[1] === undefined ? {} : { runId: match[1] }) : undefined;
+  if (!match) return undefined;
+  const rawTarget = match[1] ?? match[2];
+  if (rawTarget === undefined) return {};
+  const normalized = /^việc\s*#/iu.test(rawTarget)
+    ? rawTarget.replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #").toLowerCase()
+    : rawTarget;
+  return { runId: normalized };
 }
