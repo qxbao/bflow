@@ -83,3 +83,25 @@ changes. No remote write is authorized or performed. The test-design reference
 became available in the original checkout during this task and was read before
 integration: references/risk-viewpoints.md owns risk viewpoints/check selection; NFR
 guidance supplies oracle/measurement conditions and does not duplicate that method.
+
+## Post-merge result
+
+Local main fast-forwarded to NFR commit `861acf6fb0e78162c46e63a3bc25084b3db3cb97`.
+Autostash restored the pre-existing test-design work; its one procedure conflict was
+resolved by retaining all risk-viewpoint steps and appending NFR measurement planning.
+Other pre-existing tracked files and all untracked files were byte-compared against
+the pre-merge snapshot and preserved. Those changes remain uncommitted/unstaged.
+The safety autostash `6ec5b05` and /tmp/bflow-nfr-premerge snapshot are retained.
+
+On this main working-tree combination, pnpm --filter @bflow/skills test exited 0:
+7 files, 39 passed, 0 failed, 0 skipped. The previously uncommitted test-design work
+already changed the catalog matrix timeout from 60s to 120s; that change was preserved,
+not introduced by this NFR task. The matrix took about 109s in this run. This does not
+retroactively turn the earlier timeouts into passes.
+
+Post-merge pnpm check:deps, pnpm typecheck, git diff --check and git status --short
+all exited 0. No unmerged entries remain. Full pnpm test was not rerun after the local
+merge; the earlier interrupted full-suite run remains incomplete/failed evidence.
+The digest table above describes the isolated NFR commit; the uncommitted combined
+test-planning bundle has a different computed digest and needs review as one bundle
+before any catalog publication. No live NFR measurement or provider acceptance occurred.
