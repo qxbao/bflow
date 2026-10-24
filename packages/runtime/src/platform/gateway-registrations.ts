@@ -4,10 +4,11 @@ import { join } from "node:path";
 import {
   AgentProviderIdSchema, AgentRoleSchema, IsoDateTimeSchema, MCPClientRegistrationSchema, MCPEndpointSchema,
   MCPServiceObservationSchema, Sha256DigestSchema, TrustScopeSchema
+  , MCPToolCallSchema, MCPToolCallResultSchema
 } from "@bflow/contracts";
 import type {
   AgentProviderId, AgentRole, ContractError, JsonValue, MCPClientRegistration,
-  MCPServiceObservation, OperationOptions, OperationResult, ScopedOperation, TrustScope
+  MCPServiceObservation, MCPToolCall, MCPToolCallResult, OperationOptions, OperationResult, ScopedOperation, TrustScope
 } from "@bflow/contracts";
 import { fail, failWith, ok } from "./errors.js";
 import type {
@@ -121,7 +122,7 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       entries = { ...entries, [intent.registrationId]: intent };
       await writeLedger(identity, path, entries);
 
-      const sent = await this.control.register(registration, options);
+      const sent = await this.control.register(registration, options, request.toolGrants);
       if (!sent.ok) {
         if (isUncertain(sent.error.code)) {
           await writeLedger(identity, path, { ...entries, [intent.registrationId]: { ...intent, state: "unknown" } });
@@ -214,6 +215,38 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
         await this.revokeEntries(identity, path, entries, Object.values(entries), scope, options);
       }
       return ok(undefined);
+    }));
+  }
+
+  async invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.callRegisteredTool(identity, role, taskId, serviceId, operation, input, callId, false, options);
+  }
+
+  async reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.callRegisteredTool(identity, role, taskId, serviceId, operation, input, callId, true, options);
+  }
+
+  private async callRegisteredTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: JsonValue, callId: string, reconcile: boolean, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.serialize(() => this.guard(async () => {
+      const path = ledgerPath(identity), entries = (await readLedger(path)).entries;
+      const entry = Object.values(entries).find(item => item.state === "registered" && item.role === role && item.taskId === taskId &&
+        item.serviceIds.includes(serviceId) && item.allowedTools.includes(operation) && item.registration !== undefined &&
+        item.registration.scope.sessionId === identity.sessionId && item.registration.scope.repositoryId === identity.repositoryId &&
+        item.registration.scope.workspaceRoot === identity.workspaceRoot && item.registration.expiresAt > this.now().toISOString());
+      if (!entry?.registration) throw new GatewayPortError({ code: "not_found", retryable: false,
+        message: "No current Gateway registration grants this role, task, service and operation" });
+      const call: MCPToolCall = { schemaVersion: 3, callId, registrationId: entry.registrationId, serviceId,
+        tool: operation, input, idempotencyKey: callId };
+      const parsed = MCPToolCallSchema.safeParse(call);
+      if (!parsed.success) reject("validation", "Invalid Gateway tool call");
+      const result = reconcile ? await this.control.reconcileToolCall(parsed.data, options) : await this.control.invokeTool(parsed.data, options);
+      if (!result.ok) throw new GatewayPortError(result.error);
+      const checked = MCPToolCallResultSchema.safeParse(result.value);
+      if (!checked.success || checked.data.callId !== callId) reject("corruption", "Gateway tool result is malformed or mismatched");
+      return ok(checked.data);
     }));
   }
 

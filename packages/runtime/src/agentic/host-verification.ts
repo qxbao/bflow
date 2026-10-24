@@ -7,7 +7,9 @@ import {
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
 import { unwrap } from "./outbox.js";
-import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand } from "./behavioral-runner.js";
+import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand,
+  type BoundBehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import { NodeTapTestCodeFailure } from "./node-tap.js";
@@ -51,7 +53,8 @@ export interface HostVerificationReceipts {
 }
 /** A completed, valid measurement that requires a bounded Developer repair. */
 export class HostBehavioralFailure extends Error {
-  constructor(message: string, readonly evidence: import("@bflow/contracts").ArtifactReference) { super(message); }
+  constructor(message: string, readonly evidence: import("@bflow/contracts").ArtifactReference,
+    readonly rtkOutputs: readonly JsonValue[] = []) { super(message); }
 }
 export class HostVerification {
   private readonly gateReceipts = new Map<string, string>();
@@ -60,7 +63,8 @@ export class HostVerification {
   private readonly evidenceRecords = new Map<string, VerificationResult>();
   readonly runners: TestRunnerSource;
   constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly store: () => ArtifactStore,
-    private readonly receipts?: HostVerificationReceipts, runners: TestRunnerSource | readonly BehavioralCommand[] = []) {
+    private readonly receipts?: HostVerificationReceipts, runners: TestRunnerSource | readonly BehavioralCommand[] = [],
+    private readonly rtk?: RtkOutputIntegration) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
   /** Ownership of a task from its run definition; undefined for workflow-level checks. */
@@ -351,13 +355,23 @@ export class HostVerification {
     if (phase !== expected) throw new Error(`Expected ${expected ?? "no further"} behavioral phase`);
     const measured = [];
     for (const command of commands) {
-      try { measured.push(await measureBehavior(command, cwd, revision)); }
+      try {
+        const rtk = await this.rtk?.resolve({ role: binding.role, runId, taskId,
+          ...(typeof assignment.attemptId === "string" ? { attemptId: assignment.attemptId } : {}),
+          commandId: command.id, revision });
+        measured.push(await measureBehavior(command, cwd, revision, rtk ? { rtk } : {}));
+      }
       catch (error) {
-        if (!(error instanceof NodeTapTestCodeFailure)) throw error;
+        if (!(error instanceof NodeTapTestCodeFailure) && !(error instanceof RtkRequiredToolUnavailable && error.originalOutcome)) throw error;
         const observation = await this.capture(cwd, textField(run.baseRevision), revision);
+        const originalOutcome = error instanceof NodeTapTestCodeFailure ? error.outcome : error.originalOutcome!;
         const evidence = await this.artifact(runId, taskId, { phase, observation, verifiedBy: binding.agentId, accepted: false,
-          measurementFailure: { protocol: "node_tap", summary: error.message, outcome: error.outcome } });
-        throw new HostBehavioralFailure(error.message, evidence);
+          measurementFailure: { protocol: error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
+            outcome: originalOutcome, ...(error instanceof NodeTapTestCodeFailure && error.rtk ? { rtk: error.rtk } : {}),
+            ...(error instanceof RtkRequiredToolUnavailable ? { rawOutput: error.rawOutput ?? "", reasonCode: error.reasonCode } : {}) } });
+        if (error instanceof NodeTapTestCodeFailure && error.rtk?.status === "compressed" && error.rtk.invocationId) await this.rtk?.consume(error.rtk.invocationId, evidence);
+        throw new HostBehavioralFailure(error.message, evidence, error instanceof NodeTapTestCodeFailure && error.rtk?.status === "compressed" && error.rtk.compressedOutput
+          ? [json({ commandId: command.id, exitCode: error.outcome.exitCode, compressedOutput: error.rtk.compressedOutput })] : []);
       }
     }
     const observation = await this.capture(cwd, textField(run.baseRevision), revision);
@@ -371,13 +385,17 @@ export class HostVerification {
     }
     if (phase === "red" ? !measured.some(item => item.targetFailure) : measured.some(item => item.failed)) {
       const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId, accepted: false });
-      throw new HostBehavioralFailure(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs", evidence);
+      for (const item of measured) if (item.rtk?.status === "compressed" && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
+      throw new HostBehavioralFailure(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs",
+        evidence, measured.flatMap(item => item.rtk?.status === "compressed" && item.rtk.compressedOutput
+          ? [json({ commandId: item.commandId, exitCode: item.outcome.exitCode, compressedOutput: item.rtk.compressedOutput })] : []));
     }
     if (phase === "red") {
       const targetNames = new Set(strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames));
       if (measured.some(item => item.testResults.some(test => !test.passed && !targetNames.has(test.name)))) throw new Error("Red failure belongs to an unrelated test rather than an accepted target criterion");
     }
     const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId });
+    for (const item of measured) if (item.rtk?.status === "compressed" && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
     const observations = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
       strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
       .map(criterion => ({ method: item.method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` })));
@@ -395,7 +413,8 @@ export class HostVerification {
     // Apply the same P16 validator before minting a host receipt; the Runtime will apply it again at ingress.
     this.runtime().ports.policies.recordEvidence(strategy, result);
     await this.trustEvidence(result);
-    return { result, assignment: assignment.message };
+    return { result, assignment: assignment.message, rtkOutputs: measured.flatMap(item => item.rtk?.status === "compressed" && item.rtk.compressedOutput
+      ? [json({ commandId: item.commandId, exitCode: item.outcome.exitCode, compressedOutput: item.rtk.compressedOutput })] : []) };
   }
   private judgments(input: unknown, ids: string[]) {
     if (!Array.isArray(input)) throw new Error("Independent criterion judgments are required");
@@ -425,13 +444,20 @@ export class HostVerification {
       const commands = boundQaReviewCommands(this.resolve(dossier), Math.min(540_000, context.definition.timeout.executionTimeoutMs - age - 30_000));
       if (commands.length) {
         const measurements = [];
-        for (const command of commands) measurements.push(await measureBehavior(command, observation.cwd, observation.revision));
+        for (const command of commands) {
+          const rtk = await this.rtk?.resolve({ role: binding.role, runId: context.runId, ...(context.taskId ? { taskId: context.taskId } : {}),
+            ...(typeof out.attemptId === "string" ? { attemptId: out.attemptId } : {}),
+            commandId: command.id, revision: observation.revision });
+          measurements.push(await measureBehavior(command, observation.cwd, observation.revision, rtk ? { rtk } : {}));
+        }
         const after = await this.capture(observation.cwd, observation.base, observation.revision);
         if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
         const artifact = await this.artifact(context.runId, context.taskId!, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
+        for (const item of measurements) if (item.rtk?.status === "compressed" && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
         qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
           evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
-            tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode })) });
+            tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,
+            ...(item.rtk ? { rtk: item.rtk } : {}) })) });
         context = QualityGateContextSchema.parse({ ...context, input: { ...details, hostQaBehavioralObservation: qaBehavioralObservation } });
       }
     }

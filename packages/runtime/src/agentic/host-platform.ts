@@ -16,6 +16,7 @@ import {
   type PlatformSessionIdentity, type PlatformStatusSnapshot, type PreparedRoleLaunch, type ProviderAdapterFactoryOptions,
   type ProviderAdapterFactory, type RolePlatformRequirement
 } from "../platform/index.js";
+import type { JsonValue, MCPToolCallResult, OperationResult, ToolTrigger } from "@bflow/contracts";
 import {
   BFLOW_LAUNCH_ID_ENV, evaluateToolReachability, GATEWAY_PROBE_DIRECTORY, LAUNCH_REACHABILITY_DIRECTORY, publishLaunchProbe,
   readLaunchReachability, removeLaunchProbe, removeLaunchReachability, RoleToolReachabilitySchema, summarizeToolReachability,
@@ -137,9 +138,12 @@ export function requirementFor(
   option: PlatformRoleOption,
   hostCapabilities: Readonly<Record<string, readonly string[]>>,
   cwd: string,
-  taskId?: string
+  taskId?: string,
+  toolGrants: AgenticHostPlatformOptions["toolGrants"] = [],
+  toolPolicy: AgenticHostPlatformOptions["toolPolicy"] = undefined
 ): RolePlatformRequirement {
   const declared = hostCapabilities[option.role] ?? [];
+  const roleGrants = (toolGrants ?? []).filter(grant => grant.role === option.role);
   return {
     role: option.role,
     provider: option.provider,
@@ -151,7 +155,12 @@ export function requirementFor(
     cwd,
     ...(taskId !== undefined ? { taskId } : {}),
     capabilityIds: [...new Set([...option.capabilityIds, ...declared])],
-    mcpServiceIds: [...option.mcpServiceIds],
+    mcpServiceIds: toolGrants === undefined
+      ? []
+      : [...new Set(roleGrants.filter(grant => grant.kind !== "cli_only").map(grant => grant.serviceId!))],
+    ...(toolGrants !== undefined ? { mcpOperations: [...new Set(roleGrants.filter(grant => grant.kind !== "cli_only").flatMap(grant => grant.operations))] } : {}),
+    ...(toolGrants !== undefined ? { toolGrants: roleGrants } : {}),
+    ...(toolPolicy !== undefined ? { toolPolicy } : {}),
     toolIds: [...option.toolIds],
     skillSelections: option.skillSelections.map(selection => ({
       skill: selection.skill,
@@ -243,6 +252,8 @@ export class HostPlatformSession {
   constructor(private readonly options: HostPlatformSessionOptions, private readonly skillManager?: SkillManager,
     private readonly skillStore?: FileSkillStore) {}
 
+  get currentGeneration(): number | undefined { return this.identity?.generation; }
+
   /**
    * Preflights every non-Developer role and launches the ready set only when all required roles are ready.
    * Publishes the launch-keyed probe plan of every launch with Gateway registrations.
@@ -262,7 +273,8 @@ export class HostPlatformSession {
     this.identity = identity;
     const requirements = this.options.platform.roles
       .filter(option => option.role !== "developer")
-      .map(option => requirementFor(option, this.options.hostCapabilities, this.options.repositoryPath));
+    .map(option => requirementFor(option, this.options.hostCapabilities, this.options.repositoryPath, undefined,
+      this.options.platform.toolGrants, this.options.platform.toolPolicy));
     const result = await this.options.service.prepareSession(identity, requirements, options);
     if (!result.ok) throw new Error(`Platform readiness could not be prepared: ${describeFailure(result.error)}`);
     this.report = result.value.report;
@@ -427,7 +439,7 @@ export class HostPlatformSession {
     // Re-allocation for the same task (e.g. after restart) must not orphan the previous launch and its Gateway registration.
     await this.releaseDeveloper(taskId);
     const result = await this.options.service.prepareDeveloper(this.identity,
-      requirementFor(template, this.options.hostCapabilities, worktreePath, taskId));
+      requirementFor(template, this.options.hostCapabilities, worktreePath, taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy));
     if (!result.ok) throw new Error(`Developer ${taskId} launch is blocked: ${describeFailure(result.error)}`);
     const launchId = result.value.launch.launchId;
     let expectation: ReachabilityExpectation | undefined;
@@ -507,6 +519,50 @@ export class HostPlatformSession {
           lost: result.value.lost.map(item => ({ registrationId: item.registrationId, role: item.role, ...(item.taskId !== undefined ? { taskId: item.taskId } : {}) })) }
       : { checkedAt, healthy: false, uncertain: true, lost: [], error: describeFailure(result.error) };
     return this.gatewayCheck;
+  }
+
+  async invokeTool(role: AgentRole, taskId: string | undefined, toolId: string, serviceId: string, operation: string,
+    trigger: ToolTrigger, input: JsonValue, callId: string, reconcile = false, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    const identity = this.identity, policy = this.options.platform.toolPolicy, grants = this.options.platform.toolGrants;
+    if (!identity || !policy || !grants) return { ok: false, error: { code: "validation", retryable: false, message: "Tool actions require an active explicit repository policy and resolved grants" } };
+    const requirement = policy.requirements.find(item => item.toolId === toolId && item.roles.includes(role) && item.kind !== "cli_only" &&
+      item.serviceId === serviceId && item.operations.includes(operation) && item.triggers.includes(trigger));
+    const grant = grants.find(item => item.role === role && item.toolId === toolId && item.kind !== "cli_only" &&
+      item.policyDigest === policy.digest && item.serviceId === serviceId && item.operations.includes(operation) &&
+      item.scope.kind === "session" && item.scope.machineId === identity.machineId && item.scope.sessionId === identity.sessionId && item.scope.repositoryId === identity.repositoryId &&
+      item.scope.workspaceRoot === identity.workspaceRoot);
+    if (!requirement || !grant || !this.options.platform.roles.some(item => item.role === role))
+      return { ok: false, error: { code: "validation", retryable: false, message: "Tool action is outside the explicit repository policy or active session grant" } };
+    if (grant.requiredness !== requirement.requiredness || grant.kind !== requirement.kind ||
+        grant.operations.some(item => !requirement.operations.includes(item)) || grant.triggers.some(item => !requirement.triggers.includes(item)) ||
+        grant.memoryScope?.wing !== requirement.memoryScope?.wing || grant.memoryScope?.repositoryId !== requirement.memoryScope?.repositoryId ||
+        grant.memoryScope?.access !== requirement.memoryScope?.access || !grant.triggers.includes(trigger))
+      return { ok: false, error: { code: "validation", retryable: false, message: "Resolved tool grant exceeds repository policy" } };
+    const launchId = role === "developer" ? this.developerLaunches.get(taskId ?? "") : this.launches.get(role)?.launchId;
+    if (launchId === undefined) return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action has no active role launch" } };
+    const launch = this.options.service.status().launches.find(item => item.launchId === launchId);
+    if (!launch || launch.state !== "activated")
+      return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action needs the matching activated role launch" } };
+    const health = this.options.service.assertFresh(launchId);
+    if (!health.ok) return health;
+    const boundedOptions: OperationOptions = {
+      timeoutMs: Math.min(options?.timeoutMs ?? 5_000, 5_000),
+      ...(options?.signal ? { signal: options.signal } : {}),
+      ...(options?.deadline ? { deadline: options.deadline } : {})
+    };
+    const gateway = await this.options.service.verifyGateway(boundedOptions);
+    if (!gateway.ok) return gateway;
+    if (!gateway.value.healthy || gateway.value.uncertain)
+      return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action Gateway registrations are lost or uncertain" } };
+    if (reconcile) return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
+    return this.options.service.invokeTool(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
+  }
+
+  async reconcileToolCall(role: AgentRole, taskId: string | undefined, serviceId: string, operation: string,
+    input: JsonValue, callId: string): Promise<OperationResult<MCPToolCallResult>> {
+    const identity = this.identity;
+    if (!identity) return { ok: false, error: { code: "validation", retryable: false, message: "No active platform generation" } };
+    return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId);
   }
 
   /**

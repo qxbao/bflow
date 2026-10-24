@@ -13,6 +13,7 @@ import {
   type PlatformRoleOption,
   type AgenticHostPlatformOptions
 } from "../../src/platform/host-options.js";
+import { ResolvedToolGrantSchema, RepositoryToolPolicySchema } from "@bflow/contracts";
 import {
   HostPlatformSession, skillSupportedCommands, HostPlatformStatusSchema, launchMaterial, liveObservation, requirementFor,
   createHostProviderFactoryOptions, createHostProviderAdapterFactory
@@ -34,6 +35,65 @@ const platform: AgenticHostPlatformOptions = {
 };
 
 describe("profile selection ingress", () => {
+  it("accepts only exported tool policy and grant schemas on the host wire", () => {
+    const scope = { kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "session-1" };
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: "repo-1", scope: { kind: "repository", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo" },
+      digest: "a".repeat(64), requirements: [{ toolId: "context7", requiredness: "optional", roles: ["coordinator"], triggers: ["external_documentation"], operations: ["query_docs"], kind: "native_remote_mcp", serviceId: "context7" }] });
+    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-context7", policyDigest: "a".repeat(64), toolId: "context7",
+      kind: "native_remote_mcp", requiredness: "optional", role: "coordinator", scope, triggers: ["external_documentation"],
+      serviceId: "context7", operations: ["query_docs"] });
+    expect(AgenticHostPlatformOptionsSchema.parse({ ...platform, toolPolicy: policy, toolGrants: [grant] })).toMatchObject({ toolPolicy: policy, toolGrants: [grant] });
+    expect(AgenticHostPlatformOptionsSchema.safeParse({ ...platform, toolGrants: [{ ...grant, operations: [" "] }] }).success).toBe(false);
+  });
+  it("routes pre-run planning memory reads through an activated session grant", async () => {
+    const calls: unknown[][] = [];
+    const grantId = "grant-memory-search";
+    const service = fakeService({
+      status: () => ({ generation: 1, launches: [{ launchId: "launch-coord", role: "coordinator", provider: "codex", state: "activated" }] }),
+      assertFresh: () => ({ ok: true, value: {} as never }),
+      verifyGateway: async () => ({ ok: true, value: { checkedAt: at, healthy: true, lost: [], uncertain: false } }),
+      invokeTool: async (...args: unknown[]) => {
+        calls.push(args);
+        return { ok: true, value: { schemaVersion: 3, callId: "call-memory", status: "completed", output: { results: [] }, observedAt: at } };
+      }
+    });
+    const { options } = await session(service);
+    const scope = { kind: "session" as const, machineId: options.platform.machineId, repositoryId: options.platform.repositoryId,
+      workspaceRoot: options.repositoryPath, sessionId: options.sessionId };
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: options.platform.repositoryId,
+      scope: { kind: "repository", machineId: options.platform.machineId, repositoryId: options.platform.repositoryId, workspaceRoot: options.repositoryPath },
+      digest: "b".repeat(64), requirements: [{ toolId: "mempalace", kind: "native_remote_mcp", serviceId: "memory-service",
+        operations: ["mempalace_search"], requiredness: "optional", roles: ["coordinator"], triggers: ["prior_context"],
+        memoryScope: { wing: "engineering", repositoryId: options.platform.repositoryId, access: "read_only" } }] });
+    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId, policyDigest: policy.digest, toolId: "mempalace",
+      kind: "native_remote_mcp", requiredness: "optional", role: "coordinator", scope, triggers: ["prior_context"],
+      serviceId: "memory-service", operations: ["mempalace_search"],
+      memoryScope: { wing: "engineering", repositoryId: options.platform.repositoryId, access: "read_only" } });
+    const host = new HostPlatformSession({ ...options, platform: { ...platform, toolPolicy: policy, toolGrants: [grant] } });
+    await host.prepare();
+
+    const result = await host.invokeTool("coordinator", undefined, "mempalace", "memory-service", "mempalace_search", "prior_context",
+      { wing: "engineering", query: "prior design decisions" }, "call-memory");
+
+    if (!result.ok) throw new Error(JSON.stringify(result.error));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject([expect.anything(), "coordinator", undefined, "memory-service", "mempalace_search",
+      { wing: "engineering", query: "prior design decisions" }, "call-memory", { timeoutMs: 5_000 }]);
+  });
+  it("registers exact MCP operations while preserving catalog tool IDs", () => {
+    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-context7", policyDigest: "a".repeat(64), toolId: "context7",
+      kind: "native_remote_mcp", requiredness: "optional", role: "coordinator",
+      scope: { kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "session-1" },
+      triggers: ["external_documentation"], serviceId: "context7", operations: ["query_docs"] });
+    const required = requirementFor({ ...roleOption("coordinator", "codex"), toolIds: ["context7"] },
+      {}, "/repo", undefined, [grant]);
+    expect(required.toolIds).toEqual(["context7"]);
+    expect(required.mcpOperations).toEqual(["query_docs"]);
+    expect(required.mcpServiceIds).toEqual(["context7"]);
+    const legacyWithoutPolicy = requirementFor({ ...roleOption("coordinator", "codex"), mcpServiceIds: ["legacy-service"], toolIds: ["legacy-tool"] }, {}, "/repo");
+    expect(legacyWithoutPolicy.mcpServiceIds).toEqual([]);
+    expect(legacyWithoutPolicy.toolGrants).toEqual([]);
+  });
   it("accepts safe profile names and rejects path/control characters", () => {
     expect(PlatformRoleOptionSchema.safeParse({ ...roleOption("coordinator", "codex"), profileName: "lead-1" }).success).toBe(true);
     expect(PlatformRoleOptionSchema.safeParse({ ...roleOption("coordinator", "codex"), profileName: "p".repeat(129) }).success).toBe(true);

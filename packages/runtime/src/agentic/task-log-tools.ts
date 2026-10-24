@@ -24,6 +24,21 @@ function assignedTo(binding: PaneBinding, out: Record<string, unknown>): boolean
   return target.paneId === binding.paneId && target.agentId === binding.agentId && sameSession(target.session, binding.session) &&
     ["accepted", "released"].includes(String(out.status));
 }
+const TOOL_ACTION_MESSAGE_TYPES = new Set(["task.assignment", "delegation.request", "verification.requested"]);
+/** Current handoff holders eligible for Runtime's mediated tool action guard; released/uncertain holders never match as active. */
+export function toolActionHolderCandidates(raw: unknown, binding: PaneBinding, statuses: readonly string[] = ["accepted"]): Record<string, unknown>[] {
+  const state = recordOf(raw);
+  if (!Array.isArray(state.outbound)) throw new Error("Invalid Runtime tool action state");
+  return state.outbound.map(recordOf).filter(out => {
+    if (!statuses.includes(String(out.status)) || !out.handle || !out.request || !out.lease) return false;
+    const message = recordOf(out.message), recipient = recordOf(message.recipient);
+    if (!TOOL_ACTION_MESSAGE_TYPES.has(String(message.type)) || recipient.role !== binding.role ||
+        recipient.agent_id !== binding.agentId || recipient.pane_id !== binding.paneId) return false;
+    const handle = recordOf(out.handle), target = recordOf(handle.target);
+    return target.paneId === binding.paneId && target.agentId === binding.agentId && target.workspaceId === binding.workspaceId &&
+      target.tabId === binding.tabId && sameSession(target.session, binding.session);
+  });
+}
 export interface TaskLogAssignment { readonly runId: string; readonly taskId: string; readonly attemptId?: string; }
 
 /** Verification has a transport task/lease of its own; diagnostics follow the task it checks. */

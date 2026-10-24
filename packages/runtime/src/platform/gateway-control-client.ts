@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
-import { ContractErrorSchema, IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPServiceObservationSchema,
-  ScopedOperationSchema, TrustScopeSchema } from "@bflow/contracts";
+import { ContractErrorSchema, IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPServiceObservationSchema, MCPToolCallSchema, MCPToolCallResultSchema,
+  ScopedOperationSchema, TrustScopeSchema, ResolvedToolGrantSchema } from "@bflow/contracts";
 import type { ContractError, MCPClientRegistration, MCPServiceObservation, OperationOptions, OperationResult,
-  ScopedOperation, TrustScope } from "@bflow/contracts";
+  MCPToolCall, MCPToolCallResult, ScopedOperation, TrustScope, ResolvedToolGrant } from "@bflow/contracts";
 import { fail, failWith, ok } from "./errors.js";
 import type { GatewayControlPort, GatewayRegistrationGrant } from "./ports.js";
 
@@ -56,11 +56,21 @@ export class GatewayControlClient implements GatewayControlPort {
     }
   }
 
-  async register(registration: MCPClientRegistration, options?: OperationOptions):
+  async register(registration: MCPClientRegistration, options?: OperationOptions, grants: readonly ResolvedToolGrant[] = []):
     Promise<OperationResult<GatewayRegistrationGrant>> {
     const sent = MCPClientRegistrationSchema.safeParse(registration);
     if (!sent.success) return fail("validation", "Invalid Gateway client registration");
-    const reply = await this.call("register", { client: sent.data }, options);
+    const parsedGrants = grants.map(grant => ResolvedToolGrantSchema.safeParse(grant));
+    if (parsedGrants.some(grant => !grant.success) || parsedGrants.some(grant => {
+      if (!grant.success) return true;
+      const value = grant.data;
+      return value.kind === "cli_only" || value.role !== sent.data.role || value.scope.kind !== "session" ||
+        value.scope.sessionId !== sent.data.scope.sessionId || value.scope.repositoryId !== sent.data.scope.repositoryId ||
+        value.scope.workspaceRoot !== sent.data.scope.workspaceRoot || !value.serviceId ||
+        sent.data.serviceIds.length !== 1 || value.serviceId !== sent.data.serviceIds[0] ||
+        value.operations.some(operation => !sent.data.allowedTools.includes(operation));
+    })) return fail("validation", "Resolved Gateway grants do not match the exact registration scope, service and operations");
+    const reply = await this.call("register", { client: sent.data, toolGrants: parsedGrants.map(grant => grant.success ? grant.data : undefined) }, options);
     if (!reply.ok) return reply;
     const value = reply.value;
     if (!isRecord(value) || !hasExactKeys(value, ["registration", "token"]) || typeof value.token !== "string" ||
@@ -98,6 +108,24 @@ export class GatewayControlClient implements GatewayControlPort {
     if (!reply.ok) return reply;
     const observed = parseArray(reply.value, "observations", MCPServiceObservationSchema);
     return observed ? ok(observed) : fail("corruption", "Gateway catalog reply is malformed");
+  }
+
+  async invokeTool(call: MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.toolCall("invoke_tool", call, options);
+  }
+
+  async reconcileToolCall(call: MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    return this.toolCall("reconcile_tool_call", call, options);
+  }
+
+  private async toolCall(method: string, request: MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    const parsed = MCPToolCallSchema.safeParse(request);
+    if (!parsed.success) return fail("validation", "Invalid Gateway MCP tool call");
+    const reply = await this.call(method, { call: parsed.data }, options);
+    if (!reply.ok) return reply;
+    const result = MCPToolCallResultSchema.safeParse(reply.value);
+    return result.success && result.data.callId === parsed.data.callId
+      ? ok(result.data) : fail("corruption", "Gateway MCP tool result is malformed or mismatched");
   }
 
   private async call(method: string, params: unknown, options?: OperationOptions): Promise<Reply> {

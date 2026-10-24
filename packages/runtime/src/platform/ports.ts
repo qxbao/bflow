@@ -1,6 +1,7 @@
 import type {
   AgentEnvironment, AgentHealthCheck, AgentHealthResult, AgentLaunchAttestation, AgentLaunchProfile,
   AgentProviderAdapter, AgentProviderId, AgentRole, MCPClientRegistration, MCPServiceObservation,
+  MCPToolCallResult, RepositoryToolPolicy, ResolvedToolGrant,
   OperationOptions, OperationResult, PermissionProfile, ScopedOperation, SkillManifest, SkillPin, TrustScope
 } from "@bflow/contracts";
 import type { HostHookEvent, HostMcpServer, LiveReadinessObservation } from "@bflow/agent-providers";
@@ -45,6 +46,12 @@ export interface RolePlatformRequirement {
   readonly taskId?: string;
   readonly capabilityIds: readonly string[];
   readonly mcpServiceIds: readonly string[];
+  /** Exact MCP operation names. Kept distinct from toolIds, which are catalog inventory IDs. */
+  readonly mcpOperations?: readonly string[];
+  /** Resolved per-role grants; Runtime groups these by service before Gateway registration. */
+  readonly toolGrants?: readonly ResolvedToolGrant[];
+  /** Explicit repository policy snapshot used to fail required missing grants before Gateway or provider side effects. */
+  readonly toolPolicy?: RepositoryToolPolicy;
   readonly toolIds: readonly string[];
   readonly skillSelections: readonly RoleSkillSelection[];
   readonly environmentVariables?: Readonly<Record<string, string>>;
@@ -98,11 +105,13 @@ export interface GatewayRegistrationGrant {
 
 /** Control plane of the shared Gateway daemon. The concrete endpoint is integrated separately. */
 export interface GatewayControlPort {
-  register(registration: MCPClientRegistration, options?: OperationOptions): Promise<OperationResult<GatewayRegistrationGrant>>;
+  register(registration: MCPClientRegistration, options?: OperationOptions, grants?: readonly ResolvedToolGrant[]): Promise<OperationResult<GatewayRegistrationGrant>>;
   revoke(registrationId: string, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<void>>;
   /** Registrations visible to exactly this session scope; used to reconcile uncertain registers. */
   list(scope: TrustScope, options?: OperationOptions): Promise<OperationResult<readonly MCPClientRegistration[]>>;
   inspectServices(operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<readonly MCPServiceObservation[]>>;
+  invokeTool(call: import("@bflow/contracts").MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+  reconcileToolCall(call: import("@bflow/contracts").MCPToolCall, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
 }
 
 export interface RoleGatewayAccess {
@@ -119,6 +128,8 @@ export interface GatewayRoleRequest {
   readonly environmentId: string;
   readonly serviceIds: readonly string[];
   readonly allowedTools: readonly string[];
+  /** Exact authority attached to this single-service registration. */
+  readonly toolGrants?: readonly ResolvedToolGrant[];
   readonly configDigest: string;
 }
 
@@ -147,6 +158,10 @@ export interface GatewayRegistrationPort {
   revokeRole(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string,
     options?: OperationOptions): Promise<OperationResult<void>>;
   revokeSession(identity: PlatformSessionIdentity, options?: OperationOptions): Promise<OperationResult<void>>;
+  invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+  reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
 }
 
 // -------------------------------------------------------------- provider (T4)
@@ -306,6 +321,10 @@ export interface PlatformReadinessService {
   reconcileAfterRestart(identity: PlatformSessionIdentity,
     options?: OperationOptions): Promise<OperationResult<{ readonly releasedLaunchIds: readonly string[] }>>;
   verifyGateway(options?: OperationOptions): Promise<OperationResult<GatewayRegistrationVerification>>;
+  invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+  reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
   /** Revokes this session's Gateway registrations; never stops shared/external services. */
   shutdown(options?: OperationOptions): Promise<OperationResult<void>>;
   status(): PlatformStatusSnapshot;

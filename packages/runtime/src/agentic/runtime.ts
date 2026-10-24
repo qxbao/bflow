@@ -1,5 +1,5 @@
 import {
-  AgentBindingReceiptSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
+  AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentLeaseSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
   AgentResultSchema, AgentRoleSchema, AgentTransportCapabilitiesSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   CancellationRequestSchema, DelegationRequestSchema, GitChangeSetSchema,
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
@@ -15,7 +15,7 @@ import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession, type CoreRestoreCache } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
-import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, type TaskLogAssignment } from "./task-log-tools.js";
+import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, toolActionHolderCandidates, type TaskLogAssignment } from "./task-log-tools.js";
 import { join } from "node:path";
 import { CONVERSATION_DELIVERY_MAX_ATTEMPTS, DISPATCH_FAILURE_NOTICE_ATTEMPTS, HerdrOutbox, NOT_READY_FAILURE_MS, unwrap } from "./outbox.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integration, type VerificationPlan } from "./ports.js";
@@ -2591,6 +2591,84 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         throw new Error("No current Developer assignment owns this task workspace");
       await outbox.renew(out);
       return use(task, definition);
+    });
+  }
+  /** Revalidates and renews the authenticated pane's live task lease immediately around a mediated tool side effect. */
+  async withAssignedToolAction<T>(bindingInput: PaneBinding,
+    use: (assignment?: { readonly runId: string; readonly taskId?: string; readonly transportTaskId?: string;
+      readonly attemptId: string; readonly leaseId: string; readonly fencingToken: number }) => Promise<T>): Promise<T> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    return this.transaction(async (state, _save, core, outbox) => {
+      if (this.quiesced || binding.role === "conversation") throw new Error("Tool action is quiesced or unauthorized");
+      const candidates = toolActionHolderCandidates(state, binding) as unknown as Outbound[];
+      if (candidates.length === 0 && binding.role === "coordinator") {
+        // A missing active holder does not erase this pane's association with an existing run.
+        // Inspect every historical outbound entry for this exact pane/session, including released
+        // and unknown entries, before permitting pre-run investigation.
+        const associated = state.outbound.filter(item => {
+          if (!item.message.run_id || !item.handle) return false;
+          const recipient = item.message.recipient, target = item.handle.target;
+          return recipient.role === binding.role && recipient.agent_id === binding.agentId && recipient.pane_id === binding.paneId &&
+            target.agentId === binding.agentId && target.paneId === binding.paneId &&
+            digest(target.session) === digest(binding.session);
+        });
+        const associatedRunIds = new Set(associated.map(item => item.message.run_id!));
+        const liveRun = state.runs.some(run => associatedRunIds.has(run.runId) && !["completed", "failed", "cancelled"].includes(run.status));
+        const unresolved = associated.some(item => ["sending", "unknown_delivery"].includes(item.status)) ||
+          associated.some(item => {
+            const run = state.runs.find(candidate => candidate.runId === item.message.run_id);
+            return run?.status === "awaiting_approval" || Object.values(run?.userDecisions ?? {}).some(decision => decision.status === "pending");
+          });
+        if (liveRun || unresolved) throw new Error("Coordinator tool action is blocked by an associated live run or unresolved obligation; reconcile it before proceeding");
+        return use(undefined); // Authenticated Coordinator may investigate before a workflow run exists.
+      }
+      if (candidates.length !== 1) throw new Error("No unique live task assignment for this authenticated pane");
+      const out = candidates[0]!, handle = AgentExecutionHandleSchema.parse(out.handle), lease = AgentLeaseSchema.parse(out.lease);
+      const request = out.request!, runId = handle.runId;
+      const run = state.runs.find(item => item.runId === runId);
+      if (!run || runId !== out.message.run_id) throw new Error("Tool action has no matching Runtime run holder");
+      this.live(run);
+      if (run.status === "awaiting_approval" || run.supersededBy || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
+          state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status)))
+        throw new Error("Tool action is blocked by approval, user decision, supersession, or unresolved delivery");
+      assertNoPendingPaneDecision(run, binding);
+      if (out.cancelRequested || out.leaseRelease || out.reviewReplacement || this.supersededAttempt(state, out))
+        throw new Error("Tool action holder is cancelled, replaced, or superseded");
+      if (handle.requestId !== request.requestId || request.runId !== runId || request.taskId !== handle.taskId ||
+          request.role !== binding.role || request.target.agentId !== binding.agentId || request.target.paneId !== binding.paneId ||
+          digest(request.target.session) !== digest(binding.session) || lease.agentId !== binding.agentId || lease.runId !== runId ||
+          lease.taskId !== request.taskId || lease.attemptId !== out.attemptId || lease.fencingToken <= 0 ||
+          Date.parse(lease.expiresAt) <= Date.parse(this.now())) throw new Error("Tool action request, lease, or fencing token is stale");
+      const dispatchLease = [lease, ...out.leaseHistory ?? []].find(item => request.metadata?.leaseId === item.leaseId &&
+        request.metadata?.fencingToken === item.fencingToken);
+      if (!dispatchLease) throw new Error("Tool action request is not bound to a recorded dispatch fencing token");
+
+      let taskId = taskLogBusinessTaskId(out);
+      if (out.message.type === "task.assignment") {
+        const assignment = out.assignment;
+        if (!assignment || assignment.runId !== runId || assignment.taskId !== handle.taskId || assignment.role !== binding.role ||
+            assignment.agentId !== binding.agentId || assignment.paneId !== binding.paneId || assignment.leaseId !== dispatchLease.leaseId ||
+            assignment.fencingToken !== dispatchLease.fencingToken) throw new Error("Tool action does not match its authenticated AgentAssignment");
+        const task = run.tasks.find(item => item.taskId === handle.taskId), current = (await core.snapshot(runId)).tasks.find(item => item.taskId === handle.taskId);
+        const definition = run.definition?.tasks.find(item => item.id === handle.taskId);
+        if (!task || !definition || task.spec.specification.status !== "approved" || current?.status !== "running" ||
+            handle.requestId !== current.agentExecution?.requestId || handle.target.worktreePath !== binding.worktreePath)
+          throw new Error("Tool action is outside the current approved Core task assignment");
+        taskId = handle.taskId;
+      } else if (out.message.type === "verification.requested") {
+        if (!taskId || !run.tasks.some(item => item.taskId === taskId)) throw new Error("Verification tool action has no current business task");
+      } else if (out.message.type === "delegation.request") {
+        if (binding.role === "coordinator" && out.message.sender.role === "conversation" &&
+            digest(DelegationRequestSchema.parse(out.message.payload)) !== digest(run.delegation))
+          throw new Error("Coordinator tool action belongs to a stale delegation revision");
+      }
+      await outbox.renew(out);
+      const renewed = AgentLeaseSchema.parse(out.lease);
+      if (out.status !== "accepted" || renewed.agentId !== binding.agentId || renewed.runId !== handle.runId ||
+          renewed.taskId !== request.taskId || renewed.attemptId !== out.attemptId || renewed.fencingToken < lease.fencingToken ||
+          Date.parse(renewed.expiresAt) <= Date.parse(this.now())) throw new Error("Tool action lease renewal did not preserve the active assignment");
+      return use({ runId, ...(taskId ? { taskId } : {}), transportTaskId: request.taskId,
+        attemptId: out.attemptId, leaseId: renewed.leaseId, fencingToken: renewed.fencingToken });
     });
   }
   /** A Developer requests a policy measurement, never a direct specialist dispatch. */

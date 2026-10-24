@@ -735,6 +735,56 @@ describe.skipIf(process.platform !== "linux")("P19 integrated Agentic SDLC", () 
     expect(requests).toHaveLength(2); expect(new Set(requests.map(req => req.target.worktreePath)).size).toBe(2);
     expect(new Set(requests.map(req => req.target.paneId)).size).toBe(2);
   });
+  it("renews the active Developer lease before a mediated action and refuses a stale Registry lease", async () => {
+    const f = await fixture();
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const state = await f.runtime.inspect() as any;
+    const out = state.outbound.find((item: any) => item.status === "accepted" && item.message.type === "task.assignment");
+    expect(out).toBeDefined();
+    const binding = f.panes.bindings.find(pane => pane.paneId === out.handle.target.paneId)!;
+    const sideEffects: unknown[] = [];
+    const accepted = await f.runtime.withAssignedToolAction(binding, async context => { sideEffects.push(context); return context; });
+    expect(accepted).toMatchObject({ runId: "run-1", taskId: "implement", transportTaskId: "implement", fencingToken: out.lease.fencingToken });
+    expect(sideEffects).toHaveLength(1);
+
+    const lease = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.message_id === out.message.message_id).lease;
+    const released = await f.ports.registry.releaseLease({ leaseId: lease.leaseId, fencingToken: lease.fencingToken, expectedVersion: lease.version,
+      releasedAt: new Date().toISOString(), idempotencyKey: `stale-tool-action-${lease.leaseId}` });
+    expect(released.ok).toBe(true);
+    await expect(f.runtime.withAssignedToolAction(binding, async context => { sideEffects.push(context); return context; })).rejects.toThrow();
+    expect(sideEffects).toHaveLength(1);
+  });
+  it("allows an authenticated Coordinator to read planning context before a workflow run exists", async () => {
+    const f = await fixture({ intake: false });
+    const coordinator = f.panes.bindings.find(pane => pane.role === "coordinator")!;
+    let observed: unknown = "not-called";
+
+    const result = await f.runtime.withAssignedToolAction(coordinator, async assignment => { observed = assignment; return "context-ready"; });
+
+    expect(result).toBe("context-ready");
+    expect(observed).toBeUndefined();
+  });
+  it("denies Coordinator tool actions when a historical pane handoff is linked to a live run but no active holder exists", async () => {
+    const f = await fixture();
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const coordinator = f.panes.bindings.find(pane => pane.role === "coordinator")!;
+    const statePath = join(f.root, "journal/state.json"), state = JSON.parse(await readFile(statePath, "utf8"));
+    const linked = state.outbound.find((item: any) => item.message.run_id === "run-1" && item.handle);
+    expect(linked, JSON.stringify(state.outbound.map((item: any) => ({ type: item.message?.type, runId: item.message?.run_id,
+      role: item.message?.recipient?.role, targetPane: item.handle?.target?.paneId, targetSession: item.handle?.target?.session?.value })))).toBeDefined();
+    linked.message.recipient = { role: "coordinator", agent_id: coordinator.agentId, pane_id: coordinator.paneId };
+    linked.message.sender = { role: "conversation", agent_id: "conversation", pane_id: "pane-conversation" };
+    Object.assign(linked.handle.target, { agentId: coordinator.agentId, paneId: coordinator.paneId, session: coordinator.session });
+    if (linked.request) Object.assign(linked.request.target, { agentId: coordinator.agentId, paneId: coordinator.paneId, session: coordinator.session });
+    linked.status = "released";
+    await writeFile(statePath, JSON.stringify(state));
+    f.restart(); await f.runtime.initialize();
+
+    let called = false;
+    await expect(f.runtime.withAssignedToolAction(coordinator, async () => { called = true; return undefined; }))
+      .rejects.toThrow("associated live run");
+    expect(called).toBe(false);
+  });
   it("required TDD blocks implementation authorization until independent Red and rejects missing Green/Refactor", async () => {
     const f = await fixture({ tdd: true }); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     expect((await f.dossier()).strategy.tddDecision.mode).toBe("required");
