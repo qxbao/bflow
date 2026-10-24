@@ -4,11 +4,13 @@ import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { redactString } from "../resilience/redaction.js";
 
-export type TaskActivityKind = "admission" | "planning" | "assignment" | "progress" | "tool" | "specification" | "tdd" | "verification" | "review" | "approval" | "recovery" | "cancellation" | "result" | "error" | "transport";
+export type TaskActivityKind = "admission" | "planning" | "assignment" | "progress" | "tool" | "specification" | "tdd" | "verification" | "review" | "approval" | "recovery" | "cancellation" | "result" | "error" | "transport" | "notice";
 export interface TaskActivityInput {
   readonly kind: TaskActivityKind; readonly role: string; readonly action: string;
   readonly runId?: string; readonly taskId?: string; readonly attemptId?: string;
   readonly outcome?: string; readonly durationMs?: number;
+  readonly shortId?: string; readonly runLabel?: string; readonly messageType?: string;
+  readonly reason?: string; readonly artifacts?: readonly string[];
 }
 export interface TaskActivityEntry extends TaskActivityInput { readonly at: string; readonly id?: string; }
 type ScopeField = "runId" | "taskId" | "attemptId";
@@ -17,7 +19,7 @@ const SCOPE_FIELDS: readonly ScopeField[] = ["runId", "taskId", "attemptId"];
 const scopeKey = (value: string): string => createHash("sha256").update(value).digest("hex");
 export interface TaskActivityFilter { readonly runId?: string; readonly taskId?: string; readonly lines?: number; readonly maxBytes?: number; }
 const DEFAULT_ENTRIES = 1000, DEFAULT_BYTES = 512 * 1024, MAX_LINE_BYTES = 4096;
-const KINDS = new Set<TaskActivityKind>(["admission", "planning", "assignment", "progress", "tool", "specification", "tdd", "verification", "review", "approval", "recovery", "cancellation", "result", "error", "transport"]);
+const KINDS = new Set<TaskActivityKind>(["admission", "planning", "assignment", "progress", "tool", "specification", "tdd", "verification", "review", "approval", "recovery", "cancellation", "result", "error", "transport", "notice"]);
 function clean(value: string, limit = 240): string {
   return Array.from(redactString(value).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim())
     .slice(0, limit).join("");
@@ -27,7 +29,8 @@ function parseEntry(value: unknown): StoredTaskActivityEntry {
   const item = value as Record<string, unknown>;
   if (typeof item.at !== "string" || !Number.isFinite(Date.parse(item.at)) || typeof item.kind !== "string" || !KINDS.has(item.kind as TaskActivityKind) ||
       typeof item.role !== "string" || typeof item.action !== "string") throw new Error("Invalid task activity entry");
-  for (const field of ["runId", "taskId", "attemptId", "outcome"]) if (item[field] !== undefined && typeof item[field] !== "string") throw new Error("Invalid task activity field");
+  for (const field of ["runId", "taskId", "attemptId", "outcome", "shortId", "runLabel", "messageType", "reason"]) if (item[field] !== undefined && typeof item[field] !== "string") throw new Error("Invalid task activity field");
+  if (item.artifacts !== undefined && (!Array.isArray(item.artifacts) || item.artifacts.length > 20 || item.artifacts.some(uri => typeof uri !== "string" || !uri))) throw new Error("Invalid task activity artifacts");
   if (item.durationMs !== undefined && (typeof item.durationMs !== "number" || !Number.isFinite(item.durationMs) || item.durationMs < 0)) throw new Error("Invalid task activity duration");
   if (item.id !== undefined && (typeof item.id !== "string" || !/^[a-f0-9-]{36}$/.test(item.id))) throw new Error("Invalid task activity identity");
   if (item.scopes !== undefined) {
@@ -59,14 +62,21 @@ export class TaskActivityLog {
     try {
       const scopes: Partial<Record<ScopeField, string>> = {};
       for (const field of SCOPE_FIELDS) if (input[field]) scopes[field] = scopeKey(input[field]);
+      const artifacts = (input.artifacts ?? []).map(uri => clean(uri, 240)).filter(Boolean).slice(0, 20);
       const entry = parseEntry({ id: randomUUID(), at: new Date().toISOString(), kind: input.kind, role: clean(input.role, 32), action: clean(input.action, 80), scopes,
         ...(input.runId ? { runId: clean(input.runId, 200) } : {}), ...(input.taskId ? { taskId: clean(input.taskId, 200) } : {}),
         ...(input.attemptId ? { attemptId: clean(input.attemptId, 200) } : {}), ...(input.outcome ? { outcome: clean(input.outcome, 240) } : {}),
+        ...(input.shortId ? { shortId: clean(input.shortId, 16) } : {}), ...(input.runLabel ? { runLabel: clean(input.runLabel, 200) } : {}),
+        ...(input.messageType ? { messageType: clean(input.messageType, 80) } : {}), ...(input.reason ? { reason: clean(input.reason, 1200) } : {}),
+        ...(artifacts.length ? { artifacts } : {}),
         ...(input.durationMs === undefined ? {} : { durationMs: Math.max(0, Math.round(input.durationMs)) }) });
       let line = JSON.stringify(entry);
-      let outcome = Array.from(entry.outcome ?? ""), action = Array.from(entry.action), role = Array.from(entry.role);
-      while (Buffer.byteLength(line) > MAX_LINE_BYTES && (outcome.length > 0 || action.length > 16 || role.length > 8)) {
-        if (outcome.length > 0) {
+      let reason = Array.from(entry.reason ?? ""), outcome = Array.from(entry.outcome ?? ""), action = Array.from(entry.action), role = Array.from(entry.role);
+      while (Buffer.byteLength(line) > MAX_LINE_BYTES && (reason.length > 0 || outcome.length > 0 || action.length > 16 || role.length > 8)) {
+        if (reason.length > 0) {
+          const nextLength = Math.max(0, Math.min(reason.length - 1, Math.floor(reason.length * 0.7)));
+          reason = reason.slice(0, nextLength); Object.assign(entry, { reason: reason.join("") });
+        } else if (outcome.length > 0) {
           const nextLength = Math.max(0, Math.min(outcome.length - 1, Math.floor(outcome.length * 0.7)));
           outcome = outcome.slice(0, nextLength); Object.assign(entry, { outcome: outcome.join("") });
         } else if (action.length > 16) {

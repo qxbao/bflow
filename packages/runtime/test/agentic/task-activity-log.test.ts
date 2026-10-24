@@ -89,4 +89,35 @@ describe("TaskActivityLog", () => {
     expect(fresh[0]?.id).not.toBe(fresh[1]?.id);
     expect(JSON.stringify(fresh)).not.toContain("scopes");
   });
+
+  it("records bounded redacted notice technical details with #n, Việc #k, messageType, reason and artifacts", async () => {
+    const { root, log: activity } = await log();
+    const recorded = await activity.record({
+      kind: "notice",
+      role: "runtime",
+      action: "conversation.progress:workflow_blocked",
+      runId: "run-42",
+      shortId: "#3",
+      runLabel: "Việc #1: Thêm trang đăng nhập",
+      messageType: "conversation.progress",
+      reason: "Developer không phản hồi: {\"code\":\"timeout\",\"token\":\"Bearer super-secret-token\"}",
+      artifacts: ["artifact://store/spec-1?token=secret-123", "artifact://store/patch-1"]
+    });
+    expect(recorded).toBe(true);
+    const raw = await readFile(join(root, "activity.jsonl"), "utf8");
+    expect(raw).not.toContain("super-secret-token");
+    expect(raw).not.toContain("secret-123");
+    const [entry] = await activity.read({ runId: "run-42" });
+    expect(entry).toMatchObject({
+      kind: "notice",
+      role: "runtime",
+      action: "conversation.progress:workflow_blocked",
+      runId: "run-42",
+      shortId: "#3",
+      runLabel: "Việc #1: Thêm trang đăng nhập",
+      messageType: "conversation.progress",
+      reason: 'Developer không phản hồi: {"code":"timeout","token": "[REDACTED]"}',
+      artifacts: ["artifact://store/spec-1?token=[REDACTED]", "artifact://store/patch-1"]
+    });
+  });
 });

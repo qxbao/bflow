@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import {
   ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
   QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
@@ -14,6 +14,7 @@ import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { ApprovalNoticeSchema, BlockedNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, blockedNoticeFields, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 import { BFLOW_INBOX_NUDGE } from "./conversation-inbox.js";
+import { TaskActivityLog, type TaskActivityInput } from "./task-activity-log.js";
 import type { AgyNativeAnchor } from "./agy-native-transcript.js";
 
 type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
@@ -36,6 +37,8 @@ export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1),
   runId: z.string().min(1).optional(), correlationId: z.string().min(1), receivedAt: z.string().datetime(),
   shortId: z.string().regex(/^#[1-9]\d*$/).optional(),
   runLabel: z.string().min(1).max(200).optional(),
+  reason: z.string().max(2000).optional(),
+  artifacts: z.array(z.string().min(1).max(300)).max(20).optional(),
   summary: z.string(), truncated: z.boolean(),
   /** Bounded decision fields for user decisions, independent of the summary cap. Absent on receipts written before this field. */
   userDecision: UserDecisionNoticeSchema.optional(),
@@ -44,6 +47,67 @@ export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1),
   /** Bounded blocker fields independent of summary truncation; absent on older receipts. */
   blocked: BlockedNoticeSchema.optional() }).strict();
 export type ConversationNotice = z.infer<typeof ConversationNoticeSchema>;
+
+function extractNoticeArtifacts(
+  payload: unknown,
+  artifactReferences?: readonly { readonly uri: string }[],
+  approval?: { readonly evidence?: readonly { readonly uri: string }[] }
+): string[] {
+  const uris: string[] = [];
+  for (const ref of artifactReferences ?? []) {
+    if (typeof ref?.uri === "string" && ref.uri.trim()) uris.push(ref.uri.trim());
+  }
+  for (const item of approval?.evidence ?? []) {
+    if (typeof item?.uri === "string" && item.uri.trim()) uris.push(item.uri.trim());
+  }
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const obj = payload as Record<string, unknown>;
+    for (const key of ["evidence", "artifacts", "artifact_references"] as const) {
+      const list = obj[key];
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        if (typeof item === "string" && item.trim()) uris.push(item.trim());
+        else if (item && typeof item === "object" && !Array.isArray(item) && typeof (item as Record<string, unknown>).uri === "string") {
+          const uri = String((item as Record<string, unknown>).uri).trim();
+          if (uri) uris.push(uri);
+        }
+      }
+    }
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const uri of uris) {
+    const sanitized = redactString(uri).replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 300);
+    if (!sanitized || seen.has(sanitized)) continue;
+    seen.add(sanitized);
+    result.push(sanitized);
+    if (result.length >= 20) break;
+  }
+  return result;
+}
+
+function extractNoticeReason(
+  payload: unknown,
+  userDecision?: { readonly question: string },
+  approval?: { readonly reason: string },
+  blocked?: { readonly reason: string }
+): string | undefined {
+  const obj = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const candidates = [
+    obj.reason,
+    obj.blockageReason,
+    blocked?.reason,
+    approval?.reason,
+    userDecision?.question,
+    obj.headline,
+    obj.summary,
+    obj.status
+  ];
+  const raw = candidates.find((val): val is string => typeof val === "string" && val.trim().length > 0);
+  if (!raw) return undefined;
+  const sanitized = redactString(raw).replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 2000);
+  return sanitized.length > 0 ? sanitized : undefined;
+}
 /** Display state of a user-decision notice, for the Runtime watchdog. `since` is when the current wait began. */
 export interface ConversationNoticeState { messageId: string; approvalId?: string; runId?: string; surfaced: boolean; displayed: boolean; resends: number; since: string }
 const NoticeSurfacedSchema = z.object({ messageId: z.string().min(1), surfacedAt: z.string().datetime().optional() }).strict();
@@ -128,8 +192,19 @@ export class HostReceiptJournal {
   }
   readonly directory: string;
   readonly repository: string;
-  constructor(directory: string, repository: string, readonly sessionId: string) {
+  private readonly activityLog: { record(input: TaskActivityInput): Promise<boolean> };
+  constructor(
+    directory: string,
+    repository: string,
+    readonly sessionId: string,
+    activityLog?: { record(input: TaskActivityInput): Promise<boolean> }
+  ) {
     this.directory = resolve(directory); this.repository = resolve(repository); textField(sessionId);
+    this.activityLog = activityLog ?? TaskActivityLog.open(
+      basename(this.directory) === "authentication-receipts"
+        ? resolve(this.directory, "../../../agentic/task-activity.jsonl")
+        : resolve(this.directory, "../task-activity.jsonl")
+    );
   }
   private async prepare(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -846,12 +921,102 @@ export class HostReceiptJournal {
         .find((val): val is string => typeof val === "string" && val.trim().length > 0)?.trim() ?? runTitles.get(parsed.run_id);
       runLabel = rawTitle ? `${workTag}: ${rawTitle.slice(0, 140)}` : workTag;
     }
-    return this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
+    const reason = extractNoticeReason(parsed.payload, userDecision, approval, blocked);
+    const artifacts = extractNoticeArtifacts(parsed.payload, parsed.artifact_references, approval);
+    const created = await this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
       ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
       ...(shortId === undefined ? {} : { shortId }), ...(runLabel === undefined ? {} : { runLabel }),
+      ...(reason === undefined ? {} : { reason }), ...(artifacts.length === 0 ? {} : { artifacts }),
       ...(userDecision === undefined ? {} : { userDecision }), ...(approval === undefined ? {} : { approval }),
       ...(blocked === undefined ? {} : { blocked }),
       summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
+    if (created) {
+      const payloadRecord = parsed.payload && typeof parsed.payload === "object" && !Array.isArray(parsed.payload)
+        ? parsed.payload as Record<string, unknown>
+        : {};
+      const payloadKind = typeof payloadRecord.kind === "string" && payloadRecord.kind.trim().length > 0
+        ? payloadRecord.kind.trim()
+        : typeof payloadRecord.metadata === "object" && payloadRecord.metadata !== null && !Array.isArray(payloadRecord.metadata) &&
+            typeof (payloadRecord.metadata as Record<string, unknown>).kind === "string"
+          ? String((payloadRecord.metadata as Record<string, unknown>).kind).trim()
+          : undefined;
+      const action = payloadKind ? `${parsed.type}:${payloadKind}`.slice(0, 80) : parsed.type.slice(0, 80);
+      try {
+        await this.activityLog.record({
+          kind: "notice",
+          role: parsed.sender.role,
+          action,
+          ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }),
+          ...(shortId === undefined ? {} : { shortId }),
+          ...(runLabel === undefined ? {} : { runLabel }),
+          messageType: parsed.type,
+          ...(reason === undefined ? {} : { reason, outcome: reason.slice(0, 240) }),
+          ...(artifacts.length === 0 ? {} : { artifacts })
+        });
+      } catch {
+        // Activity logging is best-effort diagnostics; never fail notice receipt persistence.
+      }
+    }
+    return created;
+  }
+  /** Read-only on-demand technical detail for one notice (#n or Việc #k) in the current Conversation session. */
+  async readConversationNoticeDetail(ref: string): Promise<{
+    shortId?: string;
+    runLabel?: string;
+    messageId: string;
+    type: string;
+    senderRole: string;
+    runId?: string;
+    correlationId: string;
+    receivedAt: string;
+    approvalId?: string;
+    reason?: string;
+    artifacts: string[];
+    summary: string;
+    truncated: boolean;
+  }> {
+    const trimmed = textField(ref).trim();
+    const shortMatch = /^#([1-9]\d*)$/u.exec(trimmed);
+    const workMatch = /^việc\s*#([1-9]\d*)$/iu.exec(trimmed);
+    if (!shortMatch && !workMatch) {
+      throw new Error(`Invalid notice reference '${trimmed}'; pass '#n' (e.g. '#1') or 'Việc #k' (e.g. 'Việc #1')`);
+    }
+    const notices = await this.allConversationNotices();
+    let target: ConversationNotice | undefined;
+    if (shortMatch) {
+      const normalizedShortId = `#${shortMatch[1]}`;
+      target = [...notices].reverse().find(item => item.shortId === normalizedShortId);
+    } else if (workMatch) {
+      const normalizedWorkTag = `việc #${workMatch[1]}`;
+      const matchingForWork = notices.filter(item => {
+        const tag = item.runLabel?.split(":")[0]?.trim().toLowerCase().replace(/\s+/gu, " ");
+        return tag === normalizedWorkTag;
+      });
+      target = [...matchingForWork].reverse().find(item => item.shortId !== undefined) ?? matchingForWork.at(-1);
+    }
+    if (!target) {
+      throw new Error(`Unknown notice reference '${trimmed}' in the current Conversation session`);
+    }
+    let parsedSummary: unknown;
+    try { parsedSummary = JSON.parse(target.summary); } catch { parsedSummary = undefined; }
+    const approvalId = target.userDecision?.approvalId ?? target.approval?.approvalId;
+    const reason = target.reason ?? extractNoticeReason(parsedSummary, target.userDecision, target.approval, target.blocked);
+    const artifacts = target.artifacts ?? extractNoticeArtifacts(parsedSummary, undefined, target.approval);
+    return {
+      ...(target.shortId === undefined ? {} : { shortId: target.shortId }),
+      ...(target.runLabel === undefined ? {} : { runLabel: target.runLabel }),
+      messageId: target.messageId,
+      type: target.type,
+      senderRole: target.senderRole,
+      ...(target.runId === undefined ? {} : { runId: target.runId }),
+      correlationId: target.correlationId,
+      receivedAt: target.receivedAt,
+      ...(approvalId === undefined ? {} : { approvalId }),
+      ...(reason === undefined ? {} : { reason: redactString(reason).slice(0, 2000) }),
+      artifacts: artifacts.map(uri => redactString(uri).slice(0, 300)).slice(0, 20),
+      summary: redactString(target.summary).slice(0, NOTICE_SUMMARY_LIMIT),
+      truncated: target.truncated
+    };
   }
   /** Reserve before the Herdr side effect. A lost acknowledgement consumes the attempt; restart never resets this budget. */
   async reserveConversationNudge(messageIds: readonly string[]): Promise<boolean> {

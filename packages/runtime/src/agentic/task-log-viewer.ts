@@ -16,13 +16,33 @@ function display(value: unknown): string {
   const at = typeof entry.at === 'string' ? Date.parse(entry.at) : NaN;
   const time = Number.isFinite(at) ? new Date(at).toISOString().slice(11, 19) : '--:--:--';
   const kind = clean(entry.kind, 48).toLowerCase();
-  const outcome = clean(entry.outcome, 120);
-  const severity = /error|denied|failed|blocked/.test(`${kind} ${outcome}`.toLowerCase()) ? '!' : /requested|warning|retry|unknown/.test(`${kind} ${outcome}`.toLowerCase()) ? '~' : '·';
-  const context = [entry.role && clean(entry.role, 24), entry.runId && `run:${clean(entry.runId, 16)}`, entry.taskId && `task:${clean(entry.taskId, 16)}`, entry.attemptId && `try:${clean(entry.attemptId, 12)}`].filter(Boolean).join(' ');
-  const action = clean(entry.action, 100) || clean(entry.kind, 48) || 'activity';
-  const result = outcome ? ` → ${outcome}` : '';
+  const shortId = clean(entry.shortId, 16);
+  const runLabel = clean(entry.runLabel, 80);
+  const workTag = runLabel.split(':')[0]?.trim() || '';
+  const messageType = clean(entry.messageType, 80);
+  const rawReason = clean(entry.reason ?? entry.outcome, 200);
+  const artifacts = Array.isArray(entry.artifacts)
+    ? entry.artifacts.map((uri) => clean(uri, 120)).filter(Boolean).slice(0, 6)
+    : [];
+  const probe = `${kind} ${messageType} ${rawReason}`.toLowerCase();
+  const severity = /error|denied|failed|blocked/.test(probe) ? '!' : /requested|warning|retry|unknown|approval/.test(probe) ? '~' : '·';
+  const context = [
+    shortId,
+    workTag,
+    entry.role && clean(entry.role, 24),
+    entry.runId && `run:${clean(entry.runId, 16)}`,
+    entry.taskId && `task:${clean(entry.taskId, 16)}`,
+    entry.attemptId && `try:${clean(entry.attemptId, 12)}`
+  ].filter(Boolean).join(' ');
+  const action = clean(entry.action, 100) || messageType || clean(entry.kind, 48) || 'activity';
+  const artifactSuffix = artifacts.length ? ` [artifacts: ${artifacts.join(', ')}]` : '';
   const duration = typeof entry.durationMs === 'number' && Number.isFinite(entry.durationMs) ? ` (${Math.max(0, Math.min(86_400_000, Math.floor(entry.durationMs)))}ms)` : '';
-  return `${time} ${severity} ${context ? `${context} ` : ''}${action}${result}${duration}`.slice(0, 320);
+  const prefix = `${time} ${severity} ${context ? `${context} ` : ''}${action}`;
+  const tail = `${artifactSuffix}${duration}`;
+  const reasonBudget = artifacts.length ? Math.max(40, 320 - prefix.length - tail.length - 3) : 160;
+  const outcome = rawReason.slice(0, reasonBudget);
+  const result = outcome ? ` → ${outcome}` : '';
+  return `${prefix}${result}${tail}`.slice(0, 320);
 }
 
 interface Snapshot { signature?: string; occurrences: Map<string, number> }

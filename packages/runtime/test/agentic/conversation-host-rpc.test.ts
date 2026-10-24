@@ -324,7 +324,16 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
       const tool = availableTools("conversation", provider).find(item => item.name === "read_updates");
       expect(tool).toBeDefined();
       expect(tool!.description).toMatch(/display-only|never.*approve/i);
-      expect(tool!.inputSchema).toEqual({ type: "object", properties: {}, required: [], additionalProperties: false });
+      expect(tool!.description).toContain('xem chi tiết #n');
+      expect(tool!.inputSchema).toEqual({
+        type: "object",
+        properties: {
+          ref: { type: "string", minLength: 1, maxLength: 64 },
+          detail: { type: "boolean" }
+        },
+        required: [],
+        additionalProperties: false
+      });
     }
     expect(availableTools("coordinator").some(item => item.name === "read_updates")).toBe(false);
     expect(availableTools("developer").some(item => item.name === "read_updates")).toBe(false);
@@ -336,6 +345,9 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     await expect(callHost(coordinator.socketPath, coordinator.token, "role_call", {
       paneId: "pane-coordinator", name: "read_updates", arguments: {}
     })).rejects.toThrow("Only Conversation reads inbox updates");
+    await expect(callHost(coordinator.socketPath, coordinator.token, "role_call", {
+      paneId: "pane-coordinator", name: "read_updates", arguments: { ref: "#1", detail: true }
+    })).rejects.toThrow("Only Conversation reads inbox updates");
     await expect(callHost(chat.socketPath, chat.token, "role_call", {
       paneId: "pane-chat", name: "read_updates", arguments: { messageId: "not-allowed" }
     })).rejects.toThrow();
@@ -346,14 +358,56 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
       sender: { role: "coordinator" }, recipient: { role: "conversation" }, type,
       payload, artifact_references: [], occurred_at: at, idempotency_key: id
     });
-    await receipts.appendConversationNotice(makeNotice("upd-plain", "task.status", { status: "working" }));
+    await receipts.appendConversationNotice(makeNotice("upd-plain", "task.status", { status: "working", title: "Cấu hình cơ sở dữ liệu" }));
     await receipts.appendConversationNotice(makeNotice("upd-blocked", "conversation.progress", {
-      kind: "coordinator_no_response", reason: "Coordinator dừng mà chưa giao bước tiếp"
+      kind: "coordinator_no_response", reason: "Coordinator dừng mà chưa giao bước tiếp — Authorization: Bearer secret-xyz"
     }));
     await receipts.appendConversationNotice(makeNotice("upd-decision", "approval.request", {
       approvalId: "apr-read-updates-1", runId: "run-u",
+      evidence: [{ kind: "specification", uri: "artifact://store/spec-db" }],
       metadata: { kind: "user_decision", requestedByRole: "architect", question: "Chọn Postgres hay SQLite?", options: ["Postgres", "SQLite"] }
     }));
+
+    // On-demand detail lookup via { ref, detail: true } returns redacted technical details without marking notices surfaced or displayed.
+    const blockedDetail = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "#1", detail: true }
+    }) as Record<string, unknown>;
+    expect(blockedDetail).toMatchObject({
+      shortId: "#1",
+      runLabel: "Việc #1: Cấu hình cơ sở dữ liệu",
+      messageId: "upd-blocked",
+      type: "conversation.progress",
+      senderRole: "coordinator",
+      runId: "run-u",
+      correlationId: "corr-u",
+      reason: "Coordinator dừng mà chưa giao bước tiếp — Authorization: Bearer [REDACTED]"
+    });
+    expect(String(blockedDetail.summary)).not.toContain("secret-xyz");
+
+    const decisionDetail = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "Việc #1", detail: true }
+    }) as Record<string, unknown>;
+    expect(decisionDetail).toMatchObject({
+      shortId: "#2",
+      runLabel: "Việc #1: Cấu hình cơ sở dữ liệu",
+      messageId: "upd-decision",
+      type: "approval.request",
+      approvalId: "apr-read-updates-1",
+      runId: "run-u",
+      artifacts: ["artifact://store/spec-db"]
+    });
+    expect((await receipts.unsurfacedConversationNotices()).map(item => item.messageId)).toEqual(["upd-plain", "upd-blocked", "upd-decision"]);
+    expect(await receipts.undisplayedUserFacingNotices()).toEqual([]);
+
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "#99", detail: true }
+    })).rejects.toThrow(/Unknown|not found/i);
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "Việc #99", detail: true }
+    })).rejects.toThrow(/Unknown|not found/i);
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { detail: true }
+    })).rejects.toThrow(/ref/i);
 
     const first = await callHost(chat.socketPath, chat.token, "role_call", {
       paneId: "pane-chat", name: "read_updates", arguments: {}
