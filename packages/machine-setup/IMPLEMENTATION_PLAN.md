@@ -379,6 +379,5 @@ Tài liệu: `packages/machine-setup/README.md` (mục đích, ngữ nghĩa mode
 sở hữu, quy tắc an toàn, trạng thái Windows, các port do P28/P27/P29/P30 cung cấp, wiring tích hợp
 cần thiết: tham chiếu `tsconfig.json` gốc + importer lockfile, hạn chế / các mục NOT VERIFIED:
 không có installer thật, không chạy systemd/launchd thật, không Windows, không stress multi-process đồng thời
-ngoài các test lock), `packages/machine-setup/HANDOFF.md` (commit đã test, lệnh, số lượng,
-giả định, yêu cầu tích hợp). Chạy các lệnh validation đầy đủ từ AGENTS.md và ghi lại
-kết quả trong HANDOFF.md.
+ngoài các test lock). Chạy các lệnh validation đầy đủ từ AGENTS.md và báo cáo
+commit đã test, lệnh, kết quả, giả định và yêu cầu tích hợp trong kết quả công việc.
