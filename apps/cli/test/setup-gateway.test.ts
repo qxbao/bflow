@@ -9,7 +9,7 @@ import { defaultMachineConfig, detectPlatform, defaultHostEnvironment, SetupStat
   type ServiceManager, type SetupContext } from "@bflow/machine-setup";
 import { wrapSetupComponents, startSetupGatewayRuntime, setupGatewayDiagnostics } from "../src/setup-gateway.js";
 import { GatewayControlClient } from "@bflow/runtime";
-import { MCPClientRegistrationSchema, ScopedOperationSchema } from "@bflow/contracts";
+import { MCPClientRegistrationSchema, ResolvedToolGrantSchema, ScopedOperationSchema } from "@bflow/contracts";
 
 let root: string;
 let runtime: Awaited<ReturnType<typeof startSetupGatewayRuntime>> | undefined;
@@ -60,7 +60,10 @@ it("shares approved hosted Context7 across worktrees while keeping the configure
     scope: operation.scope, environmentId: "other-reviewer-env", serviceIds: ["context7"], allowedTools: ["query-docs"],
     connection: { transport: "streamable_http", endpoint: locator.endpoint, token: "secret://runtime/other-reviewer" },
     configDigest: "a".repeat(64), expiresAt: new Date(Date.now() + 60_000).toISOString(), idempotencyKey: "other-reviewer" });
-  const registered = await loaded.value.register(client);
+  const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "other-reviewer-context7",
+    policyDigest: "b".repeat(64), toolId: "context7", kind: "native_remote_mcp", requiredness: "required",
+    role: client.role, scope: operation.scope, serviceId: "context7", operations: ["query-docs"], triggers: ["external_documentation"] });
+  const registered = await loaded.value.register(client, undefined, [grant]);
   expect(registered.ok).toBe(true);
   if (!registered.ok) throw new Error(registered.error.message);
   const response = await fetch(locator.endpoint, { method: "POST", headers: { Authorization: `Bearer ${registered.value.bearerToken}`,
