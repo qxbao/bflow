@@ -16,13 +16,15 @@ Chúng được đối chiếu với implementation tại baseline ghi trong
 | `messages/task-status.json` | `RoleMessageSchema` v2 minh họa; IDs giả minh họa, không phải physical receipt |
 | `verify.mjs` | Schema/loader/policy và CLI probes trong disposable Git repositories |
 
-Từ một Bflow checkout đã install/build, với `BFLOW_HOME` là absolute path:
+Sau [build/setup một lần](../../docs/guide/installation.md), gọi lệnh tắt `bflow` từ target repo. `BFLOW_SOURCE` là đường dẫn source checkout để gọi helper, không phải `BFLOW_HOME` (selector isolation):
 
 ```sh
-node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name my-project
-node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
-node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
+bflow init --name my-project
+node "$BFLOW_SOURCE/templates/node-typescript/apply.mjs" . bugfix
+bflow doctor --json
 ```
+
+Fragment đặt startup timeout 60.000 ms, khác default 300.000 ms của `init` mới. Cho phiên đầu có thể dùng `bflow up --timeout 300000`; helper thay policy/roles trong fragment, không chỉ đổi workflow seed.
 
 Thay `bugfix` bằng `feature`, `refactor`, `docs`. Với repo cũ còn
 `.bflow/config.yaml` hoặc `.bflow/config.json`, chạy `bflow config-migrate` trước
@@ -43,10 +45,7 @@ Seed feature có criteria cho multiplication, input validation, output overflow 
 giữ nguyên sum. Host vẫn phải giữ đầy đủ các criteria intake thực tế. Không chỉnh
 sửa JSON approved hoặc tự đặt artifact URI. Không có command tự import/approve các spec mẫu vào Runtime.
 
-`environment.verification.maxIterations: 3` là policy được lưu, chưa tự truyền
-vào Runtime. Host gọi `propose_workflow` với `maxIterations: 3` riêng, cấu hình
-taskChecks/workflowChecks, deterministic runners và human/authenticated evidence
-ports. `requiresApproval: true` trong task seed bảo vệ task; không thay thế design
+CLI đã truyền `environment.verification.maxIterations: 3` và SDD/TDD/concurrency vào persistent host. Host enforce giới hạn policy và cấu hình task/workflow checks, detected runners cùng human/authenticated evidence ports; template không tạo các authority này. `requiresApproval: true` trong task seed bảo vệ task; không thay thế design
 approval hoặc delivery approval. Các trường SDD/TDD không cho phép bỏ các gate đó.
 
 Mỗi task seed có `metadata.ownedPaths` là literal repository prefixes; điều chỉnh
@@ -58,7 +57,7 @@ do agent thêm để tự review.
 Kiểm tra assets sau build:
 
 ```sh
-node "$BFLOW_HOME/templates/node-typescript/verify.mjs"
+node "$BFLOW_SOURCE/templates/node-typescript/verify.mjs"
 ```
 
 Script parse exported schemas, resolve/validate policy và gọi CLI init thật trên
@@ -67,5 +66,5 @@ canonical `.bflow/config.yml` cùng YAML comments, template merge cho cả bốn
 moved config/YAML rejection và guard không sửa
 repo đã có state. Các probe policy sai, duplicate role và identity override xác nhận
 config/backup không bị thay đổi khi input bị từ chối.
-Nó cũng xác nhận `init --force` **ghi đè** theo code thực tế, khác help hiện tại.
+Nó cũng xác nhận `init --force` **ghi đè** theo code/help hiện tại.
 Nó không chạy agent, tự phê duyệt, tạo PR/push/merge hoặc triển khai host P19.

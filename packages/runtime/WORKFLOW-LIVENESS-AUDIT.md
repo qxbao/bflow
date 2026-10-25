@@ -1,5 +1,7 @@
 # Workflow liveness incident audit
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Audit performed read-only against source at `4ae219f2475b461721775276de6bacf8e0342c90` and the local session receipts for run `run-2228e9e91ff4a0c58e0dbf3491300480682b14aaac9993f66cb7e61ff04cac6f`. All timestamps below are UTC; add seven hours for the session's Bangkok local time.
 
 ## Durable incident trace

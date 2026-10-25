@@ -1,17 +1,15 @@
-# Hướng dẫn khởi đầu nhanh (Getting Started)
+# Chạy phiên Bflow đầu tiên
 
-Bflow cho phép khởi tạo cấu hình độc lập cho từng checkout Git và quản trị các pane Herdr theo từng repository riêng biệt. Quy trình SDLC v2 đã cung cấp đầy đủ API tích hợp ở giai đoạn P19; tuy nhiên phiên bản CLI hiện tại chưa tự động hóa việc khởi động đồng thời host/provider, đăng ký công cụ cho Coordinator hoặc tự động xác thực toàn bộ bằng chứng/phê duyệt. Do đó, chuỗi lệnh `init → up → attach` chủ yếu đóng vai trò kiểm tra tính sẵn sàng của môi trường, thay vì một chu trình bàn giao tính năng AI hoàn chỉnh tự động. Xem thêm tại [Tổng quan kiến trúc](architecture-overview.md).
+Sau [setup một lần](installation.md), dùng lệnh tắt `bflow` cho mọi thao tác bên dưới. Hướng dẫn này tạo một Git repository Node/TypeScript độc lập; nó không tuyên bố đã nghiệm thu một workflow provider thật trên máy của bạn.
 
----
+## 1. Chuẩn bị repository mẫu
 
-## 1. Chuẩn bị môi trường thử nghiệm
-
-Sau khi hoàn tất bước [Cài đặt (Installation)](installation.md), hãy thiết lập biến môi trường `BFLOW_HOME` trỏ tới đường dẫn tuyệt đối của thư mục mã nguồn Bflow đã biên dịch, sau đó tạo một repository TypeScript độc lập để thử nghiệm:
+Chọn thư mục `/tmp/my-bflow-calculator` chưa tồn tại và đặt `BFLOW_SOURCE` tới source checkout đã build:
 
 ```bash
-export BFLOW_HOME=/absolute/path/to/bflow
+export BFLOW_SOURCE=/absolute/path/to/bflow
 mkdir /tmp/my-bflow-calculator
-git -C "$BFLOW_HOME" archive HEAD:examples/portable-node | tar -x -C /tmp/my-bflow-calculator
+git -C "$BFLOW_SOURCE" archive HEAD:examples/portable-node | tar -x -C /tmp/my-bflow-calculator
 cd /tmp/my-bflow-calculator
 git init
 pnpm install --frozen-lockfile
@@ -19,41 +17,69 @@ pnpm typecheck
 pnpm test
 git add .gitignore README.md package.json pnpm-lock.yaml tsconfig.json src test requests
 git commit -m "chore: initialize calculator example"
-node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name calculator
-node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
-git add .bflow/.gitignore .bflow/config.yml
-git commit -m "chore: add bflow config"
-node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
-node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
+
+bflow init --name calculator --provider codex
+node "$BFLOW_SOURCE/templates/node-typescript/apply.mjs" . bugfix
 ```
 
-> [!NOTE]
-> - Hãy chọn một thư mục đích hoàn toàn mới chưa tồn tại trước đó.
-> - Git yêu cầu phải có thông tin danh tính người dùng (`user.name` và `user.email`) được cấu hình để thực hiện lệnh commit.
-> - Commit `.bflow/.gitignore` và `.bflow/config.yml` trước `bflow up`: Runtime chỉ cấp worktree cho Developer khi working tree sạch, nên hai tệp chưa commit này sẽ chặn bước triển khai.
-> - Lệnh `git archive` chỉ trích xuất các tệp mẫu đã được commit, hoàn toàn không sao chép các thư mục tạm như `node_modules/`, `dist/` hoặc `.bflow` cục bộ từ mã nguồn gốc.
-> - Lệnh `doctor` có thể trả về mã lỗi `exit 1` nếu môi trường của bạn chưa cài đặt Herdr, chưa có CLI của agent hoặc còn thiếu cấu hình; vui lòng kiểm tra kỹ chi tiết từng hạng mục kiểm tra trong kết quả trả về.
+Git cần `user.name`/`user.email` để commit. `git archive` chỉ lấy nội dung đã commit, không lấy state, artifact hoặc `node_modules` của Bflow. `BFLOW_SOURCE` là biến ví dụ; `BFLOW_HOME` có ý nghĩa isolation riêng và không dùng làm đường dẫn source.
 
----
+## 2. Chuẩn bị provider và kiểm tra môi trường
 
-## 2. Khởi động môi trường và kết nối phiên
-
-Khi hệ thống đã cài đặt Herdr, có CLI agent tương ứng, đã hoàn tất đăng nhập và đảm bảo tính tương thích với wire contract, bạn có thể khởi chạy và gắn kết phiên làm việc:
+Đăng nhập CLI của provider bạn chọn. Dùng `--provider claude` ở bước init nếu muốn dùng Claude; mặc định init là Codex. Với profile đã tạo qua `bflow iso`, chọn `profile-name` trong config. Không đặt toàn bộ role sang Agy vì Conversation cần trusted human-input hook mà Agy chưa cung cấp.
 
 ```bash
-node "$BFLOW_HOME/apps/cli/dist/bin.js" up --timeout 60000
-node "$BFLOW_HOME/apps/cli/dist/bin.js" attach
+bflow setup --dir .
+bflow doctor
+bflow tool status
 ```
 
-- **Yêu cầu tương tác**: Lệnh `attach` đòi hỏi môi trường terminal tương tác trực tiếp (TTY).
-- **Lựa chọn nhà cung cấp**: Khuyến nghị dùng `init --provider claude` đối với persistent host mặc định đã được kiểm chứng; nếu không chỉ định cờ `--provider`, hệ thống sẽ sử dụng cấu hình mặc định kế thừa của Codex.
-- **Quản lý mô hình**: Herdr trực tiếp quản lý provider và model được giao; cấu hình role của Bflow CLI không quy định cứng model tại tầng CLI.
-- **An toàn hạ dịch vụ**: Vui lòng tham khảo kỹ các tài liệu hướng dẫn về [bflow up](bflow-up.md), [bflow attach](bflow-attach.md) và [bflow down](bflow-down.md), đặc biệt là các rào chắn kiểm soát khi shutdown trước khi triển khai môi trường dài hạn.
+`doctor` kiểm tra role/profile/model trong config mà không model ping mặc định. Standalone `agent check` có thể tiêu hao usage và không thay kiểm tra profile của host. `mcp status` hiện chỉ có inventory mặc định; live Gateway port chưa được nối vào đường CLI đó.
 
----
+Setup lại ở đây chuẩn bị index và backend gắn repo; công cụ machine đã thỏa được tái sử dụng. Thiếu thành phần bắt buộc làm doctor/preflight fail. Công cụ tích hợp optional có thể degraded; xem reason và không suy installed là usable.
 
-## 3. Lựa chọn kịch bản mẫu
+Xem lại `.bflow/config.yml`, rồi commit cấu hình trước khi triển khai:
 
-Bạn có thể thử nghiệm với một trong các bài tập có sẵn trong thư mục `requests/`: tính năng mới (`feature`), sửa lỗi (`bugfix`), tái cấu trúc mã (`refactor`) hoặc tài liệu (`docs`). Các tệp cấu hình JSON trong [thư mục mẫu templates](../../templates/node-typescript/README.md) đóng vai trò là bản thảo sơ bộ (draft/seed) cho host P19. Host có nhiệm vụ liên kết với phiên chạy thực tế, bảo lưu tiêu chí tiếp nhận ban đầu, đánh giá phạm vi tác động thực tế, thiết lập các lệnh kiểm tra độc lập và tiếp nhận phê duyệt từ con người trước khi cho phép Developer bắt đầu lập trình.
+```bash
+git add .bflow/.gitignore .bflow/config.yml
+git commit -m "chore: add bflow config"
+git status --short
+```
 
-Hiện tại hệ thống không cung cấp lệnh chạy tắt dạng `bflow run --kind bugfix` hay cơ chế tự động nạp thư mục template. Quy trình có thể chạy ngay lập tức là các bước cài đặt, kiểm tra kiểu tĩnh, biên dịch mã, chạy bộ kiểm thử và kiểm tra tính hợp lệ của cấu hình init. Vui lòng tham khảo [Báo cáo xác thực](../../templates/node-typescript/VALIDATION.md) để phân biệt rõ ràng giữa các bài kiểm tra này, bài kiểm tra smoke Herdr transport thực tế và các bước tích hợp AI đang được phát triển.
+Runtime yêu cầu working tree sạch trước khi tạo worktree cho Developer. Không sao chép config có identity từ checkout khác. Repository lớn hoặc dự án lồng cần kiểm tra [runner detection](../verification-runners.md); `.bflow/verification.json` là owner override tùy chọn.
+
+## 3. Khởi động và gửi yêu cầu
+
+```bash
+bflow up --timeout 300000
+bflow attach
+```
+
+`up` chuẩn bị persistent Runtime host, kiểm tra platform, launch từng role qua Herdr và đợi attestation/activated health. Config mới mặc định 300.000 ms, nhưng fragment template vừa áp dụng đặt 60.000 ms; lệnh trên ghi đè thành 300.000 ms cho phiên đầu. `--timeout` bao gồm toàn bộ startup budget. `attach` cần TTY và đưa bạn vào Conversation Agent.
+
+Dùng nội dung trong `requests/bugfix.md`, `feature.md`, `refactor.md` hoặc `docs.md` làm yêu cầu. Ví dụ:
+
+> Hãy sửa lỗi tràn số nguyên an toàn của `sum` theo `requests/bugfix.md`. Giữ API hiện tại, xác định tiêu chí nghiệm thu và bổ sung kiểm thử trước khi sửa nếu TDD bắt buộc.
+
+Conversation nhận yêu cầu, Coordinator khảo sát và đề xuất đặc tả/kế hoạch qua Runtime. Các seed trong template không phải đặc tả đã duyệt: host vẫn liên kết run, đóng băng tiêu chí, giải quyết TDD, yêu cầu approval và kiểm chứng độc lập. Khi Conversation trình quyết định, trả lời đúng lựa chọn và phạm vi. Không có shortcut `bflow run --kind bugfix` cho luồng P19.
+
+## 4. Theo dõi, xử lý blocker và kết thúc
+
+Trong terminal khác:
+
+```bash
+bflow status --json
+bflow doctor --json
+```
+
+Conversation báo tiến độ, blocker và bước tiếp theo. Nếu cần sửa yêu cầu, gửi revision qua cùng cuộc hội thoại. Chỉ dùng `tiếp tục`/`resume <run-id>` khi pending action cho phép; resume không thay thế approval đang chờ. Legacy `bflow resume <run-id>` dùng store khác, không dùng để phục hồi run P19.
+
+Khi kết thúc:
+
+```bash
+bflow down
+# Nếu đã quyết định dừng dù còn run active:
+bflow down --yes
+```
+
+`--yes` xác nhận dừng có checkpoint; shutdown barrier vẫn phải đạt. Giữ nguyên receipt và worktree khi delivery chưa rõ. Xem [recovery](session-recovery.md), [troubleshooting](troubleshooting.md) và [trạng thái nghiệm thu](../implementation-status.md).

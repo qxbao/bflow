@@ -37,7 +37,7 @@ Các chỉ số này thuộc về các cơ chế kiểm soát hoàn toàn riêng
 | **Chu trình xác minh (Verification Cycle)** | `propose_workflow.maxIterations` (P19) | Giới hạn số vòng lặp xác minh của P17 (mặc định: 3, cho phép từ 1–10) |
 | **Thời gian chờ vòng đời (Lifecycle Timeout)** | `environment.*TimeoutMs` / `--timeout` | Hạn mức thời gian chờ tối đa cho các thao tác khởi động hoặc dừng môi trường |
 
-Mặc dù tầng P12 có thể kiểm tra giá trị `environment.verification.maxIterations` lên tới 100, giá trị này chưa được tự động chuyển trực tiếp sang P19; host bắt buộc phải cấu hình tường minh giới hạn từ 1–10. P19 sẽ tăng ngân sách sửa chữa thêm `maxIterations - 1` và áp dụng siêu dữ liệu cổng kiểm tra `boundedVerificationRetry` cho các bài kiểm tra độc lập bắt buộc trước khi hoàn tất. Các ngân sách thử lại và sửa lỗi đều có giới hạn hữu hạn; tuyệt đối không nhân gộp các ngân sách để tạo ra số lần thử vô hạn.
+CLI đã chuyển `environment.verification.maxIterations` sang persistent host. Config schema nhận tới 100 nhưng host/VerificationEngine chỉ nhận 1–10, mặc định 3; giá trị ngoài giao miền này bị từ chối, không tự clamp hoặc bỏ qua. P19 sẽ tăng ngân sách sửa chữa thêm `maxIterations - 1` và áp dụng siêu dữ liệu cổng kiểm tra `boundedVerificationRetry` cho các bài kiểm tra độc lập bắt buộc trước khi hoàn tất. Các ngân sách thử lại và sửa lỗi đều có giới hạn hữu hạn; tuyệt đối không nhân gộp các ngân sách để tạo ra số lần thử vô hạn.
 
 ---
 

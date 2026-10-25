@@ -17,6 +17,8 @@ Mọi cổng kiểm soát độc lập và danh tính người phê duyệt bắ
 
 ---
 
+`environment.permissions.trustedWorkspace: true` là default config mới. Với required Claude, `up` có thể ghi `projects[<canonical-root>].hasTrustDialogAccepted` vào file Claude của môi trường gọi CLI (`$CLAUDE_CONFIG_DIR/.claude.json`, mặc định `~/.claude.json`). Chỉ key trust của project được cập nhật; không phải cơ chế chỉ ghi launch-local settings và không cấp quyền bỏ hook/MCP/SDD/TDD/approval. `false` làm startup bị chặn. [Config reference](configuration-reference.md#policy-và-ngân-sách).
+
 ## 2. Các điểm chốt chặn kiểm soát (Governance Checkpoints)
 
 | Điểm chốt chặn | Thành phần thực thi có thẩm quyền |
@@ -66,6 +68,14 @@ Lệnh `setup --yes` thông thường sẽ không tự động duyệt hook. Ch�
 Bản ghi phê duyệt được lưu trữ an toàn trong vùng trạng thái riêng của Bflow tại `${XDG_STATE_HOME:-$HOME/.local/state}/bflow/codex-hook-approvals.json` với quyền tệp `0600` và thư mục cha được bảo mật tuyệt đối. 
 
 ---
+
+### Chính sách tin cậy mọi hook
+
+Operator có thể chọn tường minh `bflow setup --codex-hooks --apply --trust-all --yes`,
+hoặc thu hồi bằng `--revoke-trust-all`. Chính sách này tin mọi hook hiện tại/tương lai của
+đúng Codex home, kể cả source không inventory được; không phải snapshot review. Nó không
+sửa hook/plugin, không cài provider, không cấp quyền bỏ Runtime gates hoặc chứng minh OS isolation.
+`--check`/`--plan` báo approval mode; setup thông thường không bật chính sách này.
 
 ## 5. Ranh giới thực thi và hạn chế an toàn
 

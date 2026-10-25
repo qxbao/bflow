@@ -1,5 +1,7 @@
 # Review of the macOS portability delivery
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Reviewed baseline: `26974d2f4ed75a60a0c41ea683fe44eefa78875b` plus the original 49-file
 delivery, patch SHA-256 `0637c83145143ac4bfc3f01efd4b5fa5afd32a183aaa10b67e94aa4fb79714f6`.
 All delivered source hashes were checked before review. Work remains in the isolated

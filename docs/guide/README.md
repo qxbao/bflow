@@ -1,6 +1,6 @@
 # Hướng dẫn sử dụng Bflow
 
-Tài liệu này cung cấp hướng dẫn toàn diện cho việc thiết lập và vận hành Bflow trên một repository mới, dựa trên mã nguồn thực tế hiện tại. Lưu ý rằng tầng quản lý vòng đời CLI và máy chủ P19 host là hai luồng vận hành độc lập; các tính năng chưa được tự động tích hợp đều được chú thích rõ là **dự kiến / chưa triển khai**. Hệ thống hợp đồng giao tiếp công khai (Public Contracts) và các bản ghi quyết định kiến trúc (ADR) luôn là nguồn tham chiếu chuẩn mực cao nhất.
+Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin.js setup` một lần, nạp lại shell rồi dùng lệnh tắt `bflow`. CLI lifecycle đã ghép persistent P19 host/platform; legacy workflow commands dùng Runtime store riêng. [Trạng thái source và bằng chứng](../implementation-status.md), [mục lục toàn bộ tài liệu](../README.md) và exported contracts là các điểm tham chiếu khi đối chiếu hành vi.
 
 | Chủ đề | Nội dung tóm tắt |
 | --- | --- |
@@ -35,8 +35,8 @@ Tài liệu này cung cấp hướng dẫn toàn diện cho việc thiết lập
 | Quản lý vòng đời (Up / Attach / Status / Doctor) qua P12 + P13 | Đã triển khai; môi trường nhà cung cấp (provider) và agent cần được cài đặt, đăng nhập độc lập |
 | Hạ dịch vụ (`bflow down`) của CLI adapter mặc định | Đã tích hợp cơ chế rút cạn/điểm kiểm tra của host cùng quy trình tắt P13; vượt qua kiểm thử smoke; `--yes` không bỏ qua barrier an toàn |
 | Tổ hợp quy trình SDLC (P14–P19) | Đã cung cấp API `openAgenticWorkspace`; đòi hỏi host tin cậy và cơ chế đăng ký/xác thực công cụ của provider |
-| Thực thi chính sách SDD / Conditional TDD / Verification | Chính sách môi trường được chuyển tiếp tới host; hỗ trợ rà soát thủ công và runner kiểm thử Node TAP/Vitest trên Linux |
-| CLI tự động khởi động và tắt host P19 | Đã triển khai với các native Claude hook và dịch vụ MCP; vượt qua kiểm thử chu trình up/down/restart |
+| Thực thi chính sách SDD / Conditional TDD / Verification | Policy được chuyển tới host; tự phát hiện runner theo [ma trận](../verification-runners.md), JS/TS có Linux Bubblewrap và macOS Seatbelt |
+| CLI tự động khởi động và tắt host P19 | Đã triển khai provider-aware prepare/activate và native hooks/MCP; probe/lifecycle reports có phạm vi riêng |
 | Tầng truyền tải thông điệp Herdr có chữ ký số | Đã kiểm chứng thực tế; việc truyền tải thông điệp không thay thế cho bằng chứng nghiệm thu kết quả của AI |
 | Nghiệm thu Agentic SDLC đầu-cuối với mô hình trực tiếp | **Chưa kiểm chứng đầy đủ trong đợt phát hành này** |
 | Tự động tích hợp, merge và triển khai nhánh được bảo vệ | Runtime hiện tại không cấp quyền thực thi tự động các thao tác đẩy nhánh/triển khai lên remote |

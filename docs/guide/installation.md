@@ -1,23 +1,18 @@
-# Hướng dẫn cài đặt (Installation)
+# Cài đặt Bflow
 
-Nền tảng kiểm chứng chính thức của Bflow là môi trường Linux với Git và hệ thống tệp tin cục bộ. Hệ thống yêu cầu phiên bản **Node.js `>= 22.13`** (nhằm hỗ trợ mô-đun SQLite tích hợp sẵn `node:sqlite` mà không cần cờ thử nghiệm) và công cụ **pnpm** khớp chính xác với khai báo `packageManager` trong `package.json` (hiện tại là `12.5.1`). Lưu ý rằng khai báo `engines >= 22` ở cấp root rộng hơn so với yêu cầu phiên bản SQLite thực tế. Các kịch bản chạy native trên Windows, hệ thống tệp tin mạng (NFS/SMB), phân tán đa máy chủ hoặc khôi phục sau sự cố mất điện đột ngột (power-loss recovery) hiện chưa được kiểm chứng đầy đủ.
+Bflow hiện được build từ source; các package còn `private`. Cần **Node.js ≥22.13** cho `node:sqlite` và **pnpm 12.5.1**, đúng `packageManager` trong [package.json](../../package.json).
 
-Đường chạy Node/TypeScript trên macOS có backend workspace file dùng `openat` và backend
-verification dùng Seatbelt. Cần Apple Command Line Tools (`xcode-select --install`) để Runtime
-biên dịch helper từ source đi kèm, `/usr/bin/sandbox-exec`, và `flock` có hỗ trợ inherited file
-descriptor (ví dụ bản Homebrew). Profile synchronization cần Python 3.11+ có `tomllib` trong PATH
-hoặc `AI_ISOLATOR_PY`; Python do Apple cài sẵn có thể cũ hơn yêu cầu. Cài dependency của project
-trước khi chạy trên macOS: warming có network isolation và native polyglot mounts vẫn chỉ hỗ
-trợ Linux. Các mức bằng chứng source/local/live được phân biệt trong
-[báo cáo macOS](../acceptance/2026-10-24-macos-portability.md).
+## Chuẩn bị máy
 
-Hiện tại Bflow và gói `@bflow/cli` được cấu hình ở chế độ riêng tư (`private`); tài liệu này hướng dẫn thao tác trực tiếp trên mã nguồn được clone về, không giả định việc cài đặt toàn cục qua `npm install -g bflow`.
+| Môi trường | Điều kiện |
+| --- | --- |
+| Linux | Git, filesystem cục bộ, `systemd --user`, `flock` của util-linux; `/usr/bin/bwrap` và user namespaces cho verification |
+| macOS | Git, `launchd`, Apple Command Line Tools (`xcode-select --install`), `/usr/bin/sandbox-exec`, `flock` có hỗ trợ inherited file descriptor; Python ≥3.11 có `tomllib` cho profile sync |
+| Windows native | Machine mutation vẫn `designed_unverified` và bị chặn; không coi Git Bash là nghiệm thu Windows |
 
----
+Dùng filesystem có quyền POSIX cho machine state/secret. Runtime có cơ chế chọn private state ngoài repository khi checkout không áp dụng được quyền riêng tư; xem [configuration reference](configuration-reference.md). Source/worktree, sandbox và dependency vẫn phải thỏa điều kiện riêng. Không có cam kết network filesystem, multi-host hoặc hostile same-UID isolation. [Ma trận hỗ trợ](../compatibility-matrix.md) phân biệt source, local test và phép đo thật.
 
-## 1. Biên dịch và kiểm tra mã nguồn
-
-Thực hiện sao chép mã nguồn và biên dịch toàn bộ workspace:
+## Build và bootstrap một lần
 
 ```bash
 git clone https://github.com/qxbao/bflow.git
@@ -26,34 +21,48 @@ node --version
 pnpm --version
 pnpm install --frozen-lockfile
 pnpm build
-node apps/cli/dist/bin.js --help
-node templates/node-typescript/verify.mjs
+node apps/cli/dist/bin.js setup
 ```
 
-Mọi câu lệnh mẫu bắt đầu bằng `bflow ...` trong các tài liệu hướng dẫn đều có thể thực thi tương đương thông qua:
-```bash
-node "$BFLOW_HOME/apps/cli/dist/bin.js" ...
-```
-Trong đó, `BFLOW_HOME` là biến môi trường lưu đường dẫn tuyệt đối tới thư mục mã nguồn Bflow đã được biên dịch thành công. Bạn cũng có thể liên kết tệp thực thi vào hệ thống bằng lệnh `pnpm --filter @bflow/cli link --global` nếu môi trường pnpm của bạn đã cấu hình sẵn đường dẫn biến môi trường toàn cục (global bin path). Tuy nhiên, cách gọi trực tiếp qua Node.js luôn đảm bảo tính ổn định và không đòi hỏi bước liên kết này.
-
----
-
-## 2. Cài đặt và xác thực Herdr CLI
-
-Herdr là một thành phần phụ thuộc độc lập bên ngoài, không nằm trong các gói cài đặt tự động của Bflow. Bạn cần cài đặt Herdr theo tài liệu chính thức tại [Herdr](https://herdr.dev), sau đó xác minh sự hiện diện của tệp thực thi trên máy:
+`setup` hiển thị machine plan và hỏi trước khi áp dụng trong TTY. Nó tạo launcher **`bflow`** và managed PATH trong cấu hình shell; mở terminal mới hoặc reload đúng file mà setup thông báo:
 
 ```bash
-herdr --version
-herdr --help
+# Ví dụ với zsh, nếu setup thông báo ~/.zshrc:
+source ~/.zshrc
+bflow --help
+bflow setup --check
 ```
 
-Các lệnh trên đã được kiểm chứng trực tiếp trên bản phát hành Herdr `0.9.5`. Cần lưu ý rằng nhãn phiên bản chỉ mang tính chất tham chiếu và chẩn đoán; Bflow kiểm tra trực tiếp tính tương thích của giao thức (Protocol `22` / Schema `1`) và phản hồi thực tế của từng thao tác (operation), chứ không giới hạn theo một danh sách phiên bản phát hành cố định.
+Từ đó dùng alias/lệnh tắt **`bflow …`** ở repository bất kỳ. Về kỹ thuật đây là executable wrapper do setup quản lý, không cần khai báo shell alias thủ công hoặc `pnpm link --global`. Launcher trỏ đến Node và `apps/cli/dist/bin.js` đã setup: giữ checkout tại vị trí đó, rebuild sau cập nhật source, chạy lại setup khi cần cập nhật launcher/tool/Gateway.
 
-Đối với CLI của các agent (như Claude Code, Codex hay Agy), hãy cài đặt và hoàn tất đăng nhập theo quy trình chuẩn của từng nhà cung cấp. Tuyệt đối không lưu trữ khóa API (API key), thông tin xác thực hoặc bí mật vào các tệp cấu hình JSON, prompt mẫu hoặc các lệnh được commit vào repository.
+Không tương tác: xem trước bằng `node apps/cli/dist/bin.js setup --dry-run`, rồi dùng `setup --yes` khi đã chấp thuận plan. `--check`/`--dry-run` chỉ đọc; `--yes` không thực hiện đăng nhập provider hoặc phê duyệt Codex global hooks. [Setup guide](../setup-guide.md) giải thích từng bước.
 
----
+## Provider, Herdr và repository
 
-## 3. Lưu ý khi phát triển
+Setup dùng [catalog đã review](../../packages/tool-installer/src) để chuẩn bị công cụ trên nền tảng được hỗ trợ. Cài binary chưa chứng minh auth/readiness: đăng nhập provider theo tài khoản của bạn, rồi kiểm tra trong repository đích:
 
-- Luôn chạy lệnh `pnpm build` trước khi thực thi các ví dụ mẫu hoặc chạy các bài kiểm thử có mục tiêu (targeted test), bởi các bài kiểm thử này sẽ nạp trực tiếp mã nguồn đã biên dịch từ thư mục `dist/`.
-- Tài liệu [Khởi đầu nhanh (Getting Started)](getting-started.md) hướng dẫn thiết lập trên một repository độc lập bên ngoài monorepo để kiểm chứng tính năng. Tuyệt đối không sao chép thư mục `node_modules` của Bflow sang repository mục tiêu đó.
+```bash
+cd /path/to/your-project
+bflow init --provider codex
+bflow setup --dir .
+bflow doctor
+```
+
+Standalone `bflow agent check codex` là diagnostic riêng: adapter có thể chạy model probe và dùng account mặc định, không chọn role/profile/model từ `.bflow/config.yml`. `doctor`/`up` là đường kiểm tra cấu hình host thực tế.
+
+`--dir` chuẩn bị index/backend cục bộ cho repository; installation vẫn thuộc machine. Context7 hosted dùng chung giữa worktrees, GitNexus/Chrome/local backend vẫn cần đúng workspace đã setup. Herdr phải đáp ứng protocol 22/schema 1 và hành vi thực tế; release label chỉ phục vụ chẩn đoán.
+
+Với Agy specialist, cấu hình Conversation bằng Claude/Codex; Agy Conversation và unattended hiện unsupported. Profile riêng phải được tạo/đăng nhập trước qua `bflow iso`, rồi chọn `profile-name` trong config. [Cấu hình](configuration-reference.md) · [Provider adapters](../../packages/agent-providers/README.md).
+
+## Biến môi trường và cập nhật source
+
+Nếu cần chạy script trong source checkout từ dự án khác, tự đặt biến đường dẫn **`BFLOW_SOURCE`**:
+
+```bash
+export BFLOW_SOURCE=/absolute/path/to/bflow
+node "$BFLOW_SOURCE/templates/node-typescript/verify.mjs"
+```
+
+`BFLOW_SOURCE` chỉ là biến tiện dụng trong ví dụ. **Không dùng `BFLOW_HOME` để trỏ source**: đó là selector riêng của Bflow cho machine state và provider source cô lập, làm thay đổi môi trường auth/config. Nếu chủ động dùng isolation, giữ cùng `BFLOW_HOME`/`AI_ISOLATOR_HOME` trong setup, iso và up; xem [CLI README](../../apps/cli/README.md).
+
+Build trước khi chạy demo hoặc test subprocess vì chúng import `dist/`. Cài dependency của chính target repo; không copy `node_modules` của Bflow sang đó. Trên macOS, dependency warming và native polyglot mounts vẫn Linux-only; chuẩn bị dependency trước verification. Tiếp tục với [getting started](getting-started.md).

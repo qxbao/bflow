@@ -3,8 +3,10 @@
 `RuntimeServiceImpl`, dispatcher, MVP orchestrator và workspace factory hiện có vẫn khả dụng.
 P19 bổ sung `AgenticWorkflowRuntime`, `CoordinatorTools`,
 `createAgenticConversationHost` và `openAgenticWorkspace` cho luồng SDLC v2.
-Đây là các API composition cho host. `bflow up` vẫn quản lý môi trường P12/P13;
-nó không tự động cài đặt tool plugin của model-provider hay khởi động daemon P19.
+`bflow up` đã khởi động persistent P19 host và tích hợp platform P30 cùng môi trường P12/P13;
+setup/install là bước riêng. Bootstrap một lần qua `node apps/cli/dist/bin.js setup`, sau đó dùng
+launcher `bflow`. Xem [trạng thái hiện tại](../../docs/implementation-status.md),
+[tool policy](../../docs/tools-sdlc-integration.md) và [runner matrix](../../docs/verification-runners.md).
 
 ## Composition và thực thi
 
@@ -302,7 +304,7 @@ lần nhắc inbox `[bflow]` do host gõ. Inbox được kiểm tra mỗi 2 s (`
 500 ms–30 s): nó hiển thị một thông báo Herdr và chỉ gửi lần nhắc khi Conversation
 agent đang idle và ô nhập Claude của nó được xác minh là trống. Ô nhập được đọc dưới dạng ANSI để gợi ý
 prompt kế tiếp mờ (SGR 2) của Claude được tính là trống trong khi bản nháp đã gõ thì không. Một
-notice chưa hiển thị được nhắc lại sau 5/10/20/60 s; các provider khác và layout không nhận ra sẽ fail closed. Notice chỉ là bằng chứng
+notice chưa hiển thị được nhắc lại sau 5/10/20/60 s; layout/provider không được nhận diện sẽ fail closed. Đường hiện tại hỗ trợ nhận diện Conversation Claude/Codex (xem phần workflow liveness bên dưới). Notice chỉ là bằng chứng
 về việc giao nhận, không bao giờ là task thành công, và lần nhắc không bao giờ tạo lượt người dùng hay phê duyệt. Việc phát hiện
 ô nhập trống, thông báo và tiếp tục Stop-hook chưa được xác minh live.
 
@@ -600,7 +602,7 @@ các integration test riêng. Các tích hợp agent chính thức phải cung c
 định danh native session thực tế của chúng cho receipt attestation. Việc chúng pass không thiết lập được việc triển khai
 do AI sinh ra live, review model độc lập hay một delivery SDLC đầy đủ.
 Host cục bộ mặc định được expose qua `ensureAgenticHost`. Nó khởi động một
-process tách rời trước khi launch provider và chuẩn bị cài đặt MCP theo role và Claude hook.
+process tách rời trước khi launch provider và chuẩn bị MCP/native hook theo từng provider.
 Kích hoạt yêu cầu manifest `up` đầy đủ và các receipt SessionStart gốc khớp,
 bao gồm session locator `herdr:claude` thực tế của Herdr.
 Các pane provider trần legacy phải được dừng/tạo lại; chỉ tên process
@@ -935,8 +937,8 @@ Host cấu hình cũ không có `toolPolicy` tiếp tục chạy runner gốc m�
 generation. Một lần `check_work` mới sau invocation RTK đã kết thúc có invocation ID riêng; invocation
 đang `started`/`unknown` vẫn chặn lần chạy tiếp theo cho tới khi được đối soát.
 
-Giới hạn: Runtime chưa có lifecycle acquire/renew/release cho Gateway resource lease. Các action có
-trigger `browser_inspection` vì vậy được báo `degraded` hoặc `blocked` với
+Runtime đã có acquire/renew/release Gateway resource lease cho GitNexus theo registration/generation.
+Đường browser task lease chưa được nối: action có trigger `browser_inspection` vẫn `degraded` hoặc `blocked` với
 `exclusive_resource_lease_unsupported`; chúng không được quảng bá là usable khi Gateway có thể từ chối
 vì thiếu lease. Tool MCP và RTK local ở trên chưa chứng minh live provider delivery hoặc full SDLC
 acceptance.

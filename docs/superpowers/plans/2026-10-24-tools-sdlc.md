@@ -1,5 +1,7 @@
 # Tools SDLC Implementation Plan
 
+> **Cách đọc:** quyết định/spec và audit gốc bên dưới giữ phạm vi lịch sử. [Implementation status](../../implementation-status.md) mô tả source tích hợp hiện tại, gồm các thay đổi sau baseline; không suy một plan hoặc acceptance criterion là kết quả đã nghiệm thu.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: bflow-superpowers:subagent-driven-development. Root coordinates and accepts; Luna implements. Each task has its own worktree and commit.
 
 **Goal:** Approved installed tools become scoped, observable actions in actual SDLC runs.

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="340" viewBox="0 0 1280 340" role="img" aria-labelledby="title desc">
+  <title id="title">Bflow</title>
+  <desc id="desc">Từ yêu cầu đến thay đổi có kiểm chứng. Spec, build, verify, deliver.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0b1224"/><stop offset="1" stop-color="#172b46"/></linearGradient>
+    <linearGradient id="accent"><stop stop-color="#60e4cf"/><stop offset="1" stop-color="#67b9ff"/></linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#fff" stroke-opacity=".035"/></pattern>
+  </defs>
+  <rect width="1280" height="340" rx="20" fill="url(#bg)"/>
+  <rect width="1280" height="340" rx="20" fill="url(#grid)"/>
+  <g fill="none" stroke="url(#accent)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M80 91v83h29a22 22 0 0 0 0-44H81m0-1h25a19 19 0 0 0 0-38H81"/>
+    <path d="M143 133h31m-10-10 10 10-10 10"/>
+  </g>
+  <text x="204" y="160" fill="#f5f8ff" font-family="system-ui, -apple-system, sans-serif" font-size="80" font-weight="750" letter-spacing="-4">bflow</text>
+  <text x="80" y="218" fill="#b8c9dd" font-family="system-ui, -apple-system, sans-serif" font-size="25">Từ yêu cầu đến thay đổi có kiểm chứng.</text>
+  <g font-family="system-ui, -apple-system, sans-serif" font-size="17" text-anchor="middle">
+    <path d="M756 170h48m108 0h48m108 0h48" fill="none" stroke="#5d809b" stroke-width="2"/>
+    <g fill="#142b3f" stroke="#60e4cf" stroke-width="1.5">
+      <rect x="648" y="141" width="108" height="58" rx="14"/><rect x="804" y="141" width="108" height="58" rx="14"/>
+      <rect x="960" y="141" width="108" height="58" rx="14"/><rect x="1116" y="141" width="108" height="58" rx="14"/>
+    </g>
+    <g fill="#ddf8f5"><text x="702" y="176">Spec</text><text x="858" y="176">Build</text><text x="1014" y="176">Verify</text><text x="1170" y="176">Deliver</text></g>
+  </g>
+  <text x="80" y="285" fill="#60e4cf" font-family="system-ui, -apple-system, sans-serif" font-size="14" letter-spacing="3">AGENTIC SDLC · HUMAN APPROVAL · VERIFIED EVIDENCE</text>
+</svg>

@@ -1,5 +1,7 @@
 # Lifecycle, readiness, layout và prompt startup — 2026-10-16
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Baseline: `8991f22ddd218c81f6ac052e87a1025a033ded9b`.
 Runtime source kiểm thử: `4273bc96f33c65f592efcfda02ada259b49500cd`.
 Full validation HEAD: `c2e47b3c640bf143cc46e54420adba9168cb4376`; khác runtime

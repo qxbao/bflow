@@ -1,5 +1,7 @@
 # Bflow Platform v3 — Báo cáo tương thích Agent Provider & xác minh trực tiếp
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 **Commit baseline đã kiểm thử**: `7133b02` (`main`, sau tích hợp P24–P33)
 **Ngày xác minh**: 2026-10-17
 **Host OS & Kernel**: Linux `x86_64` (filesystem cục bộ POSIX, `systemd --user` đang hoạt động)

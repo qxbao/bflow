@@ -6,7 +6,13 @@ This repository is designed for five implementation agents working in isolated G
 
 Contracts, the deterministic Core workflow engine, Herdr CLI adapter, file-backed Agent Registry, SQLite RunStore, filesystem ArtifactStore, Quality-gates, RuntimeService and CLI (`bflow`) are implemented. Do not replace implemented modules with bootstrap scaffolds or claim live Herdr end-to-end verification without evidence. See [README.md](README.md) for package status and runnable commands, and package READMEs for guarantees and limitations.
 
-Since the P24 baseline, source implementations with package-local tests exist for P25 (`packages/agent-providers`), P26 (`packages/machine-setup`, `packages/tool-installer`), P27 (`packages/mcp-gateway`, `packages/mcp-services`), P28 (`packages/skills`, `skills/**`) and P29 (`apps/cli` high-level and setup/platform commands), plus agent system prompts and behavior policies under `agents/**`. P30 Runtime/Pane Manager/Conversation integration of these platform packages is implemented in source with local tests (`packages/runtime/src/platform/**`, host wiring in `packages/runtime/src/agentic/**`, Gateway control endpoint in `apps/cli`); it has no live provider/Herdr evidence. P31 platform-v3 acceptance (`tests/platform-v3/**`) is not present in source. See the P24 section below for evidence levels.
+Since the P24 baseline, source implementations with package-local tests exist for P25 (`packages/agent-providers`), P26 (`packages/machine-setup`, `packages/tool-installer`), P27 (`packages/mcp-gateway`, `packages/mcp-services`), P28 (`packages/skills`, `skills/**`) and P29 (`apps/cli` high-level and setup/platform commands), plus agent system prompts and behavior policies under `agents/**`. P30 Runtime/Pane Manager/Conversation integration of these platform packages is implemented in source with local tests (`packages/runtime/src/platform/**`, host wiring in `packages/runtime/src/agentic/**`, Gateway control endpoint in `apps/cli`); scoped historical provider/Herdr probes are recorded separately and do not establish full SDLC acceptance. Platform coverage exists in package tests and E2E e11–e16; the dedicated P31 trees (`tests/platform-v3/**`, `tests/acceptance/platform-v3/**`) are absent. See [implementation status](docs/implementation-status.md) for the current source/evidence map.
+
+Current post-P30 source also includes D-TOOLS-01 policy/grant/usage integration, optional integrated-tool defaults and `init --update`, GitNexus resource leases, polyglot runner detection, macOS workspace/Seatbelt backends, bounded repository survey context and actionable Conversation blockers. Do not rebuild these as missing scaffolds. Agy specialist native binding has source/local tests; Agy Conversation and unattended remain unsupported. Browser task leases remain unsupported in Runtime. Keep full live workflow/fault acceptance separate from these source fixes.
+
+The binary high-level parser differs from the legacy `HighLevelCliFacade`: standalone `mcp status` lacks a default live Gateway health port (machine setup/Runtime Gateway integration exists), `skills list`/`skills sync --list` are not accepted, and standalone `agent check` may run model probes without selecting repo-configured profiles/models. Document these command-level limits rather than claiming host readiness from them.
+
+Bootstrap the built CLI once with `node apps/cli/dist/bin.js setup`, reload the managed shell PATH, then use `bflow`. `BFLOW_HOME` selects isolated setup/provider state; use `BFLOW_SOURCE` only as a documentation convenience for a source checkout path.
 
 ## Stable boundary
 
@@ -85,9 +91,10 @@ Herdr transport or full SDLC acceptance):
   revocation on quiesce/shutdown; activation accepts `herdr:<provider>` sessions for any
   adapter-ready provider. Pane Manager launches from validated launch material. Non-Conversation
   roles route user decisions through `request_user_decision` → Runtime → Conversation; native
-  `AskUserQuestion`/elicitation is denied. Not live-verified with real providers or Herdr.
-- P31: NOT implemented. No cross-provider conformance or platform-v3 live acceptance exists;
-  existing acceptance records cover P11–P22 and lifecycle startup only.
+  `AskUserQuestion`/elicitation is denied. Historical live probes have their own recorded scope; they do not certify full workflow acceptance at HEAD.
+- P31: dedicated test trees are NOT implemented. Cross-provider coverage exists in E2E e11–e16
+  and package tests; historical provider/tool/Herdr reports have limited scope. Full platform-v3
+  live workflow/fault acceptance remains open.
 - Agent system prompts and behavior policies (`agents/**`) are implemented and covered by
   behavioral tests; they are not live-provider acceptance evidence.
 
@@ -209,7 +216,7 @@ The module implementations already provide event/checkpoint persistence, compati
 - Read package manifests/scripts before running commands. Build before targeted subprocess/worker tests because they import `dist/`; rebuild after source changes, including during watch-mode development.
 - Update user-facing module status, commands and limitations when an implementation is integrated. Update package READMEs within ownership; propose shared README/AGENTS/architecture/contract edits for review. Avoid permanent test-count or moving-branch-hash claims; report the exact tested commit and actual counts in handoff evidence.
 - Do not equate fake-runner tests with live Herdr verification or advertise unsupported E2E/application commands. Do not upgrade power-loss, network-filesystem, multi-host or hostile same-user safety from NOT VERIFIED without evidence.
-- P02-RA01 (large runner timeout overflow) and P03-RA01 (late final `get()` chunk after deadline/abort) remain open non-blocking P2 follow-ups. Their owners remain Herdr Adapter and ArtifactStore respectively; do not mark them fixed from documentation or transfer them to Runtime. See README for details.
+- P02-RA01 (large runner timeout overflow) and P03-RA01 (late final `get()` chunk after deadline/abort) remain open non-blocking P2 follow-ups. Their owners remain Herdr Adapter and ArtifactStore respectively; do not mark them fixed from documentation or transfer them to Runtime. See [known limitations](docs/known-limitations-v3.md) for details.
 
 ## Required validation before handoff
 

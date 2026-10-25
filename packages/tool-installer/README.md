@@ -1,6 +1,6 @@
 # Tool installer và kiểm kê capability
 
-`@bflow/tool-installer` là bản triển khai leaf P26 của `ToolInstaller`. Package chỉ phụ thuộc vào `@bflow/contracts`. Nó không thay đổi ProviderAdapter, MCP Gateway, provider home hay cấu hình build gốc của repo. P30 phải ghép nó thông qua MachineSetup/Runtime; P27 sở hữu việc thương lượng MCP và các lease.
+`@bflow/tool-installer` là bản triển khai leaf P26 của `ToolInstaller`. Package chỉ phụ thuộc vào `@bflow/contracts`. Nó không thay đổi ProviderAdapter, MCP Gateway, provider home hay cấu hình build gốc của repo. CLI setup đã ghép nó qua MachineSetup; Runtime đọc inventory/receipt mà không cài tool khi `up`. Xem [trạng thái hiện tại](../../docs/implementation-status.md). P27 sở hữu việc thương lượng MCP và các lease.
 
 ## Thiết lập
 

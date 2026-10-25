@@ -1,6 +1,7 @@
 {
   "name": "bflow",
   "version": "0.1.0",
+  "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
   "description": "Autonomous SDLC workflow orchestration platform and CLI (bflow).",

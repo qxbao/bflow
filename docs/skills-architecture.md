@@ -3,17 +3,11 @@
 Thiết kế chuẩn tắc P24; P28 sở hữu `packages/skills/**` và `skills/**`. Contract được export
 từ `packages/contracts/src/skills.ts`. P24 không tạo skill pack hay loader đã cài đặt.
 
-## Implementation status (cập nhật 2026-10-17)
+## Implementation status (2026-10-25)
 
-P28 đã có source: `packages/skills` (list/validate/install/sync/link/verify/update/recover, bundle
-store private bất biến, pin/digest/dependency, role manifest, provider rendering,
-`SkillsSetupSynchronizer`) và `skills/**` (20 shared skill, 12 role skill, ví dụ). P29 CLI có
-`bflow skills list|sync` và validate skill trong `bflow up`/`doctor`; `bflow setup` dùng
-synchronizer. **P30 (source + local test):** Runtime resolve/sync manifest theo role, persist theo session
-generation, recover theo digest và cấp instruction text cho launch. **Chưa làm:** chưa có
-live native skill discovery trên Claude/Codex/Agy. Test là local source/rendering; kỹ năng
-đã load không chứng minh agent tuân thủ hay pass SDD/TDD/verification gates. Câu "P24 creates
-no installed skill pack or loader" dưới đây mô tả baseline P24.
+Canonical catalog ở `skills/**`; P28 resolver/store và P26/P29 setup/skills commands đã được tích hợp với session manifests của P30. CLI dùng approved role bindings và exact pins: absent `role.skills` lấy defaults, `[]` bỏ defaults nhưng không bỏ `requiredSkills`; tool-dependent skill chỉ active khi grant đã resolve. Custom `catalogDir`/`bindingsPath` hiện bị startup composition từ chối.
+
+Provider nhận instruction đã pin và đọc qua host `read_pinned_instructions`; không bật global native discovery chỉ để tìm plugin. D-TOOLS-01 tách catalog tool ID khỏi upstream operation. [Implementation status](implementation-status.md), [catalog](../skills/README.md) và [package README](../packages/skills/README.md) là nguồn hiện tại. Rendering/load không chứng minh agent tuân thủ hoặc full SDLC pass.
 
 ## Giữ nguyên thẩm quyền role và prompt hiện có
 
@@ -76,11 +70,11 @@ nhưng script đi kèm chỉ là nội dung và không thực thi chỉ vì skil
 executable-skill trong tương lai đòi hỏi một quyết định contract riêng và review sandbox/approval.
 Không chỉ dẫn nào được gọi CLI thô để né Runtime.
 
-## Binding role đề xuất
+## Binding role và catalog hiện tại
 
-Đây là các khuyến nghị capability cho các pack tương lai, không phải mặc định đã cài hay thay
-đổi đối với enum AgentRole hiện có. "Analyst" ánh xạ sang `specifier` hiện có; Chat ánh xạ sang
-`conversation`. Bind Reviewer và QA độc lập với implementer, giữ nguyên các gate.
+Bảng dưới mô tả trách nhiệm capability; lựa chọn skill thực tế nằm trong
+[`skills/roles/bindings.json`](../skills/roles/bindings.json), sau đó phải resolve thành pin/manifest.
+"Analyst" ánh xạ `specifier`, Chat ánh xạ `conversation`; Reviewer/QA độc lập với implementer.
 
 | Role | Skill cần resolve | Ranh giới |
 | --- | --- | --- |
@@ -93,11 +87,7 @@ Không chỉ dẫn nào được gọi CLI thô để né Runtime.
 | reviewer | review độc lập và phát hiện sửa chữa có giới hạn | Verdict là bằng chứng đã xác thực, không phải transition thành công trực tiếp |
 | security | phân tích mối đe dọa, phát hiện về chính sách | Role không ngầm cấp thêm quyền filesystem/network/secret |
 
-`use-context7` (tra cứu tài liệu được host) được bind cho specifier, architect, planner, developer, reviewer và qa. Nó
-không khai báo `requiredToolIds`: cùng danh sách `toolIds` của role cấp cho cả inventory tool của skill lẫn Gateway grant,
-vốn kiểm tra *tên tool* MCP, nên một yêu cầu tool-id như `context7` không bao giờ đồng thời là tên tool được cấp. Tính khả dụng
-thay vào đó được xác lập bởi chính Gateway grant, `bflow docs status` và cách xử lý lỗi của chính skill. Role Conversation
-bị loại trừ vì Gateway không bao giờ cấp tool cho nó; nó có thể nhờ Coordinator.
+`use-context7` áp dụng cho specifier, architect, planner, developer, reviewer và qa khi đủ grant tài liệu ngoài repo. Catalog tool ID, service ID và upstream operation là namespace riêng theo [D-TOOLS-01](tools-sdlc-integration.md); không còn dùng workaround overload `toolIds` làm thiết kế hiện tại. Conversation không nhận tool Gateway. `docs status` chỉ probe service/config, không chứng minh provider consumption.
 
 ## Provider rendering và readiness
 

@@ -1,5 +1,7 @@
 # Milestone 2 Integration Test Suite Readiness (`TEST_READY.md`)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 ## 1. Executive Summary
 
 Milestone 2 (`M2`) delivers an end-to-end, zero-mock integration test suite for `@bflow/runtime` covering all 8 comprehensive SDLC workflow scenarios, augmented by Tier 5 white-box adversarial stress suites (`challenger-m3-1-stress.test.ts` and `challenger-m3-2-stress.test.ts`).

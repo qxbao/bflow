@@ -3,20 +3,13 @@
 Thiết kế chuẩn tắc P24; P27 sở hữu phần triển khai. Định nghĩa công khai và port nằm trong
 `packages/contracts/src/{setup,mcp}.ts`. P24 không triển khai module Gateway/service nào.
 
-## Implementation status (cập nhật 2026-10-17)
+## Implementation status (2026-10-25)
 
-P27 đã có source: `packages/mcp-gateway` (loopback Streamable HTTP, Host/Origin + bearer token,
-stdio bridge, đăng ký/revoke client, sharing policy, lease + fencing đơn điệu, quarantine khi
-unknown call, chặn elicitation/sampling/OAuth tương tác, `/health`, `/metrics`) và
-`packages/mcp-services` (OS service manager user-level, resource pool/quota, dedicated Chrome
-profile runtime, loopback-only debugging). P26 `tool-installer` cung cấp capability inventory và
-`verifyMcpStartup`; P29 CLI có `bflow mcp status` và bước validate MCP của `up`/`doctor`.
-**P30 (source + local test):** daemon Gateway mở control endpoint có xác thực (`gateway-control.json`);
-Runtime đăng ký/revoke client theo role/session qua `GatewayControlClient`. **Chưa làm:** chưa gắn
-resource lease vào Runtime dispatch; P31 chưa có kiểm thử live (Chrome thật, OS service thật, crash của upstream
-trên nhiều repo đồng thời). Test hiện có là deterministic/local; same-user compromise,
-multi-host lease và cách ly tài nguyên không giới hạn vẫn NOT VERIFIED. Câu "No Gateway/service
-module is implemented in P24" dưới đây mô tả baseline P24, không phải trạng thái hiện tại.
+Gateway/services và control endpoint đã được nối vào Runtime theo role/session/generation. D-TOOLS-01 bổ sung policy/grant/usage schemas; registration tách service và exact operations, kiểm tra negotiated input/output schema, ledger giữ unknown và response có `structuredContent`. Runtime đã nối resource acquire/renew/release cho GitNexus; browser task actions còn degraded/blocked vì task lease chưa được hỗ trợ.
+
+Context7 hosted dùng chung giữa repository/worktree có registration hợp lệ; local backend giữ workspace partition. Agent gọi tool được policy-mediated qua Runtime, không nhận raw Gateway bearer token cho đường đó. Inter-role messages vẫn qua Herdr.
+
+[Tool integration](tools-sdlc-integration.md), [Gateway README](../packages/mcp-gateway/README.md) và [implementation status](implementation-status.md) phân biệt source/local tests với các hồ sơ probe thật. Chưa đóng full live SDLC hoặc active multi-repo fault campaign; same-UID/multi-host isolation vẫn chưa được chứng nhận. Câu P24 chưa có module chỉ mô tả baseline thiết kế.
 
 ## Tách biệt tool, service và giao tiếp giữa các agent
 

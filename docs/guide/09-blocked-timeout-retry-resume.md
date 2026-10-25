@@ -1,5 +1,7 @@
 # 9. Xử lý blocked, timeout, retry và resume
 
+> **Legacy P00–P10:** hướng dẫn API/demo của Runtime cũ. Các giới hạn tích hợp trong trang phản ánh giai đoạn đó; luồng hiện tại dùng [installation](installation.md), [getting started](getting-started.md) và [implementation status](../implementation-status.md).
+
 > **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
 > Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
 > Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.
@@ -111,4 +113,4 @@ Các điểm sau là hành vi của mã hiện tại (đã quan sát hoặc đ�
 5. **Không có API Runtime** cho: gỡ blocked, chạy lại gate, ghi kết quả `timed_out`, hẹn giờ retry.
 6. **Một QualityGate** cho mọi gate binding của một Runtime.
 7. **Báo cáo handoff** giữ nội dung của lần sinh đầu tiên ([mục 8](08-status-and-artifacts.md#artifact)).
-8. Các mục mở từ audit trước: P02-RA01 (timer của Herdr runner tràn khi > 2 147 483 647 ms) và P03-RA01 (`ArtifactStore.get` có thể trả trễ một chunk cuối sau deadline) — xem [known limitations](../known-limitations.md) và [known limitations v3](../known-limitations-v3.md#3-các-mục-nợ-kỹ-thuật-cấp-package-từ-các-giai-đoạn-trước-p02-ra01-p03-ra01).
+8. Các mục mở từ audit trước: P02-RA01 (timer của Herdr runner tràn khi > 2 147 483 647 ms) và P03-RA01 (`ArtifactStore.get` có thể trả trễ một chunk cuối sau deadline) — xem [known limitations](../known-limitations.md) và [known limitations v3](../known-limitations-v3.md#theo-dõi-package-còn-mở).

@@ -1,5 +1,7 @@
 # Bflow Platform v3 — Báo cáo kiểm toán bảo mật (P24–P34)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 - **Ngày kiểm toán**: `2026-10-18`
 - **Baseline commit**: `da9e166d136b199c62f4b862141357180268567c`
 - **Vai trò**: Principal Security Auditor

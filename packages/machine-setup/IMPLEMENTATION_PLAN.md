@@ -1,5 +1,7 @@
 # P26 — Kế hoạch triển khai Machine setup backend (`bflow setup`)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Spec (thẩm quyền ràng buộc): yêu cầu P26 của project owner (được tóm tắt trong Global Constraints),
 `AGENTS.md` (invariant P24 / V3), `docs/runtime-architecture-v3.md` §4, §7, §9, và các
 contract đã freeze `packages/contracts/src/{setup,platform,mcp,skills,commands,errors}.ts`.

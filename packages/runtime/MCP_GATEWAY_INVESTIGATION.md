@@ -1,5 +1,7 @@
 # Điều tra Conversation MCP Gateway
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Nguồn được kiểm toán: `d82ff21fa8037f4bbcfbafc785b022b3e60fb0df`.
 Bằng chứng: mã nguồn và cấu hình khởi chạy cục bộ cho session
 `conv-bf-c1695ccd3f2b994f91bd`. Không thực hiện bài kiểm thử conformance Gateway/provider thực (live) nào.

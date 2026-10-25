@@ -1,5 +1,7 @@
 # Evidence xác thực P17
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Bản triển khai được kiểm thử: `691a845911ff8e4e17ef520d7314a6a95bab1b5c`.
 Baseline: `d8c6d18120c7a01a4bf8aad13f14660d20e0cdf6`.
 Nhánh: `agent/verification/p17-loop-engine`.

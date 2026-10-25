@@ -15,7 +15,7 @@ Tác giả skill (SkillManager / P28) nên render skill từ file JSON và liên
 | Bắt đầu làm một task | `bflow task implement <task-id> --run <run-id> --spec <file>` | kiểm tra artifact P15, Conditional TDD Resolver (P16), Git Orchestrator (P18), Runtime run state |
 | Xác minh một task | `bflow verify <task-id> --run <run-id> --plan <file>` | Verification Engine (P17), ArtifactStore, các gate độc lập được inject |
 | Chuẩn bị integration | `bflow git prepare <run-id>` | Git Orchestrator (P18) integration |
-| Sức khỏe MCP | `bflow mcp status` | Machine setup (P26) `mcp.json`, MCP Gateway port (P27) |
+| Inventory MCP | `bflow mcp status` | `mcp.json`/pins; live Gateway port cần được inject, binary mặc định chưa nối |
 | Sức khỏe tool | `bflow tool status` | Machine setup (P26) catalog/probe tool |
 | Đồng bộ skill | `bflow skills sync` | Machine setup (P26) `SkillsComponent` + skill manager port (P28) |
 | Mức sẵn sàng của provider | `bflow agent check <provider>` | Agent Provider Registry (P25) |
@@ -108,8 +108,9 @@ request digest, nên việc cấp quyền khi retry vẫn dùng lại cùng key.
 - Các bước rủi ro dừng trước khi thực thi và exit 5 cho đến khi operator cấp quyền:
   `git prepare --yes`, `task plan --force` (thay thế một plan khác),
   `skills sync --allow-machine-scope` (đích phạm vi toàn machine).
-- Các lệnh chỉ đọc (`repo inspect`, `mcp status`, `tool status`, `agent check`) không bao giờ cài đặt,
-  khởi động, dừng hay đăng nhập bất cứ thứ gì. `agent check` chỉ tạo thư mục state rỗng của nó.
+- `repo inspect`, `mcp status`, `tool status` không cài tool hoặc start/stop worker.
+  `agent check` không mở Herdr role pane nhưng adapter có thể chạy native auth/model execution probe,
+  tiêu hao usage và tạo probe state; không gọi nó là phép kiểm tra không inference hoặc không ghi tuyệt đối.
 
 ## Các lệnh
 
@@ -188,13 +189,13 @@ outcome `conflict_detected` cùng các đường dẫn xung đột; việc giả
 ### `bflow mcp status [--service <id>]…`
 
 Đọc `$XDG_CONFIG_HOME/bflow/mcp.json`, kiểm tra các stdio executable được pin (sự hiện diện + digest)
-và hỏi MCP Gateway dùng chung về health của backend. Exit 0 chỉ khi Gateway truy cập được
+và, **khi caller inject `HighLevelServices.mcpGateway`**, hỏi Gateway về health backend. Binary mặc định chưa inject port này, nên báo `configured: false`/`not_ready` dù machine daemon có thể đang chạy. Dùng `doctor`, machine service status và `docs status` (Context7) để chẩn đoán; không lặp setup chỉ vì nhãn này. Exit 0 chỉ khi Gateway truy cập được
 và mọi backend được chọn đều healthy; chưa cấu hình Gateway, config không hợp lệ hoặc backend
 unhealthy thì exit 3; `--service` không xác định thì exit 4.
 
 ### `bflow tool status [--tool <id>]…`
 
-Probe `node`, `pnpm`, `git`, `herdr`, `claude`, `codex`, `agy`: trạng thái (`present`, `missing`,
+Probe catalog gồm `node`, `pnpm`, `git`, `herdr`, `claude`, `codex`, `agy` và các integrated CLI tools (`rtk`, `gitnexus`, `chrome-devtools-mcp`, `mempalace`): trạng thái (`present`, `missing`,
 `version_mismatch`, `path_missing`, …), phiên bản so với yêu cầu, đường dẫn, binary digest và hướng dẫn
 khắc phục thủ công. Các tool bắt buộc là mặc định của catalog, hoặc mọi `--tool` được cung cấp. Exit 3 liệt kê
 `data.blocking`; tool không xác định thì exit 4. Việc cài đặt là của `bflow setup`, không bao giờ của lệnh này.
@@ -202,7 +203,7 @@ khắc phục thủ công. Các tool bắt buộc là mặc định của catalo
 ### `bflow skills sync [--provider claude|codex|agy]… [--dry-run] [--allow-machine-scope] [--resume]`
 
 Quan sát các skill đã cài, resolve trạng thái mong muốn được pin và chỉ ghi khi chúng khác nhau
-(nếu không là `already_synced`). `--dry-run` xem trước. Đích phạm vi toàn machine cần
+(nếu không là `already_synced`). `--dry-run` xem trước, không publish bundle mới; default synchronizer vẫn có thể tạo/chmod thư mục kho riêng khi khởi tạo. Binary chưa nhận `skills list` hoặc `skills sync --list`. Đích phạm vi toàn machine cần
 `--allow-machine-scope` (exit 5). Sau khi ghi, một post-check phải quan sát được digest mong muốn, nếu không
 lệnh fail (`reason: sync_not_converged`). Khi chưa tích hợp skill manager, lệnh fail
 với `reason: skills_synchronizer_not_configured` (exit 1).
@@ -212,7 +213,7 @@ với `reason: skills_synchronizer_not_configured` (exit 1).
 Dựng một `AgentEnvironment` theo phạm vi session (mặc định `restricted`, chỉ đọc, chặn network) và
 chạy preflight của provider adapter: binary, version, authentication, environment, MCP,
 launch argument, permission, skill. Exit 0 chỉ với `ready`; `blocked`/`unsupported` exit 3
-kèm mã và hướng dẫn khắc phục của từng check. Preflight không phải mức sẵn sàng đã kích hoạt: `bflow up` vẫn
+kèm mã và hướng dẫn khắc phục của từng check. Standalone command này không đọc role/profile/model từ repo config; default adapter có thể chạy model probe và tiêu hao usage. `doctor`/`up` là đường kiểm tra role/profile của host. Preflight không phải mức sẵn sàng đã kích hoạt: `bflow up` vẫn
 yêu cầu một launch attestation đã xác thực từ pane đang chạy.
 
 ## Luồng agent điển hình
@@ -227,16 +228,12 @@ bflow git prepare run-1 --json                                         # 5 → c
 bflow git prepare run-1 --yes --json                                   # → request xác minh workflow
 ```
 
-## Hạn chế hiện tại
+## Tích hợp và giới hạn hiện tại
 
-- Dispatch, lease, chuyển giao qua Herdr và phê duyệt vẫn là công việc của Runtime/Coordinator; thay vào đó các lệnh này
-  trả về request và pending message. Nối chúng vào Runtime facade P30 là công việc
-  integration.
-- `task implement` quan sát run store RuntimeService cũ khi `.bflow/config.yaml` tồn tại;
-  trạng thái agentic run của P19 chưa được lộ ra qua một Runtime facade.
-- Git engine P18 cần `flock` của Linux; trên các host khác `task implement`, `verify` (không có
-  `--change-set`) và `git prepare` fail tại bước `open-resources` (exit 1, ví dụ `spawn flock ENOENT`)
-  trước khi có bất kỳ side effect nào; receipt thất bại không chặn lần retry sau.
-- Không có triển khai MCP Gateway (P27) hay skill manager (P28) nào được kết hợp theo mặc định, nên
-  `mcp status` báo not ready và `skills sync` báo not configured cho đến khi chúng được tích hợp.
-- `verify` không có gate runner độc lập mặc định; host inject chúng (`HighLevelServices.gates`).
+- Dispatch, leases/fencing, Herdr và phê duyệt vẫn thuộc Runtime/Coordinator. Lệnh trả assignment/request/pending messages; thành công command không đóng workflow.
+- Machine setup và Runtime platform đã nối Gateway/control, nhưng **standalone binary `mcp status` chưa có live Gateway port mặc định**. `skills sync` có default synchronizer thật; không đánh đồng tình trạng hai port này.
+- Binary hiện chưa nhận `skills list`/`skills sync --list`; preview qua `skills sync --dry-run`. `agent check` dùng standalone environment, có thể chạy model probe; không chứng minh config-selected profile/model ready.
+- `task implement` vẫn quan sát legacy RuntimeService store theo cấu hình repo; P19 host status và decisions đi qua lifecycle/Conversation, không dùng CLI run-ID query để giả kết quả của host.
+- `verify` cần independent gate runner được host inject (`HighLevelServices.gates`); thiếu runner là blocked.
+- Git/Runtime locking cần `flock` hỗ trợ inherited fd. Linux util-linux và bản macOS phù hợp được dùng; kiểm tra môi trường trước khi chạy. macOS workspace/JS verification có helper/Seatbelt riêng, không phải chứng nhận mọi polyglot adapter.
+- Xem [implementation status](../../../docs/implementation-status.md), [compatibility](../../../docs/compatibility-matrix.md) và [runner matrix](../../../docs/verification-runners.md) cho source/evidence hiện tại.

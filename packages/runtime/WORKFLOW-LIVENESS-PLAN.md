@@ -1,5 +1,7 @@
 # Runtime workflow liveness remediation plan
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 ## Audit result
 
 The observed capability denial is produced by the Runtime host's native `tool_guard` in

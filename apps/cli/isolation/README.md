@@ -10,6 +10,11 @@ existing profiles are used in place without migration. Codex/Claude profiles ret
 two-way compatibility with the original CLI. Agy profiles use the same
 `agy--<name>` metadata/layout protocol, but original v0.4.4 does not support Agy.
 
+The compiled distribution must retain `apps/cli/isolation/` beside `dist/`, including
+the Bash engine and both Python helpers. The release smoke test runs `bflow iso help`
+and loads both helpers from the extracted archive; CLI `--help` alone does not check
+these runtime assets. These checks do not launch or authenticate a provider.
+
 `lib/mcp_sync.py` is a standalone extraction of the behavior used by the original
 `runtime.dispatch.shell.mcp_config.sync_codex_mcp_servers`. It synchronizes only
 shared MCP tables, retains profile-local configuration, mirrors Codex hook trust
@@ -68,7 +73,9 @@ Intentional changes from the source:
 - Agy is additive: `login agy` launches native Agy onboarding under isolated
   HOME, while `run agy` and direct `agy` launch its native UI once. Agy has no
   auth/status subcommand, so status reports `unverified` without running a model
-  or auth probe. No account credentials or config are copied or linked. Agy uses
+  or auth probe. Provider account/auth files are not copied or linked. Approved
+  MCP definitions (including configured MCP secrets), instruction skills and managed
+  plugin configuration are still synchronized by the helper described above. Agy uses
   its native `$HOME/.gemini/antigravity-cli` location inside the profile.
 - Inherited `CLAUDE_CONFIG_DIR` and Agy-specific config and credential variables
   are cleared for child processes so they cannot redirect a profile to an
@@ -78,9 +85,11 @@ Intentional changes from the source:
   Sharing `hooks.json` needs symlink permission; when unavailable MCP config
   synchronization still works, but hook trust mirroring cannot be established.
 
-The engine does not install tools, modify global provider settings, or change
-file access permissions. Profile HOME/XDG isolation removes the listed provider
-credentials from the child environment; it is not an OS sandbox.
+The engine does not install provider tools. It manages profile-owned HOME/XDG/TMP
+directories, attempts private mode `0700` on those directories, and synchronizes
+owned configuration/receipt files through the helpers above. Profile HOME/XDG isolation
+scrubs the listed provider credential variables from the child environment; it is not
+an OS sandbox or a guarantee against another process with the same UID.
 
 For shell launchers, set `AI_ISOLATOR_SHELL=bash|fish|zsh|csh|ksh` when your
 current shell differs from `$SHELL`. The bundled source checks its immediate

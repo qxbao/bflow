@@ -1,5 +1,7 @@
 # Đề xuất: xác minh receipt và binding Herdr có xác thực
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Trạng thái: **APPROVED** bởi chủ dự án trong cuộc hội thoại này vào 2026-10-16
 (“Proposal: duyệt”). Quyết định triển khai, kế hoạch tương thích và các owner bị ảnh hưởng
 được ghi lại trong [ADR 0003](../../docs/adr/0003-authenticated-herdr-receipts.md).

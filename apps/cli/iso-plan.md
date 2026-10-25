@@ -1,5 +1,7 @@
 # Bflow iso implementation and acceptance plan
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 **Goal:** Bring ai-sdlc's ai-isolator 0.4.4 into `bflow iso`, reuse Codex/Claude profiles in both directions, and add Agy profiles.
 
 **Architecture:** Bundle the Bash engine and a standalone Python MCP helper inside this CLI package. Dispatch before the workflow parser, passing provider arguments literally. Existing state stays at `${AI_ISOLATOR_HOME:-$HOME/.local/share/ai-isolator}`; no profile migration or external checkout is needed.

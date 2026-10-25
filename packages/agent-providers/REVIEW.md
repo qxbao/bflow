@@ -1,5 +1,7 @@
 # Phase P25 (`@bflow/agent-providers`) — Review code và bảo mật của Argon
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 ## 1. Phạm vi review và workflow
 
 - **Workflow**: Plan (Argon) → Implement (Flash subagent `144eefc9-ce1f-4561-a90e-53220d987e0b`) → Review, Harden và Verify (Argon).

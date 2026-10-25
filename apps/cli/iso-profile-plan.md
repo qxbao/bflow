@@ -1,5 +1,7 @@
 # Configured isolator profiles and setup parity
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Extend `bflow iso` so an existing profile can be selected by `.bflow/config.yml` and used by all provider preflight and role launches.
 
 ```yaml

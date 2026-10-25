@@ -536,3 +536,15 @@ P24 thêm các root document additive với `schemaVersion: 3` (`CURRENT_PLATFOR
 | `commands.ts` | `BflowCommandSchema`, `CommandExecutionResultSchema`, port `BflowCommandExecutor` | [runtime v3 §7](runtime-architecture-v3.md) |
 
 Các package leaf P25–P29 phân tích dữ liệu trao đổi bằng các schema này (ví dụ `agent-providers` với `AgentHealthRequestSchema`/`AgentLaunchProfileSchema`). Một số tham số package-local (metadata skill, `.bflow/skills.json`, request của machine-setup) dùng schema strict riêng và không phải public contract. `SkillManager` là class của `@bflow/skills`; contracts v3 chỉ có data schemas cho skills, không có port `SkillManager`. Ngoài các contract trên, `EnvironmentDoctorReportSchema` vẫn ở `schemaVersion: 2`; chi tiết check theo nhóm của `bflow doctor` hiện nằm trong CLI, chưa là contract public.
+
+
+## D-TOOLS-01 — additive tool policy và usage contracts
+
+Quyết định được duyệt trong [tools design](superpowers/specs/2026-10-24-tools-sdlc-design.md), triển khai sau P24. Không đổi RoleMessage v2, SessionManifest v2, RuntimeService hay Core event/checkpoint/SQL formats.
+
+| Export/source | Phạm vi |
+| --- | --- |
+| [`tool-policy.ts`](../packages/contracts/src/tool-policy.ts) | `RepositoryToolPolicySchema`, `RoleToolRequirementSchema`, `ResolvedToolGrantSchema`, `ToolActionRequestSchema`; strict v3, phân biệt catalog ID/service/operation, role, trigger, scope và executable identity |
+| [`tool-usage.ts`](../packages/contracts/src/tool-usage.ts) | `ToolUsageRecordSchema`; invocation disposition, consumption và trusted artifact evidence riêng |
+
+Các schema parse ingress/egress; Runtime/Gateway vẫn xác minh authority, digest, lease/fence và runtime provenance. Schema hợp lệ không chứng minh tool đã invoked, output consumed hoặc task thành công. [Integration guide](tools-sdlc-integration.md) mô tả default-policy composition và migration hiện tại.

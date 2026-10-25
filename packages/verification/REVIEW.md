@@ -1,5 +1,7 @@
 # Review và khắc phục P17
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Đã review bản triển khai tại `01eba53` đối chiếu với các contract v2, codec nội dung artifact
 P15, ranh giới strategy P16, và các policy verification cấp task/workflow đã được chấp nhận.
 Yêu cầu review cũng ủy quyền việc sửa lỗi và tích hợp vào main cục bộ.

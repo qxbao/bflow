@@ -2,7 +2,7 @@
 
 Triển khai `SkillManager.list`, `validate`, `install`/`installBundle`, `sync`, `link`,
 `verify`, `update` và `recover` theo generation chính xác. Thư viện canonical trong `skills/`
-chứa cả 20 shared skill được yêu cầu cùng 12 role skill và các ví dụ thực hành.
+chứa các skill dùng chung, skill theo role và ví dụ thực hành; xem [catalog hiện tại](../../skills/README.md).
 Analyst ánh xạ tới `specifier`; Verifier ánh xạ tới `qa`/`tester`. Không thay đổi contract.
 
 ## Ranh giới và tích hợp
@@ -28,11 +28,7 @@ setup request và repository desired config dùng các schema nghiêm ngặt c�
   discovery của Claude vẫn bị tắt trừ khi được duyệt riêng; package này không thay đổi provider
   home, hook, thiết lập toàn cục hay đường dẫn native discovery.
 
-Các tham chiếu build gốc và workspace lockfile bao gồm package này sau khi tích hợp P28.
-CLI parser và Runtime wiring vẫn do P29/P30 sở hữu. `bflow setup`,
-`bflow skills ...` và việc kích hoạt skill tự động của `bflow init` **không phải là tuyên bố có thể chạy được**
-trên baseline này. API của package và các điểm tích hợp đã sẵn sàng; việc nối lệnh cuối cùng
-và kích hoạt provider live vẫn là công việc tích hợp. Ở đây không có scheduler hay gate mới.
+Root build/lockfile, CLI setup/skills commands và Runtime P30 manifest composition đã được nối. `bflow init` lưu desired role selections trong `.bflow/config.yml`; helper `.bflow/skills.json` bên trên là API package-local, không phải file tự sinh bởi CLI hiện tại. Runtime dùng approved bundle pins và tool grants, không dùng skill như permission grant. Xem [implementation status](../../docs/implementation-status.md).
 
 `roles/bindings.json` có thể thêm `conditionalBindings` mà không làm hỏng file legacy chỉ có
 `schemaVersion` và `bindings`. `resolveRoleSkillSelections` luôn kiểm tra skill pin cùng role
@@ -174,8 +170,8 @@ git status --short
 ```
 
 Workspace importer và TypeScript reference gốc đã được tích hợp, nên build và
-typecheck gốc bao gồm package này. Các integration owner vẫn cần ghép các port setup/init/
-Runtime ở trên; các kiểm tra cục bộ của package vẫn dùng được để xác thực tập trung. Các test
+typecheck gốc bao gồm package này. Các port setup/init/Runtime đã được ghép trong CLI/host;
+kiểm tra package vẫn dùng để xác thực tập trung. Các test
 bao phủ mọi trường hợp tiêu cực được yêu cầu, tương đương lựa chọn giữa các provider, approval lỗi thời, content drift, concurrency, lập kế hoạch chỉ đọc,
 cấu hình được bảo toàn và ngữ nghĩa restart/update bất biến. Chúng là các test source
 và rendering cục bộ; không tuyên bố có live model session, nghiệm thu native skill-discovery hay thành công SDLC
