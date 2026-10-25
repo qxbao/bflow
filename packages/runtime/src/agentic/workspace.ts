@@ -41,6 +41,7 @@ export interface OpenAgenticWorkspaceOptions {
   projectApprovalRequired?: AgenticRuntimePorts["projectApprovalRequired"];
   onHumanDecision?: (decision: ApprovalDecision) => Promise<void>;
   recoveredHumanDecisions?: readonly ApprovalDecision[];
+  noticeAliases?: () => Promise<{ approvalShortIds: Record<string, string>; runShortIds: Record<string, string> }>;
   onNativeDelivery?: (message: RoleMessage) => Promise<void>;
   onNativeRejection?: (message: RoleMessage) => Promise<void>;
   /** Restore private native intent/ACK facts before the first automatic resume or scheduler dispatch. */
@@ -283,7 +284,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     await options.beforeRecovery?.(runtime);
     conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),
-      ...(options.recoveredHumanDecisions ? { recoveredHumanDecisions: options.recoveredHumanDecisions } : {}) });
+      ...(options.recoveredHumanDecisions ? { recoveredHumanDecisions: options.recoveredHumanDecisions } : {}),
+      ...(options.noticeAliases ? { noticeAliases: options.noticeAliases } : {}) });
     // Resume only durable, explicitly recoverable blocker actions after the new host/session is fully activated.
     await runtime.resumeRecoverableRuns();
     const tools = new CoordinatorTools(runtime);

@@ -1,6 +1,6 @@
 ---
 name: browser-inspection
-description: "Use an approved browser capability to inspect an assigned UI with exclusive resource safety and reproducible evidence."
+description: "Use when an acceptance criterion requires authorized browser observation of a rendered UI with exclusive resource lease safety and risk-based evidence."
 ---
 
 ## Supported roles
@@ -11,29 +11,29 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 ## Prerequisites
 
-- An approved scoped browser tool and permitted target origin.
-- A current Gateway resource lease/fence when the browser resource is exclusive.
+- An acceptance criterion that genuinely requires rendered browser observation, plus an approved `TestStrategy` / `TddDecision`.
+- An approved scoped `browser` tool grant, permitted target origin and a current Gateway resource lease/fence when the browser resource is exclusive.
 
 ## Trigger conditions
 
-- An acceptance criterion requires browser observation.
-- An assigned UI failure needs reproduction.
+- An acceptance criterion requires browser DOM/visual/interaction observation that unit or API tests cannot establish.
+- An assigned UI failure needs reproduction against the real served entrypoint.
 
 ## Required inputs
 
 - Target environment, origin and test account policy.
-- Criterion, candidate revision and bounded inspection steps.
+- Criterion IDs, `TestStrategy` / `TddDecision`, candidate revision and bounded inspection steps.
 
 ## Expected outputs
 
-- Reproducible UI observations and artifact proposals.
-- Explicit passed, failed, inconclusive or blocked evidence.
+- Reproducible UI observations and artifact proposals mapped via `criterion → UI risk → check/action identity → environment/lease prerequisite → expected evidence`.
+- Explicit `passed`, `failed`, `inconclusive` or `blocked` evidence distinguishing rendered browser proof from unit/static checks.
 
 ## Procedure
 
-1. Discover the authorized operations and verify the browser profile/context belongs to this repository. Acquire and retain the exclusive lease for the whole navigation/action/screenshot transaction.
-2. Execute only criterion-relevant actions within allowed origin and data constraints. Recheck current lease/fence before effects; do not share cookies, tabs or credentials with another repository.
-3. Capture sanitized observations/screenshots as artifact proposals with revision, environment and steps. Release the exact lease after reconciliation; an expired lease does not prove a late browser command stopped.
+1. Verify that the task and criterion actually require browser inspection and that the role holds the `browser` tool grant and exclusive resource lease/fence for the whole navigation/action/screenshot transaction. Never require browser inspection for non-UI tasks; if a UI criterion requires browser access that is not granted or reachable, report a `blocked` prerequisite gap instead of faking UI verification with static HTML parsing.
+2. Load [the UI risk viewpoints reference](references/ui-risk-viewpoints.md) on demand and select only the viewpoints applicable to the changed UI controls and criteria (boundary/invalid/Unicode/empty inputs, double-submit protection, role/owner UI isolation, failure/timeout/empty state recovery, brownfield UI parity, and real served entrypoint/cross-screen wiring). Preserve the approved `TestStrategy` and `TddDecision`.
+3. Interact through stable semantic locators (`data-testid`, ARIA role, label) and condition-based waits (`waitFor`, `toBeVisible`) without arbitrary sleeps or forced clicks (`force: true`) that hide layout overlap. Capture sanitized observations/screenshots as artifact proposals with revision, environment and steps, then release the exact lease after reconciliation.
 
 ## Bflow commands
 
@@ -43,12 +43,13 @@ This baseline has no dedicated skill or verification command. Use the existing a
 
 ## Verification requirements
 
-- Evidence names the tested revision, target environment and reproducible actions.
+- Evidence traces `criterion → risk → check/action identity → environment/lease prerequisite → expected evidence` at the tested revision and real served origin.
+- In-memory HTML parsing or isolated component unit tests are never relabeled as browser E2E evidence.
 - The resource lease and scope are valid for every mutating operation.
 
 ## Error handling
 
-A busy browser is blocked, not permission to steal a lease. Timeout after a possible click/write is uncertain and must be reconciled before retry or reassignment.
+A missing `browser` grant, unavailable origin or busy exclusive browser lease is `blocked`, never permission to steal a lease or substitute static HTML checks. Timeout after a possible click/write is uncertain and must be reconciled before retry or reassignment.
 
 ## Escalation rules
 
@@ -58,4 +59,4 @@ Every non-Conversation role routes missing requirements, permission requests and
 
 ## Concrete examples
 
-See [the worked example](worked-example.md) for inputs, authorized steps, expected evidence and a failure branch. The example is illustrative; it does not create approval or a live run.
+Load [the UI risk viewpoints reference](references/ui-risk-viewpoints.md) for conditional browser checks and [the worked example](worked-example.md) for analyzed scenarios, authorized steps, expected evidence and a failure branch. The examples are illustrative; they do not create approval or a live run.

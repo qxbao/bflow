@@ -70,8 +70,9 @@ export class HostDevelopment {
       (args.taskId === undefined || AgentExecutionHandleSchema.parse(out.handle).taskId === args.taskId));
     if (candidates.length !== 1) throw new Error("No unique current task assignment for this Developer pane");
     const handle = AgentExecutionHandleSchema.parse(candidates[0]!.handle);
+    const message = RoleMessageSchema.parse(candidates[0]!.message);
     return { binding, runId: handle.runId, taskId: handle.taskId, attemptId: handle.attemptId, args, cwd: binding.worktreePath,
-      resolver: isConflictResolverAssignment(RoleMessageSchema.parse(candidates[0]!.message)) };
+      message, resolver: isConflictResolverAssignment(message) };
   }
   private async relativePath(cwd: string, input: string): Promise<string> {
     const root = await realpath(cwd), absolute = resolve(root, input), local = relative(root, absolute);
@@ -282,16 +283,21 @@ export class HostDevelopment {
   async status(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
     if (context.resolver) return (await this.conflictResolutionContext(binding))!;
+    const rawRework = record(context.message.payload).reworkContext;
     return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task =>
       json({ runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
-        tddDecision: task.spec.strategy.tddDecision, recordedEvidence: task.spec.strategy.metadata?.tddEvidence ?? [] }));
+        tddDecision: task.spec.strategy.tddDecision, recordedEvidence: task.spec.strategy.metadata?.tddEvidence ?? [],
+        ...(rawRework !== undefined ? { reworkContext: rawRework } : {}) }));
   }
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
     if (context.resolver) return json({ applicable: false, independentAcceptanceEvidence: false,
       reason: "check_work does not apply to a conflict resolution: it has no task test plan. Commit the resolution with commit_changes; Runtime then runs independent workflow verification on the integrated result." });
+    const rawRework = record(context.message.payload).reworkContext;
+    const reworkGeneration = rawRework !== null && typeof rawRework === "object" && !Array.isArray(rawRework) && typeof (rawRework as Record<string, unknown>).reworkGeneration === "number"
+      ? ((rawRework as Record<string, unknown>).reworkGeneration as number) : undefined;
     const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
       commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
       head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
@@ -305,8 +311,8 @@ export class HostDevelopment {
       measurements.push(await measureBehavior(command.checkoutDependencyRoots === undefined ? command : { ...command, originalRevision: selected.originalRevision },
         context.cwd, selected.head, rtk ? { rtk } : {}));
     }
-    const bytes = Buffer.from(JSON.stringify({ sourceRevision: selected.head, measurements }));
-    const artifactId = `check-work-${digest([context.runId, context.taskId, selected.head, measurements]).slice(0, 36)}`;
+    const bytes = Buffer.from(JSON.stringify({ sourceRevision: selected.head, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}), measurements }));
+    const artifactId = `check-work-${digest([context.runId, context.taskId, selected.head, reworkGeneration ?? 0, measurements]).slice(0, 36)}`;
     const stored = await this.runtime().ports.artifactStore.put({ options: ArtifactWriteOptionsSchema.parse({ artifactId,
       runId: context.runId, taskId: context.taskId, kind: "log", mediaType: "application/json",
       expectedIntegrity: { checksum: { algorithm: "sha256", value: sha256(bytes) }, sizeBytes: bytes.length }, idempotencyKey: artifactId }),
@@ -315,7 +321,7 @@ export class HostDevelopment {
     const evidence = ArtifactReferenceSchema.parse(stored.value);
     for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId)
       await this.rtk?.consume(item.rtk.invocationId, evidence);
-    return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, evidence, measurements });
+    return json({ independentAcceptanceEvidence: false, sourceRevision: selected.head, ...(reworkGeneration !== undefined ? { reworkGeneration } : {}), evidence, measurements });
   }
   /**
    * Concludes the preserved P18 merge with the resolver's edits. Only the conflicted files may differ from what the merge staged,

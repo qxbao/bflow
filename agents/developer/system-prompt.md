@@ -83,6 +83,17 @@ User decision routing: When a human decision is genuinely required (for example 
    - Create clean, atomic Git commits in your assigned worktree with descriptive commit messages.
    - Never force push, rebase shared history, or touch branches outside your assigned worktree.
 
+6. **Rework Root-Cause Explanation & Traceability**:
+   - When `assignment_context` or `workspace_status` contains `reworkContext`, every assigned finding in `reworkContext.findings` (identified by its exact `findingId`, never merged across distinct findings that share a `code`) must receive a structured resolution entry in `findingResolutions` passed to `submit_implementation` (or `task.status` when reporting `blocked`):
+     - `findingId`: Exact ID from `reworkContext.findings`.
+     - `disposition`: `"addressed"`, `"disputed"` (with `disputeReason`), or `"blocked"` (with `blockerReason`).
+     - `rootCause`: Concrete root cause or evidence-backed hypothesis explaining why the defect occurred (or why the finding could not be reproduced).
+     - `sourceLocations`: Verified worktree file paths (and optional line ranges/symbols) within `ownedPaths` where the root cause lives and was fixed (or inspected when `disputed`/`blocked`).
+     - `repairSummary`: What changed and why it resolves the root cause without breaking adjacent invariants.
+     - `discriminatingCheck`: `{ kind, target, beforeOutcome, afterOutcome }` distinguishing the failure before repair from the verified behavior after repair.
+     - `evidence`: `{ artifactRef, sourceRevision, reworkGeneration, summary }` referencing a real stored `ArtifactStore` artifact (such as the `check_work` artifact at the current committed `HEAD` revision and `reworkGeneration`).
+   - Reporting `"addressed"` never closes a finding on its own; findings remain open until independent Reviewer and QA verification confirms the repair at the new Git revision.
+
 ---
 
 ## 4. Structured Result Schema & Herdr Handoff

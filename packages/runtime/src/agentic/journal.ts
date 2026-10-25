@@ -19,6 +19,7 @@ import type { TaskWorktree, VerificationPlan } from "./ports.js";
 import { isUserDecisionRequest, type UserDecisionAnswer } from "./decision-routing.js";
 import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
 import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./native-diagnostic-fence.js";
+import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -46,6 +47,8 @@ export interface TaskRecord {
   taskId: string; spec: SpecRecord; worktrees: TaskWorktree[]; outboundIds: string[];
   changeSet?: GitChangeSet; cycle?: VerificationCycle; result?: AgentResult;
   verificationPlan?: VerificationPlan; verificationPending?: boolean; writerReleased?: boolean;
+  /** Validated root-cause rework dossiers submitted per rework attempt; absent in legacy journals/checkpoints. */
+  reworkResolutions?: ReworkResolutionDossier[];
 }
 export interface RunRecord {
   runId: string; delegation: DelegationRequest; status: SdlcWorkStatus;
@@ -312,6 +315,14 @@ function parseState(input: unknown, repository: string): JournalState {
       if (task.changeSet) task.changeSet = GitChangeSetSchema.parse(task.changeSet);
       if (task.cycle) task.cycle = VerificationCycleSchema.parse(task.cycle);
       if (task.result) task.result = AgentResultSchema.parse(task.result);
+      if (task.reworkResolutions !== undefined) {
+        if (!Array.isArray(task.reworkResolutions)) throw new Error("Invalid rework resolution history");
+        task.reworkResolutions = task.reworkResolutions.map(item => {
+          const dossier = ReworkResolutionDossierSchema.parse(item);
+          if (dossier.runId !== run.runId || dossier.taskId !== task.taskId) throw new Error("Rework resolution dossier run/task mismatch");
+          return dossier;
+        });
+      }
     }
     if (run.workflowCycle) run.workflowCycle = VerificationCycleSchema.parse(run.workflowCycle);
     if (run.workflowChange) run.workflowChange = GitChangeSetSchema.parse(run.workflowChange);

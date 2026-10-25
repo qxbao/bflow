@@ -501,6 +501,10 @@ export const ConversationContextSnapshotSchema = z
     approvalDecisions: z.record(IdentifierSchema, ApprovalDecisionSchema),
     /** Optional for snapshots written before approval closing; absent means nothing was closed. */
     closedApprovals: z.record(IdentifierSchema, ClosedApprovalSchema).optional(),
+    /** Optional monotonic short aliases (#1, #2, ...) mapped to approvalIds. */
+    approvalShortIds: z.record(z.string().regex(/^#[1-9]\d*$/), IdentifierSchema).optional(),
+    /** Optional monotonic work aliases (việc #1, việc #2, ...) mapped to runIds. */
+    runShortIds: z.record(z.string().min(1), IdentifierSchema).optional(),
     pendingInboundQueue: z.array(PendingInboundItemSchema),
     /** Optional for snapshots written before dead-lettering; absent means no dead letters. */
     deadLetters: z.array(DeadLetterItemSchema).optional(),
@@ -523,6 +527,8 @@ export interface ConversationContextSnapshot {
   readonly pendingApprovals: Readonly<Record<string, ApprovalRequest>>;
   readonly approvalDecisions: Readonly<Record<string, ApprovalDecision>>;
   readonly closedApprovals?: Readonly<Record<string, ClosedApproval>> | undefined;
+  readonly approvalShortIds?: Readonly<Record<string, string>> | undefined;
+  readonly runShortIds?: Readonly<Record<string, string>> | undefined;
   readonly pendingInboundQueue: readonly PendingInboundItem[];
   readonly deadLetters?: readonly DeadLetterItem[] | undefined;
   readonly processedMessageIds: readonly string[];

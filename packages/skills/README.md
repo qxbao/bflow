@@ -98,8 +98,8 @@ ngầm. Các thư mục staging tạm và bundle không dùng có thể còn l�
 entry skill đã publish. Publish nguyên tử không phải là transaction nhiều file hay chịu được mất điện,
 và đây không phải cô lập chống same-UID thù địch, network-filesystem hay đa host. Full provider sandboxing vẫn là công việc của P25/P30.
 
-Bundle canonical `use-mempalace` có phiên bản `1.0.1`: cách diễn đạt về điều kiện tiên quyết do setup sở hữu
-đã thay đổi sau khi `1.0.0` được publish. Setup nối thêm pin chính xác mới bên cạnh các byte
+Các bundle canonical `use-mempalace`, `test-planning`, `review-code`, `security-review` và `browser-inspection` có phiên bản `1.0.1`: nội dung hướng dẫn và các file `references/*.md` tải theo nhu cầu
+đã được cập nhật sau khi `1.0.0` được publish. Setup nối thêm pin chính xác mới bên cạnh các byte
 `1.0.0` đã cài, bảo toàn các session manifest hiện có. Không xóa catalog cũ
 hay ghi đè phiên bản cũ để hòa giải một bundle phân phối đã thay đổi.
 
@@ -176,3 +176,19 @@ bao phủ mọi trường hợp tiêu cực được yêu cầu, tương đươn
 cấu hình được bảo toàn và ngữ nghĩa restart/update bất biến. Chúng là các test source
 và rendering cục bộ; không tuyên bố có live model session, nghiệm thu native skill-discovery hay thành công SDLC
 đầy đủ.
+
+## Hướng dẫn NFR có thể kiểm chứng
+
+Các bundle `requirements-analysis`, `specification-driven-development` và `test-planning`
+phiên bản `1.0.1` bổ sung cách làm rõ NFR theo outcome/rủi ro, oracle, nguồn ngưỡng,
+điều kiện đo và evidence. Specifier nạp brief và bốn ví dụ criterion từ reference
+cục bộ của skill; Tester/QA đưa oracle và điều kiện đã chấp nhận vào ma trận check
+hiện có. Ví dụ được parse bằng `AcceptanceCriterionSchema` và `SpecificationSchema`
+thật; catalog test kiểm tra reference được phân phối trong bundle pin của Specifier
+trên cả ba provider. Đây là bằng chứng local về instruction/schema/distribution,
+không phải xác nhận provider đã làm theo hay dự án đã đạt NFR.
+
+Giá trị proposed/unknown vẫn pending; thiếu tool và thiếu evidence là các khoảng
+trống riêng. Không thêm schema, metadata protocol, gate hoặc thay đổi TddDecision.
+Digest bao phủ toàn bundle được tính lại khi load catalog; setup phải cài version/pin
+mới theo approval hiện có, không ghi đè generation đang chạy.

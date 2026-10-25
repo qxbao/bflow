@@ -162,6 +162,12 @@ describe("P14 Conversation Agent & Delegation Gateway Test Suite", () => {
       expect(CONVERSATION_SYSTEM_PROMPT_TEMPLATE).toContain("Chỉ hỏi khi cần thông tin quan trọng");
       expect(CONVERSATION_SYSTEM_PROMPT_TEMPLATE).toContain("Tuyệt đối không phân công trực tiếp cho Specialist Roles");
       expect(CONVERSATION_SYSTEM_PROMPT_TEMPLATE).toContain("readOnlyWorkspace: true");
+
+      // Verify Section 6 plain Vietnamese tone rules in both system-prompt.md and CONVERSATION_SYSTEM_PROMPT_TEMPLATE
+      expect(systemPromptMarkdown).not.toContain("giữ nguyên các thuật ngữ kỹ thuật quốc tế");
+      expect(systemPromptMarkdown).toContain("Chuyện gì xảy ra → Ảnh hưởng → Bạn cần làm gì");
+      expect(CONVERSATION_SYSTEM_PROMPT_TEMPLATE).not.toContain("giữ nguyên các thuật ngữ kỹ thuật quốc tế");
+      expect(CONVERSATION_SYSTEM_PROMPT_TEMPLATE).toContain("Chuyện gì xảy ra → Ảnh hưởng → Bạn cần làm gì");
     });
 
     it("renders dynamic conversation system prompt with safe isolation and rejects dangerous content when configured", () => {

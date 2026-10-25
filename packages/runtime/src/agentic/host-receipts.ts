@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import {
   ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
   QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
@@ -14,6 +14,7 @@ import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeEnvelopeIssues, nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { ApprovalNoticeSchema, BlockedNoticeSchema, UserDecisionNoticeSchema, approvalNoticeFields, blockedNoticeFields, renderConversationNotice, userDecisionNoticeFields } from "./conversation-notice-render.js";
 import { BFLOW_INBOX_NUDGE } from "./conversation-inbox.js";
+import { TaskActivityLog, type TaskActivityInput } from "./task-activity-log.js";
 import type { AgyNativeAnchor } from "./agy-native-transcript.js";
 
 type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
@@ -34,6 +35,10 @@ export type TrustedConversationTurn = z.infer<typeof TrustedConversationTurnSche
 const NOTICE_SUMMARY_LIMIT = 4096;
 export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1), type: z.string().min(1), senderRole: z.string().min(1),
   runId: z.string().min(1).optional(), correlationId: z.string().min(1), receivedAt: z.string().datetime(),
+  shortId: z.string().regex(/^#[1-9]\d*$/).optional(),
+  runLabel: z.string().min(1).max(200).optional(),
+  reason: z.string().max(2000).optional(),
+  artifacts: z.array(z.string().min(1).max(300)).max(20).optional(),
   summary: z.string(), truncated: z.boolean(),
   /** Bounded decision fields for user decisions, independent of the summary cap. Absent on receipts written before this field. */
   userDecision: UserDecisionNoticeSchema.optional(),
@@ -42,6 +47,67 @@ export const ConversationNoticeSchema = z.object({ messageId: z.string().min(1),
   /** Bounded blocker fields independent of summary truncation; absent on older receipts. */
   blocked: BlockedNoticeSchema.optional() }).strict();
 export type ConversationNotice = z.infer<typeof ConversationNoticeSchema>;
+
+function extractNoticeArtifacts(
+  payload: unknown,
+  artifactReferences?: readonly { readonly uri: string }[],
+  approval?: { readonly evidence?: readonly { readonly uri: string }[] }
+): string[] {
+  const uris: string[] = [];
+  for (const ref of artifactReferences ?? []) {
+    if (typeof ref?.uri === "string" && ref.uri.trim()) uris.push(ref.uri.trim());
+  }
+  for (const item of approval?.evidence ?? []) {
+    if (typeof item?.uri === "string" && item.uri.trim()) uris.push(item.uri.trim());
+  }
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const obj = payload as Record<string, unknown>;
+    for (const key of ["evidence", "artifacts", "artifact_references"] as const) {
+      const list = obj[key];
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        if (typeof item === "string" && item.trim()) uris.push(item.trim());
+        else if (item && typeof item === "object" && !Array.isArray(item) && typeof (item as Record<string, unknown>).uri === "string") {
+          const uri = String((item as Record<string, unknown>).uri).trim();
+          if (uri) uris.push(uri);
+        }
+      }
+    }
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const uri of uris) {
+    const sanitized = redactString(uri).replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 300);
+    if (!sanitized || seen.has(sanitized)) continue;
+    seen.add(sanitized);
+    result.push(sanitized);
+    if (result.length >= 20) break;
+  }
+  return result;
+}
+
+function extractNoticeReason(
+  payload: unknown,
+  userDecision?: { readonly question: string },
+  approval?: { readonly reason: string },
+  blocked?: { readonly reason: string }
+): string | undefined {
+  const obj = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const candidates = [
+    obj.reason,
+    obj.blockageReason,
+    blocked?.reason,
+    approval?.reason,
+    userDecision?.question,
+    obj.headline,
+    obj.summary,
+    obj.status
+  ];
+  const raw = candidates.find((val): val is string => typeof val === "string" && val.trim().length > 0);
+  if (!raw) return undefined;
+  const sanitized = redactString(raw).replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 2000);
+  return sanitized.length > 0 ? sanitized : undefined;
+}
 /** Display state of a user-decision notice, for the Runtime watchdog. `since` is when the current wait began. */
 export interface ConversationNoticeState { messageId: string; approvalId?: string; runId?: string; surfaced: boolean; displayed: boolean; resends: number; since: string }
 const NoticeSurfacedSchema = z.object({ messageId: z.string().min(1), surfacedAt: z.string().datetime().optional() }).strict();
@@ -126,8 +192,21 @@ export class HostReceiptJournal {
   }
   readonly directory: string;
   readonly repository: string;
-  constructor(directory: string, repository: string, readonly sessionId: string) {
+  private readonly activityLog: { record(input: TaskActivityInput): Promise<boolean> };
+  private readonly noticeCache = new Map<string, ConversationNotice>();
+  private noticeAppends: Promise<unknown> = Promise.resolve();
+  constructor(
+    directory: string,
+    repository: string,
+    readonly sessionId: string,
+    activityLog?: { record(input: TaskActivityInput): Promise<boolean> }
+  ) {
     this.directory = resolve(directory); this.repository = resolve(repository); textField(sessionId);
+    this.activityLog = activityLog ?? TaskActivityLog.open(
+      basename(this.directory) === "authentication-receipts"
+        ? resolve(this.directory, "../../../agentic/task-activity.jsonl")
+        : resolve(this.directory, "../task-activity.jsonl")
+    );
   }
   private async prepare(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -301,19 +380,24 @@ export class HostReceiptJournal {
       digest([this.legacyBindingIdentity(binding), launchId, anchor]) === id;
   }
   private async receiptIds(kind: Kind): Promise<string[]> {
-    await this.prepare(); const ids: string[] = [];
+    const ids: string[] = [];
+    for (const name of await this.receiptNames(kind)) ids.push(await this.receiptId(kind, name));
+    return ids;
+  }
+  private async receiptNames(kind: Kind): Promise<string[]> {
+    await this.prepare();
     // Kinds can share a prefix, e.g. coordinator-stop and coordinator-stop-handled.
     const pattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`);
-    for (const name of await readdir(this.directory)) {
-      if (!pattern.test(name)) continue;
-      const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      let id: string;
-      try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
-        id = textField(record(JSON.parse(await file.readFile("utf8"))).id); } finally { await file.close(); }
-      if (name !== this.filename(kind, id)) throw new Error("Host receipt filename identity mismatch");
-      await this.read(kind, id); ids.push(id);
-    }
-    return ids;
+    return (await readdir(this.directory)).filter(name => pattern.test(name));
+  }
+  private async receiptId(kind: Kind, name: string): Promise<string> {
+    const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let id: string;
+    try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
+      id = textField(record(JSON.parse(await file.readFile("utf8"))).id); } finally { await file.close(); }
+    if (name !== this.filename(kind, id)) throw new Error("Host receipt filename identity mismatch");
+    await this.read(kind, id);
+    return id;
   }
   private async coordinatorStarts(): Promise<CoordinatorTurnObservation[]> {
     const values: CoordinatorTurnObservation[] = [];
@@ -745,7 +829,13 @@ export class HostReceiptJournal {
         this.conversationBindingIdentity(turn.binding) !== this.conversationBindingIdentity(binding))
       throw new Error("Resume requires the current authenticated Conversation user message");
     const request = parseConversationResumeRequest(turn.content);
-    if (!request || request.runId !== undefined && request.runId !== runId)
+    let requestedRunId = request?.runId;
+    if (requestedRunId && /^việc\s*#[1-9]\d*$/iu.test(requestedRunId)) {
+      const key = requestedRunId.toLowerCase().replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #");
+      const aliases = await this.noticeAliases();
+      requestedRunId = aliases.runShortIds[key] ?? requestedRunId;
+    }
+    if (!request || requestedRunId !== undefined && requestedRunId !== runId)
       throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
     return turn;
   }
@@ -773,19 +863,181 @@ export class HostReceiptJournal {
     if (intent === undefined || digest(record(intent).decision) !== digest(decision)) throw new Error("Conversation result lacks matching intent");
     await this.write("conversation-result", messageId, { messageId, decision, result });
   }
-  /** Idempotent by message ID: a replayed acknowledgement never creates a second notice. */
-  async appendConversationNotice(message: RoleMessage): Promise<boolean> {
+  private async allConversationNotices(): Promise<ConversationNotice[]> {
+    // Notice receipts are immutable once linked, so each file is validated and parsed once per journal.
+    const notices: ConversationNotice[] = [];
+    for (const name of await this.receiptNames("conversation-notice")) {
+      let notice = this.noticeCache.get(name);
+      if (notice === undefined) {
+        notice = ConversationNoticeSchema.parse(await this.read("conversation-notice", await this.receiptId("conversation-notice", name)));
+        this.noticeCache.set(name, notice);
+      }
+      notices.push(notice);
+    }
+    return notices.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.messageId.localeCompare(b.messageId));
+  }
+  /** Monotonic short aliases (#n -> approvalId, việc #k -> runId) persisted across notices. */
+  async noticeAliases(): Promise<{ approvalShortIds: Record<string, string>; runShortIds: Record<string, string> }> {
+    const notices = await this.allConversationNotices();
+    const approvalShortIds: Record<string, string> = {};
+    const runShortIds: Record<string, string> = {};
+    for (const notice of notices) {
+      const approvalId = notice.userDecision?.approvalId ?? notice.approval?.approvalId;
+      if (notice.shortId && approvalId) approvalShortIds[notice.shortId] = approvalId;
+      if (notice.runId && notice.runLabel) {
+        const workTag = notice.runLabel.split(":")[0]!.trim().toLowerCase().replace(/\s+/gu, " ");
+        if (/^việc #\d+$/iu.test(workTag)) runShortIds[workTag] = notice.runId;
+      }
+    }
+    return { approvalShortIds, runShortIds };
+  }
+  /**
+   * Idempotent by message ID: a replayed acknowledgement never creates a second notice. Appends are serialized because the
+   * next #n / Việc #k alias is derived from the notices already written; two concurrent appends must never share an alias.
+   */
+  appendConversationNotice(message: RoleMessage): Promise<boolean> {
+    const next = this.noticeAppends.then(() => this.appendConversationNoticeNow(message));
+    this.noticeAppends = next.catch(() => undefined);
+    return next;
+  }
+  private async appendConversationNoticeNow(message: RoleMessage): Promise<boolean> {
     const parsed = RoleMessageSchema.parse(message);
     if (await this.read("conversation-notice", parsed.message_id) !== undefined) return false;
     const text = JSON.stringify(parsed.payload) ?? "null", truncated = text.length > NOTICE_SUMMARY_LIMIT;
     const userDecision = parsed.type === "approval.request" ? userDecisionNoticeFields(parsed.payload) : undefined;
     const approval = parsed.type === "approval.request" && userDecision === undefined ? approvalNoticeFields(parsed.payload) : undefined;
     const blocked = blockedNoticeFields(parsed.payload);
-    return this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
+    const existingNotices = await this.allConversationNotices();
+    let maxShortNum = 0;
+    const approvalToShortId = new Map<string, string>();
+    const runWorkTags = new Map<string, string>();
+    const runTitles = new Map<string, string>();
+    for (const existing of existingNotices) {
+      if (existing.shortId) {
+        const num = Number(existing.shortId.slice(1));
+        if (Number.isSafeInteger(num) && num > maxShortNum) maxShortNum = num;
+        const existingApprovalId = existing.userDecision?.approvalId ?? existing.approval?.approvalId;
+        if (existingApprovalId) approvalToShortId.set(existingApprovalId, existing.shortId);
+      }
+      if (existing.runId) {
+        if (!runWorkTags.has(existing.runId)) {
+          const existingTag = existing.runLabel?.split(":")[0]?.trim();
+          runWorkTags.set(existing.runId, existingTag && /^Việc #\d+$/u.test(existingTag) ? existingTag : `Việc #${runWorkTags.size + 1}`);
+        }
+        const existingTitle = existing.runLabel?.includes(":") ? existing.runLabel.split(":").slice(1).join(":").trim() : undefined;
+        if (existingTitle && !runTitles.has(existing.runId)) runTitles.set(existing.runId, existingTitle);
+      }
+    }
+    const approvalId = userDecision?.approvalId ?? approval?.approvalId;
+    const shortId = (userDecision !== undefined || approval !== undefined || blocked !== undefined)
+      ? (approvalId ? approvalToShortId.get(approvalId) : undefined) ?? `#${maxShortNum + 1}`
+      : undefined;
+    let runLabel: string | undefined;
+    if (parsed.run_id !== undefined) {
+      const workTag = runWorkTags.get(parsed.run_id) ?? `Việc #${runWorkTags.size + 1}`;
+      const payloadRecord = parsed.payload && typeof parsed.payload === "object" && !Array.isArray(parsed.payload)
+        ? parsed.payload as Record<string, unknown>
+        : {};
+      const rawTitle = [payloadRecord.title, payloadRecord.specTitle, payloadRecord.specificationTitle]
+        .find((val): val is string => typeof val === "string" && val.trim().length > 0)?.trim() ?? runTitles.get(parsed.run_id);
+      runLabel = rawTitle ? `${workTag}: ${rawTitle.slice(0, 140)}` : workTag;
+    }
+    const reason = extractNoticeReason(parsed.payload, userDecision, approval, blocked);
+    const artifacts = extractNoticeArtifacts(parsed.payload, parsed.artifact_references, approval);
+    const created = await this.write("conversation-notice", parsed.message_id, { messageId: parsed.message_id, type: parsed.type, senderRole: parsed.sender.role,
       ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }), correlationId: parsed.correlation_id, receivedAt: new Date().toISOString(),
+      ...(shortId === undefined ? {} : { shortId }), ...(runLabel === undefined ? {} : { runLabel }),
+      ...(reason === undefined ? {} : { reason }), ...(artifacts.length === 0 ? {} : { artifacts }),
       ...(userDecision === undefined ? {} : { userDecision }), ...(approval === undefined ? {} : { approval }),
       ...(blocked === undefined ? {} : { blocked }),
       summary: truncated ? text.slice(0, NOTICE_SUMMARY_LIMIT) : text, truncated });
+    if (created) {
+      const payloadRecord = parsed.payload && typeof parsed.payload === "object" && !Array.isArray(parsed.payload)
+        ? parsed.payload as Record<string, unknown>
+        : {};
+      const payloadKind = typeof payloadRecord.kind === "string" && payloadRecord.kind.trim().length > 0
+        ? payloadRecord.kind.trim()
+        : typeof payloadRecord.metadata === "object" && payloadRecord.metadata !== null && !Array.isArray(payloadRecord.metadata) &&
+            typeof (payloadRecord.metadata as Record<string, unknown>).kind === "string"
+          ? String((payloadRecord.metadata as Record<string, unknown>).kind).trim()
+          : undefined;
+      const action = payloadKind ? `${parsed.type}:${payloadKind}`.slice(0, 80) : parsed.type.slice(0, 80);
+      try {
+        await this.activityLog.record({
+          kind: "notice",
+          role: parsed.sender.role,
+          action,
+          ...(parsed.run_id === undefined ? {} : { runId: parsed.run_id }),
+          ...(shortId === undefined ? {} : { shortId }),
+          ...(runLabel === undefined ? {} : { runLabel }),
+          messageType: parsed.type,
+          ...(reason === undefined ? {} : { reason, outcome: reason.slice(0, 240) }),
+          ...(artifacts.length === 0 ? {} : { artifacts })
+        });
+      } catch {
+        // Activity logging is best-effort diagnostics; never fail notice receipt persistence.
+      }
+    }
+    return created;
+  }
+  /** Read-only on-demand technical detail for one notice (#n or Việc #k) in the current Conversation session. */
+  async readConversationNoticeDetail(ref: string): Promise<{
+    shortId?: string;
+    runLabel?: string;
+    messageId: string;
+    type: string;
+    senderRole: string;
+    runId?: string;
+    correlationId: string;
+    receivedAt: string;
+    approvalId?: string;
+    reason?: string;
+    artifacts: string[];
+    summary: string;
+    truncated: boolean;
+  }> {
+    const trimmed = textField(ref).trim();
+    const shortMatch = /^#([1-9]\d*)$/u.exec(trimmed);
+    const workMatch = /^việc\s*#([1-9]\d*)$/iu.exec(trimmed);
+    if (!shortMatch && !workMatch) {
+      throw new Error(`Invalid notice reference '${trimmed}'; pass '#n' (e.g. '#1') or 'Việc #k' (e.g. 'Việc #1')`);
+    }
+    const notices = await this.allConversationNotices();
+    let target: ConversationNotice | undefined;
+    if (shortMatch) {
+      const normalizedShortId = `#${shortMatch[1]}`;
+      target = [...notices].reverse().find(item => item.shortId === normalizedShortId);
+    } else if (workMatch) {
+      const normalizedWorkTag = `việc #${workMatch[1]}`;
+      const matchingForWork = notices.filter(item => {
+        const tag = item.runLabel?.split(":")[0]?.trim().toLowerCase().replace(/\s+/gu, " ");
+        return tag === normalizedWorkTag;
+      });
+      target = [...matchingForWork].reverse().find(item => item.shortId !== undefined) ?? matchingForWork.at(-1);
+    }
+    if (!target) {
+      throw new Error(`Unknown notice reference '${trimmed}' in the current Conversation session`);
+    }
+    let parsedSummary: unknown;
+    try { parsedSummary = JSON.parse(target.summary); } catch { parsedSummary = undefined; }
+    const approvalId = target.userDecision?.approvalId ?? target.approval?.approvalId;
+    const reason = target.reason ?? extractNoticeReason(parsedSummary, target.userDecision, target.approval, target.blocked);
+    const artifacts = target.artifacts ?? extractNoticeArtifacts(parsedSummary, undefined, target.approval);
+    return {
+      ...(target.shortId === undefined ? {} : { shortId: target.shortId }),
+      ...(target.runLabel === undefined ? {} : { runLabel: target.runLabel }),
+      messageId: target.messageId,
+      type: target.type,
+      senderRole: target.senderRole,
+      ...(target.runId === undefined ? {} : { runId: target.runId }),
+      correlationId: target.correlationId,
+      receivedAt: target.receivedAt,
+      ...(approvalId === undefined ? {} : { approvalId }),
+      ...(reason === undefined ? {} : { reason: redactString(reason).slice(0, 2000) }),
+      artifacts: artifacts.map(uri => redactString(uri).slice(0, 300)).slice(0, 20),
+      summary: redactString(target.summary).slice(0, NOTICE_SUMMARY_LIMIT),
+      truncated: target.truncated
+    };
   }
   /** Reserve before the Herdr side effect. A lost acknowledgement consumes the attempt; restart never resets this budget. */
   async reserveConversationNudge(messageIds: readonly string[]): Promise<boolean> {
@@ -975,10 +1227,16 @@ export class HostReceiptJournal {
 const RESUME_PREFIX = "(?:(?:ok(?:e|ay)?|được|hãy|vui lòng|please)[\\s,]+){0,2}";
 const RESUME_SUFFIX_WORDS = "đi|nhé|nha|giúp mình|giúp em|giúp tôi|please|pls";
 const RESUME_REQUEST = new RegExp(`^${RESUME_PREFIX}(?:tiếp tục|resume|continue)` +
-  `(?:\\s+(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*))?` +
+  `(?:\\s+(?:(việc\\s*#[1-9]\\d*)|(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*)))?` +
   `(?:[\\s,]+(?:${RESUME_SUFFIX_WORDS})){0,2}\\s*[.!]?$`, "iu");
-/** An explicit user request to resume, optionally naming the exact run: "tiếp tục", "ok tiếp tục nhé", "Continue run-1 please". */
+/** An explicit user request to resume, optionally naming the exact run or work alias: "tiếp tục", "tiếp tục việc #1", "Continue run-1 please". */
 export function parseConversationResumeRequest(content: string): { runId?: string } | undefined {
   const match = RESUME_REQUEST.exec(content.trim());
-  return match ? (match[1] === undefined ? {} : { runId: match[1] }) : undefined;
+  if (!match) return undefined;
+  const rawTarget = match[1] ?? match[2];
+  if (rawTarget === undefined) return {};
+  const normalized = /^việc\s*#/iu.test(rawTarget)
+    ? rawTarget.replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #").toLowerCase()
+    : rawTarget;
+  return { runId: normalized };
 }

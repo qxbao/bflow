@@ -82,6 +82,70 @@ describe("P26 setup bridge and repository init data", () => {
       generation.manifest,
     );
   });
+  it("upgrades test-planning with nested references without invalidating an installed 1.0.0 generation", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "skills-tp-upgrade-")));
+    roots.push(root);
+    const previousFiles = await readBundle(
+      fileURLToPath(new URL("./fixtures/test-planning-1.0.0", import.meta.url)),
+    );
+    const previousDigest = bundleDigest(previousFiles);
+    const source = fileURLToPath(
+      new URL("../../../skills/verification/test-planning", import.meta.url),
+    );
+    const currentFiles = await readBundle(source);
+    const currentDigest = bundleDigest(currentFiles);
+    expect(currentDigest).not.toBe(previousDigest);
+    expect(currentFiles["references/risk-viewpoints.md"]).toBeDefined();
+    const store = new SkillFileStore(join(root, "store"));
+    const manager = new SkillManager({
+      store,
+      supportedCommands: BASELINE_COMMANDS,
+      approvedBuiltinDigests: [previousDigest, currentDigest],
+    });
+    const previous = await manager.installBundle(previousFiles, {
+      source: "builtin",
+      expectedDigest: previousDigest,
+    });
+    const generation = await manager.sync({
+      manifestId: "tester-generation-1",
+      environmentId: "tester-environment-1",
+      scope: {
+        kind: "session",
+        machineId: "machine",
+        repositoryId: "repository",
+        workspaceRoot: "/repository",
+        sessionId: "tester-session",
+      },
+      role: "tester",
+      provider: "claude",
+      selections: [
+        {
+          skill: {
+            skillId: previous.skillId,
+            version: previous.version,
+            digest: previous.digest,
+          },
+          required: true,
+        },
+      ],
+      capabilityIds: [],
+      toolIds: [],
+    });
+    const setup = new SkillsSetupSynchronizer(manager, store, [
+      { root: source, source: "builtin", expectedDigest: currentDigest },
+    ]);
+    await setup.sync({ mode: "apply" });
+    const latest = await manager.validate(source, "builtin");
+    expect(latest.version).toBe("1.0.1");
+    expect(await manager.list()).toEqual([previous, latest]);
+    expect(await manager.recover(generation.manifest.digest)).toEqual(
+      generation.manifest,
+    );
+    const storedLatest = await store.getBundle(currentDigest);
+    expect(storedLatest["references/risk-viewpoints.md"]).toBe(
+      currentFiles["references/risk-viewpoints.md"],
+    );
+  });
   it("plans without writes, applies pinned skills idempotently and observes content drift", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "skills-setup-")));
     roots.push(root);

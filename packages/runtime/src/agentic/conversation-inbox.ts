@@ -1,5 +1,5 @@
 /** Fixed, non-user prompt the host may type into an idle Conversation pane to make it read its inbox. Never an approval. */
-export const BFLOW_INBOX_NUDGE = "[bflow] Có cập nhật mới từ Runtime";
+export const BFLOW_INBOX_NUDGE = "🔔 Bflow có tin mới";
 
 const RULE = /^\s*[─━]{8,}\s*$/u;
 /** Empty prompt: `❯` or `>` followed only by spaces or no-break spaces. Any other text, including a ghost suggestion, is not empty. */

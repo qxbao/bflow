@@ -36,6 +36,9 @@ export interface NoticeLike {
   type?: string | undefined;
   senderRole?: string | undefined;
   runId?: string | undefined;
+  receivedAt?: string | undefined;
+  shortId?: string | undefined;
+  runLabel?: string | undefined;
   summary?: string | undefined;
   truncated?: boolean | undefined;
   /** Preferred over the summary when present and valid. Receipts written before this field existed simply lack it. */
@@ -51,6 +54,8 @@ export type RenderedNoticeKind = "user_decision" | "approval" | "blocked" | "upd
 export interface RenderedNotice {
   messageId: string;
   kind: RenderedNoticeKind;
+  shortId?: string | undefined;
+  runLabel?: string | undefined;
   runId?: string;
   approvalId?: string;
   requestedByRole?: string | undefined;
@@ -106,16 +111,117 @@ export const BlockedNoticeSchema = z.object({
 }).strict();
 
 const BLOCKED_LABEL: Record<(typeof BLOCKED_KINDS)[number], string> = {
-  workflow_blocked: "workflow bị chặn",
-  run_stalled: "run bị treo",
-  workflow_rejected: "workflow bị từ chối",
-  delivery_failure: "gửi tin nhắn thất bại",
-  delegation_rejected: "yêu cầu cập nhật bị từ chối",
-  coordinator_no_response: "Coordinator không phản hồi",
-  developer_no_response: "Developer không phản hồi",
-  specialist_no_response: "vai trò chuyên môn không phản hồi",
-  verification_stuck: "xác minh bị kẹt"
+  workflow_blocked: "công việc đang tạm dừng vì vướng mắc",
+  run_stalled: "công việc đang bị chững lại",
+  workflow_rejected: "kế hoạch thực hiện chưa đáp ứng điều kiện kiểm tra",
+  delivery_failure: "chuyển tin nhắn nội bộ chưa thành công",
+  delegation_rejected: "yêu cầu cập nhật chưa được tiếp nhận",
+  coordinator_no_response: "Trưởng nhóm kỹ thuật chưa phản hồi",
+  developer_no_response: "Lập trình viên chưa phản hồi",
+  specialist_no_response: "thành viên chuyên trách chưa phản hồi",
+  verification_stuck: "bước kiểm tra đang bị kẹt"
 };
+
+const ROLE_LABELS: Readonly<Record<string, string>> = {
+  coordinator: "Trưởng nhóm kỹ thuật",
+  developer: "Lập trình viên",
+  verifier: "Người kiểm tra",
+  reviewer: "Người kiểm tra",
+  qa: "Người kiểm tra",
+  tester: "Người kiểm tra",
+  specifier: "Người phân tích yêu cầu",
+  analyst: "Người phân tích yêu cầu",
+  architect: "Kiến trúc sư",
+  planner: "Người lập kế hoạch",
+  security: "Chuyên gia bảo mật",
+  runtime: "Hệ thống Bflow"
+};
+
+export function formatRoleLabel(role: string | undefined): string {
+  if (!role) return "Thành viên chuyên trách";
+  const normalized = role.trim().toLowerCase();
+  return ROLE_LABELS[normalized] ?? "Thành viên chuyên trách";
+}
+
+const MESSAGE_TYPE_LABELS: Readonly<Record<string, string>> = {
+  "conversation.progress": "cập nhật tiến độ",
+  "conversation.clarification": "câu hỏi làm rõ",
+  "delegation.accepted": "xác nhận tiếp nhận",
+  "delegation.request": "yêu cầu công việc",
+  "task.assignment": "giao việc",
+  "task.status": "trạng thái công việc",
+  "approval.request": "yêu cầu duyệt",
+  "approval.decision": "quyết định duyệt",
+  "verification.requested": "yêu cầu kiểm tra",
+  "verification.result": "kết quả kiểm tra",
+  "verification.escalation": "báo cáo vướng mắc kiểm tra",
+  "review.verdict": "kết quả đánh giá",
+  "spec.draft": "bản thảo đặc tả",
+  "spec.approved": "đặc tả đã duyệt",
+  "implementation.submitted": "bài nộp thực hiện",
+  "execution.receipt": "biên nhận thực thi"
+};
+
+/** What a card's own internal ids are shown as. Ids of other approvals or runs are never rewritten to this card's labels. */
+export interface CardIdentity { readonly approvalId?: string | undefined; readonly code?: string | undefined; readonly runId?: string | undefined; readonly workTag?: string | undefined }
+
+/** Cleans technical IDs, artifact URIs, raw JSON and English role/SDD terms from user-facing card prose. */
+export function sanitizeCardProse(text: string, identity: CardIdentity = {}): string {
+  let cleaned = text.split(/\s*[\[{]\s*"/u)[0]!.split(/\n\s*at\s+/u)[0]!.trim();
+  cleaned = cleaned
+    .replace(/\{"[^}]*\}/gu, "")
+    .replace(/artifact:\/\/[^\s,;)]+/giu, "tài liệu đính kèm")
+    .replace(/\b(?:apr|design|task-approval|delivery)-[a-zA-Z0-9_-]+\b/gu, id =>
+      id === identity.approvalId && identity.code ? identity.code : "một yêu cầu duyệt khác")
+    .replace(/\b(?:run\s+)?(run[_-][a-zA-Z0-9_-]+)\b/giu, (_match, id: string) =>
+      id === identity.runId && identity.workTag ? identity.workTag : "một công việc khác")
+    .replace(/SDD\s+level\s+conflict[^.\n]*/giu, "Xung đột mức đặc tả")
+    .replace(/\blightweight(?:\s+SDD)?\b/giu, "bản mô tả ngắn gọn")
+    .replace(/\bfull\s+SDD\b/giu, "bản đặc tả đầy đủ")
+    .replace(/\bSDD\b/gu, "đặc tả")
+    .replace(/\bCoordinator\b/giu, "Trưởng nhóm kỹ thuật")
+    .replace(/\bDeveloper\b/giu, "Lập trình viên")
+    .replace(/\b(?:Verifier|Reviewer|Tester|QA)\b/giu, "Người kiểm tra")
+    .replace(/\b(?:Specifier|Analyst)\b/giu, "Người phân tích yêu cầu")
+    .replace(/\bArchitect\b/giu, "Kiến trúc sư")
+    .replace(/\bPlanner\b/giu, "Người lập kế hoạch")
+    .replace(/\bRuntime\b/giu, "Hệ thống Bflow");
+  for (const [rawType, label] of Object.entries(MESSAGE_TYPE_LABELS)) {
+    cleaned = cleaned.replaceAll(rawType, label);
+  }
+  return cleaned.replace(/\s+/gu, " ").replace(/[\s:;,]+$/u, "").trim();
+}
+
+/** Wall-clock time in the host's local time zone (the user's machine); the date is added when it is not today. */
+function localClock(ms: number, nowMs: number, timeZone?: string): string {
+  const options: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit", hour12: false, ...(timeZone ? { timeZone } : {}) };
+  const day = (value: number) => new Intl.DateTimeFormat("en-CA", { dateStyle: "short", ...(timeZone ? { timeZone } : {}) }).format(value);
+  const time = new Intl.DateTimeFormat("vi-VN", options).format(ms);
+  if (day(ms) === day(nowMs)) return time;
+  const parts = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit", ...(timeZone ? { timeZone } : {}) }).formatToParts(ms);
+  const part = (type: string) => parts.find(item => item.type === type)?.value ?? "";
+  return `${time} ngày ${part("day")}/${part("month")}`;
+}
+
+/** Remaining time is measured at render time, so a reminder shown later never repeats the original countdown. */
+export function formatFriendlyExpiry(expiresAt: string | undefined, nowMs = Date.now(), timeZone?: string): string {
+  if (!expiresAt) return "chưa giới hạn thời gian — đang chờ bạn trả lời";
+  const expMs = Date.parse(expiresAt);
+  if (Number.isNaN(expMs)) return "đang chờ bạn trả lời";
+  const clock = localClock(expMs, nowMs, timeZone);
+  if (expMs <= nowMs) return `đã hết hạn lúc ${clock}`;
+  const mins = Math.max(1, Math.round((expMs - nowMs) / 60_000));
+  return mins <= 24 * 60 ? `còn ${mins} phút (hết hạn lúc ${clock})` : `hết hạn lúc ${clock}`;
+}
+
+/**
+ * Work label of a run. Notices written before aliases existed have no runLabel: they keep the run id, because a guessed
+ * `Việc #1` could name a different run whose alias really is #1.
+ */
+function workTagOf(notice: { readonly runLabel?: string | undefined }, runId: string | undefined): string | undefined {
+  const tag = notice.runLabel?.split(":")[0]?.trim();
+  return tag ? tag : runId ? `run ${runId}` : undefined;
+}
 
 /**
  * Structured decision fields for an approval.request payload, clipped to the receipt bounds.
@@ -178,50 +284,79 @@ export function approvalNoticeFields(payload: unknown): ApprovalNotice | undefin
 }
 
 function updateNotice(notice: NoticeLike): RenderedNotice {
-  const type = notice.type ?? "notice", sender = notice.senderRole ?? "runtime";
+  const type = notice.type ?? "notice";
   const truncated = notice.truncated === true;
   // A Runtime progress message says why it matters in blockageReason (or headline); show that instead of only the type.
   const payload = ["conversation.progress", "delegation.accepted"].includes(type) ? parseSummary(notice) : undefined;
-  const text = payload && typeof payload === "object" && !Array.isArray(payload)
+  const rawText = payload && typeof payload === "object" && !Array.isArray(payload)
     ? [(payload as Record<string, unknown>).blockageReason, (payload as Record<string, unknown>).headline].find(value => typeof value === "string" && value.length > 0) as string | undefined
     : undefined;
+  const runLabel = notice.runLabel;
+  const workTag = workTagOf(notice, notice.runId) ?? formatRoleLabel(notice.senderRole ?? "runtime");
+  const cleanText = rawText ? sanitizeCardProse(rawText, { runId: notice.runId, workTag }) : (MESSAGE_TYPE_LABELS[type] ? `Đã nhận ${MESSAGE_TYPE_LABELS[type]}` : "Có cập nhật tiến độ mới");
   // Bind display to this exact notice and its content: repeated/stale headlines must not acknowledge a different update.
-  const ackToken = notice.runId && text ? `[${notice.messageId}] ${text}` : undefined;
-  const headline = `ℹ️ Cập nhật từ ${sender} (${type})${notice.runId ? ` · run ${notice.runId}` : ""}${text ? `: ${ackToken ?? text}` : ""}`;
+  const ackToken = notice.runId && rawText ? `${workTag}: ${cleanText}` : undefined;
+  const headline = `▶ ${workTag}: ${cleanText}`;
   const note = truncated ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
   // Substantive progress needs display recovery too. Its text is an acknowledgement token, never approval authority.
-  return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}), headline,
-    ...(ackToken && text ? { ackToken, ackText: text } : {}),
+  return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}),
+    ...(runLabel ? { runLabel } : {}), headline,
+    ...(ackToken ? { ackToken, ackText: cleanText } : {}),
     display: `${headline}${note}` };
 }
 
 function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): RenderedNotice {
-  const runPart = fields.runId ? ` (run ${fields.runId})` : "";
-  const role = fields.requestedByRole ? capitalise(fields.requestedByRole) : "Một vai trò";
-  const options = (fields.options ?? []).map((text, index) => ({ number: index + 1, text }));
-  const headline = `🔔 [${fields.approvalId}] ${role} cần bạn quyết định${runPart}:`;
-  const reply = `Trả lời: ${fields.approvalId}: ${options.length ? "<số lựa chọn>" : "<nội dung trả lời>"}`;
-  const hanLine = `Hạn: ${fields.expiresAt ?? "Không có hạn — đang chờ bạn trả lời"}`;
-  const lines = [headline, fields.question, ...options.map(option => `${option.number}. ${option.text}`), hanLine, reply];
-  return { messageId: notice.messageId, kind: "user_decision", approvalId: fields.approvalId, ackToken: fields.approvalId,
-    ...(fields.runId ? { runId: fields.runId } : {}), requestedByRole: fields.requestedByRole, question: fields.question,
+  // A notice without an alias keeps its approval id: a guessed #1 could route the user's answer to another approval.
+  const shortId = notice.shortId ?? fields.approvalId;
+  const runId = fields.runId ?? notice.runId;
+  const runLabel = notice.runLabel;
+  const identity = { approvalId: fields.approvalId, code: shortId, runId, workTag: workTagOf(notice, runId) };
+  const role = fields.requestedByRole ? formatRoleLabel(fields.requestedByRole) : "Một thành viên";
+  const cleanQuestion = sanitizeCardProse(fields.question, identity);
+  const options = (fields.options ?? []).map((text, index) => ({ number: index + 1, text: sanitizeCardProse(text, identity) }));
+  const headline = `🔔 Cần bạn quyết định · ${shortId}`;
+  const expiryText = formatFriendlyExpiry(fields.expiresAt);
+  const replySample = options.length ? `"${shortId}: 1"` : `"${shortId}: <nội dung trả lời>"`;
+  const reply = `Bạn trả lời: ${replySample} — ${expiryText}`;
+  const lines = [
+    headline,
+    ...(runLabel ? [runLabel] : []),
+    `${role} hỏi: ${cleanQuestion}`,
+    ...options.map(option => `  ${option.number}. ${option.text}`),
+    reply
+  ];
+  return { messageId: notice.messageId, kind: "user_decision", shortId, ...(runLabel ? { runLabel } : {}),
+    approvalId: fields.approvalId, ackToken: shortId,
+    ...(runId ? { runId } : {}), requestedByRole: fields.requestedByRole, question: cleanQuestion,
     options, ...(fields.expiresAt ? { expiresAt: fields.expiresAt } : {}), headline, reply, display: lines.join("\n") };
 }
 
 /** Full content of a design/task/gate approval: what is approved, why, by whom, on what evidence, and the numbered choices. */
 function approvalContent(notice: NoticeLike, fields: ApprovalNotice): RenderedNotice {
-  const runPart = fields.runId ? ` (run ${fields.runId})` : "";
-  const options = [`${fields.approvalId}: approve`, `${fields.approvalId}: reject <lý do>`].map((text, index) => ({ number: index + 1, text }));
-  const headline = `🔔 [${fields.approvalId}] Yêu cầu phê duyệt${runPart}:`;
-  const evidence = fields.evidence.map(item => `${item.kind} ${item.uri}`).join("; ");
-  const evidenceLine = `Bằng chứng: ${fields.evidenceCount ? `${fields.evidenceCount} artifact${evidence ? ` — ${evidence}` : ""}` : "không có"}`;
-  const lines = [headline, `Đối tượng: ${fields.target}`, `Lý do: ${fields.reason}`, `Người yêu cầu: ${fields.requestedBy}`, evidenceLine,
-    `Hạn: ${fields.expiresAt ?? "Không có hạn — đang chờ bạn trả lời"}`, ...options.map(option => `${option.number}. ${option.text}`),
-    // The Conversation parser accepts exactly these: a bare number only while this is the sole pending approval.
-    `Trả lời: "${fields.approvalId}: 1" (duyệt) / "${fields.approvalId}: 2 <lý do>" (từ chối), hoặc "${fields.approvalId}: approve" / "${fields.approvalId}: reject <lý do>"; ` +
-      `chỉ khi đây là phê duyệt duy nhất đang chờ mới được gõ "1" hoặc "2 <lý do>" không kèm mã`];
-  return { messageId: notice.messageId, kind: "approval", approvalId: fields.approvalId, ackToken: fields.approvalId,
-    ...(fields.runId ? { runId: fields.runId } : {}), headline, reply: lines[lines.length - 1]!, options, ...(fields.expiresAt ? { expiresAt: fields.expiresAt } : {}),
+  const shortId = notice.shortId ?? fields.approvalId;
+  const runId = fields.runId ?? notice.runId;
+  const runLabel = notice.runLabel;
+  const role = formatRoleLabel(fields.requestedBy);
+  const cleanReason = sanitizeCardProse(fields.reason, { approvalId: fields.approvalId, code: shortId, runId, workTag: workTagOf(notice, runId) });
+  const options = [
+    { number: 1, text: "Đồng ý" },
+    { number: 2, text: "Chưa đồng ý (ghi lý do)" }
+  ];
+  const headline = `🔔 Cần bạn duyệt · ${shortId}`;
+  const evidenceLine = fields.evidenceCount > 0 ? `Kèm ${fields.evidenceCount} tài liệu (gõ "xem chi tiết ${shortId}" để xem)` : undefined;
+  const expiryText = formatFriendlyExpiry(fields.expiresAt);
+  const reply = `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") nếu cần sửa — ${expiryText}`;
+  const lines = [
+    headline,
+    ...(runLabel ? [runLabel] : []),
+    `Cần bạn duyệt: ${cleanReason} (do ${role} gửi)`,
+    ...(evidenceLine ? [evidenceLine] : []),
+    ...options.map(option => `  ${option.number}. ${option.text}`),
+    reply
+  ];
+  return { messageId: notice.messageId, kind: "approval", shortId, ...(runLabel ? { runLabel } : {}),
+    approvalId: fields.approvalId, ackToken: shortId,
+    ...(runId ? { runId } : {}), headline, reply, options, ...(fields.expiresAt ? { expiresAt: fields.expiresAt } : {}),
     display: lines.join("\n") };
 }
 
@@ -237,23 +372,42 @@ function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAY
 }
 
 function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLOAD>): RenderedNotice {
+  const shortId = notice.shortId;
   const runId = payload.runId ?? notice.runId;
-  const revision = requirementRevisionGuidance(payload, runId);
+  const runLabel = notice.runLabel;
+  const workTag = workTagOf(notice, runId) ?? "Công việc";
+  // Legacy notices keep the exact run id in commands; only an alias is lower-cased into "việc #k".
+  const workCommand = notice.runLabel ? workTag.toLowerCase() : runId ?? workTag;
+  const identity = { runId, workTag };
+  const revision = requirementRevisionGuidance(payload, runId, workCommand);
   const automatic = revision ? undefined : AutomaticResumeSchema.safeParse((payload as { automaticResume?: unknown }).automaticResume).data;
-  const options = (revision?.options ?? payload.options ?? []).map((text, index) => ({ number: index + 1, text }));
-  const headline = `⚠️ [${notice.messageId}] ${capitalise(BLOCKED_LABEL[payload.kind])}${runId ? ` (run ${runId})` : ""}: ${payload.reason}`;
-  // Options describe possible actions; they are not numbered decisions. Revisions go through Conversation's intent handling.
-  const reply = revision ? (revision.suggestedReply ? `Trả lời: "${revision.suggestedReply}".` :
-    `Trả lời bằng nội dung yêu cầu cần sửa cho ${runId ? `run ${runId}` : "run hiện tại"}.`) +
-    (runId ? ` Hoặc "hủy ${runId}" để hủy run.` : "") :
-    automatic && runId ? `Runtime sẽ tự tiếp tục run ${runId} (lần ${automatic.attempt}/${automatic.limit}); bạn chưa cần trả lời. Trả lời "hủy ${runId}" để hủy run.` :
-    runId ? `Trả lời "tiếp tục ${runId}" sau khi khắc phục, hoặc "hủy ${runId}" để hủy run.` : "Hãy cho Conversation biết cách xử lý";
+  const rawOptions = (revision?.options ?? payload.options ?? []).filter(opt => !(revision && /khắc phục capability/iu.test(opt)));
+  const options = rawOptions.map((text, index) => ({ number: index + 1, text: sanitizeCardProse(text, identity) }));
   // The reason's prose before any structured detail: agents often reformat the JSON detail but keep this sentence.
   const lead = payload.reason.split(/[\n[{]/u)[0]!.trim();
-  return { messageId: notice.messageId, kind: "blocked", ...(runId ? { runId } : {}), ackToken: notice.messageId,
+  const cleanLead = sanitizeCardProse(lead || payload.reason, identity).replace(/[.!?]+$/u, "");
+  const headline = `⚠️ Tạm dừng vì vướng mắc${shortId ? ` · ${shortId}` : ""}`;
+  const whatHappened = `Chuyện gì xảy ra: ${capitalise(BLOCKED_LABEL[payload.kind])}${cleanLead ? ` — ${cleanLead}.` : "."}`;
+  const impact = automatic && runId
+    ? `Ảnh hưởng: ${workTag} đang tạm dừng ngắn hạn; Hệ thống Bflow sẽ tự thử chạy lại (lần ${automatic.attempt}/${automatic.limit}).`
+    : `Ảnh hưởng: ${workTag} đang tạm dừng và chờ xử lý trước khi làm tiếp.`;
+  // Options describe possible actions; they are not numbered decisions. Revisions go through Conversation's intent handling.
+  const reply = revision
+    ? (revision.suggestedReply
+      ? `Bạn cần làm gì: Gõ "${revision.suggestedReply}" để cập nhật yêu cầu${runId ? `, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.` : "."}`
+      : `Bạn cần làm gì: Nêu rõ nội dung yêu cầu cần sửa cho ${workCommand}${runId ? `, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.` : "."}`)
+    : automatic && runId
+      ? `Bạn cần làm gì: Hệ thống Bflow sẽ tự thử chạy lại ${workTag} (lần ${automatic.attempt}/${automatic.limit}), bạn chưa cần làm gì; hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
+      : runId
+        ? `Bạn cần làm gì: Gõ "tiếp tục ${workCommand}" sau khi xử lý xong, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
+        : "Bạn cần làm gì: Hãy cho biết bạn muốn xử lý tiếp như thế nào.";
+  const nextSteps = (revision?.nextSteps ?? []).map(step => sanitizeCardProse(step, identity));
+  return { messageId: notice.messageId, kind: "blocked", shortId, ...(runLabel ? { runLabel } : {}),
+    ...(runId ? { runId } : {}), ackToken: shortId ?? notice.messageId,
     ...(revision ? { requiredActionText: revision.suggestedReply ?? "nội dung yêu cầu cần sửa" } : {}),
-    ...(lead.length >= 20 ? { ackText: lead } : {}), headline, reply,
-    options, display: [headline, ...(revision?.nextSteps ?? []), ...options.map(option => `- ${option.text}`), reply].join("\n") };
+    // The card shows the cleaned lead, so that is what a display check can find; the raw lead is only a fallback.
+    ...(cleanLead.length >= 10 ? { ackText: cleanLead } : lead.length >= 20 ? { ackText: lead } : {}), headline, reply,
+    options, display: [headline, ...(runLabel ? [runLabel] : []), whatHappened, impact, ...nextSteps, ...options.map(option => `- ${option.text}`), reply].join("\n") };
 }
 
 /** Blocked payload with its reason: Runtime-authored failures use blockageReason (or headline) instead of reason. */
@@ -315,8 +469,8 @@ export function notificationBody(notice: RenderedNotice, max = 400): string {
 export function mustShowSection(notices: readonly NoticeLike[]): string {
   const rendered = notices.map(renderConversationNotice).sort((a, b) => noticePriority(a) - noticePriority(b));
   if (!rendered.length) return "";
-  return "MUST SHOW TO USER VERBATIM:\n" + rendered.map(notice => notice.display).join("\n\n") +
-    "\n\n(Copy the lines above into your reply unchanged, including every [id] marker and run id; display is checked by them.)\n\n";
+  return "MUST SHOW TO USER:\n" + rendered.map(notice => notice.display).join("\n\n") +
+    "\n\n(Hãy trình bày lại bằng lời dễ hiểu cho người dùng, giữ nguyên mã #n, nhãn Việc #k, các lựa chọn đánh số và câu trả lời mẫu; hệ thống kiểm tra hiển thị dựa trên các thông tin này.)\n\n";
 }
 
 /** Markdown emphasis/code markers and whitespace runs removed, so bolding or wrapping a line does not hide it. */
@@ -325,17 +479,40 @@ function plain(text: string): string {
 }
 
 /**
- * Whether the final Conversation text shows this notice. Decisions and approvals must name their approval id. Updates and
- * blocks are also shown by their unique message id, or by their run id together with their exact text: a stale or other-run
- * headline never acknowledges a different notice. Advisory only: display never grants approval authority.
+ * Whether the final Conversation text shows this notice. Decisions and approvals must name their short #n alias (or legacy approvalId).
+ * Updates and blocks are also shown by their short #n / unique message id, or by their work/run label together with their exact text.
+ * Advisory only: display never grants approval authority.
  */
 export function noticeDisplayed(notice: RenderedNotice, shown: string): boolean {
   if (notice.ackToken === undefined) return false;
-  if (notice.requiredActionText !== undefined && !plain(shown).toLowerCase().includes(plain(notice.requiredActionText).toLowerCase())) return false;
-  if (shown.includes(notice.ackToken)) return true;
+  if (notice.requiredActionText !== undefined) {
+    const normalizedShown = plain(shown).toLowerCase();
+    const normalizedRequired = plain(notice.requiredActionText).toLowerCase();
+    const altRequired = notice.runId ? normalizedRequired.replace(/việc\s*#\d+/gu, `run ${notice.runId.toLowerCase()}`) : normalizedRequired;
+    if (!normalizedShown.includes(normalizedRequired) && !normalizedShown.includes(altRequired)) return false;
+  }
+  if (containsCode(shown, notice.ackToken)) return true;
+  if (notice.approvalId !== undefined && containsCode(shown, notice.approvalId)) return true;
   if (notice.kind !== "update" && notice.kind !== "blocked") return false;
-  if (shown.includes(notice.messageId)) return true;
-  return notice.runId !== undefined && notice.ackText !== undefined && shown.includes(notice.runId) && plain(shown).includes(plain(notice.ackText));
+  if (containsCode(shown, notice.messageId)) return true;
+  const workTag = notice.runLabel?.split(":")[0]?.trim();
+  // An update paraphrased in Vietnamese still names its work label; a whole-token match keeps Việc #12 from showing Việc #1.
+  if (notice.kind === "update" && workTag && containsCode(plain(shown), workTag)) return true;
+  if (notice.ackText === undefined || (!plain(shown).includes(plain(notice.ackText)) && !plain(sanitizeCardProse(shown, { runId: notice.runId, workTag: workTagOf(notice, notice.runId) })).includes(plain(notice.ackText)))) return false;
+  if (notice.runId !== undefined && containsCode(shown, notice.runId)) return true;
+  return workTag !== undefined && workTag.length > 0 && containsCode(plain(shown), workTag);
+}
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/**
+ * Whole-token match. `#1` is not shown by `#12`, by `Việc #1` (a work label, not the card) or inside another id;
+ * `Việc #1` is not shown by `Việc #12`.
+ */
+export function containsCode(shown: string, code: string): boolean {
+  if (!code) return false;
+  const card = /^#\d+$/u.test(code) ? "(?<!việc\\s*)" : "";
+  return new RegExp(`(?<![\\p{L}\\p{N}_#-])${card}${escapeRegExp(code)}(?![\\p{L}\\p{N}_-])`, "iu").test(shown);
 }
 
 /** A genuine user prompt: a string, or a user entry with a text block. Tool results are user-role entries without text. */

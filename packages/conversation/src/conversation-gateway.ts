@@ -243,6 +243,27 @@ export class ConversationGateway {
   }
 
   /**
+   * Synchronizes monotonic short aliases (#n -> approvalId, việc #k -> runId) from the host notice store.
+   */
+  syncNoticeAliases(aliases: {
+    readonly approvalShortIds?: Readonly<Record<string, string>>;
+    readonly runShortIds?: Readonly<Record<string, string>>;
+  }): void {
+    if (!this.snapshot) return;
+    const approvalShortIds = aliases.approvalShortIds && Object.keys(aliases.approvalShortIds).length > 0
+      ? { ...(this.snapshot.approvalShortIds ?? {}), ...aliases.approvalShortIds }
+      : this.snapshot.approvalShortIds;
+    const runShortIds = aliases.runShortIds && Object.keys(aliases.runShortIds).length > 0
+      ? { ...(this.snapshot.runShortIds ?? {}), ...aliases.runShortIds }
+      : this.snapshot.runShortIds;
+    this.snapshot = {
+      ...this.snapshot,
+      ...(approvalShortIds !== undefined ? { approvalShortIds } : {}),
+      ...(runShortIds !== undefined ? { runShortIds } : {})
+    };
+  }
+
+  /**
    * Initializes a fresh session or recovers state from ConversationContextStore.
    */
   async initializeOrRecoverSession(): Promise<OperationResult<ConversationContextSnapshot>> {

@@ -27,6 +27,11 @@ import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFa
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
 import { NativeDiagnosticFenceAuthoritySchema, NativeDiagnosticFenceSchema } from "./native-diagnostic-fence.js";
 import { requirementRevisionGuidance } from "./requirement-revision-guidance.js";
+import {
+  buildReworkAssignmentContext, ReworkAssignmentContextSchema, settleReworkVerificationOutcome,
+  toAssignedQualityFindings, validateAndStoreReworkResolution, verifyStoredReworkDossier,
+  type ReworkResolutionDossier
+} from "./rework-causality.js";
 
 /** Existing receipt and diagnostic operations that may drain after scheduling is quiesced. */
 export const QUIESCED_RECEIPT_DRAIN_OPERATIONS: readonly string[] = Object.freeze([
@@ -1027,9 +1032,14 @@ export class AgenticWorkflowRuntime {
             if (!current?.session || current.paneId === old.paneId || digest(current.session) === digest(old.session))
               throw new Error("Authorized review replacement requires a distinct verified native session");
           }
+          const task = run.tasks.find(item => item.taskId === context.taskId);
+          const reworkDossier = task?.reworkResolutions?.find(item => item.attemptId === context.attemptId);
+          const gateArtifacts = reworkDossier
+            ? [...context.artifacts, reworkDossier.artifactRef, ...reworkDossier.findingResolutions.map(item => item.evidence.artifactRef)]
+            : context.artifacts;
           outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: key, correlation_id: run.delegation.correlationId,
             run_id: run.runId, ...(recoverySource ? { causation_id: recoverySource.message.message_id } : {}), sender: { role: "coordinator" }, recipient: { role }, type: "verification.requested",
-            payload: context, artifact_references: context.artifacts, occurred_at: this.now(), idempotency_key: key }), role,
+            payload: context, artifact_references: gateArtifacts, occurred_at: this.now(), idempotency_key: key }), role,
             `check-${digest([context.taskId, context.definition.id, context.attemptId])}`, context.attemptId!, role === "reviewer" ? ["review"] : role === "tester" ? ["testing"] : ["verification"]);
           await save();
         });
@@ -1475,6 +1485,46 @@ export class AgenticWorkflowRuntime {
         } else if (message.type === "task.status" && message.sender.role === "developer" && this.resolverReport(state, outbox, run, message)) {
           // Handled: a resolver report ends its own attempt; Runtime assigns the next resolver or escalates on the next tick.
         } else {
+          if (message.type === "task.status" && message.sender.role === "developer" && objectField(message.payload, "findingResolutions") !== undefined) {
+            const out = state.outbound.find(item => item.message.message_id === message.causation_id && item.message.type === "task.assignment");
+            const task = out ? run.tasks.find(item => item.taskId === out.taskId) : undefined;
+            const definition = task ? run.definition?.tasks.find(item => item.id === task.taskId) : undefined;
+            if (out?.handle && task?.cycle?.status === "rework_required" && task.cycle.history.length > 0 && definition) {
+              const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId);
+              const rawReworkContext = record(out.message.payload).reworkContext;
+              const reworkContext = rawReworkContext !== undefined
+                ? ReworkAssignmentContextSchema.parse(rawReworkContext)
+                : buildReworkAssignmentContext({
+                    runId: run.runId,
+                    taskId: task.taskId,
+                    cycle: task.cycle,
+                    lastChangeSetHead: task.changeSet?.headCommitHash,
+                    attempt: current?.attempt ?? (task.cycle.history.length + 1),
+                    attemptId: out.handle.attemptId,
+                    coreGeneration: current?.generation ?? task.cycle.history.length
+                  });
+              try {
+                const dossier = await validateAndStoreReworkResolution({
+                  reworkContext,
+                  findingResolutionsInput: objectField(message.payload, "findingResolutions"),
+                  worktreePath: out.handle.target.worktreePath ?? task.worktrees.at(-1)!.worktreePath,
+                  ownedPaths: strings(record(definition.metadata).ownedPaths),
+                  forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [],
+                  submissionStatus: "blocked",
+                  submittedByAgentId: out.handle.target.agentId,
+                  submittedAt: message.occurred_at ?? this.now(),
+                  artifactStore: this.ports.artifactStore
+                });
+                task.reworkResolutions ??= [];
+                const idx = task.reworkResolutions.findIndex(item => item.attemptId === dossier.attemptId);
+                if (idx >= 0) task.reworkResolutions[idx] = dossier;
+                else task.reworkResolutions.push(dossier);
+              } catch (error) {
+                inbox.status = "rejected"; inbox.reason = redactString(String(error)).slice(0, 2000); await save();
+                throw error;
+              }
+            }
+          }
           const blockage = message.sender.role !== "coordinator" ? specialistBlockage(message.payload) : undefined;
           if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
           if (message.recipient.role === "coordinator") this.wakeCoordinator(state, outbox, run, message);
@@ -2547,6 +2597,63 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (result.artifactProposals.length) throw new Error("Materialized proposals must be ingested by the trusted host before submission");
     const snapshot = await core.snapshot(run.runId);
     if (snapshot.tasks.find(item => item.taskId === result.taskId)?.attemptId !== result.attemptId) throw new Error("Stale implementation attempt");
+    const rawReworkContext = record(out.message.payload).reworkContext;
+    const isReworkAttempt = rawReworkContext !== undefined || (task.cycle?.status === "rework_required" && task.cycle.history.length > 0);
+    if (isReworkAttempt && (result.status === "succeeded" || result.status === "blocked")) {
+      const outObj = result.output !== null && typeof result.output === "object" && !Array.isArray(result.output)
+        ? (result.output as Record<string, unknown>) : undefined;
+      const metaObj = result.metadata ?? undefined;
+      const dossierInput = outObj?.reworkResolution ?? metaObj?.reworkResolution;
+      const findingResolutionsInput = outObj?.findingResolutions ?? metaObj?.findingResolutions;
+      if (result.status === "succeeded" || dossierInput !== undefined || findingResolutionsInput !== undefined) {
+        const definition = run.definition!.tasks.find(item => item.id === task.taskId)!;
+        const ownedPaths = strings(record(definition.metadata).ownedPaths);
+        const forbiddenPaths = definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [];
+        const worktreePath = out.handle.target.worktreePath ?? task.worktrees.at(-1)!.worktreePath;
+        const reworkContext = rawReworkContext !== undefined
+          ? ReworkAssignmentContextSchema.parse(rawReworkContext)
+          : buildReworkAssignmentContext({
+              runId: run.runId,
+              taskId: task.taskId,
+              cycle: task.cycle!,
+              lastChangeSetHead: task.changeSet?.headCommitHash,
+              attempt: currentTask!.attempt,
+              attemptId: result.attemptId,
+              coreGeneration: currentTask!.generation
+            });
+        try {
+          const dossier = dossierInput !== undefined
+            ? await verifyStoredReworkDossier({
+                dossierInput,
+                reworkContext,
+                worktreePath,
+                ownedPaths,
+                forbiddenPaths,
+                expectedStatus: result.status,
+                artifactStore: this.ports.artifactStore
+              })
+            : await validateAndStoreReworkResolution({
+                reworkContext,
+                findingResolutionsInput,
+                worktreePath,
+                ownedPaths,
+                forbiddenPaths,
+                submissionStatus: result.status,
+                submittedByAgentId: out.handle.target.agentId,
+                submittedAt: result.completedAt,
+                artifactStore: this.ports.artifactStore
+              });
+          task.reworkResolutions ??= [];
+          const existingIdx = task.reworkResolutions.findIndex(item => item.attemptId === dossier.attemptId);
+          if (existingIdx >= 0) task.reworkResolutions[existingIdx] = dossier;
+          else task.reworkResolutions.push(dossier);
+        } catch (error) {
+          const inbox = state.inbox.find(item => item.message.message_id === message.message_id);
+          if (inbox) { inbox.status = "rejected"; inbox.reason = redactString(String(error)).slice(0, 2000); await save(); }
+          throw error;
+        }
+      }
+    }
     await outbox.renew(out);
     task.result = result;
     await save();
@@ -2599,14 +2706,31 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const pane = PaneBindingSchema.parse(allocation.value);
       if (pane.worktreePath !== tree.worktreePath || pane.agentId !== agentName) throw new Error("Developer allocation mismatch");
       const requiredCapabilities = definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : ["implementation"];
+      const reworkContext = task.cycle?.status === "rework_required" && task.cycle.history.length > 0
+        ? buildReworkAssignmentContext({
+            runId: run.runId,
+            taskId: task.taskId,
+            cycle: task.cycle,
+            lastChangeSetHead: prior?.headCommitHash,
+            attempt: taskState.attempt,
+            attemptId: taskState.attemptId!,
+            coreGeneration: taskState.generation
+          })
+        : undefined;
+      const baseInstruction = "Use Runtime authorize_implementation after independent Red evidence, then Green and Refactor. Submit only via Herdr. Never infer success from a terminal status.";
+      const instruction = reworkContext
+        ? `${baseInstruction} Rework generation ${reworkContext.reworkGeneration}: every assigned finding in reworkContext.findings must be explained in findingResolutions when calling submit_implementation (or in AgentResult.output.findingResolutions), binding findingId -> disposition (addressed | disputed | blocked) -> rootCause -> sourceLocations -> repairSummary -> discriminatingCheck -> evidence (with current sourceRevision and reworkGeneration). Developer self-reported 'addressed' never closes a finding without independent verification.`
+        : baseInstruction;
       const messageId = `message-${digest(id)}`;
       const message = RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
         correlation_id: run.delegation.correlationId, causation_id: run.delegation.messageId, run_id: run.runId,
         sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: pane.agentId, pane_id: pane.paneId },
         type: "task.assignment", payload: { task: definition, specification: task.spec.specification,
-          testStrategy: task.spec.strategy, worktree: tree, findings: task.cycle?.history.at(-1)?.findings ?? [],
+          testStrategy: task.spec.strategy, worktree: tree,
+          findings: reworkContext ? toAssignedQualityFindings(reworkContext) : (task.cycle?.history.at(-1)?.findings ?? []),
+          ...(reworkContext ? { reworkContext } : {}),
           implementationAuthorizationRequired: task.spec.strategy.tddDecision.mode === "required",
-          instruction: "Use Runtime authorize_implementation after independent Red evidence, then Green and Refactor. Submit only via Herdr. Never infer success from a terminal status." },
+          instruction },
         artifact_references: [task.spec.specification.artifactRef!], occurred_at: this.now(), idempotency_key: id });
       outbox.enqueue(message, pane.bindingId, task.taskId, taskState.attemptId!, requiredCapabilities);
       task.outboundIds.push(messageId); delete task.result; task.writerReleased = false;
@@ -2620,6 +2744,54 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (!task || task.spec.specification.status !== "approved") throw new Error("No accepted task specification");
       this.ports.policies.assertReadyToImplement(task.spec.strategy);
       return json({ authorized: true, decisionId: task.spec.strategy.tddDecision.decisionId });
+    });
+  }
+  async prepareReworkSubmission(
+    bindingInput: PaneBinding,
+    runIdInput: string,
+    taskIdInput: string,
+    findingResolutionsInput: unknown,
+    submissionStatus: "succeeded" | "blocked" = "succeeded"
+  ): Promise<ReworkResolutionDossier | undefined> {
+    const binding = PaneBindingSchema.parse(bindingInput), runId = textField(runIdInput), taskId = textField(taskIdInput);
+    return this.transaction(async (state, _save, core, outbox) => {
+      if (this.quiesced || binding.role !== "developer") throw new Error("Developer writes are quiesced or unauthorized");
+      const run = this.run(state, runId); this.live(run);
+      assertNoPendingPaneDecision(run, binding);
+      const task = run.tasks.find(item => item.taskId === taskId), definition = run.definition?.tasks.find(item => item.id === taskId);
+      const current = (await core.snapshot(runId)).tasks.find(item => item.taskId === taskId);
+      const out = state.outbound.find(item => item.handle?.requestId === current?.agentExecution?.requestId);
+      if (!task || !definition || task.spec.specification.status !== "approved" || current?.status !== "running" ||
+          !out?.handle || out.status !== "accepted" || out.handle.target.agentId !== binding.agentId || out.handle.target.paneId !== binding.paneId ||
+          out.handle.target.worktreePath !== binding.worktreePath || digest(out.handle.target.session) !== digest(binding.session) ||
+          task.worktrees.at(-1)?.worktreePath !== binding.worktreePath)
+        throw new Error("No current Developer assignment owns this task workspace");
+      await outbox.renew(out);
+      if (task.cycle?.status !== "rework_required" || !task.cycle.history.length) return undefined;
+      const rawReworkContext = record(out.message.payload).reworkContext;
+      const reworkContext = rawReworkContext !== undefined
+        ? ReworkAssignmentContextSchema.parse(rawReworkContext)
+        : buildReworkAssignmentContext({
+            runId: run.runId,
+            taskId: task.taskId,
+            cycle: task.cycle,
+            lastChangeSetHead: task.changeSet?.headCommitHash,
+            attempt: current.attempt,
+            attemptId: current.attemptId!,
+            coreGeneration: current.generation
+          });
+      if (!binding.worktreePath) throw new Error("Developer binding lacks worktreePath");
+      return validateAndStoreReworkResolution({
+        reworkContext,
+        findingResolutionsInput,
+        worktreePath: binding.worktreePath,
+        ownedPaths: strings(record(definition.metadata).ownedPaths),
+        forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [],
+        submissionStatus,
+        submittedByAgentId: binding.agentId,
+        submittedAt: this.now(),
+        artifactStore: this.ports.artifactStore
+      });
     });
   }
   /** Trusted local tool guard. Keep current ownership and lease checks adjacent
@@ -2989,10 +3161,16 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               task.changeSet = change;
               const plan = this.verificationPlan(state, run, task);
               task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, task.taskId])}`));
+              const latestReworkDossier = task.reworkResolutions?.find(item => item.attemptId === current.attemptId);
+              if (task.cycle.history.length > 0 && record(out.message.payload).reworkContext !== undefined && !latestReworkDossier) {
+                throw new Error(`Rework attempt ${current.attemptId} for ${task.taskId} cannot enter verification without a validated rework resolution dossier`);
+              }
               task.verificationPending = true; run.status = "verifying";
               jobs.push({ runId: run.runId, taskId: task.taskId, plan, cycle: task.cycle, change,
                 options: task.cycle.history.length ? { repair: { taskId: task.taskId, role: "developer", changeSetId: change.changeSetId,
-                  summary: "Developer repaired the independent verification findings" } } : {} });
+                  summary: latestReworkDossier
+                    ? `Rework generation ${latestReworkDossier.reworkGeneration} (${latestReworkDossier.dossierId}): ${latestReworkDossier.findingResolutions.map(item => `${item.findingId} [${item.disposition}]`).join(", ")}`
+                    : "Developer repaired the independent verification findings" } } : {} });
               await save();
             }
             const snapshot = await core.snapshot(run.runId);
@@ -3219,6 +3397,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (!retryable && !await core.hasEvent(run.runId, "quality_gate.evaluated", evaluationId)) await core.mutate(run.runId, snapshot => this.ports.engine.recordQualityGateResult({ expectedVersion: snapshot.version,
           result: gate, idempotencyKey: `gate-result:${result.verificationId}` }));
         task.cycle = cycle; task.verificationPending = false;
+        if (task.reworkResolutions?.length) {
+          const reworkIdx = task.reworkResolutions.findIndex(item => item.attemptId === task.result?.attemptId);
+          if (reworkIdx >= 0) {
+            task.reworkResolutions[reworkIdx] = settleReworkVerificationOutcome(task.reworkResolutions[reworkIdx]!, result, cycle);
+          }
+        }
         const out = state.outbound.find(item => item.handle?.requestId === task.result!.requestId);
         if (out) await outbox.release(out);
         if (cycle.status === "rework_required") {

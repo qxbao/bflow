@@ -58,6 +58,34 @@ describe("skill ingress validation", () => {
         "example.md": "Local example.",
       }).skillId,
     ).toBe("example");
+    expect(
+      validate({
+        ...files(),
+        "SKILL.md":
+          body() + "\n[viewpoints](references/risk-viewpoints.md)",
+        "references/risk-viewpoints.md":
+          "See [sibling](sibling.md).\n",
+        "references/sibling.md": "Nested reference content.\n",
+      }).skillId,
+    ).toBe("example");
+    expect(() =>
+      validate({
+        ...files(),
+        "SKILL.md":
+          body() + "\n[viewpoints](references/risk-viewpoints.md)",
+        "references/risk-viewpoints.md":
+          "Broken [escape](../SKILL.md) from nested reference.\n",
+      }),
+    ).toThrow(/Unsafe or unfetched resource reference/);
+    expect(() =>
+      validate({
+        ...files(),
+        "SKILL.md":
+          body() + "\n[viewpoints](references/risk-viewpoints.md)",
+        "references/risk-viewpoints.md":
+          "Missing [missing](absent.md) inside nested reference.\n",
+      }),
+    ).toThrow(/Missing skill reference/);
   });
   it("checks all resource commands against supported command IDs", () => {
     for (const cmd of [

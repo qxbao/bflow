@@ -114,5 +114,8 @@ structured decision, then uses the existing Coordinator bridge. Read-only invest
 can be workflow spikes; named role/module scope does not require invented file paths.
 Record the exact questions/options before asking so short replies can be interpreted in
 context. Human approval remains hook-only; MCP cannot submit `approval_response`.
+Pending Runtime updates are fetched via `read_updates` and presented in plain everyday
+Vietnamese (`#n` and `Việc #k` aliases, "Chuyện gì xảy ra → Ảnh hưởng → Bạn cần làm gì")
+without exposing raw JSON, internal IDs, enum names, `artifact://` URIs, or MCP tool names.
 See [the prompt](system-prompt.md) and [Conversation package](../../packages/conversation/README.md)
 for the decision fields, retry behavior, and local-test evidence limits.

@@ -138,7 +138,7 @@ describe("isProviderInputEmpty", () => {
     expect(isProviderInputEmpty("claude", "")).toBe(false);
     expect(isProviderInputEmpty("claude", "│ >  │\n╰──╯\n" + "trailing text")).toBe(false);
   });
-  it("exposes the fixed nudge as a non-user marker", () => {
-    expect(BFLOW_INBOX_NUDGE).toContain("[bflow]");
+  it("exposes the friendly nudge as a non-user marker", () => {
+    expect(BFLOW_INBOX_NUDGE).toBe("🔔 Bflow có tin mới");
   });
 });

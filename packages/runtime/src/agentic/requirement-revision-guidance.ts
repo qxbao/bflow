@@ -32,7 +32,7 @@ function requiresFull(text: string): boolean {
 }
 
 /** Display guidance and conservative pause classification; never revises or approves a requirement. */
-export function requirementRevisionGuidance(payload: unknown, runId?: string) {
+export function requirementRevisionGuidance(payload: unknown, runId?: string, workLabel?: string) {
   const parsed = Details.safeParse(payload);
   if (!parsed.success) return undefined;
   const detail = parsed.data;
@@ -44,20 +44,20 @@ export function requirementRevisionGuidance(payload: unknown, runId?: string) {
   // Only suggest full when the reported blocker explicitly says full is required.
   // Other scope/SDD conflicts need the user's actual revision, not an invented fix.
   const needsFull = detail.requiredSddLevel === "full" || sdd && requiresFull(text);
-  const target = runId ? `run ${runId}` : "run hiện tại";
-  const suggestedReply = needsFull ? `đổi yêu cầu ${target} sang full SDD, giữ nguyên phạm vi và tiêu chí nghiệm thu` : undefined;
+  const target = workLabel ?? (runId ? `run ${runId}` : "việc hiện tại");
+  const suggestedReply = needsFull ? `đổi yêu cầu ${target} sang bản đặc tả đầy đủ, giữ nguyên phạm vi và tiêu chí nghiệm thu` : undefined;
   return {
     requested_action: "authorized_requirement_revision" as const,
     ...(needsFull ? { requiredSddLevel: "full" as const } : {}),
     blockers,
     options: needsFull
-      ? ["Đổi sang full SDD để giữ nguyên phạm vi (đề xuất)", "Sửa hoặc thu hẹp phạm vi để Coordinator đánh giá lại", "Hủy run"]
-      : ["Nêu rõ yêu cầu cần sửa để giải quyết xung đột", "Hủy run"],
+      ? ["Đổi sang bản đặc tả đầy đủ để giữ nguyên phạm vi (đề xuất)", "Sửa hoặc thu hẹp phạm vi để Trưởng nhóm kỹ thuật đánh giá lại", "Hủy việc này"]
+      : ["Nêu rõ yêu cầu cần sửa để giải quyết xung đột", "Hủy việc này"],
     nextSteps: [
-      ...(needsFull ? ["lightweight là đặc tả rút gọn; full SDD là đặc tả đầy đủ mà chính sách yêu cầu cho tính năng này."] : []),
-      "Bạn cần xác nhận nội dung sửa yêu cầu qua Conversation. Chỉ gửi lệnh tiếp tục không sửa yêu cầu và không giải quyết xung đột.",
+      ...(needsFull ? ["Dự án yêu cầu bản đặc tả đầy đủ cho tính năng này, thay vì bản mô tả ngắn gọn hiện tại."] : []),
+      "Bạn cần xác nhận nội dung sửa yêu cầu qua cuộc trò chuyện. Chỉ gửi lệnh tiếp tục không sửa yêu cầu và không giải quyết xung đột.",
       ...(blockers.length ? [`Chi tiết cần giải quyết: ${blockers.join("; ")}`] : []),
-      "Sau khi bạn trả lời, Conversation gửi bản sửa cho đúng run; Runtime/Coordinator xác nhận, đánh giá lại rồi mới tiếp tục. Các cổng phê duyệt vẫn giữ nguyên."
+      "Sau khi bạn trả lời, hệ thống sẽ gửi bản sửa cho đúng công việc; Trưởng nhóm kỹ thuật xác nhận, đánh giá lại rồi mới tiếp tục. Các bước chờ bạn duyệt vẫn giữ nguyên."
     ],
     ...(suggestedReply ? { suggestedReply } : {})
   };

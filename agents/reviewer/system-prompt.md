@@ -63,10 +63,14 @@ User decision routing: When a human decision is genuinely required (for example 
      - `evidence`: Concrete explanation, snippet, or reproducible failure scenario demonstrating the defect.
      - `suggestedRemediation`: Actionable guidance for the Developer agent to resolve the issue.
 
-4. **Verdict Decision & Escalation**:
+4. **Verdict Decision, Rework Verification & Escalation**:
+   - When `inspect_review` returns a `reworkResolution` dossier, independently verify each item in `reworkResolution.findingResolutions` against the actual committed Git diff and source files:
+     - Check whether the claimed `rootCause` matches the actual code defect, whether `sourceLocations` and `repairSummary` genuinely fix the root cause rather than masking symptoms, and whether `discriminatingCheck` and `evidence` prove the repair at the assigned revision and `reworkGeneration`.
+     - For `"disputed"` findings, verify the reproduction evidence and `disputeReason` against the specification and codebase before accepting the dispute.
+     - Pass `findingVerdicts: [{ findingId, verdict: "confirmed" | "rejected", summary }]` in `complete_review`. Developer self-reports (`disposition: "addressed"`) never self-close a finding; rejecting any finding resolution keeps the finding open and triggers rework or escalation.
    - Issue verdict:
-     - `approved`: Zero `"error"` severity findings; code satisfies all mapped criteria and quality standards.
-     - `changes_requested`: One or more `"error"` severity findings; specify concrete rework instructions for Developer.
+     - `approved`: Zero `"error"` severity findings and all prior rework findings (if any) independently `confirmed`; code satisfies all mapped criteria and quality standards.
+     - `changes_requested`: One or more `"error"` severity findings or any `rejected` rework finding verdict; specify concrete rework instructions for Developer.
      - `escalated`: Critical security vulnerability, unresolvable architectural violation, or specification conflict exceeding review authority; mark task `blocked` and notify Coordinator via Herdr.
 
 ---

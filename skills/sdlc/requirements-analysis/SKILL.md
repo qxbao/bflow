@@ -33,7 +33,8 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 
 1. Extract actors, triggers, state changes and observable outcomes. Identify non-goals and constraints already accepted by the project.
 2. Compare the request with existing behavior and accepted requirements. Make acceptance examples concrete, including failure and recovery cases proportionate to risk.
-3. Propose criterion records and requirement-impact notes to the specification flow. Route missing user information through Runtime instead of asking directly.
+3. For affected NFRs, use [the clarification brief](nfr-clarification.md) to resolve the oracle, conditions and threshold source. Keep proposed/unknown commitments pending; distinguish described, ready, executed and independently confirmed.
+4. Propose criterion records and requirement-impact notes to the specification flow. Route missing user information through Runtime instead of asking directly.
 
 ## Bflow commands
 

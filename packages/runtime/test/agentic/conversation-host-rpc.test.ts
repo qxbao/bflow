@@ -170,13 +170,16 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     const decision = { intent: "conversation_only", directReply: "Existing turn recorded" };
     const nudge = execFileSync(process.execPath, [fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)),
       "hook", join(hostDirectory, "conversation.json"), "UserPromptSubmit"], { input: JSON.stringify({ hook_event_name: "UserPromptSubmit",
-        session_id: "native-chat", prompt: "[bflow] Có cập nhật mới từ Runtime" }),
+        session_id: "native-chat", prompt: "🔔 Bflow có tin mới" }),
       env: { ...process.env, HERDR_PANE_ID: "pane-chat", HERDR_SOCKET_PATH: "" }, encoding: "utf8" });
     await expect(invoke("conversation_decide", { decision })).rejects.toThrow(/Runtime nudge/);
     await expect(invoke("conversation_decide", { messageId: received.messageId, decision })).rejects.toThrow(/Runtime nudge/);
     await expect(invoke("resume_run", { runId: "run-existing" })).rejects.toThrow(/Runtime nudge/);
     await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
       hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__conversation_decide" } })).rejects.toThrow(/Runtime nudge/);
+    await expect(callHost(chat.socketPath, chat.token, "tool_guard", { paneId: "pane-chat", hook: {
+      hook_event_name: "PreToolUse", session_id: "native-chat", tool_name: "mcp__bflow__read_updates" } })).resolves.toEqual({ permitted: true });
+    expect(await invoke("read_updates", {})).toEqual({ updates: [], remaining: 0 });
     expect(JSON.parse(nudge).hookSpecificOutput.additionalContext).toContain("requiresConversationDecision=false");
     const fresh = await callHost(chat.socketPath, chat.token, "user_prompt", { paneId: "pane-chat", hook: {
       hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt: "Báo trạng thái trước" } });
@@ -311,5 +314,135 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     expect((await readOutbound()).filter(item => item.message.type === "delegation.request")).toHaveLength(1);
     const calls = (await readFile(join(root, "herdr-calls.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
     expect(calls.some(args => args[0] === "agent" && args[1] === "prompt")).toBe(false);
+  }, 20_000);
+
+  it("serves rendered updates via read_updates only to Conversation, marks surfaced after return, and respects budget", async () => {
+    const { root, sessionId, hostDirectory, chat, coordinator, at } = await hostFixture();
+    const { availableTools } = await import("../../src/agentic/host.js");
+    const { HostReceiptJournal } = await import("../../src/agentic/host-receipts.js");
+    for (const provider of ["claude", "codex", "agy"] as const) {
+      const tool = availableTools("conversation", provider).find(item => item.name === "read_updates");
+      expect(tool).toBeDefined();
+      expect(tool!.description).toMatch(/display-only|never.*approve/i);
+      expect(tool!.description).toContain('xem chi tiết #n');
+      expect(tool!.inputSchema).toEqual({
+        type: "object",
+        properties: {
+          ref: { type: "string", minLength: 1, maxLength: 64 },
+          detail: { type: "boolean" }
+        },
+        required: [],
+        additionalProperties: false
+      });
+    }
+    expect(availableTools("coordinator").some(item => item.name === "read_updates")).toBe(false);
+    expect(availableTools("developer").some(item => item.name === "read_updates")).toBe(false);
+
+    await expect(callHost(coordinator.socketPath, coordinator.token, "tool_guard", {
+      paneId: "pane-coordinator",
+      hook: { hook_event_name: "PreToolUse", session_id: "native-coordinator", tool_name: "mcp__bflow__read_updates", tool_input: {} }
+    })).rejects.toThrow(/Conversation/i);
+    await expect(callHost(coordinator.socketPath, coordinator.token, "role_call", {
+      paneId: "pane-coordinator", name: "read_updates", arguments: {}
+    })).rejects.toThrow("Only Conversation reads inbox updates");
+    await expect(callHost(coordinator.socketPath, coordinator.token, "role_call", {
+      paneId: "pane-coordinator", name: "read_updates", arguments: { ref: "#1", detail: true }
+    })).rejects.toThrow("Only Conversation reads inbox updates");
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { messageId: "not-allowed" }
+    })).rejects.toThrow();
+
+    const receipts = new HostReceiptJournal(join(hostDirectory, "authentication-receipts"), root, sessionId);
+    const makeNotice = (id: string, type: string, payload: Record<string, unknown>) => RoleMessageSchema.parse({
+      schema_version: 2, message_id: id, correlation_id: "corr-u", run_id: "run-u",
+      sender: { role: "coordinator" }, recipient: { role: "conversation" }, type,
+      payload, artifact_references: [], occurred_at: at, idempotency_key: id
+    });
+    await receipts.appendConversationNotice(makeNotice("upd-plain", "task.status", { status: "working", title: "Cấu hình cơ sở dữ liệu" }));
+    await receipts.appendConversationNotice(makeNotice("upd-blocked", "conversation.progress", {
+      kind: "coordinator_no_response", reason: "Coordinator dừng mà chưa giao bước tiếp — Authorization: Bearer secret-xyz"
+    }));
+    await receipts.appendConversationNotice(makeNotice("upd-decision", "approval.request", {
+      approvalId: "apr-read-updates-1", runId: "run-u",
+      evidence: [{ kind: "specification", uri: "artifact://store/spec-db" }],
+      metadata: { kind: "user_decision", requestedByRole: "architect", question: "Chọn Postgres hay SQLite?", options: ["Postgres", "SQLite"] }
+    }));
+
+    // On-demand detail lookup via { ref, detail: true } returns redacted technical details without marking notices surfaced or displayed.
+    const blockedDetail = (await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "#1", detail: true }
+    }) as { detail: Record<string, unknown> }).detail;
+    expect(blockedDetail).toMatchObject({
+      shortId: "#1",
+      runLabel: "Việc #1: Cấu hình cơ sở dữ liệu",
+      messageId: "upd-blocked",
+      type: "conversation.progress",
+      senderRole: "coordinator",
+      runId: "run-u",
+      correlationId: "corr-u",
+      reason: "Coordinator dừng mà chưa giao bước tiếp — Authorization: Bearer [REDACTED]"
+    });
+    expect(String(blockedDetail.summary)).not.toContain("secret-xyz");
+    // Only the MCP server's post-reply surfaced acknowledgement may omit the native session; every other notice method still binds it.
+    await expect(callHost(chat.socketPath, chat.token, "conversation_notices_displayed", { paneId: "pane-chat", messageIds: [] }))
+      .rejects.toThrow(/nonempty string|native session mismatch/);
+    await expect(callHost(chat.socketPath, chat.token, "conversation_notices_surfaced", { paneId: "pane-chat", nativeSessionId: "other-session", messageIds: [] }))
+      .rejects.toThrow("Conversation notice native session mismatch");
+    await expect(callHost(chat.socketPath, chat.token, "conversation_notices_surfaced", { paneId: "pane-chat", messageIds: [] })).resolves.toBeDefined();
+
+    const decisionDetail = (await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "Việc #1", detail: true }
+    }) as { detail: Record<string, unknown> }).detail;
+    expect(decisionDetail).toMatchObject({
+      shortId: "#2",
+      runLabel: "Việc #1: Cấu hình cơ sở dữ liệu",
+      messageId: "upd-decision",
+      type: "approval.request",
+      approvalId: "apr-read-updates-1",
+      runId: "run-u",
+      artifacts: ["artifact://store/spec-db"]
+    });
+    expect((await receipts.unsurfacedConversationNotices()).map(item => item.messageId)).toEqual(["upd-plain", "upd-blocked", "upd-decision"]);
+    expect(await receipts.undisplayedUserFacingNotices()).toEqual([]);
+
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "#99", detail: true }
+    })).rejects.toThrow(/Unknown|not found/i);
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { ref: "Việc #99", detail: true }
+    })).rejects.toThrow(/Unknown|not found/i);
+    await expect(callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: { detail: true }
+    })).rejects.toThrow(/ref/i);
+
+    const first = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: {}
+    }) as { updates: { messageId: string; kind: string; text: string }[]; remaining: number };
+    expect(first.remaining).toBe(0);
+    expect(first.updates.map(item => item.messageId)).toEqual(["upd-decision", "upd-blocked", "upd-plain"]);
+    expect(first.updates.map(item => item.kind)).toEqual(["user_decision", "blocked", "update"]);
+    expect(first.updates[0]!.text).toContain("Chọn Postgres hay SQLite?");
+    expect(first.updates[0]!.text).not.toContain('"metadata"');
+    expect(await receipts.unsurfacedConversationNotices()).toEqual([]);
+
+    // User-facing undisplayed notices remain visible until displayed; plain non-ack updates do not repeat after surfacing.
+    const second = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: {}
+    }) as { updates: { messageId: string; kind: string; text: string }[]; remaining: number };
+    expect(second.updates.map(item => item.messageId)).toEqual(["upd-decision", "upd-blocked"]);
+
+    await receipts.markConversationNoticesDisplayed(["upd-decision", "upd-blocked"]);
+    for (let index = 0; index < 12; index++) {
+      await receipts.appendConversationNotice(makeNotice(`bulk-${index}`, "conversation.progress", {
+        headline: `Bước tiến độ số ${index} ${"dữ liệu ".repeat(120)}`
+      }));
+    }
+    const paged = await callHost(chat.socketPath, chat.token, "role_call", {
+      paneId: "pane-chat", name: "read_updates", arguments: {}
+    }) as { updates: { messageId: string; kind: string; text: string }[]; remaining: number };
+    expect(paged.updates.length).toBeGreaterThan(0);
+    expect(paged.updates.length).toBeLessThan(12);
+    expect(paged.remaining).toBe(12 - paged.updates.length);
+    expect((await receipts.unsurfacedConversationNotices()).length).toBe(paged.remaining);
   }, 20_000);
 });

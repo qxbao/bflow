@@ -180,9 +180,10 @@ describe("notice receipts for the watchdog", () => {
     expect(stored!.truncated).toBe(true);
     const rendered = renderConversationNotice(stored!);
     expect(rendered.kind).toBe("user_decision");
-    expect(rendered.display).toContain(APPROVAL_ID);
+    expect(rendered).toMatchObject({ approvalId: APPROVAL_ID, shortId: "#1" });
+    expect(rendered.display).toContain('Bạn trả lời: "#1: 1"');
     expect(rendered.display).toContain("6. Lựa chọn 6");
-    expect(rendered.display).toContain("Hạn: 2026-10-20T03:30:00.000Z");
+    expect(rendered.display).toContain("hết hạn lúc");
   });
 
   it("resurfaces a notice as a new epoch and stops once it is displayed", async () => {

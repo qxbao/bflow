@@ -140,15 +140,15 @@ describe("bounded automatic resume", () => {
     expect(blocked).toMatchObject({ status: "escalated", pendingAction: { recovery: "manual", state: "pending" } });
     const notification = (await f.outbound()).find(out => out.message.causation_id === message.message_id)!;
     expect(notification.message.payload).not.toHaveProperty("automaticResume");
-    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1",
+    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1", runLabel: "Việc #1",
       type: notification.message.type, summary: JSON.stringify(notification.message.payload) });
-    expect(rendered.display).toContain("lightweight");
-    expect(rendered.display).toContain("full SDD");
-    expect(rendered.display).toContain("đổi yêu cầu run run-1 sang full SDD");
+    expect(rendered.display).toContain("bản mô tả ngắn gọn");
+    expect(rendered.display).toContain("bản đặc tả đầy đủ");
+    expect(rendered.display).toContain("đổi yêu cầu việc #1 sang bản đặc tả đầy đủ");
     expect(rendered.display).toContain("giữ nguyên phạm vi");
     expect(rendered.display).toContain("không sửa yêu cầu");
     expect(rendered.display).not.toContain("Khắc phục capability");
-    expect(rendered.reply).not.toContain('"tiếp tục run-1" sau khi khắc phục');
+    expect(rendered.reply).not.toContain('"tiếp tục việc #1" sau khi xử lý xong');
     f.restart(); f.advance(10 * 60 * SECOND);
     expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
     expect(await f.resumeWakes()).toEqual([]);
@@ -164,7 +164,7 @@ describe("bounded automatic resume", () => {
     await f.runtime.observeCoordinatorOutcome(message);
     expect((await f.record()).pendingAction?.recovery).toBe("manual");
     const notification = (await f.outbound()).find(out => out.message.causation_id === message.message_id)!;
-    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1",
+    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1", runLabel: "Việc #1",
       type: notification.message.type, summary: JSON.stringify(notification.message.payload) });
     expect(rendered.display).toContain("Offline-only conflicts with mandatory live API calls");
     expect(rendered.display).toContain("yêu cầu");

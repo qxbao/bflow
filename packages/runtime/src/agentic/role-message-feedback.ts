@@ -38,5 +38,5 @@ export function describeValidationError(error: unknown): string {
 }
 /** An inbound failure caused by the message's own content (schema/unsupported type), not by transport or Runtime state. */
 export function isMessageContentFailure(reason: string): boolean {
-  return /ZodError|invalid_type|invalid_enum_value|invalid_union|invalid_literal|invalid_value|unrecognized_keys|Unsupported inbound message/.test(reason);
+  return /ZodError|invalid_type|invalid_enum_value|invalid_union|invalid_literal|invalid_value|unrecognized_keys|Unsupported inbound message|Rework submission|Invalid rework findingResolution|Rework finding '/.test(reason);
 }

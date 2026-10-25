@@ -152,16 +152,16 @@ describe.skipIf(process.platform === "win32")("Idle Conversation wake-up (incide
     state.now = 2_000;
     expect(await notifier.tick(herdr.value)).toBe("nudged");
     expect(herdr.typed).toEqual([BFLOW_INBOX_NUDGE]);
-    expect(herdr.notified.join("\n")).toContain(decision.approvalId);
+    expect(herdr.notified.join("\n")).toContain("#1");
 
-    // The nudge turn's hook puts the question first, verbatim, and only then marks it surfaced. No user_prompt call happens.
+    // The nudge turn's hook puts the question first, and only then marks it surfaced. No user_prompt call happens.
     const hook = await nudgeHook(receipts);
     expect(hook.code).toBe(0);
     const context = JSON.parse(hook.stdout).hookSpecificOutput.additionalContext as string;
     expect(context.startsWith("Trusted Bflow inbox nudge, not a user message and not an approval. requiresConversationDecision=false.")).toBe(true);
-    expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf(decision.approvalId));
-    expect(context).toContain(decision.approvalId);
-    expect(context).toContain("Cấu hình runner unit_test thế nào?\n1. Dùng pnpm test\n2. Tạm dừng run");
+    expect(context.indexOf("MUST SHOW TO USER:")).toBeLessThan(context.indexOf("#1"));
+    expect(context).toContain("#1");
+    expect(context).toContain("Cấu hình runner unit_test thế nào?\n  1. Dùng pnpm test\n  2. Tạm dừng run");
     expect(hook.methods).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
 
     // Once surfaced there is nothing left to nudge.

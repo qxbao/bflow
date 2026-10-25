@@ -27,6 +27,8 @@ export async function createAgenticConversationHost(options: {
   onHumanDecision?: (decision: import("@bflow/contracts").ApprovalDecision) => Promise<void>;
   /** Independently authenticated host receipts only; Gateway context is never human authority. */
   recoveredHumanDecisions?: readonly import("@bflow/contracts").ApprovalDecision[];
+  /** Short notice aliases (#n -> approvalId, việc #k -> runId) persisted in host receipts. */
+  noticeAliases?: () => Promise<{ approvalShortIds: Record<string, string>; runShortIds: Record<string, string> }>;
 }): Promise<AgenticConversationHost> {
   const manifest = SessionManifestSchema.parse(options.manifest);
   const conversation = manifest.panes.find(pane => pane.role === "conversation");
@@ -142,7 +144,13 @@ export async function createAgenticConversationHost(options: {
   // never a fabricated Herdr receipt or a human decision; the Gateway validates the exported nested contracts.
   let runtimeRunIds: string[] = [];
   let projectionWarnings: string[] = [];
+  const syncAliases = async () => {
+    if (!options.noticeAliases) return;
+    const aliases = await options.noticeAliases().catch(() => undefined);
+    if (aliases) gateway.syncNoticeAliases(aliases);
+  };
   const reconcileRuns = async () => {
+    await syncAliases();
     const state = record(await runtime.inspect());
     if (!Array.isArray(state.runs)) throw new Error("Runtime returned invalid run status snapshot");
     const entries = state.runs.map(input => {
@@ -151,6 +159,7 @@ export async function createAgenticConversationHost(options: {
     }).filter(run => run.delegation.sessionId === manifest.conversationSessionId);
     const result = await gateway.reconcileRuntimeRuns(entries);
     if (!result.ok) throw new Error(result.error.message);
+    await syncAliases();
     projectionWarnings = result.value.rejected.map((reason: string) => `Runtime projection could not be reconciled: ${reason}`);
     runtimeRunIds = entries.map(run => run.delegation.runId!);
   };
@@ -233,6 +242,7 @@ export async function createAgenticConversationHost(options: {
       let current = context;
       if (named !== undefined || Object.keys(context.pendingApprovals).length === 0) {
         await reconcileApprovals().catch(() => undefined);
+        await syncAliases();
         current = gateway.getContextSnapshot();
       }
       if (named !== undefined && !current.pendingApprovals[named]) {
