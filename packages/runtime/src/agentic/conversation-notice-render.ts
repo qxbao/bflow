@@ -495,9 +495,11 @@ export function noticeDisplayed(notice: RenderedNotice, shown: string): boolean 
   if (notice.approvalId !== undefined && containsCode(shown, notice.approvalId)) return true;
   if (notice.kind !== "update" && notice.kind !== "blocked") return false;
   if (containsCode(shown, notice.messageId)) return true;
+  const workTag = notice.runLabel?.split(":")[0]?.trim();
+  // An update paraphrased in Vietnamese still names its work label; a whole-token match keeps Việc #12 from showing Việc #1.
+  if (notice.kind === "update" && workTag && containsCode(plain(shown), workTag)) return true;
   if (notice.ackText === undefined || (!plain(shown).includes(plain(notice.ackText)) && !plain(sanitizeCardProse(shown, { runId: notice.runId, workTag: workTagOf(notice, notice.runId) })).includes(plain(notice.ackText)))) return false;
   if (notice.runId !== undefined && containsCode(shown, notice.runId)) return true;
-  const workTag = notice.runLabel?.split(":")[0]?.trim();
   return workTag !== undefined && workTag.length > 0 && containsCode(plain(shown), workTag);
 }
 
