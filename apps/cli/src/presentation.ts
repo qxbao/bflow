@@ -10,8 +10,15 @@ export const ANSI = {
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   blue: "\x1b[34m",
+  magenta: "\x1b[35m",
   cyan: "\x1b[36m",
-  gray: "\x1b[90m"
+  gray: "\x1b[90m",
+  brightRed: "\x1b[91m",
+  brightGreen: "\x1b[92m",
+  brightYellow: "\x1b[93m",
+  brightBlue: "\x1b[94m",
+  brightMagenta: "\x1b[95m",
+  brightCyan: "\x1b[96m"
 } as const;
 
 export function colorize(text: string, code: string, enabled: boolean): string {
@@ -39,12 +46,25 @@ export function blue(text: string, enabled = true): string {
   return colorize(text, ANSI.blue, enabled);
 }
 
+export function magenta(text: string, enabled = true): string {
+  return colorize(text, ANSI.magenta, enabled);
+}
+
+export function gray(text: string, enabled = true): string {
+  return colorize(text, ANSI.gray, enabled);
+}
+
 export function dim(text: string, enabled = true): string {
   return colorize(text, ANSI.dim, enabled);
 }
 
 export function bold(text: string, enabled = true): string {
   return colorize(text, ANSI.bold, enabled);
+}
+
+/** Green checkmark for completed tasks and steps. */
+export function greenTick(enabled = true): string {
+  return green("✓", enabled);
 }
 
 export interface StreamColorOptions {
@@ -278,14 +298,13 @@ export function resolveActionableRemediation(
   const msg = error.message;
 
   // 1. Dispatch / retry safety guidance for uncertain delivery or observation-only timeout
-  // Must depend on exported error.code and timeout.retrySafety, with priority over incidental message fragments
   if (
     error.code === "unknown_delivery" ||
     (error.code === "timeout" && "retrySafety" in error && (error as { retrySafety?: unknown }).retrySafety === "observation_only") ||
     msg.includes("reconcile the existing session") ||
     msg.includes("unknown_delivery")
   ) {
-    return "Inspect 'bflow status' or 'bflow doctor' and reconcile existing delivery before retry; no automatic resend.";
+    return "Kiểm tra 'bflow status' hoặc 'bflow doctor' để đối soát phiên hiện tại trước khi thử lại; không tự động gửi lại.";
   }
 
   // 2. State corruption guidance (prefer typed error.code corruption over message text)
@@ -295,122 +314,122 @@ export function resolveActionableRemediation(
     msg.includes("belongs to another repository") ||
     msg.includes("foreign")
   ) {
-    return "Preserve the .bflow directory and run 'bflow doctor' to diagnose state integrity.";
+    return "Giữ nguyên thư mục .bflow và chạy 'bflow doctor' để chẩn đoán tính toàn vẹn trạng thái.";
   }
 
   // 3. Check for specific authored instructions already embedded in the message
   if (msg.startsWith("Provider readiness is not satisfied;") && msg.includes("codex_global_hooks_")) {
-    return "Run 'bflow setup --codex-hooks --plan' to inspect the hook sources and blocking reasons.";
+    return "Chạy 'bflow setup --codex-hooks --plan' để kiểm tra nguồn hook và nguyên nhân bị chặn.";
   }
   if (msg.includes("Run bflow recover --yes")) {
-    return "Stop any old Bflow lifecycle commands, then run 'bflow recover --yes' to migrate the legacy lock.";
+    return "Dừng các lệnh Bflow cũ đang chạy, sau đó chạy 'bflow recover --yes' để chuyển đổi khóa vòng đời cũ.";
   }
   if (msg.includes("Agent provider 'agy'") || msg.includes("Agy access check failed")) {
-    if (msg.includes("blocked")) return "Resolve the provider policy/workspace block and verify with 'bflow agent check agy' or 'bflow doctor'.";
-    if (msg.includes("not authenticated")) return "Run 'agy' interactively and complete its login flow, then verify with 'agy models' and 'bflow doctor'.";
-    return "Run 'agy models' in this repository to inspect provider access, then rerun 'bflow doctor'.";
+    if (msg.includes("blocked")) return "Gỡ bỏ chính sách chặn của workspace/provider và kiểm tra lại bằng 'bflow agent check agy' hoặc 'bflow doctor'.";
+    if (msg.includes("not authenticated")) return "Chạy 'agy' ở chế độ tương tác để đăng nhập, sau đó xác minh bằng 'agy models' và 'bflow doctor'.";
+    return "Chạy 'agy models' trong kho mã nguồn này để kiểm tra quyền truy cập provider, sau đó chạy lại 'bflow doctor'.";
   }
   if (msg.includes("Run claude auth login") || msg.includes("Run codex login") || msg.includes("auth login")) {
-    return "Authenticate using 'claude auth login' or 'codex login' before running 'bflow up'.";
+    return "Xác thực bằng 'claude auth login' hoặc 'codex login' trước khi chạy 'bflow up'.";
   }
   if (msg.includes("Run bflow up before attach")) {
-    return "Run 'bflow up' to start the environment before running 'bflow attach'.";
+    return "Chạy 'bflow up' để khởi động môi trường trước khi chạy 'bflow attach'.";
   }
   if (msg.includes("Unsafe shutdown")) {
-    return "Inspect active runs with 'bflow status'. If shutdown is intended, rerun 'bflow down --yes'. Never delete .bflow.";
+    return "Kiểm tra các luồng đang chạy bằng 'bflow status'. Nếu vẫn muốn dừng, hãy chạy 'bflow down --yes'. Không xóa thư mục .bflow.";
   }
   if (msg.includes("Wait for it or interrupt that command") || msg.includes("is still running")) {
-    return "Wait for the active command to finish or stop its process. Do not delete the lifecycle.guard file.";
+    return "Đợi lệnh đang chạy hoàn tất hoặc dừng tiến trình đó. Không xóa tệp lifecycle.guard.";
   }
 
   // 4. Specific workflow run / task not found or conflict (MUST precede generic not found / executable checks)
   if (msg.includes("Run '") && msg.includes("not found")) {
-    return "Verify the run ID with 'bflow status --limit 10' or run 'bflow status <run-id>'.";
+    return "Kiểm tra mã luồng chạy bằng 'bflow status --limit 10' hoặc chạy 'bflow status <run-id>'.";
   }
   if (msg.includes("Task '") && msg.includes("not found")) {
-    return "Verify the task ID with 'bflow status <run-id>'.";
+    return "Kiểm tra mã tác vụ bằng 'bflow status <run-id>'.";
   }
   if (msg.includes("No run found containing task")) {
-    return "Specify the target run explicitly: 'bflow approve <task-id> --run <run-id>'.";
+    return "Chỉ định rõ luồng chạy mục tiêu: 'bflow approve <task-id> --run <run-id>'.";
   }
   if (msg.includes("Multiple active runs") || msg.includes("Specify --run")) {
-    return "Specify the target run explicitly: 'bflow approve <task-id> --run <run-id>'.";
+    return "Chỉ định rõ luồng chạy mục tiêu: 'bflow approve <task-id> --run <run-id>'.";
   }
 
   // 5. Missing repo
   if (msg.includes("not a git repository") || msg.includes("cannot identify repository") || msg.includes("Git repository root")) {
-    return "Navigate to a valid Git repository root or run 'git init'.";
+    return "Di chuyển tới thư mục gốc của kho Git hợp lệ hoặc chạy 'git init'.";
   }
 
   // 6. Missing config
   if (error.code === "not_found" && (msg.includes("config") || msg.includes("Configuration not found") || command === "run")) {
-    return "Run 'bflow init' to initialize repository configuration.";
+    return "Chạy 'bflow init' để khởi tạo cấu hình kho mã nguồn.";
   }
 
   // 7. Malformed config
   if (msg.includes("config.yaml") || msg.includes("config.yml") || msg.includes("Invalid configuration") || msg.includes("identity mismatch")) {
-    return "Inspect .bflow/config.yml and run 'bflow doctor'. Preserve existing configuration.";
+    return "Kiểm tra tệp .bflow/config.yml và chạy 'bflow doctor'. Giữ nguyên cấu hình hiện có.";
   }
 
   // 8. Missing executable (do not match broad 'not found')
   if (/\b(?:EACCES|EPERM)\b/.test(msg)) {
-    return "Check ownership and read/write permissions for the path shown above, then rerun the command.";
+    return "Kiểm tra quyền sở hữu và quyền đọc/ghi của đường dẫn ở trên, sau đó chạy lại lệnh.";
   }
   if (/\bENOENT\b.*\b(?:open|stat|read|scandir)\b/i.test(msg)) {
-    return "Check the input file path and pass an existing readable file; use the command's --help to review its arguments.";
+    return "Kiểm tra đường dẫn tệp đầu vào và truyền một tệp hợp lệ có thể đọc; dùng --help để xem lại tham số.";
   }
   if (/\b(?:ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT)\b|\bfetch failed\b/i.test(msg)) {
-    return "Check the endpoint and network connection, then run 'bflow doctor' to diagnose provider and Gateway access.";
+    return "Kiểm tra kết nối mạng và địa chỉ dịch vụ, sau đó chạy 'bflow doctor' để chẩn đoán kết nối.";
   }
   if (/\bERR_MODULE_NOT_FOUND\b|Cannot find (?:module|package)/i.test(msg)) {
-    return "Reinstall or rebuild the Bflow CLI, then run 'bflow doctor' to verify its components.";
+    return "Cài đặt lại hoặc biên dịch lại Bflow CLI, sau đó chạy 'bflow doctor' để kiểm tra các thành phần.";
   }
   if (msg.includes("ENOENT") || msg.includes("Missing/unavailable dependency") || msg.includes("flock") || msg.includes("not installed") || msg.includes("executable is not available")) {
-    return "Ensure the required executable is installed and available on PATH, then run 'bflow doctor'.";
+    return "Đảm bảo phần mềm thực thi cần thiết đã được cài đặt và có trong PATH, sau đó chạy 'bflow doctor'.";
   }
 
   // 9. Authentication
   if (msg.includes("not authenticated") || msg.includes("auth status") || msg.includes("Authentication diagnostics")) {
-    return "Run 'claude auth login' or 'codex login' to authenticate before running 'bflow up'.";
+    return "Chạy 'claude auth login' hoặc 'codex login' để xác thực trước khi chạy 'bflow up'.";
   }
 
   // 10. Unsupported default provider / custom host requirement
   if (msg.includes("verified Claude native hooks") || msg.includes("operator-supplied custom host") || msg.includes("unsupported provider") || (command === "init" && msg.includes("provider"))) {
-    return "Use 'bflow init --provider claude' or supply a verified custom host integration via BFLOW_ENVIRONMENT_MODULE.";
+    return "Sử dụng 'bflow init --provider claude' hoặc cung cấp custom host hợp lệ qua BFLOW_ENVIRONMENT_MODULE.";
   }
 
   // 11. Attach before up
   if (msg.includes("No active repository session") || msg.includes("session is stopped")) {
-    return "Run 'bflow up' to start the environment before running 'bflow attach'.";
+    return "Chạy 'bflow up' để khởi động môi trường trước khi chạy 'bflow attach'.";
   }
 
   // 12. Busy lock
   if (msg.includes("guard") || msg.includes("Another bflow")) {
-    return "Wait for the active command to finish or stop its process. Do not delete the lifecycle.guard file.";
+    return "Đợi lệnh đang chạy hoàn tất hoặc dừng tiến trình đó. Không xóa tệp lifecycle.guard.";
   }
 
   // 13. Legacy lock
   if (msg.includes("legacy lifecycle lock") || msg.includes("recover --yes")) {
-    return "Stop any running Bflow commands, then run 'bflow recover --yes' to migrate the legacy lock.";
+    return "Dừng các lệnh Bflow đang chạy, sau đó chạy 'bflow recover --yes' để chuyển đổi khóa vòng đời cũ.";
   }
 
   // 14. Unsafe shutdown
   if (command === "down" && (msg.includes("active runs") || msg.includes("uncommitted changes"))) {
-    return "Inspect active runs with 'bflow status'. If shutdown is intended, rerun 'bflow down --yes'. Never delete .bflow.";
+    return "Kiểm tra các luồng đang chạy bằng 'bflow status'. Nếu vẫn muốn dừng, hãy chạy 'bflow down --yes'. Không xóa thư mục .bflow.";
   }
 
   // 15. Corruption or foreign receipts (fallback for message matching)
   if (msg.includes("corrupt") || msg.includes("belongs to another repository") || msg.includes("mismatch") || msg.includes("foreign")) {
-    return "Preserve the .bflow directory and run 'bflow doctor' to diagnose state integrity.";
+    return "Giữ nguyên thư mục .bflow và chạy 'bflow doctor' để chẩn đoán tính toàn vẹn trạng thái.";
   }
 
   // 16. Usage / validation errors
   if (error.code === "validation" && (msg.includes("Unknown option") || msg.includes("requires a value") || msg.includes("does not take a value") || msg.includes("Unexpected argument"))) {
-    return `Run '${command ? `bflow ${command} --help` : "bflow --help"}' for usage information.`;
+    return `Chạy '${command ? `bflow ${command} --help` : "bflow --help"}' để xem hướng dẫn sử dụng.`;
   }
 
   // Default fallback
-  return `Run '${command ? `bflow ${command} --help` : "bflow --help"}' or 'bflow doctor' for diagnostics.`;
+  return `Chạy '${command ? `bflow ${command} --help` : "bflow --help"}' hoặc 'bflow doctor' để chẩn đoán.`;
 }
 
 /**
@@ -450,13 +469,13 @@ export function statusTag(value: unknown, useColor = false): string {
 }
 
 export const SETUP_COMPONENT_LABELS: Readonly<Record<string, string>> = {
-  path: "Make bflow and installed tools available in the terminal",
-  "role-skills": "Install agent skills",
-  "isolator-profiles": "Synchronize native and isolated provider profiles",
-  "mcp-config": "Configure MCP tools",
-  services: "Start and verify the MCP Gateway",
-  "environment-manifest": "Save verified machine configuration",
-  doctor: "Check the completed setup"
+  path: "Đưa bflow và các công cụ đã cài vào PATH của terminal",
+  "role-skills": "Cài đặt các kỹ năng (skills) cho agent",
+  "isolator-profiles": "Đồng bộ hồ sơ (profile) giữa môi trường gốc và cô lập",
+  "mcp-config": "Cấu hình các công cụ MCP",
+  services: "Khởi động và xác minh dịch vụ MCP Gateway",
+  "environment-manifest": "Lưu cấu hình máy đã xác minh",
+  doctor: "Kiểm tra lại toàn bộ thiết lập"
 };
 
 function targetPathApi(path: string): typeof posix {
@@ -482,8 +501,8 @@ export function formatTargetPaths(paths: readonly string[], indent = "    ", opt
   const lines: string[] = [];
   for (const [key, group] of groups) {
     if (group.bundles) {
-      lines.push(`${indent}- ${group.bundles} pinned skill ${group.bundles === 1 ? "bundle" : "bundles"}`);
-      lines.push(`${indent}  Store: ${key.slice("bundles:".length)}`);
+      lines.push(`${indent}- ${group.bundles} gói kỹ năng đã ghim`);
+      lines.push(`${indent}  Kho lưu trữ: ${key.slice("bundles:".length)}`);
     } else if (group.files.length > 1 && group.files.every(path => {
       const api = targetPathApi(path);
       return api.extname(path) !== "";
@@ -513,8 +532,8 @@ export function formatSetupPreview(text: string, useColor = false): string {
       const [, id, flags, summary] = match;
       component = id!.slice(id!.indexOf(":") + 1);
       const label = SETUP_COMPONENT_LABELS[component] ?? humanLine(summary);
-      const readableFlags = flags!.slice(1, -1).split(", ").map(flag => flag === "approval" ? "requires approval"
-        : flag === "no-approval" ? "no approval needed" : flag === "machine-wide" ? "this account" : readableLabel(flag)).join("; ");
+      const readableFlags = flags!.slice(1, -1).split(", ").map(flag => flag === "approval" ? "cần phê duyệt"
+        : flag === "no-approval" ? "không cần phê duyệt" : flag === "machine-wide" ? "tài khoản này" : readableLabel(flag)).join("; ");
       lines.push("", `${formatProgressStep(label, useColor, ++number)} [${readableFlags}]`);
       lines.push(dim(`    ${humanLine(id)}: ${humanLine(summary, 2000)}`, useColor));
       continue;
@@ -525,7 +544,7 @@ export function formatSetupPreview(text: string, useColor = false): string {
       while (index < input.length && /^\s+target: /.test(input[index]!));
       index--;
       const targets = formatTargetPaths(paths, "    ", { skillBundles: component === "role-skills" });
-      groupedBundles ||= targets.some(value => /^\s*- \d+ pinned skill bundles?$/.test(value));
+      groupedBundles ||= targets.some(value => /^\s*- \d+ gói kỹ năng đã ghim$/.test(value));
       lines.push(...targets.map(value => dim(value, useColor)));
       continue;
     }
@@ -539,19 +558,19 @@ export function formatSetupPreview(text: string, useColor = false): string {
         paths.push(change[2]!);
         groups.set(change[1]!, paths);
       }
-      lines.push("", useColor ? cyan(bold("Changes in this account:"), true) : "Changes in this account:");
+      lines.push("", useColor ? cyan(bold("Thay đổi trên tài khoản này:"), true) : "Thay đổi trên tài khoản này:");
       for (const [step, paths] of groups) {
         const component = step.slice(step.indexOf(":") + 1);
-        lines.push(`  ${SETUP_COMPONENT_LABELS[component] ?? readableLabel(component)} (${paths.length} ${paths.length === 1 ? "target" : "targets"})`);
+        lines.push(`  ${SETUP_COMPONENT_LABELS[component] ?? readableLabel(component)} (${paths.length} mục tiêu)`);
         const targets = formatTargetPaths(paths, "    ", { skillBundles: component === "role-skills" });
-        groupedBundles ||= targets.some(value => /^\s*- \d+ pinned skill bundles?$/.test(value));
+        groupedBundles ||= targets.some(value => /^\s*- \d+ gói kỹ năng đã ghim$/.test(value));
         lines.push(...targets);
       }
       continue;
     }
     const bounded = humanText(line, 2000);
     if (/^Apply plan /.test(line) && groupedBundles) {
-      lines.push("Bundle hashes are grouped above. Full target inventory: bflow setup --plan --json", "");
+      lines.push("Các mã băm gói kỹ năng đã được gom nhóm ở trên. Xem đầy đủ: bflow setup --plan --json", "");
     }
     lines.push(/^\s+command:/.test(line) ? dim(`    ${bounded.trimStart()}`, useColor)
       : line.endsWith(":") ? (useColor ? cyan(bold(bounded), true) : bounded) : bounded);

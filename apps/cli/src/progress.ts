@@ -1,4 +1,4 @@
-import { dim, formatProgressStep, humanLine } from "./presentation.js";
+import { dim, formatProgressStep, greenTick, humanLine } from "./presentation.js";
 import type { CliIo } from "./types.js";
 
 export interface ProgressOptions {
@@ -30,6 +30,10 @@ export class CliProgress {
       (options.io === undefined ? chunk => { process.stderr.write(chunk); } : undefined);
   }
 
+  private get color(): boolean {
+    return Boolean(this.options.color);
+  }
+
   private safely(action: () => void): void {
     try { action(); } catch { /* presentation must never affect execution */ }
   }
@@ -57,7 +61,7 @@ export class CliProgress {
     const filled = units ? Math.floor(units[0] / units[1] * 6) : undefined;
     const skeleton = filled === undefined ? `[${frames[this.frame++ % frames.length]}]`
       : `[${"#".repeat(filled)}${"-".repeat(6 - filled)}]`;
-    const label = this.waiting ? "Waiting for your confirmation" : units ? "Inspected" : "Working";
+    const label = this.waiting ? "Đang chờ xác nhận của bạn" : units ? "Đã kiểm tra" : "Đang xử lý";
     const columns = Math.max(2, (this.options.columns?.() ?? process.stderr.columns) || 80);
     // Keep the one mutable line from wrapping, including in narrow terminals.
     const text = `    ${skeleton} ${label} · ${this.detailText}`;
@@ -71,7 +75,10 @@ export class CliProgress {
       clipped += char;
       used += size;
     }
-    this.safely(() => this.raw?.(`\r\x1b[2K${dim(clipped, Boolean(this.options.color))}`));
+    const rendered = clipped.endsWith("✓")
+      ? `${dim(clipped.slice(0, -1), this.color)}${greenTick(this.color)}`
+      : dim(clipped, this.color);
+    this.safely(() => this.raw?.(`\r\x1b[2K${rendered}`));
     this.liveLine = true;
   }
 
@@ -85,7 +92,7 @@ export class CliProgress {
 
   private defer(kind: "step" | "detail" | "event" | "important" | "units", message: string, units?: readonly [number, number]): boolean {
     if (!this.waiting) return false;
-    if (kind === "important" || kind === "event" && /: (failed|blocked|skipped)$/.test(message)) {
+    if (kind === "important" || kind === "event" && /:\s*(failed|blocked|skipped|thất bại|bị chặn|bỏ qua)$/i.test(message)) {
       this.deferredImportant.add(humanLine(message, 240));
       return true;
     }
@@ -98,15 +105,18 @@ export class CliProgress {
     return true;
   }
 
-  step(message: string): void {
+  step(message: string, detail?: string): void {
     if (!this.options.enabled || this.stopped) return;
-    if (this.defer("step", message)) return;
+    if (this.defer("step", message)) {
+      if (detail !== undefined) this.defer("detail", detail);
+      return;
+    }
     this.clear();
     this.eventLabel = undefined;
     this.inspectedUnits = undefined;
     this.number++;
     this.line(formatProgressStep(message, this.options.color, this.number));
-    this.detailText = "Waiting for the current operation";
+    this.detailText = detail !== undefined ? humanLine(detail, 240) : "Đang chờ thao tác hiện tại";
     this.start();
   }
 
@@ -120,12 +130,25 @@ export class CliProgress {
     this.start();
   }
 
+  /** Marks the current step as finished with a green checkmark. */
+  done(summary?: string): void {
+    if (!this.options.enabled || this.stopped) return;
+    const base = summary !== undefined ? humanLine(summary, 240) : (this.detailText || "Hoàn tất");
+    const withTick = base.endsWith("✓") ? base : `${base} ${greenTick(this.color)}`;
+    this.detail(withTick);
+    if (!this.waiting) {
+      this.clear();
+      this.eventLabel = undefined;
+    }
+  }
+
   /** Observed units of a known list, never a duration estimate or success verdict. */
   units(completed: number, total: number, label: string): void {
     if (!this.options.enabled || this.stopped) return;
     if (!Number.isSafeInteger(completed) || !Number.isSafeInteger(total) || total <= 0 || completed < 0 || completed > total) return;
     if (this.defer("units", label, [completed, total])) return;
-    const clean = humanLine(`${completed}/${total} ${label}`, 240);
+    const suffix = completed === total ? ` ${greenTick(this.color)}` : "";
+    const clean = `${humanLine(`${completed}/${total} ${label}`, 240)}${suffix}`;
     if (clean === this.detailText && this.inspectedUnits?.[0] === completed && this.inspectedUnits[1] === total) return;
     this.inspectedUnits = [completed, total];
     this.detailText = clean;
@@ -143,13 +166,22 @@ export class CliProgress {
   event(message: string): void {
     if (!this.options.enabled || this.stopped) return;
     if (this.defer("event", message)) return;
-    const match = /^(.*): (starting|checking|complete|failed|succeeded|reused|blocked|skipped)$/.exec(message);
+    const match = /^(.*):\s*(starting|checking|complete|failed|succeeded|reused|blocked|skipped|đang bắt đầu|đang kiểm tra|hoàn tất|thành công|sẵn sàng|thất bại|bị chặn|bỏ qua)$/i.exec(message);
     const label = match?.[1] ?? message;
     if (!match || this.eventLabel !== label) this.step(label);
     this.eventLabel = label;
-    if (match && match[2] !== "starting" && match[2] !== "checking") {
-      if (["failed", "blocked", "skipped"].includes(match[2]!)) this.important(message);
-      else this.detail(message);
+    const state = match?.[2]?.toLowerCase();
+    if (match && state !== "starting" && state !== "checking" && state !== "đang bắt đầu" && state !== "đang kiểm tra") {
+      if (["failed", "blocked", "skipped", "thất bại", "bị chặn", "bỏ qua"].includes(state!)) {
+        this.important(message);
+      } else if (
+        /(?:^|\b)step\s+([^:]+):\s*(complete|succeeded|reused|hoàn tất|thành công|sẵn sàng)\b/i.test(message) ||
+        /:\s*(complete|succeeded|reused|hoàn tất|thành công|sẵn sàng)\b/i.test(message)
+      ) {
+        this.detail(`${message} ${greenTick(this.color)}`);
+      } else {
+        this.detail(message);
+      }
       this.clear();
       this.eventLabel = undefined;
     }
@@ -161,7 +193,7 @@ export class CliProgress {
     this.clear();
     this.waiting = true;
     this.number++;
-    this.line(formatProgressStep("Waiting for your confirmation", this.options.color, this.number));
+    this.line(formatProgressStep("Đang chờ xác nhận của bạn", this.options.color, this.number));
     // The caller owns the exact review text and prompt, including approval scope.
     try { return await action(); }
     finally {
@@ -173,7 +205,7 @@ export class CliProgress {
       this.omittedUpdates = 0;
       if (!this.stopped) {
         for (const message of important) this.important(message);
-        if (omitted) this.detail(`${omitted} progress updates omitted while awaiting input`);
+        if (omitted) this.detail(`Đã lược bớt ${omitted} cập nhật tiến trình trong khi chờ xác nhận`);
         for (const update of updates) {
           if (update.kind === "units" && update.units) this.units(update.units[0], update.units[1], update.message);
           else if (update.kind !== "units") this[update.kind](update.message);

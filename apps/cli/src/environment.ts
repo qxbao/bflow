@@ -195,7 +195,7 @@ export class EnvironmentLifecycle {
     return withLifecycleLock(this.statePath(repository, "."), operation);
   }
   async recover(confirmed = false): Promise<EnvironmentStatus> {
-    this.progress("Inspecting lifecycle state and migrating legacy lock...");
+    this.progress("Đang kiểm tra trạng thái vòng đời và chuyển đổi khóa cũ...");
     const repository = await identifyRepository(this.cwd, this.runner);
     if (!confirmed) fail("Stop any old Bflow lifecycle command, then run bflow recover --yes to migrate its empty legacy lock. State, agents and worktrees are preserved.");
     await withLifecycleLock(this.statePath(repository, "."), async () => {
@@ -313,12 +313,12 @@ export class EnvironmentLifecycle {
   }
   async up(timeoutMs?: number): Promise<SessionManifest> {
     // Step 1: load_project_config
-    this.progress("Checking repository and configuration...");
+    this.progress("Đang kiểm tra kho mã nguồn và cấu hình...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
     return this.locked(repository, async () => {
       const deadline = new Deadline(timeoutMs ?? config.environment.startupTimeoutMs, this.dependencies.signal);
-      this.progress("Verifying dependencies and provider authentication...");
+      this.progress("Đang xác minh các phụ thuộc và xác thực provider...");
 
       // Step 2: validate_required_providers
       const fallbackNotices: string[] = [];
@@ -571,7 +571,7 @@ export class EnvironmentLifecycle {
 
       }
 
-      this.progress("Composing session lifecycle integration...");
+      this.progress("Đang khởi tạo tích hợp quản lý vòng đời phiên...");
       const compositionConfig = fallbackNotices.length > 0
         ? { ...config, environment: { ...config.environment, roles: rolesToRun } }
         : config;
@@ -583,7 +583,7 @@ export class EnvironmentLifecycle {
       let startupError: unknown;
       let outcome: SessionManifest | undefined;
       try {
-        this.progress("Inspecting existing session state...");
+        this.progress("Đang kiểm tra trạng thái phiên hiện tại...");
         const previous = await this.intent(repository);
         const saved = await this.savedManifest(repository);
         const running = await this.probe(repository, config, deadline);
@@ -605,21 +605,21 @@ export class EnvironmentLifecycle {
           if (previous?.phase === "manager_pending" && manifest === null)
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
           if (needsRoleStartup && integration.prepareRoles) {
-            this.progress("Preparing provider environments and readiness...");
+            this.progress("Đang chuẩn bị môi trường provider và kiểm tra mức sẵn sàng...");
             await deadline.call(opts => integration.prepareRoles!(opts));
             roleStartupPrepared = true;
           }
           cleanupEligible = true;
           await this.writeIntent(repository, "server_starting");
           await mkdir(resolve(repository.root, ".bflow/logs"), { recursive: true, mode: 0o700 });
-          this.progress("Starting Herdr headless server...");
+          this.progress("Đang khởi động máy chủ Herdr ngầm...");
           const started = await this.runner.run({ executable: config.environment.herdrBinary, args: ["server"], cwd: repository.root,
             env: namedSessionEnvironment(repository.sessionName), mode: "background", logPath: resolve(repository.root, ".bflow/logs/herdr.log") });
           if (started.exitCode !== 0) fail(`Herdr headless server failed to start: ${started.stderr}`);
           if (started.pid) await this.writeJson(repository, "operation.json", { repositoryId: repository.id, sessionName: repository.sessionName, phase: "server_starting", serverPid: started.pid });
           while (!await this.probe(repository, config, deadline)) await deadline.pause();
         } else {
-          this.progress("Reusing running Herdr server...");
+          this.progress("Đang tái sử dụng máy chủ Herdr đang chạy...");
         }
 
         if (this.dependencies.mcpState) {
@@ -632,17 +632,17 @@ export class EnvironmentLifecycle {
           if (previous?.phase === "manager_pending" && manifest === null)
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
           if (integration.prepareRoles && !roleStartupPrepared) {
-            this.progress("Preparing provider environments and readiness...");
+            this.progress("Đang chuẩn bị môi trường provider và kiểm tra mức sẵn sàng...");
             await deadline.call(opts => integration.prepareRoles!(opts));
             roleStartupPrepared = true;
           }
           await this.writeIntent(repository, "manager_pending");
           cleanupEligible = true;
           roleDispatchAttempted = true;
-          this.progress("Starting agent roles...");
+          this.progress("Đang khởi chạy các vai trò agent...");
           manifest = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.up(repository.sessionName, opts))), repository);
         } else {
-          this.progress("Reconciling agent roles...");
+          this.progress("Đang đối soát các vai trò agent...");
         }
         if (manifest === null) fail("Role startup completed without a recoverable session manifest");
 
@@ -659,7 +659,7 @@ export class EnvironmentLifecycle {
           const startupObservations: string[] = [];
           const nativeReady = !integration.requiresNativeSession || manifest.panes.filter(p => p.permanent).every(p => p.session);
           if ((!nativeReady || !this.ready(manifest, config)) && !reportedWaiting) {
-            this.progress("Waiting for role transport and native readiness...");
+            this.progress("Đang chờ kết nối transport và mức sẵn sàng của các vai trò...");
             reportedWaiting = true;
           }
           if (!nativeReady) {
@@ -686,7 +686,7 @@ export class EnvironmentLifecycle {
           if (this.ready(manifest, config) && nativeReady) {
             if (integration.activate) {
               if (!reportedActivating) {
-                this.progress("Activating persistent runtime host...");
+                this.progress("Đang kích hoạt tiến trình Runtime nền...");
                 reportedActivating = true;
               }
               try { await deadline.call(opts => integration.activate!(manifest!, opts)); }
@@ -801,7 +801,7 @@ export class EnvironmentLifecycle {
     });
   }
   async attach(): Promise<SessionManifest> {
-    this.progress("Validating session and focusing Conversation pane...");
+    this.progress("Đang xác thực phiên và chuyển tiêu điểm tới khung chat Conversation...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
     const manifest = await this.savedManifest(repository);
@@ -819,7 +819,7 @@ export class EnvironmentLifecycle {
       if (pane.sessionId !== repository.sessionName || pane.role !== "conversation" || pane.paneId !== current.attachTarget.paneId ||
         !current.panes.some((p) => p.paneId === pane.paneId && p.agentId === pane.agentId && p.workspaceId === pane.workspaceId && p.tabId === pane.tabId)) fail("Manager returned an incorrect Conversation attach target");
       if (!await this.probe(repository, config, deadline)) fail("Session stopped before attach");
-      this.progress("Opening Herdr interactive terminal attach...");
+      this.progress("Đang mở giao diện kết nối trực tiếp Herdr...");
       // session attach NAME is allowed only after positive live-session checks above.
       const attached = await this.runner.run({ executable: config.environment.herdrBinary, args: ["session", "attach", repository.sessionName],
         cwd: repository.root, env: namedSessionEnvironment(repository.sessionName), mode: "interactive" });
@@ -828,7 +828,7 @@ export class EnvironmentLifecycle {
     } finally { await integration.close?.(); }
   }
   async down(confirmed = false, timeoutMs?: number, force = false): Promise<SessionManifest | EnvironmentStatus> {
-    this.progress("Inspecting session state and running workflows...");
+    this.progress("Đang kiểm tra trạng thái phiên và các quy trình đang chạy...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
     try {
@@ -839,7 +839,7 @@ export class EnvironmentLifecycle {
       // Genuine barrier/checkpoint failures on an active host still abort a forced stop.
       if (!force || !/Unknown host operation|requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(error instanceof Error ? error.message : String(error))) throw error;
     }
-    this.progress("Host daemon cannot run the shutdown barrier; force-stopping it. Durable state is preserved and the next 'bflow up' reconciles it.");
+    this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");
     return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
   }
   private async forceStopIncompatibleHost(repository: RepositoryIdentity, config: EnvironmentConfig, timeoutMs?: number): Promise<SessionManifest | EnvironmentStatus> {
@@ -850,12 +850,12 @@ export class EnvironmentLifecycle {
     try {
       await this.writeIntent(repository, "stopping");
       if (await this.probe(repository, config, deadline)) {
-        this.progress("Force-stopping this repository's Herdr session...");
+        this.progress("Đang buộc dừng phiên Herdr của kho mã nguồn này...");
         try { await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline); }
         catch (error) { if (await this.probe(repository, config, deadline)) throw error; }
         while (await this.probe(repository, config, deadline)) await deadline.pause();
       }
-      this.progress("Stopping incompatible host process...");
+      this.progress("Đang dừng tiến trình nền không tương thích...");
       await deadline.call(() => integration.terminateIncompatibleHost!());
       await this.writeIntent(repository, "down");
       this.cleanupMcpSession(repository);
@@ -907,19 +907,19 @@ export class EnvironmentLifecycle {
         } finally { if (recovery !== suppliedIntegration) await deadline.call(() => recovery.close?.() ?? Promise.resolve()); }
         if (!saved) {
           if (!confirmed) fail("Startup stopped before a pane manifest was saved. Run bflow down --yes to stop this repository's server after checking that no workflows are active. Do not delete .bflow.");
-          this.progress("Stopping partial startup session...");
+          this.progress("Đang dừng phiên khởi động dở dang...");
           const empty = await acquire();
           if (!empty?.runtime || !empty.quiesce) fail("Cannot establish runtime shutdown safety; preserve state and inspect bflow doctor.");
           try {
-            this.progress("Establishing runtime shutdown barrier...");
+            this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
             unwrap(await deadline.call(opts => empty.quiesce!(opts)));
-            this.progress("Recollecting active workflow runs...");
+            this.progress("Đang thu thập lại các luồng chạy đang hoạt động...");
             const page = unwrap(await deadline.call(opts => empty.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 1 }, opts)));
             if (page.items.length || page.nextCursor) fail("Active workflows require their recoverable manifest and checkpoints; no session was stopped.");
-            this.progress("Stopping Herdr session...");
+            this.progress("Đang dừng phiên Herdr...");
             await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline);
             while (await this.probe(repository, config, deadline)) await deadline.pause();
-            this.progress("Shutting down persistent host...");
+            this.progress("Đang tắt tiến trình Runtime nền...");
             if (empty.shutdownHost) await deadline.call(() => empty.shutdownHost!());
             await this.writeIntent(repository, "down");
             this.cleanupMcpSession(repository);
@@ -930,14 +930,14 @@ export class EnvironmentLifecycle {
       }
       const running = await this.probe(repository, config, deadline);
       if (!running) {
-        this.progress("Session server is stopped; reconciling state...");
+        this.progress("Máy chủ phiên đã dừng; đang đối soát trạng thái...");
         const offline = await acquire();
         if (offline?.shutdownHost) try {
           if (!offline.runtime || !offline.quiesce) fail("Cannot drain the retained host safely; state was preserved.");
           await this.writeIntent(repository, "stopping");
-          this.progress("Establishing runtime shutdown barrier...");
+          this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
           unwrap(await deadline.call(opts => offline.quiesce!(opts)));
-          this.progress("Recollecting active workflow runs...");
+          this.progress("Đang thu thập lại các luồng chạy đang hoạt động...");
           const active = new Map<string, { version: number }>(); let cursor: string | undefined;
           const seen = new Set<string>();
           do {
@@ -953,10 +953,10 @@ export class EnvironmentLifecycle {
             const run = WorkflowRunSnapshotSchema.parse(input); if (!["succeeded", "failed", "cancelled"].includes(run.status)) active.set(runId, { version: run.version });
           }
           if (active.size > 0) {
-            this.progress(`Writing aggregate checkpoints for ${active.size} active run(s)...`);
+            this.progress(`Đang lưu điểm khôi phục (checkpoint) cho ${active.size} luồng chạy đang hoạt động...`);
           }
           await this.checkpointRuns(offline, active, deadline);
-          this.progress("Shutting down persistent host...");
+          this.progress("Đang tắt tiến trình Runtime nền...");
           await deadline.call(() => offline.shutdownHost!());
         } finally { if (offline !== suppliedIntegration) await deadline.call(() => offline.close?.() ?? Promise.resolve()); }
         await this.writeIntent(repository, "down");
@@ -1004,20 +1004,20 @@ export class EnvironmentLifecycle {
         if (activeRuns.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
         if (!integration.quiesce) fail("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
         await this.writeIntent(repository, "stopping");
-        this.progress("Establishing runtime shutdown barrier...");
+        this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
         unwrap(await deadline.call((opts) => integration.quiesce!(opts)));
         // Runs may have advanced or appeared between the safety inspection and the barrier.
-        this.progress("Recollecting active workflow runs...");
+        this.progress("Đang thu thập lại các luồng chạy đang hoạt động...");
         await collectActiveRuns();
         if (activeRuns.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable after shutdown barrier");
         if (activeRuns.size > 0) {
-          this.progress(`Writing aggregate checkpoints for ${activeRuns.size} active run(s)...`);
+          this.progress(`Đang lưu điểm khôi phục (checkpoint) cho ${activeRuns.size} luồng chạy đang hoạt động...`);
         }
         await this.checkpointRuns(integration, activeRuns, deadline);
         await this.saveManifest(repository, { ...manifest, status: "stopping" });
         let stopped: SessionManifest | undefined;
         if (!force) {
-          this.progress("Stopping agent roles gracefully...");
+          this.progress("Đang dừng các vai trò agent một cách an toàn...");
           try {
             stopped = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.down(repository.sessionName, opts))), repository);
             if (stopped.status !== "down") fail("Role manager did not confirm graceful shutdown; session was not force-stopped");
@@ -1029,7 +1029,7 @@ export class EnvironmentLifecycle {
         } else {
           deadline.context = "Force shutdown has not been confirmed. State/checkpoints are preserved; run bflow status, then bflow down --force to reconcile.";
         }
-        this.progress(force ? "Force-stopping this repository's Herdr session..." : "Stopping Herdr session...");
+        this.progress(force ? "Đang buộc dừng phiên Herdr của kho mã nguồn này..." : "Đang dừng phiên Herdr...");
         if (await this.probe(repository, config, deadline)) {
           try {
             await this.command(repository, config.environment.herdrBinary, ["session", "stop", repository.sessionName, "--json"], deadline);
@@ -1047,7 +1047,7 @@ export class EnvironmentLifecycle {
             metadata: { ...manifest.metadata, shutdownMode: "force" } }, repository);
         }
         await this.saveManifest(repository, { ...stopped, status: "stopping" });
-        this.progress("Shutting down persistent host...");
+        this.progress("Đang tắt tiến trình Runtime nền...");
         if (integration.shutdownHost) await deadline.call(() => integration.shutdownHost!());
         await this.writeIntent(repository, "down");
         const finalManifest = await this.saveManifest(repository, stopped);
@@ -1056,7 +1056,7 @@ export class EnvironmentLifecycle {
       } finally { if (integration !== suppliedIntegration) await deadline.call(() => integration.close?.() ?? Promise.resolve()); }
   }
   async status(): Promise<EnvironmentStatus> {
-    this.progress("Reading repository configuration and saved session state...");
+    this.progress("Đang đọc cấu hình kho mã nguồn và trạng thái phiên đã lưu...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const issues: string[] = [];
     let config: EnvironmentConfig;
@@ -1071,14 +1071,14 @@ export class EnvironmentLifecycle {
       if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase))
         issues.push(`Environment operation '${intent.phase}' was interrupted. ${intent.phase === 'stopping' ? 'Run bflow down --yes to finish shutdown, then bflow up.' : 'Run bflow up to reconcile existing panes; if there is no recoverable receipt, bflow down --yes stops the partial startup.'} Preserve .bflow.`);
     } catch (error) { issues.push(String(error)); }
-    this.progress("Checking session server and dependencies...");
+    this.progress("Đang kiểm tra máy chủ phiên và các phụ thuộc...");
     try { server = await this.probe(repository, config) ? "running" : "stopped"; } catch (error) { issues.push(String(error)); }
     for (const executable of new Set([config.environment.herdrBinary, ...config.environment.roles.map((r) => r.cli)])) {
       try { await this.command(repository, executable, ["--version"]); }
       catch (error) { issues.push(`Missing/unavailable dependency '${executable}': ${String(error)}`); }
     }
     if (server === "running") {
-      this.progress("Reconciling live role observations...");
+      this.progress("Đang đối soát trạng thái trực tiếp của các vai trò...");
       const integration = await new Deadline(5000).call(() => this.integration(repository, config)).catch((error: unknown) => { issues.push(String(error)); return undefined; });
       if (integration) try {
         const deadline = new Deadline(5000);
@@ -1091,7 +1091,7 @@ export class EnvironmentLifecycle {
     return { workspaceRoot: repository.root, sessionName: repository.sessionName, server, configuration: "valid", manifest, liveObservation, issues };
   }
   async doctor(deep = false): Promise<EnvironmentDoctorReport> {
-    this.progress("Reading repository configuration for diagnostics...");
+    this.progress("Đang đọc cấu hình kho mã nguồn để chẩn đoán...");
     const repository = await identifyRepository(this.cwd, this.runner);
     let config: EnvironmentConfig | null = null;
     try { config = await readEnvironmentConfig(repository); } catch {}

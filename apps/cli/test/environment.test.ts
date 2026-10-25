@@ -373,7 +373,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(failure.contractError).toMatchObject({ code: "transport_unavailable", details: { role: "conversation" } });
     expect(failure.message).toBe(message + "\nAutomatic cleanup completed successfully.");
     const human = formatCommandError(failure.contractError, "up", false).split("\n");
-    expect(human[0]).toBe("Error [transport_unavailable]: " + message);
+    expect(human[0]).toBe("✗ Lỗi [transport_unavailable]: " + message);
     expect(human[1]).toBe("Automatic cleanup completed successfully.");
     const json = JSON.parse(formatCommandError(failure.contractError, "up", true));
     expect(json.error.message).toBe(failure.message);
@@ -471,13 +471,13 @@ describe("P12 repository environment lifecycle", () => {
       integration: { manager: fixture.manager } });
     const status = await composed.status();
     expect(status.server).toBe("stopped");
-    expect(observations).toContain("Reading repository configuration and saved session state...");
-    expect(observations).toContain("Checking session server and dependencies...");
+    expect(observations).toContain("Đang đọc cấu hình kho mã nguồn và trạng thái phiên đã lưu...");
+    expect(observations).toContain("Đang kiểm tra máy chủ phiên và các phụ thuộc...");
     observations.length = 0;
     const doctor = await composed.doctor();
     expect(doctor.schemaVersion).toBe(2);
-    expect(observations).toEqual(["Reading repository configuration for diagnostics...", "Checking Runtime and lifecycle health...",
-      "Checking agent providers and authentication...", "Checking shared MCP services...", "Checking installed tools...", "Checking approved skills..."]);
+    expect(observations).toEqual(["Đang đọc cấu hình kho mã nguồn để chẩn đoán...", "Đang kiểm tra sức khỏe Runtime và vòng đời phiên...",
+      "Đang kiểm tra các agent provider và trạng thái xác thực...", "Đang kiểm tra các dịch vụ MCP dùng chung...", "Đang kiểm tra các công cụ đã cài đặt...", "Đang kiểm tra các kỹ năng (skills) được phê duyệt..."]);
   });
 
   linuxIt("publishes changing native startup observations before the deadline, without duplicates", async () => {
@@ -727,7 +727,7 @@ describe("P12 repository environment lifecycle", () => {
       expect(output).toContain(".bflow/config.yml");
       expect(output).toContain(`environment.roles[${reviewerIndex}].required`);
       expect(output).toContain("Expected boolean");
-      if (!json) expect(output).toContain("Inspect .bflow/config.yml");
+      if (!json) expect(output).toContain("Kiểm tra tệp .bflow/config.yml");
     }
     expect(await readFile(path, "utf8")).toBe(content);
     expect(fixture.manager.down).not.toHaveBeenCalled();

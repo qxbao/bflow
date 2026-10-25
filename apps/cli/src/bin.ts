@@ -61,12 +61,16 @@ export async function main(
   }
 
   const isJson = args.some((a) => a === "--json" || a === "-j") || Boolean(context?.presentation?.json);
+  const isDebug = args.includes("--debug") || Boolean(context?.presentation?.debug);
   const cmdCandidate = args.find((a) => !a.startsWith("-"));
   const command = (cmdCandidate && VALID_COMMANDS.has(cmdCandidate as CliCommandName)
     ? cmdCandidate
     : undefined) as CliCommandName | undefined;
 
-  const presentation = resolvePresentation(context, isJson, isDefaultIo);
+  const presentation = {
+    ...resolvePresentation(context, isJson, isDefaultIo),
+    ...(isDebug ? { debug: true } : {})
+  };
 
   let bufferedStdout: string | undefined;
   let bufferedStderr: string | undefined;

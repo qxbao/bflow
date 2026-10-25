@@ -21,10 +21,10 @@ describe("provider readiness diagnostics", () => {
     const text = formatCommandError({ code: "validation", retryable: false, message: sharedHookFailure() }, "up", false);
     expect(text.match(/Plugin installation has unsafe ownership or permissions/g)).toHaveLength(1);
     expect(text.match(/agy@agy-staff/g)).toHaveLength(1);
-    expect(text).toContain("Affected roles (7): conversation, coordinator, planner, architect, specifier, reviewer, qa");
-    expect(text).toContain("Blocked checks: authentication, permissions, launch arguments");
+    expect(text).toContain("Vai trò bị ảnh hưởng (7): conversation, coordinator, planner, architect, specifier, reviewer, qa");
+    expect(text).toContain("Kiểm tra bị chặn: authentication, permissions, launch arguments");
     expect(text.match(/codex_global_hooks_unsupported/g)).toHaveLength(1);
-    expect(text).toContain("No panes were started");
+    expect(text).toContain("Chưa có khung pane nào được mở.");
     expect(text).toContain("Automatic cleanup completed successfully.");
     expect(text).toContain("bflow setup --codex-hooks --plan");
     expect(text).not.toContain("--trust-all");
@@ -38,9 +38,9 @@ describe("provider readiness diagnostics", () => {
       { role: "qa", provider: "agy", required: true, status: "blocked", checks: [{ check: "authentication", status: "failed", code: "auth_expired", message: "OAuth access token expired", remediation: "Check Agy authentication" }] }
     ] });
     const text = formatCommandError({ code: "validation", retryable: false, message: report + "\nAutomatic cleanup failed: host still running." }, "up", false);
-    expect(text).toContain("Affected roles (1): conversation");
-    expect(text).toContain("reviewer (optional, unsupported)");
-    expect(text).toContain("Affected roles (1): qa");
+    expect(text).toContain("Vai trò bị ảnh hưởng (1): conversation");
+    expect(text).toContain("reviewer (tùy chọn, unsupported)");
+    expect(text).toContain("Vai trò bị ảnh hưởng (1): qa");
     for (const value of ["codex", "agy", "auth_expired", "permission_denied", "Workspace trust required", "Run codex login", "Check Agy authentication", "Automatic cleanup failed: host still running."]) expect(text).toContain(value);
   });
 
@@ -56,7 +56,7 @@ describe("provider readiness diagnostics", () => {
     ] });
     const text = formatCommandError({ code: "validation", retryable: false, message }, "up", false);
     for (const value of ["Network unreachable", "Model endpoint unavailable", "Conversation needs a fresh login receipt"]) expect(text).toContain(value);
-    expect(text.match(/Code: probe_failed/g)).toHaveLength(2);
+    expect(text.match(/Mã lỗi: probe_failed/g)).toHaveLength(2);
   });
 
   it("retains unknown report content rather than silently dropping it during grouping", () => {
@@ -95,7 +95,7 @@ describe("provider readiness diagnostics", () => {
     expect(text).toContain("REDACTED");
     expect(text).toContain("Check account A");
     expect(text).toContain("Check account B");
-    expect(text.match(/Affected roles \(1\)/g)).toHaveLength(2);
+    expect(text.match(/Vai trò bị ảnh hưởng \(1\)/g)).toHaveLength(2);
   });
 
   it.each([
@@ -130,7 +130,7 @@ describe("provider readiness diagnostics", () => {
   it("points hook failures to their review while retaining uncertain-delivery priority", () => {
     const message = "Provider readiness is not satisfied; no panes were started.\ncodex_global_hooks_unsupported";
     expect(resolveActionableRemediation({ code: "validation", retryable: false, message }, "up")).toContain("setup --codex-hooks --plan");
-    expect(resolveActionableRemediation({ code: "unknown_delivery", retryable: false, message }, "up")).toContain("reconcile");
+    expect(resolveActionableRemediation({ code: "unknown_delivery", retryable: false, message }, "up")).toContain("đối soát");
   });
   it("bounds a large readiness report after redaction without terminal controls", () => {
     const message = "Provider readiness is not satisfied; no panes were started.\n" + "\u001b[2Jtoken=hidden-value\n".repeat(500);

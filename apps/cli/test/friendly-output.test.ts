@@ -29,10 +29,12 @@ describe("friendly CLI output", () => {
   it("groups the long setup example while retaining scope, file names, manual blockers and confirmation", () => {
     const raw = `${renderPreview(preview)}\n\nApply plan setup-1?`;
     const plain = formatSetupPreview(raw);
-    expect(plain).toContain("32 pinned skill bundles");
-    expect(plain).toContain("Store: /home/user/.local/share/bflow/skills-store/bundles");
+    expect(plain).toContain("32 gói kỹ năng đã ghim");
+    expect(plain).toContain("Kho lưu trữ: /home/user/.local/share/bflow/skills-store/bundles");
     expect(plain).not.toContain(bundles[0]);
-    expect(plain).toContain("requires approval; this account");
+    expect(plain).toContain("[1] Cài đặt các kỹ năng (skills) cho agent [cần phê duyệt; tài khoản này]");
+    expect(plain).toContain("[2] Cấu hình các công cụ MCP");
+    expect(plain).toContain("Thay đổi trên tài khoản này:");
     expect(plain).toContain("requires elevation (manual)");
     expect(plain).toContain("unsupported platform");
     expect(plain).toContain("command: service-manager register --user");
@@ -83,7 +85,7 @@ describe("friendly CLI output", () => {
         createdAt: "2026-10-19T00:00:00Z", idempotencyKey: "setup-1", steps: [] },
       preview, tools: [], skills: { catalogLoaded: true, skillCount: 32, syncedManifests: 0, storeRoot: "/store" }, diagnostics: []
     };
-    expect(formatCommandSuccess("setup", output, false)).toContain("32 pinned skill bundles");
+    expect(formatCommandSuccess("setup", output, false)).toContain("32 gói kỹ năng đã ghim");
     const json = formatCommandSuccess("setup", output, true, { color: true });
     expect(JSON.parse(json).data.preview).toEqual(preview);
     expect(json).not.toContain("\u001b[");
@@ -102,7 +104,7 @@ describe("friendly CLI output", () => {
     expect(plain).not.toContain("Command status:");
     expect(plain).not.toContain("Correlation ID:");
     expect(plain).toContain(`Idempotency key: ${report.idempotencyKey}`);
-    expect(plain).toContain("32 pinned skill bundles");
+    expect(plain).toContain("32 gói kỹ năng đã ghim");
     expect(plain).not.toMatch(/status=|exit=|commandId=|approval_required/);
     expect(plain).toContain("--allow-machine-scope");
     expect(plain).toContain("Machine-wide targets: yes");

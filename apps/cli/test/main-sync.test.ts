@@ -63,11 +63,11 @@ describe("main integration with upstream CLI commands", () => {
       metadata: { groups: { Providers: [{ component: "codex", status: "failed", reason: "Login required; token=SYNTHETIC_SECRET", repair_command: "codex login" }] } }
     });
     const human = formatCommandSuccess("doctor", report, false);
-    expect(human).toContain("[FAIL] Environment unhealthy");
-    expect(human).toContain("[FAIL] Codex: Login required");
-    expect(human).toContain("Component Groups:");
+    expect(human).toContain("✗ [CẦN XỬ LÝ] Phát hiện vấn đề trong môi trường");
+    expect(human).toContain("[LỖI] Codex: Login required");
+    expect(human).toContain("Nhóm thành phần:");
     expect(human).toContain("[Providers]");
-    expect(human).toContain("Repair: codex login");
+    expect(human).toContain("Sửa chữa: codex login");
     expect(human).not.toContain("SYNTHETIC_SECRET");
     expect(JSON.parse(formatCommandSuccess("doctor", report, true)).data).toEqual(report);
   });

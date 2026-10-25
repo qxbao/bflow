@@ -199,7 +199,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       const result = await runCli(["init"], { cwd: tempDir });
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
-      expect(result.stdout).toContain("bflow repository configuration");
+      expect(result.stdout).toContain("Đã khởi tạo cấu hình kho mã nguồn bflow");
 
       const configFilePath = join(tempDir, ".bflow", "config.yml");
       const content = await readFile(configFilePath, "utf-8");
@@ -586,7 +586,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
 
       const result = await runCli(["status"], { runtime });
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("No workflow runs found");
+      expect(result.stdout).toContain("Chưa có luồng chạy (workflow run) nào");
     });
 
     it("calls runtime.getRun(runId) when runId is provided and formats task progress", async () => {
@@ -601,10 +601,10 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       expect(result.exitCode).toBe(0);
       expect(result.ok).toBe(true);
       expect(runtime.getRun).toHaveBeenCalledWith("run-waiting-1", undefined);
-      expect(result.stdout).toContain("Run ID:   run-waiting-1");
+      expect(result.stdout).toContain("✦ Luồng chạy: run-waiting-1");
       expect(result.stdout).toContain("qa");
       expect(result.stdout).toContain("awaiting_approval");
-      expect(result.stdout).toContain("Notice: Run is waiting on 'qa'");
+      expect(result.stdout).toContain("⏳ Đang chờ phê duyệt tại 'qa'");
     });
 
     it("returns exitCode 1 and not_found error when getRun returns null", async () => {

@@ -42,7 +42,7 @@ describe("config-migrate", () => {
 
     const result = await runCli(["config-migrate"], { cwd: subdir });
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Migrated repository configuration");
+    expect(result.stdout).toContain("Đã chuyển đổi cấu hình kho mã nguồn");
     const target = join(root, ".bflow/config.yml");
     expect(await readFile(`${legacy}.bak`, "utf8")).toBe(original);
     expect(parseConfigYaml(await readFile(target, "utf8"))).toEqual(JSON.parse(original));
@@ -93,7 +93,7 @@ describe("config-migrate", () => {
     const before = await readFile(target, "utf8");
     const result = await runCli(["config-migrate"], { cwd: root });
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Already migrated");
+    expect(result.stdout).toContain("Cấu hình đã ở định dạng chuẩn");
     expect(await readFile(target, "utf8")).toBe(before);
   });
 

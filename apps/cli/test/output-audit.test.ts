@@ -33,7 +33,7 @@ describe("CLI output audit", () => {
     const text = formatCommandSuccess("doctor", report, false);
     expect(text.match(/Pinned binary changed/g)).toHaveLength(1);
     expect(text).not.toContain("Internal successful probe");
-    for (const value of ["Review the tool installation", "Legacy session needs reconciliation", "skipped"]) expect(text).toContain(value);
+    for (const value of ["Review the tool installation", "Legacy session needs reconciliation", "[BỎ QUA] optional: Optional backend disabled", "Đạt (25): tool-0, tool-1"]) expect(text).toContain(value);
     expect(stripAnsi(formatCommandSuccess("doctor", report, false, { color: true }))).toBe(text);
     expect(formatCommandSuccess("doctor", report, false, { color: true })).toContain("\x1b[31m");
     expect(JSON.parse(formatCommandSuccess("doctor", report, true)).data).toEqual(report);
@@ -73,10 +73,10 @@ describe("CLI output audit", () => {
 
   it("gives path-permission and input-file advice while preserving uncertain-delivery priority", () => {
     const permission = { code: "validation" as const, retryable: false, message: "EACCES: permission denied, open '/work/file'" };
-    expect(formatCommandError(permission, "init", false)).toMatch(/Next:.*ownership/i);
+    expect(formatCommandError(permission, "init", false)).toMatch(/👉 Tiếp theo:.*quyền sở hữu/i);
     const input = { ...permission, message: "ENOENT: no such file or directory, open '/work/spec.json'" };
-    expect(formatCommandError(input, "run", false)).toMatch(/Next:.*input.*path/i);
-    expect(formatCommandError({ ...permission, code: "unknown_delivery", manualInterventionRequired: true }, "up", false)).toMatch(/Next:.*reconcile/i);
+    expect(formatCommandError(input, "run", false)).toMatch(/👉 Tiếp theo:.*đường dẫn tệp đầu vào/i);
+    expect(formatCommandError({ ...permission, code: "unknown_delivery", manualInterventionRequired: true }, "up", false)).toMatch(/👉 Tiếp theo:.*đối soát/i);
   });
 
   it("summarizes successful setup bookkeeping but retains failed receipts and warnings", () => {
@@ -87,7 +87,7 @@ describe("CLI output audit", () => {
     const text = formatCommandSuccess("setup", output, false);
     for (const hidden of ["internal-machine-id", "internal-plan-id", "/private/skills-store", "Setup completed successfully"]) expect(text).not.toContain(hidden);
     expect(text).toContain("License:");
-    expect(text).toContain("2 ready");
+    expect(text).toContain("2/2 sẵn sàng");
     expect(text).toContain("bflow doctor");
     expect(JSON.parse(formatCommandSuccess("setup", output, true)).data).toEqual(output);
   });

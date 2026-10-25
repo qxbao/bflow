@@ -24,6 +24,7 @@ import {
 import {
   isStderrInteractive,
   resolveStreamColor,
+  sanitizeIdentifier,
   toContractError
 } from "./presentation.js";
 import { formatCommandError, formatCommandSuccess } from "./formatters.js";
@@ -80,14 +81,17 @@ export const CLI_VERSION: string = loadPackageVersion();
 export function resolvePresentation(
   context?: CliContext | undefined,
   json = false,
-  isDefaultIo = false
+  isDefaultIo = false,
+  isDebug = false
 ): PresentationOptions {
+  const debug = Boolean(isDebug || context?.presentation?.debug);
   if (json || context?.presentation?.json) {
     return {
       stdoutColor: false,
       stderrColor: false,
       interactive: false,
-      json: true
+      json: true,
+      debug
     };
   }
   const defaultIo = isDefaultIo || Boolean(context?.presentation?.isDefaultIo) || context?.io === undefined;
@@ -119,6 +123,7 @@ export function resolvePresentation(
     stderrColor,
     interactive,
     json: false,
+    debug,
     ...(defaultIo ? { isDefaultIo: true } : {})
   };
 }
@@ -135,14 +140,17 @@ function makeResult(
 ): CliExecutionResult {
   let stdout = "";
   let stderr = "";
+  const effectivePresentation = presentation !== undefined
+    ? { ...presentation, debug: Boolean(presentation.debug) }
+    : undefined;
 
   if (ok && data !== undefined && command !== undefined) {
-    stdout = formatCommandSuccess(command, data, json, presentation);
+    stdout = formatCommandSuccess(command, data, json, effectivePresentation);
     if (io !== undefined) {
       io.stdout(stdout);
     }
   } else if (!ok && error !== undefined) {
-    const formatted = formatCommandError(error, command, json, presentation);
+    const formatted = formatCommandError(error, command, json, effectivePresentation);
     stderr = formatted;
     if (json) {
       stdout = formatted;
@@ -167,7 +175,8 @@ export async function executeCommand(
   parsed: ParsedCliCommand,
   context?: CliContext | undefined
 ): Promise<CliExecutionResult> {
-  const presentation = resolvePresentation(context, Boolean(parsed.json));
+  const isDebug = Boolean("debug" in parsed && parsed.debug) || Boolean(context?.presentation?.debug);
+  const presentation = resolvePresentation(context, Boolean(parsed.json), false, isDebug);
   const progress = new CliProgress({
     enabled: Boolean(presentation.interactive) && !presentation.json && parsed.command !== "help" && parsed.command !== "version",
     color: presentation.stderrColor,
@@ -184,6 +193,17 @@ export async function executeCommand(
   finally { progress.stop(); }
 }
 
+export async function promptConfirmOverwrite(configPath: string): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) return false;
+  const safePath = sanitizeIdentifier(configPath);
+  const terminal = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return /^(y|yes)$/i.test((await terminal.question(`Tệp cấu hình đã tồn tại tại ${safePath}. Bạn có muốn ghi đè không? [y/N] `)).trim());
+  } finally {
+    terminal.close();
+  }
+}
+
 /** Asks before the first GitNexus index of a repository; non-interactive runs need --yes. */
 async function approveGitNexusIndexing(
   args: InitCommandArgs,
@@ -192,7 +212,7 @@ async function approveGitNexusIndexing(
   progress: CliProgress | undefined
 ): Promise<boolean> {
   if (args.yes) return true;
-  const prompt = `${GITNEXUS_POLYFORM_NOTICE}\n\nIndex '${repositoryRoot}' with GitNexus (writes .gitnexus/ and .git/info/exclude) and register its Gateway service?`;
+  const prompt = `${GITNEXUS_POLYFORM_NOTICE}\n\nTạo chỉ mục '${repositoryRoot}' bằng GitNexus (ghi .gitnexus/ và .git/info/exclude) và đăng ký dịch vụ Gateway?`;
   const ask = async () => {
     if (context?.setup?.confirm) return context.setup.confirm(prompt);
     if (args.json || !process.stdin.isTTY || !process.stderr.isTTY) return false;
@@ -211,10 +231,11 @@ async function executeCommandWithProgress(
   const cwd = context?.cwd ?? process.cwd();
   const io = context?.io;
   const isJson = Boolean(parsed.json) || Boolean(context?.presentation?.json);
-  const presentation = resolvePresentation(context, isJson);
+  const isDebug = Boolean("debug" in parsed && parsed.debug) || Boolean(context?.presentation?.debug);
+  const presentation = resolvePresentation(context, isJson, false, isDebug);
   const showProgress = presentation.interactive && !isJson && parsed.command !== "help" && parsed.command !== "version";
-  const emitProgress = (step: string) => {
-    progress.step(step);
+  const emitProgress = (step: string, detail?: string) => {
+    progress.step(step, detail);
   };
 
   if (parsed.command === "help") {
@@ -234,7 +255,7 @@ async function executeCommandWithProgress(
   }
 
   if (isHighLevelCommand(parsed.command)) {
-    if (showProgress) emitProgress(`Executing ${parsed.command} command...`);
+    if (showProgress) emitProgress(`Đang thực thi lệnh ${parsed.command}...`);
     const hlResult = await executeHighLevelCommand(
       parsed as HighLevelParsedCliCommand,
       context
@@ -252,6 +273,9 @@ async function executeCommandWithProgress(
   }
 
   if (parsed.command === "config-migrate") {
+    if (showProgress) {
+      emitProgress("Chuyển đổi cấu hình kho mã nguồn", "Kiểm tra tệp cấu hình cũ và tạo bản sao lưu an toàn");
+    }
     try {
       const output = await migrateRepositoryConfig(cwd);
       return makeResult(CLI_EXIT_CODES.SUCCESS, true, parsed.command, output, undefined, isJson, io, presentation);
@@ -284,12 +308,29 @@ async function executeCommandWithProgress(
     try {
       let data: CliCommandData;
       switch (parsed.command) {
-        case "up": data = await lifecycle.up(parsed.timeoutMs); break;
-        case "down": data = await lifecycle.down(parsed.yes, parsed.timeoutMs, parsed.force); break;
-        case "attach": data = await lifecycle.attach(); break;
-        case "recover": data = await lifecycle.recover(parsed.yes); break;
-        case "doctor": data = await lifecycle.doctor(parsed.deep); break;
-        default: data = await lifecycle.status();
+        case "up":
+          if (showProgress) emitProgress("Khởi động môi trường Bflow", "Kiểm tra điều kiện cần thiết và khởi chạy các vai trò");
+          data = await lifecycle.up(parsed.timeoutMs);
+          break;
+        case "down":
+          if (showProgress) emitProgress("Dừng môi trường Bflow", "Đóng phiên làm việc và giải phóng tài nguyên cục bộ");
+          data = await lifecycle.down(parsed.yes, parsed.timeoutMs, parsed.force);
+          break;
+        case "attach":
+          if (showProgress) emitProgress("Kết nối khung chat Conversation", "Chuyển tiêu điểm tới phiên Herdr của kho mã nguồn");
+          data = await lifecycle.attach();
+          break;
+        case "recover":
+          if (showProgress) emitProgress("Khôi phục môi trường Bflow", "Đối soát trạng thái phiên, vai trò và khóa vòng đời");
+          data = await lifecycle.recover(parsed.yes);
+          break;
+        case "doctor":
+          if (showProgress) emitProgress("Kiểm tra sức khỏe môi trường", "Đánh giá công cụ, agent, MCP, kỹ năng và trạng thái phiên");
+          data = await lifecycle.doctor(parsed.deep);
+          break;
+        default:
+          if (showProgress) emitProgress("Kiểm tra trạng thái môi trường", "Đọc trạng thái phiên và dịch vụ hiện tại");
+          data = await lifecycle.status();
       }
       const healthy = ( !("healthy" in data) || data.healthy ) && ( !("configuration" in data) || data.configuration === "valid" );
       return makeResult(healthy ? 0 : 1, true, parsed.command, data, undefined, isJson, io, presentation);
@@ -303,7 +344,7 @@ async function executeCommandWithProgress(
     const targetDir = resolve(cwd, parsed.dir ?? ".");
     if (parsed.check) {
       if (showProgress) {
-        emitProgress("Checking repository initialization and GitNexus status...");
+        emitProgress("Chuẩn bị kho mã nguồn", "Kiểm tra thông tin Git và cấu hình Bflow");
       }
       try {
         const repository = await identifyRepository(targetDir);
@@ -362,7 +403,7 @@ async function executeCommandWithProgress(
 
     if (parsed.remove) {
       if (showProgress) {
-        emitProgress("Removing repository GitNexus registration...");
+        emitProgress("Cấu hình GitNexus", "Gỡ đăng ký dịch vụ GitNexus của kho mã nguồn");
       }
       try {
         // A deleted repository can still be unregistered by its former path.
@@ -389,7 +430,7 @@ async function executeCommandWithProgress(
     }
 
     if (showProgress) {
-      emitProgress("Initializing repository configuration...");
+      emitProgress("Chuẩn bị kho mã nguồn", "Kiểm tra thông tin Git và cấu hình Bflow");
     }
     const initRes = await initRepositoryConfig({
       cwd,
@@ -422,7 +463,7 @@ async function executeCommandWithProgress(
     }
 
     if (showProgress && gitnexusEnabled) {
-      emitProgress("Preparing repository GitNexus index and Gateway service...");
+      emitProgress("Cấu hình GitNexus", "Tạo và kiểm tra bộ chỉ mục mã nguồn cho kho này");
     }
 
     // GitNexus is PolyForm-Noncommercial and writes into the repository, so a first registration needs explicit approval.
@@ -462,6 +503,9 @@ async function executeCommandWithProgress(
       diagnostics: gitnexus.diagnostics
     };
 
+    if (showProgress) {
+      progress.done("Hoàn tất cấu hình kho mã nguồn ✓");
+    }
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", output, undefined, isJson, io, presentation);
   }
 
@@ -515,16 +559,15 @@ async function executeCommandWithProgress(
     return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, parsed.command, undefined, error, isJson, io, presentation);
   }
 
-  if (showProgress) {
-    emitProgress(`Executing ${parsed.command} command...`);
-  }
-
   const runtime = context.runtime;
   const now = context.clock !== undefined ? context.clock() : new Date();
   const isoNow = now.toISOString();
 
   switch (parsed.command) {
     case "run": {
+      if (showProgress) {
+        emitProgress("Đang tải cấu hình kho mã nguồn và định nghĩa quy trình...");
+      }
       let definition: WorkflowDefinition;
       if (parsed.workflowPath !== undefined) {
         const fullWfPath = isAbsolute(parsed.workflowPath) ? parsed.workflowPath : resolve(cwd, parsed.workflowPath);
@@ -569,6 +612,9 @@ async function executeCommandWithProgress(
         return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "run", undefined, err, isJson, io, presentation);
       }
 
+      if (showProgress) {
+        emitProgress("Đang khởi chạy quy trình làm việc...");
+      }
       const startRes = await runtime.start(parseInput.data, context.operationOptions);
       if (!startRes.ok) {
         return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "run", undefined, startRes.error, isJson, io, presentation);
@@ -579,6 +625,9 @@ async function executeCommandWithProgress(
 
     case "status": {
       if (parsed.runId !== undefined) {
+        if (showProgress) {
+          emitProgress(`Đang truy vấn trạng thái luồng chạy '${parsed.runId}'...`);
+        }
         const getRes = await runtime.getRun(parsed.runId, context.operationOptions);
         if (!getRes.ok) {
           return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, getRes.error, isJson, io, presentation);
@@ -592,6 +641,10 @@ async function executeCommandWithProgress(
           return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "status", undefined, notFoundErr, isJson, io, presentation);
         }
         return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", getRes.value, undefined, isJson, io, presentation);
+      }
+
+      if (showProgress) {
+        emitProgress("Đang truy vấn danh sách luồng chạy...");
       }
 
       const query = {
@@ -628,6 +681,10 @@ async function executeCommandWithProgress(
           message: `Mandatory human approval cannot be satisfied by an automated or AI actor ('${decidedBy}').`
         };
         return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "approve", undefined, err, isJson, io, presentation);
+      }
+
+      if (showProgress) {
+        emitProgress(`Đang xác định luồng chạy mục tiêu cho tác vụ '${parsed.taskId}'...`);
       }
 
       let resolvedRunId: string;
@@ -746,6 +803,10 @@ async function executeCommandWithProgress(
         return makeResult(CLI_EXIT_CODES.USAGE_ERROR, false, "approve", undefined, err, isJson, io, presentation);
       }
 
+      if (showProgress) {
+        emitProgress(`Đang ghi nhận quyết định phê duyệt (${parsed.decision}) cho tác vụ '${parsed.taskId}'...`);
+      }
+
       const decideRes = await runtime.decide(parseDec.data, context.operationOptions);
       if (!decideRes.ok) {
         return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "approve", undefined, decideRes.error, isJson, io, presentation);
@@ -755,6 +816,10 @@ async function executeCommandWithProgress(
     }
 
     case "resume": {
+      if (showProgress) {
+        emitProgress(`Đang tiếp tục luồng chạy '${parsed.runId}'...`);
+      }
+
       const resumeInput = {
         runId: parsed.runId,
         idempotencyKey: parsed.idempotencyKey ?? `resume-${parsed.runId}-${randomUUID()}`,
@@ -780,6 +845,10 @@ async function executeCommandWithProgress(
     }
 
     case "cancel": {
+      if (showProgress) {
+        emitProgress(`Đang hủy luồng chạy '${parsed.runId}'...`);
+      }
+
       let expectedVersion = parsed.expectedVersion;
       if (expectedVersion === undefined) {
         const snapRes = await runtime.getRun(parsed.runId, context.operationOptions);
@@ -847,10 +916,11 @@ export async function runCli(
       context?.io === undefined &&
       context?.highLevelServices === undefined);
   if (!useFacadePath && isHighLevelInvocation(argv)) {
+    const isDebug = argv.includes("--debug") || Boolean(context?.presentation?.debug);
     const options: HighLevelRunOptions = {
       cwd: context?.cwd, io: context?.io, clock: context?.clock, services: context?.highLevelServices,
       runtime: context?.runtime as HighLevelRunOptions["runtime"], signal: context?.operationOptions?.signal,
-      presentation: resolvePresentation(context, Boolean(context?.presentation?.json))
+      presentation: resolvePresentation(context, Boolean(context?.presentation?.json), false, isDebug)
     };
     const effectiveArgv = context?.presentation?.json ? ["--json", ...argv] : argv;
     const result = await runHighLevelCli(effectiveArgv, options);
@@ -866,8 +936,9 @@ export async function runCli(
   const parseRes = parseCliArgs(argv);
   if (!parseRes.ok) {
     const isJson = Boolean(parseRes.json) || Boolean(context?.presentation?.json);
-    const presentation = resolvePresentation(context, isJson);
-    const stderr = formatCommandError(parseRes.error, parseRes.command, isJson, presentation);
+    const isDebug = argv.includes("--debug") || Boolean(context?.presentation?.debug);
+    const presentation = resolvePresentation(context, isJson, false, isDebug);
+    const stderr = formatCommandError(parseRes.error, parseRes.command, isJson, { ...presentation, debug: isDebug });
     if (context?.io !== undefined) {
       context.io.stderr(stderr);
     }
@@ -881,7 +952,8 @@ export async function runCli(
     };
   }
 
-  return executeCommand(parseRes.value, context);
+  const isDebug = Boolean(parseRes.value.debug || context?.presentation?.debug);
+  return executeCommand(parseRes.value, isDebug ? { ...context, presentation: { ...context?.presentation, debug: true } } : context);
 }
 
 export function getIsoHelpText(): string {

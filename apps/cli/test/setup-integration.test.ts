@@ -242,7 +242,7 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
       expect(setupHelp).toContain("--repair");
 
       const initHelp = getHelpText("init");
-      expect(initHelp).toContain("claude, codex, or agy");
+      expect(initHelp).toContain("claude, codex hoặc agy");
 
       const globalHelp = getHelpText("help");
       expect(globalHelp).toContain("setup");
@@ -301,15 +301,21 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
       };
 
       const formatted = formatCommandSuccess("setup", output, false);
-      expect(formatted).toContain("Setup Mode:         APPLY");
+      expect(formatted).toContain("[HOÀN TẤT] Đã áp dụng thiết lập ✓");
+      expect(formatted).toContain("🔧 Công cụ: 1/1 sẵn sàng ✓");
+      expect(formatted).toContain("📚 Kỹ năng: 10 gói kỹ năng đã ghim ✓");
       expect(formatted).not.toContain("Machine ID:");
-      expect(formatted).toContain("Operating System:   linux");
-      expect(formatted).toContain("Service Manager:    systemd-user");
-      expect(formatted).toContain("Plan ID:            plan-1");
-      expect(formatted).toContain("rtk: ready (1.0.0)");
-      expect(formatted).toContain("Catalog Loaded:   yes");
-      expect(formatted).toContain("Skill Count:      10");
-      expect(formatted).toContain("Setup completed successfully");
+
+      const debugFormatted = formatCommandSuccess("setup", output, false, { debug: true });
+      expect(debugFormatted).toContain("Chế độ:                APPLY");
+      expect(debugFormatted).not.toContain("Machine ID:");
+      expect(debugFormatted).toContain("Hệ điều hành:          linux");
+      expect(debugFormatted).toContain("Trình quản lý dịch vụ: systemd-user");
+      expect(debugFormatted).toContain("Mã kế hoạch:           plan-1");
+      expect(debugFormatted).toContain("rtk: ready (1.0.0) ✓");
+      expect(debugFormatted).toContain("Đã nạp danh mục:     có");
+      expect(debugFormatted).toContain("Số lượng kỹ năng:    10");
+      expect(debugFormatted).toContain("Setup completed successfully");
     });
 
     it("formats doctor with metadata.groups rendering 5 groups while preserving checks", () => {
@@ -345,15 +351,15 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
 
       const formatted = formatCommandSuccess("doctor", doctorData as any, false);
       // Healthy details are summarized; actionable diagnostics remain visible.
-      expect(formatted).toContain("Repository: /workspace");
-      expect(formatted).toContain("Passed (2): herdr, git");
+      expect(formatted).toContain("Kho mã nguồn: /workspace");
+      expect(formatted).toContain("Kiểm tra cơ bản: Đạt (2/2) ✓");
 
       // Renders groups
       expect(formatted).toContain("[Runtime]");
-      expect(formatted).toContain("Passed (1): Workflow Engine");
+      expect(formatted).toContain("Đạt (1/1) ✓");
       expect(formatted).toContain("[Agent Providers]");
-      expect(formatted).toContain("- [WARN] agy: Authentication token expiring soon");
-      expect(formatted).toContain("Next: Run agy login");
+      expect(formatted).toContain("- [CẢNH BÁO] agy: Authentication token expiring soon");
+      expect(formatted).toContain("👉 Tiếp theo: Run agy login");
       expect(formatted).toContain("[MCP]");
       expect(formatted).toContain("[Tools]");
       expect(formatted).toContain("[Skills]");
@@ -484,8 +490,8 @@ describe("Task 1: Bflow Platform v3 Setup Integration & Lifecycle", () => {
         expect(result.tools).toEqual([{ toolId: "rtk", status: "ready", version: "0.9.1" }]);
         expect(result.diagnostics).toContain("Plan calculated");
         expect(result.diagnostics).toContain("Step applied");
-        expect(progress).toContain("Building apply setup plan...");
-        expect(progress).toContain("Applying approved setup steps...");
+        expect(progress).toContain("Đang lập kế hoạch thiết lập (apply)...");
+        expect(progress).toContain("Đang áp dụng các bước thiết lập đã phê duyệt...");
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }

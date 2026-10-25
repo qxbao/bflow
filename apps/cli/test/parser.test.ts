@@ -1149,4 +1149,38 @@ describe("CLI Argument Parser - parseCliArgs", () => {
       }
     });
   });
+
+  describe("10. Global --debug flag", () => {
+    it("parses --debug flag across commands and attaches debug: true", () => {
+      const statusRes = parseCliArgs(["status", "--debug"]);
+      expect(statusRes.ok).toBe(true);
+      if (statusRes.ok) {
+        expect(statusRes.value.command).toBe("status");
+        expect(statusRes.value.debug).toBe(true);
+      }
+
+      const leadingDebugRes = parseCliArgs(["--debug", "doctor", "--deep"]);
+      expect(leadingDebugRes.ok).toBe(true);
+      if (leadingDebugRes.ok) {
+        expect(leadingDebugRes.value.command).toBe("doctor");
+        expect(leadingDebugRes.value.debug).toBe(true);
+      }
+
+      const setupDebugRes = parseCliArgs(["setup", "--check", "--debug"]);
+      expect(setupDebugRes.ok).toBe(true);
+      if (setupDebugRes.ok) {
+        expect(setupDebugRes.value.command).toBe("setup");
+        expect(setupDebugRes.value.debug).toBe(true);
+      }
+    });
+
+    it("rejects --debug with =value syntax", () => {
+      const res = parseCliArgs(["status", "--debug=true"]);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.error.code).toBe("validation");
+        expect(res.error.message).toMatch(/does not take a value/i);
+      }
+    });
+  });
 });

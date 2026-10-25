@@ -30,9 +30,9 @@ describe("setup result reporting", () => {
     const output = await executeSetupCommand({ command: "setup", mode: "apply", yes: true, json: false, help: false }, ctx);
     expect(output).toHaveProperty("receipts", receipts);
     const formatted = formatCommandSuccess("setup", { ...output, plan: { ...plan, steps: receipts.map(r => ({ stepId: r.stepId, componentId: r.stepId.split(":")[1], action: r.stepId.split(":")[0], requiresApproval: true })) } } as any, false);
-    expect(formatted).toContain("[OK] Setup applied");
-    expect(formatted).not.toContain("[1] Install agent skills");
-    expect(formatted).not.toContain("[requires approval]");
+    expect(formatted).toContain("[HOÀN TẤT] Đã áp dụng thiết lập");
+    expect(formatted).not.toContain("[1] Cài đặt các kỹ năng");
+    expect(formatted).not.toContain("[cần phê duyệt]");
   });
 
   it.each(["check", "dry_run"] as const)("keeps %s mode free of directory writes", async mode => {

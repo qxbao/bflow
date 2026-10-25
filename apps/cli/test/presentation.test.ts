@@ -244,8 +244,8 @@ describe("Presentation & Formatting Engine", () => {
         message: "Run 'run-123' not found."
       };
       const remediation = resolveActionableRemediation(runNotFoundErr, "status");
-      expect(remediation).toContain("Verify the run ID");
-      expect(remediation).not.toContain("executable is installed");
+      expect(remediation).toContain("Kiểm tra mã luồng chạy");
+      expect(remediation).not.toContain("phần mềm thực thi");
       expect(remediation).not.toContain("PATH");
 
       const taskNotFoundErr: ContractError = {
@@ -254,8 +254,8 @@ describe("Presentation & Formatting Engine", () => {
         message: "Task 'plan' not found in run 'run-123'."
       };
       const taskRemediation = resolveActionableRemediation(taskNotFoundErr, "approve");
-      expect(taskRemediation).toContain("Verify the task ID");
-      expect(taskRemediation).not.toContain("executable is installed");
+      expect(taskRemediation).toContain("Kiểm tra mã tác vụ");
+      expect(taskRemediation).not.toContain("phần mềm thực thi");
     });
 
     it("keeps Agy authentication recovery specific to its interactive login flow", () => {
@@ -346,9 +346,9 @@ describe("Presentation & Formatting Engine", () => {
         updatedAt: new Date().toISOString()
       }, false, { color: true });
 
-      expect(stripAnsi(out)).toContain("[OK] Returned from Conversation attach.");
-      expect(out).toContain("Returned from Conversation attach.");
-      expect(out).not.toContain("Environment ready");
+      expect(stripAnsi(out)).toContain("[HOÀN TẤT] Đã rời khung chat Conversation.");
+      expect(out).toContain("Đã rời khung chat Conversation.");
+      expect(out).not.toContain("Môi trường đã khởi động");
     });
 
     it("formats init output without falsely claiming created when overwritten is false", () => {
@@ -373,9 +373,10 @@ describe("Presentation & Formatting Engine", () => {
       };
 
       const out = formatCommandSuccess("init", initOutput, false);
-      expect(out).toContain("repository configuration ready at:");
-      expect(out).not.toContain("created at");
-      expect(out).toContain("Default provider is Codex");
+      expect(out).toContain("[HOÀN TẤT] Đã khởi tạo cấu hình kho mã nguồn bflow ✓");
+      expect(out).toContain("Tệp cấu hình: /workspace/.bflow/config.yml");
+      expect(out).not.toContain("Đã ghi đè");
+      expect(out).toContain("Dự án:        my-project (codex)");
     });
 
     it("formats doctor report correctly for healthy environments with warnings", () => {
@@ -391,12 +392,13 @@ describe("Presentation & Formatting Engine", () => {
       };
 
       const plain = formatCommandSuccess("doctor", reportWithWarn, false);
-      expect(plain).toContain("[OK] Environment healthy (2 passed, 1 warning(s))");
-      expect(plain).not.toContain("all 3 checks passed");
+      expect(plain).toContain("✓ [KHỎE MẠNH] Hệ thống hoạt động tốt ✓");
+      expect(plain).toContain("• Kiểm tra cơ bản: Đạt (2/3) ✓");
+      expect(plain).not.toContain("3/3");
 
       const colored = formatCommandSuccess("doctor", reportWithWarn, false, { color: true });
-      expect(colored).toContain("\x1b[33mWARN\x1b[0m");
-      expect(colored).toContain("Next:");
+      expect(colored).toContain("\x1b[33mCẢNH BÁO\x1b[0m");
+      expect(colored).toContain("👉 Tiếp theo:");
     });
 
     it("formats doctor report for unhealthy environments", () => {
@@ -411,12 +413,12 @@ describe("Presentation & Formatting Engine", () => {
       };
 
       const plain = formatCommandSuccess("doctor", reportUnhealthy, false);
-      expect(plain).toContain("[FAIL] Environment unhealthy (1 check(s) failed, 1 passed)");
-      expect(plain).toContain("[FAIL] server: Herdr server not running");
+      expect(plain).toContain("✗ [CẦN XỬ LÝ] Phát hiện vấn đề trong môi trường");
+      expect(plain).toContain("- [LỖI] server: Herdr server not running");
     });
 
     it("formats down output only claiming stopped when actually stopped", () => {
-      // server stopped, manifest null => [OK] Environment stopped
+      // server stopped, manifest null => [HOÀN TẤT] Đã dừng môi trường
       const stoppedStatus = {
         workspaceRoot: "/workspace",
         sessionName: "sess-1",
@@ -427,8 +429,8 @@ describe("Presentation & Formatting Engine", () => {
         issues: []
       };
       const stoppedOut = formatCommandSuccess("down", stoppedStatus, false);
-      expect(stoppedOut).toContain("[OK] Environment stopped");
-      expect(formatDownOutput(stoppedStatus, false)).toContain("[OK] Environment stopped");
+      expect(stoppedOut).toContain("[HOÀN TẤT] Đã dừng môi trường");
+      expect(formatDownOutput(stoppedStatus, false)).toContain("[HOÀN TẤT] Đã dừng môi trường");
 
       // server running, manifest degraded => NOT stopped
       const runningStatus = {
@@ -441,8 +443,8 @@ describe("Presentation & Formatting Engine", () => {
         issues: []
       };
       const runningOut = formatCommandSuccess("down", runningStatus, false);
-      expect(runningOut).not.toContain("[OK] Environment stopped");
-      expect(runningOut).toContain("Environment status:");
+      expect(runningOut).not.toContain("[HOÀN TẤT] Đã dừng môi trường");
+      expect(runningOut).toContain("Trạng thái môi trường:");
 
       // server running, manifest null => NOT stopped
       const runningNullStatus = {
@@ -451,8 +453,8 @@ describe("Presentation & Formatting Engine", () => {
         manifest: null
       };
       const runningNullOut = formatDownOutput(runningNullStatus, false);
-      expect(runningNullOut).not.toContain("[OK] Environment stopped");
-      expect(runningNullOut).toContain("Environment status:");
+      expect(runningNullOut).not.toContain("[HOÀN TẤT] Đã dừng môi trường");
+      expect(runningNullOut).toContain("Trạng thái môi trường:");
 
       // server running, manifest down => NOT stopped (server observation must decide)
       const runningDownStatus = {
@@ -461,8 +463,8 @@ describe("Presentation & Formatting Engine", () => {
         manifest: { status: "down" } as any
       };
       const runningDownOut = formatDownOutput(runningDownStatus, false);
-      expect(runningDownOut).not.toContain("[OK] Environment stopped");
-      expect(runningDownOut).toContain("Environment status:");
+      expect(runningDownOut).not.toContain("[HOÀN TẤT] Đã dừng môi trường");
+      expect(runningDownOut).toContain("Trạng thái môi trường:");
 
       // server unknown, manifest down => NOT confirmed stopped
       const unknownDownStatus = {
@@ -471,10 +473,10 @@ describe("Presentation & Formatting Engine", () => {
         manifest: { status: "down" } as any
       };
       const unknownDownOut = formatDownOutput(unknownDownStatus, false);
-      expect(unknownDownOut).not.toContain("[OK] Environment stopped");
-      expect(unknownDownOut).toContain("Environment status:");
+      expect(unknownDownOut).not.toContain("[HOÀN TẤT] Đã dừng môi trường");
+      expect(unknownDownOut).toContain("Trạng thái môi trường:");
 
-      // SessionManifest with status down => [OK] Environment stopped
+      // SessionManifest with status down => [HOÀN TẤT] Đã dừng môi trường
       const manifestDown = {
         schemaVersion: 2,
         sessionId: "sess-1",
@@ -489,7 +491,7 @@ describe("Presentation & Formatting Engine", () => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
-      expect(formatDownOutput(manifestDown as any, false)).toContain("[OK] Environment stopped");
+      expect(formatDownOutput(manifestDown as any, false)).toContain("[HOÀN TẤT] Đã dừng môi trường");
     });
 
     it("sanitizes dynamic fields in human environment status while preserving raw in JSON", () => {
@@ -585,7 +587,7 @@ describe("Presentation & Formatting Engine", () => {
       };
 
       const approvalOut = formatCommandSuccess("status", waitingApprovalSnapshot, false);
-      expect(approvalOut).toContain("To record human approval: bflow approve spec-approval --run run-approval-test");
+      expect(approvalOut).toContain("⏳ Đang chờ phê duyệt tại 'spec-approval'. Chạy: bflow approve spec-approval --run run-approval-test --by <tên-bạn>");
 
       const waitingOtherSnapshot = {
         ...waitingApprovalSnapshot,
@@ -602,8 +604,8 @@ describe("Presentation & Formatting Engine", () => {
       };
 
       const otherOut = formatCommandSuccess("status", waitingOtherSnapshot, false);
-      expect(otherOut).not.toContain("To record human approval");
-      expect(otherOut).toContain("To resume the run: bflow resume run-approval-test");
+      expect(otherOut).not.toContain("⏳ Đang chờ phê duyệt tại");
+      expect(otherOut).toContain("⚠ Luồng chạy đang bị chặn tại: network-call. Chạy: bflow resume run-approval-test");
     });
 
     it("preserves raw unredacted data and error in handled JSON without ANSI", () => {
@@ -701,8 +703,8 @@ describe("Presentation & Formatting Engine", () => {
       const expectedApprove = `bflow approve ${longTaskId} --run ${longRunId}`;
       const expectedResume = `bflow resume ${longRunId}`;
 
-      expect(plain).toContain(`To record human approval: ${expectedApprove}`);
-      expect(plain).toContain(`To resume the run: ${expectedResume}`);
+      expect(plain).toContain(`⏳ Đang chờ phê duyệt tại '${longTaskId}'. Chạy: ${expectedApprove} --by <tên-bạn>`);
+      expect(plain).toContain(`Để tiếp tục luồng chạy: ${expectedResume}`);
     });
 
     it("preserves full pagination cursors (>50 chars) in run table output", () => {
@@ -729,7 +731,7 @@ describe("Presentation & Formatting Engine", () => {
 
       const plain = formatCommandSuccess("status", page, false);
       expect(plain).not.toContain("... [truncated]");
-      expect(plain).toContain(`Next page cursor: ${longCursor} (use --cursor ${longCursor})`);
+      expect(plain).toContain(`👉 Trang tiếp: bflow status --cursor ${longCursor}`);
     });
   });
 
@@ -748,7 +750,7 @@ describe("Presentation & Formatting Engine", () => {
         expect(res.exitCode).toBe(2);
         // Error on real TTY should have ANSI color tags
         expect(res.stderr).toContain("\x1b[31m");
-        expect(res.stderr).toContain("Error [validation]:");
+        expect(res.stderr).toContain("✗ Lỗi [validation]:");
       } finally {
         (process.stderr as any).isTTY = origIsTTY;
         if (origNoColor !== undefined) process.env["NO_COLOR"] = origNoColor;
@@ -771,7 +773,7 @@ describe("Presentation & Formatting Engine", () => {
       expect(res.exitCode).toBe(2);
       expect(stderrLines.length).toBeGreaterThan(0);
       expect(stderrLines[0]).not.toContain("\x1b[");
-      expect(stderrLines[0]).toContain("Error [validation]:");
+      expect(stderrLines[0]).toContain("✗ Lỗi [validation]:");
     });
 
     it("safely handles unexpected exceptions with code=ENOENT as valid ContractErrorSchema", async () => {
@@ -1007,20 +1009,20 @@ describe("Presentation & Formatting Engine", () => {
         expect(closeMock).toHaveBeenCalledTimes(1);
 
         // Progress contains in-flight phases
-        expect(progressSteps).toContain("Checking repository and configuration...");
-        expect(progressSteps).toContain("Verifying dependencies and provider authentication...");
-        expect(progressSteps).toContain("Composing session lifecycle integration...");
-        expect(progressSteps).toContain("Inspecting existing session state...");
-        expect(progressSteps).toContain("Starting Herdr headless server...");
-        expect(progressSteps).toContain("Starting agent roles...");
-        expect(progressSteps).toContain("Activating persistent runtime host...");
+        expect(progressSteps).toContain("Đang kiểm tra kho mã nguồn và cấu hình...");
+        expect(progressSteps).toContain("Đang xác minh các phụ thuộc và xác thực provider...");
+        expect(progressSteps).toContain("Đang khởi tạo tích hợp quản lý vòng đời phiên...");
+        expect(progressSteps).toContain("Đang kiểm tra trạng thái phiên hiện tại...");
+        expect(progressSteps).toContain("Đang khởi động máy chủ Herdr ngầm...");
+        expect(progressSteps).toContain("Đang khởi chạy các vai trò agent...");
+        expect(progressSteps).toContain("Đang kích hoạt tiến trình Runtime nền...");
 
         // CRITICAL: Conclusive "Environment ready" is NEVER emitted in progress!
-        expect(progressSteps.some((s) => s.includes("Environment ready"))).toBe(false);
+        expect(progressSteps.some((s) => s.includes("Môi trường đã khởi động") || s.includes("Environment ready"))).toBe(false);
 
         // Success is reported only by final formatter
         const formatted = formatCommandSuccess("up", result, false);
-        expect(formatted).toContain("[OK] Environment ready");
+        expect(formatted).toContain("[SẴN SÀNG] Môi trường đã khởi động");
       } finally {
         lockSpy.mockRestore();
         await rm(dir, { recursive: true, force: true });
@@ -1075,12 +1077,12 @@ describe("Presentation & Formatting Engine", () => {
         expect(result.status).toBe("up");
         expect(attempts).toBe(2);
 
-        // "Activating persistent runtime host..." is emitted exactly once!
-        const activatingSteps = progressSteps.filter((s) => s.includes("Activating persistent runtime host..."));
+        // "Đang kích hoạt tiến trình Runtime nền..." is emitted exactly once!
+        const activatingSteps = progressSteps.filter((s) => s.includes("Đang kích hoạt tiến trình Runtime nền..."));
         expect(activatingSteps.length).toBe(1);
 
         // Never emitted "Environment ready" in progress
-        expect(progressSteps.some((s) => s.includes("Environment ready"))).toBe(false);
+        expect(progressSteps.some((s) => s.includes("Môi trường đã khởi động") || s.includes("Environment ready"))).toBe(false);
       } finally {
         lockSpy.mockRestore();
         await rm(dir, { recursive: true, force: true });
@@ -1127,7 +1129,7 @@ describe("Presentation & Formatting Engine", () => {
 
       try {
         await expect(lifecycle.up()).rejects.toThrow("Permanent activation failure");
-        expect(progressSteps.some((s) => s.includes("Environment ready"))).toBe(false);
+        expect(progressSteps.some((s) => s.includes("Môi trường đã khởi động") || s.includes("Environment ready"))).toBe(false);
       } finally {
         lockSpy.mockRestore();
         await rm(dir, { recursive: true, force: true });
@@ -1218,15 +1220,15 @@ describe("Presentation & Formatting Engine", () => {
         await (lifecycle as any).saveManifest(repository, manifest);
 
         const downResult = await lifecycle.down(true);
-        expect(progressSteps).toContain("Establishing runtime shutdown barrier...");
-        expect(progressSteps).toContain("Recollecting active workflow runs...");
-        expect(progressSteps).toContain("Writing aggregate checkpoints for 1 active run(s)...");
-        expect(progressSteps).toContain("Stopping agent roles gracefully...");
-        expect(progressSteps).toContain("Stopping Herdr session...");
-        expect(progressSteps).toContain("Shutting down persistent host...");
+        expect(progressSteps).toContain("Đang thiết lập rào chắn dừng Runtime an toàn...");
+        expect(progressSteps).toContain("Đang thu thập lại các luồng chạy đang hoạt động...");
+        expect(progressSteps).toContain("Đang lưu điểm khôi phục (checkpoint) cho 1 luồng chạy đang hoạt động...");
+        expect(progressSteps).toContain("Đang dừng các vai trò agent một cách an toàn...");
+        expect(progressSteps).toContain("Đang dừng phiên Herdr...");
+        expect(progressSteps).toContain("Đang tắt tiến trình Runtime nền...");
 
         // CRITICAL: Conclusive "Environment stopped" is NEVER emitted in progress!
-        expect(progressSteps.some((s) => s.includes("Environment stopped"))).toBe(false);
+        expect(progressSteps.some((s) => s.includes("Đã dừng môi trường") || s.includes("Environment stopped"))).toBe(false);
 
         // Now test down with 0 active runs
         runs.length = 0;
@@ -1235,8 +1237,8 @@ describe("Presentation & Formatting Engine", () => {
         await (lifecycle as any).saveManifest(repository, { ...manifest, status: "up" });
 
         await lifecycle.down(true);
-        expect(progressSteps.some((s) => s.includes("Writing aggregate checkpoints"))).toBe(false);
-        expect(progressSteps.some((s) => s.includes("Environment stopped"))).toBe(false);
+        expect(progressSteps.some((s) => s.includes("Đang lưu điểm khôi phục (checkpoint)"))).toBe(false);
+        expect(progressSteps.some((s) => s.includes("Đã dừng môi trường") || s.includes("Environment stopped"))).toBe(false);
       } finally {
         lockSpy.mockRestore();
         await rm(dir, { recursive: true, force: true });
@@ -1280,12 +1282,12 @@ describe("Presentation & Formatting Engine", () => {
         const attachResult = await lifecycle.attach();
         expect(attachResult.sessionId).toBe(repository.sessionName);
 
-        expect(progressSteps).toContain("Validating session and focusing Conversation pane...");
-        expect(progressSteps).toContain("Opening Herdr interactive terminal attach...");
-        expect(progressSteps.some((s) => s.includes("Returned from interactive"))).toBe(false);
+        expect(progressSteps).toContain("Đang xác thực phiên và chuyển tiêu điểm tới khung chat Conversation...");
+        expect(progressSteps).toContain("Đang mở giao diện kết nối trực tiếp Herdr...");
+        expect(progressSteps.some((s) => s.includes("Đã rời khung chat") || s.includes("Returned from interactive"))).toBe(false);
 
         const formatted = formatCommandSuccess("attach", attachResult, false);
-        expect(formatted).toContain("[OK] Returned from Conversation attach.");
+        expect(formatted).toContain("[HOÀN TẤT] Đã rời khung chat Conversation.");
       } finally {
         lockSpy.mockRestore();
         await rm(dir, { recursive: true, force: true });
@@ -1465,7 +1467,7 @@ describe("Presentation & Formatting Engine", () => {
           message: "The provider connection closed while submitting work."
         };
         const formatted = formatCommandError(error, "run", false);
-        expect(formatted).toContain("Inspect 'bflow status' or 'bflow doctor' and reconcile existing delivery before retry; no automatic resend.");
+        expect(formatted).toContain("Kiểm tra 'bflow status' hoặc 'bflow doctor' để đối soát phiên hiện tại trước khi thử lại; không tự động gửi lại.");
         expect(formatted).not.toContain("bflow run --help");
         // Verify underlying error is not mutated
         expect(error.code).toBe("unknown_delivery");
@@ -1480,8 +1482,8 @@ describe("Presentation & Formatting Engine", () => {
           message: "Timeout during operation. Run claude auth login to refresh session."
         };
         const formatted = formatCommandError(error, "up", false);
-        expect(formatted).toContain("Inspect 'bflow status' or 'bflow doctor' and reconcile existing delivery before retry; no automatic resend.");
-        expect(formatted).not.toContain("Authenticate using 'claude auth login'");
+        expect(formatted).toContain("Kiểm tra 'bflow status' hoặc 'bflow doctor' để đối soát phiên hiện tại trước khi thử lại; không tự động gửi lại.");
+        expect(formatted).not.toContain("Xác thực bằng 'claude auth login'");
       });
 
       it("typed corruption code provides preserve-state advice", () => {
@@ -1491,7 +1493,7 @@ describe("Presentation & Formatting Engine", () => {
           message: "State file payload is invalid."
         };
         const formatted = formatCommandError(error, "status", false);
-        expect(formatted).toContain("Preserve the .bflow directory and run 'bflow doctor' to diagnose state integrity.");
+        expect(formatted).toContain("Giữ nguyên thư mục .bflow và chạy 'bflow doctor' để chẩn đoán tính toàn vẹn trạng thái.");
       });
     });
 
@@ -1661,8 +1663,12 @@ describe("Presentation & Formatting Engine", () => {
           message: "Failure",
           details: { stage: "X".repeat(100000) }
         };
-        const humanOut = formatCommandError(hugeError, "up", false);
+        const conciseOut = formatCommandError(hugeError, "up", false);
+        expect(conciseOut).not.toContain("Chi tiết:");
+
+        const humanOut = formatCommandError(hugeError, "up", false, { debug: true });
         expect(humanOut.length).toBeLessThan(1000);
+        expect(humanOut).toContain("Chi tiết:");
         expect(humanOut).toContain("... [truncated]");
 
         const jsonOut = formatCommandError(hugeError, "up", true);
@@ -1681,7 +1687,10 @@ describe("Presentation & Formatting Engine", () => {
             stage: "native_startup"
           }
         };
-        const humanOut = formatCommandError(error, "status", false);
+        const conciseOut = formatCommandError(error, "status", false);
+        expect(conciseOut).not.toContain("Chi tiết:");
+
+        const humanOut = formatCommandError(error, "status", false, { debug: true });
         expect(humanOut).toContain("runId: run-custom-long-identifier-1234567890-abcdef-ghijk-lmnop-qrstuvwxyz-67890");
         expect(humanOut).toContain("paneId: w1:p0");
         expect(humanOut).toContain("stage: native_startup");
@@ -1697,7 +1706,7 @@ describe("Presentation & Formatting Engine", () => {
           skills: { catalogLoaded: true, skillCount: 2, syncedManifests: 1, storeRoot: "/safe/store" },
           diagnostics: ["Bearer abcdefghijklmnopqrstuvwxyz\u001b[31m"]
         } as any;
-        const rendered = formatCommandSuccess("setup", setup, false, { stdoutColor: true });
+        const rendered = formatCommandSuccess("setup", setup, false, { stdoutColor: true, debug: true });
         expect(rendered).toContain(ANSI.cyan);
         expect(rendered).toContain(ANSI.yellow);
         expect(rendered).toContain("[REDACTED_TOKEN]");
@@ -1714,6 +1723,51 @@ describe("Presentation & Formatting Engine", () => {
         expect(rendered).toContain(ANSI.red);
         expect(rendered).toContain(ANSI.cyan);
         expect(rendered).toContain("token=[REDACTED]");
+      });
+
+      it("renders concise output by default and full details with --debug, showing green checkmark ✓ on completed tasks", () => {
+        const snapshot: WorkflowRunSnapshot = {
+          runId: "run-tick-1",
+          workflowId: "sdlc",
+          workflowVersion: "1.0.0",
+          status: "succeeded",
+          version: 2,
+          lastEventSequence: 4,
+          createdAt: "2026-10-17T00:00:00Z",
+          updatedAt: "2026-10-17T00:05:00Z",
+          tasks: [
+            {
+              taskId: "spec",
+              status: "succeeded",
+              attempt: 1,
+              generation: 0,
+              version: 1
+            },
+            {
+              taskId: "implement",
+              status: "running",
+              attempt: 2,
+              generation: 0,
+              version: 1
+            }
+          ],
+          input: {}
+        };
+
+        const concise = formatCommandSuccess("status", snapshot, false, { color: true });
+        expect(stripAnsi(concise)).toContain("✦ Luồng chạy: run-tick-1 (sdlc) — SUCCEEDED ✓");
+        expect(stripAnsi(concise)).toContain("• spec            [SUCCEEDED] ✓");
+        expect(stripAnsi(concise)).toContain("• implement       [RUNNING]");
+        expect(stripAnsi(concise)).not.toContain("• implement       [RUNNING] ✓");
+        expect(concise).toContain("\x1b[32m✓\x1b[0m");
+        expect(stripAnsi(concise)).not.toContain("Phiên bản:");
+        expect(stripAnsi(concise)).not.toContain("lần thử=");
+
+        const debugOut = formatCommandSuccess("status", snapshot, false, { color: true, debug: true });
+        expect(stripAnsi(debugOut)).toContain("Phiên bản:       v1.0.0 (bản ghi v2)");
+        expect(stripAnsi(debugOut)).toContain("Tạo lúc:         2026-10-17T00:00:00Z");
+        expect(stripAnsi(debugOut)).toContain("(lần thử=1)");
+        expect(stripAnsi(debugOut)).toContain("(lần thử=2)");
       });
     });
   });

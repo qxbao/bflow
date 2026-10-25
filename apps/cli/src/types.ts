@@ -79,6 +79,7 @@ export type CliExitCode = number;
 export interface GlobalCliFlags {
   readonly json: boolean;
   readonly help: boolean;
+  readonly debug?: boolean | undefined;
 }
 
 export interface InitCommandArgs extends GlobalCliFlags {
@@ -493,6 +494,7 @@ export interface PresentationOptions {
   readonly interactive?: boolean | undefined;
   readonly json?: boolean | undefined;
   readonly isDefaultIo?: boolean | undefined;
+  readonly debug?: boolean | undefined;
 }
 
 export interface CliContext {

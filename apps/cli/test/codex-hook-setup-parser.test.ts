@@ -46,7 +46,7 @@ describe("explicit Codex hook setup command options", () => {
     const help = getHelpText("setup");
     expect(help).toContain("--codex-hooks");
     expect(help).toContain("--hook-digest");
-    expect(help).toContain("never installs tools or services");
+    expect(help).toContain("không bao giờ cài đặt công cụ hoặc dịch vụ");
     const reference = CLI_COMMAND_REFERENCE.find(entry => entry.command === "setup");
     expect(reference?.optionalFlags).toContain("--hook-digest <sha256>");
     expect(renderCommandReferenceMarkdown()).toContain("--codex-hooks (--check|--plan|--apply)");

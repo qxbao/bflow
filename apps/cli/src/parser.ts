@@ -104,7 +104,8 @@ const GLOBAL_BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
   "--help",
   "-h",
   "--version",
-  "-v"
+  "-v",
+  "--debug"
 ]);
 
 function isFlag(arg: string): boolean {
@@ -1358,10 +1359,11 @@ function parseDocs(args: readonly string[], json: boolean): ParseCliResult {
     ...(language !== undefined ? { language } : {}), ...(version !== undefined ? { version } : {}), ...(flags.has("--no-cache") ? { noCache: true } : {}), ...common } };
 }
 
-export function parseCliArgs(argv: readonly string[]): ParseCliResult {
-  const json = argv.some((a) => a === "--json" || a === "-j");
+export function parseCliArgs(rawArgv: readonly string[]): ParseCliResult {
+  const json = rawArgv.some((a) => a === "--json" || a === "-j");
 
-  for (const a of argv) {
+  for (const a of rawArgv) {
+    if (a === "--") break;
     const eqIdx = a.indexOf("=");
     if (eqIdx !== -1) {
       const fName = a.slice(0, eqIdx);
@@ -1370,6 +1372,34 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       }
     }
   }
+
+  let debug = false;
+  const argv: string[] = [];
+  let passthrough = false;
+  for (const token of rawArgv) {
+    if (token === "--") {
+      passthrough = true;
+      argv.push(token);
+      continue;
+    }
+    if (!passthrough && token === "--debug") {
+      debug = true;
+      continue;
+    }
+    argv.push(token);
+  }
+
+  const res = parseCliArgsCore(argv, json);
+  if (res.ok && debug) {
+    return {
+      ok: true,
+      value: { ...res.value, debug: true }
+    };
+  }
+  return res;
+}
+
+function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResult {
 
   let leadingJson = false;
   let leadingHelp = false;

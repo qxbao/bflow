@@ -114,7 +114,7 @@ export async function executeSetupCommand(
   };
 
   // 1. Resolve Platform
-  progress("Checking machine platform and setup scope...");
+  progress("Đang kiểm tra nền tảng máy và phạm vi thiết lập...");
   let platform: PlatformProfile = context?.setup?.platform ?? detectPlatform(defaultHostEnvironment());
   const isolatedRoot = context?.setup?.isolatedRoot ?? process.env.BFLOW_HOME;
   if (isolatedRoot) {
@@ -124,19 +124,19 @@ export async function executeSetupCommand(
   }
 
   // 2. Resolve Runner & Store
-  progress("Checking setup state and approvals...");
+  progress("Đang kiểm tra trạng thái thiết lập và quyền phê duyệt...");
   const baseRunner: CommandRunner = context?.setup?.runner ?? new NodeCommandRunner();
   const runner: CommandRunner = !observer ? baseRunner : { run: async (argv, options) => {
     const command = basename(argv[0] ?? "command");
     const startedAt = Date.now();
     // Arguments/output can contain account data or secrets; show process boundaries only.
-    detail(`Running ${command}`);
+    detail(`Đang chạy ${command}`);
     try {
       const result = await baseRunner.run(argv, options);
       const observe = result.timedOut || result.exitCode !== 0 ? important : detail;
-      observe(`${command}: ${result.timedOut ? "timed out" : `exit ${result.exitCode ?? "unknown"}`} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
+      observe(`${command}: ${result.timedOut ? "hết thời gian chờ" : `mã thoát ${result.exitCode ?? "không rõ"}`} (${((Date.now() - startedAt) / 1000).toFixed(1)}s)`);
       return result;
-    } catch (error) { important(`${command}: interrupted or failed`); throw error; }
+    } catch (error) { important(`${command}: bị gián đoạn hoặc thất bại`); throw error; }
   } };
   const readOnly = args.mode === "check" || args.mode === "dry_run";
   const store = new SetupStateStore(platform.paths, {
@@ -146,7 +146,7 @@ export async function executeSetupCommand(
   });
 
   // 3. Resolve Tool Installers & Capabilities
-  progress("Checking pinned tool installers...");
+  progress("Đang kiểm tra trình cài đặt các công cụ đã ghim...");
 
   let installerRegistry: ToolInstallerRegistry;
   if (context?.setup?.toolInstaller instanceof ToolInstallerRegistry) {
@@ -160,14 +160,14 @@ export async function executeSetupCommand(
   }
 
   // 4. Resolve Service Manager
-  progress("Checking service manager capabilities...");
+  progress("Đang kiểm tra trình quản lý dịch vụ hệ thống...");
   // Isolated setups namespace OS unit names so they can never collide with (or be linked into) the user's real units.
   const serviceManager: ServiceManager =
     context?.setup?.serviceManager ?? selectServiceManager(platform, runner, store,
       isolatedRoot ? { namespace: isolatedServiceNamespace(isolatedRoot) } : {});
 
   // 6. Resolve Skills Catalog & Synchronizer
-  progress("Checking approved skills catalog...");
+  progress("Đang kiểm tra danh mục kỹ năng được phê duyệt...");
   const skillsMod = await loadSkillsModule();
   const selectedCatalog = args.catalogDir ?? context?.setup?.catalogDir;
   const candidateDirs = selectedCatalog
@@ -233,7 +233,7 @@ export async function executeSetupCommand(
   }
 
   // 7. Resolve Machine Config
-  progress("Loading machine configuration...");
+  progress("Đang tải cấu hình máy...");
   const configPath = join(platform.paths.config, MACHINE_CONFIG_FILE);
   let machineConfig: MachineConfig = context?.setup?.machineConfig ?? defaultMachineConfig();
   if (!context?.setup?.machineConfig && existsSync(configPath)) {
@@ -251,7 +251,7 @@ export async function executeSetupCommand(
   let inventory: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["inventory"] = [];
   let additionalToolObservations: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["additionalToolObservations"] | undefined;
   if (!context?.setup?.machineSetup && !context?.setup?.toolInstaller) {
-    progress("Loading the supported tool and agent CLI installation catalog...");
+    progress("Đang tải danh mục cài đặt công cụ và agent CLI được hỗ trợ...");
     const defaults = await createDefaultSetupConfiguration({ platform,
       // Isolated setup must never write the real provider homes; the isolation is passed explicitly, not via global state.
       ...(isolatedRoot ? { isolation: isolatedProviderHomes(isolatedRoot) } : {}),
@@ -310,13 +310,13 @@ export async function executeSetupCommand(
       if (!installer) continue;
       observedRegistry.register({ installerId, plan: (request, options) => installer.plan(request, options),
         reconcile: (request, options) => {
-          progress(`Checking installation of ${request.step.componentId}...`);
+          progress(`Đang kiểm tra cài đặt của ${request.step.componentId}...`);
           return installer.reconcile(request, options);
         },
         apply: async (request, options) => {
-          progress(`Installing ${request.step.componentId}...`);
+          progress(`Đang cài đặt ${request.step.componentId}...`);
           const result = await installer.apply(request, options);
-          (result.ok ? detail : important)(`${request.step.componentId}: ${result.ok ? "installation receipt received" : "installation failed"}`);
+          (result.ok ? detail : important)(`${request.step.componentId}: ${result.ok ? "đã nhận biên nhận cài đặt" : "cài đặt thất bại"}`);
           return result;
         } });
     }
@@ -358,7 +358,7 @@ export async function executeSetupCommand(
   };
 
   // 8. Execute Machine Setup
-  progress(`Building ${args.mode} setup plan...`);
+  progress(`Đang lập kế hoạch thiết lập (${args.mode})...`);
   const machineSetup: any =
     context?.setup?.machineSetup ??
     new MachineSetupService({
@@ -382,7 +382,7 @@ export async function executeSetupCommand(
           : new InteractiveApprover(async text => {
             const notes = diagnostics.filter(note => /license|PolyForm|build scripts/i.test(note));
             if (inventory.some(item => item.toolId === "superpowers"))
-              notes.push(`Native plugins update the ${machineConfig.providers.join(", ")} configuration folders in this account.`);
+              notes.push(`Plugin tích hợp sẽ cập nhật thư mục cấu hình của ${machineConfig.providers.join(", ")} trên tài khoản này.`);
             const preview = [...notes, text].join("\n\n");
             // Keep injected approval callbacks plain for programmatic consumers.
             const prompt = formatSetupPreview(preview, !context?.setup?.confirm && Boolean(context?.presentation?.stderrColor) && !args.json);
@@ -433,10 +433,10 @@ export async function executeSetupCommand(
       }
       if (typeof machineSetup.apply === "function") {
         ensureIsolatedHomes();
-        progress("Applying approved setup steps...");
+        progress("Đang áp dụng các bước thiết lập đã phê duyệt...");
         const applyRes = await machineSetup.apply({ mode: args.mode, config: machineConfig, approval });
         if (applyRes) {
-          progress("Checking setup receipt...");
+          progress("Đang kiểm tra biên nhận thiết lập...");
           receipt =
             applyRes.receipt ??
             (Array.isArray(applyRes.receipts)
@@ -452,7 +452,7 @@ export async function executeSetupCommand(
   } else if (typeof machineSetup.run === "function") {
     ensureIsolatedHomes();
     // Standard MachineSetupService execution
-    progress(`Running ${args.mode} setup checks...`);
+    progress(`Đang chạy kiểm tra thiết lập (${args.mode})...`);
     const report = await machineSetup.run({
       mode: args.mode,
       assumeYes: args.yes
@@ -470,7 +470,7 @@ export async function executeSetupCommand(
 
   // Ensure plan is always populated
   if (!plan) {
-    progress("Finalizing setup plan...");
+    progress("Đang hoàn tất kế hoạch thiết lập...");
     const built = await buildSetupPlan({
       platform,
       runner,
@@ -493,7 +493,7 @@ export async function executeSetupCommand(
 
   if (toolObservations.length === 0 && !toolsReported) {
     try {
-      progress("Checking installed tools...");
+      progress("Đang kiểm tra các công cụ đã cài đặt...");
       toolObservations = await probeTools(platform, runner, { required: new Set() });
     } catch {
       // Ignore probe failures in test/isolated environments
@@ -509,7 +509,7 @@ export async function executeSetupCommand(
     };
   });
 
-  progress("Summarizing setup results...");
+  progress("Đang tổng hợp kết quả thiết lập...");
 
   return {
     mode: args.mode,

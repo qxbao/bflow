@@ -131,7 +131,7 @@ export async function runDoctorDiagnostics(
   const { repository, config, runner, dependencies } = options;
   const progress = (phase: string) => { try { dependencies?.onProgress?.(phase); } catch { /* observational only */ } };
   const env = namedSessionEnvironment(repository.sessionName, options.env);
-  progress("Checking Runtime and lifecycle health...");
+  progress("Đang kiểm tra sức khỏe Runtime và vòng đời phiên...");
   const runtimeChecks: DoctorDetailedCheck[] = [];
   const agentProviderChecks: DoctorDetailedCheck[] = [];
   const mcpChecks: DoctorDetailedCheck[] = [];
@@ -605,7 +605,7 @@ export async function runDoctorDiagnostics(
   });
 
   // ==========================================
-  progress("Checking agent providers and authentication...");
+  progress("Đang kiểm tra các agent provider và trạng thái xác thực...");
   // Group 2: agent_providers
   // ==========================================
 
@@ -790,7 +790,7 @@ export async function runDoctorDiagnostics(
   }
 
   if (options.deep) {
-    progress("Checking configured models (explicit --deep; model usage may be charged)...");
+    progress("Đang kiểm tra các model đã cấu hình (--deep; có thể phát sinh phí sử dụng model)...");
     try {
       if (config === null) throw new Error("A valid repository configuration is required for model diagnostics.");
       const results = dependencies?.probeProviderModels
@@ -933,7 +933,7 @@ export async function runDoctorDiagnostics(
   });
 
   // ==========================================
-  progress("Checking shared MCP services...");
+  progress("Đang kiểm tra các dịch vụ MCP dùng chung...");
   // Group 3: mcp
   // ==========================================
 
@@ -1105,7 +1105,7 @@ export async function runDoctorDiagnostics(
   }
 
   // ==========================================
-  progress("Checking installed tools...");
+  progress("Đang kiểm tra các công cụ đã cài đặt...");
   // Group 4: tools
   // ==========================================
 
@@ -1198,7 +1198,7 @@ export async function runDoctorDiagnostics(
   }
 
   if (config?.environment?.toolPolicy) {
-    progress("Resolving repository tool policy against machine inventory...");
+    progress("Đang đối chiếu chính sách công cụ của kho mã nguồn với danh mục trên máy...");
     try {
       const { loadHostPlatformContext, resolveRepositoryToolPolicy, resolveToolGrants } = await import("./platform-options.js");
       const input = { repository, config, env: options.env ?? process.env };
@@ -1293,7 +1293,7 @@ export async function runDoctorDiagnostics(
   }
 
   // ==========================================
-  progress("Checking approved skills...");
+  progress("Đang kiểm tra các kỹ năng (skills) được phê duyệt...");
   // Group 5: skills
   // ==========================================
 

@@ -19,7 +19,7 @@ describe("interactive progress", () => {
   it("formats approval plans without losing targets, commands or manual approval flags", () => {
     const text = "Planned steps (1):\n- configure:path [approval, machine-wide] configure managed PATH\n    target: /home/user/.bashrc\n    command: installer --token=secret\nManual action required:\n- codex: Run codex login";
     const formatted = formatSetupPreview(text, true);
-    expect(stripAnsi(formatted)).toContain("[1] Make bflow and installed tools available in the terminal [requires approval; this account]");
+    expect(stripAnsi(formatted)).toContain("[1] Đưa bflow và các công cụ đã cài vào PATH của terminal [cần phê duyệt; tài khoản này]");
     expect(stripAnsi(formatted)).toContain("configure:path");
     expect(stripAnsi(formatted)).toContain("- /home/user/.bashrc");
     expect(stripAnsi(formatted)).toContain("Run codex login");
@@ -110,13 +110,13 @@ describe("interactive progress", () => {
     for (const detail of ["1/0 optional checks", "8/3 optional checks", "1/3 diagnostic text"]) {
       expect(() => progress.detail(detail)).not.toThrow();
       expect(() => vi.advanceTimersByTime(200)).not.toThrow();
-      expect(chunks.at(-1)).toContain("Working");
+      expect(chunks.at(-1)).toContain("Đang xử lý");
       expect(chunks.at(-1)).not.toContain("#");
     }
     progress.units(1, 3, "Tools inspected");
     expect(chunks.at(-1)).toContain("[##----]");
     progress.detail("1/3 Tools inspected");
-    expect(chunks.at(-1)).toContain("Working");
+    expect(chunks.at(-1)).toContain("Đang xử lý");
     progress.units(1, 3, "Tools inspected");
     expect(chunks.at(-1)).toContain("[##----]");
     progress.stop();
@@ -141,7 +141,7 @@ describe("interactive progress", () => {
     const count = chunks.length;
     vi.advanceTimersByTime(2000);
     expect(chunks).toHaveLength(count);
-    expect(lines.join("\n")).toContain("[2] Waiting for your confirmation");
+    expect(lines.join("\n")).toContain("[2] Đang chờ xác nhận của bạn");
     expect(lines.join("\n")).not.toContain("setup plan");
     approve(false);
     expect(await pending).toBe(false);
@@ -197,7 +197,7 @@ describe("interactive progress", () => {
       expect(lines).toHaveLength(1);
       return true;
     });
-    expect(chunks.join("")).toContain("25 progress updates omitted while awaiting input");
+    expect(chunks.join("")).toContain("Đã lược bớt 25 cập nhật tiến trình trong");
     expect(lines.filter(line => line.includes("Observation"))).toHaveLength(0);
     expect(chunks.join("")).toContain("Observation 74");
     expect(lines.join("\n")).not.toContain("token=secret");
@@ -331,8 +331,8 @@ describe("setup installer progress boundaries", () => {
       } }, step => steps.push(step));
       expect(applications).toBe(1);
       expect(observations).toHaveLength(timedOut ? 1 : 2);
-      expect(observations.every(step => step === "Checking installation of gitnexus...")).toBe(true);
-      expect(steps.filter(step => step === "Checking installation of gitnexus...")).toHaveLength(observations.length);
+      expect(observations.every(step => step === "Đang kiểm tra cài đặt của gitnexus...")).toBe(true);
+      expect(steps.filter(step => step === "Đang kiểm tra cài đặt của gitnexus...")).toHaveLength(observations.length);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
@@ -345,9 +345,9 @@ describe("entrypoint progress forwarding", () => {
       runtime: { getRun: async () => ({ ok: false, error: { code: "not_found", message: "run missing", retryable: false } }) } as any,
       presentation: { interactive: true } });
     expect(result.ok).toBe(false);
-    expect((dedicated ? io.progressLines : io.errors).join("\n")).toContain("[1] Executing status command");
+    expect((dedicated ? io.progressLines : io.errors).join("\n")).toContain("[1] Đang truy vấn trạng thái luồng chạy 'run-1'...");
     expect(io.rawChunks.length).toBeGreaterThan(0);
-    expect(io.errors.filter(line => line.includes("Error ["))).toHaveLength(1);
+    expect(io.errors.filter(line => line.includes("✗ Lỗi ["))).toHaveLength(1);
   });
 
   it("connects setup process details and its real confirmation boundary to the renderer", async () => {
@@ -369,7 +369,7 @@ describe("entrypoint progress forwarding", () => {
         runner: { run: async () => ({ exitCode: 0, timedOut: false, stderr: "", stdout: "secret account diagnostic" }) },
         confirm: async preview => {
           confirmations++;
-          expect(lines.join("\n")).toContain("Waiting for your confirmation");
+          expect(lines.join("\n")).toContain("Đang chờ xác nhận của bạn");
           expect(chunks.at(-1)).toBe("\r\x1b[2K");
           expect(preview).toContain("[1]");
           return false;
@@ -377,8 +377,8 @@ describe("entrypoint progress forwarding", () => {
       } });
       expect(confirmations).toBe(1);
       expect(result.exitCode).toBe(1);
-      expect(chunks.join("")).toMatch(/Running (node|git|pnpm|herdr)/);
-      expect(lines.join("\n")).not.toMatch(/exit 0 \(\d+\.\ds\)/);
+      expect(chunks.join("")).toMatch(/Đang chạy (node|git|pnpm|herdr)/);
+      expect(lines.join("\n")).not.toMatch(/mã thoát 0 \(\d+\.\ds\)/);
       expect(lines.slice(0, -1).join("\n")).not.toContain("secret account diagnostic");
       expect(lines.join("\n")).not.toContain("[..]");
     } finally { await rm(root, { recursive: true, force: true }); }
@@ -388,7 +388,7 @@ describe("entrypoint progress forwarding", () => {
     vi.useFakeTimers();
     const { io, lines, chunks } = collector();
     const operation = vi.fn(async () => {
-      expect(lines.join("\n")).toContain("[1] Executing status command");
+      expect(lines.join("\n")).toContain("[1] Đang truy vấn trạng thái luồng chạy 'run-1'...");
       vi.advanceTimersByTime(200);
       if (throws) throw new Error("runtime failed");
       return { ok: false as const, error: { code: "not_found" as const, message: "run missing", retryable: false } };
@@ -396,7 +396,7 @@ describe("entrypoint progress forwarding", () => {
     const result = await main(["status", "run-1"], { io, runtime: { getRun: operation } as any,
       presentation: { interactive: true, stderrColor: true } });
     expect(result.ok).toBe(false);
-    expect(lines.at(-1)).toContain("Error [");
+    expect(lines.at(-1)).toContain("✗ Lỗi [");
     const count = chunks.length;
     vi.advanceTimersByTime(1000);
     expect(chunks).toHaveLength(count);

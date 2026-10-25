@@ -87,10 +87,10 @@ describe("Codex hook-only setup", () => {
     const f = await fixture();
     const result = await runCli(["setup", "--codex-hooks", "--plan"], f.context);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Codex global hook review");
+    expect(result.stdout).toContain("Đánh giá Codex global hooks");
     expect(result.stdout).toContain("SessionStart");
-    expect(result.stdout).toContain("Snapshot digest:");
-    expect(result.stdout).toContain("Approval covers only this inspected Codex hook snapshot");
+    expect(result.stdout).toContain("Mã băm bản chụp (Snapshot digest):");
+    expect(result.stdout).toContain("Phê duyệt này chỉ áp dụng cho bản chụp (snapshot) Codex hook đã kiểm tra");
   });
 
   it("keeps approved results concise while preserving the receipt and exact scope", async () => {
@@ -98,15 +98,15 @@ describe("Codex hook-only setup", () => {
     const review = await inspectCodexHooks(f.trust);
     const result = await runCli(["setup", "--codex-hooks", "--apply", "--yes", "--hook-digest", review.digest], f.context);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Approved");
-    expect(result.stdout).toContain("Scope: Only the inspected Codex hook snapshot");
+    expect(result.stdout).toContain("Đã phê duyệt");
+    expect(result.stdout).toContain("Phạm vi: Chỉ bản chụp (snapshot) Codex hook đã kiểm tra");
     expect(result.stdout).toContain(f.store);
-    expect(result.stdout).not.toContain("Sources (");
-    expect(result.stdout).not.toContain("Hook digest:");
+    expect(result.stdout).not.toContain("Nguồn cấu hình (");
+    expect(result.stdout).not.toContain("Mã băm hook (Hook digest):");
     const plan = await runCli(["setup", "--codex-hooks", "--plan"], f.context);
-    expect(plan.stdout).toContain("Snapshot digest: " + review.digest);
-    expect(plan.stdout).toContain("Matcher:");
-    expect(plan.stdout).toContain("Pinned local dependencies");
+    expect(plan.stdout).toContain("Mã băm bản chụp (Snapshot digest): " + review.digest);
+    expect(plan.stdout).toContain("Bộ lọc (Matcher):");
+    expect(plan.stdout).toContain("Phụ thuộc cục bộ đã ghim");
   });
 
   it("provides a copyable exact-snapshot approval command alongside the full review", async () => {
@@ -123,10 +123,10 @@ describe("Codex hook-only setup", () => {
     const result = await runCli(["setup", "--codex-hooks", "--apply"], { ...f.context,
       io: { stdout: () => {}, stderr: text => previews.push(text), progress: text => progress.push(text), stderrRaw: chunk => chunks.push(chunk) },
       presentation: { interactive: true }, setup: { ...f.context.setup, confirm: async review => {
-        expect(review).toContain("Snapshot digest:");
-        expect(review).toContain("Command: " + f.script);
+        expect(review).toContain("Mã băm bản chụp (Snapshot digest):");
+        expect(review).toContain("Lệnh (Command): " + f.script);
         expect(previews).toEqual([review]);
-        expect(progress.at(-1)).toContain("Waiting for your confirmation");
+        expect(progress.at(-1)).toContain("Đang chờ xác nhận của bạn");
         const count = chunks.length;
         await new Promise(resolve => setTimeout(resolve, 150));
         expect(chunks).toHaveLength(count);
@@ -135,7 +135,7 @@ describe("Codex hook-only setup", () => {
     expect(result.exitCode).toBe(0);
     expect(progress.at(-1)).toContain("Saving approval for the reviewed hook snapshot");
     expect(chunks.at(-1)).toBe("\r\x1b[2K");
-    expect(result.stdout).not.toContain("Sources (");
+    expect(result.stdout).not.toContain("Nguồn cấu hình (");
   });
 
   it("redacts command-line credentials from human and JSON hook inventories", async () => {
@@ -218,9 +218,9 @@ describe("Codex hook-only setup", () => {
     expect(reviewText).toContain(f.script);
     expect(reviewText).toContain("SHA-256 ");
     expect(reviewText).toContain("Snapshot digest");
-    expect(reviewText).toContain("does not grant Bflow permissions");
+    expect(reviewText).toContain("không cấp quyền Bflow");
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("Codex global hooks: Approved");
+    expect(result.stdout).toContain("Codex global hooks: Đã phê duyệt");
     expect((await inspectCodexHooks(f.trust)).status).toBe("approved");
   });
 
@@ -232,7 +232,7 @@ describe("Codex hook-only setup", () => {
       setup: { ...f.context.setup, confirm }
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("Result: approval declined");
+    expect(result.stdout).toContain("Kết quả: Từ chối phê duyệt");
     await expect(readFile(f.store)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -260,7 +260,7 @@ describe("Codex hook-only setup", () => {
       setup: { ...f.context.setup, confirm }
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("Result: stale review");
+    expect(result.stdout).toContain("Kết quả: Bản chụp đã thay đổi (stale review)");
     await expect(readFile(f.store)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -273,7 +273,7 @@ describe("Codex hook-only setup", () => {
       setup: { ...f.context.setup, confirm }
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("Result: unsupported");
+    expect(result.stdout).toContain("Kết quả: Không hỗ trợ");
     expect(confirm).not.toHaveBeenCalled();
     await expect(readFile(f.store)).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -300,13 +300,13 @@ describe("Codex hook-only setup", () => {
     const granted = await runCli(["setup", "--codex-hooks", "--apply", "--trust-all", "--yes", "--json"], f.context);
     expect(granted.exitCode, granted.stdout + granted.stderr).toBe(0);
     const strict = await runCli(["setup", "--codex-hooks", "--check"], f.context);
-    expect(strict.stdout).not.toContain("Warning:");
+    expect(strict.stdout).not.toContain("Cảnh báo:");
     await chmod(f.config, 0o777);
     const checked = await runCli(["setup", "--codex-hooks", "--check"], f.context);
     expect(checked.exitCode, checked.stdout + checked.stderr).toBe(0);
-    expect(checked.stdout).toContain("Scope: All current and future global hooks");
-    expect(checked.stdout).toMatch(/^Warning: hooks\.json is group\/world-writable or not owned by the current user/m);
-    expect(checked.stdout).toContain("Codex global hooks: Already approved");
+    expect(checked.stdout).toContain("Phạm vi: Toàn bộ global hooks hiện tại và tương lai");
+    expect(checked.stdout).toMatch(/^Cảnh báo: hooks\.json is group\/world-writable or not owned by the current user/m);
+    expect(checked.stdout).toContain("Codex global hooks: Đã phê duyệt trước đó");
   });
 
   it("does not grant all-hook trust from a noninteractive request without --yes", async () => {
@@ -324,9 +324,9 @@ describe("Codex hook-only setup", () => {
     const result = await runCli(["setup", "--codex-hooks", "--apply", "--trust-all"], {
       ...f.context, setup: { ...f.context.setup, confirm }
     });
-    expect(confirm.mock.calls[0]?.[0]).toContain("ALL current and future");
+    expect(confirm.mock.calls[0]?.[0]).toContain("TOÀN BỘ global hooks hiện tại và tương lai");
     expect(result.exitCode).toBe(approve ? 0 : 1);
-    expect(result.stdout).toContain(approve ? "Scope: All current and future global hooks" : "approval declined");
+    expect(result.stdout).toContain(approve ? "Phạm vi: Toàn bộ global hooks hiện tại và tương lai" : "Từ chối phê duyệt");
     expect((await inspectCodexHooks(f.trust)).status).toBe(approve ? "approved" : "unsupported");
   });
 
