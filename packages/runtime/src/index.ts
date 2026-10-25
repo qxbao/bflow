@@ -138,6 +138,7 @@ export type {
 
 export { selectRegressionTests } from "./agentic/regression-selection.js";
 export type { RegressionSelection } from "./agentic/regression-selection.js";
+export { regressionChecks } from "./agentic/task-commands.js";
 
 // P30: platform readiness composition (no concrete provider adapter classes are exported).
 export * from "./platform/index.js";

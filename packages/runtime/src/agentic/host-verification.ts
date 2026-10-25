@@ -12,10 +12,14 @@ import {
 import { digest, json, record, strings, textField } from "./journal.js";
 import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
-import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand,
-  type BoundBehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
+  type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
-import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { unconfiguredImpactIndex, type ImpactIndex } from "./impact-index.js";
+import { selectRegressionTests } from "./regression-selection.js";
+import { pinRunnerDefinitions } from "./runner-provenance.js";
+import type { RegressionScope } from "./host-controller.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
@@ -84,7 +88,8 @@ export class HostVerification {
   readonly runners: TestRunnerSource;
   constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly store: () => ArtifactStore,
     private readonly receipts?: HostVerificationReceipts, runners: TestRunnerSource | readonly BehavioralCommand[] = [],
-    private readonly rtk?: RtkOutputIntegration) {
+    private readonly rtk?: RtkOutputIntegration,
+    private readonly regression: { scope: RegressionScope; index: ImpactIndex } = { scope: "mapped_only", index: unconfiguredImpactIndex }) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
   /** Ownership of a task from its run definition; undefined for workflow-level checks. */
@@ -204,8 +209,11 @@ export class HostVerification {
   behavioralChecks(specification?: Specification, strategy?: TestStrategy, originalRevision?: string) {
     const owner = behavioralChecks(this.runners.owner);
     if (!this.runners.automatic) return owner;
-    if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles)];
     const profiles = this.runners.profilesForRevision(originalRevision);
+    const regression = this.regression.scope === "affected"
+      ? regressionChecks(specification && strategy ? profiles : this.runners.availableProfiles)
+      : [];
+    if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles), ...regression];
     const commands = resolveTaskCommands({ owner: [], profiles, specification, strategy });
     const boundChecks = automaticChecks(commands).map(check => {
       const command = commands.find(item => `host-behavioral-${item.id}` === check.id)!;
@@ -213,7 +221,7 @@ export class HostVerification {
         configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
     });
     const policyChecks = strategy.targetCommands.filter(isAutomaticStaticCommand).map(staticAnalysisCheckDefinition);
-    return [...owner, ...boundChecks, ...policyChecks];
+    return [...owner, ...boundChecks, ...policyChecks, ...regression];
   }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
   configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method)])]; }
@@ -386,8 +394,322 @@ export class HostVerification {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
       ...(this.runners.automatic ? [
         ...this.runners.availableProfiles.map(runner => this.automaticGate(runner)),
+        ...(this.regression.scope === "affected"
+          ? this.runners.availableProfiles.filter(profile => !profile.adapter).map(profile => this.regressionGate(profile))
+          : []),
         ...AUTOMATIC_STATIC_COMMANDS.map(command => this.policyDeterministicGate(staticGateId(command), command))
       ] : [])];
+  }
+  private async resolveRegressionBase(runId: string, taskId: string | undefined, fallbackBase?: unknown): Promise<string> {
+    try {
+      const dossier = await this.dossierFor(runId, taskId);
+      return dossier.originalRevision;
+    } catch {
+      const effectiveTaskId = taskId === "workflow-verification" ? undefined : taskId;
+      try {
+        const inspected = record(await this.runtime().inspect(runId));
+        const runObj = inspected.run !== null && typeof inspected.run === "object" ? record(inspected.run) : inspected;
+        if (effectiveTaskId !== undefined && Array.isArray(runObj.tasks)) {
+          const task = runObj.tasks
+            .filter(item => item !== null && typeof item === "object")
+            .map(record)
+            .find(item => item.taskId === effectiveTaskId);
+          if (task && Array.isArray(task.worktrees) && task.worktrees.length > 0) {
+            const baseCommit = record(task.worktrees.at(-1)).baseCommitHash;
+            if (typeof baseCommit === "string" && baseCommit.trim().length > 0) return baseCommit.trim();
+          }
+        }
+        if (typeof runObj.baseRevision === "string" && runObj.baseRevision.trim().length > 0) {
+          return runObj.baseRevision.trim();
+        }
+      } catch {
+        // Fall through to input.baseRevision
+      }
+      return textField(fallbackBase);
+    }
+  }
+  private regressionGate(profile: RunnerProfile): QualityGate {
+    const id = `host-regression-${profile.id}`;
+    return {
+      id,
+      evaluate: async raw => {
+        try {
+          const context = QualityGateContextSchema.parse(raw);
+          const config = record(context.definition.configuration);
+          const meta = record(context.definition.metadata ?? {});
+          const input = record(context.input);
+          const selectionMode = meta.selection ?? config.selection;
+          if (
+            context.definition.id !== id ||
+            config.command !== profile.command ||
+            config.method !== profile.method ||
+            (selectionMode !== undefined && selectionMode !== "regression")
+          ) {
+            throw new Error("Regression check does not match host runner profile");
+          }
+
+          const cwd = textField(input.sourceWorktreePath);
+          const head = textField(input.sourceRevision);
+          const base = await this.resolveRegressionBase(context.runId, context.taskId, input.baseRevision);
+          const repositoryRoot = this.runners.repositoryRoot ?? profile.dependencySource ?? cwd;
+
+          const selection = await selectRegressionTests({
+            worktreePath: cwd,
+            repositoryRoot,
+            base,
+            head,
+            profile,
+            scope: this.regression.scope === "mapped_only" ? "affected" : this.regression.scope,
+            index: this.regression.index,
+            git: (dir, args) => this.git(dir, args)
+          });
+          const evaluatedAt = new Date().toISOString();
+
+          const buildRegressionMeta = (
+            counts: { testsRun: number; passed: number; failed: number; skipped: number },
+            failures: { testPath: string; testName: string; classification: "regression_failure" | "pre_existing" }[]
+          ) =>
+            json({
+              scope: selection.scope,
+              selectedTestPaths: [...selection.testPaths],
+              testPaths: [...selection.testPaths],
+              changedFiles: [...selection.changedFiles],
+              changedFilesTruncated: selection.changedFilesTruncated,
+              truncated: selection.changedFilesTruncated,
+              widening: selection.widening.map(w => ({
+                path: w.path,
+                scope: w.tier,
+                tier: w.tier,
+                reason: w.reason,
+                ...(w.packageRoot ? { packageRoot: w.packageRoot } : {})
+              })),
+              index: "commit" in selection.index ? { ...selection.index, probedAt: evaluatedAt } : selection.index,
+              base: selection.base,
+              baseRevision: selection.base,
+              head: selection.head,
+              headRevision: selection.head,
+              failures,
+              preExistingFailures: failures
+                .filter(f => f.classification === "pre_existing")
+                .map(({ testPath, testName }) => ({ testPath, testName })),
+              testsRun: counts.testsRun,
+              passed: counts.passed,
+              failed: counts.failed,
+              skipped: counts.skipped
+            });
+
+          const finishResult = async (params: {
+            status: "passed" | "failed" | "blocked";
+            findings: ReturnType<typeof QualityFindingSchema.parse>[];
+            exitCode: number;
+            summary: string;
+            regressionMeta: JsonValue;
+            hostExecution?: JsonValue;
+          }) => {
+            const result = QualityGateResultSchema.parse({
+              gateId: context.definition.id,
+              runId: context.runId,
+              taskId: context.taskId,
+              evaluationId: randomUUID(),
+              status: params.status,
+              findings: params.findings,
+              producedArtifacts: [],
+              evaluatedAt,
+              metadata: {
+                verification: {
+                  schemaVersion: 2,
+                  checkId: context.definition.id,
+                  runId: context.runId,
+                  taskId: context.taskId,
+                  attemptId: context.attemptId,
+                  sourceRevision: head,
+                  specFingerprint: input.specFingerprint,
+                  scope: input.scope,
+                  independentExecution: true,
+                  isolated: true,
+                  executorId: "bflow-host-regression-check",
+                  role: "quality_gate",
+                  method: profile.method,
+                  command: profile.command,
+                  exitCode: params.status === "passed" ? 0 : params.exitCode,
+                  testNames: [],
+                  criteria: [],
+                  summary: params.summary
+                },
+                regression: params.regressionMeta,
+                ...(params.hostExecution !== undefined ? { hostExecution: params.hostExecution } : {})
+              }
+            });
+            await this.trustGate(result);
+            return { ok: true as const, value: result };
+          };
+
+          if (selection.scope === "none" || selection.testPaths.length === 0) {
+            const findings =
+              selection.scope === "none"
+                ? [
+                    QualityFindingSchema.parse({
+                      severity: "info",
+                      code: "docs_only",
+                      message: "Only documentation files changed; no regression tests selected"
+                    })
+                  ]
+                : [];
+            const summary =
+              selection.scope === "none"
+                ? "Only documentation files changed; no regression tests selected"
+                : `No regression tests selected (scope: ${selection.scope})`;
+            return await finishResult({
+              status: "passed",
+              findings,
+              exitCode: 0,
+              summary,
+              regressionMeta: buildRegressionMeta({ testsRun: 0, passed: 0, failed: 0, skipped: 0 }, [])
+            });
+          }
+
+          const budgetMs = Math.min(540_000, profile.timeoutMs * 3);
+          const bindAtCurrentCheckout = async (testPaths: string[]) => {
+            const pinned = await pinRunnerDefinitions(cwd, {
+              status: "detected",
+              profiles: [profile],
+              notes: []
+            });
+            const activeProfile = pinned.status === "detected" ? pinned.profiles[0]! : profile;
+            return bindRegressionProfile(activeProfile, testPaths, budgetMs);
+          };
+
+          const handleInfraFailure = async (error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            const isBudgetExceeded = message.startsWith("regression_budget_exceeded:");
+            const code = isBudgetExceeded ? "regression_budget_exceeded" : "regression_infrastructure";
+            const findingMessage = isBudgetExceeded
+              ? `Regression suite exceeded budget (${budgetMs}ms); split the task or configure verification.regressionScope: "mapped_only" (${message})`
+              : `Regression runner infrastructure error: ${message}`;
+            return await finishResult({
+              status: "blocked",
+              findings: [
+                QualityFindingSchema.parse({
+                  severity: "error",
+                  code,
+                  message: findingMessage
+                })
+              ],
+              exitCode: 1,
+              summary: findingMessage,
+              regressionMeta: buildRegressionMeta({ testsRun: 0, passed: 0, failed: 0, skipped: 0 }, [])
+            });
+          };
+
+          let headMeasured: RegressionMeasurement;
+          try {
+            const headCommand = await bindAtCurrentCheckout([...selection.testPaths]);
+            headMeasured = await measureRegression(headCommand, cwd, head);
+          } catch (error) {
+            return await handleInfraFailure(error);
+          }
+
+          const headObs = headMeasured.observation;
+          if (headObs.failures.length === 0) {
+            const summary = `${headObs.passed}/${headObs.tests} regression tests passed at ${head} (scope: ${selection.scope})`;
+            return await finishResult({
+              status: "passed",
+              findings: [],
+              exitCode: 0,
+              summary,
+              regressionMeta: buildRegressionMeta(
+                { testsRun: headObs.tests, passed: headObs.passed, failed: headObs.failed, skipped: headObs.skipped },
+                []
+              ),
+              hostExecution: json(headMeasured)
+            });
+          }
+
+          const failingTestPaths = [...new Set(headObs.failures.map(f => f.testPath))];
+          const baseTestPaths: string[] = [];
+          for (const testPath of failingTestPaths) {
+            if (!testFilePattern.test(testPath)) continue;
+            try {
+              await this.git(cwd, ["cat-file", "-e", `${base}:${testPath}`]);
+              baseTestPaths.push(testPath);
+            } catch {
+              // Did not exist at base; cannot be pre_existing
+            }
+          }
+
+          let baseFailures: RegressionFailure[] = [];
+          if (baseTestPaths.length > 0) {
+            const symbolicBranch = (
+              await this.git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"]).catch(() => "")
+            ).trim();
+            try {
+              await this.git(cwd, ["checkout", "--detach", "--force", base]);
+              const baseCommand = await bindAtCurrentCheckout(baseTestPaths);
+              const baseMeasured = await measureRegression(baseCommand, cwd, base);
+              baseFailures = baseMeasured.observation.failures;
+            } catch (error) {
+              return await handleInfraFailure(error);
+            } finally {
+              if (symbolicBranch) {
+                await this.git(cwd, ["checkout", "--force", symbolicBranch]).catch(async () => {
+                  await this.git(cwd, ["checkout", "--detach", "--force", head]);
+                });
+              } else {
+                await this.git(cwd, ["checkout", "--detach", "--force", head]);
+              }
+            }
+          }
+
+          const baseFailureKeys = new Set(baseFailures.map(f => `${f.testPath}\0${f.testName}`));
+          const classifiedFailures = headObs.failures.map(f => ({
+            testPath: f.testPath,
+            testName: f.testName,
+            classification: (baseFailureKeys.has(`${f.testPath}\0${f.testName}`)
+              ? "pre_existing"
+              : "regression_failure") as "regression_failure" | "pre_existing"
+          }));
+
+          const findings = classifiedFailures.map(f =>
+            f.classification === "regression_failure"
+              ? QualityFindingSchema.parse({
+                  severity: "error",
+                  code: "regression_failure",
+                  message: `Regression test failed at head (${head}) but passed at base (${base}): ${f.testPath} :: ${f.testName}`,
+                  location: f.testPath,
+                  details: { testName: f.testName, testPath: f.testPath, base, head }
+                })
+              : QualityFindingSchema.parse({
+                  severity: "warning",
+                  code: "pre_existing_failure",
+                  message: `Pre-existing test failure also present at base (${base}): ${f.testPath} :: ${f.testName}`,
+                  location: f.testPath,
+                  details: { testName: f.testName, testPath: f.testPath, base, head }
+                })
+          );
+
+          const regressionFailures = classifiedFailures.filter(f => f.classification === "regression_failure");
+          const status = regressionFailures.length > 0 ? "failed" : "passed";
+          const summary =
+            regressionFailures.length > 0
+              ? `${regressionFailures.length} regression failure(s) detected across ${headObs.tests} tests at ${head}`
+              : `${headObs.passed}/${headObs.tests} regression tests passed (${classifiedFailures.length} pre-existing failure(s) ignored) at ${head}`;
+
+          return await finishResult({
+            status,
+            findings,
+            exitCode: status === "passed" ? 0 : headMeasured.outcome.exitCode || 1,
+            summary,
+            regressionMeta: buildRegressionMeta(
+              { testsRun: headObs.tests, passed: headObs.passed, failed: headObs.failed, skipped: headObs.skipped },
+              classifiedFailures
+            ),
+            hostExecution: json(headMeasured)
+          });
+        } catch (error) {
+          return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
+        }
+      }
+    };
   }
   private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
     return { id, evaluate: async raw => {
