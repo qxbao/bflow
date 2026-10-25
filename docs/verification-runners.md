@@ -29,6 +29,19 @@ runner setup does not require a host restart. Unsupported detection retries; suc
 detection refreshes after repository HEAD changes and retains in-process snapshots for existing task revisions. Original task-base blobs are checked even if a newer host revision has been detected. After a host restart, a differing historical profile that cannot be reconstructed remains blocked; durable profile reconstruction is not certified by this change. A task never receives an agent
 supplied replacement command or a successful verdict.
 
+## Regression scope (`verification.regressionScope`)
+
+When automatic JS/TS runner detection is active (no `.bflow/verification.json` owner override), `HostVerification` also registers per-profile regression gates (`host-regression-<profile.id>`) controlled by `verification.regressionScope` in `.bflow/config.yml`:
+
+- **`affected` (default for new/migrated repository configs)**: Host computes `git diff --name-status -M -z <base> <head> --` (where `base` is the task worktree's `baseCommitHash` or `run.baseRevision` for workflow verification) and classifies changed files along a monotonic 3-tier safety lattice (`none` → `graph` → `package` → `full`):
+  - **Docs-only (`none`)**: Only `.md`, `.mdx`, `.txt`, `.rst`, `LICENSE*`, `CHANGELOG*`, or `docs/**` changed — passes immediately without spawning a test runner (`reason: "docs_only"`).
+  - **Import-closure graph (`graph`)**: Changed code files query the isolated GitNexus index (`GITNEXUS_HOME`, `GITNEXUS_SHARED_STORE=off`) via `gitnexus cypher` (`MATCH (f:File)-[:IMPORTS*1..10]->(t:File)`) only when `gitnexus status --json` and the storage lock file prove freshness at `base` (`index.commit === base`, `status === "up-to-date"`, `contentDrift.status === "current"`, empty `incompleteReasons`) both **before and after** the query.
+  - **Safe widening (`package` / `full`)**: Sub-package manifest/config or non-code files widen to all tests in that package (`package`); root manifests, lockfiles, tsconfig/vitest/jest configs, scripts, CI workflows, `.bflow/**` or >50 changed code files widen to all repository tests (`full`). If the GitNexus index is unavailable/stale or a changed code file is absent from `File` nodes, that file widens to its owning package (or `full` at repo root) with an explicit `widening` audit entry (`index_unavailable:<code>` / `not_in_graph_index`) rather than failing or skipping tests.
+- **`full`**: Runs all candidate test files in the repository on every verification cycle without consulting GitNexus.
+- **`mapped_only`**: Disables `host-regression-*` gates (keeps only criterion-mapped checks). Persisted `host.json` files created before this feature default to `mapped_only` on recovery so in-flight runs never change gate topology mid-run.
+
+Regression runs execute whole test files without a `--test-name-pattern` / `-t` filter inside the same Bubblewrap/Seatbelt sandbox (deadline `min(540_000, profile.timeoutMs * 3)` ms) and use a tolerant parser (`packages/runtime/src/agentic/regression-results.ts`) that allows skipped/todo tests in existing suites while capturing all assertion, file-level and unhandled runtime failures. Any test file that fails at `head` and existed at `base` is re-measured at `base` (with `try/finally` restoring the worktree ref): failures already present at `base` become `warning` findings (`pre_existing_failure`) and do not fail the gate, whereas new failures at `head` fail the gate with `error` findings (`regression_failure`). Runner crashes, unparseable output or timeouts block the gate (`regression_infrastructure` / `regression_budget_exceeded`).
+
 ## Runner matrix
 
 All rows below have source and local fixture/parser coverage. The original polyglot
