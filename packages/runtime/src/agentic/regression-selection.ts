@@ -48,7 +48,7 @@ export async function selectRegressionTests(input: {
     "-r",
     "--name-only",
     "-z",
-    input.base === input.head ? input.head : input.head
+    input.head
   ]);
   const headFiles = lsTreeOut.split("\0").filter(Boolean);
   const candidateTests = [

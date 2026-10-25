@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createGitNexusImpactIndex,
@@ -468,14 +469,13 @@ describe("ImpactIndex & GitNexus CLI adapter", () => {
       });
       const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
 
-      execFileSync(gitNexusBin, ["analyze", "--index-only", "--skip-skills"], {
+      await promisify(execFile)(gitNexusBin, ["analyze", "--index-only", "--skip-skills"], {
         cwd: repo,
         env: {
           ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
           GITNEXUS_HOME: home,
           GITNEXUS_SHARED_STORE: "off"
-        },
-        stdio: "pipe"
+        }
       });
 
       // Commit change to add in a task worktree so repositoryRoot stays indexed at base

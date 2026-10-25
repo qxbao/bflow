@@ -199,20 +199,6 @@ async function validateStatusProbe(
       detail: `GitNexus status repository ${status.repository} does not match ${expectedRoot}`
     };
   }
-  if (status.status !== "up-to-date") {
-    return {
-      ok: false,
-      code: "not_up_to_date",
-      detail: `GitNexus index status is ${status.status ?? "unknown"}`
-    };
-  }
-  if (status.contentDrift?.status !== "current") {
-    return {
-      ok: false,
-      code: "content_drift",
-      detail: `GitNexus contentDrift status is ${status.contentDrift?.status ?? "missing"}`
-    };
-  }
   if (status.index?.commit !== expectedBase) {
     return {
       ok: false,
@@ -225,6 +211,27 @@ async function validateStatusProbe(
       ok: false,
       code: "incomplete",
       detail: `GitNexus index has incompleteReasons: ${status.index?.incompleteReasons?.join(", ")}`
+    };
+  }
+  if (status.contentDrift?.status === "drifted") {
+    return {
+      ok: false,
+      code: "content_drift",
+      detail: `GitNexus contentDrift status is ${status.contentDrift.status}`
+    };
+  }
+  if (status.status !== "up-to-date") {
+    return {
+      ok: false,
+      code: "not_up_to_date",
+      detail: `GitNexus index status is ${status.status ?? "unknown"}`
+    };
+  }
+  if (status.contentDrift?.status !== "current") {
+    return {
+      ok: false,
+      code: "content_drift",
+      detail: `GitNexus contentDrift status is ${status.contentDrift?.status ?? "missing"}`
     };
   }
   return { ok: true };
