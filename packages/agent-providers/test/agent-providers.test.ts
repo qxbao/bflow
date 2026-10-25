@@ -399,6 +399,41 @@ describe("@bflow/agent-providers", () => {
       expect(calls).toEqual([]);
     });
 
+    it("checkNativeLogin reads only the provider's own login status", async () => {
+      const calls: string[][] = [];
+      const record = (scenario: "healthy" | "auth_expired") => createFakeProviderRunner({ scenario, customHandler: invocation => {
+        calls.push([...invocation.args]);
+        return undefined;
+      } });
+      const options = { executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true };
+      expect(await new ClaudeProviderAdapter({ ...options, runner: record("healthy") }).checkNativeLogin())
+        .toEqual({ verified: true, detail: "provider reports an active login" });
+      expect((await new ClaudeProviderAdapter({ ...options, runner: record("auth_expired") }).checkNativeLogin()).verified).toBe(false);
+      expect(calls).toEqual([["auth", "status", "--json"], ["auth", "status", "--json"]]);
+      const signedOut = createFakeProviderRunner({ customHandler: invocation =>
+        invocation.args.join(" ") === "login status" ? { exitCode: 1, started: true, stdout: "Not logged in", stderr: "" } : undefined });
+      expect((await new CodexProviderAdapter({ ...options, runner: signedOut }).checkNativeLogin()).verified).toBe(false);
+    });
+
+    it("checkNativeLogin never runs Agy in a home that was never onboarded", async () => {
+      const home = await mkdtemp(join(tmpdir(), "bflow-agy-login-"));
+      vi.stubEnv("HOME", home);
+      try {
+        const calls: string[][] = [];
+        const runner = createFakeProviderRunner({ scenario: "healthy", customHandler: invocation => {
+          calls.push([...invocation.args]);
+          return undefined;
+        } });
+        const result = await new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, allowTestFilesystemOwnership: true })
+          .checkNativeLogin();
+        expect(result).toEqual({ verified: false, detail: "agy onboarding is not complete" });
+        expect(calls).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
     it("Conversation role uses conversation interaction and empty tools", async () => {
       const runner = createFakeProviderRunner({ scenario: "healthy" });
       const adapter = new ClaudeProviderAdapter({

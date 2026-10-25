@@ -45,6 +45,24 @@ describe("BuiltinSetupDoctor", () => {
     expect(r.checks.find((c) => c.checkId === "machine-config")!.status).toBe("passed");
   });
 
+  it("a provider login probe passes verified logins and keeps unverified ones as warnings", async () => {
+    const probed: string[] = [];
+    const probing = new BuiltinSetupDoctor({ probeLogin: async (o) => {
+      probed.push(o.toolId);
+      if (o.toolId === "agy") throw new Error("agy exploded");
+      return o.toolId === "claude" ? { verified: true, detail: "ok" } : { verified: false, detail: "provider reports no active login" };
+    } });
+    const r = await probing.run(ctx, { ...base, observations: [tool("claude", "present", false), tool("codex", "present", false),
+      tool("agy", "present", false), tool("node", "present", true), tool("codex", "missing", false)] });
+    expect(probed).toEqual(["claude", "codex", "agy"]);
+    const login = (id: string) => r.checks.filter((c) => c.checkId === `provider-auth-${id}`);
+    expect(login("claude")).toEqual([{ checkId: "provider-auth-claude", status: "passed", summary: "claude login verified" }]);
+    expect(login("codex")).toHaveLength(1);
+    expect(login("codex")[0]).toMatchObject({ status: "warning", summary: "codex login not verified: provider reports no active login" });
+    expect(login("agy")[0]).toMatchObject({ status: "warning", summary: "agy login not verified: agy exploded" });
+    expect(r.healthy).toBe(true);
+  });
+
   it("required missing tool fails; optional missing is warning", async () => {
     const r = await doctor.run(ctx, {
       ...base, observations: [tool("node", "missing", true), tool("git", "missing", false)]
