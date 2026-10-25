@@ -42,6 +42,13 @@ When automatic JS/TS runner detection is active (no `.bflow/verification.json` o
 
 Regression runs execute whole test files without a `--test-name-pattern` / `-t` filter inside the same Bubblewrap/Seatbelt sandbox (deadline `min(540_000, profile.timeoutMs * 3)` ms) and use a tolerant parser (`packages/runtime/src/agentic/regression-results.ts`) that allows skipped/todo tests in existing suites while capturing all assertion, file-level and unhandled runtime failures. Any test file that fails at `head` and existed at `base` is re-measured at `base` (with `try/finally` restoring the worktree ref): failures already present at `base` become `warning` findings (`pre_existing_failure`) and do not fail the gate, whereas new failures at `head` fail the gate with `error` findings (`regression_failure`). Runner crashes, unparseable output or timeouts block the gate (`regression_infrastructure` / `regression_budget_exceeded`).
 
+## Fast-path review waivers and host-measured gates
+
+When `environment.fastPath.mode` is `"auto"` (default for new/migrated repository configs; persisted `host.json` files without `fastPath` default to `"off"`) and Runtime freezes `run.fastPath.status = "active"` for a single-task `trivial` change ([ADR 0004](adr/0004-fast-path-review-waiver.md)), review waivers rely strictly on independent gates measured by the host (`bflow-host-behavioral-check` / `bflow-host-git-check`), never on agent-supplied output or flags:
+
+- **Task-level waiver (`deterministic_coverage`)**: Applied only when every active required acceptance criterion uses an automated method (`verificationMethod !== "manual_review"`), is completely mapped to host-executed `kind: "deterministic"` checks, `strategy.targetCommands.length > 0`, and `strategy.tddDecision.mode !== "required"`. Documentation-only changes (`manual_review`) have no behavioral runner and therefore keep independent Reviewer/QA checks at task scope; `bugfix`/`feature` and `tddDecision.mode === "required"` are ineligible for fast-path.
+- **Workflow-level waiver (`identical_integrated_tree`)**: Applied only when the single task's verification cycle `passed` and the host-verified Git tree of `integration.expectedHead` (`git rev-parse --verify <rev>^{tree}`) equals the task commit's tree hash. Host deterministic checks (`host-git-integrity` and configured regression gates) remain mandatory at workflow scope. If P17 rejects a waiver or the integrated tree differs (`tree_mismatch`), Runtime downgrades one-way (`status: "downgraded"`) to the full Reviewer + QA verification plan. Evidence level is source implementation plus local/fake-runner tests, not live Herdr/provider acceptance.
+
 ## Runner matrix
 
 All rows below have source and local fixture/parser coverage. The original polyglot

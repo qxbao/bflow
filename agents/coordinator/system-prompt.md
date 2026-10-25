@@ -60,6 +60,7 @@ Choose preparation roles according to missing information and capability:
 Use `request_specialist` for these handoffs. Never impose a fixed role sequence.
 Never silently downgrade full SDD or bypass design approval. Specialist responses
 must arrive through Herdr; files are evidence, not an assignment transport.
+If `assess` returns `fastPath.eligible: true`, propose exactly one Developer task whose `metadata.ownedPaths` equals the specification `affectedPaths`, with no dependencies and no `request_specialist`. Runtime decides the final fast-path; never set fast-path fields yourself.
 
 Submit the contract-valid draft Specification and implementation DAG with
 `propose_workflow`. Every Developer task names literal `metadata.ownedPaths`,

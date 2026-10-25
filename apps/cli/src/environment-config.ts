@@ -99,6 +99,12 @@ export const EnvironmentConfigEnvironmentSchema = z
         regressionScope: z.enum(["affected", "full", "mapped_only"]).default("affected")
       })
       .strict(),
+    fastPath: z
+      .object({
+        mode: z.enum(["auto", "off"]).default("auto")
+      })
+      .strict()
+      .default({ mode: "auto" }),
     concurrency: z
       .object({
         maxConcurrency: z.number().int().min(1).max(64)
@@ -195,6 +201,7 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
       sdd: { minimumLevel: "lightweight", approvalRequired: true },
       tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human", regressionScope: "affected" },
+      fastPath: { mode: "auto" },
       concurrency: { maxConcurrency: 2 },
       startupTimeoutMs: 300_000,
       shutdownTimeoutMs: 30_000,
@@ -280,6 +287,7 @@ export function upsertEnvironmentConfig(
     sdd: { ...baseEnv.sdd, ...savedEnv.sdd },
     tdd: { ...baseEnv.tdd, ...savedEnv.tdd },
     verification: { ...baseEnv.verification, ...savedEnv.verification },
+    fastPath: { ...baseEnv.fastPath, ...savedEnv.fastPath },
     concurrency: { ...baseEnv.concurrency, ...savedEnv.concurrency },
     startupTimeoutMs: savedEnv.startupTimeoutMs ?? baseEnv.startupTimeoutMs,
     shutdownTimeoutMs: savedEnv.shutdownTimeoutMs ?? baseEnv.shutdownTimeoutMs,
@@ -353,6 +361,8 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
     if ((sdd["minimumLevel"] !== "lightweight" && sdd["minimumLevel"] !== "full") || typeof sdd["approvalRequired"] !== "boolean" || tdd["policy"] !== "conditional" ||
         !integer(verification["maxIterations"], 100) || verification["onExhausted"] !== "require_human" ||
         (verification["regressionScope"] !== undefined && !["affected", "full", "mapped_only"].includes(String(verification["regressionScope"]))) ||
+        (env["fastPath"] !== undefined && (typeof env["fastPath"] !== "object" || env["fastPath"] === null || Array.isArray(env["fastPath"]) ||
+          ((env["fastPath"] as Record<string, unknown>)["mode"] !== undefined && !["auto", "off"].includes(String((env["fastPath"] as Record<string, unknown>)["mode"]))))) ||
         !integer(concurrency["maxConcurrency"], 64) ||
         !integer(env["startupTimeoutMs"], 600_000) || !integer(env["shutdownTimeoutMs"], 600_000)) throw new Error("Invalid SDLC policies, concurrency or timeouts");
     WorkflowDefinitionSchema.parse(base.value.defaultWorkflow);

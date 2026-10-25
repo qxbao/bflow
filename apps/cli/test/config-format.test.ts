@@ -68,6 +68,7 @@ describe("configuration YAML format", () => {
 
     const parsed = EnvironmentConfigEnvironmentSchema.parse(environment);
     expect(parsed.defaults).toEqual(environment.defaults);
+    expect(parsed.fastPath).toEqual({ mode: "auto" });
     expect(parsed.roles[1]).toMatchObject({ model: "gpt-model", effort: "high", "profile-name": "lead" });
     expect(EnvironmentConfigEnvironmentSchema.parse({ ...environment, defaults: undefined }).defaults).toBeUndefined();
     expect(EnvironmentConfigEnvironmentSchema.safeParse({ ...environment, defaults: { gemini: { "profile-name": "work" } } }).success).toBe(false);
@@ -113,6 +114,7 @@ describe("configuration YAML format", () => {
       sdd: { minimumLevel: "lightweight", approvalRequired: true },
       tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human" },
+      fastPath: { mode: "auto" },
       concurrency: { maxConcurrency: 2 },
       startupTimeoutMs: 300_000,
       shutdownTimeoutMs: 30_000,
@@ -150,6 +152,20 @@ describe("configuration YAML format", () => {
     expect(rendered).toContain("enum: `lightweight` | `full`");
     expect(rendered).toContain("regressionScope: affected | full | mapped_only");
     expect(rendered).toContain("bflow init --update");
+    expect(parseConfigYaml(rendered)).toEqual(config);
+  });
+
+  it("renders fastPath banner in Vietnamese", () => {
+    const repository = {
+      id: "repo-1234567890abcdef12345678",
+      root: "/workspace/demo",
+      sessionName: "bf-1234567890abcdef1234"
+    };
+    const config = defaultEnvironmentConfig(repository, "fastpath-banner", new Date("2026-10-18T00:00:00.000Z"), "codex");
+    const rendered = renderEnvironmentConfigYaml(config);
+    expect(rendered).toContain("# Fast-path: thay đổi nhỏ (trivial) chạy ít bước hơn và tự duyệt design; bạn vẫn duyệt bàn giao. mode: auto | off (mặc định: auto).");
+    expect(rendered.indexOf("verification:")).toBeLessThan(rendered.indexOf("fastPath:"));
+    expect(rendered.indexOf("fastPath:")).toBeLessThan(rendered.indexOf("concurrency:"));
     expect(parseConfigYaml(rendered)).toEqual(config);
   });
 

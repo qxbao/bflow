@@ -24,7 +24,7 @@ import { probeBehavioralSandbox } from "./sandbox-readiness.js";
 import { assertWorkspaceFileCapability } from "./workspace-file-readiness.js";
 import { lastAssistantText, mustShowSection, noticeDisplayed, noticePriority, renderConversationNotice, type NoticeLike, type RenderedNotice } from "./conversation-notice-render.js";
 import { callHost } from "./host-protocol.js";
-import { effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
+import { effectiveFastPathMode, effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
@@ -720,6 +720,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
       roleCapabilities: capabilities, preflightRoleCapabilities, taskChecks: DEFAULT_HOST_CHECKS, workflowChecks: DEFAULT_HOST_CHECKS, deterministicGates: [verification.deterministicGate()],
+      fastPathMode: effectiveFastPathMode(configuration.policy, true),
       behavioralChecks: (specification, strategy, originalRevision) => verification.behavioralChecks(specification, strategy, originalRevision), behavioralGates: () => verification.behavioralGates(),
       validateTaskCommands: (specification, strategy, ownedPaths) => verification.assertTaskSupported(specification, strategy, ownedPaths),
       authenticateMessage: authenticateNativeHerdrMessage,

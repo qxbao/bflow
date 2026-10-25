@@ -118,9 +118,10 @@ export class FakeToolRunner implements QualityGate {
   }
 }
 
-export async function fixture(options: { scope?: "task" | "workflow"; maxIterations?: number } = {}) {
+export async function fixture(options: { scope?: "task" | "workflow"; maxIterations?: number; reviewWaiver?: unknown } = {}) {
   const store = new FakeArtifactStore();
   const scope = options.scope ?? "task";
+  const automatedOnly = options.reviewWaiver !== undefined;
   const level = scope === "workflow" ? "integration" : "unit";
   const method = scope === "workflow" ? "integration_test" : "unit_test";
   const testCommand = `pnpm test:${level}`;
@@ -132,9 +133,12 @@ export async function fixture(options: { scope?: "task" | "workflow"; maxIterati
       requiresFailingTestFirst: false, decidedBy: "coordinator", decidedAt: now },
     requiredTestLevels: [level], targetCommands: [testCommand, "pnpm typecheck"],
     independentVerificationRequired: true,
-    criterionMappings: [{ criterionId: "ac-1", testNames: ["target-behavior"] },
+    criterionMappings: [
+      { criterionId: "ac-1", testNames: ["target-behavior"] },
       { criterionId: "ac-types", testNames: ["types-valid"] },
-      { criterionId: "ac-review", testNames: ["review-scope"] }], createdAt: now
+      ...(automatedOnly ? [] : [{ criterionId: "ac-review", testNames: ["review-scope"] }])
+    ],
+    createdAt: now
   });
   const specDocument = {
     schemaVersion: 2, specId: "spec-1", runId: "run-1", sessionId: "session-1", level: "lightweight",
@@ -143,7 +147,7 @@ export async function fixture(options: { scope?: "task" | "workflow"; maxIterati
     acceptanceCriteria: [
       { id: "ac-1", description: "Target behavior matches expectation", category: "functional", verificationMethod: method },
       { id: "ac-types", description: "Types are valid", category: "non_functional", verificationMethod: "typecheck" },
-      { id: "ac-review", description: "Independent review confirms scope", category: "non_functional", verificationMethod: "manual_review" }
+      ...(automatedOnly ? [] : [{ id: "ac-review", description: "Independent review confirms scope", category: "non_functional", verificationMethod: "manual_review" }])
     ].map(c => ({ ...c, required: true, status: "pending", evidenceArtifactIds: [] })),
     affectedPaths: ["packages/example"], status: "approved", createdBy: "architect", approvedBy: "human-1",
     createdAt: now, updatedAt: now, testStrategy: strategy, tddDecision: strategy.tddDecision
@@ -157,11 +161,14 @@ export async function fixture(options: { scope?: "task" | "workflow"; maxIterati
       testNames: ["target-behavior"], role: "tester", levels: [level] }),
     makeCheck("type-check", { kind: "deterministic", method: "typecheck", command: "pnpm typecheck", criterionIds: ["ac-types"],
       testNames: ["types-valid"], role: "quality_gate", levels: [] }),
-    makeCheck("review-check", { kind: "review", method: "manual_review", criterionIds: ["ac-review"],
-      testNames: ["review-scope"], role: "reviewer", levels: [] })
+    ...(automatedOnly ? [] : [
+      makeCheck("review-check", { kind: "review", method: "manual_review", criterionIds: ["ac-review"],
+        testNames: ["review-scope"], role: "reviewer", levels: [] })
+    ])
   ];
   const input = { runId: "run-1", taskId: "task-1", scope, specification, strategy, checks,
-    implementerIds: ["developer-1"], ...(options.maxIterations ? { maxIterations: options.maxIterations } : {}) };
+    implementerIds: ["developer-1"], ...(options.maxIterations ? { maxIterations: options.maxIterations } : {}),
+    ...(options.reviewWaiver !== undefined ? { reviewWaiver: options.reviewWaiver } : {}) };
   const plan: VerificationPlan = createVerificationPlan(input);
   const runners = checks.map(check => new FakeToolRunner(check.id));
   let currentSpecification: Specification = specification;

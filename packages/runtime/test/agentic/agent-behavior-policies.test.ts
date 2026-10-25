@@ -240,6 +240,9 @@ describe("Bflow Agent Behavioral Policies & Autonomous Non-User-Facing Execution
       expect(coordPrompt).toMatch(/technical lead/i);
       expect(coordPrompt).toMatch(/propose_workflow/i);
       expect(coordPrompt).toMatch(/Never edit source|Never edit code|Do not edit code/i);
+      expect(coordPrompt).toContain("If `assess` returns `fastPath.eligible: true`, propose exactly one Developer task whose `metadata.ownedPaths` equals the specification `affectedPaths`, with no dependencies and no `request_specialist`. Runtime decides the final fast-path; never set fast-path fields yourself.");
+      expect(coordPrompt).toContain("Never silently downgrade full SDD or bypass design approval.");
+      expect(coordPrompt).toContain("For required TDD, Developer must first obtain independent Red evidence");
 
       // Analyst / Specifier
       const analystPrompt = await fs.readFile(path.join(repoRoot, "agents/analyst/system-prompt.md"), "utf8");

@@ -98,8 +98,26 @@ export interface RunRecord {
   conflictResolution?: ConflictResolutionRecord;
   /** Structured rejection proof of the last rejected workflow proposal; cleared when a valid proposal is admitted. */
   lastWorkflowRejection?: ProposalRejectionRecord;
+  /** Host-evaluated fast-path eligibility and one-way downgrade state; absent in legacy journals. */
+  fastPath?: FastPathRecord;
+  /** Cached workflow-level verification plan for the current integration cycle. */
+  workflowVerificationPlan?: VerificationPlan;
 }
 const rejectionText = z.string().min(1).max(2000);
+const FastPathDowngradeSchema = z.object({
+  reason: rejectionText,
+  at: IsoDateTimeSchema,
+  scope: z.enum(["task", "workflow"])
+}).strict();
+const FastPathRecordSchema = z.object({
+  status: z.enum(["active", "inactive", "downgraded"]),
+  decidedAt: IsoDateTimeSchema,
+  blockers: z.array(rejectionText).max(50),
+  reasons: z.array(rejectionText).max(50),
+  classificationDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  downgrade: FastPathDowngradeSchema.optional()
+}).strict();
+export type FastPathRecord = z.infer<typeof FastPathRecordSchema>;
 const ProposalRejectionSchema = z.object({
   code: WorkflowRejectionCodeSchema, reason: rejectionText,
   episodeNumber: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
@@ -306,6 +324,7 @@ function parseState(input: unknown, repository: string): JournalState {
       textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
     }
     if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
+    if (run.fastPath !== undefined) run.fastPath = FastPathRecordSchema.parse(run.fastPath);
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {

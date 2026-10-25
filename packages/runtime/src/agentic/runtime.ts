@@ -8,8 +8,15 @@ import {
   type ArtifactReference, type CancellationRequest, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
   type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
-import { AgenticJournal, digest, isConversationDelivery, json, record, strings, textField, type JournalState,
+import { AgenticJournal, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
   type ConflictResolverAttempt, type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
+import { evaluateFastPath } from "./fast-path.js";
+import {
+  FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE,
+  FAST_PATH_TASK_WAIVER_NOTICE,
+  FAST_PATH_WORKFLOW_WAIVER_NOTICE,
+  formatFastPathDowngradeNotice
+} from "./conversation-notice-render.js";
 import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange } from "./integration-change.js";
 import { CoreSession, type CoreRestoreCache } from "./core-session.js";
@@ -850,7 +857,7 @@ export class AgenticWorkflowRuntime {
     run.delegationHistory = [...(run.delegationHistory ?? []), run.delegation];
     run.delegation = delegation;
     delete run.lastWorkflowRejection;
-    delete run.definition; delete run.workflowSpec; delete run.baseRevision; delete run.approval; delete run.approvalKind;
+    delete run.definition; delete run.workflowSpec; delete run.baseRevision; delete run.approval; delete run.approvalKind; delete run.fastPath; delete run.workflowVerificationPlan;
     run.tasks = []; run.status = "intake"; delete run.error;
   }
   /** Validate current session ownership without depending on the pane generation that originally queued the intent. */
@@ -2265,8 +2272,10 @@ export class AgenticWorkflowRuntime {
     // Only roles with a pane bound in this session can receive request_specialist; the rest would be refused.
     const availableRoles = await this.boundSpecialistRoles(), bound = new Set(availableRoles.map(item => item.role));
     const suggested = unresolved.length ? ["specifier"] : classification.complexity === "complex" ? ["architect", "planner"] : [];
+    const fastPath = evaluateFastPath({ mode: this.ports.fastPathMode ?? "auto", classification, assessment, draft: spec });
     return json({ ...classification, clarificationRequired: unresolved.length > 0,
       suggestedRoles: suggested.filter(role => bound.has(role)),
+      fastPath: { eligible: fastPath.eligible, blockers: fastPath.blockers },
       availableRoles, roleFallbacks: Object.fromEntries(Object.entries(SPECIALIST_FALLBACKS).filter(([role, fallback]) => !bound.has(role) && bound.has(fallback))),
       availableCapabilities: Object.fromEntries(Object.entries(this.ports.roleCapabilities).filter(([role]) => !SPECIALIST_ROLES.includes(role) || bound.has(role))) });
   }
@@ -2283,7 +2292,7 @@ export class AgenticWorkflowRuntime {
         if (digest(run.definition.metadata?.proposalFingerprint) === digest(digest([draft, proposed, maxIterations]))) {
           // An identical retry re-attempts a design step that is still pending (e.g. a failed autonomous approval); it never succeeds silently.
           if (run.status === "awaiting_approval" && run.approvalKind === "design" && run.approval && !run.decision) {
-            await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, run.definition));
+            await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, run.definition, run.fastPath));
             await save();
           }
           return json(run);
@@ -2343,6 +2352,32 @@ export class AgenticWorkflowRuntime {
         tasks.push({ taskId: task.id, spec: taskSpec, worktrees: [], outboundIds: [] });
       }
       delete run.lastWorkflowRejection;
+      const specialistRequested = state.outbound.some(
+        out => out.message.run_id === run.runId && out.status !== "cancelled" && SPECIALIST_ROLES.includes(out.message.recipient.role)
+      );
+      const followUpOrRevision = Boolean(
+        run.delegationHistory?.length ||
+        revisionOf(run.delegation) > 1 ||
+        run.delegation.metadata?.followUpFromRunId
+      );
+      const fastPathDecision = evaluateFastPath({
+        mode: this.ports.fastPathMode ?? "off",
+        classification,
+        assessment: record(draft.metadata?.sdd).assessment,
+        delegationSddLevel: run.delegation.sddLevel,
+        draft,
+        definition: proposed,
+        strategies: tasks.map(t => t.spec.strategy),
+        specialistRequested,
+        followUpOrRevision
+      });
+      run.fastPath = {
+        status: fastPathDecision.eligible ? "active" : "inactive",
+        decidedAt: this.now(),
+        blockers: [...fastPathDecision.blockers],
+        reasons: [...fastPathDecision.reasons],
+        classificationDigest: digest(classification)
+      };
       run.definition = definition; run.workflowSpec = workflowSpec; run.tasks = tasks; run.maxIterations = maxIterations;
       // A follow-up run (human changes requested) starts from the parent's delivered head, preset at its creation.
       run.baseRevision ??= textField((await this.ports.policies.git.inspect()).head);
@@ -2361,13 +2396,13 @@ export class AgenticWorkflowRuntime {
         idempotencyKey: `design:${runId}${revisionKey}`, metadata: { bundleFingerprint: digest([definition, workflowSpec, tasks]) } });
       run.approvalKind = "design"; run.status = "awaiting_approval";
       await save();
-      await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, definition));
+      await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, definition, run.fastPath));
       await save(); return json(run);
     });
   }
-  private designNeedsHuman(draft: Specification, definition: WorkflowDefinition): boolean {
+  private designNeedsHuman(draft: Specification, definition: WorkflowDefinition, fastPath?: FastPathRecord): boolean {
     const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
-    return classification.humanApprovalRequired || !!this.ports.projectApprovalRequired?.("implementation", json(definition));
+    return classification.humanApprovalRequired || (fastPath?.status !== "active" && !!this.ports.projectApprovalRequired?.("implementation", json(definition)));
   }
   /**
    * Human gate, or autonomous acceptance of the pending design. A failed autonomous step is rolled back to the pending state,
@@ -2386,6 +2421,9 @@ export class AgenticWorkflowRuntime {
       await core.create(run);
       delete run.error;
       this.progress(state, outbox, run, "Accepted specification and test policy; implementation is ready");
+      if (run.fastPath?.status === "active") {
+        this.progress(state, outbox, run, FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE);
+      }
     } catch (error) {
       const reason = redactString(String(error));
       // Restore the pending design: no half-approved dossier or status may be persisted by the failed attempt.
@@ -3138,30 +3176,133 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     await this.recoverPolicyPhaseRetirements(state, save, outbox);
   }
-  private verificationPlan(state: JournalState, run: RunRecord, task?: TaskRecord): VerificationPlan {
+  private verificationPlan(
+    state: JournalState,
+    run: RunRecord,
+    task?: TaskRecord,
+    workflowTrees?: { taskTree?: string; integratedTree?: string; treeError?: boolean },
+    outbox?: HerdrOutbox
+  ): VerificationPlan {
     if (task?.verificationPlan) return task.verificationPlan;
+    if (!task && run.workflowVerificationPlan) return run.workflowVerificationPlan;
     const dossier = task?.spec ?? run.workflowSpec!;
-    const plan = this.ports.policies.createVerificationPlan({ runId: run.runId, taskId: task?.taskId ?? FINAL_TASK,
-      scope: task ? "task" : "workflow", specification: dossier.specification, strategy: dossier.strategy,
-      checks: ([...(task ? this.ports.taskChecks : this.ports.workflowChecks), ...(this.ports.behavioralChecks?.(dossier.specification, dossier.strategy, task?.worktrees.at(-1)?.baseCommitHash ?? run.baseRevision) ?? [])]).flatMap(check => {
-        if (check.metadata?.bindAcceptedCriteria !== true) return [check];
-        const config = record(check.configuration);
-        // A method-bound check (automatic runner) takes its names from the accepted mappings of that method, and does not apply without them.
-        const methodBound = check.metadata?.bindMethodTestNames === true;
-        if (methodBound && !dossier.strategy.targetCommands.includes(String(config.command))) return [];
-        const names = methodBound && check.metadata?.boundRunnerIdentities !== true ? dossier.strategy.criterionMappings.filter(mapping => dossier.specification.acceptanceCriteria.some(criterion =>
-          criterion.id === mapping.criterionId && criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === config.method))
-          .flatMap(mapping => mapping.testNames) : config.testNames;
-        const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
-          (config.kind === "review" || criterion.verificationMethod === config.method && dossier.strategy.criterionMappings.some(mapping =>
-            mapping.criterionId === criterion.id && mapping.testNames.length && mapping.testNames.every(name => Array.isArray(names) && names.includes(name)))));
-        if (methodBound && criteria.length === 0) return [];
-        return [{ ...check, configuration: json({ ...config, criterionIds: criteria.map(criterion => criterion.id),
-          testNames: config.kind === "review" ? dossier.strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames) : names }) }];
-      }),
-      implementerIds: run.tasks.flatMap(item => item.outboundIds).map(id => state.outbound.find(out => out.message.message_id === id)?.handle?.target.agentId).filter((id): id is string => !!id),
-      maxIterations: run.maxIterations });
+    const allChecks = ([...(task ? this.ports.taskChecks : this.ports.workflowChecks), ...(this.ports.behavioralChecks?.(dossier.specification, dossier.strategy, task?.worktrees.at(-1)?.baseCommitHash ?? run.baseRevision) ?? [])]).flatMap(check => {
+      if (check.metadata?.bindAcceptedCriteria !== true) return [check];
+      const config = record(check.configuration);
+      // A method-bound check (automatic runner) takes its names from the accepted mappings of that method, and does not apply without them.
+      const methodBound = check.metadata?.bindMethodTestNames === true;
+      if (methodBound && !dossier.strategy.targetCommands.includes(String(config.command))) return [];
+      const names = methodBound && check.metadata?.boundRunnerIdentities !== true ? dossier.strategy.criterionMappings.filter(mapping => dossier.specification.acceptanceCriteria.some(criterion =>
+        criterion.id === mapping.criterionId && criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === config.method))
+        .flatMap(mapping => mapping.testNames) : config.testNames;
+      const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
+        (config.kind === "review" || criterion.verificationMethod === config.method && dossier.strategy.criterionMappings.some(mapping =>
+          mapping.criterionId === criterion.id && mapping.testNames.length && mapping.testNames.every(name => Array.isArray(names) && names.includes(name)))));
+      if (methodBound && criteria.length === 0) return [];
+      return [{ ...check, configuration: json({ ...config, criterionIds: criteria.map(criterion => criterion.id),
+        testNames: config.kind === "review" ? dossier.strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames) : names }) }];
+    });
+    const implementerIds = run.tasks.flatMap(item => item.outboundIds).map(id => state.outbound.find(out => out.message.message_id === id)?.handle?.target.agentId).filter((id): id is string => !!id);
+    const baseInput = {
+      runId: run.runId,
+      taskId: task?.taskId ?? FINAL_TASK,
+      scope: (task ? "task" : "workflow") as "task" | "workflow",
+      specification: dossier.specification,
+      strategy: dossier.strategy,
+      implementerIds,
+      maxIterations: run.maxIterations
+    };
+    const prevFastPathStatus = run.fastPath?.status;
+    let plan: VerificationPlan | undefined;
+    if (task && run.fastPath?.status === "active") {
+      const activeRequired = dossier.specification.acceptanceCriteria.filter(c => c.required !== false && c.status !== "waived");
+      const canWaiveTask = activeRequired.length > 0 &&
+        activeRequired.every(c => c.verificationMethod !== "manual_review") &&
+        dossier.strategy.targetCommands.length > 0 &&
+        dossier.strategy.tddDecision.mode !== "required";
+      if (canWaiveTask) {
+        const nonReviewChecks = allChecks.filter(c => record(c.configuration).kind !== "review");
+        try {
+          plan = this.ports.policies.createVerificationPlan({
+            ...baseInput,
+            checks: nonReviewChecks,
+            reviewWaiver: {
+              kind: "deterministic_coverage",
+              reason: "fast-path: host-measured deterministic coverage of every required criterion"
+            }
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const match = /^(review_waiver_[a-z0-9_]+)/.exec(msg);
+          if (!match) throw err;
+          run.fastPath = {
+            ...run.fastPath,
+            status: "downgraded",
+            downgrade: { reason: `waiver_rejected:${match[1]!}`, at: this.now(), scope: "task" }
+          };
+        }
+      }
+    } else if (!task && run.fastPath?.status === "active" && run.tasks.length === 1) {
+      const onlyTask = run.tasks[0]!;
+      const lastVerificationId = onlyTask.cycle?.history.at(-1)?.verificationId;
+      if (onlyTask.cycle?.status !== "passed" || !lastVerificationId) {
+        run.fastPath = {
+          ...run.fastPath,
+          status: "downgraded",
+          downgrade: { reason: "task_not_passed", at: this.now(), scope: "workflow" }
+        };
+      } else if (
+        workflowTrees?.treeError ||
+        !workflowTrees?.taskTree ||
+        !workflowTrees?.integratedTree ||
+        workflowTrees.taskTree !== workflowTrees.integratedTree
+      ) {
+        run.fastPath = {
+          ...run.fastPath,
+          status: "downgraded",
+          downgrade: { reason: "tree_mismatch", at: this.now(), scope: "workflow" }
+        };
+      } else {
+        const nonReviewChecks = allChecks.filter(c => record(c.configuration).kind !== "review");
+        try {
+          plan = this.ports.policies.createVerificationPlan({
+            ...baseInput,
+            checks: nonReviewChecks,
+            reviewWaiver: {
+              kind: "identical_integrated_tree",
+              reason: "fast-path: integrated workflow tree matches verified single-task tree",
+              taskVerificationIds: [lastVerificationId],
+              taskTree: workflowTrees.taskTree,
+              integratedTree: workflowTrees.integratedTree
+            }
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const match = /^(review_waiver_[a-z0-9_]+)/.exec(msg);
+          if (!match) throw err;
+          run.fastPath = {
+            ...run.fastPath,
+            status: "downgraded",
+            downgrade: { reason: `waiver_rejected:${match[1]!}`, at: this.now(), scope: "workflow" }
+          };
+        }
+      }
+    }
+    plan ??= this.ports.policies.createVerificationPlan({ ...baseInput, checks: allChecks });
+    if (outbox) {
+      if (prevFastPathStatus === "active" && run.fastPath?.status === "downgraded" && run.fastPath.downgrade) {
+        this.progress(
+          state,
+          outbox,
+          run,
+          `${formatFastPathDowngradeNotice(run.fastPath.downgrade.reason)} [${JSON.stringify({ downgradeReason: run.fastPath.downgrade.reason, scope: run.fastPath.downgrade.scope })}]`
+        );
+      } else if (plan.reviewWaiver !== undefined) {
+        this.progress(state, outbox, run, task ? FAST_PATH_TASK_WAIVER_NOTICE : FAST_PATH_WORKFLOW_WAIVER_NOTICE);
+      }
+    }
     if (task) task.verificationPlan = plan;
+    else run.workflowVerificationPlan = plan;
     return plan;
   }
   /** A bounded scheduler step; performs independent verification outside the journal lock. */
@@ -3222,7 +3363,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               const change = GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key));
               if (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== current.attemptId) throw new Error("Git task submission mismatch");
               task.changeSet = change;
-              const plan = this.verificationPlan(state, run, task);
+              const plan = this.verificationPlan(state, run, task, undefined, outbox);
               task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, task.taskId])}`));
               const latestReworkDossier = task.reworkResolutions?.find(item => item.attemptId === current.attemptId);
               if (task.cycle.history.length > 0 && record(out.message.payload).reworkContext !== undefined && !latestReworkDossier) {
@@ -3245,7 +3386,28 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             if (snapshot.tasks.every(task => task.status === "succeeded") && run.tasks.every(task => task.cycle?.status === "passed")) {
               await this.integrate(state, save, outbox, run);
               if (run.status === "verifying" && run.workflowChange && !run.workflowVerificationPending) {
-                const plan = this.verificationPlan(state, run);
+                let workflowTrees: { taskTree?: string; integratedTree?: string; treeError?: boolean } | undefined;
+                if (
+                  !run.workflowVerificationPlan &&
+                  run.fastPath?.status === "active" &&
+                  run.tasks.length === 1 &&
+                  run.tasks[0]!.cycle?.status === "passed"
+                ) {
+                  if (run.tasks[0]!.changeSet && typeof this.ports.policies.git.treeOf === "function") {
+                    try {
+                      const [taskTree, integratedTree] = await Promise.all([
+                        this.ports.policies.git.treeOf(run.tasks[0]!.changeSet.headCommitHash),
+                        this.ports.policies.git.treeOf(run.workflowChange.headCommitHash)
+                      ]);
+                      workflowTrees = { taskTree, integratedTree };
+                    } catch {
+                      workflowTrees = { treeError: true };
+                    }
+                  } else {
+                    workflowTrees = { treeError: true };
+                  }
+                }
+                const plan = this.verificationPlan(state, run, undefined, workflowTrees, outbox);
                 run.workflowCycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, FINAL_TASK])}`));
                 run.workflowVerificationPending = true;
                 jobs.push({ runId: run.runId, taskId: FINAL_TASK, plan, cycle: run.workflowCycle, change: run.workflowChange,
@@ -3380,8 +3542,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         this.verificationPlan(state, run, task), `cycle-${digest([run.runId, task.taskId, task.cycle.cycleId])}`));
     }
     if (run.workflowVerificationPending && !retained.some(item => pendingTaskId(item) === FINAL_TASK)) run.workflowVerificationPending = false;
-    if (run.workflowCycle && retryableVerificationCycle(run.workflowCycle)) run.workflowCycle = VerificationCycleSchema.parse(this.ports.policies.verification.start(
-      this.verificationPlan(state, run), `cycle-${digest([run.runId, FINAL_TASK, run.workflowCycle.cycleId])}`));
+    if (run.workflowCycle && retryableVerificationCycle(run.workflowCycle)) {
+      delete run.workflowVerificationPlan;
+      run.workflowCycle = VerificationCycleSchema.parse(this.ports.policies.verification.start(
+        this.verificationPlan(state, run), `cycle-${digest([run.runId, FINAL_TASK, run.workflowCycle.cycleId])}`));
+    }
     run.status = "verifying"; delete run.error;
     return retained.length;
   }
