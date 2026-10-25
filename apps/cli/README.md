@@ -609,3 +609,7 @@ tool arguments. A ready grant enables the dependent `browser-inspection` skill. 
 optional services still degrade; required services block startup. Tool readiness does not prove
 browser verification or task success. Local control/stdio fixture tests are not live Chrome or
 provider/Herdr acceptance. Existing hosts must reload the rebuilt Runtime to use this integration.
+
+## Fast-path policy (`environment.fastPath.mode`)
+
+`.bflow/config.yml` includes `environment.fastPath.mode: "auto" | "off"` (default `"auto"` for new and updated configs via `bflow init` / `bflow init --update`). When set to `"auto"`, `bflow up` passes `policy.fastPath` to the Runtime host so eligible single-task `trivial` changes can auto-accept design approval and use P17 review waivers (`deterministic_coverage` / `identical_integrated_tree`) while preserving human delivery approval ([ADR 0004](../../docs/adr/0004-fast-path-review-waiver.md)). Persisted `host.json` files written before `fastPath` existed are treated as `"off"` on host recovery. Evidence level is source implementation and local tests, not live provider/Herdr acceptance.
