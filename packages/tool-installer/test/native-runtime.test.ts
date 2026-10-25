@@ -76,9 +76,11 @@ describe("native plugin runtime", () => {
     await writeFile(join(destination, ".bflow-native.json"), JSON.stringify(record));
 
     // Mock host to return plugin inventory and verify
+    const recordedArgs: (readonly string[])[] = [];
     const host: ToolHost = {
       async download() {},
       async run(_exe, args) {
+        recordedArgs.push(args);
         if (args.includes("list")) {
           return {
             exitCode: 0,
@@ -112,6 +114,7 @@ describe("native plugin runtime", () => {
     const result = await runtime.verify(pin, destination);
     expect(result.ready).toBe(true);
     expect(result.diagnostic).toContain("Provider enables the pinned plugin");
+    expect(recordedArgs).toEqual([["plugin", "list", "--marketplace", "bflow-superpowers", "--json"]]);
   });
 
   it("fails verification if superpower skill collides with a bflow skill", async () => {

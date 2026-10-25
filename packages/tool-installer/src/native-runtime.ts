@@ -90,7 +90,8 @@ export class NativePluginRuntime {
   async #inventory(provider: NativeProvider) {
     // An isolated provider home that does not exist yet has nothing installed (Codex refuses a missing CODEX_HOME).
     if (this.#options.isolation && isolationSupports(this.#options.isolation, provider) && !existsSync(this.#configRoot(provider))) return [];
-    const result = await this.#host.run(this.#binary(provider), ["plugin", "list", "--json"], { timeoutMs: 20_000, ...this.#scope(provider) });
+    const args = provider === "codex" ? ["plugin", "list", "--marketplace", "bflow-superpowers", "--json"] : ["plugin", "list", "--json"];
+    const result = await this.#host.run(this.#binary(provider), args, { timeoutMs: 20_000, ...this.#scope(provider) });
     if (result.exitCode !== 0) throw new Error("Provider plugin inventory failed");
     const value = installedSchema.parse(JSON.parse(result.stdout));
     return Array.isArray(value) ? value : value.installed ?? value.plugins ?? [];
