@@ -165,12 +165,53 @@ const MESSAGE_TYPE_LABELS: Readonly<Record<string, string>> = {
 /** What a card's own internal ids are shown as. Ids of other approvals or runs are never rewritten to this card's labels. */
 export interface CardIdentity { readonly approvalId?: string | undefined; readonly code?: string | undefined; readonly runId?: string | undefined; readonly workTag?: string | undefined }
 
+export const FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE = "Thay đổi nhỏ: tự duyệt thiết kế, bạn sẽ duyệt khi bàn giao.";
+export const FAST_PATH_TASK_WAIVER_NOTICE = "Thay đổi nhỏ: kết quả kiểm thử tự động đã đủ, không cần người review riêng.";
+export const FAST_PATH_WORKFLOW_WAIVER_NOTICE = "Thay đổi nhỏ: kết quả kiểm thử tự động đã đủ, không cần người review riêng.";
+
+const FAST_PATH_DOWNGRADE_LABELS: Readonly<Record<string, string>> = {
+  "waiver_rejected:review_waiver_manual_criterion": "có tiêu chí cần người kiểm tra thủ công",
+  review_waiver_manual_criterion: "có tiêu chí cần người kiểm tra thủ công",
+  "waiver_rejected:review_waiver_tdd_required": "yêu cầu viết kiểm thử trước",
+  review_waiver_tdd_required: "yêu cầu viết kiểm thử trước",
+  "waiver_rejected:review_waiver_no_commands": "chưa có lệnh kiểm thử tự động",
+  review_waiver_no_commands: "chưa có lệnh kiểm thử tự động",
+  "waiver_rejected:review_waiver_scope": "phạm vi miễn trừ không phù hợp",
+  review_waiver_scope: "phạm vi miễn trừ không phù hợp",
+  "waiver_rejected:review_waiver_tree_mismatch": "cây mã nguồn sau khi gộp có thay đổi",
+  review_waiver_tree_mismatch: "cây mã nguồn sau khi gộp có thay đổi",
+  tree_mismatch: "cây mã nguồn sau khi gộp có thay đổi",
+  "waiver_rejected:review_waiver_with_review": "kế hoạch kiểm tra vẫn chứa bước đánh giá thủ công",
+  review_waiver_with_review: "kế hoạch kiểm tra vẫn chứa bước đánh giá thủ công",
+  task_not_passed: "bước kiểm tra công việc chưa hoàn tất",
+  journal_legacy: "dữ liệu phiên cũ chưa hỗ trợ đường tắt"
+};
+
+export function translateFastPathDowngradeReason(reason: string): string {
+  const normalized = reason.trim();
+  if (FAST_PATH_DOWNGRADE_LABELS[normalized]) return FAST_PATH_DOWNGRADE_LABELS[normalized]!;
+  if (normalized.startsWith("waiver_rejected:")) {
+    const inner = normalized.slice("waiver_rejected:".length).trim();
+    if (FAST_PATH_DOWNGRADE_LABELS[inner]) return FAST_PATH_DOWNGRADE_LABELS[inner]!;
+    return "chưa đủ điều kiện kiểm thử tự động";
+  }
+  if (normalized.startsWith("review_waiver_")) return "chưa đủ điều kiện kiểm thử tự động";
+  return normalized;
+}
+
+export function formatFastPathDowngradeNotice(reason: string): string {
+  return `Không đi đường tắt được (${translateFastPathDowngradeReason(reason)}), chạy kiểm tra đầy đủ.`;
+}
+
 /** Cleans technical IDs, artifact URIs, raw JSON and English role/SDD terms from user-facing card prose. */
 export function sanitizeCardProse(text: string, identity: CardIdentity = {}): string {
-  let cleaned = text.split(/\s*[\[{]\s*"/u)[0]!.split(/\n\s*at\s+/u)[0]!.trim();
+  let cleaned = text.split(/\s*[\[{]+\s*"/u)[0]!.split(/\n\s*at\s+/u)[0]!.trim();
   cleaned = cleaned
     .replace(/\{"[^}]*\}/gu, "")
     .replace(/artifact:\/\/[^\s,;)]+/giu, "tài liệu đính kèm")
+    .replace(/\b(?:waiver_rejected:[a-z0-9_:-]+|review_waiver_[a-z0-9_]+|tree_mismatch|task_not_passed|journal_legacy)\b/giu, code =>
+      translateFastPathDowngradeReason(code))
+    .replace(/\b(?:deterministic_coverage|identical_integrated_tree)\b/giu, "kiểm tra tự động")
     .replace(/\b(?:apr|design|task-approval|delivery)-[a-zA-Z0-9_-]+\b/gu, id =>
       id === identity.approvalId && identity.code ? identity.code : "một yêu cầu duyệt khác")
     .replace(/\b(?:run\s+)?(run[_-][a-zA-Z0-9_-]+)\b/giu, (_match, id: string) =>
