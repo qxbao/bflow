@@ -8,6 +8,15 @@ import { CODEX_CONFIG_HOOK_MAX_BYTES } from "./codex-hook-toml.js";
 
 export type CodexInstructionHomeMode = "private" | "native_auth_compatible";
 
+export interface CodexConfiguredAuthInspection {
+  readonly hasAuthJsonFile: boolean;
+  readonly hasProviderAuthCommand: boolean;
+  readonly hasCustomProviderWithoutAuth: boolean;
+  readonly hasEnvApiKey: boolean;
+  readonly hasNonFileAuth: boolean;
+  readonly authEnvironment: Readonly<Record<string, string>>;
+}
+
 export interface PreparedCodexHome {
   readonly mode: CodexInstructionHomeMode;
   readonly BFLOW_INSTRUCTION_HOME: CodexInstructionHomeMode;
@@ -15,11 +24,12 @@ export interface PreparedCodexHome {
   readonly HOME: string;
   readonly codexHomeDirectory: string;
   readonly processHomeDirectory: string;
-  readonly environment: {
+  readonly environment: Readonly<Record<string, string>> & {
     readonly BFLOW_INSTRUCTION_HOME: CodexInstructionHomeMode;
     readonly CODEX_HOME: string;
     readonly HOME: string;
   };
+  readonly authEnvironment: Readonly<Record<string, string>>;
   readonly configFilePath?: string;
   readonly authFilePath?: string;
   readonly configDigest?: string;
@@ -32,7 +42,10 @@ const ALLOWED_TOP_LEVEL_SCALAR_KEYS = [
   "model_provider",
   "model_reasoning_effort",
   "model_reasoning_summary",
-  "model_verbosity"
+  "model_verbosity",
+  "model_context_window",
+  "model_auto_compact_token_limit",
+  "oss_provider"
 ] as const;
 
 const FORBIDDEN_PRIVATE_HOME_ENTRIES = [
@@ -151,10 +164,101 @@ function buildSanitizedCodexConfig(parsed: Record<string, unknown>): string {
   return Object.keys(sanitized).length === 0 ? "" : stringify(sanitized);
 }
 
+function evaluateConfiguredCodexAuth(
+  parsedConfig: Record<string, unknown>,
+  env: Readonly<Record<string, string | undefined>>,
+  hasAuthJsonFile: boolean
+): CodexConfiguredAuthInspection {
+  const modelProvider = typeof parsedConfig["model_provider"] === "string" ? parsedConfig["model_provider"].trim() : undefined;
+  const modelProviders = isPlainRecord(parsedConfig["model_providers"]) ? parsedConfig["model_providers"] : undefined;
+  const activeProviderTable =
+    modelProvider && modelProviders && isPlainRecord(modelProviders[modelProvider])
+      ? modelProviders[modelProvider]
+      : undefined;
+  const activeAuthTable =
+    activeProviderTable && isPlainRecord(activeProviderTable["auth"])
+      ? activeProviderTable["auth"]
+      : undefined;
+  const hasProviderAuthCommand =
+    typeof activeAuthTable?.["command"] === "string" && activeAuthTable["command"].trim().length > 0;
+  const providerEnvKey =
+    typeof activeProviderTable?.["env_key"] === "string" && activeProviderTable["env_key"].trim().length > 0
+      ? activeProviderTable["env_key"].trim()
+      : undefined;
+
+  const authEnvironment: Record<string, string> = {};
+  const candidateKeys = new Set<string>([
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+    ...(providerEnvKey !== undefined ? [providerEnvKey] : [])
+  ]);
+  for (const key of candidateKeys) {
+    const rawValue = env[key];
+    if (typeof rawValue === "string" && rawValue.trim().length > 0) {
+      authEnvironment[key] = rawValue.trim();
+    }
+  }
+
+  const hasProviderEnvKeyAuth = Boolean(providerEnvKey !== undefined && authEnvironment[providerEnvKey]);
+  const hasCustomProviderWithoutAuth = Boolean(
+    activeProviderTable !== undefined &&
+    activeProviderTable["requires_openai_auth"] === false &&
+    (providerEnvKey === undefined || hasProviderEnvKeyAuth)
+  );
+  const hasEnvApiKey =
+    activeProviderTable !== undefined && providerEnvKey !== undefined
+      ? hasProviderEnvKeyAuth
+      : Boolean(
+          authEnvironment["OPENAI_API_KEY"] ||
+          authEnvironment["CODEX_API_KEY"] ||
+          authEnvironment["CODEX_ACCESS_TOKEN"] ||
+          hasProviderEnvKeyAuth
+        );
+  const hasNonFileAuth = hasProviderAuthCommand || hasCustomProviderWithoutAuth || hasEnvApiKey;
+
+  return {
+    hasAuthJsonFile,
+    hasProviderAuthCommand,
+    hasCustomProviderWithoutAuth,
+    hasEnvApiKey,
+    hasNonFileAuth,
+    authEnvironment
+  };
+}
+
+/**
+ * Inspects whether a Codex home directory has valid non-file authentication configured via
+ * `config.toml` (`[model_providers.<active>.auth] command` or `requires_openai_auth = false`)
+ * or API key environment variables, alongside whether `auth.json` is present.
+ */
+export async function inspectCodexConfiguredAuth(
+  home: string,
+  env: Readonly<Record<string, string | undefined>> = process.env
+): Promise<CodexConfiguredAuthInspection> {
+  const resolvedHome = resolve(home);
+  const configRead = await readSafeRegularFile(join(resolvedHome, "config.toml"), CODEX_CONFIG_HOOK_MAX_BYTES);
+  let parsedConfig: Record<string, unknown> = {};
+  if (configRead.error === undefined && configRead.text !== undefined) {
+    try {
+      const parsed = parse(configRead.text, { unsafeKeyBehaviour: "throw" });
+      if (isPlainRecord(parsed)) {
+        parsedConfig = parsed;
+      }
+    } catch {
+      parsedConfig = {};
+    }
+  }
+  const authRead = await readSafeRegularFile(join(resolvedHome, "auth.json"), CODEX_CONFIG_HOOK_MAX_BYTES);
+  const hasAuthJsonFile = authRead.exists && authRead.error === undefined;
+  return evaluateConfiguredCodexAuth(parsedConfig, env, hasAuthJsonFile);
+}
+
 function fallbackCodexHome(
   sourceHome: string,
   sourceProcessHome: string,
-  reason: string
+  reason: string,
+  authEnvironment: Readonly<Record<string, string>> = {}
 ): PreparedCodexHome {
   return {
     mode: "native_auth_compatible",
@@ -164,10 +268,12 @@ function fallbackCodexHome(
     codexHomeDirectory: sourceHome,
     processHomeDirectory: sourceProcessHome,
     environment: {
+      ...authEnvironment,
       BFLOW_INSTRUCTION_HOME: "native_auth_compatible",
       CODEX_HOME: sourceHome,
       HOME: sourceProcessHome
     },
+    authEnvironment,
     diagnostic: `BFLOW_INSTRUCTION_HOME=native_auth_compatible: ${reason}; native HOME and CODEX_HOME are retained and global instruction home is not isolated.`
   };
 }
@@ -202,26 +308,22 @@ export async function preparePrivateCodexHome(
   const configRead = await readSafeRegularFile(join(resolvedSourceHome, "config.toml"), CODEX_CONFIG_HOOK_MAX_BYTES);
   let parsedConfig: Record<string, unknown> = {};
   if (configRead.error !== undefined) {
-    if (explicitMode !== "private") {
-      return fallbackCodexHome(
-        resolvedSourceHome,
-        resolvedSourceProcessHome,
-        `source config.toml cannot be safely inspected (${configRead.error})`
-      );
-    }
+    return fallbackCodexHome(
+      resolvedSourceHome,
+      resolvedSourceProcessHome,
+      `source config.toml cannot be safely inspected (${configRead.error})`
+    );
   } else if (configRead.text !== undefined) {
     try {
       const parsed = parse(configRead.text, { unsafeKeyBehaviour: "throw" });
       if (!isPlainRecord(parsed)) throw new Error("root is not a TOML table");
       parsedConfig = parsed;
     } catch {
-      if (explicitMode !== "private") {
-        return fallbackCodexHome(
-          resolvedSourceHome,
-          resolvedSourceProcessHome,
-          "source config.toml contains malformed TOML"
-        );
-      }
+      return fallbackCodexHome(
+        resolvedSourceHome,
+        resolvedSourceProcessHome,
+        "source config.toml contains malformed TOML"
+      );
     }
   }
 
@@ -240,27 +342,10 @@ export async function preparePrivateCodexHome(
     }
   }
 
-  const modelProvider = typeof parsedConfig["model_provider"] === "string" ? parsedConfig["model_provider"].trim() : undefined;
-  const modelProviders = isPlainRecord(parsedConfig["model_providers"]) ? parsedConfig["model_providers"] : undefined;
-  const activeProviderTable =
-    modelProvider && modelProviders && isPlainRecord(modelProviders[modelProvider])
-      ? modelProviders[modelProvider]
-      : undefined;
-  const activeAuthTable =
-    activeProviderTable && isPlainRecord(activeProviderTable["auth"])
-      ? activeProviderTable["auth"]
-      : undefined;
-  const hasProviderAuthCommand =
-    typeof activeAuthTable?.["command"] === "string" && activeAuthTable["command"].trim().length > 0;
-  const requiresOpenaiAuth = activeProviderTable?.["requires_openai_auth"] !== false;
-  const providerEnvKey =
-    typeof activeProviderTable?.["env_key"] === "string" ? activeProviderTable["env_key"].trim() : undefined;
-  const hasProviderEnvKeyAuth = Boolean(providerEnvKey && env[providerEnvKey]?.trim());
-  const hasEnvApiKey = Boolean(
-    env["OPENAI_API_KEY"]?.trim() ||
-    env["CODEX_API_KEY"]?.trim() ||
-    env["CODEX_ACCESS_TOKEN"]?.trim() ||
-    hasProviderEnvKeyAuth
+  const configuredAuth = evaluateConfiguredCodexAuth(
+    parsedConfig,
+    env,
+    authRead.exists && authRead.error === undefined
   );
 
   const authMode = typeof parsedAuth?.["auth_mode"] === "string" ? parsedAuth["auth_mode"].trim().toLowerCase() : undefined;
@@ -279,18 +364,16 @@ export async function preparePrivateCodexHome(
       (typeof parsedAuth["OPENAI_API_KEY"] === "string" && parsedAuth["OPENAI_API_KEY"].trim().length > 0) ||
       (typeof parsedAuth["api_key"] === "string" && parsedAuth["api_key"].trim().length > 0));
 
-  const canIsolate =
-    explicitMode === "private" ||
-    hasProviderAuthCommand ||
-    !requiresOpenaiAuth ||
-    hasEnvApiKey ||
-    isStaticApiKeyAuthJson;
+  const canIsolate = configuredAuth.hasNonFileAuth || isStaticApiKeyAuthJson;
 
   if (!canIsolate) {
     return fallbackCodexHome(
       resolvedSourceHome,
       resolvedSourceProcessHome,
-      "active provider requires non-isolatable OpenAI/ChatGPT OAuth or has no isolated credentials"
+      explicitMode === "private"
+        ? "BFLOW_INSTRUCTION_HOME=private requested, but active provider requires non-isolatable OpenAI/ChatGPT OAuth or has no isolated credentials"
+        : "active provider requires non-isolatable OpenAI/ChatGPT OAuth or has no isolated credentials",
+      configuredAuth.authEnvironment
     );
   }
 
@@ -324,10 +407,12 @@ export async function preparePrivateCodexHome(
     codexHomeDirectory: privateCodexHome,
     processHomeDirectory: privateProcessHome,
     environment: {
+      ...configuredAuth.authEnvironment,
       BFLOW_INSTRUCTION_HOME: "private",
       CODEX_HOME: privateCodexHome,
       HOME: privateProcessHome
     },
+    authEnvironment: configuredAuth.authEnvironment,
     configFilePath,
     ...(authFilePath !== undefined ? { authFilePath } : {}),
     configDigest,

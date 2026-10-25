@@ -1721,9 +1721,24 @@ rl.on("line", line => {
       OPENAI_API_KEY: "sk-static-key-value"
     });
 
-    // Verify DefaultPlatformReadinessService wires private CODEX_HOME across preflight and prepareLaunch.
+    // Verify DefaultPlatformReadinessService wires private CODEX_HOME across preflight and prepareLaunch
+    // even when source auth.json is ChatGPT OAuth (so private CODEX_HOME has no auth.json) and codex login status exits 1.
+    await writeFile(join(sourceCodexHome, "auth.json"), JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { refresh_token: "must-not-copy" }
+    }), { mode: 0o600 });
+    const fakeRunner = createFakeProviderRunner({
+      scenario: "healthy",
+      customHandler: (invocation) => {
+        if (invocation.args.join(" ") === "login status") {
+          return { exitCode: 1, stdout: "", stderr: "Not logged in\n", started: true };
+        }
+        return undefined;
+      }
+    });
     const { service } = buildService({
       gateway: false,
+      runner: fakeRunner,
       codexLaunchEnvironment: { HOME: sourceProcessHome, CODEX_HOME: sourceCodexHome }
     });
     const sessionRes = await service.prepareSession(identity, [
@@ -1733,9 +1748,19 @@ rl.on("line", line => {
     expect(sessionRes.ok).toBe(true);
     if (!sessionRes.ok) return;
     expect(sessionRes.value.report.ready).toBe(true);
+    for (const roleSummary of sessionRes.value.report.roles) {
+      expect(roleSummary.checks).toContainEqual(
+        expect.objectContaining({
+          check: "environment",
+          status: "passed",
+          code: "codex_instruction_home_private"
+        })
+      );
+    }
     for (const launch of sessionRes.value.launches) {
       const expectedCodexHome = join(launch.environment.stateDirectory, "codex-home");
       const expectedProcessHome = join(launch.environment.stateDirectory, "codex-process-home");
+      await expect(stat(join(expectedCodexHome, "auth.json"))).rejects.toMatchObject({ code: "ENOENT" });
       expect(launch.launch.env).toMatchObject({
         BFLOW_INSTRUCTION_HOME: "private",
         CODEX_HOME: expectedCodexHome,
@@ -1746,6 +1771,52 @@ rl.on("line", line => {
     }
     const convLaunch = sessionRes.value.launches.find(launch => launch.role === "conversation")!;
     expect(convLaunch.launch.argv).toContain("project_doc_max_bytes=0");
+
+    // Verify OPENAI_API_KEY env-based isolation forwards OPENAI_API_KEY into probe and launch env.
+    const envKeyHome = join(baseDir, "env-key-operator-home");
+    const envKeyCodexHome = join(envKeyHome, ".codex");
+    await mkdir(envKeyCodexHome, { recursive: true, mode: 0o700 });
+    await writeFile(join(envKeyCodexHome, "config.toml"), 'model = "gpt-5.4"\n', { mode: 0o600 });
+    const observedProbeEnvs: Array<Readonly<Record<string, string | undefined>>> = [];
+    const envKeyRunner = createFakeProviderRunner({
+      scenario: "healthy",
+      customHandler: (invocation) => {
+        if (invocation.args.includes("ping")) {
+          observedProbeEnvs.push({ ...(invocation.env ?? {}) });
+        }
+        if (invocation.args.join(" ") === "login status") {
+          return { exitCode: 1, stdout: "", stderr: "Not logged in\n", started: true };
+        }
+        return undefined;
+      }
+    });
+    const { service: envKeyService } = buildService({
+      gateway: false,
+      runner: envKeyRunner,
+      codexLaunchEnvironment: {
+        HOME: envKeyHome,
+        CODEX_HOME: envKeyCodexHome,
+        OPENAI_API_KEY: "sk-env-isolated-key"
+      }
+    });
+    const envKeySession = await envKeyService.prepareSession(
+      { ...identity, generation: 2 },
+      [
+        requirement({
+          role: "developer",
+          provider: "codex",
+          taskId: "t-env-key"
+        })
+      ]
+    );
+    expect(envKeySession.ok).toBe(true);
+    if (!envKeySession.ok) return;
+    expect(envKeySession.value.report.ready).toBe(true);
+    expect(envKeySession.value.launches[0]?.launch.env).toMatchObject({
+      BFLOW_INSTRUCTION_HOME: "private",
+      OPENAI_API_KEY: "sk-env-isolated-key"
+    });
+    expect(observedProbeEnvs[0]?.["OPENAI_API_KEY"]).toBe("sk-env-isolated-key");
   });
 
   it("launches Agy with a session and role private HOME outside untrusted role environment variables", async () => {

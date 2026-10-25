@@ -2938,10 +2938,8 @@ describe("@bflow/agent-providers", () => {
         "enabled = true",
         ""
       ].join("\n");
+      // Do not create a plugin cache directory for extra-skills@local: inspectCodexHooks must skip it because it is disabled.
       const home = await freshCodexHome({ "config.toml": config });
-      const pluginDir = join(home, "plugins", "cache", "local", "extra-skills", "1", ".codex-plugin");
-      await mkdir(pluginDir, { recursive: true, mode: 0o700 });
-      await writeFile(join(pluginDir, "plugin.json"), JSON.stringify({ name: "extra-skills", hooks: {} }), { mode: 0o600 });
 
       const invocations: Array<readonly string[]> = [];
       const adapter = codexAdapter(codexRunner({ globalServers: [], invocations }), home, { hostMcpServers: bflowServer });
@@ -2971,6 +2969,94 @@ describe("@bflow/agent-providers", () => {
         expect(health.ok && health.value.configFingerprint).toBe(launch.value.environment.configFingerprint);
       }
       expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
+    });
+
+    it("succeeds in checkHealth and prepareLaunch for a private CODEX_HOME without auth.json when codex login status exits 1", async () => {
+      const { preparePrivateCodexHome } = await import("../src/codex-home.js");
+      const sourceHome = await freshCodexHome({
+        "config.toml": [
+          'model = "gpt-5.4"',
+          'model_provider = "runsystem"',
+          "model_context_window = 1000000",
+          "model_auto_compact_token_limit = 900000",
+          '[model_providers.runsystem]',
+          'name = "Runsystem"',
+          'base_url = "https://codex.example/v1"',
+          '[model_providers.runsystem.auth]',
+          'command = "/usr/local/bin/codex-token"',
+          ""
+        ].join("\n"),
+        "auth.json": JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: { refresh_token: "rt_rotating_secret" }
+        })
+      });
+      const preparedStateDir = join(testBaseDir, "private-codex-state");
+      await mkdir(preparedStateDir, { recursive: true, mode: 0o700 });
+      const prepared = await preparePrivateCodexHome(preparedStateDir, sourceHome, testBaseDir, {});
+      expect(prepared.mode).toBe("private");
+      expect(prepared.authFilePath).toBeUndefined();
+      const sanitizedConfig = await readFile(join(prepared.CODEX_HOME, "config.toml"), "utf8");
+      expect(sanitizedConfig).toContain("model_context_window = 1000000");
+      expect(sanitizedConfig).toContain("model_auto_compact_token_limit = 900000");
+
+      const runner = createFakeProviderRunner({
+        scenario: "healthy",
+        customHandler: (invocation) => {
+          if (invocation.args.join(" ") === "login status") {
+            return { exitCode: 1, stdout: "", stderr: "Not logged in\n", started: true };
+          }
+          if (invocation.args.slice(-3).join(" ") === "mcp list --json") {
+            return { exitCode: 0, stdout: "[]", stderr: "", started: true };
+          }
+          return undefined;
+        }
+      });
+      const adapter = codexAdapter(runner, prepared.CODEX_HOME, { hostMcpServers: bflowServer });
+      const env = createTestEnvironment("codex", "workspace_auto");
+      const health = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: env,
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      expect(health.ok).toBe(true);
+      if (health.ok) {
+        expect(health.value.status).toBe("ready");
+      }
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(true);
+    });
+
+    it("falls back to native_auth_compatible when BFLOW_INSTRUCTION_HOME=private is set on malformed config.toml or non-isolatable ChatGPT OAuth", async () => {
+      const { preparePrivateCodexHome } = await import("../src/codex-home.js");
+      const malformedHome = await freshCodexHome({
+        "config.toml": "model = [unclosed\n"
+      });
+      const malformedResult = await preparePrivateCodexHome(
+        join(testBaseDir, "malformed-state"),
+        malformedHome,
+        testBaseDir,
+        { BFLOW_INSTRUCTION_HOME: "private" }
+      );
+      expect(malformedResult.mode).toBe("native_auth_compatible");
+      expect(malformedResult.diagnostic).toContain("malformed TOML");
+
+      const oauthOnlyHome = await freshCodexHome({
+        "config.toml": 'model = "gpt-5.4"\n',
+        "auth.json": JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: { refresh_token: "rt_rotating_secret" }
+        })
+      });
+      const oauthResult = await preparePrivateCodexHome(
+        join(testBaseDir, "oauth-state"),
+        oauthOnlyHome,
+        testBaseDir,
+        { BFLOW_INSTRUCTION_HOME: "private" }
+      );
+      expect(oauthResult.mode).toBe("native_auth_compatible");
+      expect(oauthResult.diagnostic).toContain("BFLOW_INSTRUCTION_HOME=private requested");
     });
 
     it("passes -c project_doc_max_bytes=0 for conversation role and synchronizes configFiles/configFingerprint/launchFingerprint", async () => {

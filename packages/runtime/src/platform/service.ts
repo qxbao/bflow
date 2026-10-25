@@ -1,5 +1,6 @@
 import type { GatewayToolOperationOptions } from "./browser-resource-transactions.js";
 import { lstat, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema,
@@ -797,20 +798,33 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       : undefined;
     let preparedCodexHome: PreparedCodexHome | undefined;
     if (requirement.provider === "codex" && isolatorProfile === undefined) {
-      const sourceProcessHome =
-        codexLaunchEnvironment?.["HOME"] ??
-        join(identity.stateDirectory, "default-codex-process-home");
-      const sourceCodexHome =
-        codexLaunchEnvironment?.["CODEX_HOME"] ??
-        (codexLaunchEnvironment?.["HOME"] !== undefined
-          ? join(codexLaunchEnvironment["HOME"], ".codex")
-          : join(identity.stateDirectory, "default-codex-home"));
+      const hasExplicitSourceHome =
+        codexLaunchEnvironment?.["HOME"] !== undefined ||
+        codexLaunchEnvironment?.["CODEX_HOME"] !== undefined ||
+        requirement.environmentVariables?.["HOME"] !== undefined ||
+        requirement.environmentVariables?.["CODEX_HOME"] !== undefined ||
+        process.env["CODEX_HOME"] !== undefined;
+      const sourceProcessHome = hasExplicitSourceHome
+        ? codexLaunchEnvironment?.["HOME"] ??
+          requirement.environmentVariables?.["HOME"] ??
+          process.env["HOME"] ??
+          homedir()
+        : join(identity.stateDirectory, "default-codex-process-home");
+      const sourceCodexHome = hasExplicitSourceHome
+        ? codexLaunchEnvironment?.["CODEX_HOME"] ??
+          requirement.environmentVariables?.["CODEX_HOME"] ??
+          process.env["CODEX_HOME"] ??
+          join(sourceProcessHome, ".codex")
+        : join(identity.stateDirectory, "default-codex-home");
       try {
         preparedCodexHome = await preparePrivateCodexHome(
           preliminaryEnvironment.value.stateDirectory,
           sourceCodexHome,
           sourceProcessHome,
           {
+            ...(process.env["BFLOW_INSTRUCTION_HOME"] !== undefined
+              ? { BFLOW_INSTRUCTION_HOME: process.env["BFLOW_INSTRUCTION_HOME"] }
+              : {}),
             ...(codexLaunchEnvironment ?? {}),
             ...(requirement.environmentVariables ?? {})
           }
@@ -822,6 +836,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
           message: `private Codex home could not be prepared: ${error instanceof Error ? error.message : String(error)}`
         });
       }
+      toolChecks.push(
+        toolCheck(
+          "passed",
+          preparedCodexHome.mode === "private"
+            ? "codex_instruction_home_private"
+            : "codex_instruction_home_native_auth_compatible",
+          preparedCodexHome.diagnostic,
+          "environment"
+        )
+      );
     }
 
     const environmentRequirement = preparedCodexHome === undefined
@@ -854,8 +878,13 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       ...(codexLaunchEnvironment ?? {}),
       ...(preparedCodexHome !== undefined
         ? {
+            ...preparedCodexHome.authEnvironment,
             BFLOW_INSTRUCTION_HOME: preparedCodexHome.BFLOW_INSTRUCTION_HOME,
-            ...(preparedCodexHome.mode === "private" || codexLaunchEnvironment !== undefined
+            ...(preparedCodexHome.mode === "private" ||
+            codexLaunchEnvironment !== undefined ||
+            requirement.environmentVariables?.["HOME"] !== undefined ||
+            requirement.environmentVariables?.["CODEX_HOME"] !== undefined ||
+            process.env["CODEX_HOME"] !== undefined
               ? {
                   CODEX_HOME: preparedCodexHome.CODEX_HOME,
                   HOME: preparedCodexHome.HOME

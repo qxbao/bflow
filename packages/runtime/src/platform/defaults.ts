@@ -76,6 +76,7 @@ export function createProviderAdapterFactory(options: ProviderAdapterFactoryOpti
             codexHomeDirectory: context.launchEnvironment["CODEX_HOME"],
             codexHookEnvironment: {
               ...(options.perProvider?.codex?.codexHookEnvironment ?? {}),
+              ...context.launchEnvironment,
               HOME: context.launchEnvironment["HOME"] ?? "",
               CODEX_HOME: context.launchEnvironment["CODEX_HOME"],
               PATH:

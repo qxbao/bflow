@@ -160,8 +160,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     };
   }
 
-  protected getProviderExecutionEnvironment(): Readonly<Record<string, string>> {
-    return this.getProviderCommandEnvironment();
+  protected getProviderExecutionEnvironment(environment?: AgentEnvironment): Readonly<Record<string, string>> {
+    return this.getProviderCommandEnvironment(environment);
   }
 
   protected commandEnvironmentOptions(): { readonly inheritEnvironment?: false } {
@@ -626,7 +626,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           args: [...inherited.argv, ...probeArgs],
           cwd: environment.cwd,
           env: {
-            ...this.getProviderExecutionEnvironment(),
+            ...this.getProviderExecutionEnvironment(environment),
             ...(agyProbeHome ? { HOME: agyProbeHome } : {})
           },
           ...this.commandEnvironmentOptions(),
