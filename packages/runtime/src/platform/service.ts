@@ -520,11 +520,27 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     let uncertain = false;
     let failure: ContractError | undefined;
     for (const identity of this.identities.values()) {
-      const verified = await gateway.verifyRegistrations(identity, options);
+      let verified = await gateway.verifyRegistrations(identity, options);
       if (!verified.ok) {
         uncertain = true;
         failure ??= verified.error;
         continue;
+      }
+      if (!verified.value.uncertain && verified.value.lost.length > 0) {
+        let refreshed = false;
+        for (const record of this.launches.values()) {
+          if (record.material?.identity.stateDirectory !== identity.stateDirectory) continue;
+          if (!verified.value.lost.some(item => item.role === record.role && item.taskId === record.taskId)) continue;
+          if (await this.refreshMediatedLaunchGateway(record, options)) refreshed = true;
+        }
+        if (refreshed) {
+          verified = await gateway.verifyRegistrations(identity, options);
+          if (!verified.ok) {
+            uncertain = true;
+            failure ??= verified.error;
+            continue;
+          }
+        }
       }
       uncertain ||= verified.value.uncertain;
       for (const registration of verified.value.lost) {
@@ -641,6 +657,48 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       record.state = "degraded";
       record.reason = GATEWAY_LOST_CODE;
     }
+  }
+
+  /**
+   * Mediated launches (`requirement.toolGrants !== undefined`) never pass Gateway bearer tokens into the provider
+   * process environment; all tool calls are brokered by the Runtime host. When a mediated registration expires,
+   * the host can renew its Gateway registration in-place without relaunching the role pane.
+   */
+  private async refreshMediatedLaunchGateway(record: LaunchRecord, options?: OperationOptions): Promise<boolean> {
+    const gateway = this.deps.gateway;
+    const material = record.material;
+    if (!gateway || !material || record.state === "released" || record.state === "failed") return false;
+    const { identity, requirement, environment } = material;
+    const grants = requirement.toolGrants;
+    if (grants === undefined || requirement.mcpServiceIds.length === 0) return false;
+    const groups = new Map<string, typeof grants[number][]>();
+    for (const grant of grants.filter(item => item.kind !== "cli_only")) {
+      if (grant.serviceId === undefined || !requirement.mcpServiceIds.includes(grant.serviceId)) return false;
+      const bucket = groups.get(grant.serviceId) ?? [];
+      bucket.push(grant);
+      groups.set(grant.serviceId, bucket);
+    }
+    if (groups.size === 0) return false;
+    const configDigest = sha256Hex(canonicalReceiptJson(requirement));
+    for (const [serviceId, serviceGrants] of groups) {
+      const operations = [...new Set(serviceGrants.flatMap(grant => grant.operations))].sort();
+      const granted = await gateway.ensureForRole(identity, {
+        role: requirement.role,
+        provider: requirement.provider,
+        ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
+        environmentId: environment.environmentId,
+        serviceIds: [serviceId],
+        allowedTools: operations,
+        toolGrants: serviceGrants,
+        configDigest
+      }, options);
+      if (!granted.ok) return false;
+    }
+    if (record.state === "degraded" && record.reason === GATEWAY_LOST_CODE) {
+      record.state = record.healthValidUntil !== undefined ? "activated" : "intent";
+      delete record.reason;
+    }
+    return true;
   }
 
   private track(identity: PlatformSessionIdentity): void {

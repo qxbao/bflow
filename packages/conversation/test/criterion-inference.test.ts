@@ -70,6 +70,22 @@ describe("B1: acceptance criteria infer verification method and category", () =>
     const [criterion] = criteriaOf(draftWith(["Kiểm thử unit cho parser"], { verificationMethods: ["lint"] }));
     expect(criterion?.verificationMethod).toBe("lint");
   });
+
+  it("does not misclassify non-security token terms (e.g. token-bucket, fencing token) as security criteria", () => {
+    const criteria = criteriaOf(draftWith([
+      "Module rate-limiter triển khai thuật toán token-bucket trong bộ nhớ (in-memory) với khả năng cấu hình capacity và refillRate",
+      "Giới hạn lưu lượng theo mô hình token bucket cho các tác vụ đồng thời",
+      "Kiểm tra fencing token tăng đơn điệu trước khi gửi lệnh qua transport",
+      "Từ chối truy cập khi bearer token không hợp lệ"
+    ]));
+
+    expect(criteria.map(c => c.category)).toEqual([
+      "functional",
+      "functional",
+      "functional",
+      "security"
+    ]);
+  });
 });
 
 describe("per-criterion verification methods", () => {

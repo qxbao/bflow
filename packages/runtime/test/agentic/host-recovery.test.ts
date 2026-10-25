@@ -117,6 +117,24 @@ describe("persisted host policy regressionScope recovery", () => {
 
     const configuration = await readHostConfiguration(hostJsonPath);
     expect(effectiveFastPathMode(configuration.policy, true)).toBe("off");
+
+    if (process.platform === "linux") {
+      const binary = join(root, "herdr-fixture.mjs");
+      await writeFile(binary, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n', { mode: 0o700 });
+      const reopened = await ensureAgenticHost({
+        repositoryPath: root,
+        sessionId,
+        herdrBinary: binary,
+        policy: {
+          ...basePolicy,
+          verification: { ...basePolicy.verification, regressionScope: "affected" },
+          fastPath: { mode: "auto" }
+        }
+      });
+      cleanup.push(() => reopened.shutdown().catch(() => undefined));
+      const afterReopen = await readHostConfiguration(hostJsonPath);
+      expect(effectiveFastPathMode(afterReopen.policy, true)).toBe("off");
+    }
   });
 
   it("rejects invalid persisted fastPath.mode", async () => {

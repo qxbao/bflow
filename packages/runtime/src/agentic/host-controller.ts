@@ -41,6 +41,30 @@ export function effectiveFastPathMode(policy: AgenticHostOptions["policy"] | und
   if (!policy) return "off";
   return policy.fastPath?.mode ?? (persisted ? "off" : "auto");
 }
+
+function compatiblePersistedPolicy(
+  persisted: AgenticHostOptions["policy"] | undefined,
+  requested: NonNullable<AgenticHostOptions["policy"]>
+): boolean {
+  if (!persisted) return false;
+  const normalizedPersisted: NonNullable<AgenticHostOptions["policy"]> = {
+    sdd: persisted.sdd,
+    tdd: persisted.tdd,
+    verification: {
+      ...persisted.verification,
+      ...(persisted.verification.regressionScope === undefined && requested.verification.regressionScope === "affected"
+        ? { regressionScope: "affected" }
+        : {})
+    },
+    ...(persisted.fastPath !== undefined
+      ? { fastPath: persisted.fastPath }
+      : requested.fastPath?.mode === "auto"
+        ? { fastPath: { mode: "auto" } }
+        : {}),
+    concurrency: persisted.concurrency
+  };
+  return digest(normalizedPersisted) === digest(requested);
+}
 export interface RoleLaunchDescriptor { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }
 export interface AgenticHostController {
   prepare(options?: OperationOptions): Promise<HostPrepareResponse>;
@@ -175,7 +199,7 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   }
   let configuration = await readHostConfiguration(configPath);
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
-  if (options.policy && JSON.stringify(configuration.policy) !== JSON.stringify(options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
+  if (options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (digest(parseBehavioralCommands(configuration.behavioralCommands)) !== digest(parseBehavioralCommands(options.behavioralCommands)))
     throw new Error("Persisted behavioral commands differ from owner configuration; quiesce and reconcile before changing verification authority");
   // Platform changes are only admissible while no host process owns the endpoint.

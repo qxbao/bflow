@@ -146,6 +146,66 @@ describe("P26 setup bridge and repository init data", () => {
       currentFiles["references/risk-viewpoints.md"],
     );
   });
+  it("upgrades using-bflow and mcp-tool-discovery without conflicting with installed 1.0.0 bundles", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "skills-d4-upgrade-")));
+    roots.push(root);
+    const usingBflowSource = fileURLToPath(
+      new URL("../../../skills/core/using-bflow", import.meta.url),
+    );
+    const mcpDiscoverySource = fileURLToPath(
+      new URL("../../../skills/tooling/mcp-tool-discovery", import.meta.url),
+    );
+    const currentUsingBflowFiles = await readBundle(usingBflowSource);
+    const currentMcpDiscoveryFiles = await readBundle(mcpDiscoverySource);
+    const previousUsingBflowFiles = {
+      ...currentUsingBflowFiles,
+      "skill.json": JSON.stringify({
+        ...JSON.parse(currentUsingBflowFiles["skill.json"]!),
+        version: "1.0.0",
+      }, null, 2) + "\n",
+      "SKILL.md": currentUsingBflowFiles["SKILL.md"]!.replace(
+        /\n4\. Prefer compact MCP views[^\n]*\n/,
+        "\n",
+      ),
+    };
+    const previousMcpDiscoveryFiles = {
+      ...currentMcpDiscoveryFiles,
+      "skill.json": JSON.stringify({
+        ...JSON.parse(currentMcpDiscoveryFiles["skill.json"]!),
+        version: "1.0.0",
+      }, null, 2) + "\n",
+      "SKILL.md": currentMcpDiscoveryFiles["SKILL.md"]!.replace(
+        /Never dump `ALL_TOOLS`[^\n]*without printing raw result envelopes\. /,
+        "",
+      ),
+    };
+    const prevUbDigest = bundleDigest(previousUsingBflowFiles);
+    const prevMcpDigest = bundleDigest(previousMcpDiscoveryFiles);
+    const curUbDigest = bundleDigest(currentUsingBflowFiles);
+    const curMcpDigest = bundleDigest(currentMcpDiscoveryFiles);
+    const store = new SkillFileStore(join(root, "store"));
+    const manager = new SkillManager({
+      store,
+      supportedCommands: BASELINE_COMMANDS,
+      approvedBuiltinDigests: [prevUbDigest, prevMcpDigest, curUbDigest, curMcpDigest],
+    });
+    await manager.installBundle(previousUsingBflowFiles, {
+      source: "builtin",
+      expectedDigest: prevUbDigest,
+    });
+    await manager.installBundle(previousMcpDiscoveryFiles, {
+      source: "builtin",
+      expectedDigest: prevMcpDigest,
+    });
+    const setup = new SkillsSetupSynchronizer(manager, store, [
+      { root: usingBflowSource, source: "builtin", expectedDigest: curUbDigest },
+      { root: mcpDiscoverySource, source: "builtin", expectedDigest: curMcpDigest },
+    ]);
+    await setup.sync({ mode: "apply" });
+    expect((await manager.validate(usingBflowSource, "builtin")).version).toBe("1.0.1");
+    expect((await manager.validate(mcpDiscoverySource, "builtin")).version).toBe("1.0.1");
+    expect((await setup.observe({ mode: "check" })).valid).toBe(true);
+  });
   it("plans without writes, applies pinned skills idempotently and observes content drift", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "skills-setup-")));
     roots.push(root);

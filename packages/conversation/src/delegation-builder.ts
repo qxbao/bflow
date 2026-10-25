@@ -44,7 +44,13 @@ function inferVerificationMethod(description: string, kind: ExtractedRequirement
 
 /** Infers the criterion category from its wording; functional is the default. */
 function inferCriterionCategory(description: string): "functional" | "security" | "performance" | "regression" | "edge_case" {
-  if (/(?<!\p{L})(?:bảo mật|security|xác thực|auth|jwt|token|quyền)(?!\p{L})/iu.test(description)) return "security";
+  if (
+    /(?<!\p{L})(?:bảo mật|security|xác thực|auth|jwt|(?<!(?:fencing|design|lexer|parser|cancel|cancellation)\s*[- ]\s*)token(?!\s*[- ]\s*bucket\b)|quyền)(?!\p{L})/iu.test(
+      description
+    )
+  ) {
+    return "security";
+  }
   if (/(?<!\p{L})(?:hiệu năng|performance|latency|tốc độ|throughput)(?!\p{L})/iu.test(description)) return "performance";
   if (/(?<!\p{L})(?:hồi quy|regression|giữ nguyên)(?!\p{L})/iu.test(description)) return "regression";
   if (/(?<!\p{L})(?:biên|edge|null|rỗng)(?!\p{L})/iu.test(description)) return "edge_case";

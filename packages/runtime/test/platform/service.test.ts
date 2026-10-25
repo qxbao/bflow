@@ -2130,5 +2130,52 @@ rl.on("line", line => {
       expect(kinds.filter(kind => kind === "released")).toHaveLength(1);
       expect(kinds[kinds.length - 1]).toBe("released");
     });
+
+    it("renews expired Gateway registrations in-place for mediated launches without degrading the role", async () => {
+      let currentNow = new Date("2026-10-25T17:50:00.000Z");
+      const { service } = buildService({ now: () => currentNow });
+      const actualScope = {
+        kind: "session" as const,
+        machineId: identity.machineId,
+        repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot,
+        sessionId: identity.sessionId
+      };
+      const { policy, grant } = scopeSearchPolicyAndGrant("svc-search", actualScope);
+      const prepared = await service.prepareSession(identity, [
+        requirement({
+          toolPolicy: policy,
+          toolGrants: [grant],
+          mcpServiceIds: ["svc-search"],
+          mcpOperations: ["search"],
+          toolIds: ["scope-search-tool"]
+        })
+      ]);
+      if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
+      const launchId = prepared.value.launches[0]?.launch.launchId ?? "";
+      const activation = await service.verifyActivated({
+        launchId,
+        paneId: PANE_ID,
+        nativeSession: NATIVE_SESSION,
+        observation: LIVE_READY
+      });
+      if (!activation.ok) throw new Error(JSON.stringify(activation.error));
+      const initialRegisterCalls = gatewayControl.registerCalls;
+
+      // Advance past the 1-hour Gateway registration TTL (DEFAULT_TTL_MS = 3_600_000).
+      currentNow = new Date(currentNow.getTime() + 3_600_000 + 1_000);
+      const verified = await service.verifyGateway();
+
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) return;
+      expect(verified.value.healthy).toBe(true);
+      expect(verified.value.lost).toEqual([]);
+      expect(gatewayControl.registerCalls).toBe(initialRegisterCalls + 1);
+      expect(service.status().launches[0]).toEqual(expect.objectContaining({
+        launchId,
+        state: "activated"
+      }));
+      expect(service.status().launches[0]?.reason).toBeUndefined();
+    });
   });
 });
