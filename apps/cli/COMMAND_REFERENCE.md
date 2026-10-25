@@ -86,11 +86,11 @@ Mọi lệnh liệt kê dưới đây tuân thủ `SupportedCommandsSchema` củ
 ### `bflow init`
 
 - **Syntax**: `bflow init [options]`
-- **Purpose**: Khởi tạo cấu hình repository bflow và định nghĩa workflow mặc định tại thư mục gốc của repository.
+- **Purpose**: Khởi tạo cấu hình repository bflow và định nghĩa workflow mặc định tại thư mục gốc của repository, sau đó index repository bằng GitNexus và đăng ký service của nó trên Gateway của máy sau khi license được chấp thuận.
 - **Reused Engines**: `RepositoryConfigService`, `DefaultWorkflowDefinition`
 - **Required Flags**: None
-- **Optional Flags**: `--dir <path>`, `--config <path>`, `--name <name>`, `--provider <claude|codex>`, `-f, --force`, `-y, --yes`, `-j, --json`, `-h, --help`
-- **Idempotency & Retry**: Idempotent. Chạy lại không có --force sẽ xác minh cấu hình hiện có mà không sửa nó.
+- **Optional Flags**: `--dir <path>`, `--config <path>`, `--name <name>`, `--provider <claude|codex|agy>`, `-f, --force`, `-y, --yes`, `-u, --update`, `--check`, `--remove`, `--no-gitnexus`, `-j, --json`, `-h, --help`
+- **Idempotency & Retry**: Idempotent. Chạy lại không có --force hoặc --update sẽ xác minh cấu hình hiện có mà không sửa nó. Lần index GitNexus đầu tiên hỏi xác nhận; khi không tương tác cần --yes. --check chỉ đọc; --remove cũng gỡ được repository đã bị xoá khỏi đĩa.
 - **Permission Requirements**: Yêu cầu quyền ghi filesystem vào thư mục repository.
 - **Associated Skills**: `using-bflow`
 - **Exit Codes**:

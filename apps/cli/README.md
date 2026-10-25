@@ -49,19 +49,22 @@ Các machine pin tường minh được bảo toàn. Đăng nhập provider vẫ
 tương tác của chủ tài khoản; cài một CLI không thiết lập xác thực. Các điều kiện
 license của upstream được hiển thị trong chẩn đoán cài đặt.
 
-Setup cấu hình MCP Gateway dùng chung như một service của người dùng hiện tại và xác minh
-việc thương lượng MCP upstream cùng khám phá tool. Việc index GitNexus được giới hạn trong
-Git repository đã chọn; ngoài một repository, việc cài đặt vẫn tiếp tục và index
-bị hoãn đến khi chạy `bflow setup --dir <repository>`. Chrome dùng một profile Bflow
-riêng. Các workflow role kết nối tới Gateway chạy nền qua bộ định vị riêng
+Setup cấu hình MCP Gateway dùng chung ở phạm vi máy như một service của người dùng hiện tại
+và xác minh việc thương lượng MCP upstream cùng khám phá tool; kết quả `setup --check` giống
+nhau ở mọi thư mục. Setup chỉ cài và duyệt binary GitNexus. `bflow init` trong từng repository
+mới index repository đó và thêm service `gitnexus-<repo>` vào Gateway đang chạy, không thay
+repository khác. Lần index đầu hỏi xác nhận license PolyForm-Noncommercial (không tương tác
+thì cần `--yes`; `--no-gitnexus` bỏ qua). `bflow init --check` báo trạng thái chỉ đọc,
+`bflow init --remove` gỡ đăng ký, kể cả khi thư mục repository đã bị xoá; Gateway cũng tự
+dọn repository không còn trên đĩa khi khởi động lại. Chrome dùng một profile Bflow riêng. Các workflow role kết nối tới Gateway chạy nền qua bộ định vị riêng
 `gateway-control.json` trong thư mục state của Gateway. `bflow up` truyền bộ định vị đó
 cho host khi nó tồn tại; setup không thiết lập các kết nối role này.
 
-Context7 hosted do setup tạo dùng chung giữa các repository/worktree trên cùng máy:
-chuyển worktree rồi chạy `down`/`up` không cần rebind Gateway. Control endpoint chỉ
-chia sẻ đúng dịch vụ Context7 đã được setup duyệt, vẫn kiểm tra machine, workspace
-canonical, token và quyền từng role/session. GitNexus, Chrome và các backend cục bộ
-vẫn giới hạn trong workspace đã setup; một repo khác cần setup riêng để sử dụng chúng.
+Context7 hosted và MemPalace do setup tạo dùng chung giữa các repository/worktree trên cùng
+máy: chuyển worktree rồi chạy `down`/`up` không cần rebind Gateway. MemPalace giữ một
+backend partition riêng cho mỗi repository. Control endpoint vẫn kiểm tra machine, workspace
+canonical, token và quyền từng role/session. Service GitNexus của một repository chỉ phục vụ
+đúng repository đó; profile Chrome do setup tạo không được chia sẻ cho session của repository.
 Gateway đang chạy từ bản CLI cũ cần khởi động lại service do Bflow sở hữu sau khi build
 bản sửa; `up` không tự sửa cấu hình machine hoặc khởi động lại Gateway dùng chung.
 
@@ -141,7 +144,7 @@ kể cả giá trị có dấu nháy mà dấu nháy đóng bị thiếu trong �
 
 | Lệnh | Hành vi |
 | --- | --- |
-| `bflow init [--provider claude\|codex\|agy]` | Tạo `.bflow/config.yml` và `.bflow/.gitignore` tại Git root chuẩn tắc. Provider mặc định là Codex. Chạy init lặp lại giữ nguyên cấu hình; `--force`/`--yes` tường minh sẽ thay thế. Không gọi Herdr. |
+| `bflow init [--provider claude\|codex\|agy]` | Tạo `.bflow/config.yml` và `.bflow/.gitignore` tại Git root chuẩn tắc, rồi (sau khi chấp thuận license) index GitNexus và đăng ký service của repository trên Gateway. Provider mặc định là Codex. Chạy init lặp lại giữ nguyên cấu hình; `--force`/`--yes` tường minh sẽ thay thế. `--check`, `--remove`, `--no-gitnexus` như mô tả ở trên. Không gọi Herdr. |
 | `bflow config-migrate` | Xác thực một `.bflow/config.yaml` hoặc `.bflow/config.json` cũ, ghi `.bflow/config.yml`, lưu các byte gốc thành `<legacy-path>.bak`, rồi xóa file cũ đang hoạt động. Nguồn hoặc đích xung đột sẽ fail mà không ghi đè. |
 | `bflow setup --codex-hooks --plan\|--check\|--apply` | Kiểm tra Codex home đã chọn và chỉ review các global hook. Plan/check chỉ đọc; apply yêu cầu một quyết định tương tác hoặc `--yes --hook-digest <sha256>`. Không bao giờ cài tool hay service. |
 | `bflow up [--timeout <ms>]` | Kiểm tra executable, xác thực provider và protocol Herdr; khởi động một server có tên, chuẩn bị persistent P19 host cùng platform readiness (từ chối khởi động pane khi một role bắt buộc bị chặn), rồi gọi P13. Chờ mọi role bắt buộc và xác nhận kích hoạt host trước khi ghi nhận ready. Lưu các binding đã xác thực và tái dùng các role đang sống. |

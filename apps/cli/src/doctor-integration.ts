@@ -1262,7 +1262,7 @@ export async function runDoctorDiagnostics(
           const bflowHome = options.env?.BFLOW_HOME ?? host.env.BFLOW_HOME ?? process.env.BFLOW_HOME;
           const platform = bflowHome
             ? setup.isolatedPlatformProfile(setup.detectPlatform(host), resolve(bflowHome))
-            : resolveSetupPlatform(undefined, repository.root);
+            : resolveSetupPlatform();
           const gn = await checkRepositoryGitNexus({ repository, platform });
           const isRequired = config?.environment?.tools?.gitnexus?.required === true || requiredTools.includes("gitnexus");
           const readyStatus: DoctorCheckStatus = gn.status === "ready"

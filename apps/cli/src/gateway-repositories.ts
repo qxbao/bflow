@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
@@ -18,14 +18,12 @@ import {
   detectPlatform,
   digest,
   isolatedPlatformProfile,
-  loadMachineConfig,
-  MACHINE_CONFIG_FILE,
   type PlatformProfile
 } from "@bflow/machine-setup";
 import { GATEWAY_CONTROL_LOCATOR_FILE, registerGatewayRepositoryService, removeGatewayRepositoryService } from "./gateway-control.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
-import { identifyRepository, type RepositoryIdentity } from "./repository.js";
-import { repositoryHasCommits } from "./setup-gateway.js";
+import type { RepositoryIdentity } from "./repository.js";
+import { approvedGitNexusExecutable, repositoryHasCommits } from "./setup-gateway.js";
 import type { CliContext } from "./types.js";
 
 export const GATEWAY_REPOSITORIES_FILE = "gateway-repositories.json";
@@ -295,7 +293,7 @@ export async function validateRepositoryServiceLaunch(
   entry: RegisteredRepositoryService,
   paths: { readonly config: string; readonly state: string; readonly data: string },
   machineId: string,
-  approvedExecutable?: { readonly executable: string; readonly version: string }
+  approvedExecutable: { readonly executable: string; readonly version: string }
 ): Promise<MCPServiceDefinition> {
   const parsed = RegisteredRepositoryServiceSchema.parse(entry);
   const definition = parsed.service;
@@ -328,7 +326,7 @@ export async function validateRepositoryServiceLaunch(
     sha(await readFile(launcher!)) !== launcherDigest ||
     sha(JSON.stringify(spec)) !== specDigest ||
     !isAbsolute(spec.executable) ||
-    (approvedExecutable && (spec.executable !== approvedExecutable.executable || definition.tool.version !== approvedExecutable.version)) ||
+    spec.executable !== approvedExecutable.executable || definition.tool.version !== approvedExecutable.version ||
     sha(await readFile(spec.executable)) !== spec.executableDigest ||
     !specPath!.startsWith(`${launchesDir}${sep}`)
   ) {
@@ -389,64 +387,22 @@ export async function validateRepositoryServiceLaunch(
   return expectedDefinition;
 }
 
-export function resolveSetupPlatform(context?: CliContext, fallbackRoot?: string): PlatformProfile {
+export function resolveSetupPlatform(context?: CliContext): PlatformProfile {
   const host = defaultHostEnvironment();
   let platform: PlatformProfile = context?.setup?.platform ?? detectPlatform(host);
-  const isolatedRoot =
-    context?.setup?.isolatedRoot ??
-    host.env.BFLOW_HOME ??
-    process.env.BFLOW_HOME ??
-    (!context?.setup?.platform && process.env.VITEST && fallbackRoot
-      ? join(fallbackRoot, ".bflow", "test-machine-home")
-      : undefined);
+  const isolatedRoot = context?.setup?.isolatedRoot ?? host.env.BFLOW_HOME ?? process.env.BFLOW_HOME;
   if (isolatedRoot) {
     platform = isolatedPlatformProfile(platform, resolve(isolatedRoot));
   }
   return platform;
 }
 
+/** Only the executable approved by machine setup may back a repository service. */
 export async function resolveApprovedGitNexusBinary(
   platform: PlatformProfile
 ): Promise<{ readonly executable: string; readonly version: string } | undefined> {
-  const machine = await loadMachineConfig(join(platform.paths.config, MACHINE_CONFIG_FILE));
-  if (machine.status !== "valid" || !machine.config) return undefined;
-  const pin = machine.config.toolPins.find(item => item.toolId === "gitnexus");
-  if (!pin) return undefined;
-  // 1. Check setup-gateway.json approval if present (supports custom/fixture pins in tests)
-  const gatewayConfigPath = join(platform.paths.config, "setup-gateway.json");
-  try {
-    const raw = await readRegularJson(gatewayConfigPath) as {
-      approval?: { requirements?: { toolId?: string; executable?: string; version?: string }[] };
-    };
-    const approvedReq = raw.approval?.requirements?.find(item => item.toolId === "gitnexus");
-    if (approvedReq?.executable && approvedReq.version && existsSync(approvedReq.executable)) {
-      return { executable: approvedReq.executable, version: approvedReq.version };
-    }
-  } catch {
-    // Fall through to catalog / managed root resolution.
-  }
-  // 2. Check standard managed tool installation
-  const tools = await leaf("tool-installer");
-  const catalog = tools.defaultToolCatalog(platform.os, platform.arch);
-  const builtIn = catalog.pins.find((candidate: { toolId: string; version: string }) =>
-    candidate.toolId === "gitnexus" && candidate.version === pin.version);
-  if (builtIn) {
-    const managedPath = join(platform.paths.data, "tools", "gitnexus", tools.managedToolExecutable(builtIn));
-    if (existsSync(managedPath)) {
-      return { executable: managedPath, version: pin.version };
-    }
-  }
-  const fallbackBin = join(platform.paths.managedBin, "gitnexus");
-  if (existsSync(fallbackBin)) {
-    return { executable: fallbackBin, version: pin.version };
-  }
-  if (pin.installerId === "fixture") {
-    const fixtureBin = join(dirname(platform.paths.config), "gitnexus");
-    if (existsSync(fixtureBin)) {
-      return { executable: fixtureBin, version: pin.version };
-    }
-  }
-  return undefined;
+  const approved = approvedGitNexusExecutable(platform.paths.config);
+  return approved && existsSync(approved.executable) ? approved : undefined;
 }
 
 export interface RepositoryGitNexusReport {
@@ -595,7 +551,26 @@ export async function checkRepositoryGitNexus(input: {
 export async function prepareRepositoryGitNexus(input: {
   readonly repository: RepositoryIdentity;
   readonly platform: PlatformProfile;
-  readonly executableOverride?: { readonly executable: string; readonly version: string } | undefined;
+}): Promise<RepositoryGitNexusReport> {
+  try {
+    return await indexAndRegisterRepository(input);
+  } catch (error) {
+    // The repository configuration is already written; report GitNexus as blocked instead of failing init.
+    return {
+      status: "blocked",
+      serviceId: gitNexusServiceId(await realpath(input.repository.root).catch(() => input.repository.root)),
+      indexed: false,
+      registered: false,
+      gatewayReady: false,
+      diagnostics: [GITNEXUS_POLYFORM_NOTICE,
+        `GitNexus repository preparation failed (${error instanceof Error ? error.message : String(error)}). Fix the cause and rerun 'bflow init'.`]
+    };
+  }
+}
+
+async function indexAndRegisterRepository(input: {
+  readonly repository: RepositoryIdentity;
+  readonly platform: PlatformProfile;
 }): Promise<RepositoryGitNexusReport> {
   const { repository, platform } = input;
   const canonicalRoot = await realpath(repository.root).catch(() => repository.root);
@@ -614,7 +589,7 @@ export async function prepareRepositoryGitNexus(input: {
     };
   }
 
-  const binary = input.executableOverride ?? await resolveApprovedGitNexusBinary(platform);
+  const binary = await resolveApprovedGitNexusBinary(platform);
   if (!binary) {
     diagnostics.push("Machine setup is incomplete or GitNexus is not installed. Run 'bflow setup' first, then rerun 'bflow init' in this repository.");
     return {
@@ -732,47 +707,53 @@ export async function prepareRepositoryGitNexus(input: {
   };
 }
 
-/**
- * Unregisters a repository's GitNexus service from `gateway-repositories.json` and stops/removes
- * it on the running Gateway (`bflow init --remove`).
- */
-export async function removeRepositoryGitNexus(input: {
+/** True when this repository already has a registration, so 'bflow init' was approved for it before. */
+export async function isRepositoryGitNexusRegistered(input: {
   readonly repository: RepositoryIdentity;
   readonly platform: PlatformProfile;
+}): Promise<boolean> {
+  const canonicalRoot = await realpath(input.repository.root).catch(() => input.repository.root);
+  const state = await readGatewayRepositoriesState(input.platform.paths.state, input.platform.machineId);
+  return state.state?.repositories.some(item => item.workspaceRoot === canonicalRoot) ?? false;
+}
+
+/**
+ * Unregisters a repository's GitNexus service from `gateway-repositories.json` and stops/removes
+ * it on the running Gateway (`bflow init --remove`). The workspace may already be deleted from disk.
+ */
+export async function removeRepositoryGitNexus(input: {
+  readonly workspaceRoot: string;
+  readonly platform: PlatformProfile;
 }): Promise<RepositoryGitNexusReport> {
-  const { repository, platform } = input;
-  const canonicalRoot = await realpath(repository.root).catch(() => repository.root);
+  const { platform } = input;
+  const canonicalRoot = await realpath(input.workspaceRoot).catch(() => resolve(input.workspaceRoot));
   const serviceId = gitNexusServiceId(canonicalRoot);
   const diagnostics: string[] = [];
 
-  await removeRegisteredRepositoryService(platform.paths.state, platform.machineId, {
-    repositoryId: repository.id,
+  const { removed } = await removeRegisteredRepositoryService(platform.paths.state, platform.machineId, {
     workspaceRoot: canonicalRoot,
     serviceId
   });
 
   const locatorPath = join(platform.paths.state, GATEWAY_CONTROL_LOCATOR_FILE);
-  if (existsSync(locatorPath)) {
-    const repoOperation = ScopedOperationSchema.parse({
-      schemaVersion: 3,
-      scope: {
-        kind: "repository",
-        machineId: platform.machineId,
-        repositoryId: repository.id,
-        workspaceRoot: canonicalRoot
-      },
-      idempotencyKey: `remove-gitnexus-${repository.id}-${randomUUID()}`
-    });
+  for (const entry of removed) {
+    if (!existsSync(locatorPath)) break;
     const removedRes = await removeGatewayRepositoryService(locatorPath, {
-      serviceId,
-      operation: repoOperation
+      serviceId: entry.service.serviceId,
+      operation: ScopedOperationSchema.parse({
+        schemaVersion: 3,
+        scope: entry.service.scope,
+        idempotencyKey: `remove-gitnexus-${entry.repositoryId}-${randomUUID()}`
+      })
     });
     if (!removedRes.ok && removedRes.error.code !== "not_found") {
-      diagnostics.push(`Removed '${serviceId}' from ${GATEWAY_REPOSITORIES_FILE}; running Gateway reported: ${removedRes.error.message}`);
+      diagnostics.push(`Removed '${entry.service.serviceId}' from ${GATEWAY_REPOSITORIES_FILE}; running Gateway reported: ${removedRes.error.message}`);
     }
   }
 
-  diagnostics.push(`Removed repository GitNexus registration '${serviceId}' for '${canonicalRoot}'.`);
+  diagnostics.push(removed.length
+    ? `Removed repository GitNexus registration '${serviceId}' for '${canonicalRoot}'.`
+    : `No repository GitNexus registration exists for '${canonicalRoot}'.`);
   return {
     status: "removed",
     serviceId,
@@ -781,8 +762,4 @@ export async function removeRepositoryGitNexus(input: {
     gatewayReady: false,
     diagnostics
   };
-}
-
-export async function resolveRepositoryForInit(cwd: string, dir?: string): Promise<RepositoryIdentity> {
-  return identifyRepository(resolve(cwd, dir ?? "."));
 }

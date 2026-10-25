@@ -12,7 +12,6 @@ import {
   readGatewayRepositoriesState,
   RegisteredRepositoryServiceSchema,
   removeRegisteredRepositoryService,
-  resolveApprovedGitNexusBinary,
   upsertRegisteredRepositoryService,
   validateRepositoryServiceLaunch,
   type RegisteredRepositoryService
@@ -20,7 +19,6 @@ import {
 import { readStoredContext7Key, writeStoredContext7Key } from "./context7-secret.js";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
   loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER, ToolInstallDescriptorSchema,
-  defaultHostEnvironment, detectPlatform,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
   type ServiceDefinition, type ServiceManager } from "@bflow/machine-setup";
 
@@ -172,6 +170,16 @@ function configurationDigest(saved: z.infer<typeof GatewayConfigSchema>): string
     services: saved.services.filter(item => !saved.generatedIds.includes(item.serviceId)) });
 }
 
+/** The GitNexus executable machine setup approved; 'bflow init' and the Gateway trust no other binary for repository services. */
+export function approvedGitNexusExecutable(configDirectory: string): { readonly executable: string; readonly version: string } | undefined {
+  try {
+    const saved = ownedConfiguration(join(configDirectory, "setup-gateway.json"));
+    if (!saved?.approval || saved.operation.scope.kind !== "machine" || configurationDigest(saved) !== saved.desiredDigest) return undefined;
+    const item = saved.approval.requirements.find(candidate => candidate.toolId === "gitnexus");
+    return item ? { executable: item.executable, version: item.version } : undefined;
+  } catch { return undefined; }
+}
+
 /** Reconstruct boundaries from the unit-bound approval, never from a spec's self-checksums alone. */
 async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
   if (!saved.approval || configurationDigest(saved) !== saved.desiredDigest || saved.operation.scope.kind !== "machine" || saved.approval.repositorySelected)
@@ -252,7 +260,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     const pin = config.toolPins.find(candidate => candidate.toolId === item.toolId);
     return { ...item, pin, version: pin?.version ?? "" };
   });
-  // GitNexus is repository-scoped and registered by 'bflow init'; machine setup only starts machine-scoped services.
+  // GitNexus is approved here but started per repository by 'bflow init'; machine setup only starts machine-scoped services.
   const activeRequirements = requirements.filter(item => item.toolId !== "gitnexus");
   for (const item of requirements) {
     if (!isAbsolute(item.executable) || !item.version) throw new Error(`Missing pinned managed executable/version for ${item.toolId}`);
@@ -264,7 +272,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   const remoteServices = (input.remoteServices ?? []).map(item => ({ toolId: item.toolId, authenticated: item.authenticated,
     keyFingerprint: item.authenticated ? item.keyFingerprint : null }));
   const approval = ApprovalSchema.parse({ policyVersion: 2, repositorySelected: false,
-    browserExecutable: approvedBrowser(platform), requirements: activeRequirements, remoteServices });
+    browserExecutable: approvedBrowser(platform), requirements, remoteServices });
   const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot: "",
     paths: platform.paths,
     repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements: approval.requirements,
@@ -490,17 +498,19 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   if (configured.definitionDigest !== digest(configured.services)) throw new Error("Gateway service definition checksum mismatch");
   if (expectedDesiredDigest && configured.desiredDigest !== expectedDesiredDigest) throw new Error("Gateway service configuration differs from its installed setup plan");
   await validateLaunches(configured);
+  const { scope } = configured.operation;
+  if (scope.kind !== "machine") throw new Error("Gateway control requires a machine-scoped Gateway operation");
+  const machineId = scope.machineId;
+  // Startup, health and discovery probes share one stable probe session, so each repository-partitioned
+  // machine backend runs a single probe partition instead of one per probe.
+  const healthOperation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "session", machineId,
+    repositoryId: `setup-probe-${sha(machineId).slice(0, 24)}`, workspaceRoot: join(configured.paths.data, "gateway-probe"),
+    sessionId: "setup-gateway" }, idempotencyKey: "setup-gateway" });
   const module = await leaf("mcp-gateway");
   const tools = await leaf("tool-installer");
   const runtimeGrants = new Map<string, readonly ResolvedToolGrant[]>();
   const gateway = new module.BflowSharedMCPGateway({
-    policyOverrides: (service: MCPServiceDefinition) => {
-      const base = tools.trustedGatewayPolicy(service);
-      if (service.scope.kind === "machine" && service.tool.toolId === "mempalace" && base) {
-        return { ...base, sessionIsolationPolicy: "protocol_session", sharedStatePolicy: "stateless" };
-      }
-      return base;
-    },
+    policyOverrides: (service: MCPServiceDefinition) => tools.trustedGatewayPolicy(service),
     callLedgerPath: join(configured.paths.state, "gateway-tool-calls.json"),
     requireResolvedToolGrants: (registration: { registrationId: string }) => runtimeGrants.has(registration.registrationId),
     toolGrantResolver: (registration: { registrationId: string }) => runtimeGrants.get(registration.registrationId)
@@ -537,7 +547,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     await rm(configured.receiptPath, { force: true });
     await server.stop();
     for (const service of configured.services) if (service.connection.ownership === "bflow")
-      await gateway.serviceManager.stop(service.serviceId, configured.operation);
+      await gateway.serviceManager.stop(service.serviceId, healthOperation);
     for (const { service, operation: repoOp } of repoServices.values()) if (service.connection.ownership === "bflow")
       await gateway.serviceManager.stop(service.serviceId, repoOp);
   };
@@ -545,7 +555,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     for (const service of configured.services) {
       try {
         if (service.tool.toolId === "chrome-devtools-mcp") await tools.verifyChromeStartup(service);
-        const result = await gateway.serviceManager.ensure(service, configured.operation, { timeoutMs: service.healthTimeoutMs, signal: shutdown.signal });
+        const result = await gateway.serviceManager.ensure(service, healthOperation, { timeoutMs: service.healthTimeoutMs, signal: shutdown.signal });
         const observation = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(result));
         if (observation.status !== "ready" || service.tool.operations.some(tool => !observation.discoveredTools.includes(tool)))
           throw new Error(`Gateway upstream ${service.serviceId} did not negotiate required tools`);
@@ -559,37 +569,14 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     const readyServices = configured.services.filter(service => machineObservations.some(item => item.serviceId === service.serviceId && item.status === "ready"));
 
     const endpoint = `${await server.start()}/mcp`;
-    const { scope } = configured.operation;
-    if (scope.kind !== "machine") throw new Error("Gateway control requires a machine-scoped Gateway operation");
-    const machineId = scope.machineId;
-    const gatewayPlatform: PlatformProfile = {
-      ...detectPlatform(defaultHostEnvironment()),
-      machineId,
-      homeDir: dirname(configured.paths.config),
-      pathEntries: [configured.paths.managedBin],
-      paths: configured.paths
-    };
 
     const verifyHttpToolDiscovery = async (servicesToVerify: readonly MCPServiceDefinition[], probeOperation: ScopedOperation) => {
       if (!servicesToVerify.length) return;
       const registrationId = `setup-probe-${randomUUID()}`;
-      const probeScope = probeOperation.scope.kind === "session"
-        ? probeOperation.scope
-        : probeOperation.scope.kind === "repository"
-          ? {
-              kind: "session" as const,
-              machineId: probeOperation.scope.machineId,
-              repositoryId: probeOperation.scope.repositoryId,
-              workspaceRoot: probeOperation.scope.workspaceRoot,
-              sessionId: `setup-probe-${registrationId}`
-            }
-          : {
-              kind: "session" as const,
-              machineId: probeOperation.scope.machineId,
-              repositoryId: `setup-probe-${sha(probeOperation.scope.machineId).slice(0, 24)}`,
-              workspaceRoot: join(configured.paths.data, "gateway-probe"),
-              sessionId: `setup-probe-${registrationId}`
-            };
+      if (probeOperation.scope.kind === "machine") throw new Error("Gateway discovery probes need a session or repository scope");
+      // Registrations are session-scoped; a repository probe uses a throwaway session inside that repository.
+      const probeScope = probeOperation.scope.kind === "session" ? probeOperation.scope : { ...probeOperation.scope, kind: "session" as const,
+        sessionId: `setup-probe-${registrationId}` };
       const registration = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId, provider: "codex", role: "reviewer",
         scope: probeScope, environmentId: "setup-probe", serviceIds: servicesToVerify.map(service => service.serviceId),
         allowedTools: [...new Set(servicesToVerify.flatMap(service => service.tool.operations))],
@@ -612,7 +599,7 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
         InitializeSchema.parse(initialized.result);
         const listed = await call(2, "tools/list", initialized.response.headers.get("Mcp-Session-Id") ?? undefined);
         const discovered = ToolsSchema.parse(listed.result);
-        for (const service of readyServices.includes(servicesToVerify[0]!) ? readyServices : servicesToVerify) {
+        for (const service of servicesToVerify) {
           for (const tool of service.tool.operations) {
             if (!discovered.tools.some(item => item.serviceId === service.serviceId && item.name === tool)) {
               throw new Error(`Gateway did not discover required tool ${tool}`);
@@ -623,52 +610,16 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     };
 
     if (readyServices.length) {
-      await verifyHttpToolDiscovery(readyServices, configured.operation);
+      await verifyHttpToolDiscovery(readyServices, healthOperation);
     }
-
-    // Reload persisted repository-scoped GitNexus services on Gateway startup/restart.
-    const approvedBinary = await resolveApprovedGitNexusBinary(gatewayPlatform);
-    const persistedRepos = await readGatewayRepositoriesState(configured.paths.state, machineId);
-    if (persistedRepos.status === "valid" && persistedRepos.state) {
-      for (const entry of persistedRepos.state.repositories) {
-        if (!existsSync(entry.workspaceRoot)) {
-          // Repository directory was removed from disk; skip without failing Gateway startup.
-          continue;
-        }
-        try {
-          const info = await lstat(entry.workspaceRoot);
-          if (!info.isDirectory() || info.isSymbolicLink()) continue;
-          const validatedService = await validateRepositoryServiceLaunch(entry, configured.paths, machineId, approvedBinary);
-          const repoOp = ScopedOperationSchema.parse({
-            schemaVersion: 3,
-            scope: validatedService.scope,
-            idempotencyKey: `gateway-repo-${entry.repositoryId}`
-          });
-          const ensured = await gateway.serviceManager.ensure(validatedService, repoOp, {
-            timeoutMs: validatedService.healthTimeoutMs,
-            signal: shutdown.signal
-          });
-          const observation = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(ensured));
-          if (observation.status !== "ready" || validatedService.tool.operations.some(tool => !observation.discoveredTools.includes(tool))) {
-            throw new Error(`Gateway repository upstream ${validatedService.serviceId} did not negotiate required tools`);
-          }
-          await verifyHttpToolDiscovery([validatedService], repoOp);
-          repoServices.set(validatedService.serviceId, { service: validatedService, operation: repoOp });
-          repoObservations.set(validatedService.serviceId, observation);
-        } catch (error) {
-          process.stderr.write(`Skipping repository service ${entry.service.serviceId} on Gateway startup: ${why(error)}\n`);
-        }
-      }
-    }
-    syncObservations();
 
     const publish = async () => {
       for (let index = 0; index < configured.services.length; index++) {
         const service = configured.services[index]!;
         try {
-          const current = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(await gateway.serviceManager.inspect(service.serviceId, configured.operation)));
+          const current = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(await gateway.serviceManager.inspect(service.serviceId, healthOperation)));
           const entry = gateway.registry.getService(service.serviceId);
-          const partition = entry && unwrap<string>(module.computePartitionKey(entry.definition, entry.policy, configured.operation.scope));
+          const partition = entry && unwrap<string>(module.computePartitionKey(entry.definition, entry.policy, healthOperation.scope));
           const driver = partition && gateway.serviceManager.getDriver(partition);
           if (current.status !== "ready" || !driver) throw new Error(`Gateway upstream ${service.serviceId} lost readiness`);
           const timeoutMs = Math.min(service.healthTimeoutMs, 5000);
@@ -711,100 +662,94 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
         definitionDigest: configured.definitionDigest, pid: process.pid, endpoint, observedAt: new Date().toISOString(), observations }))}\n`, 0o600));
     };
 
+    /** Validates a repository service against the setup approval, starts it and verifies discovery through the Gateway. */
+    const activateRepositoryService = async (entry: RegisteredRepositoryService, repoOp: ScopedOperation) => {
+      const approved = approvedGitNexusExecutable(configured.paths.config);
+      if (!approved) throw new Error("Machine setup has not approved a GitNexus executable; run 'bflow setup'");
+      const validatedService = await validateRepositoryServiceLaunch(entry, configured.paths, machineId, approved);
+      const observation = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(await gateway.serviceManager.ensure(validatedService, repoOp, {
+        timeoutMs: validatedService.healthTimeoutMs, signal: shutdown.signal })));
+      if (observation.status !== "ready" || validatedService.tool.operations.some(tool => !observation.discoveredTools.includes(tool)))
+        throw new Error(`Repository service '${validatedService.serviceId}' did not negotiate required tools`);
+      await verifyHttpToolDiscovery([validatedService], repoOp);
+      repoServices.set(validatedService.serviceId, { service: validatedService, operation: repoOp });
+      repoObservations.set(validatedService.serviceId, observation);
+      control?.trackRepositoryService(validatedService);
+      return { service: validatedService, observation };
+    };
+    const failed = (error: unknown, code: ContractError["code"] = "validation"): OperationResult<never> =>
+      ({ ok: false, error: { code, message: why(error), retryable: code === "transport_unavailable" } as ContractError });
+
     control = await startGatewayControl({
       gateway,
       stateRoot: configured.paths.state,
       machineId,
       configDigest: configured.definitionDigest,
       endpoint,
-      services: [...configured.services, ...Array.from(repoServices.values(), item => item.service)],
+      services: configured.services,
       grantMap: runtimeGrants,
-      // Only Bflow-generated machine-scoped services (mempalace, chrome-devtools-mcp, context7) are shared across repositories.
-      // Operator-defined services are not automatically granted cross-repository sharing.
+      // Every repository may use the approved hosted Context7 service and MemPalace, whose default policy keeps one
+      // backend partition per repository. Browser profiles stay unshared, and operator services are never shared implicitly.
       machineSharedServiceIds: configured.services.filter(service =>
-        configured.generatedIds.includes(service.serviceId) &&
-        service.scope.kind === "machine" &&
-        service.scope.machineId === machineId
-      ).map(service => service.serviceId),
+        configured.generatedIds.includes(service.serviceId) && service.scope.kind === "machine" && service.scope.machineId === machineId &&
+        ((service.tool.toolId === "context7" && service.serviceId === tools.CONTEXT7_SERVICE_ID && service.connection.kind === "native_remote_mcp" &&
+          service.connection.endpoint === tools.CONTEXT7_MCP_ENDPOINT && service.connection.ownership === "external" &&
+          service.tool.resource.sharing === "concurrent" &&
+          service.tool.operations.every(operation => tools.CONTEXT7_TOOLS.includes(operation)) &&
+          service.tool.operations.length === tools.CONTEXT7_TOOLS.length) ||
+        (service.tool.toolId === "mempalace" && service.connection.ownership === "bflow" && service.tool.resource.sharing === "concurrent")))
+        .map(service => service.serviceId),
       onRegisterRepositoryService: async ({ service, operation: repoOp, rawEntry }): Promise<OperationResult<MCPServiceObservation>> => {
+        if (repoOp.scope.kind !== "repository") return failed(new Error("Repository service requires repository scope"));
+        let candidateEntry: RegisteredRepositoryService;
         try {
-          if (repoOp.scope.kind !== "repository") {
-            return { ok: false, error: { code: "validation", message: "Repository service requires repository scope", retryable: false } as ContractError };
-          }
-          const candidateEntry: RegisteredRepositoryService = rawEntry
-            ? RegisteredRepositoryServiceSchema.parse(rawEntry)
-            : RegisteredRepositoryServiceSchema.parse({
-                schemaVersion: 3,
-                repositoryId: repoOp.scope.repositoryId,
-                workspaceRoot: repoOp.scope.workspaceRoot,
-                service,
-                registeredAt: new Date().toISOString()
-              });
-          const currentApprovedBinary = await resolveApprovedGitNexusBinary(gatewayPlatform);
-          const validatedService = await validateRepositoryServiceLaunch(candidateEntry, configured.paths, machineId, currentApprovedBinary);
-          const ensured = await gateway.serviceManager.ensure(validatedService, repoOp, {
-            timeoutMs: validatedService.healthTimeoutMs,
-            signal: shutdown.signal
-          });
-          if (!ensured.ok) return ensured;
-          const observation = MCPServiceObservationSchema.parse(ensured.value);
-          if (observation.status !== "ready" || validatedService.tool.operations.some(tool => !observation.discoveredTools.includes(tool))) {
-            return {
-              ok: false,
-              error: {
-                code: "transport_unavailable",
-                message: `Repository service '${validatedService.serviceId}' did not negotiate required tools`,
-                retryable: true
-              } as ContractError
-            };
-          }
-          await verifyHttpToolDiscovery([validatedService], repoOp);
-          await upsertRegisteredRepositoryService(configured.paths.state, machineId, {
-            ...candidateEntry,
-            service: validatedService
-          });
-          repoServices.set(validatedService.serviceId, { service: validatedService, operation: repoOp });
-          repoObservations.set(validatedService.serviceId, observation);
+          candidateEntry = RegisteredRepositoryServiceSchema.parse(rawEntry ?? { schemaVersion: 3, repositoryId: repoOp.scope.repositoryId,
+            workspaceRoot: repoOp.scope.workspaceRoot, service, registeredAt: new Date().toISOString() });
+        } catch (error) { return failed(error); }
+        try {
+          const activated = await activateRepositoryService(candidateEntry, repoOp);
+          await upsertRegisteredRepositoryService(configured.paths.state, machineId, { ...candidateEntry, service: activated.service });
           await publish();
-          return { ok: true, value: observation };
-        } catch (error) {
-          return {
-            ok: false,
-            error: {
-              code: "validation",
-              message: why(error),
-              retryable: false
-            } as ContractError
-          };
-        }
+          return { ok: true, value: activated.observation };
+        } catch (error) { return failed(error, "transport_unavailable"); }
       },
       onRemoveRepositoryService: async ({ serviceId, operation: repoOp }): Promise<OperationResult<void>> => {
         try {
-          const existing = repoServices.get(serviceId);
-          if (existing) {
-            await gateway.serviceManager.stop(serviceId, existing.operation);
-          } else {
-            await gateway.serviceManager.stop(serviceId, repoOp);
-          }
+          await gateway.serviceManager.stop(serviceId, repoServices.get(serviceId)?.operation ?? repoOp);
           gateway.registry.unregisterService(serviceId);
           repoServices.delete(serviceId);
           repoObservations.delete(serviceId);
           await removeRegisteredRepositoryService(configured.paths.state, machineId, { serviceId });
           await publish();
           return { ok: true, value: undefined };
-        } catch (error) {
-          return {
-            ok: false,
-            error: {
-              code: "validation",
-              message: why(error),
-              retryable: false
-            } as ContractError
-          };
-        }
+        } catch (error) { return failed(error); }
       }
     });
 
+    // Machine services are published before repositories load, so many registered repositories cannot delay setup readiness.
+    await publish();
+    // Reload persisted repository services; a repository removed from disk is pruned instead of retried forever.
+    const persistedRepos = await readGatewayRepositoriesState(configured.paths.state, machineId);
+    if (persistedRepos.status === "invalid") process.stderr.write(`Repository services were not reloaded: ${persistedRepos.error}\n`);
+    for (const entry of persistedRepos.state?.repositories ?? []) {
+      if (stopped) break;
+      try {
+        const info = await lstat(entry.workspaceRoot).catch(error => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw error;
+        });
+        if (!info) {
+          await removeRegisteredRepositoryService(configured.paths.state, machineId, { serviceId: entry.service.serviceId });
+          process.stderr.write(`Removed repository service ${entry.service.serviceId}: ${entry.workspaceRoot} no longer exists\n`);
+          continue;
+        }
+        if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${entry.workspaceRoot} is not a real directory`);
+        await activateRepositoryService(entry, ScopedOperationSchema.parse({ schemaVersion: 3, scope: entry.service.scope,
+          idempotencyKey: `gateway-repo-${entry.repositoryId}` }));
+      } catch (error) {
+        process.stderr.write(`Skipping repository service ${entry.service.serviceId} on Gateway startup: ${why(error)}\n`);
+      }
+    }
     await publish();
     let publishing = false;
     timer = setInterval(() => {

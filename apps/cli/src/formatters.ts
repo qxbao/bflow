@@ -54,7 +54,7 @@ function resolveColor(options: FormatterOptions | PresentationOptions | undefine
 }
 
 function isInitOutput(data: CliCommandData): data is InitCommandOutput {
-  return typeof data === "object" && data !== null && "configPath" in data && "config" in data;
+  return typeof data === "object" && data !== null && "configPath" in data && ("config" in data || (data as { mode?: unknown }).mode === "remove");
 }
 
 function isConfigMigrationOutput(command: CliCommandName, data: CliCommandData): data is import("./config-migration.js").ConfigMigrationOutput {
@@ -501,8 +501,10 @@ function formatInitOutput(output: InitCommandOutput, useColor = false): string {
   }
   lines.push(`  ${sanitizeIdentifier(output.configPath)}`);
   lines.push("");
-  lines.push(`Project Name:  ${sanitizeIdentifier(output.config.projectName)}`);
-  lines.push(`Default Tasks: ${output.config.defaultWorkflow.tasks.map((t) => sanitizeIdentifier(t.id)).join(" -> ")}`);
+  if (output.config) {
+    lines.push(`Project Name:  ${sanitizeIdentifier(output.config.projectName)}`);
+    lines.push(`Default Tasks: ${output.config.defaultWorkflow.tasks.map((t) => sanitizeIdentifier(t.id)).join(" -> ")}`);
+  }
   if (output.gitnexus) {
     lines.push(`GitNexus:      ${sanitizeIdentifier(output.gitnexus.status)} (${sanitizeIdentifier(output.gitnexus.serviceId)})`);
   }

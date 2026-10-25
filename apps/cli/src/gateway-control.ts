@@ -40,8 +40,6 @@ export interface GatewayControlGateway {
   readonly secretStore: { getClientTokenByRegistration(registrationId: string): string | undefined };
   readonly serviceManager: {
     inspect(serviceId: string, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<MCPServiceObservation>>;
-    ensure?(service: MCPServiceDefinition, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<MCPServiceObservation>>;
-    stop?(serviceId: string, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<MCPServiceObservation>>;
   };
 }
 
@@ -75,6 +73,8 @@ export interface GatewayControlOptions {
 
 export interface GatewayControl {
   readonly locator: GatewayControlLocator;
+  /** Offers a repository-scoped service the trusted host has already validated and started. */
+  trackRepositoryService(service: MCPServiceDefinition): void;
   stop(): Promise<void>;
 }
 
@@ -177,6 +177,12 @@ export async function startGatewayControl(options: GatewayControlOptions): Promi
   let stopped = false;
   return {
     locator,
+    trackRepositoryService(service) {
+      const parsed = MCPServiceDefinitionSchema.parse(service);
+      if (parsed.scope.kind !== "repository" || parsed.scope.machineId !== options.machineId)
+        throw new TypeError("Tracked repository services must be repository-scoped on this machine");
+      services.set(parsed.serviceId, parsed);
+    },
     async stop() {
       if (stopped) return;
       stopped = true;
@@ -500,21 +506,13 @@ class GatewayControlService {
       return failure("validation", "Repository service workspaceRoot is not a canonical existing directory");
     }
 
-    if (this.settings.onRegisterRepositoryService) {
-      const result = await this.settings.onRegisterRepositoryService({ service, operation, rawEntry });
-      if (!result.ok) return this.forward(result.error);
-      const observation = MCPServiceObservationSchema.safeParse(result.value);
-      if (!observation.success) return failure("corruption", "Gateway returned a malformed service observation");
-      this.settings.services.set(service.serviceId, service);
-      return { ok: true, value: observation.data };
-    }
-
-    if (!this.settings.gateway.serviceManager.ensure) {
+    // Only the trusted host can validate launch boundaries; never start a caller-supplied definition directly.
+    if (!this.settings.onRegisterRepositoryService) {
       return failure("validation", "Dynamic repository service registration is not supported on this Gateway control");
     }
-    const ensured = await this.settings.gateway.serviceManager.ensure(service, operation);
-    if (!ensured.ok) return this.forward(ensured.error);
-    const observation = MCPServiceObservationSchema.safeParse(ensured.value);
+    const result = await this.settings.onRegisterRepositoryService({ service, operation, rawEntry });
+    if (!result.ok) return this.forward(result.error);
+    const observation = MCPServiceObservationSchema.safeParse(result.value);
     if (!observation.success) return failure("corruption", "Gateway returned a malformed service observation");
     this.settings.services.set(service.serviceId, service);
     return { ok: true, value: observation.data };
@@ -547,13 +545,11 @@ class GatewayControlService {
       }
     }
 
-    if (this.settings.onRemoveRepositoryService) {
-      const result = await this.settings.onRemoveRepositoryService({ serviceId, operation });
-      if (!result.ok && result.error.code !== "not_found") return this.forward(result.error);
-    } else if (existing && this.settings.gateway.serviceManager.stop) {
-      const stopped = await this.settings.gateway.serviceManager.stop(serviceId, operation);
-      if (!stopped.ok && stopped.error.code !== "not_found") return this.forward(stopped.error);
+    if (!this.settings.onRemoveRepositoryService) {
+      return failure("validation", "Dynamic repository service removal is not supported on this Gateway control");
     }
+    const result = await this.settings.onRemoveRepositoryService({ serviceId, operation });
+    if (!result.ok && result.error.code !== "not_found") return this.forward(result.error);
 
     this.settings.services.delete(serviceId);
     return { ok: true, value: null };
@@ -864,7 +860,8 @@ export async function registerGatewayRepositoryService(
         readonly operation: ScopedOperation;
       }
 ): Promise<OperationResult<MCPServiceObservation>> {
-  return sendGatewayControlRequest(locatorPath, "register_repository_service", params, MCPServiceObservationSchema);
+  // Activation starts the backend (bounded by its 15s health timeout) and then probes discovery, so allow more than one health window.
+  return sendGatewayControlRequest(locatorPath, "register_repository_service", params, MCPServiceObservationSchema, 60_000);
 }
 
 export async function removeGatewayRepositoryService(

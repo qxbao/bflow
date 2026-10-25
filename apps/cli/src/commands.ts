@@ -1,6 +1,7 @@
 import { EnvironmentLifecycle } from "./environment.js";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
+import { createInterface } from "node:readline/promises";
 import { isAbsolute, resolve } from "node:path";
 import {
   ApprovalDecisionSchema,
@@ -38,6 +39,7 @@ import {
   type CliExitCode,
   type CliIo,
   type HighLevelParsedCliCommand,
+  type InitCommandArgs,
   type InitCommandOutput,
   type ParsedCliCommand,
   type PresentationOptions
@@ -49,6 +51,8 @@ import { identifyRepository } from "./repository.js";
 import {
   checkRepositoryGitNexus,
   gitNexusServiceId,
+  GITNEXUS_POLYFORM_NOTICE,
+  isRepositoryGitNexusRegistered,
   prepareRepositoryGitNexus,
   removeRepositoryGitNexus,
   resolveSetupPlatform
@@ -180,6 +184,25 @@ export async function executeCommand(
   finally { progress.stop(); }
 }
 
+/** Asks before the first GitNexus index of a repository; non-interactive runs need --yes. */
+async function approveGitNexusIndexing(
+  args: InitCommandArgs,
+  repositoryRoot: string,
+  context: CliContext | undefined,
+  progress: CliProgress | undefined
+): Promise<boolean> {
+  if (args.yes) return true;
+  const prompt = `${GITNEXUS_POLYFORM_NOTICE}\n\nIndex '${repositoryRoot}' with GitNexus (writes .gitnexus/ and .git/info/exclude) and register its Gateway service?`;
+  const ask = async () => {
+    if (context?.setup?.confirm) return context.setup.confirm(prompt);
+    if (args.json || !process.stdin.isTTY || !process.stderr.isTTY) return false;
+    const terminal = createInterface({ input: process.stdin, output: process.stderr });
+    try { return /^(y|yes)$/i.test((await terminal.question(`${prompt} [y/N] `)).trim()); }
+    finally { terminal.close(); }
+  };
+  return progress ? progress.confirmation(ask) : ask();
+}
+
 async function executeCommandWithProgress(
   parsed: ParsedCliCommand,
   context: CliContext | undefined,
@@ -294,7 +317,7 @@ async function executeCommandWithProgress(
         } catch (error) {
           configDiagnostics.push(error instanceof Error ? error.message : String(error));
         }
-        const platform = resolveSetupPlatform(context, repository.root);
+        const platform = resolveSetupPlatform(context);
         const rawGitnexus = await checkRepositoryGitNexus({ repository, platform });
         const gitnexusEnabled = envConfig ? envConfig.environment.tools?.gitnexus?.enabled !== false : true;
         const gitnexus = gitnexusEnabled
@@ -342,17 +365,17 @@ async function executeCommandWithProgress(
         emitProgress("Removing repository GitNexus registration...");
       }
       try {
-        const repository = await identifyRepository(targetDir);
-        const configPath = resolve(repository.root, parsed.configPath ?? ENVIRONMENT_CONFIG_PATH);
-        const platform = resolveSetupPlatform(context, repository.root);
-        const gitnexus = await removeRepositoryGitNexus({ repository, platform });
-        const loaded = await loadRepositoryConfig(configPath);
-        const config = loaded.ok
-          ? loaded.value
-          : defaultEnvironmentConfig(repository, parsed.projectName, context?.clock?.(), parsed.provider);
+        // A deleted repository can still be unregistered by its former path.
+        const repository = await identifyRepository(targetDir).catch(() => undefined);
+        const workspaceRoot = repository?.root ?? targetDir;
+        const configPath = resolve(workspaceRoot, parsed.configPath ?? ENVIRONMENT_CONFIG_PATH);
+        const platform = resolveSetupPlatform(context);
+        const gitnexus = await removeRepositoryGitNexus({ workspaceRoot, platform });
+        const loaded = repository ? await loadRepositoryConfig(configPath) : undefined;
+        const config = loaded?.ok ? loaded.value : undefined;
         const output: InitCommandOutput = {
           configPath,
-          config,
+          ...(config ? { config } : {}),
           overwritten: false,
           mode: "remove",
           healthy: true,
@@ -385,7 +408,7 @@ async function executeCommandWithProgress(
     }
 
     const repository = await identifyRepository(targetDir);
-    const platform = resolveSetupPlatform(context, repository.root);
+    const platform = resolveSetupPlatform(context);
     let gitnexusEnabled = !parsed.noGitnexus;
     if (gitnexusEnabled) {
       try {
@@ -402,9 +425,22 @@ async function executeCommandWithProgress(
       emitProgress("Preparing repository GitNexus index and Gateway service...");
     }
 
-    const gitnexus = gitnexusEnabled
+    // GitNexus is PolyForm-Noncommercial and writes into the repository, so a first registration needs explicit approval.
+    const approved = gitnexusEnabled && (await isRepositoryGitNexusRegistered({ repository, platform }) ||
+      await approveGitNexusIndexing(parsed, repository.root, context, showProgress ? progress : undefined));
+    const gitnexus = approved
       ? await prepareRepositoryGitNexus({ repository, platform })
-      : {
+      : gitnexusEnabled
+        ? {
+            status: "skipped" as const,
+            serviceId: gitNexusServiceId(repository.root),
+            indexed: false,
+            registered: false,
+            gatewayReady: false,
+            diagnostics: [GITNEXUS_POLYFORM_NOTICE,
+              "GitNexus indexing was not approved; rerun 'bflow init --yes' to accept the license and index this repository, or pass --no-gitnexus."]
+          }
+        : {
           status: "skipped" as const,
           serviceId: gitNexusServiceId(repository.root),
           indexed: false,
