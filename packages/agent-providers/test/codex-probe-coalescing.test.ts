@@ -74,13 +74,28 @@ function harness(settings: { probeOutcome?: ProviderCommandOutcome; differentAcc
   const health = (role: "conversation" | "reviewer", options: ProviderAdapterOptions = {}, env = environment(role)) => adapter(options).checkHealth({
     schemaVersion: 3, environment: env, stage: "preflight", requestedAt: new Date().toISOString()
   });
-  return { adapter, health, commands, get probes() { return probes; }, get authentications() { return authentications; } };
+  return { adapter, health, commands, coalescer, get probes() { return probes; }, get authentications() { return authentications; } };
+}
+
+function heldExecutionProbe() {
+  let release!: () => void;
+  const completion = new Promise<void>(resolve => { release = resolve; });
+  return { release, executionOutcome: async () => { await completion; return undefined; } };
 }
 
 describe("Codex readiness execution ping sharing", () => {
   it("reduces overlapping roles to one ping while each retains its own authentication and health", async () => {
-    const h = harness();
-    const [conversation, reviewer] = await Promise.all([h.health("conversation"), h.health("reviewer")]);
+    const held = heldExecutionProbe();
+    const h = harness(held);
+    const requests = vi.spyOn(h.coalescer, "probe");
+    const healthChecks = [h.health("conversation"), h.health("reviewer")] as const;
+    try {
+      await expect.poll(() => requests.mock.calls.length).toBe(2);
+    } finally {
+      held.release();
+      await Promise.allSettled(healthChecks);
+    }
+    const [conversation, reviewer] = await Promise.all(healthChecks);
     expect(conversation.ok && conversation.value.status, JSON.stringify(conversation)).toBe("ready");
     expect(reviewer.ok && reviewer.value.status).toBe("ready");
     expect(conversation.ok && conversation.value.role).toBe("conversation");
@@ -112,13 +127,23 @@ describe("Codex readiness execution ping sharing", () => {
   });
 
   it.each(["config.toml", "auth.json", "hooks.json"])("does not share across changed %s observations", async file => {
-    const h = harness();
-    const first = h.health("conversation");
-    await expect.poll(() => h.probes).toBe(1);
-    await writeFile(join(home, file), file === "config.toml" ? 'model = "new-model"\n' : file === "hooks.json" ? '{"hooks":{}}\n' : "{}\n", { mode: 0o600 });
-    const second = h.health("reviewer");
-    const results = await Promise.all([first, second]);
+    const held = heldExecutionProbe();
+    const h = harness(held);
+    const healthChecks = [h.health("conversation")];
+    try {
+      await expect.poll(() => h.probes).toBe(1);
+      // Polling can outlast the fake runner's delay; keep the original ping in flight until after the mutation.
+      await writeFile(join(home, file), file === "config.toml" ? 'model = "new-model"\n' : file === "hooks.json" ? '{"hooks":{}}\n' : "{}\n", { mode: 0o600 });
+      healthChecks.push(h.health("reviewer"));
+      await expect.poll(() => h.probes).toBe(2);
+    } finally {
+      held.release();
+      await Promise.allSettled(healthChecks);
+    }
+    const results = await Promise.all(healthChecks);
     expect(results[0]!.ok && results[0]!.value.status).toBe("blocked");
+    expect(results[0]!.ok && results[0]!.value.checks.some(check => check.check === "authentication" &&
+      check.code === "probe_failed" && check.message.includes("context changed"))).toBe(true);
     expect(results[1]!.ok && results[1]!.value.status).toBe("ready");
     expect(h.probes).toBe(2);
   });
