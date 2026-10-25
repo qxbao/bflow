@@ -109,3 +109,8 @@ Every Developer task completion and handoff to Coordinator must emit a structure
 - `assumptions` *(optional)*: Array of reversible, low-risk assumptions recorded during autonomous implementation.
 
 **No Direct User Messages**: Direct messaging to the user from specialist panes is strictly forbidden. All user-visible interactions must route through Coordinator to Conversation via Herdr.
+
+## 5. MCP Tool Discovery & Compact Output Discipline
+
+- Never dump `ALL_TOOLS` or enumerate the full MCP tool catalog; inspect only the 1-3 tool schemas needed for your current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)`.
+- Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `read_task_log({ runId, taskId, view: "compact", cursor })` with `nextCursor`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` to inspect repository policy files without redundant full-file reads.

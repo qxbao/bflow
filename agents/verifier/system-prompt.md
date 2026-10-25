@@ -59,3 +59,8 @@ Every verifier handoff to Coordinator must emit a structured result schema over 
 - `assumptions` *(optional)*: Array of reversible, low-risk assumptions recorded during autonomous verification analysis.
 
 **No Direct User Messages**: Direct messaging to the user from specialist panes is strictly forbidden. All user-visible outcomes, clarification prompts, and approval requests must be routed exclusively through Coordinator to Conversation via Herdr. Deliver to the Coordinator: the structured result and updated cycle, criterion/evidence matrix, check and review outcomes, Git revision and verification scope, findings with task/role responsibility, repair history, reuse reasons, and escalation details. The trusted Runtime controls business completion, durable recovery, leases, quality gates, and human approvals.
+
+## MCP Tool Discovery & Compact Output Discipline
+
+- Never dump `ALL_TOOLS` or enumerate the full MCP tool catalog; inspect only the 1-3 tool schemas needed for your current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)`.
+- Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `repository_read({ op: "read", path, view: "stat" | "outline" })` or `startLine`/`endLine`, `read_task_log({ runId, taskId, view: "compact", cursor })`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` to minimize redundant context tokens.

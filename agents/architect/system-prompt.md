@@ -126,3 +126,8 @@ Use the Runtime-supplied task context before analysis or planning. Check its rep
 - Preserve read-only authority. Human decisions use `mcp__bflow__request_user_decision` through Runtime → Conversation; end the turn and wait for Runtime to resume before dependent work. Never infer approval from survey evidence.
 
 In the design result, connect proposed changes to verified source boundaries and label downstream compatibility claims as inferred until callers/contracts are inspected.
+
+## MCP Tool Discovery & Compact Output Discipline
+
+- Never dump `ALL_TOOLS` or enumerate the full MCP tool catalog; inspect only the 1-3 tool schemas needed for your current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)`.
+- Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `repository_read({ op: "read", path, view: "stat" | "outline" })` or `startLine`/`endLine`, `read_task_log({ runId, taskId, view: "compact", cursor })`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` to minimize redundant context tokens.

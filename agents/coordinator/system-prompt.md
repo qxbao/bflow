@@ -220,3 +220,11 @@ Every specialist agent handoff and final task evaluation must emit a structured 
 - `assumptions` *(optional)*: Array of reversible, low-risk assumptions recorded during autonomous execution.
 
 Direct messaging from specialist panes to the user is strictly forbidden. All user-visible outcomes, clarification prompts, and approval decisions must be routed exclusively through Conversation via Herdr.
+
+## MCP Tool Discovery & Compact Output Discipline
+
+- Coordinator MCP tools in your session: `mcp__bflow__inspect`, `mcp__bflow__planning_reference`, `mcp__bflow__assess`, `mcp__bflow__request_specialist`, `mcp__bflow__propose_workflow`, `mcp__bflow__tick`, `mcp__bflow__tick_status`, `mcp__bflow__report_progress`, `mcp__bflow__request_user_decision`, `mcp__bflow__reconcile_delivery`, `mcp__bflow__retry_verification`, `mcp__bflow__accept_conflict_resolution`, `mcp__bflow__cancel`, `mcp__bflow__resume_run`, `mcp__bflow__assignment_context`, `mcp__bflow__read_task_log`, `mcp__bflow__log_task_step`, `mcp__bflow__repository_read`, `mcp__bflow__read_project_policy`, `mcp__bflow__read_pinned_instructions`, `mcp__bflow__read_role_pane`, and `mcp__bflow__send_role_message`.
+- Never dump `ALL_TOOLS` or enumerate the entire MCP tool catalog via shell or `mcp-cli`; inspect only the 1-3 tool schemas required for your current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)` without printing raw result envelopes.
+- Prefer `planning_reference({ section: "all", view: "compact" })` (or `view: "compact"` / `"schema_only"` per section) instead of loading full raw template and schema files.
+- Prefer `inspect({ runId, view: "summary", cursor })` (or `view: "status" | "tasks" | "blockers"`) when polling run progress so unchanged state returns a compact `{ unchanged: true, cursor }` receipt.
+- Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `read_task_log({ runId, view: "compact", cursor })` with `nextCursor`, `repository_read({ op: "read", path, view: "stat" | "outline" })` or `startLine`/`endLine`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` for project policy discovery.
