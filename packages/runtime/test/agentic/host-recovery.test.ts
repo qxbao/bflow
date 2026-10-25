@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureAgenticHost } from "../../dist/agentic/host-controller.js";
 import {
+  effectiveFastPathMode,
   effectiveRegressionScope,
   openPersistedAgenticHost,
   readHostConfiguration,
@@ -59,6 +60,84 @@ describe("persisted host policy regressionScope recovery", () => {
           verification: {
             ...basePolicy.verification,
             regressionScope: "bogus"
+          }
+        }
+      }),
+      { mode: 0o600 }
+    );
+
+    await expect(readHostConfiguration(hostJsonPath)).rejects.toThrow("Invalid persisted host policy");
+    await expect(openPersistedAgenticHost({ repositoryPath: root, sessionId })).rejects.toThrow(
+      "Invalid persisted host policy"
+    );
+  });
+
+  it("persisted host policy without fastPath is valid and treated as off", async () => {
+    expect(effectiveFastPathMode(basePolicy, true)).toBe("off");
+    expect(effectiveFastPathMode(basePolicy, false)).toBe("auto");
+    expect(effectiveFastPathMode(undefined, false)).toBe("off");
+    expect(effectiveFastPathMode(undefined, true)).toBe("off");
+    expect(
+      effectiveFastPathMode(
+        {
+          ...basePolicy,
+          fastPath: { mode: "auto" }
+        },
+        true
+      )
+    ).toBe("auto");
+    expect(
+      effectiveFastPathMode(
+        {
+          ...basePolicy,
+          fastPath: { mode: "off" }
+        },
+        false
+      )
+    ).toBe("off");
+
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-fastpath-valid-")));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const sessionId = "session-fastpath-valid";
+    const directory = join(root, ".bflow", "state", "host", sessionId);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const hostJsonPath = join(directory, "host.json");
+    await writeFile(
+      hostJsonPath,
+      JSON.stringify({
+        repositoryPath: root,
+        sessionId,
+        directory,
+        socketPath: join(directory, "host.sock"),
+        token: "secret-token",
+        policy: basePolicy
+      }),
+      { mode: 0o600 }
+    );
+
+    const configuration = await readHostConfiguration(hostJsonPath);
+    expect(effectiveFastPathMode(configuration.policy, true)).toBe("off");
+  });
+
+  it("rejects invalid persisted fastPath.mode", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-fastpath-invalid-")));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const sessionId = "session-fastpath-invalid";
+    const directory = join(root, ".bflow", "state", "host", sessionId);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const hostJsonPath = join(directory, "host.json");
+    await writeFile(
+      hostJsonPath,
+      JSON.stringify({
+        repositoryPath: root,
+        sessionId,
+        directory,
+        socketPath: join(directory, "host.sock"),
+        token: "secret-token",
+        policy: {
+          ...basePolicy,
+          fastPath: {
+            mode: "bogus"
           }
         }
       }),
