@@ -108,6 +108,18 @@ export type { BehavioralCommand } from "./agentic/behavioral-runner.js";
 export { effectiveRegressionScope, ensureAgenticHost, openPersistedAgenticHost } from "./agentic/host-controller.js";
 export type { AgenticHostController, AgenticHostOptions, RegressionScope, RoleLaunchDescriptor } from "./agentic/host-controller.js";
 
+export {
+  createGitNexusImpactIndex,
+  unconfiguredImpactIndex,
+  parseCypherFilePaths
+} from "./agentic/impact-index.js";
+export type {
+  IndexUnavailableCode,
+  ImportersResult,
+  ImpactIndex,
+  GitNexusImpactIndexOptions
+} from "./agentic/impact-index.js";
+
 // P30: platform readiness composition (no concrete provider adapter classes are exported).
 export * from "./platform/index.js";
 
