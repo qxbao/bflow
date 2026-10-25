@@ -2620,7 +2620,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const result = AgentResultSchema.parse(message.payload);
     const task = run.tasks.find(item => item.taskId === result.taskId);
     const out = state.outbound.find(item => item.message.message_id === message.causation_id);
-    if (!task || !out?.handle || out.message.type !== "task.assignment" || out.status !== "accepted" ||
+    if (!task || !out?.handle || out.message.type !== "task.assignment" ||
+        (out.status !== "accepted" && !(out.status === "released" && task.result?.attemptId === result.attemptId)) ||
         message.sender.role !== "developer" || message.sender.agent_id !== out.handle.target.agentId ||
         message.sender.pane_id !== out.handle.target.paneId || result.runId !== run.runId ||
         result.executionId !== out.handle.executionId || result.requestId !== out.handle.requestId || result.attemptId !== out.handle.attemptId ||

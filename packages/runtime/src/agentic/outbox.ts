@@ -214,7 +214,7 @@ export class HerdrOutbox {
       if (!released.ok && !(released.error.code === "conflict" && Date.parse(out.lease.expiresAt) <= Date.parse(this.now()))) unwrap(released);
       delete out.leaseRelease;
     }
-    delete out.error;
+    if (!out.phaseFailure && !out.error?.startsWith("policy_phase_failed:")) delete out.error;
     out.status = "released";
     await this.save();
   }

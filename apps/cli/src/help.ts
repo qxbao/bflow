@@ -5,7 +5,7 @@ const GLOBAL_HELP = `Cách dùng: bflow <command> [options] (Usage: bflow <comma
 
 CLI điều phối quy trình SDLC tự hành (Autonomous SDLC workflow orchestration CLI).
 
-Lệnh (Commands):
+Lệnh / Commands:
   init            Khởi tạo cấu hình kho mã bflow và quy trình mặc định
   config-migrate  Chuyển đổi tệp cấu hình cũ sang .bflow/config.yml
   setup           Lập kế hoạch và cài đặt môi trường máy cùng các thành phần nền tảng

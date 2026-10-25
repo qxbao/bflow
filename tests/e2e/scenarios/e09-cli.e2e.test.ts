@@ -99,7 +99,7 @@ describe("Scenario E09 — CLI Subprocess Verification & End-to-End Execution", 
     const workDir = makeTempDir();
     const { stdout, exitCode } = await runCli(["init"], workDir);
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("bflow repository configuration ready at:");
+    expect(stdout).toContain("Đã khởi tạo cấu hình kho mã nguồn bflow");
     const configPath = join(workDir, ".bflow", "config.yml");
     expect(existsSync(configPath)).toBe(true);
     expect(existsSync(join(workDir, ".bflow", "config.yaml"))).toBe(false);
