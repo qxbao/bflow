@@ -526,7 +526,125 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     }) as Record<string, any>;
     expect(decided).toMatchObject({
       ok: true,
-      recoverableUserTurns: [{ content: "Yêu cầu 1 chưa xử lý" }]
+      recoverableUserTurns: [{ content: "Yêu cầu 1 chưa xử lý" }],
+      turnContext: {
+        requiresConversationDecision: false,
+        recoverableUserTurns: [{ content: "Yêu cầu 1 chưa xử lý" }]
+      }
     });
-  }, 20_000);
+    const firstTurnId = decided.recoverableUserTurns[0]!.messageId as string;
+    await invoke("conversation_decide", {
+      messageId: firstTurnId,
+      decision: { intent: "conversation_only", directReply: "Đã xử lý yêu cầu 1" }
+    });
+
+    const submitUserTurn = (prompt: string) => callHost(chat.socketPath, chat.token, "user_prompt", {
+      paneId: "pane-chat",
+      hook: { hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt }
+    });
+
+    // Approval failure on codex: read_updates and conversation_decide expose the failure details.
+    await submitUserTurn("apr-missing-99: 1");
+    const failedUpdates = await invoke("read_updates", {}) as { turnContext: Record<string, any> };
+    expect(failedUpdates.turnContext).toMatchObject({
+      requiresConversationDecision: false,
+      approvalFailed: true,
+      approvalFailure: {
+        error: expect.stringContaining("apr-missing-99"),
+        note: expect.stringContaining("The approval was NOT recorded")
+      }
+    });
+    await expect(invoke("conversation_decide", {
+      decision: { intent: "conversation_only", directReply: "Thử lại" }
+    })).rejects.toThrow(/Trusted approval failed:.*The approval was NOT recorded.*apr-missing-99/);
+
+    // Unrecorded approval warning (turnWarnings) + valid trusted_approval on codex + CONVERSATION_CONTEXT_BUDGET bounding.
+    const { AgenticJournal } = await import("../../src/agentic/journal.js");
+    const { CONVERSATION_CONTEXT_BUDGET } = await import("../../src/agentic/conversation-context-budget.js");
+    const { buildUserDecisionRequest } = await import("../../src/agentic/decision-routing.js");
+    const { draft } = await import("../../../specification/test/fixtures.js");
+    const journal = new AgenticJournal(join(root, ".bflow/state/agentic/journal"), root);
+    const runId = "run-codex-approval";
+    const correlationId = "corr-codex-approval";
+    const delegation = DelegationRequestSchema.parse({
+      schemaVersion: 2,
+      delegationId: "del-codex-approval",
+      messageId: "msg-codex-approval",
+      correlationId,
+      runId,
+      sessionId: "chat-session",
+      requestedBy: "conversation",
+      targetRole: "coordinator",
+      title: "Kiểm thử cache prefix",
+      objective: "Kiểm tra approval và budget trên codex",
+      specificationId: "spec-codex-approval",
+      sddLevel: "lightweight",
+      acceptanceCriteria: draft().acceptanceCriteria,
+      inputArtifacts: [],
+      priority: "normal",
+      requestedAt: at,
+      idempotencyKey: "msg-codex-approval"
+    });
+    const reqA = buildUserDecisionRequest({
+      input: { runId, taskId: "task-a", question: "Câu hỏi A?", options: ["Phương án A", "Phương án B"], expiresInMinutes: 20 },
+      role: "coordinator",
+      sessionId: "chat-session",
+      revision: 1,
+      generation: 1,
+      now: at
+    });
+    const reqB = buildUserDecisionRequest({
+      input: { runId, taskId: "task-b", question: "Câu hỏi B?", options: ["Phương án C", "Phương án D"], expiresInMinutes: 20 },
+      role: "coordinator",
+      sessionId: "chat-session",
+      revision: 1,
+      generation: 1,
+      now: at
+    });
+    await expect.poll(async () => {
+      try {
+        await journal.exclusive(async (state, save) => {
+          state.runs.push({
+            runId,
+            delegation,
+            status: "implementing",
+            tasks: [],
+            coreCreated: false,
+            cancelled: false,
+            maxIterations: 3,
+            userDecisions: {
+              [reqA.approvalId]: { request: reqA, role: "coordinator", agentId: "coordinator", paneId: "pane-coordinator", taskId: "task-a", status: "pending" },
+              [reqB.approvalId]: { request: reqB, role: "coordinator", agentId: "coordinator", paneId: "pane-coordinator", taskId: "task-b", status: "pending" }
+            }
+          });
+          await save();
+        });
+        return true;
+      } catch (error) {
+        if (String(error).includes("runtime busy")) return false;
+        throw error;
+      }
+    }, { timeout: 10_000, interval: 25 }).toBe(true);
+
+    // Bare "1" with 2 pending approvals cannot be auto-recorded -> sets turnWarnings on both read_updates and conversation_decide.
+    await submitUserTurn("1");
+    const ambiguousDecided = await invoke("conversation_decide", {
+      decision: { intent: "conversation_only", directReply: `Hiện có 2 câu hỏi đang chờ, bạn chọn mã cụ thể nhé. ${"Chi tiết ".repeat(650)}` }
+    }) as Record<string, any>;
+    expect(ambiguousDecided.approvalWarnings?.some((w: string) => w.includes(reqA.approvalId) && w.includes(reqB.approvalId))).toBe(true);
+
+    // Exact approval reply "<approvalId>: 1" succeeds in the trusted hook -> read_updates exposes result and bounds turnContext within CONVERSATION_CONTEXT_BUDGET.
+    await submitUserTurn(`${reqA.approvalId}: 1`);
+    const approvedUpdates = await invoke("read_updates", {}) as { turnContext: Record<string, any> };
+    expect(approvedUpdates.turnContext).toMatchObject({
+      requiresConversationDecision: false,
+      result: { ok: true, value: { recognizedIntent: "approval_response" } },
+      context: { messagesOmitted: expect.any(Number) }
+    });
+    expect(approvedUpdates.turnContext.context.messagesOmitted).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(approvedUpdates.turnContext), "utf8")).toBeLessThanOrEqual(CONVERSATION_CONTEXT_BUDGET);
+    await expect(invoke("conversation_decide", {
+      decision: { intent: "conversation_only", directReply: "Không được phép ghi đè" }
+    })).rejects.toThrow(/Conflicting Conversation decision.*requiresConversationDecision=false.*"recognizedIntent":"approval_response"/);
+  }, 30_000);
 });

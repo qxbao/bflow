@@ -1233,7 +1233,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     if (name === "conversation_decide") {
       if (role !== "conversation") throw new Error("Only Conversation decides user intent");
-      return conversationIntake.decide(binding, parameters);
+      const decided = await conversationIntake.decide(binding, parameters);
+      const isCodexConversation = providerForRole(role) === "codex" || binding.provider === "codex" || binding.agentKind === "codex";
+      if (!isCodexConversation || typeof decided !== "object" || decided === null || Array.isArray(decided)) return decided;
+      return json({
+        ...(decided as Record<string, unknown>),
+        turnContext: boundConversationContext(await conversationIntake.inspectTurn(binding), CONVERSATION_CONTEXT_BUDGET)
+      });
     }
     if (name === "send_role_message") {
       // Identity comes from the authenticated pane, never from the model: a missing agent_id/pane_id is filled in, a wrong one is still refused.
@@ -2632,8 +2638,9 @@ function stopNoticeReason(notices: readonly NoticeLike[]): string {
 
 export const CODEX_CONVERSATION_USER_TURN_MARKER =
   "Trusted Bflow user turn: requiresConversationDecision=true unless the host recorded a trusted approval or fence command. " +
-  "For an ordinary user turn, call conversation_decide first (messageId is optional; the host binds the latest trusted user turn automatically). " +
-  "Call read_updates to inspect pending Runtime updates and current turn/Conversation context. Never fabricate provenance or approval.";
+  "If the user message is an approval/decision reply (#n, apr-..., đồng ý, từ chối), an explicit tiếp tục/resume request, a physical fence command, or references existing workflows/clarifications, call read_updates FIRST to inspect turnContext (messageId, requiresConversationDecision, result, approvalFailure, workflows, pendingClarifications, recoverableUserTurns) and pending Runtime updates. " +
+  "When turnContext.requiresConversationDecision is false, do NOT call conversation_decide; report turnContext.result or turnContext.approvalFailure to the user. " +
+  "For an ordinary new user turn (requiresConversationDecision=true), call conversation_decide (messageId is optional; the host binds the latest trusted user turn automatically). Never fabricate provenance or approval.";
 
 export const CODEX_CONVERSATION_NUDGE_MARKER =
   "Trusted Bflow inbox nudge, not a user message and not an approval. requiresConversationDecision=false. " +
