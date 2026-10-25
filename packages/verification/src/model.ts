@@ -209,6 +209,7 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
   }
   for (const criterion of spec.acceptanceCriteria) {
     if (criterion.required === false || criterion.status === "waived") continue;
+    if (value.reviewWaiver?.kind === "identical_integrated_tree" && criterion.verificationMethod === "manual_review") continue;
     const names = mappings.get(criterion.id);
     if (!names || !configs.some(c => c.method === criterion.verificationMethod && c.criterionIds.includes(criterion.id) &&
         names.every(name => c.testNames.includes(name)))) throw new Error(`No complete check mapping for ${criterion.id}`);
