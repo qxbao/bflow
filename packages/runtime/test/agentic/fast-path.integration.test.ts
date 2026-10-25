@@ -168,7 +168,7 @@ async function createIntegrationHarness(options: {
   cleanups.push(async () => {
     store.close();
     artifacts.close();
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   const transport = new FakeAgentTransport();

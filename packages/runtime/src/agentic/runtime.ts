@@ -2350,7 +2350,7 @@ export class AgenticWorkflowRuntime {
         run.delegation.metadata?.followUpFromRunId
       );
       const fastPathDecision = evaluateFastPath({
-        mode: this.ports.fastPathMode ?? "auto",
+        mode: this.ports.fastPathMode ?? "off",
         classification,
         assessment: record(draft.metadata?.sdd).assessment,
         delegationSddLevel: run.delegation.sddLevel,
@@ -3531,8 +3531,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         this.verificationPlan(state, run, task), `cycle-${digest([run.runId, task.taskId, task.cycle.cycleId])}`));
     }
     if (run.workflowVerificationPending && !retained.some(item => pendingTaskId(item) === FINAL_TASK)) run.workflowVerificationPending = false;
-    if (run.workflowCycle && retryableVerificationCycle(run.workflowCycle)) run.workflowCycle = VerificationCycleSchema.parse(this.ports.policies.verification.start(
-      this.verificationPlan(state, run), `cycle-${digest([run.runId, FINAL_TASK, run.workflowCycle.cycleId])}`));
+    if (run.workflowCycle && retryableVerificationCycle(run.workflowCycle)) {
+      delete run.workflowVerificationPlan;
+      run.workflowCycle = VerificationCycleSchema.parse(this.ports.policies.verification.start(
+        this.verificationPlan(state, run), `cycle-${digest([run.runId, FINAL_TASK, run.workflowCycle.cycleId])}`));
+    }
     run.status = "verifying"; delete run.error;
     return retained.length;
   }

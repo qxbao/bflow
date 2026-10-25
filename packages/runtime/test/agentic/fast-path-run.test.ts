@@ -167,7 +167,7 @@ async function setupFixture(options: {
   cleanups.push(async () => {
     store.close();
     artifacts.close();
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   const transport = new FakeAgentTransport();
@@ -390,7 +390,7 @@ async function setupFixture(options: {
     },
     taskChecks: checks,
     workflowChecks: checks,
-    ...(options.fastPathMode ? { fastPathMode: options.fastPathMode } : {}),
+    fastPathMode: options.fastPathMode ?? "auto",
     authenticateMessage: async () => true,
     authenticateResult: async () => true,
     authenticateEvidence: async () => true,

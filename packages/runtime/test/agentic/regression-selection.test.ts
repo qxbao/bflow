@@ -10,7 +10,7 @@ import { selectRegressionTests } from "../../src/agentic/regression-selection.js
 const tempDirs: string[] = [];
 afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
 
@@ -24,7 +24,7 @@ async function makeTempRepo(files: Record<string, string>): Promise<{ repo: stri
     await writeFile(fullPath, content);
   }
   execFileSync("git", ["add", "."], { cwd: repo });
-  execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@bflow.invalid", "commit", "-qm", "base"], {
+  execFileSync("git", ["-c", "gc.auto=0", "-c", "user.name=Test", "-c", "user.email=test@bflow.invalid", "commit", "-qm", "base"], {
     cwd: repo
   });
   const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
@@ -45,7 +45,7 @@ async function commitChanges(
     await unlink(join(repo, relPath));
   }
   execFileSync("git", ["add", "-A"], { cwd: repo });
-  execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@bflow.invalid", "commit", "-qm", message], {
+  execFileSync("git", ["-c", "gc.auto=0", "-c", "user.name=Test", "-c", "user.email=test@bflow.invalid", "commit", "-qm", message], {
     cwd: repo
   });
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
