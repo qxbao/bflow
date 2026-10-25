@@ -12,6 +12,12 @@ export const AUTOMATIC_RUNNERS = [
   { id: "auto-integration", command: "auto:integration", method: "integration_test", levels: ["integration", "regression"] }
 ] as const;
 
+export const AUTOMATIC_STATIC_COMMANDS = ["auto:static", "auto:static_analysis"] as const;
+
+export function isAutomaticStaticCommand(command: string): boolean {
+  return (AUTOMATIC_STATIC_COMMANDS as readonly string[]).includes(command);
+}
+
 export interface AutomaticRunner { id: string; command: string; method: BehavioralCommand["method"]; levels: readonly string[] }
 
 /** Static gate definitions for the automatic runners; their test identities are bound when the verification plan is built. */
@@ -137,7 +143,12 @@ export function describeTestRunners(source: TestRunnerSource) {
         id: profile.id, command: profile.command, method: profile.method, levels: profile.levels, reporter: profile.reporter, source: "detected",
         testPathRule: TEST_PATH_RULE, testNameRule: profile.adapter?.nameRule ?? (profile.reporter === "vitest_json" ? VITEST_NAME_RULE : TAP_NAME_RULE),
         ...(profile.adapter ? { adapter: profile.adapter.adapterId, version: profile.adapter.version, projectDirectory: profile.adapter.projectDirectory, resultFormat: profile.adapter.format } : {})
-      }))
+      })),
+      ...(source.automatic && detection?.status === "detected" ? [{
+        id: "auto-static", command: "auto:static", method: "static_analysis", levels: [] as string[], reporter: "host_static", source: "detected",
+        testPathRule: "Host-verified Git diff integrity and syntax check on changed files.",
+        testNameRule: "Policy static_analysis check; include {\"method\":\"static_analysis\",\"command\":\"auto:static\"} in metadata.conditionalTdd.infrastructure.commands when high-risk or security-sensitive policy requires static_analysis."
+      }] : [])
     ],
     testRunnerDetection: !source.automatic ? { status: "owner" }
       : detection?.status === "detected" ? { status: "detected", notes: detection.notes }

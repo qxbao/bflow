@@ -744,7 +744,7 @@ describe("Rework root-cause explanation & independent verification through Runti
         findingId: finding2.findingId,
         disposition: "addressed",
         rootCause: "notes.md omitted rollback invariant B on line 2 during initial drafting",
-        sourceLocations: [{ path: "notes.md", startLine: 2, endLine: 2 }],
+        sourceLocations: ["notes.md:2-2"],
         repairSummary: "Documented rollback invariant B on line 2 of notes.md",
         discriminatingCheck: {
           kind: "manual_review",
@@ -770,6 +770,9 @@ describe("Rework root-cause explanation & independent verification through Runti
       "succeeded"
     );
     expect(dossier).toBeDefined();
+    expect(dossier!.findingResolutions[1]!.sourceLocations).toEqual([
+      { path: "notes.md", startLine: 2, endLine: 2 }
+    ]);
     // Crucial invariant: Developer claiming "addressed" NEVER closes findings before independent verification
     expect(dossier!.verificationOutcome.status).toBe("pending_independent_verification");
     expect(dossier!.verificationOutcome.closedFindingIds).toEqual([]);

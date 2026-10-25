@@ -193,15 +193,28 @@ export class HerdrOutbox {
     if (out.status === "released") return;
     if (out.leaseReacquisition) await this.reconcileLeaseAcquisition(out);
     if (out.lease && !out.parentAssignmentId) {
-      if (out.leaseRenewal) await this.renew(out);
+      if (out.leaseRenewal) {
+        const reconciled = await this.ports.registry.renewLease(out.leaseRenewal);
+        if (!reconciled.ok && !(reconciled.error.code === "conflict" && reconciled.error.message === "Lease expired or released"))
+          unwrap(reconciled);
+        if (reconciled.ok) {
+          out.lease = AgentLeaseSchema.parse(reconciled.value);
+          for (const child of this.state.outbound) if (child.parentAssignmentId === out.message.message_id) child.lease = out.lease;
+        }
+        delete out.leaseRenewal;
+        await this.save();
+      }
       out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({
         leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken, expectedVersion: out.lease.version,
         releasedAt: this.now(), idempotencyKey: `release:${out.lease.leaseId}:${out.lease.version}`
       });
       await this.save();
-      unwrap(await this.ports.registry.releaseLease(out.leaseRelease));
+      const released = await this.ports.registry.releaseLease(out.leaseRelease);
+      if (!released.ok && !(released.error.code === "conflict" && released.error.message === "Lease expired or already released"))
+        unwrap(released);
       delete out.leaseRelease;
     }
+    delete out.error;
     out.status = "released";
     await this.save();
   }
@@ -252,7 +265,13 @@ export class HerdrOutbox {
       if (!out.parentAssignmentId) await onBound(out, out.handle);
       if (out.message.type === "task.assignment") {
         const run = this.state.runs.find(item => item.runId === out.message.run_id);
-        if (run && !run.cancelled && !["completed", "failed", "escalated"].includes(run.status)) {
+        const task = run?.tasks.find(item => item.taskId === out.taskId);
+        if (task?.writerReleased) {
+          await this.release(out);
+          return;
+        }
+        if (run && !run.cancelled && !["completed", "failed", "escalated"].includes(run.status) &&
+            (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
           try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); }
         }
         return;
@@ -260,7 +279,8 @@ export class HerdrOutbox {
       const health = await this.ports.panes.inspectRoleHealth(out.selector);
       if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
         await this.release(out); // transport capacity only; never task-success evidence
-      else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId)
+      else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId &&
+          (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000))
         await this.renew(out); // a bounded host measurement may outlive one lease period
       return;
     }
@@ -302,6 +322,11 @@ export class HerdrOutbox {
     if (pane.metadata?.launchId !== undefined && !pane.session) { this.markNotReady(out); return; }
     const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
     if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId || health.agentId !== pane.agentId) {
+      if (health.occupantMatches && health.paneId === pane.paneId && health.agentId === pane.agentId &&
+          this.state.outbound.some(item => item !== out && !item.phaseRetirement && !item.reviewReplacement &&
+            item.status === "accepted" && item.handle?.target.paneId === pane.paneId && item.handle?.target.agentId === pane.agentId)) {
+        this.markReady(out); return;
+      }
       this.markNotReady(out); return;
     }
     this.markReady(out);
@@ -335,6 +360,13 @@ export class HerdrOutbox {
           Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
           this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status))) {
         out.status = "cancelled"; out.error = "Review continuation no longer matches an active known-delivered request"; await this.save(); return;
+      }
+    }
+    if (record(out.message.payload).kind === "result_reminder") {
+      const source = this.state.outbound.find(item => item.message.message_id === record(out.message.payload).sourceMessageId);
+      const target = source?.handle?.target;
+      if (target?.session && pane.session && digest(target.session) !== digest(pane.session)) {
+        out.status = "cancelled"; out.error = "Result reminder recipient native session changed after restart"; await this.save(); return;
       }
     }
     // Fail closed before Registry lease acquisition, dispatch intent, or transport side effects.

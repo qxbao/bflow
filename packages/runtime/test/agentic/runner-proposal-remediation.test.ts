@@ -78,6 +78,44 @@ describe("historical workflow proposal binding", () => {
     expect(error.reason).toContain("static_analysis");
     expect(error.reason).toContain("policy");
   });
+  it("accepts high-risk security-sensitive proposals when auto:static and auto:integration are provisioned", async () => {
+    const conditionalTdd = (spec.metadata as Record<string, unknown>).conditionalTdd as Record<string, unknown>;
+    const infrastructure = conditionalTdd.infrastructure as { readiness: string; commands: Array<Record<string, unknown>> };
+    const unitOnlyCriteria = spec.acceptanceCriteria.map(criterion => ({ ...criterion, verificationMethod: "unit_test" as const }));
+    const highRiskUnitOnly = SpecificationSchema.parse({
+      ...spec,
+      complexity: "complex",
+      level: "full",
+      riskLevel: "high",
+      acceptanceCriteria: unitOnlyCriteria,
+      metadata: {
+        ...spec.metadata,
+        conditionalTdd: {
+          ...conditionalTdd,
+          riskClassification: "high",
+          changeImpact: { ...(conditionalTdd.changeImpact as Record<string, unknown>), securitySensitive: true },
+          infrastructure: {
+            ...infrastructure,
+            commands: [
+              ...infrastructure.commands,
+              { method: "static_analysis", command: "auto:static" }
+            ]
+          }
+        }
+      }
+    });
+    const resolved = new TestStrategyResolver().resolve(highRiskUnitOnly);
+    expect(resolved.targetCommands).toEqual(["auto:unit", "auto:integration", "auto:static"]);
+    const host = await verification();
+    expect(() => host.assertSupported(highRiskUnitOnly, resolved, definition)).not.toThrow();
+    expect(() => host.assertTaskSupported(highRiskUnitOnly, resolved, definition.tasks[0]!.metadata!.ownedPaths as string[])).not.toThrow();
+    const checks = host.behavioralChecks(highRiskUnitOnly, resolved);
+    expect(checks.map(check => (check.configuration as Record<string, unknown>).command)).toEqual([
+      "auto:unit",
+      "auto:integration",
+      "auto:static"
+    ]);
+  });
   it("rejects partial criterion coverage in a monorepo task after both profiles bind globally", async () => {
     const unit = { ...profiles()[0]!, timeoutMs: 1000, prepare: undefined };
     const integration: RunnerProfile = { ...profiles()[1]!, timeoutMs: 1000, prepare: undefined, adapter: {

@@ -9,16 +9,18 @@ import { unwrap } from "./outbox.js";
 import { eventTailCursor } from "../recovery.js";
 
 /** Process-local proof of a previously restored or successfully persisted aggregate; never reconstructed from a query projection. */
-export type CoreRestoreCache = Map<string, { snapshot: WorkflowRunSnapshot; engine: AgenticRuntimePorts["engine"]; runStore: AgenticRuntimePorts["runStore"]; definitionDigest: string }>;
+export type CoreRestoreCache = Map<string, { snapshot: WorkflowRunSnapshot; engine: AgenticRuntimePorts["engine"]; runStore: AgenticRuntimePorts["runStore"]; definitionDigest: string; checkpointedVersion?: number }>;
 
 /** Core event batches are journaled before SQLite writes. Recovery replays authoritative events. */
 export class CoreSession {
   constructor(private readonly ports: AgenticRuntimePorts, private readonly state: JournalState,
     private readonly save: () => Promise<void>, private readonly restored: CoreRestoreCache = new Map()) {}
-  private remember(snapshot: WorkflowRunSnapshot): void {
+  private remember(snapshot: WorkflowRunSnapshot, checkpointedVersion?: number): void {
     const run = this.state.runs.find(item => item.runId === snapshot.runId);
+    const priorCheckpointedVersion = checkpointedVersion ?? this.restored.get(snapshot.runId)?.checkpointedVersion;
     if (run?.definition) this.restored.set(snapshot.runId, { snapshot: WorkflowRunSnapshotSchema.parse(snapshot),
-      engine: this.ports.engine, runStore: this.ports.runStore, definitionDigest: digest(run.definition) });
+      engine: this.ports.engine, runStore: this.ports.runStore, definitionDigest: digest(run.definition),
+      ...(priorCheckpointedVersion !== undefined ? { checkpointedVersion: priorCheckpointedVersion } : {}) });
   }
   async flush(): Promise<void> {
     while (this.state.pendingCore.length) {
@@ -97,7 +99,7 @@ export class CoreSession {
         events.push(...page.items.map(event => DomainEventSchema.parse(event))); cursor = page.nextCursor;
       } while (cursor);
       unwrap(await this.ports.engine.recover({ runId: run.runId, ...(checkpoint ? { checkpoint } : {}), events, expectedVersion: stored.snapshot.version }));
-      this.remember(await this.snapshot(run.runId));
+      this.remember(await this.snapshot(run.runId), checkpoint?.version);
     }
   }
   async hasEvent(runId: string, type: string, id: string): Promise<boolean> {
@@ -113,10 +115,20 @@ export class CoreSession {
     } while (cursor);
     return false;
   }
+  hasUncheckpointedEvents(runId: string): boolean {
+    const cached = this.restored.get(runId);
+    return cached === undefined || cached.checkpointedVersion === undefined || cached.snapshot.version > cached.checkpointedVersion;
+  }
   async checkpoint(runId: string): Promise<void> {
     const snapshot = await this.snapshot(runId);
+    const cached = this.restored.get(runId);
+    if (cached && cached.engine === this.ports.engine && cached.runStore === this.ports.runStore &&
+        cached.checkpointedVersion === snapshot.version && digest(snapshot) === digest(cached.snapshot)) {
+      return;
+    }
     const checkpoint = unwrap(await this.ports.engine.createCheckpoint({ runId, expectedVersion: snapshot.version,
       checkpointId: `p19-checkpoint:${runId}:${snapshot.version}`, createdAt: snapshot.updatedAt }));
     unwrap(await this.ports.runStore.saveCheckpoint(checkpoint, snapshot.version));
+    this.remember(snapshot, snapshot.version);
   }
 }

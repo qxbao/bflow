@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileAgentRegistry } from "@bflow/agent-registry";
-import { ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema,
+import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema,
   type OperationResult, type PaneBinding, type RoleMessage } from "@bflow/contracts";
 import { AgenticJournal, digest, type JournalState, type Outbound, type RunRecord } from "../../src/agentic/journal.js";
+import { CoreSession } from "../../src/agentic/core-session.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { routeNativeConversationMessage } from "../../src/agentic/workspace.js";
 import { evaluateWatchdog } from "../../src/agentic/run-watchdog.js";
@@ -75,7 +76,7 @@ async function fixture(options: { deliveryFails?: boolean; runs?: RunRecord[]; c
   cleanup.push(root);
   let now = Date.parse(T0);
   const panes = new Panes(), transport = new FakeAgentTransport();
-  const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
+  const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json"), clock: () => new Date(now) });
   const delivered: RoleMessage[] = [];
   const conversation = { attempts: 0, failing: options.deliveryFails ?? false };
   let capabilityAllowed = options.capabilityAllowed ?? true;
@@ -229,6 +230,40 @@ describe("run watchdog facts", () => {
     expect(facts!.activeHandoff).toBe(false);
     expect(evaluateWatchdog({ now: f.now(), runs: [facts!], notices: [], panes: [{ role: "coordinator", status: "idle" }] }))
       .toEqual([expect.objectContaining({ kind: "stalled" })]);
+  });
+
+  it("does not report not-ready delivery_failure or run_stalled on a follow-up run while Coordinator works on the parent changes_requested turn", async () => {
+    const approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: "design-1", runId: "run-1", sessionId: "session-1",
+      status: "pending", target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: T0,
+      reason: "Design review", evidence: [], idempotencyKey: "design:run-1" });
+    const f = await fixture({ runs: [run("run-1", "awaiting_approval", { approval, approvalKind: "design", baseRevision: "a".repeat(40) })] });
+    const decision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: "design-1", runId: "run-1", sessionId: "session-1",
+      target: { type: "run" }, revision: 1, generation: 0, decision: "changes_requested", decidedBy: "user", decidedAt: T0,
+      reason: "Keep full SDD level", feedbackArtifacts: [], idempotencyKey: "decision:design-1" });
+    const decisionMsg = message("approval-decision-1", { sender: { role: "conversation", agent_id: "conversation-agent", pane_id: "pane-conversation" },
+      recipient: { role: "coordinator" }, type: "approval.decision", payload: decision });
+    await f.runtime.queueHerdr(decisionMsg);
+    await f.runtime.flushOutbound();
+    expect((await f.outboundOf("approval-decision-1")).status).toBe("accepted");
+
+    // Coordinator starts working on approval-decision-1 and acknowledges it, creating follow-up run-1-r2 and queueing its wake.
+    f.panes.busy.add("coordinator");
+    await f.runtime.receiveHerdr(decisionMsg);
+    const wakeId = `p19-wake-${digest(["run-1-r2", "changes_requested", "design-1"])}`;
+    expect((await f.outboundOf(wakeId)).status).toBe("queued");
+
+    f.advance(6 * MINUTE);
+    await f.runtime.flushOutbound();
+    const wake = await f.outboundOf(wakeId);
+    expect(wake.notReadySince).toBeUndefined();
+    expect(wake.error).toBeUndefined();
+    expect(await f.notices("delivery_failure", "run-1-r2")).toHaveLength(0);
+
+    const r2Facts = (await f.runtime.watchdogSnapshot("session-1")).find(item => item.runId === "run-1-r2")!;
+    expect(r2Facts).toMatchObject({ activeHandoff: true, acceptedRoles: ["coordinator"],
+      acceptedPanes: [{ role: "coordinator", paneId: "pane-coordinator" }] });
+    expect(evaluateWatchdog({ now: f.now(), runs: [r2Facts], notices: [],
+      panes: [{ role: "coordinator", paneId: "pane-coordinator", status: "working" }] })).toEqual([]);
   });
 });
 
@@ -440,5 +475,112 @@ describe("escalated verification retry and design approval", () => {
     expect(blocked).toHaveLength(1);
     expect(blocked[0]!.message.payload).toMatchObject({ approvalId: "design-1", options: expect.any(Array) });
     expect(digest(after.approval)).toBe(digest(approval));
+  });
+
+  it("releases a writer-released task assignment cleanly even when its lease expired with a pending renewal", async () => {
+    const f = await fixture();
+    await f.registry.upsert({ agentId: "developer-agent", role: "developer", transport: "herdr", enabled: true,
+      priority: 1, maxConcurrentTasks: 1, capabilities: ["implementation"], settings: {} });
+    const leaseRes = await f.registry.acquireLease({ leaseId: "lease-dev-1", agentId: "developer-agent",
+      runId: "run-1", taskId: "task-1", attemptId: "attempt-1", ttlMs: 1_000, requestedAt: T0, idempotencyKey: "acq-dev-1" });
+    if (!leaseRes.ok) throw new Error(leaseRes.error.message);
+    await f.journal.exclusive(async (state: JournalState, save: () => Promise<void>) => {
+      state.runs[0]!.tasks.push({
+        taskId: "task-1", spec: { specification, strategy: { schemaVersion: 2, strategyId: "strat-1", runId: "run-1", taskId: "task-1",
+          specId: specification.specId, tddDecision: { schemaVersion: 2, decisionId: "tdd-1", runId: "run-1", taskId: "task-1",
+            specId: specification.specId, mode: "not_applicable", rationale: "test", verifiableConditions: ["c"],
+            changeClassification: "bugfix", requiresFailingTestFirst: false, decidedBy: "coordinator", decidedAt: T0 },
+          testTypes: ["unit"], targetCommands: ["auto:unit"], criterionMappings: [{ criterionId: specification.acceptanceCriteria[0]!.id,
+            verificationMethod: "automated_test", testNames: ["t1"] }], alternativeVerifications: [{ method: "automated_test",
+            description: "unit test", command: "auto:unit", requiredArtifactKind: "test-result" }], createdAt: T0 } },
+        worktrees: [], outboundIds: ["assign-dev-1"], writerReleased: true
+      } as never);
+      const assignMsg = message("assign-dev-1", {
+        sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: "developer-agent", pane_id: "pane-developer" },
+        type: "task.assignment"
+      });
+      state.outbound.push({
+        message: assignMsg, status: "accepted", selector: "binding-developer-removed", taskId: "task-1", attemptId: "attempt-1",
+        capabilities: ["implementation"], lease: leaseRes.value,
+        leaseRenewal: { leaseId: "lease-dev-1", fencingToken: leaseRes.value.fencingToken, expectedVersion: leaseRes.value.version,
+          ttlMs: 300_000, requestedAt: T0, idempotencyKey: "renew-expired-dev-1" },
+        request: { requestId: "req-dev-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-1", role: "developer",
+          target: { transport: "herdr", agentId: "developer-agent", paneId: "pane-developer", workspaceId: "workspace-1", tabId: "tab-1" },
+          instruction: JSON.stringify(assignMsg), workingDirectory: "/tmp", inputs: [], context: assignMsg, attempt: 1,
+          retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 60_000, onTimeout: "block" },
+          idempotency: { key: "assign-dev-1", scope: "agent-request", fingerprint: digest(assignMsg) }, createdAt: T0 },
+        handle: { executionId: "exec-dev-1", requestId: "req-dev-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-1",
+          role: "developer", target: { transport: "herdr", agentId: "developer-agent", paneId: "pane-developer", workspaceId: "workspace-1", tabId: "tab-1" },
+          acceptedAt: T0, transportState: "idle", correlationVerified: true }
+      });
+      await save();
+    });
+    f.advance(5 * MINUTE);
+    await f.runtime.flushOutbound();
+    const state = await f.runtime.inspect() as unknown as JournalState;
+    const assigned = state.outbound.find(item => item.message.message_id === "assign-dev-1")!;
+    expect(assigned.status).toBe("released");
+    expect(assigned.leaseRenewal).toBeUndefined();
+    expect(assigned.leaseRelease).toBeUndefined();
+    expect(assigned.error).toBeUndefined();
+  });
+
+  it("skips redundant Core checkpoint writes when the snapshot version has not changed", async () => {
+    let currentVersion = 1;
+    let createCalls = 0;
+    let saveCalls = 0;
+    const definition = {
+      id: "wf-1",
+      version: 1,
+      name: "Workflow",
+      failurePolicy: "fail-fast" as const,
+      maxConcurrency: 1,
+      tasks: [{ id: "task-1", name: "Task 1", role: "developer" as const, dependsOn: [], maxAttempts: 2 }]
+    };
+    const makeSnapshot = () => ({
+      runId: "run-1",
+      workflowId: "wf-1",
+      workflowVersion: 1,
+      status: "running" as const,
+      tasks: [{ taskId: "task-1", status: "running" as const, attempt: 1, generation: 0, version: currentVersion }],
+      createdAt: T0,
+      updatedAt: T0,
+      version: currentVersion,
+      lastEventSequence: currentVersion
+    });
+    const ports = {
+      engine: {
+        getSnapshot: async () => ({ ok: true, value: makeSnapshot() }),
+        createCheckpoint: async ({ checkpointId, expectedVersion }: { checkpointId: string; expectedVersion: number }) => {
+          createCalls++;
+          return { ok: true, value: { checkpointId, runId: "run-1", version: expectedVersion, eventSequence: expectedVersion } };
+        }
+      },
+      runStore: {
+        saveCheckpoint: async () => {
+          saveCalls++;
+          return { ok: true, value: undefined };
+        }
+      }
+    } as unknown as AgenticRuntimePorts;
+    const state = {
+      version: 1 as const,
+      repository: "/tmp/repo",
+      runs: [run("run-1", "implementing", { definition, coreCreated: true })],
+      outbound: [],
+      inbox: [],
+      pendingCore: [],
+      pendingVerifications: []
+    };
+    const core = new CoreSession(ports, state, async () => {});
+    await core.checkpoint("run-1");
+    await core.checkpoint("run-1");
+    expect(createCalls).toBe(1);
+    expect(saveCalls).toBe(1);
+    currentVersion = 2;
+    await core.checkpoint("run-1");
+    expect(createCalls).toBe(2);
+    expect(saveCalls).toBe(2);
   });
 });

@@ -76,4 +76,75 @@ describe("trusted host observations",()=>{
     expect(completed.result.status).toBe("passed");
   });
 
+  it("bounds large Agy inspect_review payloads below the 10KB inline tool limit while preserving full observation digests",async()=>{
+    const f=await fixture();
+    const largeText=Array.from({length:300},(_,i)=>`export const line_${i} = "value_${i}_${"x".repeat(25)}";`).join("\n")+"\n";
+    await writeFile(join(f.repository,"guide.md"),largeText);
+    f.git("add","guide.md");f.git("commit","-m","large-change");
+    const largeHead=f.git("rev-parse","HEAD");
+    const agyBinding={...f.binding,provider:"agy" as const,agentKind:"agy" as const};
+    const bigRework={
+      resolutionId:"res-1",
+      reworkGeneration:1,
+      developerAttemptId:"dev-attempt-2",
+      sourceRevision:largeHead,
+      baseRevision:f.base,
+      rootCauseSummary:"R".repeat(800),
+      fixSummary:"F".repeat(800),
+      changedFiles:["guide.md"],
+      checkWorkEvidence:{receiptId:"cw-1",sourceRevision:largeHead,exitCode:0,passed:true,rawEvidenceArtifact:"artifact://test/cw-1",checkedAt:new Date().toISOString()},
+      findingResolutions:Array.from({length:4},(_,i)=>({
+        findingId:`finding-1-${i+1}`,
+        rootCauseSummary:`Root cause ${i}: ${"C".repeat(450)}`,
+        fixExplanation:`Fix explanation ${i}: ${"E".repeat(450)}`,
+        changedFiles:["guide.md"],
+        sourceLocations:[{path:"guide.md",startLine:1,endLine:10,symbol:"line_0",summary:"S".repeat(200)}],
+        verificationSummary:`Verification ${i}: ${"V".repeat(450)}`,
+        evidenceArtifacts:["artifact://test/ev-1","artifact://test/ev-2","artifact://test/ev-3","artifact://test/ev-4"],
+        testRefs:["test/guide.test.ts"]
+      })),
+      verificationOutcome:{status:"pending_independent_re_verification"}
+    };
+    const bigArtifacts=Array.from({length:12},(_,i)=>({
+      artifactId:`art-${i}`,
+      uri:`artifact://test/art-${i}`,
+      kind:"test-result" as const,
+      mediaType:"application/json",
+      checksum:{algorithm:"sha256" as const,digest:"b".repeat(64)},
+      sizeBytes:1024,
+      createdAt:new Date().toISOString(),
+      createdBy:{agentId:"dev-1",role:"developer" as const,runId:"run",taskId:"task",attemptId:"attempt"},
+      extraMetadata:"M".repeat(300)
+    }));
+    f.outbound[0]={
+      ...f.outbound[0]!,
+      message:{
+        ...f.outbound[0]!.message,
+        payload:{...f.context,artifacts:bigArtifacts,input:{...(f.context.input as object),sourceRevision:largeHead,reworkResolution:bigRework}}
+      }
+    };
+    const first=await f.host.inspectReview(agyBinding,{messageId:"request"}) as {
+      reviewId:string;
+      reworkResolution?:{findingResolutions:Array<{findingId:string}>};
+      observation:{diff:string;diffOffset:number;diffTotalChars:number;diffTruncated:boolean;nextDiffOffset:number|null};
+    };
+    expect(Buffer.byteLength(JSON.stringify(first),"utf8")).toBeLessThanOrEqual(8500);
+    expect(first.reworkResolution?.findingResolutions.map(r=>r.findingId)).toEqual(["finding-1-1","finding-1-2","finding-1-3","finding-1-4"]);
+    expect(first.observation.diffTruncated).toBe(true);
+    expect(first.observation.nextDiffOffset).toBeGreaterThan(0);
+    const second=await f.host.inspectReview(agyBinding,{messageId:"request",diffOffset:first.observation.nextDiffOffset!}) as {
+      reviewId:string;
+      observation:{diff:string;diffOffset:number;diffTruncated:boolean;nextDiffOffset:number|null};
+    };
+    expect(second.reviewId).toBe(first.reviewId);
+    expect(Buffer.byteLength(JSON.stringify(second),"utf8")).toBeLessThanOrEqual(8500);
+    const completed=await f.restore().completeReview(agyBinding,{
+      messageId:"request",
+      reviewId:first.reviewId,
+      criteria:[{criterionId:"ac-1",passed:true,summary:"Full diff verified across paginated inspect_review slices"}],
+      summary:"Completed review for Agy large diff"
+    });
+    expect(completed.result.status).toBe("passed");
+  });
+
 });

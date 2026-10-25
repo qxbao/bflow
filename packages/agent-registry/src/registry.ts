@@ -120,6 +120,10 @@ export class FileAgentRegistry implements AgentRegistry {
       if (!Number.isFinite(time + request.ttlMs) || time + request.ttlMs > 8.64e15) return fail(validation("Lease TTL exceeds supported date range"));
       const lease = AgentLeaseSchema.parse({ ...entry.lease, version: entry.lease.version + 1, expiresAt: new Date(time + request.ttlMs).toISOString() });
       entry.lease = lease;
+      for (const [key, item] of Object.entries(state.receipts)) {
+        const current = item.kind === "lease" && item.lease ? state.leases[item.lease.leaseId] : undefined;
+        if (key.startsWith("renew:") && current && item.lease!.version < current.lease.version) delete state.receipts[key];
+      }
       state.receipts[request.idempotencyKey] = { fingerprint, kind: "lease", lease };
       return ok(lease);
     }, options);
@@ -140,6 +144,10 @@ export class FileAgentRegistry implements AgentRegistry {
       if (!active(entry, time)) return fail(conflict("Lease expired or already released"));
       if (entry.lease.fencingToken !== request.fencingToken || entry.lease.version !== request.expectedVersion) return fail(conflict("Stale fencing token or lease version"));
       entry.active = false;
+      for (const [key, item] of Object.entries(state.receipts)) {
+        const current = item.kind === "lease" && item.lease ? state.leases[item.lease.leaseId] : undefined;
+        if (key.startsWith("renew:") && current && item.lease!.version < current.lease.version) delete state.receipts[key];
+      }
       state.receipts[request.idempotencyKey] = { fingerprint, kind: "void" };
       return ok(undefined);
     }, options);

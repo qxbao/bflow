@@ -978,10 +978,17 @@ export class AgenticWorkflowRuntime {
       try {
         await this.transaction(async (state, save, _core, outbox) => {
           const run = this.run(state, context.runId); this.live(run);
+          const task = run.tasks.find(item => item.taskId === context.taskId);
+          const binding = unwrap(await this.ports.panes.getRoleBinding(role));
           // An already-applied verdict predates this evaluation and fails the verifier's execution-window check, so a retry asks
           // again under the next deterministic key. A request still awaiting its reply (same key, no verdict) is waited on, not resent.
           const settled = (messageId: string): boolean => {
             const prior = state.outbound.find(item => item.message.message_id === messageId);
+            if (prior?.status === "released" && prior.handle && task?.cycle?.startedAt &&
+                Date.parse(prior.handle.acceptedAt) < Date.parse(task.cycle.startedAt) &&
+                (prior.stopObservedAt !== undefined || (binding?.session && digest(binding.session) !== digest(prior.handle.target.session)))) {
+              return true;
+            }
             return state.inbox.some(item => item.status === "applied" && item.message.causation_id === messageId &&
               (item.message.type === "review.verdict" || prior?.handle && ["accepted", "released"].includes(prior.status) &&
                 item.message.type === "task.status" && objectField(item.message.payload, "status") === "blocked" &&
@@ -1032,7 +1039,6 @@ export class AgenticWorkflowRuntime {
             if (!current?.session || current.paneId === old.paneId || digest(current.session) === digest(old.session))
               throw new Error("Authorized review replacement requires a distinct verified native session");
           }
-          const task = run.tasks.find(item => item.taskId === context.taskId);
           const reworkDossier = task?.reworkResolutions?.find(item => item.attemptId === context.attemptId);
           const gateArtifacts = reworkDossier
             ? [...context.artifacts, reworkDossier.artifactRef, ...reworkDossier.findingResolutions.map(item => item.evidence.artifactRef)]
@@ -1095,11 +1101,24 @@ export class AgenticWorkflowRuntime {
     const handoffs = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation");
     const messages = [...state.outbound.map(out => out.message), ...state.inbox.map(item => item.message)]
       .filter(message => message.run_id === run.runId && message.recipient.role !== "conversation");
-    const times = [Date.parse(run.delegation.requestedAt), ...messages.map(message => Date.parse(message.occurred_at ?? ""))].filter(Number.isFinite);
+    const times = [
+      Date.parse(run.delegation.requestedAt),
+      ...(run.lastWorkflowRejection?.rejectedAt ? [Date.parse(run.lastWorkflowRejection.rejectedAt)] : []),
+      ...messages.map(message => Date.parse(message.occurred_at ?? ""))
+    ].filter(Number.isFinite);
     const pendingDecisionRequests = Object.values(run.userDecisions ?? {}).filter(entry => entry.status === "pending")
       .map(entry => ({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId }));
-    const holders = handoffs.filter(out => this.outboundOwesResult(state, run, out) ||
-      out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined);
+    const parentRunId = typeof run.delegation.metadata?.parentRunId === "string" ? run.delegation.metadata.parentRunId : undefined;
+    const supersededApprovalId = typeof run.delegation.metadata?.supersededApprovalId === "string" ? run.delegation.metadata.supersededApprovalId : undefined;
+    const parentApprovalHolders = !run.definition && parentRunId ? state.outbound.filter(out =>
+      out.message.run_id === parentRunId && out.message.type === "approval.decision" && out.message.recipient.role === "coordinator" &&
+      out.status === "accepted" && out.handle !== undefined &&
+      (!supersededApprovalId || record(out.message.payload).approvalId === supersededApprovalId)) : [];
+    const holders = [
+      ...handoffs.filter(out => this.outboundOwesResult(state, run, out) ||
+        out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined),
+      ...parentApprovalHolders
+    ];
     return {
       runId: run.runId, status: run.status, live: !(run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)),
       lastActivityAt: Math.max(...times), awaitingHuman: run.status === "awaiting_approval" || run.status === "clarifying" && state.outbound.some(out =>
@@ -1982,6 +2001,16 @@ export class AgenticWorkflowRuntime {
             !Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending") &&
             !state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status) && item !== out) &&
             this.outboundOwesResult(state, run, source);
+        } else if (payload.kind === "result_reminder") {
+          const source = state.outbound.find(item => item.message.message_id === payload.sourceMessageId);
+          const target = source?.handle?.target;
+          continuation = source !== undefined && source.message.run_id === run.runId &&
+            ["accepted", "released"].includes(source.status) &&
+            target !== undefined && target.agentId === binding.agentId && target.paneId === binding.paneId &&
+            target.workspaceId === binding.workspaceId && target.tabId === binding.tabId && digest(target.session) === digest(binding.session) &&
+            message.sender.role === "runtime" && message.causation_id === source.message.message_id &&
+            message.message_id === this.holderReminderId(run, source) &&
+            this.outboundOwesResult(state, run, source);
         }
       }
       if (binding.role !== "coordinator" && !out.parentAssignmentId &&
@@ -2063,6 +2092,16 @@ export class AgenticWorkflowRuntime {
   }
   /** A specialist attempt replaced by a newer attempt of the same Coordinator request no longer owes a result. */
   private supersededAttempt(state: JournalState, out: Outbound): boolean {
+    if (out.reviewReplacement) return true;
+    if (out.message.type === "verification.requested" && out.message.message_id.startsWith("gate-")) {
+      const context = out.message.payload;
+      if (state.outbound.some(item => item !== out && item.message.run_id === out.message.run_id &&
+          item.message.type === "verification.requested" && item.message.recipient.role === out.message.recipient.role &&
+          digest(item.message.payload) === digest(context) &&
+          Date.parse(item.message.occurred_at ?? "") > Date.parse(out.message.occurred_at ?? ""))) {
+        return true;
+      }
+    }
     const key = objectField(out.message.payload, "idempotencyKey");
     return out.message.type === "delegation.request" && typeof key === "string" && key.startsWith("specialist:") &&
       state.outbound.some(item => item.message.message_id === `p19-${digest([out.message.run_id, nextAttemptKey(key)])}`);
@@ -2248,6 +2287,8 @@ export class AgenticWorkflowRuntime {
         if (!accepted || accepted.description !== criterion.description || accepted.verificationMethod !== criterion.verificationMethod || criterion.required && !accepted.required)
           throw new Error("Planning weakens the delegated acceptance criteria");
       }
+      if (run.delegation.sddLevel === "full" && draft.level !== "full")
+        throw new Error("Planning weakens the delegated full SDD specification level");
       if (proposed.qualityGates.length || proposed.tasks.some(task => task.qualityGates.length))
         throw new Error("Configure independent project gates through taskChecks/workflowChecks, not agent-controlled gate definitions");
       if (proposed.tasks.some(task => task.role !== "developer")) throw new Error("Implementation DAG nodes must be Developer tasks; request read-only specialists through requestSpecialist");
@@ -2678,8 +2719,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   private async dispatch(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox, run: RunRecord): Promise<void> {
     const before = await core.snapshot(run.runId);
     if (["succeeded", "failed", "cancelled", "cancelling"].includes(before.status)) return;
-    await core.mutate(run.runId, snapshot => this.ports.engine.advance({ runId: run.runId, expectedVersion: snapshot.version,
-      occurredAt: this.now(), idempotencyKey: `advance:${run.runId}:${snapshot.version}` }));
+    const needsAdvance = before.status === "queued" ||
+      core.hasUncheckpointedEvents(run.runId) ||
+      before.tasks.some(task => ["pending", "ready", "retrying"].includes(task.status)) ||
+      (before.status === "running" && before.tasks.every(task => ["succeeded", "failed", "blocked", "cancelled"].includes(task.status)));
+    if (needsAdvance) {
+      await core.mutate(run.runId, snapshot => this.ports.engine.advance({ runId: run.runId, expectedVersion: snapshot.version,
+        occurredAt: this.now(), idempotencyKey: `advance:${run.runId}:${snapshot.version}` }));
+    }
     const snapshot = await core.snapshot(run.runId);
     for (const taskState of snapshot.tasks.filter(task => task.status === "running" && !task.agentExecution)) {
       const task = run.tasks.find(item => item.taskId === taskState.taskId)!;
@@ -2703,6 +2750,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (allocation.error.code !== "conflict" || !allocation.error.retryable) this.pauseDeveloperAllocation(run, task.taskId, run.error);
         this.progress(state, outbox, run, run.error); await save(); continue;
       }
+      if (run.error?.startsWith(`Developer allocation pending for ${task.taskId}: `)) delete run.error;
       const pane = PaneBindingSchema.parse(allocation.value);
       if (pane.worktreePath !== tree.worktreePath || pane.agentId !== agentName) throw new Error("Developer allocation mismatch");
       const requiredCapabilities = definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : ["implementation"];
@@ -3142,10 +3190,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             for (const task of run.tasks) {
               if (!task.result || task.result.status !== "succeeded" || task.verificationPending) continue;
               const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId)!;
-              if (current.status !== "waiting") continue;
+              if (! current || current.status !== "waiting") continue;
               const out = state.outbound.find(item => item.handle?.requestId === task.result!.requestId)!;
-              const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
-              if (!health.readyForPrompt || !health.occupantMatches) continue; // writer still active
+              if (!task.writerReleased) {
+                const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
+                if (!health.readyForPrompt || !health.occupantMatches) continue; // writer still active
+              }
               try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); }
               catch (error) {
                 run.error = `Independent policy evidence required for ${task.taskId}: ${String(error)}`;
@@ -3156,6 +3206,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
                 unwrap(await this.ports.panes.releaseDeveloper({ taskId: `${run.runId}-${task.taskId}`, closePane: false, removeWorktree: false }));
                 task.writerReleased = true; await save();
               }
+              await outbox.release(out);
               const change = GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key));
               if (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== current.attemptId) throw new Error("Git task submission mismatch");
               task.changeSet = change;

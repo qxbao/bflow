@@ -66,7 +66,23 @@ export const ReworkAssignmentContextSchema = z.object({
 });
 export type ReworkAssignmentContext = z.infer<typeof ReworkAssignmentContextSchema>;
 
-export const ReworkSourceLocationSchema = z.object({
+function normalizeSourceLocationInput(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  const lineMatch = /^(.+?):(\d+)(?:-(\d+))?$/.exec(trimmed);
+  if (lineMatch) {
+    const startLine = Number.parseInt(lineMatch[2]!, 10);
+    const endLine = lineMatch[3] !== undefined ? Number.parseInt(lineMatch[3], 10) : undefined;
+    return {
+      path: lineMatch[1]!.trim(),
+      startLine,
+      ...(endLine !== undefined ? { endLine } : {})
+    };
+  }
+  return { path: trimmed };
+}
+
+const ReworkSourceLocationObjectSchema = z.object({
   path: z.string().trim().min(1).max(1024),
   startLine: z.number().int().min(1).optional(),
   endLine: z.number().int().min(1).optional(),
@@ -79,7 +95,12 @@ export const ReworkSourceLocationSchema = z.object({
     context.addIssue({ code: "custom", message: `sourceLocations endLine (${value.endLine}) must be >= startLine (${value.startLine})` });
   }
 });
-export type ReworkSourceLocation = z.infer<typeof ReworkSourceLocationSchema>;
+
+export const ReworkSourceLocationSchema = z.preprocess(
+  normalizeSourceLocationInput,
+  ReworkSourceLocationObjectSchema
+);
+export type ReworkSourceLocation = z.infer<typeof ReworkSourceLocationObjectSchema>;
 
 export const DiscriminatingCheckSchema = z.object({
   kind: z.string().trim().min(1).max(128).default("check_work"),

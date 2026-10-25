@@ -171,4 +171,26 @@ describe("P02 registry reliability regressions", () => {
     expect(await reopened.releaseLease({ leaseId: winner.value.leaseId, fencingToken: winner.value.fencingToken, expectedVersion: 0, releasedAt: time.toISOString(), idempotencyKey: "stale-release" })).toMatchObject({ ok: false, error: { code: "conflict" } });
     expect(await reopened.renewLease({ leaseId: "replacement", fencingToken: 1, expectedVersion: 0, ttlMs: 1000, requestedAt: time.toISOString(), idempotencyKey: "stale-renew" })).toMatchObject({ ok: false, error: { code: "conflict" } });
   });
+
+  it("prunes superseded renew receipts while retaining current renewal and acquire receipts", async () => {
+    await registry.upsert(config());
+    const acquired = await registry.acquireLease(acquire("lease-prune"));
+    if (!acquired.ok) throw new Error(acquired.error.message);
+    let version = acquired.value.version;
+    for (let i = 0; i < 5; i++) {
+      const renewed = await registry.renewLease({
+        leaseId: "lease-prune",
+        fencingToken: acquired.value.fencingToken,
+        expectedVersion: version,
+        ttlMs: 1_000,
+        requestedAt: time.toISOString(),
+        idempotencyKey: `renew:msg:lease-prune:${version}`
+      });
+      if (!renewed.ok) throw new Error(renewed.error.message);
+      version = renewed.value.version;
+    }
+    const persisted = JSON.parse(await readFile(stateFile, "utf8")) as { receipts: Record<string, unknown> };
+    const renewKeys = Object.keys(persisted.receipts).filter(key => key.startsWith("renew:"));
+    expect(renewKeys).toEqual([`renew:msg:lease-prune:${version - 1}`]);
+  });
 });

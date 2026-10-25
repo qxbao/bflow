@@ -284,11 +284,28 @@ export class HostDevelopment {
     const context = await this.identity(binding, input);
     if (context.resolver) return (await this.conflictResolutionContext(binding))!;
     const rawRework = record(context.message.payload).reworkContext;
-    return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task =>
-      json({ runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+    return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
+      const fullEvidence = task.spec.strategy.metadata?.tddEvidence ?? [];
+      const fullReply = { runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
-        tddDecision: task.spec.strategy.tddDecision, recordedEvidence: task.spec.strategy.metadata?.tddEvidence ?? [],
-        ...(rawRework !== undefined ? { reworkContext: rawRework } : {}) }));
+        tddDecision: task.spec.strategy.tddDecision, recordedEvidence: fullEvidence,
+        ...(rawRework !== undefined ? { reworkContext: rawRework } : {}) };
+      if ((context.binding.agentKind === "agy" || context.binding.provider === "agy") && Buffer.byteLength(JSON.stringify(fullReply), "utf8") > 8500) {
+        const compactEvidence = Array.isArray(fullEvidence) ? fullEvidence.map(item => {
+          const entry = record(item);
+          return {
+            phase: entry.phase,
+            status: entry.status,
+            sourceRevision: entry.sourceRevision,
+            ...(entry.reworkGeneration !== undefined ? { reworkGeneration: entry.reworkGeneration } : {}),
+            ...(entry.evidence !== undefined ? { evidence: entry.evidence } : {}),
+            ...(entry.occurredAt !== undefined ? { occurredAt: entry.occurredAt } : {})
+          };
+        }) : [];
+        return json({ ...fullReply, recordedEvidence: compactEvidence });
+      }
+      return json(fullReply);
+    });
   }
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {

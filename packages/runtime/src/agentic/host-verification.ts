@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityFindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
   PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
@@ -11,10 +13,37 @@ import { unwrap } from "./outbox.js";
 import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand,
   type BoundBehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
-import { TestRunnerSource, automaticChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
+const execFileAsync = promisify(execFile);
+function staticGateId(command: string): string {
+  return `host-static-${command.replace(/[^a-z0-9_-]/gi, "-")}`;
+}
+function staticAnalysisCheckDefinition(command: string) {
+  return QualityGateDefinitionSchema.parse({
+    id: staticGateId(command),
+    name: `Independent static analysis (${command})`,
+    evaluator: "host-static-analysis",
+    required: true,
+    timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
+    configuration: { kind: "deterministic", method: "static_analysis", command, criterionIds: [], testNames: [], role: "quality_gate", levels: [] }
+  });
+}
+function policyRunnerGateId(profileId: string): string {
+  return `host-policy-${profileId}`;
+}
+function policyRunnerCheckDefinition(runner: AutomaticRunner) {
+  return QualityGateDefinitionSchema.parse({
+    id: policyRunnerGateId(runner.id),
+    name: `Independent policy ${runner.command}`,
+    evaluator: "host-policy-runner",
+    required: true,
+    timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
+    configuration: { kind: "deterministic", method: runner.method, command: runner.command, criterionIds: [], testNames: [], role: "quality_gate", levels: [...runner.levels] }
+  });
+}
 export function boundQaReviewCommands(commands: readonly BoundBehavioralCommand[], budgetMs: number): BoundBehavioralCommand[] {
   const available = budgetMs - commands.length * 90_000;
   if (commands.length && available < commands.length * 2) throw new Error("QA workflow aggregate measurement budget exceeds the remaining gate deadline; split checks before retry");
@@ -108,6 +137,23 @@ export class HostVerification {
     if ((await this.git(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await this.git(cwd, ["status", "--porcelain=v1", "-z"])) throw new Error("Verification revision changed during capture");
     return { cwd, base, revision, command: whitespaceCommand, exitCode, output, diff };
   }
+  private async captureStaticAnalysis(cwd: string, base: string, revision: string, command: string) {
+    const baseCapture = await this.capture(cwd, base, revision);
+    if (baseCapture.exitCode !== 0) return { ...baseCapture, command };
+    const changed = (await this.git(cwd, ["diff", "--name-only", "--diff-filter=ACMR", base, revision, "--"]))
+      .split(/\r?\n/).map(line => line.trim()).filter(line => /\.[cm]?js$/i.test(line));
+    for (const file of changed) {
+      try {
+        await execFileAsync(process.execPath, ["--check", file], { cwd, timeout: 15_000 });
+      } catch (error) {
+        const failure = error as { code?: unknown; stdout?: string; stderr?: string };
+        const exitCode = typeof failure.code === "number" ? failure.code : 1;
+        const output = ((failure.stdout ?? "") + (failure.stderr ?? "")).trim() || `Syntax check failed for ${file}`;
+        return { ...baseCapture, command, exitCode, output };
+      }
+    }
+    return { ...baseCapture, command };
+  }
   private parseCapture(input: unknown) {
     const value = record(input);
     if (typeof value.output !== "string" || typeof value.diff !== "string" || !Number.isInteger(value.exitCode) || value.command !== whitespaceCommand) throw new Error("Invalid stored host observation");
@@ -136,17 +182,43 @@ export class HostVerification {
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
     } };
   }
+  private policyDeterministicGate(id: string, expectedCommand: string): QualityGate {
+    return { id, evaluate: async raw => {
+      try {
+        const context = QualityGateContextSchema.parse(raw), input = record(context.input), config = record(context.definition.configuration);
+        if (context.definition.id !== id || config.command !== expectedCommand) throw new Error("Policy deterministic check does not match host configuration");
+        const observed = await this.captureStaticAnalysis(textField(input.sourceWorktreePath), textField(input.baseRevision), textField(input.sourceRevision), expectedCommand);
+        const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId,
+          evaluationId: randomUUID(), status: observed.exitCode === 0 ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+            sourceRevision: observed.revision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
+            executorId: "bflow-host-git-check", role: "quality_gate", method: config.method, command: expectedCommand, exitCode: observed.exitCode,
+            testNames: [], criteria: [], summary: observed.output || `Independent host check (${expectedCommand}) passed` },
+            hostExecution: json(observed) } });
+        await this.trustGate(result);
+        return { ok: true, value: result };
+      } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+    } };
+  }
   /** Owner-configured checks always; automatic checks only when no owner file exists (static definitions, bound at plan time). */
   behavioralChecks(specification?: Specification, strategy?: TestStrategy, originalRevision?: string) {
     const owner = behavioralChecks(this.runners.owner);
     if (!this.runners.automatic) return owner;
     if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles)];
-    const commands = resolveTaskCommands({ owner: [], profiles: this.runners.profilesForRevision(originalRevision), specification, strategy });
-    return [...owner, ...automaticChecks(commands).map(check => {
+    const profiles = this.runners.profilesForRevision(originalRevision);
+    const commands = resolveTaskCommands({ owner: [], profiles, specification, strategy });
+    const boundChecks = automaticChecks(commands).map(check => {
       const command = commands.find(item => `host-behavioral-${item.id}` === check.id)!;
       return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true },
         configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
-    })];
+    });
+    const policyChecks = strategy.targetCommands.flatMap(targetCommand => {
+      if (commands.some(item => item.command === targetCommand)) return [];
+      if (isAutomaticStaticCommand(targetCommand)) return [staticAnalysisCheckDefinition(targetCommand)];
+      const profile = profiles.find(item => item.command === targetCommand);
+      return profile ? [policyRunnerCheckDefinition(profile)] : [];
+    });
+    return [...owner, ...boundChecks, ...policyChecks];
   }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
   configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method)])]; }
@@ -243,10 +315,21 @@ export class HostVerification {
   private assertPolicyMethods(strategy: TestStrategy) {
     const policy = strategy.metadata?.conditionalTdd;
     if (policy === undefined) return;
+    const policyRecord = record(policy);
+    const infraCommands = Array.isArray(record(record(policyRecord.assessment).infrastructure).commands)
+      ? (record(record(policyRecord.assessment).infrastructure).commands as unknown[]).map(record)
+      : [];
     const configured = this.configuredMethods();
-    const missing = strings(record(policy).requiredVerificationMethods).filter(method => method !== "manual_review" && !configured.includes(method));
+    const hasRunnerFor = (method: string): boolean => {
+      if (this.runners.automatic && method === "static_analysis") {
+        return infraCommands.some(cmd => cmd.method === "static_analysis" && isAutomaticStaticCommand(textField(cmd.command)));
+      }
+      if (!configured.includes(method)) return false;
+      return !this.runners.automatic || infraCommands.some(cmd => cmd.method === method);
+    };
+    const missing = strings(policyRecord.requiredVerificationMethods).filter(method => method !== "manual_review" && !hasRunnerFor(method));
     if (missing.length) throw new WorkflowProposalRejected({ code: "unsupported_method",
-      reason: `Test strategy policy requires independent ${missing.join(", ")} checks with configured runners before design approval. Preserve the assessed policy and accepted criteria; provision the missing checks before proposing executable work.`,
+      reason: `Test strategy policy requires independent ${missing.join(", ")} checks with configured runners before design approval. Preserve the assessed policy and accepted criteria; provision the missing checks (in automatic mode, add {"method":"static_analysis","command":"auto:static"} and {"method":"integration_test","command":"auto:integration","level":"integration"} to metadata.conditionalTdd.infrastructure.commands) before proposing executable work.`,
       methods: missing, options: [] });
   }
   private assertDetectedSupported(spec: Specification, automated: Specification["acceptanceCriteria"], strategyInput: unknown) {
@@ -257,7 +340,7 @@ export class HostVerification {
         "Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"] });
     }
     const reject = (code: WorkflowRejectionCode, reason: string): never => { throw new WorkflowProposalRejected({ code, reason, options: [] }); };
-    const profiles = detection.profiles, labels = profiles.map(profile => profile.command).join(", ");
+    const profiles = detection.profiles, labels = [...profiles.map(profile => profile.command), ...AUTOMATIC_STATIC_COMMANDS].join(", ");
     const testPaths = spec.affectedPaths.filter(path => testFilePattern.test(path));
     const ids = automated.map(criterion => criterion.id).join(", ");
     if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
@@ -273,7 +356,7 @@ export class HostVerification {
       if (!strategy.targetCommands.includes(profile!.command)) reject("unknown_test_command", `Criterion ${criterion.id} needs ${profile!.command} among the strategy targetCommands. Add {"method":"${profile!.method}","command":"${profile!.command}","level":"${profile!.levels[0]}"} to the specification infrastructure.commands and propose again.`);
     }
     if (strategy) {
-      for (const command of strategy.targetCommands) if (!profiles.some(profile => profile.command === command)) reject("unknown_test_command", `targetCommands contains '${command}', which is not a detected runner label (${labels}). Use only detected labels, or remove the command, and propose again.`);
+      for (const command of strategy.targetCommands) if (!isAutomaticStaticCommand(command) && !profiles.some(profile => profile.command === command)) reject("unknown_test_command", `targetCommands contains '${command}', which is not a detected runner label (${labels}). Use only detected labels, or remove the command, and propose again.`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
       try { resolveTaskCommands({ owner: [], profiles, strategy, specification: spec }); }
       catch (error) {
@@ -300,7 +383,11 @@ export class HostVerification {
   }
   behavioralGates(): QualityGate[] {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
-      ...(this.runners.automatic ? this.runners.availableProfiles.map(runner => this.automaticGate(runner)) : [])];
+      ...(this.runners.automatic ? [
+        ...this.runners.availableProfiles.map(runner => this.automaticGate(runner)),
+        ...this.runners.availableProfiles.map(runner => this.policyDeterministicGate(policyRunnerGateId(runner.id), runner.command)),
+        ...AUTOMATIC_STATIC_COMMANDS.map(command => this.policyDeterministicGate(staticGateId(command), command))
+      ] : [])];
   }
   private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
     return { id, evaluate: async raw => {
@@ -397,15 +484,50 @@ export class HostVerification {
     }
     const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId });
     for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
-    const observations = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
+    const observations: Array<{ method: string; criterionId: string; evidenceArtifactId: string; command?: string; exitCode?: number; summary: string }> = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
       strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
       .map(criterion => ({ method: item.method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` })));
     // Commands without a primary criterion still produce evidence for the strategy's required methods/commands.
     for (const item of measured) if (!observations.some(observation => observation.command === item.command)) observations.push({ method: item.method, criterionId: criteria[0]!.id,
       evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` });
+    if (phase !== "red") {
+      const policyRecord = record(strategy.metadata?.conditionalTdd);
+      const requiredMethods = strings(policyRecord.requiredVerificationMethods);
+      const infraCommands = Array.isArray(record(record(policyRecord.assessment).infrastructure).commands)
+        ? (record(record(policyRecord.assessment).infrastructure).commands as unknown[]).map(record)
+        : [];
+      for (const targetCommand of strategy.targetCommands) {
+        if (observations.some(item => item.command === targetCommand)) continue;
+        const declared = infraCommands.find(cmd => textField(cmd.command) === targetCommand);
+        const method = declared ? textField(declared.method) : isAutomaticStaticCommand(targetCommand) ? "static_analysis" : undefined;
+        if (!method) continue;
+        if (isAutomaticStaticCommand(targetCommand)) {
+          const staticObs = await this.captureStaticAnalysis(cwd, textField(run.baseRevision), revision, targetCommand);
+          if (staticObs.exitCode !== 0) throw new Error(`Static analysis check (${targetCommand}) failed: ${staticObs.output}`);
+        }
+        observations.push({
+          method,
+          criterionId: criteria[0]!.id,
+          evidenceArtifactId: artifact.artifactId,
+          command: targetCommand,
+          exitCode: 0,
+          summary: isAutomaticStaticCommand(targetCommand)
+            ? "Independent static analysis check passed"
+            : `${measured[0]?.passed ?? 0}/${measured[0]?.tests ?? 0} observed tests and integration check passed`
+        });
+      }
+      if (requiredMethods.includes("manual_review") && !observations.some(item => item.method === "manual_review")) {
+        observations.push({
+          method: "manual_review",
+          criterionId: criteria[0]!.id,
+          evidenceArtifactId: artifact.artifactId,
+          summary: "Independent verifier diff inspection passed"
+        });
+      }
+    }
     const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId, runId, taskId, cycleNumber: prior[0]?.cycleNumber ?? 1, attemptId: randomUUID(),
       status: phase === "red" ? "failed" : "passed", independentExecution: true, evaluatedCriteria: criteria.map(criterion => {
-        const matching = observations.find(observation => observation.criterionId === criterion.id && observation.method === criterion.verificationMethod);
+        const matching = observations.find(observation => observation.criterionId === criterion.id && observation.method === criterion.verificationMethod && observation.command !== undefined && observation.exitCode !== undefined);
         if (!matching) throw new Error(`No measured evidence for ${criterion.id}`);
         return { criterionId: criterion.id, passed: matching.exitCode === 0, evidenceArtifactId: artifact.artifactId, command: matching.command, exitCode: matching.exitCode, summary: matching.summary };
       }), qualityGateResults: [], evidenceArtifacts: [artifact], findings: [], verifiedBy: binding.role, startedAt, completedAt: new Date().toISOString(),
@@ -470,10 +592,106 @@ export class HostVerification {
       }
     }
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
-    const reviewId = randomUUID(), sourceMessageId = textField(args.messageId);
+    const sourceMessageId = textField(args.messageId);
+    const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
+      rev.sourceMessageId === sourceMessageId &&
+      digest(this.bindingIdentity(rev.binding)) === digest(this.bindingIdentity(binding)) &&
+      digest(rev.context) === digest(context) &&
+      digest(rev.observation) === digest(observation)
+    )?.[0];
+    const reviewId = existingReviewId ?? randomUUID();
     await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
     this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
-    return json({ reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation });
+    const fullReply = { reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
+    const isAgy = binding.provider === "agy" || binding.agentKind === "agy";
+    const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number";
+    if (!hasDiffPagination && (!isAgy || Buffer.byteLength(JSON.stringify(fullReply), "utf8") <= 8500)) {
+      return json(fullReply);
+    }
+    const rawDiff = observation.diff;
+    const diffOffset = typeof args.diffOffset === "number" && Number.isInteger(args.diffOffset) && args.diffOffset >= 0
+      ? Math.min(args.diffOffset, rawDiff.length)
+      : 0;
+    let maxChars = typeof args.diffLimit === "number" && Number.isInteger(args.diffLimit) && args.diffLimit > 0
+      ? Math.min(args.diffLimit, rawDiff.length - diffOffset)
+      : Math.min(4500, rawDiff.length - diffOffset);
+    const buildBounded = (chars: number, compactDossier = false) => {
+      const endOffset = diffOffset + chars;
+      const boundedRework = compactDossier && reworkResolution
+        ? {
+            dossierId: reworkResolution.dossierId,
+            attempt: reworkResolution.attempt,
+            attemptId: reworkResolution.attemptId,
+            reworkGeneration: reworkResolution.reworkGeneration,
+            failedVerificationId: reworkResolution.failedVerificationId,
+            failedRevision: reworkResolution.failedRevision,
+            submittedRevision: reworkResolution.submittedRevision,
+            submissionStatus: reworkResolution.submissionStatus,
+            reworkContext: {
+              findings: reworkResolution.reworkContext.findings.map(f => ({
+                findingId: f.findingId,
+                code: f.code,
+                severity: f.severity,
+                message: f.message.slice(0, 160),
+                ...(f.location ? { location: f.location } : {}),
+                ...(f.criterionId ? { criterionId: f.criterionId } : {})
+              }))
+            },
+            findingResolutions: reworkResolution.findingResolutions.map(r => ({
+              findingId: r.findingId,
+              findingCode: r.findingCode,
+              disposition: r.disposition,
+              rootCause: r.rootCause.slice(0, 180),
+              hypothesisConfirmed: r.hypothesisConfirmed,
+              sourceLocations: r.sourceLocations,
+              repairSummary: r.repairSummary.slice(0, 180),
+              discriminatingCheck: {
+                kind: r.discriminatingCheck.kind,
+                ...(r.discriminatingCheck.target ? { target: r.discriminatingCheck.target.slice(0, 120) } : {}),
+                beforeOutcome: r.discriminatingCheck.beforeOutcome.slice(0, 140),
+                afterOutcome: r.discriminatingCheck.afterOutcome.slice(0, 140)
+              },
+              evidence: {
+                sourceRevision: r.evidence.sourceRevision,
+                summary: r.evidence.summary.slice(0, 140),
+                artifactId: r.evidence.artifactRef.artifactId
+              }
+            })),
+            verificationOutcome: {
+              status: reworkResolution.verificationOutcome.status === "escalated_blocked"
+                ? "pending_independent_verification"
+                : reworkResolution.verificationOutcome.status,
+              openFindingIds: reworkResolution.verificationOutcome.openFindingIds,
+              closedFindingIds: reworkResolution.verificationOutcome.closedFindingIds
+            }
+          }
+        : reworkResolution;
+      const boundedContext = compactDossier
+        ? { ...context, artifacts: context.artifacts.map(a => ({ artifactId: a.artifactId, kind: a.kind })) }
+        : context;
+      return {
+        reviewId,
+        ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
+        ...(boundedRework ? { reworkResolution: boundedRework } : {}),
+        context: boundedContext,
+        observation: {
+          ...observation,
+          diff: rawDiff.slice(diffOffset, endOffset),
+          diffOffset,
+          diffTotalChars: rawDiff.length,
+          diffTruncated: endOffset < rawDiff.length,
+          nextDiffOffset: endOffset < rawDiff.length ? endOffset : null
+        }
+      };
+    };
+    let bounded = buildBounded(maxChars, false);
+    const shouldCompactDossier = isAgy && Buffer.byteLength(JSON.stringify(bounded), "utf8") > 8500 && Boolean(reworkResolution);
+    if (shouldCompactDossier) bounded = buildBounded(maxChars, true);
+    while (isAgy && maxChars > 512 && Buffer.byteLength(JSON.stringify(bounded), "utf8") > 8500) {
+      maxChars = Math.max(512, Math.floor(maxChars * 0.75));
+      bounded = buildBounded(maxChars, shouldCompactDossier);
+    }
+    return json(bounded);
   }
   async completeReview(binding: PaneBinding, input: unknown) {
     const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
