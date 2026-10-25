@@ -102,8 +102,24 @@ export * from "./resilience/index.js";
 export * from "./observability/index.js";
 export * from "./context/index.js";
 export * from "./session-recovery/index.js";
-export { parseBehavioralCommands } from "./agentic/behavioral-runner.js";
-export type { BehavioralCommand } from "./agentic/behavioral-runner.js";
+export {
+  parseBehavioralCommands,
+  bindRegressionProfile,
+  measureRegression
+} from "./agentic/behavioral-runner.js";
+export type {
+  BehavioralCommand,
+  RegressionCommand,
+  RegressionMeasurement
+} from "./agentic/behavioral-runner.js";
+export {
+  parseRegressionResult,
+  RegressionInfrastructureFailure
+} from "./agentic/regression-results.js";
+export type {
+  RegressionFailure,
+  RegressionObservation
+} from "./agentic/regression-results.js";
 
 export { effectiveRegressionScope, ensureAgenticHost, openPersistedAgenticHost } from "./agentic/host-controller.js";
 export type { AgenticHostController, AgenticHostOptions, RegressionScope, RoleLaunchDescriptor } from "./agentic/host-controller.js";

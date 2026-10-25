@@ -15,6 +15,18 @@ import type { AdapterRunner } from "./runner-adapter.js";
 import { parseRunnerResult } from "./runner-results.js";
 import { collectRunnerReports } from "./runner-reports.js";
 import { assertRunnerProvenance } from "./runner-provenance.js";
+import {
+  parseRegressionResult,
+  RegressionInfrastructureFailure,
+  type RegressionObservation
+} from "./regression-results.js";
+
+export {
+  parseRegressionResult,
+  RegressionInfrastructureFailure,
+  type RegressionFailure,
+  type RegressionObservation
+} from "./regression-results.js";
 
 export interface BehavioralCommand {
   id: string; command: string; executable: string; args: string[];
@@ -116,6 +128,35 @@ export function bindRunnerProfile(profile: RunnerProfile, identities: { testName
     checkoutDependencyRoots, dependencySource: profile.dependencySource,
     ...(profile.adapter ? { adapter: profile.adapter } : {}),
     ...(profile.definitionBlobs ? { definitionBlobs: Object.fromEntries(Object.entries(profile.definitionBlobs).filter(([path]) => !testPaths.includes(path))) } : {}),
+    ...(profile.prepare === undefined ? {} : { prepare: { args: strings(profile.prepare.args, "prepare argv"), timeoutMs: profile.prepare.timeoutMs } })
+  };
+}
+export type RegressionCommand = Omit<BoundBehavioralCommand, "testNames"> & { testNames: []; selection: "regression" };
+export function bindRegressionProfile(profile: RunnerProfile, testPaths: string[], timeoutMs: number): RegressionCommand {
+  if (profile.source !== "detected") throw new Error("Runner profiles must be Runtime-detected");
+  if (profile.adapter !== undefined) throw new Error("Regression profile binding does not support adapter profiles");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(profile.id) || profile.command.length === 0 || profile.executable.includes("\0") || !isAbsolute(profile.executable)) throw new Error("Runner profile executable must be absolute and id must be safe");
+  if (!["unit_test", "integration_test", "e2e_test"].includes(profile.method)) throw new Error("Unsupported behavioral method");
+  const levels = strings(profile.levels, "levels") as BehavioralCommand["levels"];
+  if (levels.some(level => !permittedLevels[profile.method].includes(level))) throw new Error("Behavioral test levels do not match method");
+  if (profile.reporter !== "node_tap" && profile.reporter !== "vitest_json") throw new Error("Unsupported behavioral reporter");
+  const args = strings(profile.args, "argv", false);
+  const paths = strings(testPaths, "test paths");
+  assertTestIdentities([], paths);
+  if (paths.some(path => !testFilePattern.test(path))) throw new Error("Behavioral test paths must be committed test files");
+  const checkoutDependencyRoots = strings(profile.checkoutDependencyRoots, "checkout dependency roots", false);
+  for (const path of checkoutDependencyRoots) assertCheckoutDependencyRoot(path);
+  if (!isAbsolute(profile.dependencySource) || profile.dependencySource.includes("\0")) throw new Error("Behavioral dependency source must be an absolute repository path");
+  assertExecutionBounds(profile.timeoutMs, profile.maxOutputBytes);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 540_000) throw new Error("Invalid regression execution bounds");
+  if (profile.prepare !== undefined) assertExecutionBounds(profile.prepare.timeoutMs, undefined);
+  return {
+    id: profile.id, command: profile.command, executable: profile.executable, args: [...args, ...paths],
+    method: profile.method, levels, testNames: [], testPaths: paths, selection: "regression",
+    reporter: profile.reporter, timeoutMs,
+    ...(profile.maxOutputBytes === undefined ? {} : { maxOutputBytes: profile.maxOutputBytes }),
+    checkoutDependencyRoots, dependencySource: profile.dependencySource,
+    ...(profile.definitionBlobs ? { definitionBlobs: Object.fromEntries(Object.entries(profile.definitionBlobs).filter(([path]) => !paths.includes(path))) } : {}),
     ...(profile.prepare === undefined ? {} : { prepare: { args: strings(profile.prepare.args, "prepare argv"), timeoutMs: profile.prepare.timeoutMs } })
   };
 }
@@ -277,9 +318,15 @@ function outputTail(outcome: QualityCommandOutcome): string {
   const stderr = outcome.stderr.trim().slice(-1_000), stdout = outcome.stdout.trim().slice(-1_000);
   return [stderr ? `stderr: ${stderr}` : "", stdout ? `stdout: ${stdout}` : ""].filter(Boolean).map(part => ` ${part}`).join("");
 }
-/** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
-export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string,
-  options: { readonly rtk?: RtkOutputRequest } = {}): Promise<BehavioralMeasurement> {
+export interface RegressionMeasurement {
+  sourceRevision: string; commandId: string; testBlobs: Record<string, string>;
+  observation: RegressionObservation; outcome: QualityCommandOutcome;
+}
+async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: string, revision: string,
+  options: { readonly rtk?: RtkOutputRequest } = {}): Promise<{
+  outcome: QualityCommandOutcome; testBlobs: Record<string, string>; checkout: string;
+  reports?: Awaited<ReturnType<typeof collectRunnerReports>>; rtk?: BehavioralMeasurement["rtk"];
+}> {
   await assertPinnedRevision(cwd, revision);
   await assertRunnerProvenance(command, cwd, revision);
   const testBlobs: Record<string, string> = {};
@@ -408,17 +455,8 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     const relaxed = command.prepare !== undefined || command.checkoutDependencyRoots !== undefined;
     if (!relaxed && await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
     await assertPinnedRevision(cwd, revision);
-    let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
-    try {
-      parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames,
-        invocation?.reportPaths ? await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory) : undefined, command.adapter.failureExitCodes)
-        : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
-    } catch (error) {
-      if (error instanceof NodeTapTestCodeFailure && rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
-      throw error;
-    }
-    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,
-      ...(rtkResult ? { rtk: rtkResult } : {}) };
+    const reports = invocation?.reportPaths ? await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory) : undefined;
+    return { outcome, testBlobs, checkout, ...(reports ? { reports } : {}), ...(rtkResult ? { rtk: rtkResult } : {}) };
   } finally {
     if (rtkIntentOpen && !rtkSettled && options.rtk?.onResult) {
       rtkSettled = true;
@@ -427,4 +465,40 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     if (added) await verificationGit(cwd, ["worktree", "remove", "--force", checkout]);
     await rm(temporary, { recursive: true, force: true });
   }
+}
+/** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
+export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string,
+  options: { readonly rtk?: RtkOutputRequest } = {}): Promise<BehavioralMeasurement> {
+  const { outcome, testBlobs, reports, rtk: rtkResult } = await runMeasurementCommand(command, cwd, revision, options);
+  let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
+  try {
+    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes)
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
+  } catch (error) {
+    if (error instanceof NodeTapTestCodeFailure && rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+    throw error;
+  }
+  return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,
+    ...(rtkResult ? { rtk: rtkResult } : {}) };
+}
+export async function measureRegression(command: RegressionCommand, cwd: string, revision: string): Promise<RegressionMeasurement> {
+  let run: Awaited<ReturnType<typeof runMeasurementCommand>>;
+  try {
+    run = await runMeasurementCommand(command, cwd, revision);
+  } catch (error) {
+    if (error instanceof RegressionInfrastructureFailure) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new RegressionInfrastructureFailure(
+      message.includes("deadline exceeded") ? `regression_budget_exceeded: ${message}` : message,
+      error instanceof Error ? { cause: error } : undefined
+    );
+  }
+  const observation = parseRegressionResult(run.outcome, command.reporter ?? "node_tap", run.checkout);
+  return {
+    sourceRevision: revision,
+    commandId: command.id,
+    testBlobs: run.testBlobs,
+    observation,
+    outcome: run.outcome
+  };
 }
