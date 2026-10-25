@@ -560,4 +560,13 @@ describe("technical detail logging and on-demand lookup", () => {
     await expect(resilientReceipts.readConversationNoticeDetail("#99")).rejects.toThrow(/Unknown|not found/i);
     await expect(resilientReceipts.readConversationNoticeDetail("Việc #99")).rejects.toThrow(/Unknown|not found/i);
   });
+
+  it("acknowledges an update notice when Conversation paraphrases it in Vietnamese with its Việc #k label", () => {
+    const rendered = renderConversationNotice(notice("accepted-1", "delegation.accepted", {
+      headline: "Coordinator accepted the objective"
+    }, { runId: "run-1", runLabel: "Việc #1: Tạo calc.js" }));
+    expect(rendered.kind).toBe("update");
+    expect(noticeDisplayed(rendered, "Việc #1: Trưởng nhóm kỹ thuật đã chấp nhận mục tiêu.")).toBe(true);
+    expect(noticeDisplayed(rendered, "Việc #2: Trưởng nhóm kỹ thuật đã chấp nhận mục tiêu.")).toBe(false);
+  });
 });

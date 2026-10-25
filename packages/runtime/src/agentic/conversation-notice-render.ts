@@ -470,9 +470,10 @@ export function noticeDisplayed(notice: RenderedNotice, shown: string): boolean 
   if (notice.approvalId !== undefined && shown.includes(notice.approvalId)) return true;
   if (notice.kind !== "update" && notice.kind !== "blocked") return false;
   if (shown.includes(notice.messageId)) return true;
+  const workTag = (notice.runLabel ?? (notice.runId ? "Việc #1" : "")).split(":")[0]!.trim();
+  if (notice.kind === "update" && workTag.length > 0 && plain(shown).toLowerCase().includes(workTag.toLowerCase())) return true;
   if (notice.ackText === undefined || (!plain(shown).includes(plain(notice.ackText)) && !plain(sanitizeCardProse(shown)).includes(plain(notice.ackText)))) return false;
   if (notice.runId !== undefined && shown.includes(notice.runId)) return true;
-  const workTag = (notice.runLabel ?? (notice.runId ? "Việc #1" : "")).split(":")[0]!.trim();
   return workTag.length > 0 && plain(shown).includes(workTag);
 }
 
