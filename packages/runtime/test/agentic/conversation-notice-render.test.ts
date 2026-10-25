@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { TaskActivityLog } from "../../src/agentic/task-activity-log.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
-import { blockedNoticeFields, containsCode, formatFriendlyExpiry, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice, sanitizeCardProse } from "../../src/agentic/conversation-notice-render.js";
+import { blockedNoticeFields, containsCode, FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE, FAST_PATH_TASK_WAIVER_NOTICE, formatFastPathDowngradeNotice, formatFriendlyExpiry, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice, sanitizeCardProse } from "../../src/agentic/conversation-notice-render.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { vi.useRealTimers(); for (const action of cleanups.splice(0).reverse()) await action(); });
@@ -623,5 +623,57 @@ describe("technical detail logging and on-demand lookup", () => {
     expect(rendered.kind).toBe("update");
     expect(noticeDisplayed(rendered, "Việc #1: Trưởng nhóm kỹ thuật đã chấp nhận mục tiêu.")).toBe(true);
     expect(noticeDisplayed(rendered, "Việc #2: Trưởng nhóm kỹ thuật đã chấp nhận mục tiêu.")).toBe(false);
+  });
+
+  it("renders fast-path waiver and downgrade notices in plain Vietnamese without leaking internal codes onto the card", async () => {
+    const waived = renderConversationNotice(notice("fp-waived-1", "conversation.progress", {
+      headline: FAST_PATH_TASK_WAIVER_NOTICE,
+      fastPath: { status: "active", waiver: "deterministic_coverage" }
+    }, { senderRole: "runtime", runId: "run-42", runLabel: "Việc #1: Refactor nhỏ" }));
+    expect(waived.kind).toBe("update");
+    expect(waived.display).toContain("▶ Việc #1: Thay đổi nhỏ: kết quả kiểm thử tự động đã đủ, không cần người review riêng.");
+    expect(waived.display).not.toContain("deterministic_coverage");
+
+    const designAuto = renderConversationNotice(notice("fp-design-1", "conversation.progress", {
+      headline: FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE
+    }, { senderRole: "runtime", runId: "run-42", runLabel: "Việc #1: Refactor nhỏ" }));
+    expect(designAuto.display).toContain("▶ Việc #1: Thay đổi nhỏ: tự duyệt thiết kế, bạn sẽ duyệt khi bàn giao.");
+
+    for (const [code, expectedReason] of [
+      ["waiver_rejected:review_waiver_manual_criterion", "có tiêu chí cần người kiểm tra thủ công"],
+      ["waiver_rejected:review_waiver_no_commands", "chưa có lệnh kiểm thử tự động"],
+      ["tree_mismatch", "cây mã nguồn sau khi gộp có thay đổi"],
+      ["task_not_passed", "bước kiểm tra công việc chưa hoàn tất"],
+      ["journal_legacy", "dữ liệu phiên cũ chưa hỗ trợ đường tắt"]
+    ] as const) {
+      const text = formatFastPathDowngradeNotice(code);
+      expect(text).toBe(`Không đi đường tắt được (${expectedReason}), chạy kiểm tra đầy đủ.`);
+      const rendered = renderConversationNotice(notice(`fp-down-${code}`, "conversation.progress", {
+        headline: `${text} [{"code":"${code}"}]`
+      }, { senderRole: "runtime", runId: "run-42", runLabel: "Việc #1: Refactor nhỏ" }));
+      expect(rendered.display).toBe(`▶ Việc #1: Không đi đường tắt được (${expectedReason}), chạy kiểm tra đầy đủ.`);
+      expect(rendered.display).not.toContain(code);
+      expect(rendered.display).not.toContain("waiver_rejected");
+      expect(rendered.display).not.toContain("review_waiver_");
+    }
+
+    const root = await directory();
+    const receipts = new HostReceiptJournal(join(root, "receipts"), "/tmp/bflow-notice-render-repo", "session-1");
+    await receipts.appendConversationNotice({
+      schema_version: 2,
+      message_id: "fp-downgrade-log",
+      correlation_id: "corr-fp-1",
+      run_id: "run-42",
+      sender: { role: "runtime" },
+      recipient: { role: "conversation" },
+      type: "conversation.progress",
+      payload: {
+        headline: `${formatFastPathDowngradeNotice("waiver_rejected:review_waiver_no_commands")} [{"downgradeReason":"waiver_rejected:review_waiver_no_commands"}]`
+      },
+      artifact_references: [],
+      idempotency_key: "fp-downgrade-log"
+    });
+    const detail = await receipts.readConversationNoticeDetail("Việc #1");
+    expect(detail.summary).toContain("waiver_rejected:review_waiver_no_commands");
   });
 });

@@ -121,8 +121,8 @@ export type {
   RegressionObservation
 } from "./agentic/regression-results.js";
 
-export { effectiveRegressionScope, ensureAgenticHost, openPersistedAgenticHost } from "./agentic/host-controller.js";
-export type { AgenticHostController, AgenticHostOptions, RegressionScope, RoleLaunchDescriptor } from "./agentic/host-controller.js";
+export { effectiveFastPathMode, effectiveRegressionScope, ensureAgenticHost, openPersistedAgenticHost } from "./agentic/host-controller.js";
+export type { AgenticHostController, AgenticHostOptions, FastPathMode, RegressionScope, RoleLaunchDescriptor } from "./agentic/host-controller.js";
 
 export {
   createGitNexusImpactIndex,

@@ -360,18 +360,21 @@ export class VerificationEngine {
     }, "report");
     const evaluatedCriteria = plan.specification.acceptanceCriteria.map(criterion => {
       const isWaived = criterion.status === "waived";
+      const isWaivedByIdenticalTree = plan.reviewWaiver?.kind === "identical_integrated_tree" && criterion.verificationMethod === "manual_review";
       const relevant = receipts.filter(r => r.observation.criteria.some(c => c.criterionId === criterion.id));
       const primary = relevant.find(r => r.observation.method === criterion.verificationMethod);
       const observation = primary?.observation.criteria.find(c => c.criterionId === criterion.id);
       const expectedChecks = plan.checks.filter(check => CheckConfigurationSchema.parse(check.configuration).criterionIds.includes(criterion.id));
       const missing = expectedChecks.filter(check => !relevant.some(r => r.gate.gateId === check.id));
 
-      if (isWaived && expectedChecks.length === 0) {
+      if ((isWaived || isWaivedByIdenticalTree) && expectedChecks.length === 0) {
         return {
           criterionId: criterion.id,
-          passed: true,
+          passed: isWaived ? true : (!conflict && !blocked && !failed),
           evidenceArtifactId: audit.artifactId,
-          summary: criterion.waiverReason ? `Waived: ${criterion.waiverReason}` : "Criterion waived"
+          summary: isWaived
+            ? (criterion.waiverReason ? `Waived: ${criterion.waiverReason}` : "Criterion waived")
+            : `Satisfied by verified task tree (${plan.reviewWaiver?.kind === "identical_integrated_tree" ? plan.reviewWaiver.taskVerificationIds.join(", ") : ""})`
         };
       }
 

@@ -4,7 +4,11 @@ import type {
   QualityGateDefinition, QualityGateResult, RoleMessage, RunStore, SessionManifest, Specification, TestStrategy,
   VerificationCycle, VerificationResult, WorkflowDefinition, WorkflowEngine
 } from "@bflow/contracts";
+import { execFile } from "node:child_process";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 /** Package-local composition interfaces. Wire values always use frozen contracts. */
 export interface SpecificationPolicy {
@@ -22,6 +26,7 @@ export interface VerificationPlan {
   runId: string; taskId: string; scope: "task" | "workflow"; specification: Specification;
   strategy: TestStrategy; checks: QualityGateDefinition[]; implementerIds: string[];
   maxIterations: number; planId: string; specFingerprint: string;
+  reviewWaiver?: unknown;
 }
 export interface VerificationPolicy {
   start(plan: VerificationPlan, cycleId: string): VerificationCycle;
@@ -53,6 +58,7 @@ export interface GitPolicy {
   recordVerification(key: string, result: unknown): Promise<Integration>;
   cancelTask(key: string): Promise<unknown>;
   cancelIntegration(key: string): Promise<unknown>;
+  treeOf?(revision: string): Promise<string>;
 }
 export interface PanePolicy {
   getManifest(options?: OperationOptions): Promise<OperationResult<SessionManifest | null>>;
@@ -110,6 +116,7 @@ export interface AgenticRuntimePorts {
   validateTaskCommands?: (specification: Specification, strategy: TestStrategy, ownedPaths: readonly string[]) => void;
   taskChecks: readonly QualityGateDefinition[];
   workflowChecks: readonly QualityGateDefinition[];
+  fastPathMode?: "auto" | "off";
   clock?: () => Date;
 }
 export class RoleCapabilityPreflightError extends Error {
@@ -157,8 +164,25 @@ export async function loadAgenticPolicies(options: AgenticCompositionOptions): P
     },
     // Developer agents edit these worktrees, and agent CLIs refuse writes under `.git`. `.bflow/state/` is ignored by the
     // init `.bflow/.gitignore`, and staying inside the checkout keeps the provider's folder trust for the repository.
-    git: await git.GitIntegrationEngine.open({ repositoryPath: options.repositoryPath, artifactStore: options.artifactStore,
-      worktreeRoot: resolve(options.repositoryPath, ".bflow", "state", "worktrees") }),
+    git: await (async () => {
+      const gitEngine = await git.GitIntegrationEngine.open({ repositoryPath: options.repositoryPath, artifactStore: options.artifactStore,
+        worktreeRoot: resolve(options.repositoryPath, ".bflow", "state", "worktrees") });
+      gitEngine.treeOf = async (revision: string): Promise<string> => {
+        if (typeof revision !== "string" || !/^[a-fA-F0-9]{7,40}$/.test(revision)) {
+          throw new Error(`Invalid Git revision for tree lookup: ${String(revision)}`);
+        }
+        const { stdout } = await execFileAsync("git", ["rev-parse", "--verify", `${revision}^{tree}`], {
+          cwd: options.repositoryPath,
+          encoding: "utf8"
+        });
+        const tree = stdout.trim();
+        if (!/^[a-f0-9]{40}$/i.test(tree)) {
+          throw new Error(`Invalid Git tree hash for revision ${revision}`);
+        }
+        return tree;
+      };
+      return gitEngine;
+    })(),
     classifyChange: spec.classifyChange, createVerificationPlan: verification.createVerificationPlan,
     recordEvidence: tdd.recordEvidence, assertReadyToImplement: tdd.assertReadyToImplement,
     assertEvidenceComplete: tdd.assertEvidenceComplete

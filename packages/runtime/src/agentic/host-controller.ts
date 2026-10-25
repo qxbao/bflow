@@ -18,6 +18,7 @@ import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformSt
 import type { RegressionScope } from "./regression-changes.js";
 
 export type { RegressionScope };
+export type FastPathMode = "auto" | "off";
 
 export interface AgenticHostOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
@@ -26,6 +27,7 @@ export interface AgenticHostOptions {
   platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
     tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope };
+    fastPath?: { mode: FastPathMode };
     concurrency: { maxConcurrency: number } };
   impactIndex?: { executable: string; home: string; storageLockPath: string };
 }
@@ -33,6 +35,11 @@ export interface AgenticHostOptions {
 export function effectiveRegressionScope(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): RegressionScope {
   if (!policy) return "mapped_only";
   return policy.verification.regressionScope ?? (persisted ? "mapped_only" : "affected");
+}
+
+export function effectiveFastPathMode(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): FastPathMode {
+  if (!policy) return "off";
+  return policy.fastPath?.mode ?? (persisted ? "off" : "auto");
 }
 export interface RoleLaunchDescriptor { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }
 export interface AgenticHostController {
@@ -67,6 +74,11 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
         verification.onExhausted !== "require_human" || !Number.isInteger(verification.maxIterations) || Number(verification.maxIterations) < 1 || Number(verification.maxIterations) > 10 ||
         (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
+    if (policy.fastPath !== undefined) {
+      if (policy.fastPath === null || typeof policy.fastPath !== "object" || Array.isArray(policy.fastPath)) throw new Error("Invalid persisted host policy");
+      const fastPath = policy.fastPath as Record<string, unknown>;
+      if (Object.keys(fastPath).some(key => key !== "mode") || (fastPath.mode !== "auto" && fastPath.mode !== "off")) throw new Error("Invalid persisted host policy");
+    }
   }
   if (value.impactIndex !== undefined) {
     if (value.impactIndex === null || typeof value.impactIndex !== "object" || Array.isArray(value.impactIndex)) {

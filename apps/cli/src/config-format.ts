@@ -67,6 +67,7 @@ export function stringifyConfigYaml(value: unknown): string {
       "sdd",
       "tdd",
       "verification",
+      "fastPath",
       "concurrency",
       "startupTimeoutMs",
       "shutdownTimeoutMs",
@@ -198,6 +199,11 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     "  verification:"
   ].join("\n");
 
+  const fastPathBanner = [
+    "  # Fast-path: thay đổi nhỏ (trivial) chạy ít bước hơn và tự duyệt design; bạn vẫn duyệt bàn giao. mode: auto | off (mặc định: auto).",
+    "  fastPath:"
+  ].join("\n");
+
   const concurrencyBanner = [
     "  # Giới hạn thực thi đồng thời & Thời gian chờ (Timeouts):",
     "  #   - concurrency.maxConcurrency : (integer: `1..64`, mặc định: `2`) Số lượng Developer task chạy song song tối đa.",
@@ -290,6 +296,7 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     .replace(/^  sdd:\n/m, `${sddBanner}\n`)
     .replace(/^  tdd:\n/m, `${tddBanner}\n`)
     .replace(/^  verification:\n/m, `${verificationBanner}\n`)
+    .replace(/^  fastPath:\n/m, `${fastPathBanner}\n`)
     .replace(/^  concurrency:\n/m, `${concurrencyBanner}\n`)
     .replace(/^  permissions:\n/m, `${permissionsBanner}\n`)
     .replace(/^  tools:\n/m, `${toolsBanner}\n`)
