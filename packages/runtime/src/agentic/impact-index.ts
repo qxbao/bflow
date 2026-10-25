@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 
 export type IndexUnavailableCode =
@@ -147,6 +148,7 @@ function defaultRun(
         maxBuffer: 16 * 1024 * 1024,
         env: {
           ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+          ...(process.env.HOME ? { HOME: process.env.HOME } : {}),
           ...options.env
         }
       },
@@ -237,6 +239,42 @@ async function validateStatusProbe(
   return { ok: true };
 }
 
+const readerLeaseSchema = z
+  .object({
+    pid: z.number().int().positive(),
+    acquiredAt: z.string().min(1)
+  })
+  .strict();
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function observeStorageLock(storageLockPath: string): { locked: boolean; readerLease: string | null } {
+  const writerLockPath = join(dirname(storageLockPath), "gitnexus-writer.lock");
+  if (existsSync(writerLockPath)) {
+    return { locked: true, readerLease: null };
+  }
+  if (!existsSync(storageLockPath)) {
+    return { locked: false, readerLease: null };
+  }
+  try {
+    const raw = readFileSync(storageLockPath, "utf8").trim();
+    const parsed = readerLeaseSchema.safeParse(JSON.parse(raw));
+    if (parsed.success && processAlive(parsed.data.pid)) {
+      return { locked: false, readerLease: raw };
+    }
+  } catch {
+    // Non-JSON or unreadable lock files are treated as exclusive writer locks.
+  }
+  return { locked: true, readerLease: null };
+}
+
 export const unconfiguredImpactIndex: ImpactIndex = {
   async importersOf(): Promise<ImportersResult> {
     return {
@@ -261,7 +299,8 @@ export function createGitNexusImpactIndex(options: GitNexusImpactIndexOptions): 
         }
       }
 
-      if (existsSync(options.storageLockPath)) {
+      const beforeLock = observeStorageLock(options.storageLockPath);
+      if (beforeLock.locked) {
         return {
           status: "unavailable",
           code: "storage_locked",
@@ -292,8 +331,9 @@ export function createGitNexusImpactIndex(options: GitNexusImpactIndexOptions): 
       const collected: string[] = [];
       for (let offset = 0; offset < input.files.length; offset += CYPHER_BATCH_SIZE) {
         const batch = input.files.slice(offset, offset + CYPHER_BATCH_SIZE);
-        const query = `MATCH (t:File)-[:CodeRelation* 1..10 (r, n | WHERE r.type = 'IMPORTS')]->(f:File) WHERE f.filePath IN [${batch.map(filePath => `'${filePath}'`).join(",")}] RETURN DISTINCT t.filePath`;
-        const cypherResult = await run(
+        const fileList = batch.map(filePath => `'${filePath}'`).join(",");
+        const query = `MATCH (t:File)-[:CodeRelation* 1..10 (r, n | WHERE r.type = 'IMPORTS')]->(f:File) WHERE f.filePath IN [${fileList}] RETURN DISTINCT t.filePath`;
+        let cypherResult = await run(
           options.executable,
           ["cypher", "-r", root, "-l", String(CYPHER_ROW_LIMIT), query],
           {
@@ -302,6 +342,21 @@ export function createGitNexusImpactIndex(options: GitNexusImpactIndexOptions): 
             timeoutMs: COMMAND_TIMEOUT_MS
           }
         );
+        if (
+          cypherResult.exitCode !== 0 &&
+          `${cypherResult.stdout}\n${cypherResult.stderr}`.includes("Buffer manager exception")
+        ) {
+          const fallbackQuery = `MATCH (t:File)-[:CodeRelation* ALL SHORTEST 1..10 (r, n | WHERE r.type = 'IMPORTS')]->(f:File) WHERE f.filePath IN [${fileList}] RETURN DISTINCT t.filePath`;
+          cypherResult = await run(
+            options.executable,
+            ["cypher", "-r", root, "-l", String(CYPHER_ROW_LIMIT), fallbackQuery],
+            {
+              cwd: root,
+              env,
+              timeoutMs: COMMAND_TIMEOUT_MS
+            }
+          );
+        }
         if (cypherResult.exitCode !== 0) {
           return {
             status: "unavailable",
@@ -320,7 +375,8 @@ export function createGitNexusImpactIndex(options: GitNexusImpactIndexOptions): 
         }
       }
 
-      if (existsSync(options.storageLockPath)) {
+      const afterLock = observeStorageLock(options.storageLockPath);
+      if (afterLock.locked || (afterLock.readerLease !== null && afterLock.readerLease !== beforeLock.readerLease)) {
         return {
           status: "unavailable",
           code: "changed_during_query",

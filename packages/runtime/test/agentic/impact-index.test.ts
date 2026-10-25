@@ -254,6 +254,59 @@ describe("ImpactIndex & GitNexus CLI adapter", () => {
     expect(called).toBe(false);
   });
 
+  it("allows queries when storageLockPath holds a live reader lease without gitnexus-writer.lock and falls back to ALL SHORTEST on Buffer manager exception", async () => {
+    const root = await makeTempDir("bflow-impact-reader-lease-");
+    const lockPath = join(root, "storage.lock");
+    await writeFile(lockPath, JSON.stringify({ pid: process.pid, acquiredAt: "2026-10-26T00:00:00.000Z" }));
+    const cypherQueries: string[] = [];
+
+    const index = createGitNexusImpactIndex({
+      executable: "gitnexus",
+      home: join(root, "home"),
+      storageLockPath: lockPath,
+      run: async (_exe, args) => {
+        if (args[0] === "status") {
+          return { exitCode: 0, stdout: freshStatusJson(root), stderr: "" };
+        }
+        cypherQueries.push(args[5]!);
+        if (cypherQueries.length === 1) {
+          return {
+            exitCode: 1,
+            stdout: JSON.stringify({
+              error: "Buffer manager exception: Unable to allocate memory! The buffer pool is full and no memory could be freed!"
+            }),
+            stderr: ""
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            markdown: "| t.filePath |\n| --- |\n| test/math.test.ts |",
+            row_count: 1
+          }),
+          stderr: ""
+        };
+      }
+    });
+
+    const okResult = await index.importersOf({ repositoryRoot: root, base: BASE, files: ["src/math.ts"] });
+    expect(okResult).toEqual({
+      status: "ok",
+      indexCommit: BASE,
+      files: ["test/math.test.ts"]
+    });
+    expect(cypherQueries).toHaveLength(2);
+    expect(cypherQueries[1]).toContain("ALL SHORTEST 1..10");
+
+    await writeFile(join(root, "gitnexus-writer.lock"), "");
+    const writerLocked = await index.importersOf({ repositoryRoot: root, base: BASE, files: ["src/math.ts"] });
+    expect(writerLocked).toEqual({
+      status: "unavailable",
+      code: "storage_locked",
+      detail: expect.any(String)
+    });
+  });
+
   it("returns query_failed when cypher exits non-zero or row_count mismatches parsed rows", async () => {
     const root = await makeTempDir("bflow-impact-query-fail-");
     const indexExitFail = createGitNexusImpactIndex({
