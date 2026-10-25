@@ -97,6 +97,44 @@ describe("trusted raw turns and model decision receipts", () => {
     expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
     expect(await f.journal().humanDecisions()).toEqual([]);
   });
+  it("exposes turn state and bounded context via inspectTurn and returns remaining recoverableUserTurns from decide", async () => {
+    const f = await fixture();
+    expect(await f.intake.inspectTurn(f.binding)).toEqual({
+      requiresConversationDecision: false,
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    await f.intake.receive(f.binding, f.turn("user-unfinished", "Yêu cầu ban đầu"));
+    expect(await f.reopen().inspectTurn(f.binding)).toEqual({
+      messageId: "user-unfinished",
+      requiresConversationDecision: true,
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    await f.intake.runtimeNudge(f.binding);
+    expect(await f.reopen().inspectTurn(f.binding)).toEqual({
+      requiresConversationDecision: false,
+      runtimeNudge: true,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }],
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    await f.reopen().receive(f.binding, f.turn("user-new", "Kiểm tra tiến độ trước"));
+    expect(await f.reopen().inspectTurn(f.binding)).toEqual({
+      messageId: "user-new",
+      requiresConversationDecision: true,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }],
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    const firstDecided = await f.reopen().decide(f.binding, { decision: { intent: "conversation_only", directReply: "Đã kiểm tra tiến độ" } });
+    expect(firstDecided).toMatchObject({
+      ok: true,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }]
+    });
+    expect(await f.reopen().inspectTurn(f.binding)).toMatchObject({
+      messageId: "user-new",
+      requiresConversationDecision: false,
+      result: firstDecided,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }]
+    });
+  });
   it.each([{ mode: "failed", priorIntent: false }, { mode: "queued", priorIntent: false }, { mode: "queued", priorIntent: true }] as const)(
     "keeps the newer $mode decision ahead of an older suspended turn (prior intent: $priorIntent) until its result commits", async ({ mode, priorIntent }) => {
     const f = await fixture();

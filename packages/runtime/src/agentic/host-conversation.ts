@@ -119,6 +119,25 @@ export class HostConversationIntake {
   runtimeNudge(principal: PaneBinding): Promise<void> {
     return this.exclusive(() => this.receipts.recordConversationRuntimeNudge(principal));
   }
+  inspectTurn(principal: PaneBinding): Promise<JsonValue> {
+    return this.exclusive(async () => {
+      const binding = PaneBindingSchema.parse(principal);
+      if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation has user turns");
+      const turn = (await this.receipts.conversationTurns()).filter(value => identity(value.binding) === identity(binding)).at(-1);
+      const isNudge = await this.receipts.isConversationRuntimeNudge(binding);
+      const saved = turn && !isNudge ? await this.receipts.conversationDecision(turn.messageId) : undefined;
+      const failed = turn && !isNudge ? await this.receipts.conversationApprovalFailure(turn.messageId) : undefined;
+      const trustedApproval = saved !== undefined && digest(saved.decision) === digest(TRUSTED_APPROVAL);
+      const requiresConversationDecision = !isNudge && turn !== undefined && failed === undefined && saved?.result === undefined && !trustedApproval;
+      return this.reply(binding, {
+        ...(turn && !isNudge ? { messageId: turn.messageId } : {}),
+        requiresConversationDecision,
+        ...(isNudge ? { runtimeNudge: true } : {}),
+        ...(failed ? { approvalFailed: true, approvalFailure: { error: failed.error, note: failed.note } } : {}),
+        ...(saved?.result !== undefined ? { result: saved.result } : saved?.decision !== undefined ? { decision: saved.decision } : {})
+      });
+    });
+  }
   pendingApprovalFailure(principal: PaneBinding): Promise<{ messageId: string; error: string; note: string } | undefined> {
     return this.exclusive(async () => {
       const binding = PaneBindingSchema.parse(principal);
@@ -183,10 +202,14 @@ export class HostConversationIntake {
       if (!previous) await this.conversation().validateDecision(decision);
       await this.receipts.recordConversationIntent(messageId, decision);
       // Gateway binds deterministic message/run/outbox ids to this trusted messageId and reconciles retries.
-      const result = json(await this.conversation().handleUserTurn({ ...this.userInput(turn), conversationDecision: decision }));
-      if (record(result).ok !== true) throw new Error(`Conversation decision failed: ${JSON.stringify(record(result).error)}`);
+      const rawResult = json(await this.conversation().handleUserTurn({ ...this.userInput(turn), conversationDecision: decision }));
+      if (record(rawResult).ok !== true) throw new Error(`Conversation decision failed: ${JSON.stringify(record(rawResult).error)}`);
       // A durable FIFO acknowledgement is pending work, not a completed Chat decision.
-      if (record(record(result).value).queuedBecauseBusy === true) return result;
+      if (record(record(rawResult).value).queuedBecauseBusy === true) return rawResult;
+      const remainingRecoverable = (await this.recoverableTurns(binding)).filter(value => value.messageId !== messageId);
+      const result = remainingRecoverable.length && typeof rawResult === "object" && rawResult !== null && !Array.isArray(rawResult)
+        ? json({ ...rawResult, recoverableUserTurns: remainingRecoverable.map(({ messageId: id, content }) => ({ messageId: id, content })) })
+        : rawResult;
       await this.receipts.recordConversationResult(messageId, decision, result);
       return result;
     });

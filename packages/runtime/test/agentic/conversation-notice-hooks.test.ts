@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
+import { CODEX_CONVERSATION_NUDGE_MARKER, CODEX_CONVERSATION_USER_TURN_MARKER } from "../../src/agentic/host.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -213,8 +214,8 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
   });
 
-  it.each(["claude", "codex"])("puts the MUST SHOW section in the inbox nudge context without raw JSON for %s", async provider => {
-    const f = await fixture({ conversation_runtime_nudge: { notices: [decisionNotice], undisplayed: [] } }, provider);
+  it("puts the MUST SHOW section in the inbox nudge context without raw JSON for claude", async () => {
+    const f = await fixture({ conversation_runtime_nudge: { notices: [decisionNotice], undisplayed: [] } }, "claude");
     const result = await f.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "🔔 Bflow có tin mới" });
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
     expect(context).toContain("not a user message and not an approval");
@@ -223,8 +224,71 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(context).toContain("không chào hỏi");
     expect(context).toContain("do not ask the user to repeat");
     expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
-    expect(context.indexOf("MUST SHOW TO USER VERBATIM:")).toBeLessThan(context.indexOf("Dùng schema v2"));
+    expect(context.indexOf("MUST SHOW TO USER:")).toBeLessThan(context.indexOf("Dùng schema v2"));
     for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(context).not.toContain(forbidden);
+  });
+
+  it("emits a byte-identical fixed marker for codex UserPromptSubmit on inbox nudges and user turns without surfacing notices in the hook", async () => {
+    const expiringDecision = {
+      ...decisionNotice,
+      summary: JSON.stringify({
+        approvalId: APPROVAL_ID,
+        runId: "run-42",
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+        metadata: { kind: "user_decision", question: "Dùng schema v2 hay giữ v1?", requestedByRole: "coordinator", options: ["Schema v2", "Giữ v1"] }
+      })
+    };
+    const nudgeFixture = await fixture({ conversation_runtime_nudge: { notices: [expiringDecision], undisplayed: [] } }, "codex");
+    const nudge1 = await nudgeFixture.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "🔔 Bflow có tin mới" });
+    const nudge2 = await nudgeFixture.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "🔔 Bflow có tin mới" });
+    const nudgeCtx1 = JSON.parse(nudge1.stdout).hookSpecificOutput.additionalContext as string;
+    const nudgeCtx2 = JSON.parse(nudge2.stdout).hookSpecificOutput.additionalContext as string;
+    expect(nudgeCtx1).toBe(CODEX_CONVERSATION_NUDGE_MARKER);
+    expect(nudgeCtx2).toBe(nudgeCtx1);
+    expect(nudgeCtx1).toContain("requiresConversationDecision=false");
+    expect(nudgeCtx1).toContain("read_updates");
+    expect(nudgeCtx1).not.toContain("MUST SHOW TO USER");
+    expect(nudgeFixture.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_runtime_nudge"]);
+
+    const turnReplies = [
+      { messageId: "user-turn-1", requiresConversationDecision: true, notices: [], undisplayed: [], context: { session: { turnCount: 1, updatedAt: "2026-10-25T00:00:01.000Z" }, messages: [] } },
+      {
+        messageId: "user-turn-2",
+        requiresConversationDecision: true,
+        notices: [expiringDecision],
+        undisplayed: [expiringDecision],
+        recoverableUserTurns: [{ messageId: "user-turn-0", content: "Yêu cầu cũ" }],
+        context: {
+          session: { turnCount: 19, updatedAt: "2026-10-25T00:05:00.000Z" },
+          workflows: { "corr-1": { correlationId: "corr-1", runId: "run-42", title: "Workflow lớn", sdlcStatus: "implementing", updatedAt: "2026-10-25T00:05:00.000Z" } },
+          messages: Array.from({ length: 20 }, (_, idx) => ({ messageId: `msg-${idx}`, createdAt: `2026-10-25T00:00:${String(idx).padStart(2, "0")}.000Z`, content: `Tin nhắn ${idx}` }))
+        }
+      }
+    ];
+    let turnCall = 0;
+    const userFixture = await fixture({
+      get user_prompt() { return turnReplies[Math.min(turnCall++, turnReplies.length - 1)]; },
+      conversation_pending_decision: {},
+      conversation_notices: { notices: [expiringDecision], undisplayed: [] }
+    }, "codex");
+    const user1 = await userFixture.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "Câu hỏi 1" });
+    const user2 = await userFixture.invoke("UserPromptSubmit", { hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "Câu hỏi 2" });
+    const userCtx1 = JSON.parse(user1.stdout).hookSpecificOutput.additionalContext as string;
+    const userCtx2 = JSON.parse(user2.stdout).hookSpecificOutput.additionalContext as string;
+    expect(userCtx1).toBe(CODEX_CONVERSATION_USER_TURN_MARKER);
+    expect(userCtx2).toBe(userCtx1);
+    for (const forbidden of ["user-turn-1", "user-turn-2", '{"', "MUST SHOW TO USER", "Workflow lớn"]) {
+      expect(userCtx1).not.toContain(forbidden);
+    }
+    expect(userFixture.calls.map(call => call.method)).toEqual(["user_prompt", "user_prompt"]);
+
+    // Stop still surfaces the unsurfaced decision with its live countdown when the model has not displayed it yet.
+    const stopResult = await userFixture.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", last_assistant_message: "Chưa hiển thị thẻ quyết định." });
+    const stopJson = JSON.parse(stopResult.stdout);
+    expect(stopJson.decision).toBe("block");
+    expect(stopJson.reason).toContain("Dùng schema v2 hay giữ v1?");
+    expect(stopJson.reason).toMatch(/còn \d+ phút \(hết hạn lúc /u);
+    expect(userFixture.calls.at(-1)).toMatchObject({ method: "conversation_notices_surfaced", params: { messageIds: [expiringDecision.messageId] } });
   });
 
   it("directs an explicit resume turn and its Stop reminder to the existing run", async () => {
