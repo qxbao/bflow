@@ -175,7 +175,7 @@ export async function loadRepositoryConfig(
       error: {
         code: "not_found",
         retryable: false,
-        message: `Configuration file not found at '${configPath}'.`
+        message: `Configuration file not found at '${configPath}'. Run 'bflow init' to initialize this repository.`
       }
     };
   }

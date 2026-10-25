@@ -1,16 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { lstat, readFile, realpath, rm } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, MCPServiceObservationSchema, ScopedOperationSchema,
-  type MCPServiceDefinition, type MCPServiceObservation, type ResolvedToolGrant } from "@bflow/contracts";
+  type ContractError, type MCPServiceDefinition, type MCPServiceObservation, type OperationResult, type ResolvedToolGrant, type ScopedOperation } from "@bflow/contracts";
 import { GATEWAY_CONTROL_LOCATOR_FILE, startGatewayControl, type GatewayControl } from "./gateway-control.js";
+import {
+  readGatewayRepositoriesState,
+  RegisteredRepositoryServiceSchema,
+  removeRegisteredRepositoryService,
+  resolveApprovedGitNexusBinary,
+  upsertRegisteredRepositoryService,
+  validateRepositoryServiceLaunch,
+  type RegisteredRepositoryService
+} from "./gateway-repositories.js";
 import { readStoredContext7Key, writeStoredContext7Key } from "./context7-secret.js";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
   loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER, ToolInstallDescriptorSchema,
+  defaultHostEnvironment, detectPlatform,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
   type ServiceDefinition, type ServiceManager } from "@bflow/machine-setup";
 
@@ -51,14 +61,42 @@ export function repositoryHasCommits(repositoryRoot: string): boolean {
   } catch { return false; }
 }
 
-export function setupGatewayDiagnostics(input: Pick<SetupGatewayInput, "repositoryRoot" | "launchRequirements"> & { gatewayStateDirectory?: string | undefined }): string[] {
-  const locator = input.gatewayStateDirectory ? ` at ${join(input.gatewayStateDirectory, GATEWAY_CONTROL_LOCATOR_FILE)}` : "";
+export function setupGatewayDiagnostics(
+  input: Pick<SetupGatewayInput, "repositoryRoot" | "launchRequirements"> & {
+    platform?: PlatformProfile | undefined;
+    gatewayStateDirectory?: string | undefined;
+    gatewayConfigDirectory?: string | undefined;
+  }
+): string[] {
+  const stateDir = input.gatewayStateDirectory ?? input.platform?.paths.state;
+  const configDir = input.gatewayConfigDirectory ?? input.platform?.paths.config;
+  const locator = stateDir ? ` at ${join(stateDir, GATEWAY_CONTROL_LOCATOR_FILE)}` : "";
   const gitNexusRequested = input.launchRequirements.some(item => item.toolId === "gitnexus");
+  const migrationDiagnostics: string[] = [];
+  if (configDir) {
+    try {
+      const prior = ownedConfiguration(join(configDir, "setup-gateway.json"));
+      if (prior?.operation.scope.kind === "session") {
+        migrationDiagnostics.push(
+          `Legacy session-scoped Gateway configuration detected for '${prior.operation.scope.workspaceRoot}'. Running 'bflow setup' migrates the Gateway to machine scope; run 'bflow init' in '${prior.operation.scope.workspaceRoot}' to register its repository GitNexus service.`
+        );
+      }
+    } catch {
+      // Unreadable or absent setup-gateway.json is handled during component observation.
+    }
+  }
   return [
-    ...(!input.repositoryRoot && gitNexusRequested
-      ? ["GitNexus installs globally; repository indexing and its MCP activation are deferred until bflow setup --dir <repository>."] : []),
-    ...(input.repositoryRoot && gitNexusRequested && !repositoryHasCommits(input.repositoryRoot)
-      ? ["GitNexus indexing deferred: the repository has no commits yet; rerun bflow setup after the first commit."] : []),
+    ...migrationDiagnostics,
+    ...(input.repositoryRoot
+      ? [
+          `bflow setup operates at machine scope; repository '${input.repositoryRoot}' is not bound to the machine Gateway. Run 'bflow init' in '${input.repositoryRoot}' to index it and register its repository-scoped GitNexus MCP service.`
+        ]
+      : []),
+    ...(gitNexusRequested
+      ? [
+          "GitNexus installs globally at machine scope; repository indexing and its MCP activation are deferred until 'bflow init' is run in each repository."
+        ]
+      : []),
     `The background Gateway verifies installed backends and serves role registration through its private ${GATEWAY_CONTROL_LOCATOR_FILE} locator${locator}; machine setup does not establish those role connections.`
   ];
 }
@@ -136,15 +174,14 @@ function configurationDigest(saved: z.infer<typeof GatewayConfigSchema>): string
 
 /** Reconstruct boundaries from the unit-bound approval, never from a spec's self-checksums alone. */
 async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
-  if (!saved.approval || configurationDigest(saved) !== saved.desiredDigest || saved.operation.scope.kind !== "session")
+  if (!saved.approval || configurationDigest(saved) !== saved.desiredDigest || saved.operation.scope.kind !== "machine" || saved.approval.repositorySelected)
     throw new Error("Gateway launch configuration differs from its approved specification");
-  const root = saved.operation.scope.workspaceRoot;
-  const repositoryId = `setup-${sha(root).slice(0, 24)}`;
-  const expectedOperation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "session", machineId: saved.operation.scope.machineId,
-    repositoryId, workspaceRoot: root, sessionId: "setup-gateway" }, idempotencyKey: "setup-gateway" });
+  const machineId = saved.operation.scope.machineId;
+  const chromeProfileScopeId = `setup-${sha(machineId).slice(0, 24)}`;
+  const expectedOperation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "machine", machineId }, idempotencyKey: "setup-gateway" });
   if (digest(saved.operation) !== digest(expectedOperation) || saved.receiptPath !== join(saved.paths.state, "setup-gateway-ready.json"))
-    throw new Error("Gateway session identity or readiness path differs from the approved boundary");
-  const active = saved.approval.requirements.filter(item => item.toolId !== "gitnexus" || saved.approval!.repositorySelected);
+    throw new Error("Gateway machine identity or readiness path differs from the approved boundary");
+  const active = saved.approval.requirements.filter(item => item.toolId !== "gitnexus");
   if (new Set(saved.generatedIds).size !== active.length + saved.approval.remoteServices.length) throw new Error("Managed MCP service inventory does not match setup");
   const tools = await leaf("tool-installer");
   for (const item of active) {
@@ -160,19 +197,13 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
       throw new Error(`Managed ${item.toolId} executable or launch specification changed`);
     let expectedSpec: unknown;
     let serviceId: string;
-    if (item.toolId === "gitnexus") {
-      const canonicalRoot = await realpath(root), state = await realpath(join(saved.paths.state, "gitnexus"));
-      serviceId = `gitnexus-${sha(canonicalRoot).slice(0, 24)}`;
-      expectedSpec = { schemaVersion: 3, executable: item.executable, executableDigest: spec.executableDigest, argv: ["mcp"], cwd: canonicalRoot,
-        environment: { GITNEXUS_HOME: join(state, "gitnexus-home"), GITNEXUS_MCP_ALLOWED_REPOS: canonicalRoot,
-          GITNEXUS_MCP_READ_ONLY: "1", GITNEXUS_SHARED_STORE: "off" }, lockPath: join(state, `gitnexus-storage-${sha(canonicalRoot)}.lock`) };
-    } else if (item.toolId === "mempalace") {
+    if (item.toolId === "mempalace") {
       const state = await realpath(join(saved.paths.state, "mempalace"));
-      serviceId = `mempalace-${sha(saved.operation.scope.machineId).slice(0, 24)}`;
+      serviceId = `mempalace-${sha(machineId).slice(0, 24)}`;
       expectedSpec = { schemaVersion: 3, executable: item.executable, executableDigest: spec.executableDigest, argv: [], cwd: state, environment: {} };
     } else {
       const profileRoot = await realpath(join(saved.paths.data, "browser-profiles"));
-      const profile = join(profileRoot, "chrome", repositoryId, "setup-browser-probe");
+      const profile = join(profileRoot, "chrome", chromeProfileScopeId, "setup-browser-probe");
       if (await realpath(profile) !== profile || !saved.approval.browserExecutable ||
         await realpath(saved.approval.browserExecutable) !== saved.approval.browserExecutable)
         throw new Error("Chrome profile or approved executable is not canonical");
@@ -184,12 +215,12 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
       serviceId = `chrome-${sha(profile).slice(0, 24)}`;
       expectedSpec = { schemaVersion: 3, executable: item.executable, executableDigest: spec.executableDigest, argv,
         cwd: dirname(profile), environment: {}, lockPath: join(profile, ".bflow-profile.lock"),
-        browserOwner: { taskId: "setup-browser-probe", repositoryId, profileDir: profile } };
+        browserOwner: { taskId: "setup-browser-probe", repositoryId: chromeProfileScopeId, profileDir: profile } };
     }
     if (digest(spec) !== digest(expectedSpec)) throw new Error(`Managed ${item.toolId} canonical launch boundaries changed`);
     const expectedDefinition = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId, revision: 1,
-      scope: { kind: "machine", machineId: saved.operation.scope.machineId },
-      tool: { ...tools.createToolCapability(item.toolId, item.version, saved.operation.scope.machineId), required: true,
+      scope: { kind: "machine", machineId },
+      tool: { ...tools.createToolCapability(item.toolId, item.version, machineId), required: true,
         operations: requiredOperations[item.toolId],
         resource: item.toolId === "mempalace" ? { sharing: "concurrent", maxConcurrency: 16 } : { sharing: "exclusive", resourceKey: serviceId } },
       connection: { kind: "stdio_mcp", executable: process.execPath, executableDigest: sha(await readFile(process.execPath)),
@@ -199,7 +230,7 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
   }
   for (const remote of saved.approval.remoteServices) {
     const expected = tools.createContext7RemoteService({ authenticated: remote.authenticated,
-      operation: { ...saved.operation, scope: { kind: "machine", machineId: saved.operation.scope.machineId } } });
+      operation: { ...saved.operation, scope: { kind: "machine", machineId } } });
     const definition = saved.services.find(candidate => saved.generatedIds.includes(candidate.serviceId) && candidate.tool.toolId === remote.toolId);
     if (!definition || digest(definition) !== digest(expected)) throw new Error(`Remote ${remote.toolId} service differs from its approved definition`);
   }
@@ -211,17 +242,18 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   const config = MachineConfigSchema.parse(input.config);
   const configPath = join(platform.paths.config, "setup-gateway.json");
   const receiptPath = join(platform.paths.state, "setup-gateway-ready.json");
-  const repositoryRoot = input.repositoryRoot ? realpathSync(input.repositoryRoot) : resolve(join(platform.paths.data, "gateway-repository"));
-  const repositoryId = `setup-${sha(repositoryRoot).slice(0, 24)}`;
-  const operation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "session", machineId: platform.machineId,
-    repositoryId, workspaceRoot: repositoryRoot, sessionId: "setup-gateway" }, idempotencyKey: "setup-gateway" });
+  const chromeProfileScopeId = `setup-${sha(platform.machineId).slice(0, 24)}`;
+  const operation = ScopedOperationSchema.parse({
+    schemaVersion: 3,
+    scope: { kind: "machine", machineId: platform.machineId },
+    idempotencyKey: "setup-gateway"
+  });
   const requirements = input.launchRequirements.map(item => {
     const pin = config.toolPins.find(candidate => candidate.toolId === item.toolId);
     return { ...item, pin, version: pin?.version ?? "" };
   });
-  // An unborn HEAD defers GitNexus (no commit to index) while the other managed services still configure.
-  const selectedHasCommits = input.repositoryRoot ? repositoryHasCommits(repositoryRoot) : false;
-  const activeRequirements = requirements.filter(item => item.toolId !== "gitnexus" || selectedHasCommits);
+  // GitNexus is repository-scoped and registered by 'bflow init'; machine setup only starts machine-scoped services.
+  const activeRequirements = requirements.filter(item => item.toolId !== "gitnexus");
   for (const item of requirements) {
     if (!isAbsolute(item.executable) || !item.version) throw new Error(`Missing pinned managed executable/version for ${item.toolId}`);
   }
@@ -231,9 +263,9 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   const operatorServices = config.mcpServices.filter(item => !priorOwnedIds.has(item.serviceId));
   const remoteServices = (input.remoteServices ?? []).map(item => ({ toolId: item.toolId, authenticated: item.authenticated,
     keyFingerprint: item.authenticated ? item.keyFingerprint : null }));
-  const approval = ApprovalSchema.parse({ policyVersion: 2, repositorySelected: Boolean(input.repositoryRoot),
+  const approval = ApprovalSchema.parse({ policyVersion: 2, repositorySelected: false,
     browserExecutable: approvedBrowser(platform), requirements: activeRequirements, remoteServices });
-  const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot,
+  const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot: "",
     paths: platform.paths,
     repositorySelected: approval.repositorySelected, browserExecutable: approval.browserExecutable, requirements: approval.requirements,
     ...(approval.remoteServices.length > 0 ? { remoteServices: approval.remoteServices } : {}), services: operatorServices });
@@ -253,9 +285,8 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   }
   const desiredServices = [...config.services.filter(item => item.serviceId !== service.serviceId), service];
   const plannedMcpIds = [...operatorServices.map(item => item.serviceId), ...activeRequirements.map(item =>
-    item.toolId === "gitnexus" ? `gitnexus-${sha(repositoryRoot).slice(0, 24)}` :
-      item.toolId === "mempalace" ? `mempalace-${sha(platform.machineId).slice(0, 24)}` :
-      `chrome-${sha(join(platform.paths.data, "browser-profiles", "chrome", repositoryId, "setup-browser-probe")).slice(0, 24)}`)];
+    item.toolId === "mempalace" ? `mempalace-${sha(platform.machineId).slice(0, 24)}` :
+      `chrome-${sha(join(platform.paths.data, "browser-profiles", "chrome", chromeProfileScopeId, "setup-browser-probe")).slice(0, 24)}`)];
   for (const remote of remoteServices) plannedMcpIds.push(`${remote.toolId}`);
   for (const component of components) if (component instanceof EnvironmentManifestComponent)
     component.bindServiceInventory(plannedMcpIds, desiredServices.map(item => item.serviceId));
@@ -272,33 +303,27 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     ].filter(Boolean);
     if (mismatched.length > 0) {
       const changes: string[] = [];
-      const savedRoot = saved.operation.scope.kind === "machine" ? null : saved.operation.scope.workspaceRoot;
-      if (savedRoot !== repositoryRoot || saved.approval?.repositorySelected !== approval.repositorySelected)
-        changes.push(`repository scope changed (configured: ${JSON.stringify(savedRoot)}; requested: ${JSON.stringify(repositoryRoot)})`);
+      if (saved.operation.scope.kind === "session") {
+        changes.push(
+          `uses legacy session scope bound to '${saved.operation.scope.workspaceRoot}' and must be migrated to machine scope (run 'bflow init' in '${saved.operation.scope.workspaceRoot}' to register its repository GitNexus service)`
+        );
+      }
       if (saved.approval) {
         const serviceIds = (value: z.infer<typeof ApprovalSchema>) =>
-          new Set([...value.requirements.map(item => item.toolId), ...value.remoteServices.map(item => item.toolId)]);
+          new Set([...value.requirements.filter(item => item.toolId !== "gitnexus").map(item => item.toolId), ...value.remoteServices.map(item => item.toolId)]);
         const previous = serviceIds(saved.approval), requested = serviceIds(approval);
         const added = [...requested].filter(id => !previous.has(id)).sort();
         const removed = [...previous].filter(id => !requested.has(id)).sort();
         if (added.length || removed.length)
           changes.push(`managed MCP services changed (added: ${added.join(", ") || "none"}; removed: ${removed.join(", ") || "none"})`);
-        else if (digest(saved.approval) !== digest(approval)) changes.push("approved launch settings or tool pins changed");
+        else if (digest(saved.approval) !== digest(approval) && saved.operation.scope.kind === "machine")
+          changes.push("approved launch settings or tool pins changed");
       }
       throw new Error(`${changes.length ? `Gateway ${changes.join("; ")}` : "Gateway configuration does not match the approved setup specification"} (differs: ${mismatched.join(", ")}). ` +
-        "Run 'bflow setup' in the requested directory to review and apply a new setup plan; --check does not change the existing Gateway.");
+        "Run 'bflow setup' to review and apply the machine-scoped setup plan; --check does not change the existing Gateway.");
     }
     if (digest(saved.approval) !== digest(approval)) throw new Error("Gateway canonical launch approval changed");
     await validateLaunches(saved);
-    for (const item of activeRequirements) if (item.toolId === "gitnexus") {
-      const tools = await leaf("tool-installer");
-      const result = await tools.systemToolHost.run(item.executable, ["status", "--json"], { cwd: repositoryRoot, timeoutMs: 15_000,
-        environment: { GITNEXUS_HOME: await realpath(join(platform.paths.state, "gitnexus", "gitnexus-home")), GITNEXUS_SHARED_STORE: "off" } });
-      const status = z.object({ schemaVersion: z.literal(1), repository: z.string(), status: z.literal("up-to-date") }).passthrough().safeParse(
-        (() => { try { const text = result.stdout.trim(); return JSON.parse(text.slice(text.indexOf("{"))); } catch { return null; } })());
-      if (result.exitCode !== 0 || !status.success || await realpath(status.data.repository) !== repositoryRoot)
-        throw new Error("GitNexus repository index is stale or cannot be verified; run the approved repository setup plan");
-    }
     const machine = await loadMachineConfig(join(platform.paths.config, MACHINE_CONFIG_FILE));
     if (machine.status !== "valid" || !machine.config ||
       digest(machine.config.mcpServices) !== digest(saved.services) || digest(machine.config.services) !== digest(desiredServices))
@@ -311,9 +336,8 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     componentId: "mcp-config", action: "register_mcp", rollback: "restore_owned_config",
     desired: async () => ({ digest: desiredDigest,
       summary: "Configure pinned shared MCP services and a loopback Gateway; verify actual MCP protocol and required tools after installation",
-      targets: [configPath, join(platform.paths.config, "mcp.json"), join(platform.paths.config, MACHINE_CONFIG_FILE),
-        ...(input.repositoryRoot && activeRequirements.some(item => item.toolId === "gitnexus")
-          ? [join(repositoryRoot, ".gitnexus"), join(repositoryRoot, ".git", "info", "exclude")] : [])], machineWide: true, repairNeeded: false }),
+      targets: [configPath, join(platform.paths.config, "mcp.json"), join(platform.paths.config, MACHINE_CONFIG_FILE)],
+      machineWide: true, repairNeeded: false }),
     observe: async ctx => {
       try {
         const { mcp } = await loadConfigured();
@@ -329,17 +353,16 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
         let prior: z.infer<typeof GatewayConfigSchema> | undefined;
         try { prior = GatewayConfigSchema.parse(await readJson(configPath)); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        const migrationDiagnostics = prior?.operation.scope.kind === "session"
+          ? [
+              `Migrated legacy session-scoped Gateway configuration from '${prior.operation.scope.workspaceRoot}' to machine scope; run 'bflow init' in '${prior.operation.scope.workspaceRoot}' to keep its GitNexus repository service registered.`
+            ]
+          : [];
         const generated: MCPServiceDefinition[] = [];
         for (const item of activeRequirements) {
           let definition: MCPServiceDefinition;
-          const machineOperation = { ...operation, scope: { kind: "machine", machineId: platform.machineId } };
-          if (item.toolId === "gitnexus") {
-            const indexed = await tools.ensureGitNexusIndex({ repositoryRoot, stateRoot: join(platform.paths.state, "gitnexus"),
-              executable: item.executable, timeoutMs: 300_000 });
-            if (!["fresh", "indexed"].includes(indexed.status)) throw new Error(indexed.diagnostic);
-            definition = await tools.createGitNexusService({ executable: item.executable, version: item.version, repositoryRoot,
-              stateRoot: join(platform.paths.state, "gitnexus"), configRoot: join(platform.paths.config, "tool-launches"), operation: machineOperation });
-          } else if (item.toolId === "mempalace") {
+          const machineOperation = { ...operation, scope: { kind: "machine" as const, machineId: platform.machineId } };
+          if (item.toolId === "mempalace") {
             definition = await tools.createMemPalaceService({ executable: item.executable, version: item.version,
               stateRoot: join(platform.paths.state, "mempalace"), configRoot: join(platform.paths.config, "tool-launches"), operation: machineOperation });
           } else {
@@ -347,7 +370,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
             if (!browserExecutable) throw new Error("Chrome/Chromium is unavailable; install a supported browser before Gateway browser verification");
             const browserProbe = await input.runner.run([browserExecutable, "--version"], { timeoutMs: 5000, ...(ctx.signal ? { signal: ctx.signal } : {}) });
             if (browserProbe.exitCode !== 0 || !/chrome|chromium/i.test(browserProbe.stdout + browserProbe.stderr)) throw new Error("Approved browser failed its version probe");
-            definition = await tools.createChromeService({ managedRoot: join(platform.paths.data, "browser-profiles"), repositoryId,
+            definition = await tools.createChromeService({ managedRoot: join(platform.paths.data, "browser-profiles"), repositoryId: chromeProfileScopeId,
               taskId: "setup-browser-probe", browserExecutable, serverExecutable: item.executable, version: item.version,
               configRoot: join(platform.paths.config, "tool-launches"), operation: machineOperation });
             if (definition.connection.kind === "stdio_mcp") {
@@ -402,7 +425,7 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
           unwrap(await store.writeFileAtomic(paths[index]!, `${JSON.stringify(payload, null, 2)}\n`, 0o600));
         }
         await loadConfigured();
-        return { ownedPaths: [...mcpResult.ownedPaths, ...paths], diagnostics: [] };
+        return { ownedPaths: [...mcpResult.ownedPaths, ...paths], diagnostics: migrationDiagnostics };
       } catch (error) { return { ownedPaths: [], diagnostics: [why(error)] }; }
     }
   };
@@ -470,10 +493,18 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   const module = await leaf("mcp-gateway");
   const tools = await leaf("tool-installer");
   const runtimeGrants = new Map<string, readonly ResolvedToolGrant[]>();
-  const gateway = new module.BflowSharedMCPGateway({ policyOverrides: (service: MCPServiceDefinition) => tools.trustedGatewayPolicy(service),
+  const gateway = new module.BflowSharedMCPGateway({
+    policyOverrides: (service: MCPServiceDefinition) => {
+      const base = tools.trustedGatewayPolicy(service);
+      if (service.scope.kind === "machine" && service.tool.toolId === "mempalace" && base) {
+        return { ...base, sessionIsolationPolicy: "protocol_session", sharedStatePolicy: "stateless" };
+      }
+      return base;
+    },
     callLedgerPath: join(configured.paths.state, "gateway-tool-calls.json"),
     requireResolvedToolGrants: (registration: { registrationId: string }) => runtimeGrants.has(registration.registrationId),
-    toolGrantResolver: (registration: { registrationId: string }) => runtimeGrants.get(registration.registrationId) });
+    toolGrantResolver: (registration: { registrationId: string }) => runtimeGrants.get(registration.registrationId)
+  });
   // The Context7 key reaches the Gateway only through its in-memory secret store, from a private file or the environment.
   if (configured.approval?.remoteServices.some(item => item.authenticated)) {
     const stored = await readStoredContext7Key(configured.paths);
@@ -484,7 +515,13 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   }
   const server = new module.StreamableHttpGatewayServer({ gateway, host: "127.0.0.1", port: 0 });
   const store = new SetupStateStore(configured.paths, { uid: process.getuid?.() ?? null, now: () => new Date() });
+  const machineObservations: MCPServiceObservation[] = [];
+  const repoServices = new Map<string, { readonly service: MCPServiceDefinition; readonly operation: ScopedOperation }>();
+  const repoObservations = new Map<string, MCPServiceObservation>();
   const observations: MCPServiceObservation[] = [];
+  const syncObservations = () => {
+    observations.splice(0, observations.length, ...machineObservations, ...repoObservations.values());
+  };
   let timer: ReturnType<typeof setInterval> | undefined;
   let control: GatewayControl | undefined;
   let stopped = false;
@@ -501,7 +538,8 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     await server.stop();
     for (const service of configured.services) if (service.connection.ownership === "bflow")
       await gateway.serviceManager.stop(service.serviceId, configured.operation);
-
+    for (const { service, operation: repoOp } of repoServices.values()) if (service.connection.ownership === "bflow")
+      await gateway.serviceManager.stop(service.serviceId, repoOp);
   };
   try {
     for (const service of configured.services) {
@@ -511,34 +549,50 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
         const observation = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(result));
         if (observation.status !== "ready" || service.tool.operations.some(tool => !observation.discoveredTools.includes(tool)))
           throw new Error(`Gateway upstream ${service.serviceId} did not negotiate required tools`);
-        observations.push(observation);
+        machineObservations.push(observation);
       } catch (error) {
         if (service.tool.required) throw error;
-        observations.push(unavailable(service));
+        machineObservations.push(unavailable(service));
       }
     }
-    const readyServices = configured.services.filter(service => observations.some(item => item.serviceId === service.serviceId && item.status === "ready"));
+    syncObservations();
+    const readyServices = configured.services.filter(service => machineObservations.some(item => item.serviceId === service.serviceId && item.status === "ready"));
 
     const endpoint = `${await server.start()}/mcp`;
     const { scope } = configured.operation;
-    if (scope.kind !== "session") throw new Error("Gateway control requires a session-scoped Gateway operation");
-    control = await startGatewayControl({ gateway, stateRoot: configured.paths.state, machineId: scope.machineId,
-      configDigest: configured.definitionDigest, endpoint, workspaceRoot: scope.workspaceRoot, services: configured.services, grantMap: runtimeGrants,
-      // Only the exact approved stateless hosted service crosses workspace boundaries. Local indexes,
-      // browser profiles and memory backends keep the workspace selected by setup.
-      machineSharedServiceIds: configured.services.filter(service =>
-        configured.generatedIds.includes(service.serviceId) && service.scope.kind === "machine" &&
-        service.scope.machineId === scope.machineId && service.tool.toolId === "context7" &&
-        service.serviceId === tools.CONTEXT7_SERVICE_ID && service.connection.kind === "native_remote_mcp" &&
-        service.connection.endpoint === tools.CONTEXT7_MCP_ENDPOINT && service.connection.ownership === "external" &&
-        service.tool.resource.sharing === "concurrent" &&
-        service.tool.operations.every(operation => tools.CONTEXT7_TOOLS.includes(operation)) &&
-        service.tool.operations.length === tools.CONTEXT7_TOOLS.length).map(service => service.serviceId) });
-    if (readyServices.length) {
+    if (scope.kind !== "machine") throw new Error("Gateway control requires a machine-scoped Gateway operation");
+    const machineId = scope.machineId;
+    const gatewayPlatform: PlatformProfile = {
+      ...detectPlatform(defaultHostEnvironment()),
+      machineId,
+      homeDir: dirname(configured.paths.config),
+      pathEntries: [configured.paths.managedBin],
+      paths: configured.paths
+    };
+
+    const verifyHttpToolDiscovery = async (servicesToVerify: readonly MCPServiceDefinition[], probeOperation: ScopedOperation) => {
+      if (!servicesToVerify.length) return;
       const registrationId = `setup-probe-${randomUUID()}`;
+      const probeScope = probeOperation.scope.kind === "session"
+        ? probeOperation.scope
+        : probeOperation.scope.kind === "repository"
+          ? {
+              kind: "session" as const,
+              machineId: probeOperation.scope.machineId,
+              repositoryId: probeOperation.scope.repositoryId,
+              workspaceRoot: probeOperation.scope.workspaceRoot,
+              sessionId: `setup-probe-${registrationId}`
+            }
+          : {
+              kind: "session" as const,
+              machineId: probeOperation.scope.machineId,
+              repositoryId: `setup-probe-${sha(probeOperation.scope.machineId).slice(0, 24)}`,
+              workspaceRoot: join(configured.paths.data, "gateway-probe"),
+              sessionId: `setup-probe-${registrationId}`
+            };
       const registration = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId, provider: "codex", role: "reviewer",
-        scope: configured.operation.scope, environmentId: "setup-probe", serviceIds: readyServices.map(service => service.serviceId),
-        allowedTools: [...new Set(readyServices.flatMap(service => service.tool.operations))],
+        scope: probeScope, environmentId: "setup-probe", serviceIds: servicesToVerify.map(service => service.serviceId),
+        allowedTools: [...new Set(servicesToVerify.flatMap(service => service.tool.operations))],
         connection: { transport: "streamable_http", endpoint, token: `secret://setup/${registrationId}` },
         configDigest: configured.definitionDigest, expiresAt: new Date(Date.now() + 60_000).toISOString(), idempotencyKey: registrationId });
       unwrap(await gateway.register(registration));
@@ -558,11 +612,56 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
         InitializeSchema.parse(initialized.result);
         const listed = await call(2, "tools/list", initialized.response.headers.get("Mcp-Session-Id") ?? undefined);
         const discovered = ToolsSchema.parse(listed.result);
-        for (const service of readyServices) for (const tool of service.tool.operations)
-          if (!discovered.tools.some(item => item.serviceId === service.serviceId && item.name === tool))
-            throw new Error(`Gateway did not discover required tool ${tool}`);
-      } finally { await gateway.revoke(registrationId, configured.operation); }
+        for (const service of readyServices.includes(servicesToVerify[0]!) ? readyServices : servicesToVerify) {
+          for (const tool of service.tool.operations) {
+            if (!discovered.tools.some(item => item.serviceId === service.serviceId && item.name === tool)) {
+              throw new Error(`Gateway did not discover required tool ${tool}`);
+            }
+          }
+        }
+      } finally { await gateway.revoke(registrationId, probeOperation); }
+    };
+
+    if (readyServices.length) {
+      await verifyHttpToolDiscovery(readyServices, configured.operation);
     }
+
+    // Reload persisted repository-scoped GitNexus services on Gateway startup/restart.
+    const approvedBinary = await resolveApprovedGitNexusBinary(gatewayPlatform);
+    const persistedRepos = await readGatewayRepositoriesState(configured.paths.state, machineId);
+    if (persistedRepos.status === "valid" && persistedRepos.state) {
+      for (const entry of persistedRepos.state.repositories) {
+        if (!existsSync(entry.workspaceRoot)) {
+          // Repository directory was removed from disk; skip without failing Gateway startup.
+          continue;
+        }
+        try {
+          const info = await lstat(entry.workspaceRoot);
+          if (!info.isDirectory() || info.isSymbolicLink()) continue;
+          const validatedService = await validateRepositoryServiceLaunch(entry, configured.paths, machineId, approvedBinary);
+          const repoOp = ScopedOperationSchema.parse({
+            schemaVersion: 3,
+            scope: validatedService.scope,
+            idempotencyKey: `gateway-repo-${entry.repositoryId}`
+          });
+          const ensured = await gateway.serviceManager.ensure(validatedService, repoOp, {
+            timeoutMs: validatedService.healthTimeoutMs,
+            signal: shutdown.signal
+          });
+          const observation = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(ensured));
+          if (observation.status !== "ready" || validatedService.tool.operations.some(tool => !observation.discoveredTools.includes(tool))) {
+            throw new Error(`Gateway repository upstream ${validatedService.serviceId} did not negotiate required tools`);
+          }
+          await verifyHttpToolDiscovery([validatedService], repoOp);
+          repoServices.set(validatedService.serviceId, { service: validatedService, operation: repoOp });
+          repoObservations.set(validatedService.serviceId, observation);
+        } catch (error) {
+          process.stderr.write(`Skipping repository service ${entry.service.serviceId} on Gateway startup: ${why(error)}\n`);
+        }
+      }
+    }
+    syncObservations();
+
     const publish = async () => {
       for (let index = 0; index < configured.services.length; index++) {
         const service = configured.services[index]!;
@@ -578,16 +677,133 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
           })));
           if (!discovered.length || service.tool.operations.some(tool => !discovered.includes(tool)))
             throw new Error(`Gateway upstream ${service.serviceId} no longer exposes required tools`);
-          observations[index] = MCPServiceObservationSchema.parse({ ...current, discoveredTools: discovered, observedAt: new Date().toISOString() });
+          machineObservations[index] = MCPServiceObservationSchema.parse({ ...current, discoveredTools: discovered, observedAt: new Date().toISOString() });
         } catch (error) {
           if (service.tool.required) throw error;
-          observations[index] = unavailable(service);
+          machineObservations[index] = unavailable(service);
         }
       }
+      for (const [serviceId, { service, operation: repoOp }] of repoServices.entries()) {
+        try {
+          if (!existsSync(repoOp.scope.kind === "machine" ? "" : repoOp.scope.workspaceRoot)) {
+            throw new Error(`Repository workspace removed for ${serviceId}`);
+          }
+          const current = MCPServiceObservationSchema.parse(unwrap<MCPServiceObservation>(await gateway.serviceManager.inspect(service.serviceId, repoOp)));
+          const entry = gateway.registry.getService(service.serviceId);
+          const partition = entry && unwrap<string>(module.computePartitionKey(entry.definition, entry.policy, repoOp.scope));
+          const driver = partition && gateway.serviceManager.getDriver(partition);
+          if (current.status !== "ready" || !driver) throw new Error(`Gateway repository upstream ${service.serviceId} lost readiness`);
+          const timeoutMs = Math.min(service.healthTimeoutMs, 5000);
+          const discovered = z.array(z.string().min(1)).parse(unwrap<readonly string[]>(await driver.listTools("setup-health", {
+            timeoutMs, signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(timeoutMs)])
+          })));
+          if (!discovered.length || service.tool.operations.some(tool => !discovered.includes(tool)))
+            throw new Error(`Gateway repository upstream ${service.serviceId} no longer exposes required tools`);
+          repoObservations.set(serviceId, MCPServiceObservationSchema.parse({ ...current, discoveredTools: discovered, observedAt: new Date().toISOString() }));
+        } catch (error) {
+          if (service.tool.required) throw error;
+          repoObservations.set(serviceId, unavailable(service));
+        }
+      }
+      syncObservations();
       if (stopped) return;
       unwrap(await store.writeFileAtomic(configured.receiptPath, `${JSON.stringify(ReadySchema.parse({ schemaVersion: 3,
         definitionDigest: configured.definitionDigest, pid: process.pid, endpoint, observedAt: new Date().toISOString(), observations }))}\n`, 0o600));
     };
+
+    control = await startGatewayControl({
+      gateway,
+      stateRoot: configured.paths.state,
+      machineId,
+      configDigest: configured.definitionDigest,
+      endpoint,
+      services: [...configured.services, ...Array.from(repoServices.values(), item => item.service)],
+      grantMap: runtimeGrants,
+      // Only Bflow-generated machine-scoped services (mempalace, chrome-devtools-mcp, context7) are shared across repositories.
+      // Operator-defined services are not automatically granted cross-repository sharing.
+      machineSharedServiceIds: configured.services.filter(service =>
+        configured.generatedIds.includes(service.serviceId) &&
+        service.scope.kind === "machine" &&
+        service.scope.machineId === machineId
+      ).map(service => service.serviceId),
+      onRegisterRepositoryService: async ({ service, operation: repoOp, rawEntry }): Promise<OperationResult<MCPServiceObservation>> => {
+        try {
+          if (repoOp.scope.kind !== "repository") {
+            return { ok: false, error: { code: "validation", message: "Repository service requires repository scope", retryable: false } as ContractError };
+          }
+          const candidateEntry: RegisteredRepositoryService = rawEntry
+            ? RegisteredRepositoryServiceSchema.parse(rawEntry)
+            : RegisteredRepositoryServiceSchema.parse({
+                schemaVersion: 3,
+                repositoryId: repoOp.scope.repositoryId,
+                workspaceRoot: repoOp.scope.workspaceRoot,
+                service,
+                registeredAt: new Date().toISOString()
+              });
+          const currentApprovedBinary = await resolveApprovedGitNexusBinary(gatewayPlatform);
+          const validatedService = await validateRepositoryServiceLaunch(candidateEntry, configured.paths, machineId, currentApprovedBinary);
+          const ensured = await gateway.serviceManager.ensure(validatedService, repoOp, {
+            timeoutMs: validatedService.healthTimeoutMs,
+            signal: shutdown.signal
+          });
+          if (!ensured.ok) return ensured;
+          const observation = MCPServiceObservationSchema.parse(ensured.value);
+          if (observation.status !== "ready" || validatedService.tool.operations.some(tool => !observation.discoveredTools.includes(tool))) {
+            return {
+              ok: false,
+              error: {
+                code: "transport_unavailable",
+                message: `Repository service '${validatedService.serviceId}' did not negotiate required tools`,
+                retryable: true
+              } as ContractError
+            };
+          }
+          await verifyHttpToolDiscovery([validatedService], repoOp);
+          await upsertRegisteredRepositoryService(configured.paths.state, machineId, {
+            ...candidateEntry,
+            service: validatedService
+          });
+          repoServices.set(validatedService.serviceId, { service: validatedService, operation: repoOp });
+          repoObservations.set(validatedService.serviceId, observation);
+          await publish();
+          return { ok: true, value: observation };
+        } catch (error) {
+          return {
+            ok: false,
+            error: {
+              code: "validation",
+              message: why(error),
+              retryable: false
+            } as ContractError
+          };
+        }
+      },
+      onRemoveRepositoryService: async ({ serviceId, operation: repoOp }): Promise<OperationResult<void>> => {
+        try {
+          const existing = repoServices.get(serviceId);
+          if (existing) {
+            await gateway.serviceManager.stop(serviceId, existing.operation);
+          } else {
+            await gateway.serviceManager.stop(serviceId, repoOp);
+          }
+          gateway.registry.unregisterService(serviceId);
+          repoServices.delete(serviceId);
+          repoObservations.delete(serviceId);
+          await removeRegisteredRepositoryService(configured.paths.state, machineId, { serviceId });
+          await publish();
+          return { ok: true, value: undefined };
+        } catch (error) {
+          return {
+            ok: false,
+            error: {
+              code: "validation",
+              message: why(error),
+              retryable: false
+            } as ContractError
+          };
+        }
+      }
+    });
 
     await publish();
     let publishing = false;

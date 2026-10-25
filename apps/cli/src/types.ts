@@ -89,6 +89,9 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly provider?: "claude" | "codex" | "agy" | undefined;
   readonly force: boolean;
   readonly update?: boolean | undefined;
+  readonly check?: boolean | undefined;
+  readonly remove?: boolean | undefined;
+  readonly noGitnexus?: boolean | undefined;
 }
 
 export interface ConfigMigrateCommandArgs extends GlobalCliFlags {
@@ -405,6 +408,11 @@ export interface InitCommandOutput {
   readonly config: BflowRepositoryConfig;
   readonly overwritten: boolean;
   readonly updated?: boolean | undefined;
+  readonly mode?: "init" | "check" | "remove" | undefined;
+  readonly healthy?: boolean | undefined;
+  readonly configValid?: boolean | undefined;
+  readonly gitnexus?: import("./gateway-repositories.js").RepositoryGitNexusReport | undefined;
+  readonly diagnostics?: readonly string[] | undefined;
 }
 
 export interface HighLevelStepRecord {

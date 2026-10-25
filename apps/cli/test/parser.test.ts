@@ -442,6 +442,32 @@ describe("CLI Argument Parser - parseCliArgs", () => {
         expect(res2.error.code).toBe("validation");
       }
     });
+
+    it("parses --check, --remove, and --no-gitnexus and rejects conflicting init flags", () => {
+      const checkRes = parseCliArgs(["init", "--check"]);
+      expect(checkRes.ok).toBe(true);
+      if (checkRes.ok) {
+        expect((checkRes.value as InitCommandArgs).check).toBe(true);
+      }
+
+      const removeRes = parseCliArgs(["init", "--remove"]);
+      expect(removeRes.ok).toBe(true);
+      if (removeRes.ok) {
+        expect((removeRes.value as InitCommandArgs).remove).toBe(true);
+      }
+
+      const noGnRes = parseCliArgs(["init", "--no-gitnexus"]);
+      expect(noGnRes.ok).toBe(true);
+      if (noGnRes.ok) {
+        expect((noGnRes.value as InitCommandArgs).noGitnexus).toBe(true);
+      }
+
+      const conflictRes = parseCliArgs(["init", "--check", "--remove"]);
+      expect(conflictRes.ok).toBe(false);
+      if (!conflictRes.ok) {
+        expect(conflictRes.error.code).toBe("validation");
+      }
+    });
   });
 
   describe("3. bflow run argument parsing", () => {

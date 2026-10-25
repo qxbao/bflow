@@ -1671,7 +1671,21 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
     }
 
     case "init": {
-      const booleanFlags = new Set(["--force", "-f", "--yes", "-y", "--update", "-u", "--json", "-j", "--help", "-h"]);
+      const booleanFlags = new Set([
+        "--force",
+        "-f",
+        "--yes",
+        "-y",
+        "--update",
+        "-u",
+        "--check",
+        "--remove",
+        "--no-gitnexus",
+        "--json",
+        "-j",
+        "--help",
+        "-h"
+      ]);
       const allowedFlags = new Set([
         "--dir",
         "--config",
@@ -1683,6 +1697,9 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         "-y",
         "--update",
         "-u",
+        "--check",
+        "--remove",
+        "--no-gitnexus",
         "--json",
         "-j",
         "--help",
@@ -1734,6 +1751,20 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       const update =
         optRes.value.flags.has("--update") ||
         optRes.value.flags.has("-u");
+      const check = optRes.value.flags.has("--check");
+      const remove = optRes.value.flags.has("--remove");
+      const noGitnexus = optRes.value.flags.has("--no-gitnexus");
+
+      if (check && remove) {
+        return makeValidationError("Conflicting init mode flags '--check' and '--remove' cannot be combined.", json, "init");
+      }
+      if ((check || remove) && (force || update || noGitnexus || projectName !== undefined || provider !== undefined)) {
+        return makeValidationError(
+          `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--name', or '--provider'.`,
+          json,
+          "init"
+        );
+      }
 
       const value: InitCommandArgs = {
         command: "init",
@@ -1743,6 +1774,9 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         provider,
         force,
         ...(update ? { update: true } : {}),
+        ...(check ? { check: true } : {}),
+        ...(remove ? { remove: true } : {}),
+        ...(noGitnexus ? { noGitnexus: true } : {}),
         json,
         help: false
       };

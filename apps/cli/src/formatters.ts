@@ -459,6 +459,38 @@ function formatRunPage(page: Page<WorkflowRunSnapshot>, useColor = false): strin
 function formatInitOutput(output: InitCommandOutput, useColor = false): string {
   const lines: string[] = [];
   const okMarker = useColor ? green(bold("[OK]"), true) : "[OK]";
+  if (output.mode === "check") {
+    const marker = output.healthy ? okMarker : (useColor ? yellow(bold("[ATTENTION]"), true) : "[ATTENTION]");
+    lines.push(`${marker} Repository initialization check ${output.healthy ? "passed" : "needs attention"}`);
+    lines.push(`  Config:      ${sanitizeIdentifier(output.configPath)} (${output.configValid ? "valid" : "missing/invalid"})`);
+    if (output.gitnexus) {
+      lines.push(`  GitNexus:    ${sanitizeIdentifier(output.gitnexus.status)} (service: ${sanitizeIdentifier(output.gitnexus.serviceId)})`);
+    }
+    if (output.diagnostics && output.diagnostics.length > 0) {
+      lines.push("");
+      lines.push("Diagnostics:");
+      for (const diag of output.diagnostics) {
+        lines.push(`  - ${humanText(diag, 250)}`);
+      }
+    }
+    lines.push("");
+    lines.push(output.healthy ? "Next: Run 'bflow up' to start the environment." : "Next: Run 'bflow init' to complete repository initialization.");
+    return lines.join("\n");
+  }
+  if (output.mode === "remove") {
+    lines.push(`${okMarker} Removed repository GitNexus registration`);
+    if (output.gitnexus) {
+      lines.push(`  Service: ${sanitizeIdentifier(output.gitnexus.serviceId)} (${sanitizeIdentifier(output.gitnexus.status)})`);
+    }
+    if (output.diagnostics && output.diagnostics.length > 0) {
+      lines.push("");
+      lines.push("Diagnostics:");
+      for (const diag of output.diagnostics) {
+        lines.push(`  - ${humanText(diag, 250)}`);
+      }
+    }
+    return lines.join("\n");
+  }
   if (output.updated) {
     lines.push(`${okMarker} bflow repository configuration (updated) at:`);
   } else if (output.overwritten) {
@@ -471,6 +503,16 @@ function formatInitOutput(output: InitCommandOutput, useColor = false): string {
   lines.push("");
   lines.push(`Project Name:  ${sanitizeIdentifier(output.config.projectName)}`);
   lines.push(`Default Tasks: ${output.config.defaultWorkflow.tasks.map((t) => sanitizeIdentifier(t.id)).join(" -> ")}`);
+  if (output.gitnexus) {
+    lines.push(`GitNexus:      ${sanitizeIdentifier(output.gitnexus.status)} (${sanitizeIdentifier(output.gitnexus.serviceId)})`);
+  }
+  if (output.diagnostics && output.diagnostics.length > 0) {
+    lines.push("");
+    lines.push("Diagnostics:");
+    for (const diag of output.diagnostics) {
+      lines.push(`  - ${humanText(diag, 250)}`);
+    }
+  }
   lines.push("");
   lines.push("Next action:");
   lines.push("  Run 'bflow up' to start the environment.");

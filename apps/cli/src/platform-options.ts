@@ -10,6 +10,7 @@ import { readGatewayReadiness } from "./gateway-readiness.js";
 import type { EnvironmentCompositionInput } from "./environment.js";
 import { EnvironmentProviderSchema, type EnvironmentProvider, type EnvironmentRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
+import { readGatewayRepositoriesState } from "./gateway-repositories.js";
 import { CONTEXT7_SERVICE_ID, CONTEXT7_TOOLS } from "./context7-constants.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import { loadMachineSkillCatalog, type MachineSkillCatalog } from "./skill-catalog.js";
@@ -74,7 +75,16 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
   });
   const machineConfigPath = join(platform.paths.config, "machine.json");
   const machineConfig = await setup.loadMachineConfig(machineConfigPath);
-  const mcpServices = machineConfig.status === "valid" ? machineConfig.config!.mcpServices : [];
+  const reposState = await readGatewayRepositoriesState(platform.paths.state, platform.machineId);
+  const repoServices = reposState.status === "valid" && reposState.state
+    ? reposState.state.repositories.map(item => item.service)
+    : [];
+  const machineServices = machineConfig.status === "valid" ? machineConfig.config!.mcpServices : [];
+  const seenServiceIds = new Set(machineServices.map(s => (s as { serviceId?: string }).serviceId).filter(Boolean));
+  const mcpServices = [
+    ...machineServices,
+    ...repoServices.filter(s => !seenServiceIds.has(s.serviceId))
+  ];
   const skills = await loadMachineSkillCatalog();
   const toolInventory = new Map<string, { executablePath: string; version: string; digest: string }>();
   const effectivePolicy = (() => {
@@ -445,7 +455,11 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
           (service.scope.kind === "session" && service.scope.machineId === context.machineId && service.scope.repositoryId === input.repository.id &&
             service.scope.workspaceRoot === input.repository.root && service.scope.sessionId === input.repository.sessionName)));
       if (matches.length !== 1) {
-        reason = matches.length === 0 ? "no approved machine service matches tool ID, kind and operation allowlist" : "multiple approved services match; specify serviceId";
+        reason = matches.length === 0
+          ? canonicalToolId === "gitnexus"
+            ? "no approved machine service matches tool ID, kind and operation allowlist (run 'bflow init' to index this repository and register its GitNexus service)"
+            : "no approved machine service matches tool ID, kind and operation allowlist"
+          : "multiple approved services match; specify serviceId";
         report();
         if (requirement.requiredness === "required" && strictRequired) throw new Error(`Required tool '${requirement.toolId}' for role '${role}' is unavailable: ${reason}`);
         warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);
@@ -470,7 +484,10 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
       // This is service readiness only. The approved wing constrains calls at the
       // Gateway; Runtime validates each retrieved item's provenance before use.
       if (!ready) {
-        reason = readiness?.reason ?? (readiness ? `Gateway status is ${readiness.status} or required operations were not discovered` : "Gateway has no current ready observation");
+        const baseReason = readiness?.reason ?? (readiness ? `Gateway status is ${readiness.status} or required operations were not discovered` : "Gateway has no current ready observation");
+        reason = canonicalToolId === "gitnexus"
+          ? `${baseReason} (run 'bflow init' to index this repository and register its GitNexus service)`
+          : baseReason;
         report();
         if (requirement.requiredness === "required" && strictRequired) throw new Error(`Required tool '${requirement.toolId}' for role '${role}' is unavailable: ${reason}`);
         warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);

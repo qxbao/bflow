@@ -50,7 +50,6 @@ import { wrapSetupComponents, setupGatewayDiagnostics, type SetupGatewayRemoteRe
 import { context7KeyFingerprint, readKeyFromStream, readStoredContext7Key, validateContext7ApiKey } from "./context7-secret.js";
 import { describeExistingContext7, detectExistingContext7 } from "./context7-detect.js";
 import { formatSetupPreview, readableLabel, SETUP_COMPONENT_LABELS } from "./presentation.js";
-import { identifyRepository } from "./repository.js";
 import { createDefaultSetupConfiguration, isolatedProviderHomes } from "./setup-defaults.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import { ProfileSetupComponent, resolveProfileSetupOptions } from "./profile-setup.js";
@@ -242,16 +241,18 @@ export async function executeSetupCommand(
     if (loaded.config) machineConfig = loaded.config;
   }
 
+  if (args.dir !== undefined) {
+    diagnostics.push(
+      `bflow setup operates at machine scope; --dir '${args.dir}' does not bind the Gateway to a repository. Run 'bflow init --dir ${args.dir}' to index that repository and register its GitNexus service.`
+    );
+  }
+
   let launchRequirements: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["launchRequirements"] = [];
-  let repositoryRoot: string | undefined;
   let inventory: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["inventory"] = [];
   let additionalToolObservations: Awaited<ReturnType<typeof createDefaultSetupConfiguration>>["additionalToolObservations"] | undefined;
   if (!context?.setup?.machineSetup && !context?.setup?.toolInstaller) {
     progress("Loading the supported tool and agent CLI installation catalog...");
-    const target = resolve(context?.cwd ?? process.cwd(), args.dir ?? ".");
-    try { repositoryRoot = (await identifyRepository(target)).root; }
-    catch (error) { if (args.dir) throw error; }
-    const defaults = await createDefaultSetupConfiguration({ platform, projectRoot: repositoryRoot ?? target,
+    const defaults = await createDefaultSetupConfiguration({ platform,
       // Isolated setup must never write the real provider homes; the isolation is passed explicitly, not via global state.
       ...(isolatedRoot ? { isolation: isolatedProviderHomes(isolatedRoot) } : {}),
       ...(context?.setup?.machineConfig || existsSync(configPath) ? { config: machineConfig } : {}),
@@ -295,7 +296,11 @@ export async function executeSetupCommand(
   }
 
   if (launchRequirements.length) {
-    diagnostics.push(...setupGatewayDiagnostics({ launchRequirements, ...(repositoryRoot ? { repositoryRoot } : {}), gatewayStateDirectory: platform.paths.state }));
+    diagnostics.push(...setupGatewayDiagnostics({
+      launchRequirements,
+      gatewayStateDirectory: platform.paths.state,
+      gatewayConfigDirectory: platform.paths.config
+    }));
   }
 
   if (onProgress) {
@@ -338,8 +343,7 @@ export async function executeSetupCommand(
 
   const decorateComponents = (components: readonly SetupComponent[], input: ComponentFactoryInput) => {
     let composed = launchRequirements.length || remoteServices.length ? wrapSetupComponents(components, { ...input, serviceManager, launchRequirements,
-      remoteServices, ...(context7ApiKey !== undefined && (args.mode === "apply" || args.mode === "repair") ? { context7ApiKey } : {}),
-      ...(repositoryRoot ? { repositoryRoot } : {}) }) : components;
+      remoteServices, ...(context7ApiKey !== undefined && (args.mode === "apply" || args.mode === "repair") ? { context7ApiKey } : {}) }) : components;
     if (profileSetup) composed = [...composed, profileSetup];
     return !onProgress ? composed : composed.map(component => ({ componentId: component.componentId, action: component.action,
       rollback: component.rollback, observe: component.observe.bind(component), desired: component.desired.bind(component),

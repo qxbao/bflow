@@ -40,6 +40,8 @@ export interface GatewayControlGateway {
   readonly secretStore: { getClientTokenByRegistration(registrationId: string): string | undefined };
   readonly serviceManager: {
     inspect(serviceId: string, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<MCPServiceObservation>>;
+    ensure?(service: MCPServiceDefinition, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<MCPServiceObservation>>;
+    stop?(serviceId: string, operation: ScopedOperation, options?: OperationOptions): Promise<OperationResult<MCPServiceObservation>>;
   };
 }
 
@@ -58,6 +60,17 @@ export interface GatewayControlOptions {
   readonly services: readonly MCPServiceDefinition[];
   /** Authenticated Runtime grants keyed by ephemeral Gateway registration. */
   readonly grantMap?: Map<string, readonly ResolvedToolGrant[]>;
+  /** Dynamic handler to validate and start a repository-scoped service on the running Gateway. */
+  readonly onRegisterRepositoryService?: (input: {
+    readonly service: MCPServiceDefinition;
+    readonly operation: ScopedOperation;
+    readonly rawEntry?: unknown;
+  }) => Promise<OperationResult<MCPServiceObservation>>;
+  /** Dynamic handler to stop and remove a repository-scoped service on the running Gateway. */
+  readonly onRemoveRepositoryService?: (input: {
+    readonly serviceId: string;
+    readonly operation: ScopedOperation;
+  }) => Promise<OperationResult<void>>;
 }
 
 export interface GatewayControl {
@@ -65,7 +78,20 @@ export interface GatewayControl {
   stop(): Promise<void>;
 }
 
-const METHODS = ["catalog", "register", "list", "acquire", "renew", "release", "invoke_tool", "reconcile_tool_call", "reconcile", "revoke"] as const;
+const METHODS = [
+  "catalog",
+  "register",
+  "list",
+  "acquire",
+  "renew",
+  "release",
+  "invoke_tool",
+  "reconcile_tool_call",
+  "reconcile",
+  "revoke",
+  "register_repository_service",
+  "remove_repository_service"
+] as const;
 type Method = (typeof METHODS)[number];
 
 const RequestSchema = z.object({
@@ -121,9 +147,20 @@ export async function startGatewayControl(options: GatewayControlOptions): Promi
   const locator = GatewayControlLocatorSchema.parse({ socketPath, token: randomBytes(32).toString("hex"),
     generation: randomBytes(16).toString("hex"), endpoint });
   const locatorPath = join(options.stateRoot, GATEWAY_CONTROL_LOCATOR_FILE);
-  const service = new GatewayControlService({ gateway: options.gateway, machineId: options.machineId,
-    ...(options.workspaceRoot === undefined ? {} : { workspaceRoot: options.workspaceRoot }), endpoint, services, machineSharedServiceIds,
-    ...(options.grantMap ? { grantMap: options.grantMap } : {}), token: locator.token, generation: locator.generation });
+  const service = new GatewayControlService({
+    gateway: options.gateway,
+    machineId: options.machineId,
+    ...(options.workspaceRoot === undefined ? {} : { workspaceRoot: options.workspaceRoot }),
+    endpoint,
+    services,
+    machineSharedServiceIds,
+    hasExplicitMachineShareList: options.machineSharedServiceIds !== undefined,
+    ...(options.grantMap ? { grantMap: options.grantMap } : {}),
+    ...(options.onRegisterRepositoryService ? { onRegisterRepositoryService: options.onRegisterRepositoryService } : {}),
+    ...(options.onRemoveRepositoryService ? { onRemoveRepositoryService: options.onRemoveRepositoryService } : {}),
+    token: locator.token,
+    generation: locator.generation
+  });
 
   const sockets = new Set<Socket>();
   const server = createServer(socket => serveConnection(socket, service, sockets));
@@ -182,12 +219,33 @@ interface ServiceSettings {
   readonly machineId: string;
   readonly workspaceRoot?: string;
   readonly endpoint: string;
-  readonly services: ReadonlyMap<string, MCPServiceDefinition>;
+  readonly services: Map<string, MCPServiceDefinition>;
   readonly machineSharedServiceIds: ReadonlySet<string>;
+  readonly hasExplicitMachineShareList: boolean;
   readonly grantMap?: Map<string, readonly ResolvedToolGrant[]>;
+  readonly onRegisterRepositoryService?: GatewayControlOptions["onRegisterRepositoryService"];
+  readonly onRemoveRepositoryService?: GatewayControlOptions["onRemoveRepositoryService"];
   readonly token: string;
   readonly generation: string;
 }
+
+const RegisterRepositoryServiceParamsSchema = z.union([
+  z.object({
+    service: MCPServiceDefinitionSchema,
+    operation: ScopedOperationSchema,
+    entry: z.unknown().optional()
+  }).strict(),
+  z.object({
+    entry: z.object({
+      schemaVersion: PlatformSchemaVersionSchema,
+      repositoryId: IdentifierSchema,
+      workspaceRoot: z.string().min(1),
+      service: MCPServiceDefinitionSchema,
+      registeredAt: z.string().datetime()
+    }).strict(),
+    operation: ScopedOperationSchema
+  }).strict()
+]);
 
 /** Authorization and delegation. Registrations are tracked here so the control never trusts the Gateway's private state. */
 class GatewayControlService {
@@ -237,6 +295,8 @@ class GatewayControlService {
       case "reconcile_tool_call": return this.reconcileToolCall(params);
       case "reconcile": return this.reconcile(params);
       case "revoke": return this.revoke(params);
+      case "register_repository_service": return this.registerRepositoryService(params);
+      case "remove_repository_service": return this.removeRepositoryService(params);
     }
   }
 
@@ -418,6 +478,87 @@ class GatewayControlService {
     return revoked.ok ? { ok: true, value: null } : this.forward(revoked.error);
   }
 
+  private async registerRepositoryService(params: unknown): Promise<ControlReply> {
+    const parsed = parseParams(RegisterRepositoryServiceParamsSchema, params, "register_repository_service");
+    if ("reply" in parsed) return parsed.reply;
+    const service = "service" in parsed.data ? parsed.data.service : parsed.data.entry.service;
+    const rawEntry = "entry" in parsed.data ? parsed.data.entry : undefined;
+    const operation = parsed.data.operation;
+    if (operation.scope.kind !== "repository" || service.scope.kind !== "repository") {
+      return failure("validation", "register_repository_service requires repository scope");
+    }
+    if (operation.scope.machineId !== this.settings.machineId || service.scope.machineId !== this.settings.machineId) {
+      return failure("validation", "Repository service operation belongs to a different machine");
+    }
+    if (
+      service.scope.repositoryId !== operation.scope.repositoryId ||
+      service.scope.workspaceRoot !== operation.scope.workspaceRoot
+    ) {
+      return failure("validation", "Repository service scope does not match operation scope");
+    }
+    if (!isCanonicalDirectory(service.scope.workspaceRoot)) {
+      return failure("validation", "Repository service workspaceRoot is not a canonical existing directory");
+    }
+
+    if (this.settings.onRegisterRepositoryService) {
+      const result = await this.settings.onRegisterRepositoryService({ service, operation, rawEntry });
+      if (!result.ok) return this.forward(result.error);
+      const observation = MCPServiceObservationSchema.safeParse(result.value);
+      if (!observation.success) return failure("corruption", "Gateway returned a malformed service observation");
+      this.settings.services.set(service.serviceId, service);
+      return { ok: true, value: observation.data };
+    }
+
+    if (!this.settings.gateway.serviceManager.ensure) {
+      return failure("validation", "Dynamic repository service registration is not supported on this Gateway control");
+    }
+    const ensured = await this.settings.gateway.serviceManager.ensure(service, operation);
+    if (!ensured.ok) return this.forward(ensured.error);
+    const observation = MCPServiceObservationSchema.safeParse(ensured.value);
+    if (!observation.success) return failure("corruption", "Gateway returned a malformed service observation");
+    this.settings.services.set(service.serviceId, service);
+    return { ok: true, value: observation.data };
+  }
+
+  private async removeRepositoryService(params: unknown): Promise<ControlReply> {
+    const parsed = parseParams(
+      z.object({ serviceId: IdentifierSchema, operation: ScopedOperationSchema }).strict(),
+      params,
+      "remove_repository_service"
+    );
+    if ("reply" in parsed) return parsed.reply;
+    const { serviceId, operation } = parsed.data;
+    if (operation.scope.kind !== "repository") {
+      return failure("validation", "remove_repository_service requires repository scope");
+    }
+    if (operation.scope.machineId !== this.settings.machineId) {
+      return failure("validation", "Repository service operation belongs to a different machine");
+    }
+    const existing = this.settings.services.get(serviceId);
+    if (existing) {
+      if (existing.scope.kind !== "repository") {
+        return failure("validation", "Cannot remove a machine-scoped service via remove_repository_service");
+      }
+      if (
+        existing.scope.repositoryId !== operation.scope.repositoryId ||
+        existing.scope.workspaceRoot !== operation.scope.workspaceRoot
+      ) {
+        return failure("validation", "Repository service belongs to a different workspace");
+      }
+    }
+
+    if (this.settings.onRemoveRepositoryService) {
+      const result = await this.settings.onRemoveRepositoryService({ serviceId, operation });
+      if (!result.ok && result.error.code !== "not_found") return this.forward(result.error);
+    } else if (existing && this.settings.gateway.serviceManager.stop) {
+      const stopped = await this.settings.gateway.serviceManager.stop(serviceId, operation);
+      if (!stopped.ok && stopped.error.code !== "not_found") return this.forward(stopped.error);
+    }
+
+    this.settings.services.delete(serviceId);
+    return { ok: true, value: null };
+  }
+
   /** Foreign workspaces may use only the machine services explicitly granted by the trusted host. */
   private checkScope(scope: TrustScope): ControlReply | undefined {
     if (scope.kind !== "session") return failure("validation", "Gateway control requires session scope");
@@ -432,9 +573,23 @@ class GatewayControlService {
   }
 
   private serviceAllowed(serviceId: string, scope: TrustScope): boolean {
-    return this.settings.workspaceRoot === undefined ||
-      (scope.kind !== "machine" && scope.workspaceRoot === this.settings.workspaceRoot) ||
-      this.settings.machineSharedServiceIds.has(serviceId);
+    const service = this.settings.services.get(serviceId);
+    if (!service) return false;
+    if (service.scope.kind === "repository") {
+      return (
+        scope.kind !== "machine" &&
+        scope.machineId === service.scope.machineId &&
+        scope.repositoryId === service.scope.repositoryId &&
+        scope.workspaceRoot === service.scope.workspaceRoot
+      );
+    }
+    if (this.settings.workspaceRoot !== undefined) {
+      return (
+        (scope.kind !== "machine" && scope.workspaceRoot === this.settings.workspaceRoot) ||
+        this.settings.machineSharedServiceIds.has(serviceId)
+      );
+    }
+    return !this.settings.hasExplicitMachineShareList || this.settings.machineSharedServiceIds.has(serviceId);
   }
 
   private ownedBy(registrationId: string, scope: TrustScope):
@@ -576,4 +731,145 @@ async function removeOwnLocator(path: string, generation: string): Promise<void>
   } catch {
     // Missing or unreadable locator: nothing of this generation remains to remove.
   }
+}
+
+async function sendGatewayControlRequest<T>(
+  locatorPath: string,
+  method: Method,
+  params: unknown,
+  responseSchema: z.ZodType<T>,
+  timeoutMs = 15_000
+): Promise<OperationResult<T>> {
+  let locator: GatewayControlLocator;
+  try {
+    locator = GatewayControlLocatorSchema.parse(JSON.parse(await readFile(locatorPath, "utf8")));
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "transport_unavailable",
+        message: `Gateway control locator is unavailable (${error instanceof Error ? error.message : String(error)})`,
+        retryable: true
+      } as ContractError
+    };
+  }
+
+  return new Promise<OperationResult<T>>(resolve => {
+    const socket = createConnection(locator.socketPath);
+    let buffer = Buffer.alloc(0);
+    let settled = false;
+    const finish = (result: OperationResult<T>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        error: {
+          code: "transport_unavailable",
+          message: `Gateway control request '${method}' timed out after ${timeoutMs}ms`,
+          retryable: true
+        } as ContractError
+      });
+    }, timeoutMs);
+
+    socket.once("connect", () => {
+      const request = {
+        schemaVersion: 3,
+        id: randomUUID(),
+        token: locator.token,
+        generation: locator.generation,
+        method,
+        params
+      };
+      socket.write(`${JSON.stringify(request)}\n`);
+    });
+
+    socket.on("data", (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const newline = buffer.indexOf(0x0a);
+      if (newline === -1) return;
+      try {
+        const reply = JSON.parse(buffer.subarray(0, newline).toString("utf8")) as ControlReply;
+        if (!reply.ok) {
+          finish({ ok: false, error: reply.error });
+          return;
+        }
+        const parsed = responseSchema.safeParse(reply.value);
+        if (!parsed.success) {
+          finish({
+            ok: false,
+            error: {
+              code: "corruption",
+              message: `Gateway control returned malformed response for '${method}'`,
+              retryable: false
+            } as ContractError
+          });
+          return;
+        }
+        finish({ ok: true, value: parsed.data });
+      } catch (error) {
+        finish({
+          ok: false,
+          error: {
+            code: "corruption",
+            message: `Gateway control returned invalid JSON (${error instanceof Error ? error.message : String(error)})`,
+            retryable: false
+          } as ContractError
+        });
+      }
+    });
+
+    socket.once("error", error => {
+      finish({
+        ok: false,
+        error: {
+          code: "transport_unavailable",
+          message: `Gateway control socket error: ${error.message}`,
+          retryable: true
+        } as ContractError
+      });
+    });
+
+    socket.once("close", () => {
+      if (!settled) {
+        finish({
+          ok: false,
+          error: {
+            code: "transport_unavailable",
+            message: `Gateway control closed socket before replying to '${method}'`,
+            retryable: true
+          } as ContractError
+        });
+      }
+    });
+  });
+}
+
+export async function registerGatewayRepositoryService(
+  locatorPath: string,
+  params:
+    | { readonly service: MCPServiceDefinition; readonly operation: ScopedOperation; readonly entry?: unknown }
+    | {
+        readonly entry: {
+          readonly schemaVersion: 3;
+          readonly repositoryId: string;
+          readonly workspaceRoot: string;
+          readonly service: MCPServiceDefinition;
+          readonly registeredAt: string;
+        };
+        readonly operation: ScopedOperation;
+      }
+): Promise<OperationResult<MCPServiceObservation>> {
+  return sendGatewayControlRequest(locatorPath, "register_repository_service", params, MCPServiceObservationSchema);
+}
+
+export async function removeGatewayRepositoryService(
+  locatorPath: string,
+  params: { readonly serviceId: string; readonly operation: ScopedOperation }
+): Promise<OperationResult<null>> {
+  return sendGatewayControlRequest(locatorPath, "remove_repository_service", params, z.null());
 }

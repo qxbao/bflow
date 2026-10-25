@@ -278,7 +278,7 @@ export class EnvironmentLifecycle {
     this.dependencies.mcpState.activeRepositories?.delete(repository.id);
     if (this.dependencies.mcpState.services && this.dependencies.mcpState.stoppedServices) {
       for (const [svcId, svc] of Object.entries(this.dependencies.mcpState.services)) {
-        if (svc.ownership === "external" || svc.scope === "machine") continue;
+        if (svc.ownership === "external" || svc.scope === "machine" || svc.scope === "repository") continue;
         const stillReferenced = Array.from(this.dependencies.mcpState.sessionRegistrations?.values() ?? []).some((list) => list.includes(svcId));
         if (!stillReferenced && !this.dependencies.mcpState.stoppedServices.includes(svcId)) {
           this.dependencies.mcpState.stoppedServices.push(svcId);

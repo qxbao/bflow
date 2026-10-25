@@ -5,11 +5,28 @@ import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { defaultMachineConfig, detectPlatform, defaultHostEnvironment, SetupStateStore, digest, NodeCommandRunner, MachineSetupService, NonInteractiveApprover,
-  type ServiceManager, type SetupContext } from "@bflow/machine-setup";
+import {
+  defaultMachineConfig,
+  detectPlatform,
+  defaultHostEnvironment,
+  SetupStateStore,
+  digest,
+  NodeCommandRunner,
+  MachineSetupService,
+  NonInteractiveApprover,
+  type ServiceManager,
+  type SetupContext
+} from "@bflow/machine-setup";
 import { wrapSetupComponents, startSetupGatewayRuntime, setupGatewayDiagnostics } from "../src/setup-gateway.js";
+import {
+  checkRepositoryGitNexus,
+  gitNexusServiceId,
+  prepareRepositoryGitNexus,
+  readGatewayRepositoriesState
+} from "../src/gateway-repositories.js";
+import { identifyRepository, runCli } from "../src/index.js";
 import { GatewayControlClient } from "@bflow/runtime";
-import { MCPClientRegistrationSchema, ResolvedToolGrantSchema, ScopedOperationSchema } from "@bflow/contracts";
+import { MCPClientRegistrationSchema, MCPServiceDefinitionSchema, ResolvedToolGrantSchema, ScopedOperationSchema } from "@bflow/contracts";
 
 let root: string;
 let runtime: Awaited<ReturnType<typeof startSetupGatewayRuntime>> | undefined;
@@ -21,9 +38,10 @@ afterEach(async () => {
   else await rm(root, { recursive: true, force: true });
 });
 
-it("shares approved hosted Context7 across worktrees while keeping the configured GitNexus private", async () => {
+it("shares approved hosted Context7 across worktrees while keeping the repository GitNexus private", async () => {
   const { input, ctx, platform } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
+  await installFixtureTools(["query", "context", "impact"], { executableName: "gitnexus" });
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
   const actualFetch = globalThis.fetch;
   vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
     if (String(url) !== "https://mcp.context7.com/mcp") return actualFetch(url, options);
@@ -45,6 +63,11 @@ it("shares approved hosted Context7 across worktrees while keeping the configure
   for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
   const configPath = join(platform.paths.config, "setup-gateway.json");
   const savedConfig = await readFile(configPath, "utf8");
+
+  // Register repository-scoped GitNexus for `root` via bflow init / prepareRepositoryGitNexus
+  const repoReport = await prepareRepositoryGitNexus({ repository: await identifyRepository(root), platform });
+  expect(repoReport.status).toBe("ready");
+
   const loaded = await GatewayControlClient.fromLocator(join(platform.paths.state, "gateway-control.json"));
   if (!loaded.ok) throw new Error(loaded.error.message);
   const otherRoot = join(root, "other-worktree");
@@ -54,7 +77,8 @@ it("shares approved hosted Context7 across worktrees while keeping the configure
   const catalog = await loaded.value.inspectServices(operation);
   expect(catalog.ok).toBe(true);
   if (!catalog.ok) throw new Error(catalog.error.message);
-  expect(catalog.value.map(service => service.serviceId)).toEqual(["context7"]);
+  expect(catalog.value.map(service => service.serviceId)).toContain("context7");
+  expect(catalog.value.map(service => service.serviceId)).not.toContain(repoReport.serviceId);
   const locator = JSON.parse(await readFile(join(platform.paths.state, "gateway-control.json"), "utf8"));
   const client = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId: "other-reviewer", provider: "codex", role: "reviewer",
     scope: operation.scope, environmentId: "other-reviewer-env", serviceIds: ["context7"], allowedTools: ["query-docs"],
@@ -70,9 +94,8 @@ it("shares approved hosted Context7 across worktrees while keeping the configure
     "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: "docs", method: "tools/call",
       params: { name: "query-docs", serviceId: "context7", arguments: { query: "example" } } }) });
   expect(await response.json()).toMatchObject({ result: { status: "completed", output: [{ text: "documentation from hosted upstream" }] } });
-  const privateService = JSON.parse(savedConfig).services.find((service: any) => service.tool.toolId === "gitnexus");
   expect((await loaded.value.register({ ...client, registrationId: "foreign-gitnexus", idempotencyKey: "foreign-gitnexus",
-    serviceIds: [privateService.serviceId], allowedTools: ["query"] })).ok).toBe(false);
+    serviceIds: [repoReport.serviceId], allowedTools: ["query"] })).ok).toBe(false);
   expect((await loaded.value.register({ ...client, registrationId: "foreign-operator-docs", idempotencyKey: "foreign-operator-docs",
     serviceIds: [operatorService.serviceId] })).ok).toBe(false);
   expect((await loaded.value.revoke(client.registrationId, operation)).ok).toBe(true);
@@ -80,7 +103,6 @@ it("shares approved hosted Context7 across worktrees while keeping the configure
 });
 
 function fixture(mode: SetupContext["mode"] = "apply", options: { initialize?: boolean } = {}) {
-  // Setup runs against an existing repository, so components are wrapped after the repository exists.
   if (options.initialize !== false) initializeGitRepository();
   const platform = { ...detectPlatform(defaultHostEnvironment()),
     paths: { config: join(root, "config"), data: join(root, "data"), state: join(root, "state"), managedBin: join(root, "bin") } };
@@ -101,22 +123,37 @@ function fixture(mode: SetupContext["mode"] = "apply", options: { initialize?: b
     listInstalled: async () => [], remove: async () => ({ ownedPaths: [], diagnostics: [] })
   };
   const config = defaultMachineConfig();
-  config.toolPins = [{ schemaVersion: 3, toolId: "gitnexus", installerId: "fixture", method: "npm", version: "1.6.12",
-    source: "https://registry.npmjs.org/gitnexus/-/gitnexus-1.6.12.tgz", integrity: "a".repeat(64), platforms: ["linux"], requiresElevation: false }];
+  config.toolPins = [
+    { schemaVersion: 3, toolId: "mempalace", installerId: "fixture", method: "verified_archive", version: "3.11.0",
+      source: "https://pypi.org/project/mempalace/3.11.0/", integrity: "a".repeat(64), platforms: ["linux"], requiresElevation: false },
+    { schemaVersion: 3, toolId: "gitnexus", installerId: "fixture", method: "npm", version: "1.6.12",
+      source: "https://registry.npmjs.org/gitnexus/-/gitnexus-1.6.12.tgz", integrity: "a".repeat(64), platforms: ["linux"], requiresElevation: false }
+  ];
   const runner = { run: async () => { throw new Error("Unexpected external command during setup planning"); } };
   const ctx: SetupContext = { platform, runner, mode, now: () => new Date() };
-  const input = { platform, store, config, runner, serviceManager, repositoryRoot: root,
-    launchRequirements: [{ toolId: "gitnexus" as const, executable: join(root, "gitnexus"), args: ["mcp"], requirements: [] }] };
+  const input = { platform, store, config, runner, serviceManager,
+    launchRequirements: [
+      { toolId: "mempalace" as const, executable: join(root, "mempalace-mcp"), args: [], requirements: [] },
+      { toolId: "gitnexus" as const, executable: join(root, "gitnexus"), args: ["mcp"], requirements: [] }
+    ] };
   const components = wrapSetupComponents([], input);
   return { platform, store, config, components, ctx, input };
 }
 
 async function installFixtureTools(tools: string[], options: { initialize?: boolean; executableName?: string } = {}) {
   if (options.initialize !== false) initializeGitRepository();
-  const executable = join(root, options.executableName ?? "gitnexus");
+  const executable = join(root, options.executableName ?? "mempalace-mcp");
   await writeFile(executable, `#!${process.execPath}
 if (process.argv[2] === '--version') { console.log('fixture 1.0.0'); process.exit(0); }
-if (process.argv[2] === 'status') { console.log(JSON.stringify({schemaVersion:1,repository:process.cwd(),status:require('node:fs').existsSync(${JSON.stringify(join(root, "stale-index"))})?'stale':'up-to-date'})); process.exit(0); }
+if (process.argv[2] === 'analyze') {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  fs.mkdirSync(path.join(process.cwd(), '.gitnexus'), { recursive: true });
+  fs.writeFileSync(path.join(process.cwd(), '.gitnexus', 'meta.json'), JSON.stringify({ repository: process.cwd() }));
+  console.log(JSON.stringify({ status: 'up-to-date', repository: process.cwd() }));
+  process.exit(0);
+}
+if (process.argv[2] === 'status') { console.log(JSON.stringify({schemaVersion:1,repository:process.cwd(),status:require('node:fs').existsSync(require('node:path').join(process.cwd(), 'stale-index')) || require('node:fs').existsSync(${JSON.stringify(join(root, "stale-index"))})?'stale':'up-to-date'})); process.exit(0); }
 require('node:fs').appendFileSync(${JSON.stringify(join(root, "launch-count"))}, 'started\\n');
 let pending = '';
 process.stdin.on('data', chunk => { pending += chunk; while (pending.includes('\\n')) {
@@ -147,17 +184,18 @@ it("plans gateway and managed MCP setup without installing tools or creating sta
   expect((await readdir(root)).filter(entry => entry !== ".git")).toEqual([]);
 });
 
-it("configures after installation and verifies actual MCP negotiation and tools through the gateway", async () => {
+it("configures machine services after installation and verifies actual MCP negotiation and tools through the gateway", async () => {
   const { components, ctx, platform, input } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
   for (const component of components) {
     expect((await component.apply(ctx)).diagnostics).toEqual([]);
     expect(await component.observe(ctx)).toMatchObject({ valid: true, stateDigest: (await component.desired(ctx)).digest });
   }
   const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
-  expect(machine.mcpServices[0].tool.operations).toEqual(["query", "context", "impact"]);
+  expect(machine.mcpServices[0].tool.operations).toEqual(["mempalace_search"]);
   expect(JSON.stringify(machine)).not.toContain('"token"');
-  expect(runtime?.observations[0]).toMatchObject({ status: "ready", protocolVersion: "2025-11-25", discoveredTools: ["query", "context", "impact"] });
+  expect(runtime?.observations[0]).toMatchObject({ status: "ready", protocolVersion: "2025-11-25", discoveredTools: ["mempalace_status", "mempalace_search"] });
   const repeated = wrapSetupComponents([], { ...input, config: machine });
   expect((await repeated[0]!.desired(ctx)).digest).toBe((await components[0]!.desired(ctx)).digest);
   expect((await repeated[0]!.observe(ctx)).valid).toBe(true);
@@ -170,48 +208,52 @@ it("configures after installation and verifies actual MCP negotiation and tools 
 
 it("fails the service postcheck when a real upstream omits required tools", async () => {
   const { components, ctx } = fixture();
-  await installFixtureTools(["query"]);
+  await installFixtureTools(["mempalace_status"]);
   expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
   const applied = await components[1]!.apply(ctx);
   expect(applied.diagnostics.join(" ")).toMatch(/required|ready|tools/i);
   expect((await components[1]!.observe(ctx)).valid).toBe(false);
 });
 
-it("explains repository scope changes without rewriting the previously approved Gateway", async () => {
+it("produces the exact same valid setup check across different directories and emits init guidance when --dir is passed", async () => {
   const { components, ctx, input, platform } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
-  expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
   const configPath = join(platform.paths.config, "setup-gateway.json");
   const savedBytes = await readFile(configPath, "utf8");
+  const savedJson = JSON.parse(savedBytes);
+  expect(savedJson.operation.scope).toEqual({ kind: "machine", machineId: platform.machineId });
+  expect(savedJson.operation.scope.workspaceRoot).toBeUndefined();
+
   const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
   const otherRepository = join(root, "other-repository");
+  await mkdir(otherRepository);
   initializeGitRepository(otherRepository);
-  const changed = wrapSetupComponents([], { ...input, config: machine, repositoryRoot: otherRepository });
 
-  for (const component of changed) {
-    const observed = await component.observe({ ...ctx, mode: "check" });
-    expect(observed.valid).toBe(false);
-    const diagnostic = observed.diagnostics.join(" ");
-    expect(diagnostic).toContain("repository scope changed");
-    expect(diagnostic).toContain(root);
-    expect(diagnostic).toContain(otherRepository);
-    expect(diagnostic).toContain("bflow setup");
+  const checkInRepoA = wrapSetupComponents([], { ...input, config: machine });
+  const checkInRepoB = wrapSetupComponents([], { ...input, config: machine, repositoryRoot: otherRepository });
+
+  for (let i = 0; i < checkInRepoA.length; i++) {
+    const obsA = await checkInRepoA[i]!.observe({ ...ctx, mode: "check" });
+    const obsB = await checkInRepoB[i]!.observe({ ...ctx, mode: "check" });
+    expect(obsA.valid).toBe(true);
+    expect(obsB.valid).toBe(true);
+    expect(obsA.stateDigest).toBe(obsB.stateDigest);
+    expect((await checkInRepoA[i]!.desired(ctx)).digest).toBe((await checkInRepoB[i]!.desired(ctx)).digest);
   }
+  expect(setupGatewayDiagnostics({ ...input, repositoryRoot: otherRepository }).join(" ")).toContain("bflow init");
   expect(await readFile(configPath, "utf8")).toBe(savedBytes);
-  expect(runtime).toBeUndefined();
 });
 
 it("identifies newly selected MCP services as a setup plan change", async () => {
   const { input, ctx, platform } = fixture();
-  const components = wrapSetupComponents([], { ...input, repositoryRoot: undefined });
+  const baseInput = { ...input, launchRequirements: [] };
+  const components = wrapSetupComponents([], baseInput);
   expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
   const configPath = join(platform.paths.config, "setup-gateway.json");
   const savedBytes = await readFile(configPath, "utf8");
   const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
-  machine.toolPins.push({ ...machine.toolPins[0], toolId: "mempalace", version: "3.11.0" });
-  const changed = wrapSetupComponents([], { ...input, repositoryRoot: undefined, config: machine,
-    launchRequirements: [...input.launchRequirements,
-      { toolId: "mempalace", executable: join(root, "mempalace-mcp"), args: [], requirements: [] }],
+  const changed = wrapSetupComponents([], { ...input, config: machine,
     remoteServices: [{ toolId: "context7", authenticated: false, keyFingerprint: null }] });
 
   const observed = await changed[0]!.observe({ ...ctx, mode: "check" });
@@ -222,58 +264,29 @@ it("identifies newly selected MCP services as a setup plan change", async () => 
   expect(runtime).toBeUndefined();
 });
 
-it("adds MemPalace to an active Gateway while retaining its current GitNexus reader lock", async () => {
-  const { components, ctx, input, platform } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
-  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
-  const lock = join(platform.paths.state, "gitnexus", `gitnexus-storage-${createHash("sha256").update(root).digest("hex")}.lock`);
-  const reader = await readFile(lock, "utf8");
-  const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
-  await installFixtureTools(["mempalace_status", "mempalace_search"], { initialize: false, executableName: "mempalace-mcp" });
-  machine.toolPins.push({ ...machine.toolPins[0], toolId: "mempalace", version: "1.14.1" });
-  const updated = wrapSetupComponents([], { ...input, config: machine, launchRequirements: [...input.launchRequirements,
-    { toolId: "mempalace", executable: join(root, "mempalace-mcp"), args: [], requirements: [] }] });
+it("retains registered repository GitNexus services and reader locks across Gateway restarts and setup updates", async () => {
+  const { input, ctx, platform } = fixture();
+  await installFixtureTools(["query", "context", "impact"], { executableName: "gitnexus" });
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  const withoutMempalace = wrapSetupComponents([], { ...input, launchRequirements: [] });
+  for (const component of withoutMempalace) expect((await component.apply(ctx)).diagnostics).toEqual([]);
 
+  const repoReport = await prepareRepositoryGitNexus({ repository: await identifyRepository(root), platform });
+  expect(repoReport.status).toBe("ready");
+  const lock = join(platform.paths.state, "gitnexus", `gitnexus-storage-${createHash("sha256").update(root).digest("hex")}.lock`);
+  const reader = JSON.parse(await readFile(lock, "utf8")) as { pid: number };
+  expect(reader.pid).toBeGreaterThan(0);
+
+  const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
+  const updated = wrapSetupComponents([], { ...input, config: machine });
   expect((await updated[0]!.apply(ctx)).diagnostics).toEqual([]);
-  expect(await readFile(lock, "utf8")).toBe(reader);
   expect((await updated[0]!.observe(ctx)).valid).toBe(true);
   expect((await updated[1]!.apply(ctx)).diagnostics).toEqual([]);
   expect((await updated[1]!.observe(ctx)).valid).toBe(true);
-  expect(runtime?.observations.map(item => item.serviceId)).toHaveLength(2);
-});
-
-it("blocks Gateway startup after stale GitNexus configuration fails and preserves the running reader", async () => {
-  const { components, ctx, input, platform } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
-  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
-  const lock = join(platform.paths.state, "gitnexus", `gitnexus-storage-${createHash("sha256").update(root).digest("hex")}.lock`);
-  const reader = await readFile(lock, "utf8");
-  const machineFile = join(platform.paths.config, "machine.json");
-  const machineBytes = await readFile(machineFile, "utf8");
-  const account = { ...platform, homeDir: root, shell: "bash" as const, pathEntries: [join(root, "fixtures")] };
-  await mkdir(account.pathEntries[0]!);
-  for (const name of ["node", "pnpm", "git", "herdr", "gitnexus"]) {
-    const file = join(account.pathEntries[0]!, name); await writeFile(file, "#!/bin/sh\nexit 0\n"); await chmod(file, 0o700);
-  }
-  const runner = { run: async (argv: readonly string[]) => ({ exitCode: 0, timedOut: false, stderr: "", stdout:
-    argv[0]!.endsWith("/pnpm") ? "12.5.1" : argv[0]!.endsWith("/git") ? "git version 2.45.0" :
-      argv[0]!.endsWith("/herdr") ? "herdr 0.9.5" : argv[0]!.endsWith("/gitnexus") ? "gitnexus 1.6.12" : "v24.16.0" }) };
-  const install = vi.spyOn(input.serviceManager, "install");
-  const setup = new MachineSetupService({ platform: account, runner, config: JSON.parse(machineBytes),
-    approver: new NonInteractiveApprover(), persistMachineConfig: false,
-    decorateComponents: (base, factory) => wrapSetupComponents(base, { ...input, ...factory }) });
-  await writeFile(join(root, "stale-index"), "stale");
-
-  const result = await setup.run({ mode: "apply", assumeYes: true });
-  expect(result.receipts.find(item => item.stepId === "register_mcp:mcp-config")).toMatchObject({ status: "failed" });
-  expect(result.receipts.find(item => item.stepId === "configure:services")).toMatchObject({
-    status: "blocked", diagnostics: ["dependency register_mcp:mcp-config is failed"]
-  });
-  expect(result.receipts.some(item => item.stepId === "verify:doctor")).toBe(true);
-  expect(install).not.toHaveBeenCalled();
-  expect(await readFile(lock, "utf8")).toBe(reader);
-  expect(await readFile(machineFile, "utf8")).toBe(machineBytes);
-  expect(runtime?.observations[0]?.status).toBe("ready");
+  const reloadedReader = JSON.parse(await readFile(lock, "utf8")) as { pid: number };
+  expect(reloadedReader.pid).toBeGreaterThan(0);
+  expect(runtime?.observations.map(item => item.serviceId)).toContain(repoReport.serviceId);
+  expect(runtime?.observations.some(item => item.serviceId.startsWith("mempalace-"))).toBe(true);
 });
 
 it("does not configure a missing managed executable or record it as ready", async () => {
@@ -282,21 +295,24 @@ it("does not configure a missing managed executable or record it as ready", asyn
   await expect(readFile(join(platform.paths.config, "machine.json"))).rejects.toThrow();
 });
 
-it("starts the machine Gateway outside a repository and explicitly defers repository-scoped GitNexus activation", async () => {
+it("starts the machine Gateway outside a repository and explicitly defers repository-scoped GitNexus activation to bflow init", async () => {
   const { input, ctx } = fixture();
-  const outsideRepository = { ...input, repositoryRoot: undefined };
+  const outsideRepository = {
+    ...input,
+    launchRequirements: [{ toolId: "gitnexus" as const, executable: join(root, "gitnexus"), args: ["mcp"], requirements: [] }]
+  };
   const components = wrapSetupComponents([], outsideRepository);
   for (const component of components) {
     expect((await component.apply(ctx)).diagnostics).toEqual([]);
     expect((await component.observe(ctx)).valid).toBe(true);
   }
   expect(runtime?.observations).toEqual([]);
-  expect(setupGatewayDiagnostics(outsideRepository).join(" ")).toMatch(/GitNexus.*deferred/);
+  expect(setupGatewayDiagnostics(outsideRepository).join(" ")).toMatch(/GitNexus.*deferred.*bflow init/);
 });
 
 it("preserves an unowned existing gateway user service", async () => {
   const { input, ctx } = fixture();
-  const components = wrapSetupComponents([], { ...input, repositoryRoot: undefined });
+  const components = wrapSetupComponents([], { ...input, launchRequirements: [] });
   const unitPath = input.serviceManager.unitPath("mcp-gateway");
   await writeFile(unitPath, "[Service]\nExecStart=/operator-owned/worker\n");
   expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
@@ -307,7 +323,7 @@ it("preserves an unowned existing gateway user service", async () => {
 
 it.each(["argv", "environment", "cwd", "lockPath", "owner", "profile"])("rejects a self-checksummed Chrome spec with changed %s", async field => {
   const { input, ctx, platform } = fixture();
-  await installFixtureTools(["list_pages", "new_page", "navigate_page"]);
+  await installFixtureTools(["list_pages", "new_page", "navigate_page"], { executableName: "chrome-mcp" });
   await mkdir(join(root, "bin"));
   const browser = join(root, "bin", "google-chrome");
   await writeFile(browser, `#!${process.execPath}\nconsole.log('Google Chrome 152.0.0.0');\n`);
@@ -315,7 +331,7 @@ it.each(["argv", "environment", "cwd", "lockPath", "owner", "profile"])("rejects
   const chromeInput = { ...input, platform: { ...platform, pathEntries: [join(root, "bin")] },
     config: { ...input.config, toolPins: [{ ...input.config.toolPins[0]!, toolId: "chrome-devtools-mcp", version: "1.11.0" }] },
     runner: new NodeCommandRunner(), launchRequirements: [{ toolId: "chrome-devtools-mcp" as const,
-      executable: join(root, "gitnexus"), args: ["--no-usage-statistics", "--no-performance-crux"], requirements: [] }] };
+      executable: join(root, "chrome-mcp"), args: ["--no-usage-statistics", "--no-performance-crux"], requirements: [] }] };
   const [component] = wrapSetupComponents([], chromeInput);
   expect((await component!.apply(ctx)).diagnostics).toEqual([]);
   const file = join(platform.paths.config, "setup-gateway.json");
@@ -346,52 +362,216 @@ it.each(["argv", "environment", "cwd", "lockPath", "owner", "profile"])("rejects
 
 it("invalidates readiness when the current backend stops answering after startup", async () => {
   const { components, ctx } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
   for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
   await writeFile(join(root, "hang"), "hang");
   await vi.waitFor(async () => expect((await components[1]!.observe(ctx)).valid).toBe(false), { timeout: 18_000, interval: 500 });
   expect((await readFile(join(root, "launch-count"), "utf8")).trim().split("\n")).toHaveLength(1);
 }, 25_000);
 
-it("does not carry a prior generated repository backend into another repository session", async () => {
-  const { components, ctx, input, platform } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
-  expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
-  const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
-  const previousId = machine.mcpServices[0].serviceId;
-  const other = join(root, "other"); await mkdir(other); initializeGitRepository(other);
-  const next = wrapSetupComponents([], { ...input, config: machine, repositoryRoot: other });
-  for (const component of next) expect((await component.apply(ctx)).diagnostics).toEqual([]);
-  const finalMachine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
-  const finalMcp = JSON.parse(await readFile(join(platform.paths.config, "mcp.json"), "utf8"));
-  expect(finalMachine.mcpServices).toHaveLength(1);
-  expect(finalMcp.services).not.toHaveProperty(previousId);
-  expect(runtime?.observations.map(item => item.serviceId)).not.toContain(previousId);
-});
-
-it("observes stale repository indexes without rerunning analysis or rewriting state", async () => {
+it("registers multiple repositories concurrently via bflow init, reloads them on Gateway restart, skips deleted repos, and supports bflow init --remove", async () => {
   const { components, ctx, platform } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
-  expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
-  const file = join(platform.paths.config, "setup-gateway.json"); const before = await readFile(file, "utf8");
-  await writeFile(join(root, "stale-index"), "stale");
-  expect((await components[0]!.observe({ ...ctx, mode: "check" })).valid).toBe(false);
-  expect(await readFile(file, "utf8")).toBe(before);
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+
+  const repoA = join(root, "repo-a");
+  const repoB = join(root, "repo-b");
+  await mkdir(repoA); await mkdir(repoB);
+  initializeGitRepository(repoA);
+  initializeGitRepository(repoB);
+
+  const initA = await runCli(["init", "--json"], { cwd: repoA, setup: { platform } });
+  const initB = await runCli(["init", "--json"], { cwd: repoB, setup: { platform } });
+  expect(initA.exitCode).toBe(0);
+  expect(initB.exitCode).toBe(0);
+
+  const dataA = JSON.parse(initA.stdout).data;
+  const dataB = JSON.parse(initB.stdout).data;
+  expect(dataA.gitnexus).toMatchObject({ status: "ready", serviceId: gitNexusServiceId(repoA), indexed: true, registered: true, gatewayReady: true });
+  expect(dataB.gitnexus).toMatchObject({ status: "ready", serviceId: gitNexusServiceId(repoB), indexed: true, registered: true, gatewayReady: true });
+
+  // Both services are simultaneously active in gateway-repositories.json and on the running Gateway
+  const persisted = await readGatewayRepositoriesState(platform.paths.state, platform.machineId);
+  expect(persisted.status).toBe("valid");
+  expect(persisted.state?.repositories.map(item => item.service.serviceId).sort()).toEqual(
+    [gitNexusServiceId(repoA), gitNexusServiceId(repoB)].sort()
+  );
+  expect(runtime?.observations.map(item => item.serviceId)).toEqual(
+    expect.arrayContaining([gitNexusServiceId(repoA), gitNexusServiceId(repoB)])
+  );
+
+  // bflow init --check succeeds for both repositories
+  const checkA = await runCli(["init", "--check", "--json"], { cwd: repoA, setup: { platform } });
+  const checkB = await runCli(["init", "--check", "--json"], { cwd: repoB, setup: { platform } });
+  expect(checkA.exitCode).toBe(0);
+  expect(checkB.exitCode).toBe(0);
+
+  // Restart Gateway -> reloads both repoA and repoB
+  const gatewayConfigPath = join(platform.paths.config, "setup-gateway.json");
+  await runtime?.stop();
+  runtime = await startSetupGatewayRuntime(gatewayConfigPath);
+  expect(runtime.observations.map(item => item.serviceId)).toEqual(
+    expect.arrayContaining([gitNexusServiceId(repoA), gitNexusServiceId(repoB)])
+  );
+
+  // Remove repoA via `bflow init --remove` -> repoA is removed while repoB stays active
+  const removeA = await runCli(["init", "--remove", "--json"], { cwd: repoA, setup: { platform } });
+  expect(removeA.exitCode).toBe(0);
+  expect(JSON.parse(removeA.stdout).data.gitnexus.status).toBe("removed");
+  expect(runtime.observations.map(item => item.serviceId)).not.toContain(gitNexusServiceId(repoA));
+  expect(runtime.observations.map(item => item.serviceId)).toContain(gitNexusServiceId(repoB));
+
+  // Re-init repoA, then delete repoB directory from disk and restart Gateway -> Gateway skips deleted repoB without failing
+  expect((await runCli(["init", "--json"], { cwd: repoA, setup: { platform } })).exitCode).toBe(0);
+  await rm(repoB, { recursive: true, force: true });
+  await runtime.stop();
+  runtime = await startSetupGatewayRuntime(gatewayConfigPath);
+  expect(runtime.observations.map(item => item.serviceId)).toContain(gitNexusServiceId(repoA));
+  expect(runtime.observations.map(item => item.serviceId)).not.toContain(gitNexusServiceId(repoB));
 });
 
-it("uses canonical repository identity for symlinked setup paths", async () => {
+it("observes stale repository indexes in bflow init --check without rerunning analysis or rewriting state", async () => {
+  const { components, ctx, platform } = fixture();
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+
+  expect((await runCli(["init", "--json"], { cwd: root, setup: { platform } })).exitCode).toBe(0);
+  const reposFile = join(platform.paths.state, "gateway-repositories.json");
+  const before = await readFile(reposFile, "utf8");
+  await writeFile(join(root, "stale-index"), "stale");
+
+  const checkRes = await runCli(["init", "--check", "--json"], { cwd: root, setup: { platform } });
+  expect(checkRes.exitCode).toBe(1);
+  expect(JSON.parse(checkRes.stdout).data.gitnexus.status).toBe("stale");
+  // Machine setup check remains valid even when a repository index is stale
+  expect((await components[0]!.observe({ ...ctx, mode: "check" })).valid).toBe(true);
+  expect(await readFile(reposFile, "utf8")).toBe(before);
+});
+
+it("uses canonical repository identity for symlinked init paths", async () => {
+  const { components, ctx, platform } = fixture();
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+
+  const alias = join(root, "repo-alias");
+  await symlink(root, alias);
+  const initRes = await runCli(["init", "--dir", alias, "--json"], { cwd: root, setup: { platform } });
+  expect(initRes.exitCode).toBe(0);
+  const persisted = await readGatewayRepositoriesState(platform.paths.state, platform.machineId);
+  expect(persisted.state?.repositories[0]?.workspaceRoot).toBe(root);
+});
+
+it("migrates a legacy session-scoped setup-gateway.json to machine scope on bflow setup while backing up the old file", async () => {
   const { input, ctx, platform } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
-  const alias = join(root, "repo-alias"); await symlink(root, alias);
-  const components = wrapSetupComponents([], { ...input, repositoryRoot: alias });
-  expect((await components[0]!.apply(ctx)).diagnostics).toEqual([]);
-  const saved = JSON.parse(await readFile(join(platform.paths.config, "setup-gateway.json"), "utf8"));
-  expect(saved.operation.scope.workspaceRoot).toBe(root);
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+
+  // Simulate legacy session-scoped setup-gateway.json + machine.json + mcp.json bound to `root`
+  await mkdir(platform.paths.config, { recursive: true });
+  await mkdir(platform.paths.state, { recursive: true });
+  const legacyGitnexusId = gitNexusServiceId(root);
+  const legacyGitnexusService = MCPServiceDefinitionSchema.parse({
+    schemaVersion: 3,
+    serviceId: legacyGitnexusId,
+    revision: 1,
+    scope: { kind: "session", machineId: platform.machineId, repositoryId: "legacy-repo", workspaceRoot: root, sessionId: "setup-gateway-probe" },
+    tool: {
+      schemaVersion: 3,
+      toolId: "gitnexus",
+      kind: "stdio_mcp",
+      version: "1.6.12",
+      required: true,
+      operations: ["query", "context", "impact"],
+      resource: { sharing: "exclusive", resourceKey: legacyGitnexusId }
+    },
+    connection: {
+      kind: "stdio_mcp",
+      executable: process.execPath,
+      executableDigest: createHash("sha256").update(await readFile(process.execPath)).digest("hex"),
+      argv: ["mcp"],
+      environmentBindings: {},
+      ownership: "bflow",
+      bridgeRequired: true
+    },
+    authentication: { mode: "none" },
+    healthTimeoutMs: 15_000,
+    idleTimeoutMs: 60_000,
+    restartLimit: 2
+  });
+  const legacyConfig = {
+    schemaVersion: 3,
+    desiredDigest: "c".repeat(64),
+    definitionDigest: digest([legacyGitnexusService]),
+    operation: {
+      schemaVersion: 3,
+      scope: { kind: "session", machineId: platform.machineId, repositoryId: "legacy-repo", workspaceRoot: root, sessionId: "setup-gateway-probe" },
+      idempotencyKey: "legacy-setup"
+    },
+    paths: platform.paths,
+    receiptPath: join(platform.paths.state, "setup-gateway-ready.json"),
+    generatedIds: [legacyGitnexusId],
+    services: [legacyGitnexusService]
+  };
+  const gatewayConfigPath = join(platform.paths.config, "setup-gateway.json");
+  await writeFile(gatewayConfigPath, JSON.stringify(legacyConfig, null, 2), { mode: 0o600 });
+  const machineWithLegacy = { ...input.config, mcpServices: [legacyGitnexusService] };
+  await writeFile(join(platform.paths.config, "machine.json"), JSON.stringify(machineWithLegacy, null, 2), { mode: 0o600 });
+
+  const components = wrapSetupComponents([], { ...input, config: machineWithLegacy });
+  // 1. `setup --check` clearly reports that `bflow setup` is needed to migrate to machine scope
+  const checkObs = await components[0]!.observe({ ...ctx, mode: "check" });
+  expect(checkObs.valid).toBe(false);
+  expect(checkObs.diagnostics.join(" ")).toContain("legacy session scope");
+  expect(checkObs.diagnostics.join(" ")).toContain("bflow setup");
+  expect(checkObs.diagnostics.join(" ")).toContain("bflow init");
+  expect(setupGatewayDiagnostics({ ...input, config: machineWithLegacy }).join(" ")).toContain("Legacy session-scoped Gateway configuration detected");
+
+  // 2. `setup --apply` migrates to machine scope, backs up old file, preserves mempalace, and removes legacy gitnexus from machine.json/mcp.json
+  const mcpApplied = await components[0]!.apply(ctx);
+  expect(mcpApplied.diagnostics.join(" ")).toContain("Migrated legacy session-scoped Gateway configuration");
+  expect(mcpApplied.diagnostics.join(" ")).toContain("bflow init");
+  expect((await components[1]!.apply(ctx)).diagnostics).toEqual([]);
+  const migratedGateway = JSON.parse(await readFile(gatewayConfigPath, "utf8"));
+  expect(migratedGateway.operation.scope).toEqual({ kind: "machine", machineId: platform.machineId });
+  expect(migratedGateway.services.some((s: { tool: { toolId: string } }) => s.tool.toolId === "mempalace")).toBe(true);
+  expect(migratedGateway.services.some((s: { tool: { toolId: string } }) => s.tool.toolId === "gitnexus")).toBe(false);
+
+  const migratedMachine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
+  expect(migratedMachine.mcpServices.some((s: { tool: { toolId: string } }) => s.tool.toolId === "gitnexus")).toBe(false);
+  expect(migratedMachine.mcpServices.some((s: { tool: { toolId: string } }) => s.tool.toolId === "mempalace")).toBe(true);
+
+  const backupIndex = await readFile(join(platform.paths.state, "backups", "index.jsonl"), "utf8");
+  expect(backupIndex).toContain("setup-gateway.json");
+});
+
+it("writes .bflow/config.yml and emits clear diagnostics when bflow init runs before bflow setup or when Gateway is not running", async () => {
+  const { platform, input, ctx } = fixture();
+  // Case A: before bflow setup (no machine.json / gitnexus binary)
+  const beforeSetup = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  expect(beforeSetup.exitCode).toBe(0);
+  const beforeData = JSON.parse(beforeSetup.stdout).data;
+  expect(beforeData.gitnexus.status).toBe("missing");
+  expect(beforeData.diagnostics.join(" ")).toContain("bflow setup");
+
+  // Case B: machine.json and gitnexus binary exist, but Gateway is not running
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  const mcpOnly = wrapSetupComponents([], { ...input, launchRequirements: [] });
+  expect((await mcpOnly[0]!.apply(ctx)).diagnostics).toEqual([]);
+  const gatewayStopped = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  expect(gatewayStopped.exitCode).toBe(0);
+  const stoppedData = JSON.parse(gatewayStopped.stdout).data;
+  expect(stoppedData.gitnexus.indexed).toBe(true);
+  expect(stoppedData.gitnexus.registered).toBe(true);
+  expect(stoppedData.gitnexus.gatewayReady).toBe(false);
+  expect(stoppedData.diagnostics.join(" ")).toContain("bflow setup");
 });
 
 it("keeps required services ready when an optional external backend is offline", async () => {
   const { input, ctx } = fixture();
-  await installFixtureTools(["query", "context", "impact"]);
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
   const external = createServer((_request, response) => { response.writeHead(503); response.end("offline"); });
   await new Promise<void>(resolve => external.listen(0, "127.0.0.1", resolve));
   const address = external.address(); if (!address || typeof address === "string") throw new Error("No test listener");
@@ -434,7 +614,7 @@ it("invalidates a required HTTP backend when it stops answering protocol request
         operations: ["health_tool"], resource: { sharing: "concurrent" as const, maxConcurrency: 1 } },
       connection: { kind: "native_remote_mcp" as const, endpoint: `http://127.0.0.1:${address.port}/mcp`, ownership: "external" as const },
       authentication: { mode: "none" as const }, healthTimeoutMs: 500, idleTimeoutMs: 1000, restartLimit: 0 };
-    const components = wrapSetupComponents([], { ...input, repositoryRoot: undefined, config: { ...input.config, mcpServices: [required] } });
+    const components = wrapSetupComponents([], { ...input, launchRequirements: [], config: { ...input.config, mcpServices: [required] } });
     for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
     hanging = true;
     await vi.waitFor(async () => expect((await components[1]!.observe(ctx)).valid).toBe(false), { timeout: 13_000, interval: 200 });
@@ -461,7 +641,7 @@ it.runIf(Boolean(process.env.BFLOW_GATEWAY_LIVE_TOOL_ROOT))("verifies installed 
   const config = { ...input.config, toolPins: [...input.config.toolPins, { schemaVersion: 3 as const, toolId: "chrome-devtools-mcp",
     installerId: "fixture", method: "npm" as const, version: "1.11.0", source: "https://registry.npmjs.org/chrome-devtools-mcp/-/chrome-devtools-mcp-1.11.0.tgz",
     integrity: "a".repeat(64), platforms: ["linux" as const], requiresElevation: false }] };
-  const components = wrapSetupComponents([], { ...input, repositoryRoot, platform, store, config, runner: new NodeCommandRunner(), launchRequirements: [
+  const components = wrapSetupComponents([], { ...input, platform, store, config, runner: new NodeCommandRunner(), launchRequirements: [
     { toolId: "gitnexus", executable: join(toolRoot, "gitnexus/node_modules/.bin/gitnexus"), args: ["mcp"], requirements: [] },
     { toolId: "chrome-devtools-mcp", executable: join(toolRoot, "chrome-devtools-mcp/node_modules/.bin/chrome-devtools-mcp"),
       args: ["--no-usage-statistics", "--no-performance-crux"], requirements: [] }
@@ -470,10 +650,11 @@ it.runIf(Boolean(process.env.BFLOW_GATEWAY_LIVE_TOOL_ROOT))("verifies installed 
     expect((await component.apply(ctx)).diagnostics).toEqual([]);
     expect((await component.observe(ctx)).valid).toBe(true);
   }
+  const repoReport = await prepareRepositoryGitNexus({ repository: await identifyRepository(repositoryRoot), platform });
+  expect(repoReport.status).toBe("ready");
   expect(runtime?.observations).toHaveLength(2);
   console.log(JSON.stringify({ gateway: runtime?.endpoint, observations: runtime?.observations }, null, 2));
 }, 150_000);
-
 
 it("composes the full setup service without overwriting generated gateway config", async () => {
   const { input, platform } = fixture();
@@ -501,25 +682,28 @@ it("composes the full setup service without overwriting generated gateway config
   expect((await setup.run({ mode: "apply", assumeYes: true })).outcome).toBe("healthy");
 });
 
-it("defers GitNexus in a repository without commits, keeps the other services configured, and activates it after the first commit", async () => {
-  const { input, ctx, platform } = fixture("apply", { initialize: false });
+it("defers GitNexus in a repository without commits during bflow init, writes .bflow/config.yml, and activates it after the first commit", async () => {
+  const { components, ctx, platform } = fixture("apply", { initialize: false });
   execFileSync("git", ["init", "--quiet", root]);
-  await installFixtureTools(["query", "context", "impact"], { initialize: false });
-  const configPath = join(platform.paths.config, "setup-gateway.json");
-  const unborn = wrapSetupComponents([], input);
-  expect(setupGatewayDiagnostics(input).join(" ")).toContain("GitNexus indexing deferred: the repository has no commits yet; rerun bflow setup after the first commit");
-  const deferred = unborn.find(component => component.componentId === "mcp-config")!;
-  expect((await deferred.apply(ctx)).diagnostics).toEqual([]);
-  expect((await deferred.observe(ctx)).valid).toBe(true);
-  const before = JSON.parse(await readFile(configPath, "utf8"));
-  expect(before.services).toEqual([]);
-  expect(before.approval.requirements).toEqual([]);
+  await installFixtureTools(["mempalace_status", "mempalace_search"], { initialize: false });
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+
+  const unbornInit = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  expect(unbornInit.exitCode).toBe(0);
+  const unbornData = JSON.parse(unbornInit.stdout).data;
+  expect(unbornData.gitnexus.status).toBe("deferred");
+  expect(unbornData.diagnostics.join(" ")).toContain("no commits yet");
+  expect(await readFile(join(root, ".bflow", "config.yml"), "utf8")).toContain("schemaVersion:");
+
   execFileSync("git", ["-C", root, "-c", "user.name=Gateway Test", "-c", "user.email=gateway@example.test", "commit", "--quiet", "--allow-empty", "-m", "First commit"]);
-  const committed = wrapSetupComponents([], input);
-  expect(setupGatewayDiagnostics(input).join(" ")).not.toContain("no commits yet");
-  const activated = committed.find(component => component.componentId === "mcp-config")!;
-  expect((await activated.apply(ctx)).diagnostics).toEqual([]);
-  const after = JSON.parse(await readFile(configPath, "utf8"));
-  expect(after.services.map((service: { tool: { toolId: string } }) => service.tool.toolId)).toEqual(["gitnexus"]);
-  expect(after.desiredDigest).not.toBe(before.desiredDigest);
+  const committedInit = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  expect(committedInit.exitCode).toBe(0);
+  const committedData = JSON.parse(committedInit.stdout).data;
+  expect(committedData.gitnexus.status).toBe("ready");
+  expect(committedData.gitnexus.gatewayReady).toBe(true);
+  expect(committedData.diagnostics.join(" ")).toContain("PolyForm-Noncommercial-1.0.0");
+
+  const checkReport = await checkRepositoryGitNexus({ repository: await identifyRepository(root), platform });
+  expect(checkReport.status).toBe("ready");
 });

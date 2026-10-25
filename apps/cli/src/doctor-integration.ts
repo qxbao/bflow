@@ -1254,6 +1254,37 @@ export async function runDoctorDiagnostics(
         allowedByDefault
           ? ""
           : "Enable the tool under environment.tools or add an explicit role and operation requirement under environment.toolPolicy.");
+      if (toolId === "gitnexus" && allowedByDefault) {
+        try {
+          const { checkRepositoryGitNexus, resolveSetupPlatform } = await import("./gateway-repositories.js");
+          const setup = await import("@bflow/machine-setup");
+          const host = setup.defaultHostEnvironment();
+          const bflowHome = options.env?.BFLOW_HOME ?? host.env.BFLOW_HOME ?? process.env.BFLOW_HOME;
+          const platform = bflowHome
+            ? setup.isolatedPlatformProfile(setup.detectPlatform(host), resolve(bflowHome))
+            : resolveSetupPlatform(undefined, repository.root);
+          const gn = await checkRepositoryGitNexus({ repository, platform });
+          const isRequired = config?.environment?.tools?.gitnexus?.required === true || requiredTools.includes("gitnexus");
+          const readyStatus: DoctorCheckStatus = gn.status === "ready"
+            ? "pass"
+            : isRequired
+              ? "fail"
+              : "warning";
+          addPolicyState("granted", gn.registered ? "pass" : "skipped",
+            gn.registered
+              ? `Repository GitNexus service '${gn.serviceId}' is registered for this repository.`
+              : `Repository GitNexus service '${gn.serviceId}' is not registered yet (${gn.status}).`,
+            gn.registered ? "" : "Run 'bflow init' in this repository to index and register its GitNexus service.");
+          addPolicyState("ready", readyStatus,
+            gn.status === "ready"
+              ? `Repository GitNexus service '${gn.serviceId}' is indexed, registered, and ready on the shared Gateway.`
+              : `Repository GitNexus service '${gn.serviceId}' is ${gn.status}: ${gn.diagnostics.join(" ")}`,
+            gn.status === "ready" ? "" : "Run 'bflow init' in this repository to index and register its GitNexus service.");
+          continue;
+        } catch {
+          // Fall back to default policy state below if inspection fails
+        }
+      }
       addPolicyState("granted", "skipped", `No explicit Runtime grant overrides exist for '${toolId}'; default optional grants are resolved at startup when machine inventory is ready.`,
         "Verify the machine tool or Gateway service with 'bflow setup --check' or 'bflow tool status'.");
       addPolicyState("ready", "skipped", `'${toolId}' readiness is evaluated against verified machine inventory and Gateway services during startup.`,

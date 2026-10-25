@@ -38,11 +38,21 @@ import {
   type CliExitCode,
   type CliIo,
   type HighLevelParsedCliCommand,
+  type InitCommandOutput,
   type ParsedCliCommand,
   type PresentationOptions
 } from "./types.js";
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 import { executeSetupCommand } from "./setup-integration.js";
+import { defaultEnvironmentConfig, ENVIRONMENT_CONFIG_PATH, readEnvironmentConfig } from "./environment-config.js";
+import { identifyRepository } from "./repository.js";
+import {
+  checkRepositoryGitNexus,
+  gitNexusServiceId,
+  prepareRepositoryGitNexus,
+  removeRepositoryGitNexus,
+  resolveSetupPlatform
+} from "./gateway-repositories.js";
 import { codexHookSetupSucceeded, executeCodexHookSetup } from "./codex-hook-setup.js";
 import { migrateRepositoryConfig } from "./config-migration.js";
 import { CliProgress } from "./progress.js";
@@ -267,6 +277,94 @@ async function executeCommandWithProgress(
   }
 
   if (parsed.command === "init") {
+    const targetDir = resolve(cwd, parsed.dir ?? ".");
+    if (parsed.check) {
+      if (showProgress) {
+        emitProgress("Checking repository initialization and GitNexus status...");
+      }
+      try {
+        const repository = await identifyRepository(targetDir);
+        const configPath = resolve(repository.root, parsed.configPath ?? ENVIRONMENT_CONFIG_PATH);
+        let envConfig: Awaited<ReturnType<typeof readEnvironmentConfig>> | undefined;
+        let configValid = false;
+        const configDiagnostics: string[] = [];
+        try {
+          envConfig = await readEnvironmentConfig(repository);
+          configValid = true;
+        } catch (error) {
+          configDiagnostics.push(error instanceof Error ? error.message : String(error));
+        }
+        const platform = resolveSetupPlatform(context, repository.root);
+        const rawGitnexus = await checkRepositoryGitNexus({ repository, platform });
+        const gitnexusEnabled = envConfig ? envConfig.environment.tools?.gitnexus?.enabled !== false : true;
+        const gitnexus = gitnexusEnabled
+          ? rawGitnexus
+          : {
+              ...rawGitnexus,
+              status: "skipped" as const,
+              diagnostics: ["GitNexus is disabled in .bflow/config.yml (tools.gitnexus.enabled: false)."]
+            };
+        const healthy = configValid && (!gitnexusEnabled || gitnexus.status === "ready");
+        const diagnostics = [
+          ...(!configValid
+            ? [`Repository configuration is missing or invalid (${configDiagnostics.join("; ") || configPath}); run 'bflow init' in '${repository.root}'.`]
+            : []),
+          ...gitnexus.diagnostics
+        ];
+        const config = envConfig ?? defaultEnvironmentConfig(repository, parsed.projectName, context?.clock?.(), parsed.provider);
+        const output: InitCommandOutput = {
+          configPath,
+          config,
+          overwritten: false,
+          mode: "check",
+          healthy,
+          configValid,
+          gitnexus,
+          diagnostics
+        };
+        return makeResult(
+          healthy ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR,
+          true,
+          "init",
+          output,
+          undefined,
+          isJson,
+          io,
+          presentation
+        );
+      } catch (error) {
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "init", undefined, toContractError(error), isJson, io, presentation);
+      }
+    }
+
+    if (parsed.remove) {
+      if (showProgress) {
+        emitProgress("Removing repository GitNexus registration...");
+      }
+      try {
+        const repository = await identifyRepository(targetDir);
+        const configPath = resolve(repository.root, parsed.configPath ?? ENVIRONMENT_CONFIG_PATH);
+        const platform = resolveSetupPlatform(context, repository.root);
+        const gitnexus = await removeRepositoryGitNexus({ repository, platform });
+        const loaded = await loadRepositoryConfig(configPath);
+        const config = loaded.ok
+          ? loaded.value
+          : defaultEnvironmentConfig(repository, parsed.projectName, context?.clock?.(), parsed.provider);
+        const output: InitCommandOutput = {
+          configPath,
+          config,
+          overwritten: false,
+          mode: "remove",
+          healthy: true,
+          gitnexus,
+          diagnostics: gitnexus.diagnostics
+        };
+        return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", output, undefined, isJson, io, presentation);
+      } catch (error) {
+        return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "init", undefined, toContractError(error), isJson, io, presentation);
+      }
+    }
+
     if (showProgress) {
       emitProgress("Initializing repository configuration...");
     }
@@ -286,7 +384,49 @@ async function executeCommandWithProgress(
       return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "init", undefined, initRes.error, isJson, io, presentation);
     }
 
-    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", initRes.value, undefined, isJson, io, presentation);
+    const repository = await identifyRepository(targetDir);
+    const platform = resolveSetupPlatform(context, repository.root);
+    let gitnexusEnabled = !parsed.noGitnexus;
+    if (gitnexusEnabled) {
+      try {
+        const envConfig = await readEnvironmentConfig(repository);
+        if (envConfig.environment.tools?.gitnexus?.enabled === false) {
+          gitnexusEnabled = false;
+        }
+      } catch {
+        // Keep gitnexusEnabled = true if environment config could not be read
+      }
+    }
+
+    if (showProgress && gitnexusEnabled) {
+      emitProgress("Preparing repository GitNexus index and Gateway service...");
+    }
+
+    const gitnexus = gitnexusEnabled
+      ? await prepareRepositoryGitNexus({ repository, platform })
+      : {
+          status: "skipped" as const,
+          serviceId: gitNexusServiceId(repository.root),
+          indexed: false,
+          registered: false,
+          gatewayReady: false,
+          diagnostics: [
+            parsed.noGitnexus
+              ? "GitNexus indexing and Gateway registration skipped (--no-gitnexus)."
+              : "GitNexus indexing and Gateway registration skipped (tools.gitnexus.enabled: false in .bflow/config.yml)."
+          ]
+        };
+
+    const output: InitCommandOutput = {
+      ...initRes.value,
+      mode: "init",
+      healthy: !gitnexusEnabled || gitnexus.status === "ready",
+      configValid: true,
+      gitnexus,
+      diagnostics: gitnexus.diagnostics
+    };
+
+    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", output, undefined, isJson, io, presentation);
   }
 
   if (parsed.command === "docs") {

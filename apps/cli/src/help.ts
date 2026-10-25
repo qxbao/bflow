@@ -56,13 +56,16 @@ Run 'bflow help <command>' or 'bflow <command> --help' for command-specific opti
 
 const INIT_HELP = `Usage: bflow init [options]
 
-Initialize .bflow/config.yml at the canonical Git repository root. Safe to repeat.
+Initialize .bflow/config.yml at the canonical Git repository root and register the repository's GitNexus service on the shared Gateway. Safe to repeat.
 
 Options:
   --dir <path>          Target directory for initialization (default: current directory)
   --config <path>       Custom configuration file path (default: .bflow/config.yml)
   --name <name>         Project name
   --provider <kind>     Role provider: claude, codex, or agy (default: codex)
+  --check               Read-only check of .bflow/config.yml and repository GitNexus readiness
+  --remove              Remove this repository's GitNexus service registration from the shared Gateway
+  --no-gitnexus         Skip GitNexus indexing and Gateway service registration
   -f, --force, -y, --yes  Explicitly replace existing configuration with fresh defaults
   -u, --update          Rebuild .bflow/config.yml with fresh comments and new default fields while preserving existing values
   -j, --json            Output response in JSON envelope format
@@ -70,6 +73,9 @@ Options:
 
 Examples:
   bflow init
+  bflow init --check
+  bflow init --remove
+  bflow init --no-gitnexus
   bflow init --update
   bflow init --name my-project
   bflow init --provider claude
@@ -101,7 +107,7 @@ Modes:
 
 Options:
   -y, --yes             Confirm setup, exact snapshot approval (--hook-digest), or explicit --trust-all
-  --dir <path>          Repository to prepare (machine installation stays user-global)
+  --dir <path>          Backward-compatible flag (setup is machine-global; use 'bflow init --dir <path>' for repositories)
   --catalog-dir <path>  Custom skills catalog directory
   --context7-api-key-stdin  Read a Context7 API key from standard input and store it privately (--apply/--repair).
                         CONTEXT7_API_KEY in the environment is used the same way. Without a key Context7 runs anonymously.
