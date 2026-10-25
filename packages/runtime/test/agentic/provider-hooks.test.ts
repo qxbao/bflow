@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile, realpath } from "node:fs/promises
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 import { RoleMessageSchema } from "@bflow/contracts";
 import { BFLOW_INBOX_NUDGE } from "../../dist/agentic/conversation-inbox.js";
 import { randomUUID } from "node:crypto";
@@ -394,8 +395,8 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
     expect(context).toContain("not a user message and not an approval");
-    expect(context).toContain("MUST SHOW TO USER VERBATIM:");
-    expect(context).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    expect(context).toContain("MUST SHOW TO USER:");
+    expect(context).toContain(renderConversationNotice(notice).display);
     for (const forbidden of ['{"', "messageId", "message_id", "payload", "notice-1"]) expect(context).not.toContain(forbidden);
     expect(f.calls[1]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
     expect(f.calls.map(call => call.method)).not.toContain("user_prompt");
@@ -427,8 +428,8 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     const result = await f.invoke("UserPromptSubmit", JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-1", prompt: "hello" }));
     expect(result.code).toBe(0);
     const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
-    expect(context).toContain("MUST SHOW TO USER VERBATIM:");
-    expect(context).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    expect(context).toContain("MUST SHOW TO USER:");
+    expect(context).toContain(renderConversationNotice(notice).display);
     expect(context).toContain("dữ liệu nội bộ, không trích ra màn hình");
     expect(context).not.toContain("notice-1");
     expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced"]);
@@ -443,8 +444,8 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(first.code).toBe(0);
     const firstInjected = JSON.parse(first.stdout).injectSteps?.[0]?.systemMessage?.systemMessage as string;
     expect(firstInjected).toMatch(/^Trusted Bflow user turn: messageId=user-agy-1; requiresConversationDecision=true\./);
-    expect(firstInjected).toContain("MUST SHOW TO USER VERBATIM:");
-    expect(firstInjected).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    expect(firstInjected).toContain("MUST SHOW TO USER:");
+    expect(firstInjected).toContain(renderConversationNotice(notice).display);
     expect(firstInjected).toContain("dữ liệu nội bộ, không trích ra màn hình");
     expect(firstInjected).not.toContain("notice-1");
     expect(f.calls.map(call => call.method)).toEqual(["user_prompt", "conversation_notices_surfaced"]);
@@ -461,8 +462,8 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(first.code).toBe(0);
     const injected = JSON.parse(first.stdout).injectSteps?.[0]?.systemMessage?.systemMessage as string;
     expect(injected).toContain("not a user message and not an approval");
-    expect(injected).toContain("MUST SHOW TO USER VERBATIM:");
-    expect(injected).toContain("ℹ️ Cập nhật từ runtime (notice)");
+    expect(injected).toContain("MUST SHOW TO USER:");
+    expect(injected).toContain(renderConversationNotice(notice).display);
     expect(injected).toContain("không chào hỏi");
     for (const forbidden of ['{"', "messageId", "message_id", "payload", "notice-1"]) expect(injected).not.toContain(forbidden);
     expect(f.calls.map(call => call.method)).toEqual(["conversation_runtime_nudge", "conversation_notices_surfaced"]);

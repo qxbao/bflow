@@ -1,14 +1,14 @@
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { TaskActivityLog } from "../../src/agentic/task-activity-log.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
-import { blockedNoticeFields, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
+import { blockedNoticeFields, containsCode, formatFriendlyExpiry, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice, sanitizeCardProse } from "../../src/agentic/conversation-notice-render.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { for (const action of cleanups.splice(0).reverse()) await action(); });
+afterEach(async () => { vi.useRealTimers(); for (const action of cleanups.splice(0).reverse()) await action(); });
 async function directory(): Promise<string> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-notice-render-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
@@ -23,8 +23,9 @@ const decisionPayload = {
 };
 function notice(messageId: string, type: string, payload: unknown, extra: Record<string, unknown> = {}) {
   const summary = JSON.stringify(payload);
+  // Receipts written since aliases exist carry a work label for every run notice; legacy tests pass runLabel: undefined.
   return { messageId, type, senderRole: "coordinator", runId: "run-42", correlationId: "corr-1", receivedAt: "2026-10-20T03:16:58.000Z",
-    summary, truncated: summary.length > 4096, ...extra };
+    runLabel: "Việc #1", summary, truncated: summary.length > 4096, ...extra };
 }
 
 describe("isProviderInputEmpty on the current Claude layout", () => {
@@ -111,6 +112,7 @@ describe("Conversation notice rendering", () => {
   });
 
   it("renders a user decision as a 3-part Vietnamese card with short alias, friendly expiry and reply syntax", () => {
+    vi.useFakeTimers({ now: Date.parse("2026-10-20T03:16:58.000Z") });
     const rendered = renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", decisionPayload, {
       shortId: "#2", runLabel: "Việc #1: Thêm trang đăng nhập"
     }));
@@ -127,7 +129,8 @@ describe("Conversation notice rendering", () => {
     expect(rendered.display).toContain("🔔 Cần bạn quyết định · #2");
     expect(rendered.display).toContain("Việc #1: Thêm trang đăng nhập");
     expect(rendered.display).toContain("Trưởng nhóm kỹ thuật hỏi: Dùng schema v2 hay giữ v1?\n  1. Schema v2\n  2. Giữ v1\n  3. Hoãn");
-    expect(rendered.display).toContain('Bạn trả lời: "#2: 1" — còn 43 phút (hết hạn lúc 04:00)');
+    expect(rendered.display).toContain(`Bạn trả lời: "#2: 1" — ${formatFriendlyExpiry(decisionPayload.expiresAt)}`);
+    expect(rendered.display).toContain("còn 43 phút");
     expect(rendered.display).not.toContain("apr-");
     expect(rendered.display).not.toContain("run-42");
     expect(rendered.display).not.toContain("approval.request");
@@ -252,6 +255,56 @@ describe("Conversation notice rendering", () => {
     expect(body).toContain('Bạn trả lời: "#2: 1"');
     const short = notificationBody(renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", decisionPayload, { shortId: "#2" })));
     expect(short).toContain("Dùng schema v2 hay giữ v1?");
+  });
+});
+
+describe("review fixes: aliases, display acknowledgement and expiry", () => {
+  it("does not count a work label, a longer code or another id as showing card #1", () => {
+    const rendered = renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", decisionPayload, { shortId: "#1" }));
+    expect(noticeDisplayed(rendered, "Việc #1 đang chạy bình thường.")).toBe(false);
+    expect(noticeDisplayed(rendered, "**Việc  #1**: tiến độ")).toBe(false);
+    expect(noticeDisplayed(rendered, "Câu hỏi #12 đã có câu trả lời")).toBe(false);
+    expect(noticeDisplayed(rendered, "mã x#1 nội bộ")).toBe(false);
+    expect(noticeDisplayed(rendered, "🔔 Cần bạn quyết định · #1")).toBe(true);
+    expect(noticeDisplayed(rendered, "Trả lời **#1**: 1")).toBe(true);
+    expect(containsCode("Việc #12 xong", "Việc #1")).toBe(false);
+    expect(containsCode("Việc #1: xong", "Việc #1")).toBe(true);
+  });
+  it("keeps legacy notices on their exact ids instead of a guessed #1 / Việc #1", () => {
+    const legacy = { runLabel: undefined };
+    const decision = renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", decisionPayload, legacy));
+    expect(decision).toMatchObject({ ackToken: APPROVAL_ID, shortId: APPROVAL_ID });
+    expect(decision.display).not.toMatch(/#1\b/u);
+    expect(noticeDisplayed(decision, "Việc #1 và câu hỏi #1")).toBe(false);
+    const blocked = renderConversationNotice(notice("blocked-legacy", "conversation.progress", { kind: "workflow_blocked", reason: "Handoff refused", runId: "run-7" }, legacy));
+    expect(blocked.ackToken).toBe("blocked-legacy");
+    expect(blocked.display).toContain('"tiếp tục run-7"');
+    expect(blocked.display).not.toContain("Việc #1");
+    expect(renderConversationNotice(notice("progress-legacy", "conversation.progress", { headline: "x" }, legacy)).display).toBe("▶ run run-42: x");
+  });
+  it("never rewrites another approval or run id to this card's own labels", () => {
+    const identity = { approvalId: APPROVAL_ID, code: "#2", runId: "run-42", workTag: "Việc #1" };
+    expect(sanitizeCardProse(`Giống ${APPROVAL_ID} trong run run-42`, identity)).toBe("Giống #2 trong Việc #1");
+    expect(sanitizeCardProse("Giống apr-other-1 trong run run-99", identity)).toBe("Giống một yêu cầu duyệt khác trong một công việc khác");
+  });
+  it("formats expiry in the local time zone and measures remaining time at render time", () => {
+    const expiresAt = "2026-10-20T04:00:00.000Z", zone = "Asia/Ho_Chi_Minh";
+    expect(formatFriendlyExpiry(expiresAt, Date.parse("2026-10-20T03:17:00.000Z"), zone)).toBe("còn 43 phút (hết hạn lúc 11:00)");
+    expect(formatFriendlyExpiry(expiresAt, Date.parse("2026-10-20T03:50:00.000Z"), zone)).toBe("còn 10 phút (hết hạn lúc 11:00)");
+    expect(formatFriendlyExpiry(expiresAt, Date.parse("2026-10-20T04:05:00.000Z"), zone)).toBe("đã hết hạn lúc 11:00");
+    expect(formatFriendlyExpiry("2026-10-22T04:00:00.000Z", Date.parse("2026-10-20T03:00:00.000Z"), zone)).toBe("hết hạn lúc 11:00 ngày 22/10");
+  });
+  it("assigns distinct #n aliases to concurrently appended decisions", async () => {
+    const root = await directory();
+    const receipts = new HostReceiptJournal(join(root, "receipts"), "/tmp/bflow-notice-render-repo", "session-1",
+      TaskActivityLog.open(join(root, "task-activity.jsonl")));
+    const message = (index: number) => ({ schema_version: 2, message_id: `decision-${index}`, correlation_id: "corr-1", run_id: "run-42",
+      sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "approval.request", artifact_references: [],
+      payload: { ...decisionPayload, approvalId: `apr-user-decision-${index}` } });
+    await Promise.all([1, 2, 3, 4, 5].map(index => receipts.appendConversationNotice(message(index) as never)));
+    const aliases = await receipts.noticeAliases();
+    expect(Object.keys(aliases.approvalShortIds).sort()).toEqual(["#1", "#2", "#3", "#4", "#5"]);
+    expect(new Set(Object.values(aliases.approvalShortIds)).size).toBe(5);
   });
 });
 
@@ -397,10 +450,12 @@ describe("structured decision fields and assistant text", () => {
       userDecision: { approvalId: APPROVAL_ID, requestedByRole: "developer", question: "Dùng schema nào?", options: ["Schema v2", "Giữ v1"],
         expiresAt: "2026-10-20T04:00:00.000Z" } });
     expect(rendered.kind).toBe("user_decision");
-    expect(rendered.display).toContain("🔔 Cần bạn quyết định · #1");
+    // No alias was stored: the card keeps the exact approval id instead of guessing #1.
+    expect(rendered.display).toContain(`🔔 Cần bạn quyết định · ${APPROVAL_ID}`);
     expect(rendered.display).toContain("Lập trình viên hỏi: Dùng schema nào?");
     expect(rendered.display).toContain("  1. Schema v2\n  2. Giữ v1");
-    expect(rendered.display).toContain('Bạn trả lời: "#1: 1"');
+    expect(rendered.display).toContain(`Bạn trả lời: "${APPROVAL_ID}: 1"`);
+    expect(rendered.display).not.toContain("#1");
   });
   it("degrades a malformed structured field to an update that says it was cut short", () => {
     const rendered = renderConversationNotice({ messageId: "m-1", type: "approval.request", summary: undefined, truncated: true,

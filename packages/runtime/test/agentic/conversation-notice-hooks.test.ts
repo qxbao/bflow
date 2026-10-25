@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { renderConversationNotice } from "../../src/agentic/conversation-notice-render.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -118,7 +119,9 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(result.code).toBe(0);
     const block = JSON.parse(result.stdout);
     expect(block.decision).toBe("block");
-    expect(block.reason).toBe("Bflow: còn 1 cập nhật chưa báo người dùng (1 cần quyết định). Gọi read_updates rồi trình bày bằng lời dễ hiểu.");
+    expect(block.reason).toContain("Bflow: còn 1 cập nhật chưa báo người dùng (1 cần quyết định).");
+    // The surfaced notice's rendered card travels in the reason, so it is not lost if the model skips read_updates.
+    expect(block.reason).toContain(renderConversationNotice(decisionNotice).display);
     for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(block.reason).not.toContain(forbidden);
     expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
   });
@@ -128,7 +131,7 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const f = await fixture({ conversation_notices: { notices: [], undisplayed: [undisplayed] } });
     const transcript = await f.transcript([{ type: "user", message: { content: "hi" } }, assistantTurn("Đã xem, không có gì mới.")]);
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
-    expect(JSON.parse(result.stdout).reason).toBe("Bflow: còn 1 cập nhật chưa báo người dùng (1 cần quyết định). Gọi read_updates rồi trình bày bằng lời dễ hiểu.");
+    expect(JSON.parse(result.stdout).reason).toContain("Bflow: còn 1 cập nhật chưa báo người dùng (1 cần quyết định).");
     expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_reblocked"]);
     expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
 

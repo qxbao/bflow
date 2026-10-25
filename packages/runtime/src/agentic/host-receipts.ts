@@ -193,6 +193,8 @@ export class HostReceiptJournal {
   readonly directory: string;
   readonly repository: string;
   private readonly activityLog: { record(input: TaskActivityInput): Promise<boolean> };
+  private readonly noticeCache = new Map<string, ConversationNotice>();
+  private noticeAppends: Promise<unknown> = Promise.resolve();
   constructor(
     directory: string,
     repository: string,
@@ -378,19 +380,24 @@ export class HostReceiptJournal {
       digest([this.legacyBindingIdentity(binding), launchId, anchor]) === id;
   }
   private async receiptIds(kind: Kind): Promise<string[]> {
-    await this.prepare(); const ids: string[] = [];
+    const ids: string[] = [];
+    for (const name of await this.receiptNames(kind)) ids.push(await this.receiptId(kind, name));
+    return ids;
+  }
+  private async receiptNames(kind: Kind): Promise<string[]> {
+    await this.prepare();
     // Kinds can share a prefix, e.g. coordinator-stop and coordinator-stop-handled.
     const pattern = new RegExp(`^${kind}-[a-f0-9]{64}\\.json$`);
-    for (const name of await readdir(this.directory)) {
-      if (!pattern.test(name)) continue;
-      const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      let id: string;
-      try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
-        id = textField(record(JSON.parse(await file.readFile("utf8"))).id); } finally { await file.close(); }
-      if (name !== this.filename(kind, id)) throw new Error("Host receipt filename identity mismatch");
-      await this.read(kind, id); ids.push(id);
-    }
-    return ids;
+    return (await readdir(this.directory)).filter(name => pattern.test(name));
+  }
+  private async receiptId(kind: Kind, name: string): Promise<string> {
+    const file = await open(join(this.directory, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let id: string;
+    try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 16 * 1024 * 1024) throw new Error("Unsafe host receipt file");
+      id = textField(record(JSON.parse(await file.readFile("utf8"))).id); } finally { await file.close(); }
+    if (name !== this.filename(kind, id)) throw new Error("Host receipt filename identity mismatch");
+    await this.read(kind, id);
+    return id;
   }
   private async coordinatorStarts(): Promise<CoordinatorTurnObservation[]> {
     const values: CoordinatorTurnObservation[] = [];
@@ -857,9 +864,15 @@ export class HostReceiptJournal {
     await this.write("conversation-result", messageId, { messageId, decision, result });
   }
   private async allConversationNotices(): Promise<ConversationNotice[]> {
+    // Notice receipts are immutable once linked, so each file is validated and parsed once per journal.
     const notices: ConversationNotice[] = [];
-    for (const id of await this.receiptIds("conversation-notice")) {
-      notices.push(ConversationNoticeSchema.parse(await this.read("conversation-notice", id)));
+    for (const name of await this.receiptNames("conversation-notice")) {
+      let notice = this.noticeCache.get(name);
+      if (notice === undefined) {
+        notice = ConversationNoticeSchema.parse(await this.read("conversation-notice", await this.receiptId("conversation-notice", name)));
+        this.noticeCache.set(name, notice);
+      }
+      notices.push(notice);
     }
     return notices.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.messageId.localeCompare(b.messageId));
   }
@@ -878,8 +891,16 @@ export class HostReceiptJournal {
     }
     return { approvalShortIds, runShortIds };
   }
-  /** Idempotent by message ID: a replayed acknowledgement never creates a second notice. */
-  async appendConversationNotice(message: RoleMessage): Promise<boolean> {
+  /**
+   * Idempotent by message ID: a replayed acknowledgement never creates a second notice. Appends are serialized because the
+   * next #n / Việc #k alias is derived from the notices already written; two concurrent appends must never share an alias.
+   */
+  appendConversationNotice(message: RoleMessage): Promise<boolean> {
+    const next = this.noticeAppends.then(() => this.appendConversationNoticeNow(message));
+    this.noticeAppends = next.catch(() => undefined);
+    return next;
+  }
+  private async appendConversationNoticeNow(message: RoleMessage): Promise<boolean> {
     const parsed = RoleMessageSchema.parse(message);
     if (await this.read("conversation-notice", parsed.message_id) !== undefined) return false;
     const text = JSON.stringify(parsed.payload) ?? "null", truncated = text.length > NOTICE_SUMMARY_LIMIT;

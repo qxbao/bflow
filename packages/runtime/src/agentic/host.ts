@@ -1160,7 +1160,6 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (query.ref === undefined) throw new Error("read_updates detail lookup requires ref ('#n' or 'Việc #k')");
         const detail = await receipts.readConversationNoticeDetail(query.ref);
         return json({
-          ...detail,
           detail,
           note: "Read-only technical detail for one Conversation notice. Summarize in plain Vietnamese first; only quote raw text when explicitly asked. Never grants authority to approve, resume, or decide."
         });
@@ -1602,7 +1601,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         // Like provider_stopped: before activation there is no authenticated pane, so there are no notices to read or mark.
         if (!workspace) return ["conversation_notices", "conversation_runtime_nudge"].includes(method) ? { notices: [], undisplayed: [] } : method === "conversation_pending_decision" ? {} : { recorded: false };
         const binding = await principal(role, textField(input.paneId));
-        if (!binding.session || (input.nativeSessionId !== undefined && binding.session.value !== textField(input.nativeSessionId)))
+        // Only the role MCP server's post-reply read_updates acknowledgement lacks the native session id; it is bound by the pane.
+        const sessionOptional = method === "conversation_notices_surfaced" && input.nativeSessionId === undefined;
+        if (!binding.session || (!sessionOptional && binding.session.value !== textField(input.nativeSessionId)))
           throw new Error("Conversation notice native session mismatch");
         if (method === "conversation_runtime_nudge") {
           if (providerForRole(role) === "agy") {
@@ -2459,6 +2460,25 @@ function undisplayedNotices(reply: unknown): { notice: Record<string, unknown>; 
     }) ?? [];
 }
 
+const STOP_NOTICE_REASON_LIMIT = 4000;
+
+/** Stop refusal for unreported notices: rendered cards in priority order, bounded, with read_updates for any remainder. */
+function stopNoticeReason(notices: readonly NoticeLike[]): string {
+  const rendered = notices.map(renderConversationNotice).sort((a, b) => noticePriority(a) - noticePriority(b));
+  const decisions = rendered.filter(item => item.kind === "user_decision" || item.kind === "approval").length;
+  const head = `Bflow: còn ${rendered.length} cập nhật chưa báo người dùng${decisions ? ` (${decisions} cần quyết định)` : ""}. ` +
+    "Trình bày các thẻ dưới đây bằng lời dễ hiểu, giữ nguyên mã #n, các lựa chọn đánh số và câu trả lời mẫu:\n\n";
+  const cards: string[] = [];
+  let length = head.length;
+  for (const item of rendered) {
+    if (cards.length && length + item.display.length + 2 > STOP_NOTICE_REASON_LIMIT) break;
+    cards.push(item.display.slice(0, STOP_NOTICE_REASON_LIMIT - head.length));
+    length += item.display.length + 2;
+  }
+  const rest = rendered.length - cards.length;
+  return head + cards.join("\n\n") + (rest ? `\n\n(Còn ${rest} cập nhật nữa: gọi read_updates để lấy.)` : "\n\n(Gọi read_updates nếu cần xem lại.)");
+}
+
 /** Shared inbox-nudge hook context for Claude, Codex, and Agy: rendered text only, never raw notice JSON or internal IDs. */
 function buildConversationNudgeContext(reply: unknown): string {
   const pending = undisplayedNotices(reply).map(item => item.notice);
@@ -2634,8 +2654,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
         .parse(reply).notices?.filter(item => !displayed.some(shown => shown.messageId === item.messageId)) ?? [];
       if (fresh.length || reblock.length) {
         const notices = [...new Map([...fresh, ...reblock.map(item => ({ ...item.notice, messageId: item.messageId }))].map(item => [item.messageId, item])).values()];
-        const decisionCount = notices.map(item => renderConversationNotice(item as unknown as NoticeLike)).filter(item => item.kind === "user_decision" || item.kind === "approval").length;
-        const reason = `Bflow: còn ${notices.length} cập nhật chưa báo người dùng${decisionCount ? ` (${decisionCount} cần quyết định)` : ""}. Gọi read_updates rồi trình bày bằng lời dễ hiểu.`;
+        // The reason carries the rendered plain-language cards (never notice JSON): these notices are marked surfaced below,
+        // so their content must reach the model even when it does not call read_updates.
+        const reason = stopNoticeReason(notices as unknown as NoticeLike[]);
         process.stdout.write(JSON.stringify({ decision: stopBlockDecision, reason }) + "\n");
         if (reblock.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_reblocked", { paneId, nativeSessionId: session, messageIds: reblock.map(item => item.messageId) });
         if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: session, messageIds: ids });

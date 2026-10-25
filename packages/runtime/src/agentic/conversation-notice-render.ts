@@ -162,15 +162,19 @@ const MESSAGE_TYPE_LABELS: Readonly<Record<string, string>> = {
   "execution.receipt": "biên nhận thực thi"
 };
 
+/** What a card's own internal ids are shown as. Ids of other approvals or runs are never rewritten to this card's labels. */
+export interface CardIdentity { readonly approvalId?: string | undefined; readonly code?: string | undefined; readonly runId?: string | undefined; readonly workTag?: string | undefined }
+
 /** Cleans technical IDs, artifact URIs, raw JSON and English role/SDD terms from user-facing card prose. */
-export function sanitizeCardProse(text: string, workTag = "Việc #1", shortId = "#1"): string {
+export function sanitizeCardProse(text: string, identity: CardIdentity = {}): string {
   let cleaned = text.split(/\s*[\[{]\s*"/u)[0]!.split(/\n\s*at\s+/u)[0]!.trim();
   cleaned = cleaned
     .replace(/\{"[^}]*\}/gu, "")
     .replace(/artifact:\/\/[^\s,;)]+/giu, "tài liệu đính kèm")
-    .replace(/\bapr-[a-zA-Z0-9_-]+\b/gu, shortId)
-    .replace(/\b(?:design|task-approval|delivery)-[a-zA-Z0-9_-]+\b/gu, shortId)
-    .replace(/\b(?:run\s+)?run[_-][a-zA-Z0-9_-]+\b/giu, workTag)
+    .replace(/\b(?:apr|design|task-approval|delivery)-[a-zA-Z0-9_-]+\b/gu, id =>
+      id === identity.approvalId && identity.code ? identity.code : "một yêu cầu duyệt khác")
+    .replace(/\b(?:run\s+)?(run[_-][a-zA-Z0-9_-]+)\b/giu, (_match, id: string) =>
+      id === identity.runId && identity.workTag ? identity.workTag : "một công việc khác")
     .replace(/SDD\s+level\s+conflict[^.\n]*/giu, "Xung đột mức đặc tả")
     .replace(/\blightweight(?:\s+SDD)?\b/giu, "bản mô tả ngắn gọn")
     .replace(/\bfull\s+SDD\b/giu, "bản đặc tả đầy đủ")
@@ -188,17 +192,35 @@ export function sanitizeCardProse(text: string, workTag = "Việc #1", shortId =
   return cleaned.replace(/\s+/gu, " ").replace(/[\s:;,]+$/u, "").trim();
 }
 
-export function formatFriendlyExpiry(expiresAt: string | undefined, receivedAt?: string): string {
+/** Wall-clock time in the host's local time zone (the user's machine); the date is added when it is not today. */
+function localClock(ms: number, nowMs: number, timeZone?: string): string {
+  const options: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit", hour12: false, ...(timeZone ? { timeZone } : {}) };
+  const day = (value: number) => new Intl.DateTimeFormat("en-CA", { dateStyle: "short", ...(timeZone ? { timeZone } : {}) }).format(value);
+  const time = new Intl.DateTimeFormat("vi-VN", options).format(ms);
+  if (day(ms) === day(nowMs)) return time;
+  const parts = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit", ...(timeZone ? { timeZone } : {}) }).formatToParts(ms);
+  const part = (type: string) => parts.find(item => item.type === type)?.value ?? "";
+  return `${time} ngày ${part("day")}/${part("month")}`;
+}
+
+/** Remaining time is measured at render time, so a reminder shown later never repeats the original countdown. */
+export function formatFriendlyExpiry(expiresAt: string | undefined, nowMs = Date.now(), timeZone?: string): string {
   if (!expiresAt) return "chưa giới hạn thời gian — đang chờ bạn trả lời";
   const expMs = Date.parse(expiresAt);
   if (Number.isNaN(expMs)) return "đang chờ bạn trả lời";
-  const hhmm = new Date(expMs).toISOString().slice(11, 16);
-  const refMs = receivedAt ? Date.parse(receivedAt) : Date.now();
-  if (!Number.isNaN(refMs)) {
-    const mins = Math.max(1, Math.round((expMs - refMs) / 60_000));
-    if (mins > 0 && mins <= 24 * 60) return `còn ${mins} phút (hết hạn lúc ${hhmm})`;
-  }
-  return `hết hạn lúc ${hhmm}`;
+  const clock = localClock(expMs, nowMs, timeZone);
+  if (expMs <= nowMs) return `đã hết hạn lúc ${clock}`;
+  const mins = Math.max(1, Math.round((expMs - nowMs) / 60_000));
+  return mins <= 24 * 60 ? `còn ${mins} phút (hết hạn lúc ${clock})` : `hết hạn lúc ${clock}`;
+}
+
+/**
+ * Work label of a run. Notices written before aliases existed have no runLabel: they keep the run id, because a guessed
+ * `Việc #1` could name a different run whose alias really is #1.
+ */
+function workTagOf(notice: { readonly runLabel?: string | undefined }, runId: string | undefined): string | undefined {
+  const tag = notice.runLabel?.split(":")[0]?.trim();
+  return tag ? tag : runId ? `run ${runId}` : undefined;
 }
 
 /**
@@ -269,9 +291,9 @@ function updateNotice(notice: NoticeLike): RenderedNotice {
   const rawText = payload && typeof payload === "object" && !Array.isArray(payload)
     ? [(payload as Record<string, unknown>).blockageReason, (payload as Record<string, unknown>).headline].find(value => typeof value === "string" && value.length > 0) as string | undefined
     : undefined;
-  const runLabel = notice.runLabel ?? (notice.runId ? "Việc #1" : undefined);
-  const workTag = (runLabel ?? formatRoleLabel(notice.senderRole ?? "runtime")).split(":")[0]!.trim();
-  const cleanText = rawText ? sanitizeCardProse(rawText, workTag, notice.shortId ?? "#1") : (MESSAGE_TYPE_LABELS[type] ? `Đã nhận ${MESSAGE_TYPE_LABELS[type]}` : "Có cập nhật tiến độ mới");
+  const runLabel = notice.runLabel;
+  const workTag = workTagOf(notice, notice.runId) ?? formatRoleLabel(notice.senderRole ?? "runtime");
+  const cleanText = rawText ? sanitizeCardProse(rawText, { runId: notice.runId, workTag }) : (MESSAGE_TYPE_LABELS[type] ? `Đã nhận ${MESSAGE_TYPE_LABELS[type]}` : "Có cập nhật tiến độ mới");
   // Bind display to this exact notice and its content: repeated/stale headlines must not acknowledge a different update.
   const ackToken = notice.runId && rawText ? `${workTag}: ${cleanText}` : undefined;
   const headline = `▶ ${workTag}: ${cleanText}`;
@@ -284,15 +306,16 @@ function updateNotice(notice: NoticeLike): RenderedNotice {
 }
 
 function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): RenderedNotice {
-  const shortId = notice.shortId ?? "#1";
+  // A notice without an alias keeps its approval id: a guessed #1 could route the user's answer to another approval.
+  const shortId = notice.shortId ?? fields.approvalId;
   const runId = fields.runId ?? notice.runId;
-  const runLabel = notice.runLabel ?? (runId ? "Việc #1" : undefined);
-  const workTag = (runLabel ?? "Việc #1").split(":")[0]!.trim();
+  const runLabel = notice.runLabel;
+  const identity = { approvalId: fields.approvalId, code: shortId, runId, workTag: workTagOf(notice, runId) };
   const role = fields.requestedByRole ? formatRoleLabel(fields.requestedByRole) : "Một thành viên";
-  const cleanQuestion = sanitizeCardProse(fields.question, workTag, shortId);
-  const options = (fields.options ?? []).map((text, index) => ({ number: index + 1, text: sanitizeCardProse(text, workTag, shortId) }));
+  const cleanQuestion = sanitizeCardProse(fields.question, identity);
+  const options = (fields.options ?? []).map((text, index) => ({ number: index + 1, text: sanitizeCardProse(text, identity) }));
   const headline = `🔔 Cần bạn quyết định · ${shortId}`;
-  const expiryText = formatFriendlyExpiry(fields.expiresAt, notice.receivedAt);
+  const expiryText = formatFriendlyExpiry(fields.expiresAt);
   const replySample = options.length ? `"${shortId}: 1"` : `"${shortId}: <nội dung trả lời>"`;
   const reply = `Bạn trả lời: ${replySample} — ${expiryText}`;
   const lines = [
@@ -310,19 +333,18 @@ function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): Rendere
 
 /** Full content of a design/task/gate approval: what is approved, why, by whom, on what evidence, and the numbered choices. */
 function approvalContent(notice: NoticeLike, fields: ApprovalNotice): RenderedNotice {
-  const shortId = notice.shortId ?? "#1";
+  const shortId = notice.shortId ?? fields.approvalId;
   const runId = fields.runId ?? notice.runId;
-  const runLabel = notice.runLabel ?? (runId ? "Việc #1" : undefined);
-  const workTag = (runLabel ?? "Việc #1").split(":")[0]!.trim();
+  const runLabel = notice.runLabel;
   const role = formatRoleLabel(fields.requestedBy);
-  const cleanReason = sanitizeCardProse(fields.reason, workTag, shortId);
+  const cleanReason = sanitizeCardProse(fields.reason, { approvalId: fields.approvalId, code: shortId, runId, workTag: workTagOf(notice, runId) });
   const options = [
     { number: 1, text: "Đồng ý" },
     { number: 2, text: "Chưa đồng ý (ghi lý do)" }
   ];
   const headline = `🔔 Cần bạn duyệt · ${shortId}`;
   const evidenceLine = fields.evidenceCount > 0 ? `Kèm ${fields.evidenceCount} tài liệu (gõ "xem chi tiết ${shortId}" để xem)` : undefined;
-  const expiryText = formatFriendlyExpiry(fields.expiresAt, notice.receivedAt);
+  const expiryText = formatFriendlyExpiry(fields.expiresAt);
   const reply = `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") nếu cần sửa — ${expiryText}`;
   const lines = [
     headline,
@@ -350,19 +372,21 @@ function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAY
 }
 
 function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLOAD>): RenderedNotice {
-  const shortId = notice.shortId ?? "#1";
+  const shortId = notice.shortId;
   const runId = payload.runId ?? notice.runId;
-  const runLabel = notice.runLabel ?? (runId ? "Việc #1" : undefined);
-  const workTag = (runLabel ?? "Việc #1").split(":")[0]!.trim();
-  const workCommand = workTag.toLowerCase();
+  const runLabel = notice.runLabel;
+  const workTag = workTagOf(notice, runId) ?? "Công việc";
+  // Legacy notices keep the exact run id in commands; only an alias is lower-cased into "việc #k".
+  const workCommand = notice.runLabel ? workTag.toLowerCase() : runId ?? workTag;
+  const identity = { runId, workTag };
   const revision = requirementRevisionGuidance(payload, runId, workCommand);
   const automatic = revision ? undefined : AutomaticResumeSchema.safeParse((payload as { automaticResume?: unknown }).automaticResume).data;
   const rawOptions = (revision?.options ?? payload.options ?? []).filter(opt => !(revision && /khắc phục capability/iu.test(opt)));
-  const options = rawOptions.map((text, index) => ({ number: index + 1, text: sanitizeCardProse(text, workTag, shortId) }));
+  const options = rawOptions.map((text, index) => ({ number: index + 1, text: sanitizeCardProse(text, identity) }));
   // The reason's prose before any structured detail: agents often reformat the JSON detail but keep this sentence.
   const lead = payload.reason.split(/[\n[{]/u)[0]!.trim();
-  const cleanLead = sanitizeCardProse(lead || payload.reason, workTag, shortId).replace(/[.!?]+$/u, "");
-  const headline = `⚠️ Tạm dừng vì vướng mắc · ${shortId}`;
+  const cleanLead = sanitizeCardProse(lead || payload.reason, identity).replace(/[.!?]+$/u, "");
+  const headline = `⚠️ Tạm dừng vì vướng mắc${shortId ? ` · ${shortId}` : ""}`;
   const whatHappened = `Chuyện gì xảy ra: ${capitalise(BLOCKED_LABEL[payload.kind])}${cleanLead ? ` — ${cleanLead}.` : "."}`;
   const impact = automatic && runId
     ? `Ảnh hưởng: ${workTag} đang tạm dừng ngắn hạn; Hệ thống Bflow sẽ tự thử chạy lại (lần ${automatic.attempt}/${automatic.limit}).`
@@ -377,11 +401,12 @@ function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLO
       : runId
         ? `Bạn cần làm gì: Gõ "tiếp tục ${workCommand}" sau khi xử lý xong, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
         : "Bạn cần làm gì: Hãy cho biết bạn muốn xử lý tiếp như thế nào.";
-  const nextSteps = (revision?.nextSteps ?? []).map(step => sanitizeCardProse(step, workTag, shortId));
+  const nextSteps = (revision?.nextSteps ?? []).map(step => sanitizeCardProse(step, identity));
   return { messageId: notice.messageId, kind: "blocked", shortId, ...(runLabel ? { runLabel } : {}),
-    ...(runId ? { runId } : {}), ackToken: shortId,
+    ...(runId ? { runId } : {}), ackToken: shortId ?? notice.messageId,
     ...(revision ? { requiredActionText: revision.suggestedReply ?? "nội dung yêu cầu cần sửa" } : {}),
-    ...(lead.length >= 20 ? { ackText: lead } : cleanLead.length >= 10 ? { ackText: cleanLead } : {}), headline, reply,
+    // The card shows the cleaned lead, so that is what a display check can find; the raw lead is only a fallback.
+    ...(cleanLead.length >= 10 ? { ackText: cleanLead } : lead.length >= 20 ? { ackText: lead } : {}), headline, reply,
     options, display: [headline, ...(runLabel ? [runLabel] : []), whatHappened, impact, ...nextSteps, ...options.map(option => `- ${option.text}`), reply].join("\n") };
 }
 
@@ -466,14 +491,26 @@ export function noticeDisplayed(notice: RenderedNotice, shown: string): boolean 
     const altRequired = notice.runId ? normalizedRequired.replace(/việc\s*#\d+/gu, `run ${notice.runId.toLowerCase()}`) : normalizedRequired;
     if (!normalizedShown.includes(normalizedRequired) && !normalizedShown.includes(altRequired)) return false;
   }
-  if (shown.includes(notice.ackToken)) return true;
-  if (notice.approvalId !== undefined && shown.includes(notice.approvalId)) return true;
+  if (containsCode(shown, notice.ackToken)) return true;
+  if (notice.approvalId !== undefined && containsCode(shown, notice.approvalId)) return true;
   if (notice.kind !== "update" && notice.kind !== "blocked") return false;
-  if (shown.includes(notice.messageId)) return true;
-  if (notice.ackText === undefined || (!plain(shown).includes(plain(notice.ackText)) && !plain(sanitizeCardProse(shown)).includes(plain(notice.ackText)))) return false;
-  if (notice.runId !== undefined && shown.includes(notice.runId)) return true;
-  const workTag = (notice.runLabel ?? (notice.runId ? "Việc #1" : "")).split(":")[0]!.trim();
-  return workTag.length > 0 && plain(shown).includes(workTag);
+  if (containsCode(shown, notice.messageId)) return true;
+  if (notice.ackText === undefined || (!plain(shown).includes(plain(notice.ackText)) && !plain(sanitizeCardProse(shown, { runId: notice.runId, workTag: workTagOf(notice, notice.runId) })).includes(plain(notice.ackText)))) return false;
+  if (notice.runId !== undefined && containsCode(shown, notice.runId)) return true;
+  const workTag = notice.runLabel?.split(":")[0]?.trim();
+  return workTag !== undefined && workTag.length > 0 && containsCode(plain(shown), workTag);
+}
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+/**
+ * Whole-token match. `#1` is not shown by `#12`, by `Việc #1` (a work label, not the card) or inside another id;
+ * `Việc #1` is not shown by `Việc #12`.
+ */
+export function containsCode(shown: string, code: string): boolean {
+  if (!code) return false;
+  const card = /^#\d+$/u.test(code) ? "(?<!việc\\s*)" : "";
+  return new RegExp(`(?<![\\p{L}\\p{N}_#-])${card}${escapeRegExp(code)}(?![\\p{L}\\p{N}_-])`, "iu").test(shown);
 }
 
 /** A genuine user prompt: a string, or a user entry with a text block. Tool results are user-role entries without text. */

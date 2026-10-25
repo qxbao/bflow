@@ -369,9 +369,9 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     }));
 
     // On-demand detail lookup via { ref, detail: true } returns redacted technical details without marking notices surfaced or displayed.
-    const blockedDetail = await callHost(chat.socketPath, chat.token, "role_call", {
+    const blockedDetail = (await callHost(chat.socketPath, chat.token, "role_call", {
       paneId: "pane-chat", name: "read_updates", arguments: { ref: "#1", detail: true }
-    }) as Record<string, unknown>;
+    }) as { detail: Record<string, unknown> }).detail;
     expect(blockedDetail).toMatchObject({
       shortId: "#1",
       runLabel: "Việc #1: Cấu hình cơ sở dữ liệu",
@@ -383,10 +383,16 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
       reason: "Coordinator dừng mà chưa giao bước tiếp — Authorization: Bearer [REDACTED]"
     });
     expect(String(blockedDetail.summary)).not.toContain("secret-xyz");
+    // Only the MCP server's post-reply surfaced acknowledgement may omit the native session; every other notice method still binds it.
+    await expect(callHost(chat.socketPath, chat.token, "conversation_notices_displayed", { paneId: "pane-chat", messageIds: [] }))
+      .rejects.toThrow(/nonempty string|native session mismatch/);
+    await expect(callHost(chat.socketPath, chat.token, "conversation_notices_surfaced", { paneId: "pane-chat", nativeSessionId: "other-session", messageIds: [] }))
+      .rejects.toThrow("Conversation notice native session mismatch");
+    await expect(callHost(chat.socketPath, chat.token, "conversation_notices_surfaced", { paneId: "pane-chat", messageIds: [] })).resolves.toBeDefined();
 
-    const decisionDetail = await callHost(chat.socketPath, chat.token, "role_call", {
+    const decisionDetail = (await callHost(chat.socketPath, chat.token, "role_call", {
       paneId: "pane-chat", name: "read_updates", arguments: { ref: "Việc #1", detail: true }
-    }) as Record<string, unknown>;
+    }) as { detail: Record<string, unknown> }).detail;
     expect(decisionDetail).toMatchObject({
       shortId: "#2",
       runLabel: "Việc #1: Cấu hình cơ sở dữ liệu",

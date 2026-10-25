@@ -140,7 +140,7 @@ describe("bounded automatic resume", () => {
     expect(blocked).toMatchObject({ status: "escalated", pendingAction: { recovery: "manual", state: "pending" } });
     const notification = (await f.outbound()).find(out => out.message.causation_id === message.message_id)!;
     expect(notification.message.payload).not.toHaveProperty("automaticResume");
-    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1",
+    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1", runLabel: "Việc #1",
       type: notification.message.type, summary: JSON.stringify(notification.message.payload) });
     expect(rendered.display).toContain("bản mô tả ngắn gọn");
     expect(rendered.display).toContain("bản đặc tả đầy đủ");
@@ -164,7 +164,7 @@ describe("bounded automatic resume", () => {
     await f.runtime.observeCoordinatorOutcome(message);
     expect((await f.record()).pendingAction?.recovery).toBe("manual");
     const notification = (await f.outbound()).find(out => out.message.causation_id === message.message_id)!;
-    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1",
+    const rendered = renderConversationNotice({ messageId: notification.message.message_id, runId: "run-1", runLabel: "Việc #1",
       type: notification.message.type, summary: JSON.stringify(notification.message.payload) });
     expect(rendered.display).toContain("Offline-only conflicts with mandatory live API calls");
     expect(rendered.display).toContain("yêu cầu");

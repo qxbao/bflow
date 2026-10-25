@@ -31,7 +31,7 @@ describe("renderer: design and task approvals carry full content", () => {
     requestedAt: "2026-10-20T01:00:00.000Z", reason: "Human design approval required before implementation", evidence, expiresAt: "2026-10-21T01:00:00.000Z",
     idempotencyKey: "design:run-1", metadata: { bundleFingerprint: "x" } };
   it("renders target, reason, requester, evidence, deadline and numbered approve/reject actions", () => {
-    const rendered = renderConversationNotice(notice({ messageId: "p19-1", type: "approval.request", summary: JSON.stringify(payload), truncated: false }));
+    const rendered = renderConversationNotice(notice({ messageId: "p19-1", type: "approval.request", summary: JSON.stringify(payload), truncated: false, shortId: "#1" }));
     expect(rendered).toMatchObject({ kind: "approval", approvalId: "design-abc", ackToken: "#1", runId: "run-1" });
     expect(rendered.display).toContain("🔔 Cần bạn duyệt · #1");
     expect(rendered.display).toContain("Cần bạn duyệt: Human design approval required before implementation (do Trưởng nhóm kỹ thuật gửi)");
@@ -41,7 +41,7 @@ describe("renderer: design and task approvals carry full content", () => {
     expect(isUserFacingNotice(rendered)).toBe(true);
   });
   it("uses the bounded structured fields when the raw summary was truncated", () => {
-    const rendered = renderConversationNotice(notice({ messageId: "p19-2", type: "approval.request", summary: "{\"approvalId\"", truncated: true,
+    const rendered = renderConversationNotice(notice({ messageId: "p19-2", type: "approval.request", summary: "{\"approvalId\"", truncated: true, shortId: "#1",
       approval: { approvalId: "design-abc", target: "run", reason: "Human design approval required", requestedBy: "coordinator", evidence: evidence.slice(0, 1), evidenceCount: 12 } }));
     expect(rendered).toMatchObject({ kind: "approval", ackToken: "#1" });
     expect(rendered.display).toContain("Cần bạn duyệt: Human design approval required (do Trưởng nhóm kỹ thuật gửi)");
@@ -71,8 +71,9 @@ describe("renderer: stuck states are blocked notices with their reason", () => {
     ["developer_no_response", { kind: "developer_no_response", reason: "developer ended its turn", options: ["Giao lại việc"] }],
     ["verification_stuck", { kind: "verification_stuck", reason: "Verification waits", options: ["Thử lại"] }]
   ])("%s renders as blocked with reason and acknowledges by message id", (_name, payload) => {
+    // A notice without a stored alias is acknowledged by its exact message id, never a guessed #1.
     const rendered = renderConversationNotice(notice({ messageId: "n-1", type: "conversation.progress", summary: JSON.stringify(payload) }));
-    expect(rendered).toMatchObject({ kind: "blocked", ackToken: "#1" });
+    expect(rendered).toMatchObject({ kind: "blocked", ackToken: "n-1" });
     expect(isUserFacingNotice(rendered)).toBe(true);
     expect(rendered.display).toContain("Chuyện gì xảy ra:");
     expect(rendered.display).toContain("Ảnh hưởng:");
