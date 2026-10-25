@@ -16,3 +16,9 @@ export function operationBudget<T extends OperationOptions>(
   if (!Number.isFinite(end) || end > 8.64e15) return { ok: false, error: { code: "validation", retryable: false, message: "Operation deadline exceeds supported range" } };
   return { ok: true, value: { ...options, timeoutMs, deadline: new Date(end).toISOString() } as T & OperationOptions };
 }
+
+/** Validate SemVer 2.0.0, allowing an optional leading v. */
+export function isSafeSemver(input: string): boolean {
+  // The final assertion also rejects a trailing newline, which $ alone allows.
+  return typeof input === "string" && /^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$(?![\s\S])/.test(input);
+}
