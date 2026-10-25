@@ -7,9 +7,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   PaneBindingSchema,
   RoleMessageSchema,
+  TddDecisionSchema,
+  TestStrategySchema,
+  WorkflowDefinitionSchema,
   type AgentRole,
   type PaneBinding
 } from "@bflow/contracts";
+import { SpecificationDocumentSchema } from "../../../specification/src/index.js";
+import { AssessmentSchema } from "../../../test-strategy/src/index.js";
+import { AssessmentSpecificationSchema } from "../../src/agentic/assessment-input.js";
 import { RepositoryReadInputSchema, repositoryRead } from "../../src/agentic/repository-read.js";
 import { TaskActivityLog } from "../../src/agentic/task-activity-log.js";
 import { handleTaskLogTool } from "../../src/agentic/task-log-tools.js";
@@ -186,10 +192,28 @@ describe("D5.1 planning_reference compact & schema_only views", () => {
     expect(sections.specification.schema.requiredFields).toContain("acceptanceCriteria");
     expect(sections.specification.schema.superRefineRules.length).toBeGreaterThan(0);
     expect(sections.specification.skeleton).toBeDefined();
-    expect(sections.test_strategy.schema.requiredFields).toContain("criteriaMappings");
+    expect(() => AssessmentSpecificationSchema.parse(sections.specification.skeleton)).not.toThrow();
+    expect(() => SpecificationDocumentSchema.parse(sections.specification.skeleton)).not.toThrow();
+    expect(() =>
+      AssessmentSchema.parse(sections.specification.skeleton.metadata.conditionalTdd)
+    ).not.toThrow();
+    expect(sections.specification.skeleton.status).toBe("draft");
+
+    expect(sections.test_strategy.schema.requiredFields).toContain("criterionMappings");
     expect(sections.test_strategy.skeleton).toBeDefined();
+    expect(() => AssessmentSchema.parse(sections.test_strategy.skeleton.conditionalTdd)).not.toThrow();
+    expect(() => TestStrategySchema.parse(sections.test_strategy.skeleton.strategy)).not.toThrow();
+    expect(() => TddDecisionSchema.parse(sections.test_strategy.skeleton.strategy.tddDecision)).not.toThrow();
+
     expect(sections.workflow.schema.requiredFields).toContain("tasks");
     expect(sections.workflow.skeleton).toBeDefined();
+    expect(() => WorkflowDefinitionSchema.parse(sections.workflow.skeleton)).not.toThrow();
+    expect(sections.workflow.skeleton.qualityGates).toEqual([]);
+    expect(sections.workflow.skeleton.tasks[0].role).toBe("developer");
+    expect(sections.workflow.skeleton.tasks[0].qualityGates).toEqual([]);
+    expect(sections.workflow.skeleton.tasks[0].metadata.ownedPaths).toEqual(
+      sections.specification.skeleton.affectedPaths
+    );
 
     const schemaOnly = await planningReferenceView(
       { section: "specification", view: "schema_only", includeRunners: false },
@@ -241,8 +265,13 @@ describe("D5.2 inspect summary/status/tasks/blockers views and scoped cursor", (
     approval: { requestId: "app-1", runId: "run-1", status: "approved" },
     decision: { decisionId: "dec-1", requestId: "app-1", status: "approved" },
     userDecisions: [{ decisionId: "ud-1", taskId: "task-1", status: "answered" }],
+    supersededApprovals: [{ approval: { requestId: "app-0" }, supersededAt: "2026-10-25T00:00:00.000Z" }],
+    workflowCycle: { cycleId: "wf-cyc-1", iteration: 1, maxIterations: 3, status: "running" },
+    workflowChange: { commitHash: "abc1234", changedFiles: ["packages/runtime/src/agentic/host.ts"] },
+    workflowVerificationPending: true,
     delegation: {
-      requestId: "del-1",
+      delegationId: "del-1",
+      messageId: "msg-del-1",
       sessionId: "sess-1",
       runId: "run-1",
       correlationId: "corr-1",
@@ -252,10 +281,20 @@ describe("D5.2 inspect summary/status/tasks/blockers views and scoped cursor", (
       sddLevel: "full",
       priority: "normal",
       specificationId: "spec-1",
-      createdAt: "2026-10-26T00:00:00.000Z",
+      requestedAt: "2026-10-26T00:00:00.000Z",
       metadata: { affectedPaths: ["packages/runtime/src/agentic/host.ts"], extraLargeField: "x".repeat(2000) }
     },
+    definition: {
+      schemaVersion: 2,
+      id: "wf-1",
+      name: "Workflow 1",
+      tasks: [{ id: "task-1", name: "Task 1", role: "developer", dependencies: [] }]
+    },
     workflowSpec: {
+      approvalId: "app-1",
+      decisionStatus: "approved",
+      tddMode: "required",
+      targetCommands: ["pnpm test"],
       specification: {
         specId: "spec-1",
         runId: "run-1",
@@ -269,12 +308,6 @@ describe("D5.2 inspect summary/status/tasks/blockers views and scoped cursor", (
           { id: "ac-1", description: "Works", status: "verified", verificationMethod: "unit_test" }
         ],
         technicalDesign: { overview: "huge".repeat(1000) }
-      },
-      definition: {
-        id: "wf-1",
-        name: "Workflow 1",
-        version: 1,
-        tasks: [{ id: "task-1", name: "Task 1", agentRole: "developer", dependencies: [] }]
       }
     },
     tasks: [
@@ -332,11 +365,26 @@ describe("D5.2 inspect summary/status/tasks/blockers views and scoped cursor", (
     expect(summary.approval).toEqual(sampleRun.approval);
     expect(summary.decision).toEqual(sampleRun.decision);
     expect(summary.userDecisions).toEqual(sampleRun.userDecisions);
+    expect(summary.supersededApprovals).toEqual(sampleRun.supersededApprovals);
+    expect(summary.workflowCycle).toEqual(sampleRun.workflowCycle);
+    expect(summary.workflowChange).toEqual(sampleRun.workflowChange);
+    expect(summary.workflowVerificationPending).toBe(true);
+    expect(summary.delegation).toMatchObject({
+      delegationId: "del-1",
+      messageId: "msg-del-1",
+      requestedAt: "2026-10-26T00:00:00.000Z",
+      sessionId: "sess-1",
+      runId: "run-1"
+    });
     expect(summary.workflowSpec).toMatchObject({
       specificationId: "spec-1",
       title: "Feature X Spec",
       level: "full",
       status: "approved",
+      approvalId: "app-1",
+      decisionStatus: "approved",
+      tddMode: "required",
+      targetCommands: ["pnpm test"],
       criteriaIds: ["ac-1"],
       taskCount: 1
     });
@@ -382,6 +430,10 @@ describe("D5.2 inspect summary/status/tasks/blockers views and scoped cursor", (
     const blockersView = summarizeInspectRun(sampleRun, { runId: "run-1", view: "blockers" }) as Record<string, any>;
     expect(blockersView.pendingAction).toEqual(sampleRun.pendingAction);
     expect(blockersView.lastWorkflowRejection).toEqual(sampleRun.lastWorkflowRejection);
+    expect(blockersView.workflowCycle).toEqual(sampleRun.workflowCycle);
+    expect(blockersView.workflowChange).toEqual(sampleRun.workflowChange);
+    expect(blockersView.workflowVerificationPending).toBe(true);
+    expect(blockersView.supersededApprovals).toEqual(sampleRun.supersededApprovals);
 
     expect(() =>
       summarizeInspectRun(sampleRun, { runId: "run-1", view: "tasks", taskId: "non-existent" })
@@ -471,12 +523,61 @@ describe("D5.3 repository_read stat, outline, and line-range views", () => {
     })) as Record<string, any>;
     expect(lineSlice.startLine).toBe(3);
     expect(lineSlice.endLine).toBe(6);
+    expect(lineSlice.nextStartLine).toBe(7);
     expect(lineSlice.content.split("\n")).toEqual([
       "export interface SampleConfig {",
       "  readonly name: string;",
       "  readonly limit: number;",
       "}"
     ]);
+
+    // view="full" alias behaves identically to view="content"
+    const fullView = (await repositoryRead(repo, {
+      op: "read",
+      path: "src/sample.ts",
+      view: "full"
+    })) as Record<string, any>;
+    expect(fullView).toEqual(defaultRead);
+
+    // Line-range read truncated by byte limit adjusts endLine and nextStartLine accurately
+    const truncatedSlice = (await repositoryRead(repo, {
+      op: "read",
+      path: "src/sample.ts",
+      startLine: 3,
+      endLine: 6,
+      limit: 31
+    })) as Record<string, any>;
+    expect(truncatedSlice.startLine).toBe(3);
+    expect(truncatedSlice.endLine).toBe(3);
+    expect(truncatedSlice.nextStartLine).toBe(4);
+    expect(truncatedSlice.truncated).toBe(true);
+
+    // CRLF file byteOffset and nextOffset accuracy
+    const crlfContent = ["export const first = 1;", "export function second() {", "  return first;", "}"].join("\r\n") + "\r\n";
+    await writeFile(join(repo, "src", "crlf.ts"), crlfContent, "utf8");
+    const crlfOutline = (await repositoryRead(repo, {
+      op: "read",
+      path: "src/crlf.ts",
+      view: "outline"
+    })) as Record<string, any>;
+    expect(crlfOutline.outline).toEqual([
+      { line: 1, byteOffset: 0, text: "export const first = 1;" },
+      { line: 2, byteOffset: Buffer.byteLength("export const first = 1;\r\n", "utf8"), text: "export function second() {" }
+    ]);
+    const crlfLine1 = (await repositoryRead(repo, {
+      op: "read",
+      path: "src/crlf.ts",
+      startLine: 1,
+      endLine: 1
+    })) as Record<string, any>;
+    expect(crlfLine1.offset).toBe(0);
+    expect(crlfLine1.nextOffset).toBe(Buffer.byteLength("export const first = 1;\r\n", "utf8"));
+    const crlfFromNextOffset = (await repositoryRead(repo, {
+      op: "read",
+      path: "src/crlf.ts",
+      offset: crlfLine1.nextOffset
+    })) as Record<string, any>;
+    expect(crlfFromNextOffset.content.startsWith("export function second() {")).toBe(true);
 
     // Validation & security checks
     expect(() =>
@@ -528,20 +629,32 @@ describe("D5.4 assignment_context compact/active_only and surveyView modes", () 
   const fullReply = {
     repositorySurvey: {
       status: "ready",
+      assignmentMessageId: "msg-active",
+      runId: "run-1",
+      taskId: "task-1",
+      scopeSource: "task_owned_paths",
+      expectedBaseRevision: "abc1234",
+      freshness: { valid: true, reason: "fresh" },
+      gitnexus: { status: "ready" },
+      authority: "supplementary_read_context_only",
       context: {
-        formattedPromptContext: "### Repository Survey\n" + "line\n".repeat(500),
-        survey: {
-          surveyId: "surv-1",
-          runId: "run-1",
-          taskId: "task-1",
-          role: "developer",
-          headRevision: "abc1234",
-          worktreePath: "/tmp/wt",
-          anchors: [{ path: "src/sample.ts", sha256: "0".repeat(64), reason: "owned" }],
-          omittedScope: [],
-          uncertainties: ["none"],
-          limits: { maxFiles: 20 }
-        }
+        repositoryIdentity: { rootPath: "/tmp/wt", gitCommitHash: "abc1234", branch: "bflow/task-1", isDirty: false },
+        role: "developer",
+        taskId: "task-1",
+        runId: "run-1",
+        specId: "spec-1",
+        contextHash: "hash-ctx-1",
+        fileFingerprints: { "src/sample.ts": "0".repeat(64) },
+        specVersion: 1,
+        specFingerprint: "f".repeat(64),
+        totalBytes: 1200,
+        includedFiles: ["src/sample.ts"],
+        excludedFileCount: 2,
+        preparedAt: "2026-10-26T00:00:00.000Z",
+        adrSummaries: [{ id: "0001", title: "Contract Hardening", path: "docs/adr/0001.md" }],
+        adrFingerprints: { "docs/adr/0001.md": "1".repeat(64) },
+        artifactReferences: [],
+        formattedPromptContext: "### Repository Survey\n" + "line\n".repeat(500)
       }
     },
     policyEvidence: [{ phase: "red", accepted: true }],
@@ -572,14 +685,30 @@ describe("D5.4 assignment_context compact/active_only and surveyView modes", () 
       {
         runId: "run-1",
         status: "implementing",
+        cancelled: false,
+        coreCreated: true,
         baseRevision: "abc1234",
+        integrationKey: "int-1",
         maxIterations: 3,
+        lastWorkflowRejection: { code: "missing_test_mapping", reason: "Add test mapping" },
+        approval: { requestId: "app-1", status: "approved" },
+        decision: { decisionId: "dec-1", status: "approved" },
+        userDecisions: [{ decisionId: "ud-1", status: "answered" }],
+        workflowCycle: { cycleId: "wf-c-1", iteration: 1, maxIterations: 3, status: "running" },
+        workflowChange: { commitHash: "abc1234", changedFiles: ["src/sample.ts"] },
+        workflowVerificationPending: false,
         delegation: {
+          delegationId: "del-1",
+          messageId: "msg-del-1",
+          correlationId: "corr-1",
+          sessionId: "sess-1",
           runId: "run-1",
           title: "Feature",
           objective: "Build it",
           sddLevel: "full",
           specificationId: "spec-1",
+          requestedAt: "2026-10-26T00:00:00.000Z",
+          idempotencyKey: "idem-del-1",
           metadata: { affectedPaths: ["src/sample.ts"] }
         },
         workflowSpec: {
@@ -614,8 +743,13 @@ describe("D5.4 assignment_context compact/active_only and surveyView modes", () 
               strategy: {
                 mode: "required",
                 rationale: "TDD",
+                tddDecision: { mode: "required", requiresFailingTestFirst: true },
+                requiredTestLevels: ["unit"],
                 requiredVerificationMethods: ["unit_test"],
-                targetCommands: ["pnpm test"]
+                targetCommands: ["pnpm test"],
+                criterionMappings: [
+                  { criterionId: "ac-1", requiredMethods: ["unit_test"], testNames: ["suite passes"] }
+                ]
               }
             }
           }
@@ -655,11 +789,35 @@ describe("D5.4 assignment_context compact/active_only and surveyView modes", () 
     expect(active.message.payload.testStrategy.metadata).toBeUndefined();
 
     expect(compact.repositorySurvey.context.formattedPromptContext).toBeUndefined();
-    expect(compact.repositorySurvey.context.survey.surveyId).toBe("surv-1");
+    expect(compact.repositorySurvey.context.contextHash).toBe("hash-ctx-1");
+    expect(compact.repositorySurvey.freshness).toEqual({ valid: true, reason: "fresh" });
+    expect(compact.repositorySurvey.gitnexus).toEqual({ status: "ready" });
     expect(compact.policyEvidence).toEqual(fullReply.policyEvidence);
     expect(compact.toolActions).toEqual(fullReply.toolActions);
+    expect(compact.runs[0].delegation).toMatchObject({
+      delegationId: "del-1",
+      messageId: "msg-del-1",
+      correlationId: "corr-1",
+      sessionId: "sess-1",
+      requestedAt: "2026-10-26T00:00:00.000Z"
+    });
+    expect(compact.runs[0].lastWorkflowRejection).toEqual(fullReply.runs[0]!.lastWorkflowRejection);
+    expect(compact.runs[0].approval).toEqual(fullReply.runs[0]!.approval);
+    expect(compact.runs[0].decision).toEqual(fullReply.runs[0]!.decision);
+    expect(compact.runs[0].userDecisions).toEqual(fullReply.runs[0]!.userDecisions);
+    expect(compact.runs[0].workflowCycle).toEqual(fullReply.runs[0]!.workflowCycle);
     expect(compact.runs[0].tasks[0].spec.request.context).toBeUndefined();
     expect(compact.runs[0].tasks[0].spec.request.requestId).toBe("req-1");
+    expect(compact.runs[0].tasks[0].spec.strategy).toMatchObject({
+      mode: "required",
+      tddDecision: { mode: "required", requiresFailingTestFirst: true },
+      requiredTestLevels: ["unit"],
+      requiredVerificationMethods: ["unit_test"],
+      targetCommands: ["pnpm test"],
+      criterionMappings: [
+        { criterionId: "ac-1", requiredMethods: ["unit_test"], testNames: ["suite passes"] }
+      ]
+    });
     expect(compact.runs[0].tasks[0].reworkResolutions).toEqual([
       { findingId: "finding-1", disposition: "addressed" }
     ]);
@@ -668,9 +826,20 @@ describe("D5.4 assignment_context compact/active_only and surveyView modes", () 
       view: "compact",
       surveyView: "anchors_only"
     }) as Record<string, any>;
-    expect(anchorsOnly.repositorySurvey.anchors).toEqual([
-      { path: "src/sample.ts", sha256: "0".repeat(64), reason: "owned" }
-    ]);
+    expect(anchorsOnly.repositorySurvey).toMatchObject({
+      status: "ready",
+      assignmentMessageId: "msg-active",
+      runId: "run-1",
+      taskId: "task-1",
+      scopeSource: "task_owned_paths",
+      expectedBaseRevision: "abc1234",
+      freshness: { valid: true, reason: "fresh" },
+      gitnexus: { status: "ready" },
+      authority: "supplementary_read_context_only",
+      contextHash: "hash-ctx-1",
+      includedFiles: ["src/sample.ts"],
+      fileFingerprints: { "src/sample.ts": "0".repeat(64) }
+    });
     expect(anchorsOnly.repositorySurvey.context).toBeUndefined();
   });
 });
@@ -680,7 +849,15 @@ describe("D5.5 read_task_log incremental cursor and compact view", () => {
     const dir = await mkdtemp(join(tmpdir(), "bflow-task-log-trim-"));
     tempDirs.push(dir);
     const log = TaskActivityLog.open(join(dir, "task-activity.jsonl"));
-    await log.record({ kind: "progress", role: "developer", runId: "run-1", taskId: "task-1", action: "first step" });
+    await log.record({
+      kind: "progress",
+      role: "developer",
+      runId: "run-1",
+      taskId: "task-1",
+      attemptId: "att-1",
+      artifacts: ["artifact://sha256/abc"],
+      action: "first step"
+    });
     await log.record({ kind: "progress", role: "developer", runId: "run-2", taskId: "task-2", action: "other run step" });
     await log.record({ kind: "progress", role: "developer", runId: "run-1", taskId: "task-1", action: "second step" });
 
@@ -714,16 +891,32 @@ describe("D5.5 read_task_log incremental cursor and compact view", () => {
     expect(defaultRes.entries.map((e: any) => e.action)).toEqual(["first step", "second step"]);
     expect(defaultRes.nextCursor).toBeUndefined();
 
-    // Compact view returns nextCursor and compact entries
+    // Compact view returns nextCursor, truncated, hasMore, and preserves id, attemptId, artifacts
     const page1 = (await handleTaskLogTool(
       { role: "developer", binding: devBinding, activityLog: log, inspect: async () => state },
       "read_task_log",
       { runId: "run-1", taskId: "task-1", view: "compact" }
     )) as Record<string, any>;
     expect(page1.entries).toHaveLength(2);
-    expect(page1.entries[0].id).toBeUndefined();
+    expect(typeof page1.entries[0].id).toBe("string");
+    expect(page1.entries[0].attemptId).toBe("att-1");
+    expect(page1.entries[0].artifacts).toEqual(["artifact://sha256/abc"]);
+    // Omit runId and taskId when caller filtered by both
     expect(page1.entries[0].runId).toBeUndefined();
+    expect(page1.entries[0].taskId).toBeUndefined();
     expect(typeof page1.nextCursor).toBe("string");
+    expect(page1.hasMore).toBe(false);
+    expect(page1.truncated).toBe(false);
+
+    // Coordinator reading run-wide without taskId filter retains taskId in compact entries
+    const coordBinding = makeBinding("coordinator");
+    const coordCompact = (await handleTaskLogTool(
+      { role: "coordinator", binding: coordBinding, activityLog: log, inspect: async () => state },
+      "read_task_log",
+      { runId: "run-1", view: "compact" }
+    )) as Record<string, any>;
+    expect(coordCompact.entries[0].taskId).toBe("task-1");
+    expect(coordCompact.entries[0].runId).toBeUndefined();
 
     // No new entries -> empty delta with same nextCursor
     const emptyDelta = (await handleTaskLogTool(
@@ -733,21 +926,40 @@ describe("D5.5 read_task_log incremental cursor and compact view", () => {
     )) as Record<string, any>;
     expect(emptyDelta.entries).toEqual([]);
     expect(emptyDelta.nextCursor).toBe(page1.nextCursor);
+    expect(emptyDelta.hasMore).toBe(false);
 
-    // Add a new step on run-1/task-1 and another on run-2/task-2
+    // Record 4 new steps on run-1/task-1 and paginate forward with lines: 2 without skipping any entry
     await log.record({ kind: "progress", role: "developer", runId: "run-2", taskId: "task-2", action: "other run 2" });
     await log.record({ kind: "progress", role: "developer", runId: "run-1", taskId: "task-1", action: "third step" });
+    await log.record({ kind: "progress", role: "developer", runId: "run-1", taskId: "task-1", action: "fourth step" });
+    await log.record({ kind: "progress", role: "developer", runId: "run-1", taskId: "task-1", action: "fifth step" });
 
-    const delta = (await handleTaskLogTool(
+    const deltaPage1 = (await handleTaskLogTool(
       { role: "developer", binding: devBinding, activityLog: log, inspect: async () => state },
       "read_task_log",
-      { runId: "run-1", taskId: "task-1", view: "compact", cursor: page1.nextCursor }
+      { runId: "run-1", taskId: "task-1", view: "compact", cursor: page1.nextCursor, lines: 2 }
     )) as Record<string, any>;
-    expect(delta.entries.map((e: any) => e.action)).toEqual(["third step"]);
-    expect(delta.nextCursor).not.toBe(page1.nextCursor);
+    expect(deltaPage1.entries.map((e: any) => e.action)).toEqual(["third step", "fourth step"]);
+    expect(deltaPage1.hasMore).toBe(true);
+    expect(deltaPage1.truncated).toBe(true);
 
-    // Rejects cursor from another role or runId/taskId scope
-    const coordBinding = makeBinding("coordinator");
+    const deltaPage2 = (await handleTaskLogTool(
+      { role: "developer", binding: devBinding, activityLog: log, inspect: async () => state },
+      "read_task_log",
+      { runId: "run-1", taskId: "task-1", view: "compact", cursor: deltaPage1.nextCursor, lines: 2 }
+    )) as Record<string, any>;
+    expect(deltaPage2.entries.map((e: any) => e.action)).toEqual(["fifth step"]);
+    expect(deltaPage2.hasMore).toBe(false);
+    expect(deltaPage2.truncated).toBe(false);
+
+    // Rejects non-integer / coerced bounds and cross-scope cursors
+    await expect(
+      handleTaskLogTool(
+        { role: "developer", binding: devBinding, activityLog: log, inspect: async () => state },
+        "read_task_log",
+        { runId: "run-1", taskId: "task-1", lines: true as any }
+      )
+    ).rejects.toThrow("bounds");
     await expect(
       handleTaskLogTool(
         { role: "coordinator", binding: coordBinding, activityLog: log, inspect: async () => state },
@@ -833,9 +1045,26 @@ describe("D4 read_project_policy hierarchical policy discovery, views, and known
 
     // Security: rejects traversal and symlinks
     await expect(readProjectPolicy(repo, { filePath: "../outside" })).rejects.toThrow(/escapes|relative/i);
+    await expect(readProjectPolicy(repo, { filePath: "packages/../../outside" })).rejects.toThrow(/escapes|relative/i);
+    await expect(readProjectPolicy(repo, { filePath: "packages\\sub" })).rejects.toThrow(/escapes|relative/i);
     await rm(join(repo, "packages", "sub", "AGENTS.override.md"));
     await symlink(join(repo, ".env"), join(repo, "packages", "sub", "AGENTS.override.md"));
     await expect(readProjectPolicy(repo, { filePath: "packages/sub" })).rejects.toThrow();
+
+    // Enforces maxTotalBytes on view='section' and multi-byte UTF-8 safe truncation without U+FFFD
+    await writeFile(
+      join(repo, "AGENTS.md"),
+      "# Root\n\n## Unicode Section\n\n" + "Tiếng Việt chuẩn xác ".repeat(80) + "\n",
+      "utf8"
+    );
+    const boundedSection = await readProjectPolicy(
+      repo,
+      { view: "section", heading: "Unicode Section" },
+      { maxTotalBytes: 200 }
+    );
+    expect(boundedSection.truncated).toBe(true);
+    expect(boundedSection.totalBytes).toBeLessThanOrEqual(200);
+    expect(boundedSection.documents[0]!.section).not.toContain("\uFFFD");
 
     // Validation: view='section' requires heading
     expect(() => ReadProjectPolicyInputSchema.parse({ view: "section" })).toThrow(/heading/i);
@@ -850,6 +1079,8 @@ describe("D4 role briefing and tool discovery discipline", () => {
     expect(coordinatorBrief).toContain("planning_reference");
     expect(coordinatorBrief).toContain("read_project_policy");
     expect(coordinatorBrief).toContain("assignment_context");
+    expect(coordinatorBrief).toContain("mcp__bflow__propose_workflow");
+    expect(coordinatorBrief).toContain("mcp__bflow__tick");
 
     const developerBrief = buildRoleBriefing("developer", "codex");
     expect(developerBrief).toContain("read_project_policy");

@@ -30,7 +30,7 @@ export const RepositoryReadInputSchema = z.discriminatedUnion("op", [
     path: relativePath,
     offset: z.number().int().min(0).max(MAX_FILE_BYTES).default(0),
     limit: boundedLimit,
-    view: z.enum(["content", "stat", "outline"]).optional(),
+    view: z.enum(["content", "full", "stat", "outline"]).optional(),
     startLine: z.number().int().min(1).max(1_000_000).optional(),
     endLine: z.number().int().min(1).max(1_000_000).optional()
   }).strict(),
@@ -114,10 +114,45 @@ const CODE_DECLARATION_PATTERN =
   /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|enum|namespace|module|def|fn|pub\s+fn|struct|impl|trait)\b.+/;
 const MARKDOWN_HEADING_PATTERN = /^#{1,6}\s+.+/;
 
-function countLines(text: string): number {
-  if (text.length === 0) return 0;
-  const lines = text.split(/\r?\n/);
-  return text.endsWith("\n") ? lines.length - 1 : lines.length;
+interface LineWithOffset {
+  readonly line: number;
+  readonly rawLine: string;
+  readonly rawWithEnding: string;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+}
+
+function splitLinesWithByteOffsets(text: string): LineWithOffset[] {
+  if (text.length === 0) return [];
+  const result: LineWithOffset[] = [];
+  let cursor = 0;
+  let byteOffset = 0;
+  let lineNumber = 1;
+  while (cursor < text.length) {
+    const lfIndex = text.indexOf("\n", cursor);
+    let lineEnd: number;
+    let sliceEnd: number;
+    if (lfIndex === -1) {
+      lineEnd = text.length;
+      sliceEnd = text.length;
+    } else {
+      lineEnd = lfIndex > cursor && text.charCodeAt(lfIndex - 1) === 13 ? lfIndex - 1 : lfIndex;
+      sliceEnd = lfIndex + 1;
+    }
+    const rawLine = text.slice(cursor, lineEnd);
+    const rawWithEnding = text.slice(cursor, sliceEnd);
+    const byteLength = Buffer.byteLength(rawWithEnding, "utf8");
+    result.push({
+      line: lineNumber++,
+      rawLine,
+      rawWithEnding,
+      byteOffset,
+      byteLength
+    });
+    byteOffset += byteLength;
+    cursor = sliceEnd;
+  }
+  return result;
 }
 
 function extractOutlineEntries(
@@ -127,25 +162,22 @@ function extractOutlineEntries(
 ): { outline: Array<{ line: number; byteOffset: number; text: string }>; truncated: boolean } {
   const isMarkdown = /\.(?:md|mdx|markdown)$/i.test(path);
   const pattern = isMarkdown ? MARKDOWN_HEADING_PATTERN : CODE_DECLARATION_PATTERN;
-  const lines = text.split(/\r?\n/);
+  const lines = splitLinesWithByteOffsets(text);
   const outline: Array<{ line: number; byteOffset: number; text: string }> = [];
-  let byteOffset = 0;
   let usedBytes = 0;
   let truncated = false;
   let inFence = false;
 
-  for (let i = 0; i < lines.length; i++) {
-    const rawLine = lines[i]!;
-    const lineBytes = Buffer.byteLength(rawLine, "utf8") + 1;
+  for (const item of lines) {
+    const rawLine = item.rawLine;
     if (isMarkdown && /^\s*(?:```|~~~)/.test(rawLine)) {
       inFence = !inFence;
-      byteOffset += lineBytes;
       continue;
     }
     if ((!isMarkdown || !inFence) && pattern.test(rawLine)) {
       const entry = {
-        line: i + 1,
-        byteOffset,
+        line: item.line,
+        byteOffset: item.byteOffset,
         text: rawLine.trim().slice(0, 200)
       };
       const entryBytes = Buffer.byteLength(JSON.stringify(entry), "utf8");
@@ -156,7 +188,6 @@ function extractOutlineEntries(
       outline.push(entry);
       usedBytes += entryBytes;
     }
-    byteOffset += lineBytes;
   }
 
   return { outline, truncated };
@@ -168,7 +199,7 @@ async function readText(
   offset: number,
   limit: number,
   options?: {
-    readonly view?: "content" | "stat" | "outline";
+    readonly view?: "content" | "full" | "stat" | "outline";
     readonly startLine?: number;
     readonly endLine?: number;
   }
@@ -181,7 +212,7 @@ async function readText(
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.size > MAX_FILE_BYTES) throw new Error("repository path is not a bounded regular file");
-    const view = options?.view ?? "content";
+    const view = options?.view === "full" || options?.view === undefined ? "content" : options.view;
     const hasLineRange = options?.startLine !== undefined || options?.endLine !== undefined;
 
     if (view === "content" && !hasLineRange) {
@@ -205,7 +236,8 @@ async function readText(
       throw new Error("file is not valid UTF-8 text");
     }
     const sha256 = createHash("sha256").update(allBytes).digest("hex");
-    const lineCount = countLines(fullText);
+    const lines = splitLinesWithByteOffsets(fullText);
+    const lineCount = lines.length;
 
     if (view === "stat") {
       return {
@@ -234,24 +266,63 @@ async function readText(
     }
 
     // Line-range read (startLine / endLine)
-    const rawLines = fullText.length === 0 ? [] : fullText.split(/\r?\n/);
-    const lines = fullText.endsWith("\n") ? rawLines.slice(0, -1) : rawLines;
-    const startLine = Math.min(Math.max(1, options?.startLine ?? 1), Math.max(1, lines.length));
-    const endLine = Math.min(Math.max(startLine, options?.endLine ?? lines.length), Math.max(1, lines.length));
-    const selectedLines = lines.length === 0 ? [] : lines.slice(startLine - 1, endLine);
-    const joinedSlice = selectedLines.join("\n");
+    if (lines.length === 0) {
+      return {
+        op: "read",
+        path,
+        startLine: 1,
+        endLine: 1,
+        nextStartLine: null,
+        offset: 0,
+        nextOffset: null,
+        bytes: 0,
+        totalBytes: 0,
+        lineCount: 0,
+        sha256,
+        content: "",
+        truncated: false
+      };
+    }
+    const startLine = Math.min(Math.max(1, options?.startLine ?? 1), lines.length);
+    const requestedEndLine = Math.min(Math.max(startLine, options?.endLine ?? lines.length), lines.length);
+    const selectedLines = lines.slice(startLine - 1, requestedEndLine);
+    const joinedSlice = selectedLines.map(item => item.rawLine).join("\n");
     const sliceBytes = Buffer.from(joinedSlice, "utf8");
     const decoded = decodeUtf8Chunk(sliceBytes, 0, limit);
-    const prefixText = startLine > 1 ? lines.slice(0, startLine - 1).join("\n") + "\n" : "";
-    const startByteOffset = Buffer.byteLength(prefixText, "utf8");
-    const truncated = decoded.bytes < sliceBytes.length || endLine < lines.length;
+    const startByteOffset = selectedLines[0]!.byteOffset;
+    const truncatedByLimit = decoded.bytes < sliceBytes.length;
+    const truncated = truncatedByLimit || requestedEndLine < lines.length;
+    let actualEndLine = requestedEndLine;
+    let nextOffset: number | null = null;
+    let nextStartLine: number | null = null;
+    if (!truncatedByLimit) {
+      const lastSelected = selectedLines[selectedLines.length - 1]!;
+      if (truncated) {
+        nextOffset = lastSelected.byteOffset + lastSelected.byteLength;
+        nextStartLine = requestedEndLine + 1;
+      }
+    } else {
+      const partLines = decoded.content.length === 0 ? [] : decoded.content.split("\n");
+      const includedCount = Math.max(1, partLines.length);
+      actualEndLine = startLine + includedCount - 1;
+      const lastIncludedMeta = selectedLines[includedCount - 1]!;
+      const lastPartText = partLines[partLines.length - 1] ?? "";
+      if (lastPartText.length >= lastIncludedMeta.rawLine.length) {
+        nextOffset = lastIncludedMeta.byteOffset + lastIncludedMeta.byteLength;
+        nextStartLine = actualEndLine < lines.length ? actualEndLine + 1 : null;
+      } else {
+        nextOffset = lastIncludedMeta.byteOffset + Buffer.byteLength(lastPartText, "utf8");
+        nextStartLine = actualEndLine;
+      }
+    }
     return {
       op: "read",
       path,
       startLine,
-      endLine,
+      endLine: actualEndLine,
+      nextStartLine,
       offset: startByteOffset,
-      nextOffset: truncated ? startByteOffset + decoded.bytes : null,
+      nextOffset,
       bytes: decoded.bytes,
       totalBytes: allBytes.length,
       lineCount,

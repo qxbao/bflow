@@ -111,13 +111,13 @@ export class TaskActivityLog {
       return contents.split(/\r?\n/).filter(Boolean).map(line => parseEntry(JSON.parse(line))).slice(-this.maxEntries);
     } catch { return []; }
   }
-  async read(filter: TaskActivityFilter = {}): Promise<TaskActivityEntry[]> {
+  async readWithMeta(filter: TaskActivityFilter = {}): Promise<{ entries: TaskActivityEntry[]; hasMore: boolean; truncated: boolean }> {
     let entries: TaskActivityEntry[];
     try {
       entries = (await this.readStored()).filter(entry => (["runId", "taskId"] as const).every(field =>
         filter[field] === undefined || (entry.scopes?.[field] !== undefined ? entry.scopes[field] === scopeKey(filter[field]) : entry[field] === filter[field])))
         .map(({ scopes: _scopes, ...entry }) => entry);
-    } catch { return []; }
+    } catch { return { entries: [], hasMore: false, truncated: false }; }
     if (filter.afterId !== undefined && filter.afterId !== "none") {
       const idx = entries.findIndex(entry => entry.id === filter.afterId);
       if (idx === -1) throw new Error("Task log cursor does not match any entry in the requested scope");
@@ -126,11 +126,25 @@ export class TaskActivityLog {
     const maxBytes = Math.min(this.maxBytes, filter.maxBytes ?? 16 * 1024), lines = Math.min(this.maxEntries, filter.lines ?? 100);
     const selected: TaskActivityEntry[] = [];
     let used = 0;
+    if (filter.afterId !== undefined) {
+      for (const entry of entries) {
+        if (selected.length >= lines) break;
+        const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
+        if (used + size > maxBytes) break;
+        selected.push(entry); used += size;
+      }
+      const hasMore = selected.length < entries.length;
+      return { entries: selected, hasMore, truncated: hasMore };
+    }
     for (const entry of entries.slice(-lines).reverse()) {
       const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
       if (used + size > maxBytes) break;
       selected.unshift(entry); used += size;
     }
-    return selected;
+    const truncated = selected.length < entries.length;
+    return { entries: selected, hasMore: false, truncated };
+  }
+  async read(filter: TaskActivityFilter = {}): Promise<TaskActivityEntry[]> {
+    return (await this.readWithMeta(filter)).entries;
   }
 }
