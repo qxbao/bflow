@@ -1,5 +1,7 @@
 # 2. Yêu cầu môi trường
 
+> **Legacy P00–P10:** hướng dẫn API/demo của Runtime cũ. Các giới hạn tích hợp trong trang phản ánh giai đoạn đó; luồng hiện tại dùng [installation](installation.md), [getting started](getting-started.md) và [implementation status](../implementation-status.md).
+
 > **Phạm vi legacy P00–P10.** Trang này giữ API/demo và đánh giá integration ở thời điểm trước P19.
 > Dùng [hướng dẫn hiện tại](README.md) cho onboarding, lifecycle/config.yaml và P19.
 > Không áp dụng các nhận định integration cũ hoặc thao tác Core trực tiếp để bypass policy P19.

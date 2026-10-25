@@ -1,6 +1,6 @@
 # Bflow canonical skill library
 
-This pack contains 32 instruction-only skills. The canonical source for each skill is
+This pack contains the instruction-only skills listed in the catalog below. The canonical source for each skill is
 `SKILL.md` plus its `skill.json` and every declared referenced resource. Native skill
 frontmatter contains only `name` and `description`; Bflow metadata lives in the adjacent
 JSON document. Provider adapters publish from this single source rather than maintaining
@@ -43,13 +43,9 @@ verified launch adapter. Mark unsupported provider launch surfaces unsupported i
 claiming native CLI conformance from text rendering tests. Loading these instructions is
 not proof they were followed, or that a task passed verification.
 
-The baseline CLI currently exposes `init`, `up`, `down`, `attach`, `doctor`, `recover`,
-`run`, `status`, `approve`, `resume`, `cancel` and help. It has no dedicated skills, setup,
-Git workflow or verification subcommand. Skill examples use actual help/status/doctor
-observations and existing authorized host capabilities; they do not invent future commands.
-`bflow recover` only handles an empty legacy lifecycle lock and does not reconstruct task
-receipts. Recording a human approval is never authorized merely because `approve` exists.
-P26/P29/P30 owners must integrate setup/init/Runtime composition separately.
+The current CLI exposes setup, lifecycle, high-level Git/task/verification commands, skills sync, docs and provider diagnostics. The binary currently rejects `skills list` and `skills sync --list`; use `skills sync --dry-run` for a preview. See the [CLI reference](../apps/cli/COMMAND_REFERENCE.md). Setup installs reviewed bundles; Runtime resolves approved role bindings and exact session pins. Absent role selection uses defaults; an explicit empty selection removes defaults but not applicable required skills. Conditional tool instructions require an independent resolved grant.
+
+`bflow recover --yes` handles an empty legacy lifecycle lock, not workflow reconstruction. P19 decisions and operational resume use Conversation; legacy `approve`/`resume` act on a separate Runtime store. Command availability never grants human authority. See [implementation status](../docs/implementation-status.md).
 
 ## Optional tool prerequisites
 
@@ -113,3 +109,8 @@ chain or another workflow engine.
 Every specialist routes missing information, permissions and approvals through
 Runtime → Herdr → Conversation. Do not open native direct user questions or elicitation.
 All examples preserve waiting state until an authenticated current answer arrives.
+
+
+## NFR and conditional test-design guidance
+
+The canonical references now include NFR outcome/oracle/measurement briefs and conditional risk viewpoints. See the [integrated guide](../docs/nfr-and-test-design.md) for the consumer/reference map and compatibility limits. Load the relevant pinned reference on demand; instructions, valid example schemas and rendered distribution are not measurement results or tool permissions. Existing sessions retain their immutable generation; differing bytes under an already installed version require owner reconciliation, never overwrite.

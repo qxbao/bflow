@@ -1,5 +1,7 @@
 # Bflow Platform v3 — Kiến trúc Shared MCP Gateway & Benchmark bộ nhớ thực trên Linux
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 **Commit baseline đã kiểm thử**: `7133b02` (`main`, sau tích hợp P24–P33)
 **Thời điểm đo**: `2026-10-17T14:43:39.461Z`
 **Kernel & OS của host**: Linux `x86_64` (`/proc/<pid>/status` `VmRSS` & `/proc/<pid>/smaps_rollup` `Pss`)

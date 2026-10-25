@@ -1,5 +1,7 @@
 # Bằng chứng triển khai receipt đã duyệt và tương thích — 2026-10-16
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Source commit được kiểm thử: `728f706ca92c5ee9dfab7cc67eb0daed99ce24ad`.
 Baseline: P19 `973a943` (bao gồm implementation `a44d2a1`).
 Branch/worktree: `agent/runtime/p19-authenticated-receipts`, `/tmp/bflow-p19-receipts`.

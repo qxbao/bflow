@@ -1,5 +1,7 @@
 # P08 Findings & Upstream Defect Catalog
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 During the design, implementation, and execution of the P08 End-to-End Integration verification suite, the following cross-module defects, security gaps, and architectural limitations in upstream packages were identified, reproduced with deterministic probes, and subsequently remediated and verified GREEN across the integrated codebase.
 
 ---

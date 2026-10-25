@@ -1,198 +1,102 @@
-# Bflow Platform v3 — Hướng dẫn thiết lập & Onboarding
+# Thiết lập máy và repository
 
-Tài liệu này hướng dẫn chi tiết quy trình cài đặt, thiết lập cấp độ máy chủ (`bflow setup`), khởi tạo cấu hình dự án (`bflow init`) và kiểm tra tính sẵn sàng của toàn bộ hệ thống (`bflow doctor`, `bflow agent check`) cho nền tảng Bflow Platform v3.
+Đây là hướng dẫn hiện hành cho `bflow setup`, `init`, provider và Gateway. [Installation](guide/installation.md) có lệnh build và bootstrap: gọi `node apps/cli/dist/bin.js setup` **một lần**, mở lại shell, rồi dùng lệnh tắt **`bflow`**. Setup tạo launcher và PATH; không cần tự khai báo shell alias.
 
----
+## Yêu cầu môi trường
 
-## 1. Yêu cầu hệ thống (Prerequisites)
+- Node.js **≥22.13**, pnpm **12.5.1**, Git và filesystem cục bộ. Root `engines >=22` rộng hơn yêu cầu của `node:sqlite`.
+- Linux: `systemd --user`, `flock`, Bubblewrap/user namespaces cho verification. macOS: `launchd`, Apple Command Line Tools, Seatbelt và `flock` hỗ trợ inherited fd; Python ≥3.11 cho profile sync. [Compatibility matrix](compatibility-matrix.md).
+- Machine state và secret cần POSIX ownership/mode `0700`/`0600`. Với repository không hỗ trợ private permissions, Runtime có thể chọn state ngoài checkout theo [configuration reference](guide/configuration-reference.md); không tự di chuyển state đã có authority.
+- Dùng đường dẫn Unix socket ngắn. Khi gặp `sun_path`, chọn `TMPDIR=/tmp` và runtime directory ngắn; giới hạn phụ thuộc OS.
+- CLI provider đã cài vẫn cần đăng nhập. Herdr được kiểm tra theo protocol 22/schema 1 và hành vi; release label không phải allowlist.
 
-### 1.1 Hệ điều hành và Hệ thống tệp tin (Filesystem)
-
-- **Hệ điều hành được kiểm chứng đầy đủ**: **Linux `x86_64`** hỗ trợ `systemd --user` và Linux namespaces (`/usr/bin/bwrap` — Bubblewrap).
-- **Hệ điều hành hỗ trợ theo thiết kế (Design / Adapter Level)**:
-  - **macOS (`darwin`)**: Hỗ trợ quản lý dịch vụ nền qua `launchd` (`~/Library/LaunchAgents`); hiện chưa hỗ trợ sandbox kiểm tra hành vi Bubblewrap (chỉ khả dụng trên Linux).
-  - **Windows (`win32`)**: Ở trạng thái thiết kế chưa kiểm chứng (`designed_unverified`) — mọi thao tác ghi thay đổi hệ thống sẽ được chặn an toàn (`blocked`) cho tới khi được chứng thực trên máy chủ Windows thực tế.
-- **Yêu cầu bắt buộc về Hệ thống tệp POSIX**:
-  - Thư mục làm việc của repository và các thư mục trạng thái (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`) **bắt buộc phải nằm trên hệ thống tệp POSIX thực sự** (`ext4`, `xfs`, `btrfs`, `apfs`, `tmpfs`) hỗ trợ phân quyền `chmod 0700` / `0600` và thuộc đúng UID của người dùng hiện hành.
-  - **Tuyệt đối không đặt trạng thái runtime trên phân vùng `fuseblk` / NTFS / exFAT mount qua FUSE** (nơi mọi tệp tin luôn mang quyền `0777` hoặc `root:root`), vì Bflow sẽ từ chối khởi chạy nhằm bảo vệ tuyệt đối khóa ký Ed25519 và Bearer token.
-  - **Giới hạn độ dài đường dẫn Unix Domain Socket**: Thiết lập `TMPDIR=/tmp` và sử dụng `XDG_RUNTIME_DIR` ngắn gọn để tổng độ dài đường dẫn socket không vượt quá giới hạn `sockaddr_un.sun_path` (tối đa `108` bytes trên Linux).
-
-### 1.2 Công cụ nền tảng bắt buộc
-
-| Thành phần | Phiên bản tối thiểu | Phiên bản đã kiểm chứng thực tế | Câu lệnh kiểm tra |
-| :--- | :--- | :--- | :--- |
-| **Node.js** | `>= 22.0.0` | `v24.16.0` | `node --version` |
-| **pnpm** | `>= 9.0.0` | `12.5.1` | `pnpm --version` |
-| **Git** | `>= 2.38.0` | `2.43.0` | `git --version` |
-| **Herdr CLI** | Protocol `22` / Schema `1` | `herdr 0.9.5` | `herdr --version` |
-| **Bubblewrap** *(Linux)* | `>= 0.8.0` | `0.9.0` | `bwrap --version` |
-
-### 1.3 Công cụ CLI của Agent Provider (cần ít nhất 1 nhà cung cấp đã đăng nhập)
-
-| Provider ID | Tên công cụ CLI | Phiên bản tối thiểu | Phiên bản đã kiểm chứng | Lệnh đăng nhập / kiểm tra trạng thái |
-| :--- | :--- | :--- | :--- | :--- |
-| `claude` | Claude Code | `>= 2.0.0` | `2.1.301` / `2.1.302` | `claude auth login` / `claude auth status` |
-| `codex` | OpenAI Codex CLI | `>= 0.150.0` | `0.162.0` / `0.163.0` | `codex login` / `codex login status` |
-| `agy` | Google Antigravity CLI | `>= 1.0.0` | `1.4.0` | `agy models` |
-
-> [!IMPORTANT]
-> **Lưu ý đặc biệt cho người dùng `codex`**: Bflow tự động vô hiệu hóa các máy chủ MCP toàn cục được khai báo trong bảng `[mcp_servers.<name>]` tại `~/.codex/config.toml` khi khởi chạy từng vai trò (`-c mcp_servers.<name>.enabled=false`). Nếu môi trường máy tính của bạn có cấu hình **Codex hooks toàn cục** (`~/.codex/hooks.json`), bộ điều hợp `CodexProviderAdapter` mặc định sẽ chuyển sang trạng thái **fail-closed** (`codex_global_hooks_not_isolated`) cho tới khi bạn chủ động rà soát và phê duyệt rõ ràng snapshot SHA-256 của các hook đó:
-> ```bash
-> bflow setup --codex-hooks --plan
-> bflow setup --codex-hooks --apply
-> ```
-
----
-
-## 2. Biên dịch từ mã nguồn (Source Build)
+## 1. Xem và áp dụng machine plan
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm build
-pnpm check:deps
-pnpm typecheck
+bflow setup --check          # Chỉ quan sát prerequisite và drift
+bflow setup --dry-run        # Xem plan, không áp dụng
+bflow setup                 # Hiển thị plan và hỏi trong TTY
+# Với plan đã được chấp thuận, trong môi trường không tương tác:
+bflow setup --apply --yes
 ```
 
----
+Setup quản lý thư mục XDG riêng tư, catalog/pins đã review, immutable skill bundles, managed launcher/PATH, MCP configuration và service người dùng (`systemd --user` hoặc `launchd`). Receipt ghi rõ bước applied/noop/blocked/failed; partial apply hoặc doctor cuối không đạt trả mã lỗi. Cài đặt toàn máy ở đây là **phạm vi tài khoản người dùng**, không phải cấp quyền agent trên toàn máy.
 
-## 3. Thiết lập cấp độ máy chủ (`bflow setup`)
+Setup có thể cài Herdr, provider CLI và tools từ [catalog installer](../packages/tool-installer/README.md); không tự đăng nhập provider. Native plugin và các bước cần review riêng được trình bày trong plan. Các pin hiện có được giữ theo authority của machine config. `up` không cài dependency hoặc thực hiện machine setup. Riêng `trustedWorkspace: true` với required Claude cho phép CLI ghi per-project trust vào `$CLAUDE_CONFIG_DIR/.claude.json` hoặc `~/.claude.json`; xem [config reference](guide/configuration-reference.md#policy-và-ngân-sách) trước khi khởi động.
 
-Bflow phân tách rõ ràng giữa **thiết lập cấp độ máy chủ (`bflow setup`)** và **khởi chạy phiên làm việc của dự án (`bflow up`)**. Lệnh `bflow up` **tuyệt đối không bao giờ** tự ý tải công cụ từ internet hoặc can thiệp chỉnh sửa cấu hình toàn cục của người dùng.
+Chạy lại khi môi trường đã hội tụ trả `noop`/`already_satisfied`; chạy `bflow setup --repair --yes` khi cần sửa owned config/state theo plan. Giữ receipt không rõ kết quả để reconcile, không xóa state nhằm ép cài lại.
 
-### 3.1 Kiểm tra trạng thái hiện tại (Read-only Check)
+### Kiểm tra native login và intent Superpowers
+
+Từ mốc `2357669`, setup doctor có thể báo native login đã verified khi CLI chạy trong môi trường tài khoản thông thường. Nó dùng status command của provider (`codex login status`, Claude structured auth status, Agy model-list check khi đã onboarding), chạy các provider probe độc lập đồng thời và không thực hiện model inference hoặc tạo credential.
+
+Installed binary vẫn là một quan sát riêng. Login chưa xác minh báo warning và hướng dẫn operator đăng nhập; login verified không chứng minh model quota, profile trong config, launch/activated readiness hoặc task success. Với `BFLOW_HOME`/isolated setup hay injected platform, mặc định giữ warning nếu không có login probe phù hợp, không lấy login của tài khoản ngoài để chứng nhận scope cô lập. Agy chưa có native onboarding file thì không gọi `agy models`, tránh tạo first-run state từ phép kiểm tra.
+
+`setup --check` cũng không còn dùng stage Superpowers chưa từng ghi native metadata để che diagnostic của installed destination. Nếu owned destination chứng minh exact pin đã được kích hoạt, lần apply được duyệt có thể archive intent cũ và bỏ stage của chính nó. Check không làm thao tác cleanup này. Intent đã có native metadata, destination chưa đủ bằng chứng hoặc kết quả mutation vẫn uncertain phải tiếp tục reconciliation theo receipt; không xóa cache/intent thủ công. [Installer reference](../packages/tool-installer/README.md).
+
+## 2. Chuẩn bị repository và Gateway
 
 ```bash
-bflow setup --check
-# Hoặc xuất kết quả định dạng JSON:
-bflow setup --check --json
+cd /path/to/your-project
+bflow init --provider codex
+bflow setup --dir .
 ```
 
-Các chế độ `--check` và `--dry-run` vận hành hoàn toàn ở chế độ chỉ đọc và không thực hiện bất kỳ thao tác ghi nào xuống đĩa.
+`init` tạo `.bflow/config.yml` và ignore file với identity riêng. Các defaults hiện tại: Codex, `workspace_auto`, `trustedWorkspace: true`, SDD lightweight có approval, Conditional TDD, verification 3 vòng, concurrency 2, startup 300.000 ms. `init --update` bổ sung default fields/comment và giữ giá trị cũ; `--force`/`--yes` thay toàn bộ config bằng defaults mới. Config `.yaml`/`.json` cũ cần `bflow config-migrate` trước.
 
-### 3.2 Thực thi thiết lập môi trường (`apply`)
+`setup --dir` chọn ngữ cảnh để chuẩn bị GitNexus index/backend của repo; installation vẫn dùng chung ở machine. **Context7 hosted được chia sẻ giữa repository/worktree** khi machine identity, canonical workspace và registration hợp lệ. **GitNexus, Chrome và backend local vẫn gắn workspace đã setup**. Khi bị lỗi workspace mismatch, chuẩn bị đúng repo bằng `bflow setup --dir <repo>`; không rebind Context7 chỉ vì đổi worktree.
+
+Index GitNexus fresh có thể được đọc khi setup hội tụ cấu hình. Rebuild index stale cần quyền storage độc quyền: nếu reader/writer còn giữ lock, setup báo blocked và giữ lock, không tự dừng Gateway hoặc thu hồi quyền đang dùng. Thực hiện bảo trì rồi chạy lại plan.
+
+Các tích hợp RTK/GitNexus/MemPalace/Chrome và Context7 được bật ở mức **optional** khi tạo config mới. Cấu hình không khai toggle cũng dùng optional defaults trong CLI composition. `enabled: false` tắt yêu cầu tương ứng; `required: true` chặn nếu chưa đủ inventory/grant/readiness. **Skill không cấp quyền tool.** Xem [tool policy](tools-sdlc-integration.md) và [config](guide/configuration-reference.md).
+
+MemPalace dùng wheel PyPI pin checksum trong virtualenv do Bflow sở hữu, cần `uv` hoặc Python phù hợp. `wing` mặc định là repository ID, chỉ search read-only trong scope đó; setup không tạo memory fixture hoặc ghi memory. Có palace sẵn không chứng minh có dữ liệu đúng wing.
+
+## 3. Provider, profile và Codex hooks
+
+Đăng nhập CLI bằng account/profile bạn chọn. Chọn `profile-name` ở role hoặc provider defaults; Bflow không tự tạo profile, sao chép credential hoặc fallback account khi profile thiếu. Agy có native launch/binding cho specialist ở source/local tests, nhưng **Conversation và unattended vẫn unsupported**. Giữ Conversation trên Claude/Codex. [Provider README](../packages/agent-providers/README.md).
+
+Nếu Codex global hooks chưa được duyệt:
 
 ```bash
-# Chạy ở chế độ tương tác (hiển thị kế hoạch và chờ người dùng xác nhận):
-bflow setup
-
-# Chạy tự động xác nhận dành cho môi trường CI / tự động hóa:
-bflow setup --yes
+bflow setup --codex-hooks --plan
+bflow setup --codex-hooks --apply
 ```
 
-Khi thực thi `bflow setup`, hệ thống tuân thủ nghiêm ngặt thứ tự phụ thuộc và đảm bảo tính lũy thừa (idempotency):
-1. Tạo lập các thư mục trạng thái, cấu hình, dữ liệu và `skills-store` với phân quyền bảo mật riêng tư `0700`.
-2. Tải, cài đặt và kiểm tra mã băm SHA-256 cho **32 builtin skills** vào kho lưu trữ bất biến (`skills-store`).
-3. Khởi tạo cấu hình Shared MCP Gateway (`mcp-config`) và đăng ký dịch vụ chạy nền cấp người dùng (`bflow-mcp-gateway.service` trên `systemd --user` hoặc `launchd` agent trên macOS) đi kèm nhãn sở hữu `.bflow-owner`.
-4. Cập nhật khối `PATH` được quản lý trong tệp cấu hình shell (`~/.bashrc` hoặc `~/.zshrc`) và cài đặt kịch bản khởi chạy `bflow` vào thư mục `managedBin`.
-5. Cấu hình tích hợp các công cụ chuyên dụng (`rtk`, `gitnexus`, `mempalace`, `superpowers`; trong đó MemPalace được cài đặt từ wheel cố định vào môi trường ảo virtualenv riêng của Bflow và đăng ký qua Gateway) khi có mặt và thỏa mãn điều kiện.
+Đây là luồng **chỉ review hooks**, không cài tool/service. Non-interactive snapshot approval cần `--yes --hook-digest <sha256>` đúng bản đã review. `setup --yes` thông thường không duyệt hooks. Chính sách `--trust-all`/`--revoke-trust-all` là lựa chọn operator riêng, xem [security and approval](guide/security-approval.md).
 
-Việc chạy lại `bflow setup --yes` trên môi trường đã hội tụ trạng thái sẽ trả về kết quả `outcome: "noop"` (`already_satisfied`) mà không thực hiện ghi đè dư thừa.
+`BFLOW_HOME` chọn isolated machine/provider source. Để trỏ source checkout trong script, dùng biến ví dụ `BFLOW_SOURCE`; không đánh đồng hai biến. Khi dùng `AI_ISOLATOR_HOME`, giữ nhất quán trong setup, iso và up. [CLI profile reference](../apps/cli/README.md).
 
-### 3.2.1 Context7: Tra cứu tài liệu thư viện qua Gateway dùng chung
+## 4. Context7
 
-Lệnh `bflow setup` thiết lập **Context7** (dịch vụ MCP trực tuyến tại `https://mcp.context7.com/mcp`) như một dịch vụ *từ xa* (remote service) của Shared MCP Gateway. Không có tiến trình cục bộ nào được khởi chạy và không cần cài đặt thêm phần mềm: mọi agent dùng chung một kết nối thượng nguồn (upstream), và mỗi agent được Gateway phân quyền dựa trên bản đăng ký riêng biệt. Công cụ `ctx7` CLI hoàn toàn **không** được cài đặt do Bflow không có nhu cầu sử dụng công cụ này.
+Setup đăng ký `https://mcp.context7.com/mcp` qua Shared Gateway, không cài `ctx7` CLI. Dùng anonymous hoặc API key tùy chọn:
 
-- **Khóa API (Tùy chọn)**: Nếu không cung cấp khóa, Context7 sẽ hoạt động ở chế độ ẩn danh với giới hạn tần suất truy vấn (rate limit) thấp hơn. Bạn có thể lấy khóa tại `https://context7.com/dashboard` (hoặc qua lệnh `npx ctx7 setup`), sau đó lưu trữ bằng một trong hai phương thức an toàn sau (tuyệt đối không truyền khóa qua đối số dòng lệnh):
-  ```bash
-  printf %s "$KEY" | bflow setup --apply --context7-api-key-stdin
-  CONTEXT7_API_KEY="$KEY" bflow setup --apply
-  ```
-  Khóa bí mật được ghi nhận một cách nguyên tử vào `<state>/secrets/context7-api-key` (thư mục `0700`, tệp `0600`, tự động từ chối nếu là liên kết mềm symlink hoặc có quyền đọc từ người dùng khác) và chỉ được nạp trong bộ nhớ của Gateway. Các tệp cấu hình, nhật ký log, biên nhận và prompt chỉ lưu trữ tham chiếu an toàn `secret://bflow/context7/api-key` kèm dấu vân tay ngắn (fingerprint) để phát hiện sự thay đổi.
-- **Hạn chế OAuth**: Giao thức OAuth (`/mcp/oauth`) hiện chưa được hỗ trợ do Gateway vận hành dưới dạng dịch vụ nền không có giao diện tương tác.
-- **Rà soát cấu hình sẵn có**: Quá trình setup chỉ *đọc* `~/.claude.json`, `$CODEX_HOME/config.toml` và `agy mcp list` để cảnh báo nếu Context7 đã được đăng ký trực tiếp từ trước; hệ thống hoàn toàn không ghi đè cấu hình MCP của bạn. Các vai trò do Bflow khởi chạy chỉ nhận máy chủ MCP thông qua Gateway nên không bao giờ xảy ra xung đột đăng ký.
-- **Tắt dịch vụ**: Thực hiện lệnh `bflow setup --apply --no-context7`.
-- **Bảo mật dữ liệu ra bên ngoài**: Chỉ có tên thư viện và nội dung câu hỏi tra cứu tài liệu được gửi tới máy chủ `context7.com`. Tuyệt đối không gửi mã nguồn nội bộ hoặc thông tin bí mật vào nội dung truy vấn.
-
-Kích hoạt theo từng repository trong tệp `.bflow/config.yml` (lệnh `bflow init` đã bật sẵn ở chế độ tùy chọn):
-
-```yaml
-environment:
-  context7:
-    enabled: true     # Bật/tắt dịch vụ cho repository
-    required: false   # true: bflow up và doctor sẽ báo lỗi nếu dịch vụ chưa sẵn sàng; false: cảnh báo và chạy mà không có Context7
-    cache:            # Tùy chọn bộ nhớ đệm
-      enabled: true
-      ttlSeconds: 3600
-      allowAuthenticated: false   # Khi có khóa API, câu trả lời có thể từ thư viện riêng nên mặc định không cache
-```
-
-Chỉ các vai trò được cấp phép trong kỹ năng `use-context7` (gồm `specifier`, `architect`, `planner`, `developer`, `reviewer`, `qa`) mới được cấp quyền sử dụng dịch vụ. Vai trò Conversation Agent không bao giờ nhận công cụ Gateway, và Coordinator cũng không sử dụng Context7.
-
-Tra cứu trực tiếp từ dòng lệnh:
 ```bash
+# KEY được nhập từ nguồn bí mật của operator, không commit vào repository.
+printf %s "$KEY" | bflow setup --apply --context7-api-key-stdin
+# Hoặc cấp CONTEXT7_API_KEY trong environment của setup.
 bflow docs search react
 bflow docs lookup react --query "cleanup function trong useEffect" --json
 bflow docs status
 ```
 
-Lệnh `lookup` sẽ tìm kiếm từ thư mục hiện tại ngược lên gốc repository để phát hiện phiên bản thư viện chính xác đang sử dụng từ các tệp khóa (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `uv.lock`, `poetry.lock`, `go.mod`, `Cargo.lock`). Hệ thống không bao giờ tự động nhảy sang tài liệu của phiên bản mới hơn nếu phiên bản hiện tại chưa có tài liệu tương ứng.
+Secret lưu riêng dưới machine state, mode `0600`; config/log/receipt chỉ giữ reference/fingerprint. `--no-context7` bỏ dịch vụ trong setup; `environment.context7.enabled: false` tắt yêu cầu của repo. Cache mặc định tắt; authenticated cache cần opt-in riêng. OAuth chưa hỗ trợ. Truy vấn gửi ra Context7, vì vậy không đưa secret hoặc mã nội bộ vào query.
 
-### 3.2.2 Liên kết Gateway của máy với Workspace
+Version lookup dùng lockfile/manifest trong scope repository và không tự chọn tài liệu mới hơn phiên bản dự án. Kết quả `docs status` là probe dịch vụ/config, không chứng minh provider đang chạy đã dùng tài liệu. [Docs retrieval](../packages/docs-retrieval/README.md).
 
-Shared MCP Gateway chạy nền là một dịch vụ cấp máy nhưng được gắn kết với duy nhất một repository tại một thời điểm (chính là workspace nơi thực thi lệnh `bflow setup --apply --dir <repo>` gần nhất). 
-
-Khi bạn chạy `bflow up` tại một repository khác, các vai trò yêu cầu Gateway sẽ bị chặn với thông báo: `The machine Gateway is bound to workspace '<A>' but this operation targets '<B>'`. Để chuyển đổi liên kết, hãy thực thi:
-```bash
-bflow setup --apply --yes --dir <đường dẫn repo B>
-```
-Lệnh trên sẽ khởi động lại Gateway và liên kết an toàn với repository mới.
-
-### 3.3 Khắc phục và sửa chữa thiết lập (`--repair`)
-
-Nếu tệp `state.json`, kho lưu trữ `skills-store` hoặc cấu hình dịch vụ nền bị hỏng hoặc mất mát:
+## 5. Chẩn đoán và khởi động
 
 ```bash
-bflow setup --repair --yes
-```
-
----
-
-## 4. Khởi tạo Repository (`bflow init`) & Chuyển đổi cấu hình (`bflow config-migrate`)
-
-Tại thư mục gốc của Git repository (trên hệ thống tệp tin POSIX):
-
-```bash
-bflow init
-```
-
-Lệnh `bflow init` tạo ra:
-- `.bflow/config.yml`: Cấu hình dự án chuẩn mực, định danh phiên Herdr, ánh xạ vai trò sang nhà cung cấp (`claude`, `codex`, `agy`), tham số `model` / `effort` theo từng vai trò, chế độ phân quyền (`restricted`, `workspace_auto`, `unattended_isolated`) và giới hạn tài nguyên.
-- `.bflow/.gitignore`: Tự động loại trừ các thư mục nhạy cảm `state/`, `logs/`, `secrets/`, `worktrees/` và các tệp `*.db` khỏi kho mã nguồn Git.
-
-Theo mặc định, Claude Code sẽ hiển thị hộp thoại xác nhận tin cậy repository ở mỗi pane mới, và lệnh `bflow up` sẽ dừng ở trạng thái `blocked` chờ người dùng xác nhận. Để Bflow tự động ghi nhận sự tin cậy này, hãy khai báo trong `.bflow/config.yml`:
-
-```yaml
-environment:
-  permissions:
-    trustedWorkspace: true
-```
-
-Khi thiết lập `trustedWorkspace: true`, `bflow up` sẽ ghi nhận trạng thái `hasTrustDialogAccepted = true` vào `$CLAUDE_CONFIG_DIR/.claude.json`. Thao tác này được thực hiện nguyên tử và chỉ thay đổi duy nhất khóa cấu hình nói trên.
-
-Lệnh `bflow init` có tính lũy thừa: chạy lại lần 2 sẽ bảo lưu nguyên vẹn cấu hình hiện tại (`overwritten: false`). Nếu dự án đang sử dụng định dạng cấu hình cũ, hãy chạy `bflow config-migrate` để nâng cấp an toàn sang `.bflow/config.yml`.
-
----
-
-## 5. Chẩn đoán và Kiểm tra Sẵn sàng (`doctor`, `agent check`, `skills sync`)
-
-Trước khi thực thi `bflow up`, hãy tiến hành kiểm tra toàn diện chuỗi cung ứng:
-
-```bash
-# 1. Chẩn đoán tổng thể 6 phân hệ (environment, herdr, providers, mcp, tools, skills):
 bflow doctor --json
-
-# 2. Kiểm tra chuyên sâu từng provider (mã băm nhị phân, xác thực, năng lực, phân quyền, tin cậy workspace):
-bflow agent check claude
-bflow agent check codex
-bflow agent check agy
-
-# 3. Kiểm tra trạng thái các công cụ tích hợp và MCP Gateway:
 bflow tool status
-bflow mcp status
-bflow docs status
-
-# 4. Đồng bộ và kiểm tra tính toàn vẹn của các role skills:
-bflow skills sync
+bflow mcp status   # Inventory; live Gateway port của CLI chưa được nối mặc định
+bflow skills sync --dry-run
 ```
 
-Chỉ khi toàn bộ các vai trò bắt buộc (`required: true`) đạt trạng thái sẵn sàng (`ready`), lệnh `bflow up` mới cho phép khởi tạo các pane tác tử trên Herdr.
+`skills sync --dry-run` preview catalog; CLI hiện chưa nhận `skills list` hoặc `skills sync --list`. Khi cần áp dụng skill vào machine scope, review preview rồi dùng `bflow skills sync --allow-machine-scope`. Standalone `agent check <provider>` có thể gọi model probe và không đọc role/profile/model từ config; nó không thay `doctor`/`up`.
+
+`mcp status` đọc machine config và pin inventory; đường CLI mặc định chưa inject `mcpGateway`, nên `configured: false`/`not_ready` có thể là giới hạn composition dù daemon đang chạy. Dùng `doctor` cho platform diagnostics và `docs status` cho probe Context7; không lặp setup chỉ để xóa nhãn này.
+
+`doctor`/`up` mặc định không gửi ping tới model. `bflow doctor --deep` chạy model probe theo từng bộ provider/profile/model/effort và có thể tiêu hao usage. Auth, native hooks, skills, permission, Gateway và activated health vẫn phải đạt riêng.
+
+Xem lại/commit `.bflow/config.yml` và `.bflow/.gitignore`, bảo đảm working tree sạch, rồi chạy `bflow up` → `bflow attach`. Chỉ Conversation tương tác với người dùng; mọi role khác xin quyết định qua Runtime. Một lần `up` thành công không chứng minh workflow đã pass. [Getting started](guide/getting-started.md) · [Implementation status](implementation-status.md).

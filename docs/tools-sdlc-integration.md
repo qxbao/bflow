@@ -4,7 +4,9 @@ This implements the additive D-TOOLS-01 decision approved by the project owner.
 The accepted specification and acceptance criteria are in
 [the design](superpowers/specs/2026-10-24-tools-sdlc-design.md).
 Source integration, package tests, real prerequisite probes and completed live
-workflow acceptance are distinct evidence levels. Live acceptance is in progress.
+workflow acceptance are distinct evidence levels. Full live acceptance is not closed by the checked-in evidence. See the
+[current implementation status](implementation-status.md) and the
+[configuration reference](guide/configuration-reference.md).
 
 ## Authority and execution
 
@@ -57,7 +59,13 @@ putting memory in context. Native MemPalace drawer/source/timestamp fields remai
 source evidence. The repository relation is explicitly labelled as an approved
 wing-policy binding when the upstream does not supply that relation. Historical
 memory cannot replace the specification, current tests, journal or artifacts.
-Writing memory requires separate permission.
+Writing memory requires separate permission. The CLI default wing is the repository ID;
+a configured `environment.tools.mempalace.wing` must bind a reviewed alternative. An empty
+wing is not an excuse to search the whole palace or manufacture retrieval evidence.
+
+GitNexus now uses Runtime-managed Gateway resource acquire/renew/release with generation-bound
+registration, fencing and unknown/quarantine handling. Browser task actions still return
+`exclusive_resource_lease_unsupported`; the Gateway browser APIs alone do not make them usable.
 
 GitNexus, Context7 and browser operations require their own policy requirements,
 task triggers and current readiness. A small arithmetic task does not itself
@@ -68,8 +76,12 @@ optional services must remain visible as degraded; skills cannot enable them.
 
 The new strict version-3 schemas are additive exports. Existing RoleMessage,
 SessionManifest, Core checkpoints and SQL formats retain their contracts. New
-host fields are optional. Configurations without tool policy do not acquire
-implicit tool grants.
+host fields are optional. CLI composition now derives optional requirements for Context7, RTK, GitNexus,
+MemPalace and Chrome when their toggles are absent or enabled. Set `enabled: false`
+to omit one. An explicit `toolPolicy` uses its own strict scope/digest and requirements.
+Derived requirements still need independently resolved machine inventory, service mapping,
+role/operation/scope authority and readiness before becoming grants. Direct legacy host
+compositions without a policy do not acquire new grants.
 
 Legacy `environment.context7` is translated to its explicit service, operations
 and role set; conflicting explicit policy is rejected. Ambiguous legacy
@@ -80,8 +92,12 @@ assuming the paths were loaded.
 
 Quiesce before downgrading a session with new invocation ledgers. Preserve its
 receipts, artifacts and unknown calls; deleting state is not reconciliation.
-No installer, global provider configuration change or permission expansion is
-performed to make preflight pass.
+The CLI default policy change and `init --update` are implemented after the original design
+in `apps/cli/src/{environment-config,platform-options}.ts`. Existing sessions retain their
+pinned policy; use the lifecycle to apply reviewed changes.
+Tool-policy resolution does not install prerequisites or expand permissions to make
+preflight pass. Separately, CLI startup may apply the explicitly configured Claude
+per-project trust write described in the [configuration reference](guide/configuration-reference.md#policy-và-ngân-sách); do not describe that as launch-local-only state.
 
 ## Evidence and acceptance
 
@@ -94,5 +110,6 @@ The acceptance procedure requires a temporary repository, Codex personal, task
 input through Conversation, real scoped MCP retrieval and downstream use, real
 RTK command/status parity, unavailable/degraded cases and owned-process restart
 checks. Herdr `idle`/`done`, `tools/list`, a setup receipt and an agent's report
-cannot close those criteria. The full root validation and independent review must
-finish before local merge into `main`; no remote merge or push is authorized.
+cannot close those criteria. The original acceptance plan required full root validation and independent review before its
+local integration. That plan is historical; it does not grant a later task remote push/merge
+authority. The current code is integrated, while full live acceptance still needs its own evidence.

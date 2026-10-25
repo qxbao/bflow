@@ -1,5 +1,7 @@
 # Phạm vi đã duyệt và kế hoạch nghiệm thu P28
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Yêu cầu của owner cho phép triển khai thiết kế skills của P24. Baseline a39374d
 giữ P24 8dbb056; các schema công khai không đổi. Chỉ packages/skills và skills
 bị thay đổi. Không bao gồm database migration, thay đổi provider-home, thay đổi CLI parser hay

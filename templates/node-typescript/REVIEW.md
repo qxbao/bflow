@@ -1,5 +1,7 @@
 # DX review and local integration — 2026-10-16
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Reviewed original documentation commit `57924982481c3e3be1ba24a287759476e502fc3b`.
 Before validation, merged current local main
 `b29e5b20d64f18b91ff323afdc63b2e908d8082e` into the DX branch, preserving its

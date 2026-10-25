@@ -55,12 +55,18 @@ Node thật trong home tạm. Các test này không xác lập acceptance provid
 
 ---
 
+## Native provider login trong setup doctor
+
+`BuiltinSetupDoctor({ probeLogin })` nhận callback `ProviderLoginProbe` tùy chọn từ composition root. Với provider binary quan sát được, callback trả `{verified, detail}` từ native status command; các provider checks được khởi chạy đồng thời. `verified: true` tạo check auth passed; thiếu callback, status thất bại hoặc chưa xác minh giữ warning/remediation, không biến installed CLI thành authenticated readiness.
+
+CLI setup mới inject helper `checkNativeLogin()` của provider adapter ở môi trường tài khoản thông thường; isolated/injected platform không tự mượn auth ngoài scope. Callback chỉ là setup diagnostic, không phải launch environment hay một port/phiên bản mới của `AgentProviderAdapter` trong contracts. Setup không tự đăng nhập, tạo credentials hoặc inference để làm check pass. [Hướng dẫn và giới hạn](../../docs/setup-guide.md#kiểm-tra-native-login-và-intent-superpowers).
+
 ## Ranh giới kiến trúc và quyền sở hữu
 
 Theo [AGENTS.md](../../AGENTS.md) và [docs/runtime-architecture-v3.md](../../docs/runtime-architecture-v3.md):
 - **Owned Scope**: chỉ `packages/machine-setup/**`.
 - **Không có CLI Parser**: P29 (`apps/cli/**`) sở hữu việc parse argument CLI và giao diện terminal. `@bflow/machine-setup` export các mode của `MachineSetupService`.
-- **Không có Tool Installer cụ thể**: Các installer của package manager riêng lẻ (`npm`, `homebrew`, `verified_archive`, v.v.) thuộc P28 / các triển khai provider. `@bflow/machine-setup` cung cấp `ToolInstallerRegistry` để nhận các triển khai contract được inject.
+- **Không có Tool Installer cụ thể**: Các installer của package manager riêng lẻ (`npm`, `homebrew`, `verified_archive`, v.v.) thuộc P26 `@bflow/tool-installer` / các triển khai installer. `@bflow/machine-setup` cung cấp `ToolInstallerRegistry` để nhận các triển khai contract được inject.
 - **Ranh giới schema Version 3 nghiêm ngặt**: Mọi tài liệu trao đổi (machine config, environment manifest, journal, approvals, doctor report) được validate theo Zod schema nghiêm ngặt với `schemaVersion: 3`. Version không được hỗ trợ trả về lỗi `unsupported_version` (`supportedVersions: [3]`).
 
 ---
@@ -150,23 +156,19 @@ packages/machine-setup/
 ## Port và tích hợp bên ngoài
 
 - **P27 (`@bflow/mcp-gateway`)**: Dùng `<config>/mcp.json` do `McpConfigComponent` quản lý cho việc proxy tool cục bộ.
-- **P28 (`@bflow/skills` / `@bflow/tool-installer`)**: Cung cấp các triển khai `ToolInstaller` cụ thể được đăng ký vào `ToolInstallerRegistry`, và `SkillsSynchronizer` được inject vào `createSkillsComponent`.
+- **P26 tool-installer / P28 skills (`@bflow/skills` / `@bflow/tool-installer`)**: Cung cấp các triển khai `ToolInstaller` cụ thể được đăng ký vào `ToolInstallerRegistry`, và `SkillsSynchronizer` được inject vào `createSkillsComponent`.
 - **P29 (`apps/cli`)**: Bọc `MachineSetupService` thành các subcommand `bflow setup` và render văn bản `SetupPreview`.
 - **P30 (`packages/runtime`)**: Nối các health check khi khởi động runtime với `MachineDoctorReport` và `EnvironmentManifest`.
 
 ---
 
-## Wiring tích hợp cần thiết
+## Wiring hiện tại
 
-Tại integration synchronization gate:
-1. **`tsconfig.json` gốc**: Thêm `{ "path": "./packages/machine-setup" }` vào `references`.
-2. **`pnpm-lock.yaml`**: Cập nhật lockfile để khóa các dependency của `@bflow/machine-setup`.
-
----
+Root TypeScript references và lockfile đã chứa package. CLI setup inject installer, skill synchronizer, launcher và Gateway component; Runtime P30 đọc platform inventory/readiness. Không thêm lại bootstrap wiring. [Setup guide](../../docs/setup-guide.md) mô tả đường sử dụng; [implementation status](../../docs/implementation-status.md) phân biệt local tests và hồ sơ probe thật.
 
 ## Hạn chế và trạng thái xác minh
 
-- **Installer được inject**: Package được test với các fake installer tuân thủ contract; việc tải package qua mạng thật cần tích hợp installer của P28.
+- **Installer được inject**: Unit tests dùng fake installer; CLI đã ghép `@bflow/tool-installer`. Download/probe thật chỉ được xác nhận trong phạm vi báo cáo riêng.
 - **OS Services**: Unit file và plist launchd được xác minh qua `CommandRunner` mock; việc spawn OS service thật cần môi trường tích hợp.
 - **Concurrency**: Locking của state store được xác minh với tranh chấp PID sống vs stale; lock trên distributed filesystem không được hỗ trợ hay tuyên bố.
 - **Windows**: Chưa được xác minh trên các host test POSIX.

@@ -1,5 +1,7 @@
 # Security review sau P22 (cập nhật P25–P29)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Follow-up lỗi Ctrl+C/readiness/layout/original prompts đã được sửa; kết quả và
 giới hạn riêng ở [lifecycle startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md).
 Các số liệu/baseline bên dưới giữ đúng phạm vi nghiệm thu P22 trước follow-up.

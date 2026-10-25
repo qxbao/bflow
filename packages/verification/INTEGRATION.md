@@ -1,5 +1,7 @@
 # Bàn giao tích hợp P17
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Chỉ `packages/verification/**` và `agents/verifier/**` thuộc quyền sở hữu ở đây. P17 không
 bao gồm thay đổi nào đối với shared contract, migration, cấu hình build gốc hay lockfile.
 Baseline tiền nhiệm là `d8c6d18120c7a01a4bf8aad13f14660d20e0cdf6`, chứa bản đóng băng contract

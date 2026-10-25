@@ -89,8 +89,8 @@ jobs:
           # Include every workspace package as the platform grows. Keep only the
           # manifests and compiled output needed by an extracted installation.
           distribution_paths=(
-            package.json pnpm-lock.yaml pnpm-workspace.yaml README.md
-            agents skills templates docs
+            package.json pnpm-lock.yaml pnpm-workspace.yaml README.md LICENSE
+            agents skills templates docs apps/cli/isolation
           )
           for manifest in packages/*/package.json apps/*/package.json; do
             package_dir="${manifest%/package.json}"
@@ -113,8 +113,12 @@ jobs:
           trap 'rm -rf "$smoke_dir"' EXIT
           tar -xzf "${GITHUB_WORKSPACE}/release-assets/bflow-${RELEASE_TAG}-dist.tar.gz" -C "$smoke_dir"
           cd "$smoke_dir"
+          test -s LICENSE
+          grep -q 'GNU AFFERO GENERAL PUBLIC LICENSE' LICENSE
           pnpm install --offline --frozen-lockfile --ignore-scripts
           node apps/cli/dist/bin.js --help
+          AI_ISOLATOR_HOME="$smoke_dir/iso-smoke" node apps/cli/dist/bin.js iso help
+          python3 -c 'import runpy; runpy.run_path("apps/cli/isolation/lib/mcp_sync.py"); runpy.run_path("apps/cli/isolation/lib/profile_sync.py")'
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2

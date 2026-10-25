@@ -5,7 +5,7 @@ bflow up
 bflow attach
 ```
 
-Lệnh `bflow attach` kiểm tra tính hợp lệ của manifest và session tương ứng, yêu cầu Pane Manager (P13) tập trung tiêu điểm (focus) vào pane của Conversation Agent (`chat`), sau đó chạy lệnh `herdr attach` kế thừa toàn bộ luồng vào/ra (terminal I/O) của giao diện điều khiển. Lệnh này không tạo môi trường mới và tuyệt đối không gắn kết trực tiếp vào các pane của Coordinator hay Developer. Tùy chọn `--json` không thể thay thế cho nhu cầu thao tác trên một terminal tương tác (interactive terminal) thực sự của giao diện Herdr.
+Lệnh `bflow attach` kiểm tra tính hợp lệ của manifest và session tương ứng, yêu cầu Pane Manager (P13) tập trung tiêu điểm (focus) vào pane của Conversation Agent (`chat`), sau đó chạy lệnh `herdr session attach <session-name>` kế thừa toàn bộ luồng vào/ra (terminal I/O) của giao diện điều khiển. Lệnh này không tạo môi trường mới và tuyệt đối không gắn kết trực tiếp vào các pane của Coordinator hay Developer. Tùy chọn `--json` không thể thay thế cho nhu cầu thao tác trên một terminal tương tác (interactive terminal) thực sự của giao diện Herdr.
 
 ---
 

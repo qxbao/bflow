@@ -1,5 +1,7 @@
 # Bflow Platform v3 (Sau tích hợp P24–P33) — Báo cáo QA End-to-End
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 - **Commit đã kiểm thử**: `7133b02` (`main`)
 - **Ngày thực thi**: `2026-10-17`
 - **Vai trò**: Principal QA Automation Engineer

@@ -30,6 +30,8 @@ Mọi bộ điều hợp môi trường tùy biến (`BFLOW_ENVIRONMENT_MODULE`)
 
 ---
 
+`bflow down --force` là tùy chọn riêng để xử lý stuck pane cleanup **sau Runtime barrier**, vẫn cần checkpoint và quan sát server đã dừng mới. ACK dừng bị mất phải đối soát; force không biến unknown delivery thành not-delivered. Gateway dùng chung của machine và external workers không bị repo down dừng.
+
 ## 2. Xử lý sự cố gián đoạn khi hạ dịch vụ
 
 - Nếu cấu hình tùy biến báo cáo thiếu rào chắn an toàn hoặc quá trình rút cạn tác vụ chưa hoàn tất, hệ thống sẽ bảo lưu nguyên vẹn session và trạng thái để người vận hành kiểm tra xử lý. Hướng dẫn này không khuyến nghị lệnh dừng Herdr toàn cục vì có thể gây ảnh hưởng xấu tới các phiên làm việc của các dự án khác trên cùng máy. Xem thêm tại [Khôi phục phiên làm việc (Session Recovery)](session-recovery.md).

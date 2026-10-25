@@ -296,3 +296,14 @@ revision của đúng run và chờ Runtime/Coordinator xác nhận. Prompt ch�
 mới theo bộ phân loại P15 hiện có, kể cả tính năng nhỏ; lựa chọn SDD rõ ràng của người dùng
 vẫn được giữ và báo xung đột nếu cần. Thay đổi prompt cần được role đang chạy nạp lại qua
 lifecycle hiện có; kiểm thử source không chứng minh hành vi của provider live.
+
+
+## Thẻ tiếng Việt và notice aliases
+
+Host đồng bộ `approvalShortIds`/`runShortIds` vào private Conversation snapshot từ notice receipts. Các field mới là optional cho snapshot cũ; alias có scope của phiên, không thay public RoleMessage v2 hoặc approval ID thật. `#n` định danh thẻ, `Việc #k` định danh run; named reply không biết/đã đóng không fallback sang một approval khác.
+
+Classifier hỗ trợ thẻ với lựa chọn đánh số, work alias cho status/cancellation/requirement revision; operational resume qua host cũng resolve alias theo cùng kho. Chat tiếp tục dùng human turn/provenance và existing decision/versioning flow, không tự tạo approval qua MCP. Number-only reply chỉ có nghĩa theo câu hỏi đang chờ; không gán một nghĩa toàn cục cho mọi số.
+
+Pending updates đi qua Conversation tool `read_updates`, rồi được trình bày bằng tiếng Việt theo “Chuyện gì xảy ra → Ảnh hưởng → Bạn cần làm gì”. Chi tiết được đọc theo yêu cầu hoặc xem ở Log. Surfaced và displayed là receipt riêng; Stop reminder mang plaintext card, không mark model-seen mà bỏ mất nội dung. Alias/expiry/display matching fixes có regression coverage cục bộ, không phải live provider acceptance.
+
+[Hướng dẫn người dùng](../../docs/guide/conversation-updates.md) · [Runtime tool/receipt reference](../runtime/README.md#bổ-sung-sau-mốc-docs-355a998) · [Commit audit](../../docs/main-updates-2026-10-25.md).

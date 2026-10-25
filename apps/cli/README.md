@@ -4,13 +4,15 @@ Khi session đang offline, `up` chuẩn bị và kiểm tra provider trước kh
 server mới. Nếu preflight từ chối, CLI giữ manifest/run cũ và trả lỗi provider;
 không gọi shutdown barrier trên công việc chưa được activate. Các trường hợp
 startup cũ chưa rõ delivery và session đang chạy vẫn phải reconciliation theo
-receipt hiện có. Cấu hình native Agy đã có trong source, nhưng readiness vẫn bị
-chặn khi native binding hoặc human-input provenance chưa được chứng nhận.
+receipt hiện có. Agy specialist đã có native hook/shim/binding trong source và local tests;
+Conversation thiếu trusted human-input provenance và unattended vẫn unsupported.
+Xem [trạng thái triển khai](../../docs/implementation-status.md).
 
-Build từ thư mục gốc của repository bằng `pnpm build`, sau đó chạy
-`node apps/cli/dist/bin.js <command>` (hoặc executable `bflow` đã cài).
+Build từ root bằng `pnpm build`, gọi **`node apps/cli/dist/bin.js setup` một lần**,
+rồi reload shell/mở terminal mới và dùng **`bflow <command>`**. Setup tạo managed
+launcher/PATH; không cần tự thêm shell alias. [Installation](../../docs/guide/installation.md).
 Cần Node >=22.13 và pnpm được pin ở root cho storage runtime hiện có.
-Việc khóa vòng đời yêu cầu `flock` của Linux (util-linux) có trong PATH.
+Lifecycle cần `flock` trên PATH: Linux util-linux hoặc bản macOS có inherited-fd support.
 
 Các subprocess trong vòng đời phiên nhận `DISABLE_AUTOUPDATER=1` ngay từ dependency/auth
 checks, để Claude không tự đổi binary khi `up` đang chuẩn bị và activate các role.
@@ -399,57 +401,51 @@ hướng dẫn khắc phục thủ công mà không trả về đầu ra termina
 
 ## Các lệnh Agentic SDLC cấp cao (P29)
 
-`bflow repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`,
-`tool status`, `skills sync` và `agent check` mỗi lệnh cho agent một lệnh cấp mục tiêu. Chúng
-tái dùng Specification Engine, Conditional TDD Resolver, Verification Engine, Git Orchestrator,
-các thành phần tool/MCP/skills của machine setup và Agent Provider Registry qua các port trong
-`src/high-level/services.ts` và `HighLevelCliFacade`; CLI bổ sung parsing, xác thực ingress,
-idempotency receipt, điểm dừng quyền và structured envelope, không bao giờ lập lịch, gate hay phê duyệt.
+Đường binary dùng parser/handler trong `src/high-level/index.ts`; cú pháp được đối chiếu tại
+[CLI reference](COMMAND_REFERENCE.md) và [parser-backed reference](docs/command-reference.md).
+`HighLevelCliFacade` là đường API/programmatic kế thừa: không dùng các flag của facade hoặc
+static help cũ để suy ra binary nhận cùng cú pháp. Các lệnh chuẩn bị dữ liệu/request;
+Runtime vẫn sở hữu dispatch, lease/fence, scheduler, quality gates và human approvals.
 
-Mọi lệnh đều hỗ trợ `--help` và `--json`. Với `--json`, kết quả là một envelope dựa trên
-`CommandExecutionResult` trên stdout và exit code của process khớp với nó
-(0 thành công, 1 thất bại, 2 usage, 3 chưa sẵn sàng, 4 không tìm thấy, 5 cần cấp quyền, 6 conflict,
-7 trạng thái không xác định). Các lệnh thay đổi trạng thái giữ receipt trong `.bflow/state/cli/` và `.bflow/state/commands/`
-(phải được Git-ignore), phát lại các request đã hoàn tất, tuần tự hóa các lần gọi đồng thời và từ chối
-lặp lại một bước không idempotent bị gián đoạn cho đến khi có `--resume`.
+Với `--json`, high-level commands xuất `{ok, command, exitCode, result}`; `result` là
+`CommandExecutionResult` v3, `result.output` có outcome/steps riêng. Exit code 0–7 có nghĩa
+đã ghi trong reference, không áp đồng loạt cho lifecycle/iso/docs. Command `succeeded`
+không chứng minh task/run thành công. Repo mutation receipts ở `.bflow/state/cli/commands/`;
+`skills sync` giữ receipt machine-scoped. Interrupted mutation cần reconcile/`--resume`
+ở những lệnh parser hỗ trợ, không blindly resend.
 
-Agent và script nên truyền `--json`, parse envelope duy nhất và dùng exit code của process
-làm kết quả lệnh có thẩm quyền. Đầu ra cho người dùng tóm tắt lệnh, các bước theo thứ tự,
-các phát hiện domain liên quan và mọi hành động tiếp theo; nó không in toàn bộ dữ liệu kết quả.
-Màu được phân giải theo từng output stream, và tiến trình chỉ xuất hiện trên stderr tương tác của người dùng. Một
-lệnh thành công vẫn có thể báo kết luận domain âm tính như `not_passed` hoặc
-`not_ready`; các kết luận đó giữ exit code đã được tài liệu hóa.
+| Lệnh | Hành vi và cú pháp chính |
+| --- | --- |
+| `bflow repo inspect` | Đọc Git/project context từ cwd; không có `--dir`/`--include-files`/`--max-files` |
+| `bflow task plan --spec <file>` | Preview task graph; `--workflow` kiểm tra traceability; `--write [--out <file>] [--force]` lưu plan |
+| `bflow task implement <task-id> --run <id> --spec <file>` | Validate spec/artifact/TDD, chuẩn bị worktree và assignment request; không start agent |
+| `bflow verify <task-id> --run <id> --plan <file>` | Independent gates; `--change-set`, `--repair`, `--integration`; thiếu runner là blocked |
+| `bflow git prepare <run-id> [--task <id>] [--yes] [--resume]` | Preview rồi dedicated integration branch + workflow-verification request; không merge main/push/PR |
+| `bflow mcp status [--service <id>]` | Đọc MCP config/pins; live health cần `HighLevelServices.mcpGateway` được inject, binary mặc định chưa nối port này |
+| `bflow tool status [--tool <id>]` | Probe catalog tool versions/digests; không cài tool. `tools status` là alias ở parser kế thừa, nên ưu tiên cú pháp singular này |
+| `bflow skills sync [--provider <kind>] [--dry-run] [--allow-machine-scope]` | Default pinned synchronizer; CLI chưa nhận `skills list` hoặc `sync --list` |
+| `bflow agent check <claude|codex|agy> [--role <role>] [--mode restricted|workspace_auto]` | Standalone preflight; có thể chạy model probe/tiêu hao usage; không chọn role/profile/model từ repo config |
 
-Xem [docs/command-reference.md](docs/command-reference.md), tệp được sinh
-[docs/command-reference.json](docs/command-reference.json) (được kiểm tra bởi một unit test) và
-[COMMAND_REFERENCE.md](./COMMAND_REFERENCE.md) để biết hợp đồng đầy đủ và các skill binding,
-bao gồm các hạn chế hiện tại (Linux `flock` cho engine P18; MCP Gateway và verification
-gate runner vẫn cần các port thật được inject hoặc composed). Skills synchronizer mặc định của CLI
-dùng skill manager và store thật với builtin catalog được pin, còn các
-service port được cung cấp tường minh vẫn có hiệu lực. `bflow mcp status` báo `not_ready` khi không có Gateway health
-observation; chỉ một file MCP đã cấu hình không thiết lập health của backend.
+`mcp status` có thể báo `configured: false`/`not_ready` dù machine Gateway đã được setup:
+đó là thiếu live port ở command composition, không phải bằng chứng daemon chưa chạy.
+Dùng `doctor` và machine service status cho platform diagnostics; `docs status` probe Context7.
+Không lặp setup chỉ để làm command này xanh. Verification gate runner cũng cần port tin cậy;
+thiếu runner không được pass. Git locking cần `flock` phù hợp cho Linux/macOS.
 
-### Tóm tắt lệnh cấp cao
-
-| Lệnh | Mục đích | Các SDLC engine được tái dùng | Cờ chính |
-| --- | --- | --- | --- |
-| `bflow repo inspect` | Kiểm tra cấu trúc workspace, quy ước và trạng thái Git để agent tiếp nhận. | `ProjectContextService`, Git inspection | `--dir <path>`, `--include-files`, `--max-files <n>` |
-| `bflow task plan` | Phân rã một specification thành task DAG đã xác thực với acceptance criteria. | `SpecificationEngine`, Planner Agent | `--spec <path>`, `-w, --workflow <path>`, `--run-id <id>` |
-| `bflow task implement` | Triển khai một task trong Git worktree cô lập theo quy tắc conditional TDD. | `DeveloperAgent`, `TestStrategyResolver`, `GitOrchestrator` | `<task-id>`, `--run-id <id>`, `--require-red-evidence` |
-| `bflow verify` | Thực thi verification cấp task hoặc cấp workflow theo acceptance criteria. | `VerificationEngine`, `QualityGates` | `[task-id]`, `--scope <task\|workflow>`, `--spec <path>` |
-| `bflow git prepare` | Chuẩn bị tích hợp nhánh theo thứ tự phụ thuộc và xác thực worktree. | `GitOrchestrator` | `--run-id <id>`, `--target-branch <branch>`, `--auto-approve` |
-| `bflow mcp status` | Probe các MCP tool đã đăng ký và khả năng kết nối bridge. | `McpGateway` | `--service <id>` |
-| `bflow tool status` | Kiểm tra tính khả dụng, phiên bản và health của các tool được pin (ví dụ RTK). | `ToolInstaller`, `ToolCatalog` | `--tool <id>` (alias: `bflow tools status`) |
-| `bflow skills sync` | Đồng bộ các skill đã duyệt từ catalog sang storage của agent provider. | `SkillManager`, `SkillStore` | `--list`, `--provider <claude\|codex\|agy>` |
-| `bflow agent check` | Xác thực provider readiness và activated health theo contract. | `AgentProviderRegistry` | `--provider <claude\|codex\|agy>`, `--stage <preflight\|activated>` |
+Standalone `agent check` khác preflight của host trong `up`/`doctor`: nó không mở Herdr pane,
+nhưng adapter mặc định có thể tạo model request và temporary probe state. `up`/`doctor`
+mặc định chọn native auth/catalog và không inference ping; `doctor --deep` là opt-in.
+`skills sync --dry-run` không áp dụng bundle mới nhưng default synchronizer có thể tạo/chmod
+thư mục kho riêng khi khởi tạo. Các diagnostic này không phải full SDLC acceptance.
 
 ### Repository tool policy
 
 `bflow up` resolves tool access from the repository's optional `environment.toolPolicy`,
 the machine's approved setup inventory and a fresh Gateway observation. A tool pin or
-installed executable alone never creates repository access. With no policy, provider roles
-still receive their approved workflow skills, while tool-backed skills are skipped with a
-reason. Explicit `role.skills: []` removes only that role's defaults; repository
+installed executable alone never creates repository access. When no explicit policy is supplied, CLI composition derives optional Context7/RTK/GitNexus/
+MemPalace/Chrome requirements unless their toggles are disabled. Provider roles retain
+approved workflow skills; tool-backed skills are included only after independent grants
+resolve. Missing optional grants are skipped/degraded with a reason. Explicit `role.skills: []` removes only that role's defaults; repository
 `environment.skills.requiredSkills` remain required.
 
 The policy distinguishes the catalog `toolId`, an MCP `serviceId`, and exact upstream

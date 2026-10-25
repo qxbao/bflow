@@ -4,19 +4,11 @@ Thiết kế chuẩn tắc P24; owner triển khai là P25. Public export:
 `packages/contracts/src/{platform,provider}.ts`. [Runtime v3](runtime-architecture-v3.md)
 ghi lại kết quả audit source, ủy quyền D24-01, migration và quyền sở hữu theo phase.
 
-## Implementation status (cập nhật 2026-10-17)
+## Implementation status (2026-10-25)
 
-P25 đã có source tại `packages/agent-providers` (adapter Claude Code, Codex, Agy; `checkHealth`
-preflight/activated; compile permission profile; `prepareLaunch`; ký/kiểm chứng
-`AgentLaunchAttestation` Ed25519; `buildHerdrAgentStartCommand`; registry mặc định). Agy
-báo `unsupported` cho `unattended_isolated` và chưa certify native attestation, đúng yêu cầu
-bên dưới. CLI P29 gọi registry qua `bflow agent check`, `bflow setup` và các bước validate của
-`bflow up`/`doctor`. **P30 (source + local test):** Runtime host gọi preflight/`prepareLaunch`, ký attestation và
-yêu cầu activated health; adapter render MCP server của host, Gateway HTTP (token qua tên env var)
-và đủ 4 native hook; `provider-launch.ts` chỉ còn là đường legacy. Mức bằng chứng: source + local
-test; không có hồ sơ live provider login/launch/permission enforcement cho P25/P30.
-Chi tiết ở [package README](../packages/agent-providers/README.md) và
-[hồ sơ P25–P29](acceptance/2026-10-17-p25-p29.md). Nội dung dưới đây là thiết kế đóng băng.
+P25/P30 đã có provider adapters và Runtime prepare/activate, native launch hooks, MCP material, Ed25519 attestation và activated health. Claude/Codex có đường Conversation; Agy specialist có native binding/hook/shim ở source/local tests, nhưng Conversation thiếu trusted human-input provenance và unattended vẫn unsupported. `up`/doctor mặc định không inference ping; `doctor --deep` và standalone `agent check` có thể tiêu hao usage. CLI workspace trust có cập nhật per-project trong config Claude khi được bật, xem [config reference](guide/configuration-reference.md#policy-và-ngân-sách).
+
+[Provider README](../packages/agent-providers/README.md), [implementation status](implementation-status.md) và [compatibility matrix](compatibility-matrix.md) ghi hỗ trợ hiện tại. [Provider probe report](provider-compatibility.md) là bằng chứng lịch sử có baseline riêng, không phải full workflow acceptance. Nội dung contract/invariants dưới đây giữ quyết định P24; các quan sát baseline trong phần ánh xạ provider không được hiểu là trạng thái HEAD.
 
 ## Danh mục contract
 

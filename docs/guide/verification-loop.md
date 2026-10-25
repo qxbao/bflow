@@ -37,11 +37,19 @@ Các chỉ số này thuộc về các cơ chế kiểm soát hoàn toàn riêng
 | **Chu trình xác minh (Verification Cycle)** | `propose_workflow.maxIterations` (P19) | Giới hạn số vòng lặp xác minh của P17 (mặc định: 3, cho phép từ 1–10) |
 | **Thời gian chờ vòng đời (Lifecycle Timeout)** | `environment.*TimeoutMs` / `--timeout` | Hạn mức thời gian chờ tối đa cho các thao tác khởi động hoặc dừng môi trường |
 
-Mặc dù tầng P12 có thể kiểm tra giá trị `environment.verification.maxIterations` lên tới 100, giá trị này chưa được tự động chuyển trực tiếp sang P19; host bắt buộc phải cấu hình tường minh giới hạn từ 1–10. P19 sẽ tăng ngân sách sửa chữa thêm `maxIterations - 1` và áp dụng siêu dữ liệu cổng kiểm tra `boundedVerificationRetry` cho các bài kiểm tra độc lập bắt buộc trước khi hoàn tất. Các ngân sách thử lại và sửa lỗi đều có giới hạn hữu hạn; tuyệt đối không nhân gộp các ngân sách để tạo ra số lần thử vô hạn.
+CLI đã chuyển `environment.verification.maxIterations` sang persistent host. Config schema nhận tới 100 nhưng host/VerificationEngine chỉ nhận 1–10, mặc định 3; giá trị ngoài giao miền này bị từ chối, không tự clamp hoặc bỏ qua. P19 sẽ tăng ngân sách sửa chữa thêm `maxIterations - 1` và áp dụng siêu dữ liệu cổng kiểm tra `boundedVerificationRetry` cho các bài kiểm tra độc lập bắt buộc trước khi hoàn tất. Các ngân sách thử lại và sửa lỗi đều có giới hạn hữu hạn; tuyệt đối không nhân gộp các ngân sách để tạo ra số lần thử vô hạn.
 
 ---
 
-## 3. Xử lý khi cạn kiệt số lần thử và khôi phục trạng thái
+## 3. Rework có giải trình theo finding
+
+Sau cycle thất bại cần sửa, Runtime giao `reworkContext` với exact finding ID, revision/generation và ngân sách còn lại. Developer nộp `findingResolutions` theo từng finding: nguyên nhân, source location, repair summary, phép kiểm tra phân biệt trước/sau và evidence. `addressed` cần commit sạch mới và ràng buộc revision đúng; `disputed`/`blocked` phải có lý do và bằng chứng tương ứng.
+
+Hồ sơ được host kiểm tra cấu trúc/provenance và lưu vào ArtifactStore; report này chưa tự chứng minh causal claim đúng. Reviewer/QA nhận dossier và dùng `findingVerdicts` để xác nhận hoặc bác bỏ. Source hiện từ chối ID verdict lạ/trùng nhưng chưa bắt buộc đủ verdict cho mọi finding khi gate pass; cần giữ rõ khoảng trống enforcement này, không gọi instruction trong prompt là hard gate đã đóng. [Rework reference](../rework-causality.md).
+
+Test plan mới dùng chuỗi criterion → risk/viewpoint → exact test/check → observation → evidence. NFR có thêm điều kiện/oracle đã được duyệt; skill reference không thay runner khả dụng hoặc TddDecision. [NFR/test design](../nfr-and-test-design.md).
+
+## 4. Xử lý khi cạn kiệt số lần thử và khôi phục trạng thái
 
 Khi đã cạn kiệt số vòng lặp tối đa, Runtime sẽ tự động leo thang thông qua Conversation Agent để yêu cầu con người can thiệp. Trong mọi tình huống, hệ thống:
 - Tuyệt đối không tự ý cắt giảm tiêu chí nghiệm thu, thay đổi đặc tả hay sửa đổi chiến lược kiểm thử chỉ nhằm mục đích làm "xanh" kết quả kiểm thử.

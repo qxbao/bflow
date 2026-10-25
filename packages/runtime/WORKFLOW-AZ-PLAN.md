@@ -1,5 +1,7 @@
 # Kế hoạch: luồng workflow chạy trơn tru từ A–Z
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Baseline: `5c6716d` (nhánh `dele`). Phạm vi: `packages/runtime/**`, `agents/coordinator/**` (chỉ khi cần cập nhật hướng dẫn tool). Không đổi `packages/contracts/**`, root config, lockfile.
 
 ## Vấn đề

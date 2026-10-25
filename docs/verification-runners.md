@@ -31,11 +31,13 @@ supplied replacement command or a successful verdict.
 
 ## Runner matrix
 
-All rows below have source and local fixture/parser coverage. No row has successful
-real measurement evidence on the implementation host: its real empty Bubblewrap probe
-fails with `loopback: Failed RTM_NEWADDR: Operation not permitted`. Tests explicitly
-skip measurements after that probe; this is not a passing sandbox campaign. Parser
-fixtures for unavailable tools reproduce documented output shapes, not recorded runs.
+All rows below have source and local fixture/parser coverage. The original polyglot
+implementation host could not run its empty Bubblewrap probe (`loopback: Failed RTM_NEWADDR:
+Operation not permitted`); measurements skipped after that probe were not passes.
+Later [macOS measurements](acceptance/2026-10-24-macos-portability.md) cover JS/TS
+Seatbelt only, not all native adapters. Other historic Linux measurements are scoped
+in the [release report](release-readiness-v3.md). Parser fixtures for unavailable tools
+reproduce documented output shapes, not recorded runs.
 The Node/Vitest parser-selection regression includes captures from installed tools,
 which are parser evidence only. Installed Node, Python, Maven and Java version probes
 are separate from test execution evidence.

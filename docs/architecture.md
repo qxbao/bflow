@@ -1,5 +1,7 @@
 # Kiến trúc Hệ thống (Architecture)
 
+> **Cách đọc:** quyết định/spec và audit gốc bên dưới giữ phạm vi lịch sử. [Implementation status](implementation-status.md) mô tả source tích hợp hiện tại, gồm các thay đổi sau baseline; không suy một plan hoặc acceptance criterion là kết quả đã nghiệm thu.
+
 ## 1. Phạm vi kiến trúc
 
 > [!NOTE]

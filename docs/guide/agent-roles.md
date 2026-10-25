@@ -28,7 +28,10 @@ Cấu hình mẫu CLI khởi tạo bảy vai trò thường trực (permanent ro
 ```
 
 - **Công cụ dòng lệnh (`cli`)**: Phải là một loại agent được hỗ trợ sẵn trên biến môi trường `PATH`. Tầng P12 không chấp nhận lệnh đi kèm tham số hoặc đường dẫn tệp thực thi tuyệt đối cho vai trò. Danh sách chuẩn mực được quy định tại [P13 types](../../packages/pane-manager/src/types.ts). Lưu ý rằng agent đã cài đặt nhưng chưa hoàn tất đăng nhập có thể rơi vào trạng thái bị chặn (`blocked`); trạng thái này không phải bằng chứng về sự không tương thích phiên bản.
-- **Vai trò Developer**: Tuyệt đối **không thêm vai trò Developer vào danh sách thường trực `environment.roles`**; nếu cố tình thêm, bộ điều hợp sẽ từ chối khởi động. Runtime và Pane Manager (P13) sẽ tự động cấp phát Developer một cách linh hoạt theo từng tác vụ, đi kèm Git worktree độc lập và giới hạn hạn mức dung lượng (capacity).
+- **Vai trò Developer**: `environment.roles` mặc định có một entry `developer` với `required: false` để làm **launch template** (provider/model/profile/skills). Entry này không tạo permanent pane. Runtime cấp Developer động theo task với Git worktree riêng, capacity và lease/fence; không cấu hình Developer thành permanent role của Pane Manager.
+- **Provider/profile**: `model`, `effort`, `profile-name`, `permissionMode` có thể chọn theo role; provider defaults là fallback cấu hình. Agy dùng được cho specialist theo readiness hiện tại, nhưng Conversation/unattended vẫn unsupported.
+- **Role khác trong contract**: `tester`/`security` có trong policy/skills/gate contracts nhưng không thêm permanent panes mặc định; không suy mọi enum role là topology key được lifecycle chấp nhận.
+- **Khảo sát source**: Coordinator/specifier/architect/planner đọc `assignment_context` có source citations, HEAD/fingerprint và mức observed/inferred/unknown. Đây là diagnostic context; không tự chấp nhận business requirement hoặc thay approval. [Implementation status](../implementation-status.md).
 
 ---
 
