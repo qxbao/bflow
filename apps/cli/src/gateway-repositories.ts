@@ -602,13 +602,45 @@ async function indexAndRegisterRepository(input: {
     };
   }
 
+  const repoOperation = ScopedOperationSchema.parse({
+    schemaVersion: 3,
+    scope: {
+      kind: "repository",
+      machineId: platform.machineId,
+      repositoryId: repository.id,
+      workspaceRoot: canonicalRoot
+    },
+    idempotencyKey: `init-gitnexus-${repository.id}`
+  });
+
+  const locatorPath = join(platform.paths.state, GATEWAY_CONTROL_LOCATOR_FILE);
+  const gitnexusStateRoot = join(platform.paths.state, "gitnexus");
   const tools = await leaf("tool-installer");
-  const indexed = await tools.ensureGitNexusIndex({
+  let indexed = await tools.ensureGitNexusIndex({
     repositoryRoot: canonicalRoot,
-    stateRoot: join(platform.paths.state, "gitnexus"),
+    stateRoot: gitnexusStateRoot,
     executable: binary.executable,
     timeoutMs: 300_000
   });
+  if (indexed.status === "busy" && existsSync(locatorPath)) {
+    const removedRes = await removeGatewayRepositoryService(locatorPath, {
+      serviceId,
+      operation: repoOperation
+    });
+    if (removedRes.ok) {
+      const storageLockPath = join(gitnexusStateRoot, `gitnexus-storage-${sha(canonicalRoot)}.lock`);
+      const deadline = Date.now() + 3000;
+      while (existsSync(storageLockPath) && Date.now() < deadline) {
+        await new Promise<void>(r => setTimeout(r, 50));
+      }
+      indexed = await tools.ensureGitNexusIndex({
+        repositoryRoot: canonicalRoot,
+        stateRoot: gitnexusStateRoot,
+        executable: binary.executable,
+        timeoutMs: 300_000
+      });
+    }
+  }
   if (!["fresh", "indexed"].includes(indexed.status)) {
     diagnostics.push(`GitNexus indexing ${indexed.status}: ${indexed.diagnostic}`);
     return {
@@ -621,22 +653,11 @@ async function indexAndRegisterRepository(input: {
     };
   }
 
-  const repoOperation = ScopedOperationSchema.parse({
-    schemaVersion: 3,
-    scope: {
-      kind: "repository",
-      machineId: platform.machineId,
-      repositoryId: repository.id,
-      workspaceRoot: canonicalRoot
-    },
-    idempotencyKey: `init-gitnexus-${repository.id}`
-  });
-
   const rawDefinition: MCPServiceDefinition = await tools.createGitNexusService({
     executable: binary.executable,
     version: binary.version,
     repositoryRoot: canonicalRoot,
-    stateRoot: join(platform.paths.state, "gitnexus"),
+    stateRoot: gitnexusStateRoot,
     configRoot: join(platform.paths.config, "tool-launches"),
     operation: repoOperation
   });
@@ -660,7 +681,6 @@ async function indexAndRegisterRepository(input: {
   await validateRepositoryServiceLaunch(entry, platform.paths, platform.machineId, binary);
   await upsertRegisteredRepositoryService(platform.paths.state, platform.machineId, entry);
 
-  const locatorPath = join(platform.paths.state, GATEWAY_CONTROL_LOCATOR_FILE);
   if (!existsSync(locatorPath)) {
     diagnostics.push("Repository GitNexus index and registration were saved, but the machine Gateway is not running. Run 'bflow setup' to start the Gateway.");
     return {

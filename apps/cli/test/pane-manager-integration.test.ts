@@ -205,13 +205,23 @@ describe("P12 composition with real P13 RolePaneManager", () => {
 
   linuxIt("reports a stopped session without treating cancelled cleanup records as unhealthy panes", async () => {
     const environment = lifecycle();
-    await environment.up();
+    const active = await environment.up();
     await environment.down(true);
     const adapter = new PaneManagerLifecycleAdapter(input, runner);
     const report = await adapter.doctorSession({ workspaceRoot: dir });
     expect(report.healthy).toBe(true);
     expect(report.checks).toContainEqual(expect.objectContaining({ checkId: "p13-stopped", status: "passed", message: expect.stringContaining("stopped") }));
     expect(report.checks.some(check => check.checkId.startsWith("pane-"))).toBe(false);
+
+    const paneManifestPath = join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`);
+    const degraded = { ...active, status: "degraded" as const, panes: active.panes.map(p => ({ ...p, transportState: "disconnected" as const })) };
+    await writeFile(paneManifestPath, JSON.stringify(degraded));
+    await writeFile(join(dir, ".bflow/state/session.json"), JSON.stringify(degraded));
+    await environment.down(false, 3000, true);
+    const forcedReport = await adapter.doctorSession({ workspaceRoot: dir });
+    expect(forcedReport.healthy).toBe(true);
+    expect(forcedReport.checks).toContainEqual(expect.objectContaining({ checkId: "p13-stopped", status: "passed", message: expect.stringContaining("stopped") }));
+    expect(forcedReport.checks.some(check => check.checkId.startsWith("pane-"))).toBe(false);
   });
 
   linuxIt.each(["cancelled", "blocked", "disconnected"] as const)("retains %s pane failures in an active session", async transportState => {

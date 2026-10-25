@@ -150,6 +150,7 @@ if (process.argv[2] === 'analyze') {
   const path = require('node:path');
   fs.mkdirSync(path.join(process.cwd(), '.gitnexus'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), '.gitnexus', 'meta.json'), JSON.stringify({ repository: process.cwd() }));
+  fs.rmSync(path.join(process.cwd(), 'stale-index'), { force: true });
   console.log(JSON.stringify({ status: 'up-to-date', repository: process.cwd() }));
   process.exit(0);
 }
@@ -504,6 +505,10 @@ it("observes stale repository indexes in bflow init --check without rerunning an
   // Machine setup check remains valid even when a repository index is stale
   expect((await components[0]!.observe({ ...ctx, mode: "check" })).valid).toBe(true);
   expect(await readFile(reposFile, "utf8")).toBe(before);
+
+  const refreshRes = await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } });
+  expect(refreshRes.exitCode).toBe(0);
+  expect(JSON.parse(refreshRes.stdout).data.gitnexus.status).toBe("ready");
 });
 
 it("uses canonical repository identity for symlinked init paths", async () => {
