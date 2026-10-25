@@ -95,7 +95,8 @@ export const EnvironmentConfigEnvironmentSchema = z
     verification: z
       .object({
         maxIterations: z.number().int().min(1).max(100),
-        onExhausted: z.literal("require_human")
+        onExhausted: z.literal("require_human"),
+        regressionScope: z.enum(["affected", "full", "mapped_only"]).default("affected")
       })
       .strict(),
     concurrency: z
@@ -193,7 +194,7 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
       },
       sdd: { minimumLevel: "lightweight", approvalRequired: true },
       tdd: { policy: "conditional" },
-      verification: { maxIterations: 3, onExhausted: "require_human" },
+      verification: { maxIterations: 3, onExhausted: "require_human", regressionScope: "affected" },
       concurrency: { maxConcurrency: 2 },
       startupTimeoutMs: 300_000,
       shutdownTimeoutMs: 30_000,
@@ -350,7 +351,9 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
     const verification = record(env["verification"]);
     const concurrency = record(env["concurrency"]);
     if ((sdd["minimumLevel"] !== "lightweight" && sdd["minimumLevel"] !== "full") || typeof sdd["approvalRequired"] !== "boolean" || tdd["policy"] !== "conditional" ||
-        !integer(verification["maxIterations"], 100) || verification["onExhausted"] !== "require_human" || !integer(concurrency["maxConcurrency"], 64) ||
+        !integer(verification["maxIterations"], 100) || verification["onExhausted"] !== "require_human" ||
+        (verification["regressionScope"] !== undefined && !["affected", "full", "mapped_only"].includes(String(verification["regressionScope"]))) ||
+        !integer(concurrency["maxConcurrency"], 64) ||
         !integer(env["startupTimeoutMs"], 600_000) || !integer(env["shutdownTimeoutMs"], 600_000)) throw new Error("Invalid SDLC policies, concurrency or timeouts");
     WorkflowDefinitionSchema.parse(base.value.defaultWorkflow);
     const parsedEnv = EnvironmentConfigEnvironmentSchema.parse({

@@ -30,6 +30,32 @@ export function automaticChecks(runners: readonly AutomaticRunner[] = AUTOMATIC_
   }));
 }
 
+/** Static gate definitions for affected-scope regression checks on detected JS profiles (no adapter). */
+export function regressionChecks(profiles: readonly RunnerProfile[]): QualityGateDefinition[] {
+  return profiles
+    .filter(profile => !profile.adapter)
+    .map(profile => QualityGateDefinitionSchema.parse({
+      id: `host-regression-${profile.id}`,
+      name: `Independent regression ${profile.command}`,
+      evaluator: "host-regression-command",
+      required: true,
+      timeout: {
+        executionTimeoutMs: Math.min(540_000, profile.timeoutMs * 3) + 60_000,
+        onTimeout: "block"
+      },
+      metadata: { selection: "regression" },
+      configuration: {
+        kind: "deterministic",
+        method: profile.method,
+        command: profile.command,
+        criterionIds: [],
+        testNames: [],
+        role: "quality_gate",
+        levels: ["regression"]
+      }
+    }));
+}
+
 /**
  * Owner commands (`.bflow/verification.json`, optional override) or Runtime-detected runner profiles. Owner configuration
  * disables automatic detection entirely, so existing owner-configured hosts keep their exact behaviour.
@@ -38,7 +64,7 @@ export class TestRunnerSource {
   private detection: RunnerDetection | undefined;
   private revision: string | undefined;
   private readonly snapshots = new Map<string, RunnerProfile[]>();
-  constructor(readonly owner: readonly BehavioralCommand[], private readonly repositoryRoot?: string,
+  constructor(readonly owner: readonly BehavioralCommand[], readonly repositoryRoot?: string,
     private readonly detect: (repositoryRoot: string) => Promise<RunnerDetection> = root => detectTestRunners(root)) {}
   /** True when no owner command exists and a repository is available for detection. */
   get automatic(): boolean { return this.owner.length === 0 && this.repositoryRoot !== undefined; }

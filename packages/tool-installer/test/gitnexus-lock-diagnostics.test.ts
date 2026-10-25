@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile, realpath } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { ensureGitNexusIndex } from "../src/integrations.js";
+import { ensureGitNexusIndex, gitNexusStorageLockPath } from "../src/integrations.js";
 import type { ToolHost } from "../src/installer.js";
 
 const roots: string[] = [];
@@ -49,4 +49,11 @@ it.each(["", "legacy lock", '{"pid":"not-a-process"}'])("reports an unknown writ
   expect(result.diagnostic).toContain("approved setup");
   expect(await readFile(f.lockPath, "utf8")).toBe(bytes);
   expect((await readdir(f.stateRoot)).filter(name => name.endsWith(".lock"))).toEqual(["gitnexus-writer.lock"]);
+});
+
+it("derives the canonical storage lock path from stateRoot and canonicalRoot", () => {
+  const stateRoot = "/tmp/bflow-state/gitnexus";
+  const canonicalRoot = "/workspace/repo-one";
+  const expected = join(stateRoot, `gitnexus-storage-${createHash("sha256").update(canonicalRoot).digest("hex")}.lock`);
+  expect(gitNexusStorageLockPath(stateRoot, canonicalRoot)).toBe(expected);
 });

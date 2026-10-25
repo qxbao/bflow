@@ -148,6 +148,7 @@ describe("configuration YAML format", () => {
     expect(rendered).toContain("enum: `restricted` | `workspace_auto` | `unattended_isolated`");
     expect(rendered).toContain("enum: `provider_policy` | `os_sandbox` | `container`");
     expect(rendered).toContain("enum: `lightweight` | `full`");
+    expect(rendered).toContain("regressionScope: affected | full | mapped_only");
     expect(rendered).toContain("bflow init --update");
     expect(parseConfigYaml(rendered)).toEqual(config);
   });

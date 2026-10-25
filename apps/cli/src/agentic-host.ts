@@ -1,11 +1,13 @@
 import type { AgentRole, OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
+import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile } from "@bflow/machine-setup";
 import { resolvePrivateRuntimeStateDirectory, type HostPrepareResponse, type HostRoleLaunch } from "@bflow/runtime";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 import { buildHostPlatformOptions, loadHostPlatformContext } from "./platform-options.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
+import { resolveApprovedGitNexusBinary } from "./gateway-repositories.js";
 
 export type { HostPrepareResponse, HostRoleLaunch };
 
@@ -61,6 +63,37 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     }
   };
 
+  const resolveImpactIndex = async (): Promise<{ executable: string; home: string; storageLockPath: string } | undefined> => {
+    const host = defaultHostEnvironment();
+    const mergedHost = { ...host, env: { ...host.env, ...input.env } };
+    let setupPlatform = detectPlatform(mergedHost);
+    if (mergedHost.env.BFLOW_HOME) {
+      setupPlatform = isolatedPlatformProfile(setupPlatform, resolve(mergedHost.env.BFLOW_HOME));
+    }
+    const binary = await resolveApprovedGitNexusBinary(setupPlatform);
+    if (!binary) return undefined;
+    const gitnexusState = join(setupPlatform.paths.state, "gitnexus");
+    const homeCandidate = join(gitnexusState, "gitnexus-home");
+    try {
+      const [homeStat, home, canonicalRoot] = await Promise.all([
+        lstat(homeCandidate),
+        realpath(homeCandidate),
+        realpath(input.repository.root)
+      ]);
+      if (!homeStat.isDirectory()) return undefined;
+      const { gitNexusStorageLockPath } = await import(
+        new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href
+      );
+      return {
+        executable: binary.executable,
+        home,
+        storageLockPath: gitNexusStorageLockPath(gitnexusState, canonicalRoot)
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
   const openForStartup = (): Promise<LifecycleHost> => {
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
@@ -70,6 +103,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         ? (await readGatewayReadiness(context.stateDirectory, "context7")).status === "ready" : undefined;
       const platform = await buildHostPlatformOptions(input, { context, context7Ready,
         warn: message => process.stderr.write(`Warning: ${message}\n`) });
+      const impactIndex = await resolveImpactIndex();
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -78,6 +112,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
         behavioralCommands,
         platform,
+        ...(impactIndex ? { impactIndex } : {}),
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,

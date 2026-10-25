@@ -791,6 +791,18 @@ script, runner configuration, imported Gradle/MSBuild definitions and helper blo
 revision; selected test files freeze after independent Red. Structured leaf results,
 assertion/error discrimination and independent Quality Gates remain mandatory.
 
+`verification.regressionScope` controls host regression gates (`affected` default for new configs,
+`full`, `mapped_only`; a persisted `host.json` missing `regressionScope` defaults to `mapped_only`).
+When `affected` or `full`, `HostVerification` adds one required gate `host-regression-<profile.id>` per
+detected automatic JS/TS runner (`vitest_json` or `node_tap` without a polyglot `adapter`) using a
+3-tier widening order (`graph` via GitNexus `IMPORTS` closure when the index is proven fresh at `base`
+before and after the query → `package` for non-code/non-doc files, nested `package.json`, or unavailable/stale
+index → `full` for root configs/lockfiles/workspace manifests; docs-only diffs pass with `scope: "none"`).
+Test failures at `head` are re-measured per failing file at `base` to classify `pre_existing` warnings vs
+`regression_failure` errors. Limits: regression gates apply to automatic JS/TS runners only (polyglot adapters
+are recorded as `unsupported_runner`), and the verification gate never invokes `gitnexus analyze` or refreshes
+the GitNexus index.
+
 Linux Bubblewrap is discovered on PATH and actually probed. macOS uses deny-default
 Seatbelt and probes both a system binary and the actual Node runtime. When configured
 or detected checks require verification, `prepare` refuses an unavailable sandbox before

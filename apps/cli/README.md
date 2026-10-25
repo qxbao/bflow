@@ -393,6 +393,14 @@ Executable và argv do Runtime quyết định, kết quả từng test có cấ
 Phép đo yêu cầu sandbox: Linux Bubblewrap hoặc macOS Seatbelt cho các runner JS/owner
 được hỗ trợ. Mount/cache/report của adapter native và làm ấm dependency còn giới hạn Linux.
 Không có fallback chạy ngoài sandbox. Xem [ma trận và giới hạn verification](../../docs/verification-runners.md).
+`environment.verification.regressionScope` hỗ trợ ba giá trị: `affected` (mặc định khi `init`/đọc config thiếu trường),
+`full` (chạy toàn bộ test file runner nhận diện) và `mapped_only` (chỉ chạy test được map từ criterion;
+`host.json` cũ đã persist mà thiếu trường được giữ ở `mapped_only`). Ở chế độ `affected`, host chọn test theo
+ba tầng mở rộng an toàn (`graph` qua closure `IMPORTS` của GitNexus khi index fresh tại `base` → `package`
+khi file ngoài code/docs hoặc index không khả dụng → `full` khi chạm root config/lockfile; diff chỉ tài liệu
+là `none`). Khi khởi động host, CLI truyền `impactIndex` (`executable`, `home`, `storageLockPath`) nếu binary
+GitNexus đã duyệt và `gitnexus-home` tồn tại. Giới hạn: regression gate chỉ tạo cho runner JS/TS tự động
+(`vitest_json`, `node_tap`), và verification không bao giờ gọi `gitnexus analyze` để làm mới index.
 
 Chat/Coordinator nạp đầy đủ các prompt gốc đã cài trước lượt đầu tiên.
 Claude dùng một prompt file cục bộ theo launch; các file launch của Codex dùng

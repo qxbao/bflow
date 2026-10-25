@@ -191,6 +191,10 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     "  #   - maxIterations : (integer: `1..100`, mặc định: `3`) Số vòng lặp kiểm chứng & sửa lỗi (rework) tối đa cho mỗi task.",
     "  #   - onExhausted   : (enum: `require_human`, mặc định: `require_human`)",
     "  #                     Khi vượt quá `maxIterations` mà chưa đạt tiêu chuẩn, leo thang để xin quyết định từ người dùng.",
+    "  #   - regressionScope: affected | full | mapped_only (mặc định: `affected`)",
+    "  #                      + `affected`    : Chạy kiểm thử liên quan đến các file thay đổi trong phạm vi task/run.",
+    "  #                      + `full`        : Chạy toàn bộ bộ kiểm thử (full regression suite) của repository.",
+    "  #                      + `mapped_only` : Chỉ chạy các lệnh kiểm thử được ánh xạ trực tiếp tới tiêu chí nghiệm thu.",
     "  verification:"
   ].join("\n");
 

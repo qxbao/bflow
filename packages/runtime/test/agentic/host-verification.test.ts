@@ -130,4 +130,74 @@ describe("trusted host observations",()=>{
     expect((await evaluate(f.git("rev-parse","HEAD"))).status).toBe("failed");
   });
 
+  it("includes host-regression-* checks only when scope is affected, not owner-configured, and profile has no adapter",async()=>{
+    const f=await fixture();
+    const jsProfile={
+      id:"node-tap-pnpm",
+      command:"detected:node-tap",
+      executable:process.execPath,
+      args:["--test","--test-reporter=tap"],
+      method:"unit_test" as const,
+      levels:["unit" as const,"regression" as const],
+      reporter:"node_tap" as const,
+      timeoutMs:30_000,
+      checkoutDependencyRoots:[],
+      dependencySource:f.repository,
+      source:"detected" as const
+    };
+    const adapterProfile={
+      ...jsProfile,
+      id:"pytest-adapter",
+      command:"detected:pytest",
+      adapter:{format:"node_tap" as const,projectDirectory:".",bind:()=>({args:[]})}
+    };
+    const source=new TestRunnerSource([],f.repository,async()=>({status:"detected",profiles:[jsProfile,adapterProfile],notes:[]}));
+    await source.refresh();
+    const runtime={inspect:async()=>({outbound:f.outbound})} as unknown as AgenticWorkflowRuntime;
+
+    const affectedHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
+      scope:"affected",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(affectedHost.behavioralChecks().map(c=>c.id)).toContain("host-regression-node-tap-pnpm");
+    expect(affectedHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-pytest-adapter");
+    expect(affectedHost.behavioralGates().map(g=>g.id)).toContain("host-regression-node-tap-pnpm");
+    expect(affectedHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-pytest-adapter");
+
+    const fullHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
+      scope:"full",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(fullHost.behavioralChecks().map(c=>c.id)).toContain("host-regression-node-tap-pnpm");
+    expect(fullHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-pytest-adapter");
+    expect(fullHost.behavioralGates().map(g=>g.id)).toContain("host-regression-node-tap-pnpm");
+    expect(fullHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-pytest-adapter");
+
+    const mappedOnlyHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
+      scope:"mapped_only",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(mappedOnlyHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-node-tap-pnpm");
+    expect(mappedOnlyHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-node-tap-pnpm");
+
+    const ownerSource=new TestRunnerSource([{
+      id:"owner-unit",
+      command:"owner:unit",
+      executable:process.execPath,
+      args:["--test","--test-reporter=tap"],
+      method:"unit_test",
+      levels:["unit"],
+      testNames:["test-1"],
+      testPaths:["test/unit.test.js"],
+      reporter:"node_tap",
+      timeoutMs:30_000
+    }],f.repository,async()=>({status:"detected",profiles:[jsProfile],notes:[]}));
+    const ownerHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,ownerSource,undefined,{
+      scope:"affected",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(ownerHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-node-tap-pnpm");
+    expect(ownerHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-node-tap-pnpm");
+  });
+
 });

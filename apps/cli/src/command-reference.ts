@@ -320,7 +320,7 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
   {
     command: "verify",
     syntax: "bflow verify [task-id] [options]",
-    purpose: "Execute task-level or workflow-level verification against specification acceptance criteria.",
+    purpose: "Execute task-level or workflow-level verification against specification acceptance criteria (regressionScope: affected | full | mapped_only; widening tiers graph -> package -> full; JS runners only, never refreshes the GitNexus index).",
     reusedEngines: ["VerificationEngine", "QualityGates", "OperationLedger"],
     requiredFlags: [],
     optionalFlags: [

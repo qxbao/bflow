@@ -268,6 +268,10 @@ export interface GitNexusIndexObservation {
   diagnostic: string;
 }
 
+export function gitNexusStorageLockPath(stateRoot: string, canonicalRoot: string): string {
+  return join(stateRoot, `gitnexus-storage-${sha(canonicalRoot)}.lock`);
+}
+
 async function gitNexusBusyDiagnostic(lockPath: string, kind: "storage" | "writer"): Promise<string> {
   let owner = "owner unknown";
   try {
@@ -310,7 +314,7 @@ export async function ensureGitNexusIndex(input: {
   // a database reader lease. Stale indexes still require both locks before analysis can mutate it.
   if (current(initial)) return { status: "fresh", repositoryRoot: root, fingerprint,
     diagnostic: "GitNexus status --json confirms a current index" };
-  const storageLockPath = join(input.stateRoot, `gitnexus-storage-${sha(root)}.lock`);
+  const storageLockPath = gitNexusStorageLockPath(input.stateRoot, root);
   let storageLock;
   try { storageLock = await open(storageLockPath, "wx", 0o600); }
   catch { return { status: "busy", repositoryRoot: root, fingerprint, diagnostic: await gitNexusBusyDiagnostic(storageLockPath, "storage") }; }

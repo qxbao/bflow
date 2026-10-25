@@ -102,11 +102,43 @@ export * from "./resilience/index.js";
 export * from "./observability/index.js";
 export * from "./context/index.js";
 export * from "./session-recovery/index.js";
-export { parseBehavioralCommands } from "./agentic/behavioral-runner.js";
-export type { BehavioralCommand } from "./agentic/behavioral-runner.js";
+export {
+  parseBehavioralCommands,
+  bindRegressionProfile,
+  measureRegression
+} from "./agentic/behavioral-runner.js";
+export type {
+  BehavioralCommand,
+  RegressionCommand,
+  RegressionMeasurement
+} from "./agentic/behavioral-runner.js";
+export {
+  parseRegressionResult,
+  RegressionInfrastructureFailure
+} from "./agentic/regression-results.js";
+export type {
+  RegressionFailure,
+  RegressionObservation
+} from "./agentic/regression-results.js";
 
-export { ensureAgenticHost, openPersistedAgenticHost } from "./agentic/host-controller.js";
-export type { AgenticHostController, AgenticHostOptions, RoleLaunchDescriptor } from "./agentic/host-controller.js";
+export { effectiveRegressionScope, ensureAgenticHost, openPersistedAgenticHost } from "./agentic/host-controller.js";
+export type { AgenticHostController, AgenticHostOptions, RegressionScope, RoleLaunchDescriptor } from "./agentic/host-controller.js";
+
+export {
+  createGitNexusImpactIndex,
+  unconfiguredImpactIndex,
+  parseCypherFilePaths
+} from "./agentic/impact-index.js";
+export type {
+  IndexUnavailableCode,
+  ImportersResult,
+  ImpactIndex,
+  GitNexusImpactIndexOptions
+} from "./agentic/impact-index.js";
+
+export { selectRegressionTests } from "./agentic/regression-selection.js";
+export type { RegressionSelection } from "./agentic/regression-selection.js";
+export { regressionChecks } from "./agentic/task-commands.js";
 
 // P30: platform readiness composition (no concrete provider adapter classes are exported).
 export * from "./platform/index.js";

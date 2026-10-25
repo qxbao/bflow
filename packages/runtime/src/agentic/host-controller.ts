@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
@@ -15,6 +15,9 @@ import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
+import type { RegressionScope } from "./regression-changes.js";
+
+export type { RegressionScope };
 
 export interface AgenticHostOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
@@ -22,8 +25,14 @@ export interface AgenticHostOptions {
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
-    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human" };
+    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope };
     concurrency: { maxConcurrency: number } };
+  impactIndex?: { executable: string; home: string; storageLockPath: string };
+}
+
+export function effectiveRegressionScope(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): RegressionScope {
+  if (!policy) return "mapped_only";
+  return policy.verification.regressionScope ?? (persisted ? "mapped_only" : "affected");
 }
 export interface RoleLaunchDescriptor { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }
 export interface AgenticHostController {
@@ -56,7 +65,27 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
     const policy = record(value.policy), sdd = record(policy.sdd), tdd = record(policy.tdd), verification = record(policy.verification), concurrency = record(policy.concurrency);
     if (!["lightweight", "full"].includes(String(sdd.minimumLevel)) || typeof sdd.approvalRequired !== "boolean" || tdd.policy !== "conditional" ||
         verification.onExhausted !== "require_human" || !Number.isInteger(verification.maxIterations) || Number(verification.maxIterations) < 1 || Number(verification.maxIterations) > 10 ||
+        (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
+  }
+  if (value.impactIndex !== undefined) {
+    if (value.impactIndex === null || typeof value.impactIndex !== "object" || Array.isArray(value.impactIndex)) {
+      throw new Error("Invalid persisted host impactIndex");
+    }
+    const impact = value.impactIndex as Record<string, unknown>;
+    const keys = Object.keys(impact);
+    if (
+      keys.length !== 3 ||
+      !["executable", "home", "storageLockPath"].every(
+        key =>
+          typeof impact[key] === "string" &&
+          (impact[key] as string).length > 0 &&
+          isAbsolute(impact[key] as string) &&
+          !(impact[key] as string).includes("\0")
+      )
+    ) {
+      throw new Error("Invalid persisted host impactIndex");
+    }
   }
   return value as unknown as HostConfiguration;
 }
@@ -75,7 +104,8 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
     ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
-    ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}) });
+    ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
+    ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}) });
 }
 function failure<T>(error: unknown): OperationResult<T> {
   if (String(error).includes("[bflow:native-startup-pending]")) return { ok: false, error: { code: "conflict", retryable: true,
