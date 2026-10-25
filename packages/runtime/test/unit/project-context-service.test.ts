@@ -286,6 +286,21 @@ build/
       }
     });
 
+    it("reads repository files when the root itself is reached through a symlinked ancestor", async () => {
+      const aliasParent = await fs.mkdtemp(path.join(os.tmpdir(), "bflow-alias-"));
+      try {
+        const aliasRoot = path.join(aliasParent, "repo-alias");
+        await fs.symlink(tmpRepoRoot, aliasRoot, "dir");
+        await writeFile("src/normal.ts", "const x = 1;");
+
+        const analysis = await new ProjectContextService(aliasRoot).analyzeRepositoryStructure();
+
+        expect(analysis.files.map((f) => f.relativePath)).toContain("src/normal.ts");
+      } finally {
+        await fs.rm(aliasParent, { recursive: true, force: true });
+      }
+    });
+
     it("handles symlink cycle without infinite recursion", async () => {
       const loopDir = path.join(tmpRepoRoot, "loop");
       await fs.mkdir(loopDir, { recursive: true });
