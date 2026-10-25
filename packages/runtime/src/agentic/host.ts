@@ -24,7 +24,8 @@ import { probeBehavioralSandbox } from "./sandbox-readiness.js";
 import { assertWorkspaceFileCapability } from "./workspace-file-readiness.js";
 import { lastAssistantText, mustShowSection, noticeDisplayed, noticePriority, renderConversationNotice, type NoticeLike, type RenderedNotice } from "./conversation-notice-render.js";
 import { callHost } from "./host-protocol.js";
-import { readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
+import { effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
+import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
 import { digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
@@ -476,7 +477,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await toolUsage.notUsed({ ...previous, evidenceReferences: [evidence],
       consumption: { status: "not_used", reasonCode: "provider_delivery_unconfirmed" } });
   } };
-  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners, rtkUsageIntegration);
+  const impactIndex = configuration.impactIndex ? createGitNexusImpactIndex(configuration.impactIndex) : unconfiguredImpactIndex;
+  const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners, rtkUsageIntegration,
+    { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex });
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration);
   const activePolicyMeasurements = new Set<string>();
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation, async (turn, operationId) => {

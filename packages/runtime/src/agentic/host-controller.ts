@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
@@ -27,6 +27,7 @@ export interface AgenticHostOptions {
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
     tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope };
     concurrency: { maxConcurrency: number } };
+  impactIndex?: { executable: string; home: string; storageLockPath: string };
 }
 
 export function effectiveRegressionScope(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): RegressionScope {
@@ -67,6 +68,25 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
         (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
   }
+  if (value.impactIndex !== undefined) {
+    if (value.impactIndex === null || typeof value.impactIndex !== "object" || Array.isArray(value.impactIndex)) {
+      throw new Error("Invalid persisted host impactIndex");
+    }
+    const impact = value.impactIndex as Record<string, unknown>;
+    const keys = Object.keys(impact);
+    if (
+      keys.length !== 3 ||
+      !["executable", "home", "storageLockPath"].every(
+        key =>
+          typeof impact[key] === "string" &&
+          (impact[key] as string).length > 0 &&
+          isAbsolute(impact[key] as string) &&
+          !(impact[key] as string).includes("\0")
+      )
+    ) {
+      throw new Error("Invalid persisted host impactIndex");
+    }
+  }
   return value as unknown as HostConfiguration;
 }
 
@@ -84,7 +104,8 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
     ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
-    ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}) });
+    ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
+    ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}) });
 }
 function failure<T>(error: unknown): OperationResult<T> {
   if (String(error).includes("[bflow:native-startup-pending]")) return { ok: false, error: { code: "conflict", retryable: true,
