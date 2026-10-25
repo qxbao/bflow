@@ -272,7 +272,7 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       const parsedAfter = parseConfigYaml(contentAfter) as Record<string, any>;
       expect(parsedAfter.projectName).toBe("custom-project");
       expect(parsedAfter.environment.sdd).toEqual({ minimumLevel: "full", approvalRequired: false });
-      expect(parsedAfter.environment.verification).toEqual({ maxIterations: 5, onExhausted: "require_human" });
+      expect(parsedAfter.environment.verification).toEqual({ maxIterations: 5, onExhausted: "require_human", regressionScope: "affected" });
       // Preserved custom disabled tool while populating missing default tools
       expect(parsedAfter.environment.tools).toEqual({
         rtk: { enabled: false, required: false },

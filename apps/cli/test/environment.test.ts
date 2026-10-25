@@ -8,7 +8,7 @@ import {
   type RecoveryCheckpoint, type WorkflowRunSnapshot, type CreateCheckpointCommand
 } from "@bflow/contracts";
 import { EnvironmentConfigSchema, EnvironmentError, EnvironmentLifecycle, identifyRepository, main, namedSessionEnvironment, parseCliArgs, parseConfigYaml,
-  renderEnvironmentConfigYaml, runCli, environmentProcessRunner, formatCommandError, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
+  readEnvironmentConfig, renderEnvironmentConfigYaml, runCli, environmentProcessRunner, formatCommandError, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
 import { PaneManagerLifecycleAdapter, openPaneManagerEnvironment } from "../src/pane-manager-integration.js";
 import type { LifecycleHost } from "../src/agentic-host.js";
 
@@ -102,6 +102,29 @@ describe("P12 repository environment lifecycle", () => {
       expect(result.ok).toBe(false); expect(result.stderr).toContain("Not a Git");
       await expect(readFile(join(other, ".bflow/config.yml"))).rejects.toThrow();
     } finally { await rm(other, { recursive: true, force: true }); }
+  });
+  it("defaults verification.regressionScope to affected", async () => {
+    const raw = parseConfigYaml(await readFile(join(dir, ".bflow/config.yml"), "utf8")) as { environment: { verification: { regressionScope?: unknown } } };
+    expect(raw.environment.verification.regressionScope).toBe("affected");
+    const loaded = await readEnvironmentConfig(repository);
+    expect(loaded.environment.verification.regressionScope).toBe("affected");
+  });
+  it("reads legacy config without regressionScope as affected", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const raw = parseConfigYaml(await readFile(path, "utf8")) as Record<string, unknown>;
+    const env = raw["environment"] as Record<string, unknown>;
+    env["verification"] = { maxIterations: 3, onExhausted: "require_human" };
+    await writeFile(path, renderEnvironmentConfigYaml(raw));
+    const loaded = await readEnvironmentConfig(repository);
+    expect(loaded.environment.verification.regressionScope).toBe("affected");
+  });
+  it("rejects unknown regressionScope", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const raw = parseConfigYaml(await readFile(path, "utf8")) as Record<string, unknown>;
+    const env = raw["environment"] as Record<string, unknown>;
+    env["verification"] = { maxIterations: 3, onExhausted: "require_human", regressionScope: "some" };
+    await writeFile(path, renderEnvironmentConfigYaml(raw));
+    await expect(readEnvironmentConfig(repository)).rejects.toThrow("Invalid SDLC policies, concurrency or timeouts");
   });
   // EnvironmentLifecycle uses the production Linux flock repository guard.
   linuxIt("fails startup before launching Herdr when provider is not authenticated and redacts auth diagnostics", async () => {
