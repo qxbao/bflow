@@ -63,7 +63,9 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   /** Explicit repository policy snapshot; absent remains default-deny for tool actions. */
   toolPolicy: RepositoryToolPolicySchema.optional(),
   /** Host-resolved grants bound to exact roles, operations and session scope. */
-  toolGrants: z.array(ResolvedToolGrantSchema).optional()
+  toolGrants: z.array(ResolvedToolGrantSchema).optional(),
+  /** Trusted machine service resource keys; never supplied by role tool arguments. */
+  exclusiveMcpResources: z.record(IdentifierSchema, IdentifierSchema).optional()
 }).strict().superRefine((options, ctx) => {
   const roles = options.roles.map(role => role.role);
   if (new Set(roles).size !== roles.length) ctx.addIssue({ code: "custom", message: "platform roles must be unique" });

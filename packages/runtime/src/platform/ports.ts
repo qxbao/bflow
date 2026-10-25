@@ -1,3 +1,4 @@
+import type { GatewayToolOperationOptions } from "./browser-resource-transactions.js";
 import type {
   AgentEnvironment, AgentHealthCheck, AgentHealthResult, AgentLaunchAttestation, AgentLaunchProfile,
   AgentProviderAdapter, AgentProviderId, AgentRole, MCPClientRegistration, MCPServiceObservation,
@@ -162,9 +163,10 @@ export interface GatewayRegistrationPort {
     options?: OperationOptions): Promise<OperationResult<void>>;
   revokeSession(identity: PlatformSessionIdentity, options?: OperationOptions): Promise<OperationResult<void>>;
   invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: GatewayToolOperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+  finishToolTransaction?(identity: PlatformSessionIdentity, role: AgentRole, transactionId: string): Promise<OperationResult<void>>;
   reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: GatewayToolOperationOptions): Promise<OperationResult<MCPToolCallResult>>;
 }
 
 // -------------------------------------------------------------- provider (T4)
@@ -325,9 +327,10 @@ export interface PlatformReadinessService {
     options?: OperationOptions): Promise<OperationResult<{ readonly releasedLaunchIds: readonly string[] }>>;
   verifyGateway(options?: OperationOptions): Promise<OperationResult<GatewayRegistrationVerification>>;
   invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: GatewayToolOperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+  finishToolTransaction?(identity: PlatformSessionIdentity, role: AgentRole, transactionId: string): Promise<OperationResult<void>>;
   reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>>;
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: GatewayToolOperationOptions): Promise<OperationResult<MCPToolCallResult>>;
   /** Revokes this session's Gateway registrations; never stops shared/external services. */
   shutdown(options?: OperationOptions): Promise<OperationResult<void>>;
   status(): PlatformStatusSnapshot;

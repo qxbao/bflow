@@ -242,12 +242,12 @@ describe("buildHostPlatformOptions", () => {
     expect(grants[0]?.capabilityIds).toBeUndefined();
   });
 
-  it("degrades exclusive browser resources until the Runtime can acquire their lease", async () => {
+  it("grants ready exclusive browser resources and carries their trusted resource identity", async () => {
     const service = MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "chrome-session", revision: 1,
       scope: { kind: "machine", machineId: context.machineId },
       tool: { schemaVersion: 3, toolId: "chrome-devtools-mcp", kind: "stdio_mcp", version: "1",
         operations: ["list_pages", "new_page", "navigate_page"], required: true,
-        resource: { sharing: "exclusive", resourceKey: "chrome-session" } },
+        resource: { sharing: "exclusive", resourceKey: "chrome-profile" } },
       connection: { kind: "stdio_mcp", executable: "/machine/chrome-mcp", argv: [], environmentBindings: {},
         executableDigest: "b".repeat(64), ownership: "bflow", bridgeRequired: true },
       authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0 });
@@ -265,11 +265,11 @@ describe("buildHostPlatformOptions", () => {
       serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent,
       onToolStatus: status => statuses.push(status) });
     const tester = options.roles.find(role => role.role === "tester")!;
-    expect(tester.toolIds).toEqual([]);
-    expect(tester.skillSelections.map(selection => selection.skill.skillId)).not.toContain("browser-inspection");
-    expect(options.toolGrants?.find(grant => grant.role === "tester")).toBeUndefined();
-    expect(statuses.find(status => status.toolId === "browser")).toMatchObject({ granted: false, ready: false,
-      reason: expect.stringContaining("exclusive MCP resources are not yet supported") });
+    expect(tester.toolIds).toContain("chrome-devtools-mcp");
+    expect(tester.skillSelections.map(selection => selection.skill.skillId)).toContain("browser-inspection");
+    expect(options.toolGrants?.find(grant => grant.role === "tester")).toMatchObject({ toolId: "chrome-devtools-mcp", serviceId: "chrome-session" });
+    expect(options.exclusiveMcpResources).toEqual({ "chrome-session": "chrome-profile" });
+    expect(statuses.find(status => status.toolId === "browser")).toMatchObject({ granted: true, ready: true });
     const requiredInput = configure(environment => {
       delete environment.context7;
       environment.roles.push({ role: "tester", cli: "codex" });
@@ -281,7 +281,7 @@ describe("buildHostPlatformOptions", () => {
     });
     await expect(buildHostPlatformOptions(requiredInput, { context: { ...context, mcpServices: [service],
       serviceReadiness: new Map([[service.serviceId, { status: "ready", discoveredTools: service.tool.operations }]]) }, fileExists: absent }))
-      .rejects.toThrow(/Required tool 'browser'.*exclusive MCP resources are not yet supported/i);
+      .resolves.toMatchObject({ toolGrants: expect.arrayContaining([expect.objectContaining({ requiredness: "required", role: "tester" })]) });
   });
 
   it("grants exclusive gitnexus resources through the Runtime lease path when ready", async () => {

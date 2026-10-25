@@ -4,6 +4,10 @@ import type { AgenticHostPlatformOptions } from "../platform/host-options.js";
 import { digest } from "./journal.js";
 
 export interface ToolActionAssignmentIdentity { readonly runId: string; readonly taskId?: string; readonly attemptId?: string; }
+/** One browser transaction per authenticated assignment attempt, shared across all its browser actions. */
+export function browserTransactionId(sessionId: string, role: AgentRole, assignment: { readonly runId: string; readonly attemptId?: string }): string {
+  return `browser-${digest([sessionId, role, assignment.runId, assignment.attemptId ?? ""]).slice(0, 48)}`;
+}
 export function toolActionInvocationId(sessionId: string, role: AgentRole, actionId: string, toolId: string, operation: string,
   assignment?: ToolActionAssignmentIdentity): string {
   return `tool-${digest([sessionId, assignment?.runId ?? "", assignment?.taskId ?? "", assignment?.attemptId ?? "", role,
@@ -56,14 +60,12 @@ export function uninvokedToolDispositions(input: { policy: RepositoryToolPolicy;
       for (const trigger of requirement.triggers) {
         const invocationId = toolActionInvocationId(input.sessionId, input.role, trigger, requirement.toolId, operation, input.assignment);
         if (input.existing.some(item => item.invocationId === invocationId)) continue;
-        const exclusiveBrowserUnsupported = Boolean(grant && trigger === "browser_inspection");
-        const status = grant && !exclusiveBrowserUnsupported ? "skipped" as const : requirement.requiredness === "required" ? "blocked" as const : "degraded" as const;
+        const status = grant ? "skipped" as const : requirement.requiredness === "required" ? "blocked" as const : "degraded" as const;
         const serviceId = grant?.serviceId ?? requirement.serviceId;
         result.push(ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: input.assignment.runId,
           ...(input.assignment.taskId ? { taskId: input.assignment.taskId } : {}),
           role: input.role, sessionId: input.sessionId, generation: input.generation, invocationId, toolId: requirement.toolId,
-          ...(serviceId ? { serviceId } : {}), operation, status, reasonCode: exclusiveBrowserUnsupported ? "exclusive_resource_lease_unsupported" :
-            grant ? "trigger_not_used" : requirement.requiredness === "required" ? "required_grant_unavailable" :
+          ...(serviceId ? { serviceId } : {}), operation, status, reasonCode: grant ? "trigger_not_used" : requirement.requiredness === "required" ? "required_grant_unavailable" :
               candidates.length > 1 ? "ambiguous_grant" : "optional_grant_unavailable", observedAt: input.observedAt }));
       }
     }
@@ -84,14 +86,13 @@ export function describeToolActions(role: AgentRole, platform: AgenticHostPlatfo
       (requirement.serviceId === undefined || requirement.serviceId === grant.serviceId) && grant.scope.kind === "session" &&
       grant.scope.sessionId === sessionId && grant.scope.repositoryId === platform.repositoryId && grant.scope.workspaceRoot === repositoryPath);
     const grant = matches.length === 1 ? matches[0] : undefined;
-    const needsExclusiveBrowserLease = requirement.triggers.includes("browser_inspection");
     const serviceId = grant?.serviceId ?? requirement.serviceId;
     return { toolId: requirement.toolId, kind: requirement.kind, requiredness: requirement.requiredness, triggers: requirement.triggers,
       operations: requirement.operations, ...(requirement.capabilityIds ? { capabilityIds: requirement.capabilityIds } : {}),
       ...(serviceId ? { serviceId } : {}), ...(requirement.memoryScope ? { memoryScope: requirement.memoryScope } : {}),
       scope: { kind: "session" as const, sessionId, repositoryId: platform.repositoryId, workspaceRoot: repositoryPath },
-      status: grant && !needsExclusiveBrowserLease ? "available" as const : requirement.requiredness === "required" ? "blocked" as const : "degraded" as const,
-      ...(!grant || needsExclusiveBrowserLease ? { reasonCode: needsExclusiveBrowserLease && grant ? "exclusive_resource_lease_unsupported" : matches.length > 1 ? "ambiguous_grant" : "grant_unavailable" } : {}) };
+      status: grant ? "available" as const : requirement.requiredness === "required" ? "blocked" as const : "degraded" as const,
+      ...(!grant ? { reasonCode: matches.length > 1 ? "ambiguous_grant" : "grant_unavailable" } : {}) };
   });
 }
 

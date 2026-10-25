@@ -326,7 +326,7 @@ describe("DefaultPlatformReadinessService", () => {
     return { service, journal };
   }
 
-  async function createActualScopedGatewayFixture(mode: "valid" | "missing-input-schema" | "unavailable-actual") {
+  async function createActualScopedGatewayFixture(mode: "valid" | "missing-input-schema" | "unavailable-actual" | "unknown", exclusive = false) {
     const serviceId = "scoped-stdio-search";
     const counterPath = join(baseDir, `scope-calls-${mode}.txt`);
     const workerPath = join(baseDir, `scope-worker-${mode}.cjs`);
@@ -354,6 +354,7 @@ rl.on("line", line => {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { tools } }) + "\\n");
   } else if (message.method === "tools/call") {
     fs.appendFileSync(counterPath, "x");
+    if (mode === "unknown") return;
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id,
       result: { content: [{ type: "text", text: "actual-scope-result" }] } }) + "\\n");
   }
@@ -365,7 +366,7 @@ rl.on("line", line => {
       schemaVersion: 3, serviceId, revision: 1,
       scope: { kind: "machine", machineId: identity.machineId },
       tool: { schemaVersion: 3, toolId: "scope-search-tool", kind: "stdio_mcp", version: "1.0.0",
-        operations: ["search"], resource: { sharing: "concurrent", maxConcurrency: 2 }, required: true },
+        operations: ["search"], resource: exclusive ? { sharing: "exclusive", resourceKey: "actual-browser-profile" } : { sharing: "concurrent", maxConcurrency: 2 }, required: true },
       connection: { kind: "stdio_mcp", executable: process.execPath,
         argv: [workerPath, mode, counterPath, startCounterPath],
         environmentBindings: {}, executableDigest: createHash("sha256").update(await readFile(process.execPath)).digest("hex"),
@@ -529,6 +530,60 @@ rl.on("line", line => {
     } finally {
       await fixture.cleanup();
     }
+  });
+
+  it("serializes browser transactions through the real control endpoint and stdio worker", async () => {
+    const fixture = await createActualScopedGatewayFixture("valid", true);
+    try {
+      const manager = fixture.registrationManager;
+      const baseGrant = scopeSearchPolicyAndGrant(fixture.serviceId, fixture.actualScope).grant;
+      for (const role of ["tester", "qa"] as const) {
+        const result = await manager.ensureForRole(identity, { role, provider: "codex", environmentId: `env-${role}`,
+          serviceIds: [fixture.serviceId], allowedTools: ["search"], configDigest: "a".repeat(64),
+          toolGrants: [{ ...baseGrant, grantId: `grant-${role}`, role, triggers: ["browser_inspection"] }] });
+        expect(result.ok).toBe(true);
+      }
+      const options = { browserTransaction: { id: "tester-assignment", resourceKey: "actual-browser-profile" } };
+      const first = await manager.invokeTool(identity, "tester", undefined, fixture.serviceId, "search", { query: "navigate" }, "browser-first", options);
+      expect(first.ok && first.value.status).toBe("completed");
+      const second = await manager.invokeTool(identity, "tester", undefined, fixture.serviceId, "search", { query: "inspect" }, "browser-second", options);
+      expect(second.ok && second.value.status).toBe("completed");
+      const qaOptions = { browserTransaction: { id: "qa-assignment", resourceKey: "actual-browser-profile" } };
+      expect((await manager.invokeTool(identity, "qa", undefined, fixture.serviceId, "search", { query: "qa" }, "browser-qa", qaOptions)).ok).toBe(false);
+      expect(await readFile(fixture.counterPath, "utf8")).toBe("xx");
+      expect((await manager.finishToolTransaction(identity, "tester", options.browserTransaction.id)).ok).toBe(true);
+      const qa = await manager.invokeTool(identity, "qa", undefined, fixture.serviceId, "search", { query: "qa" }, "browser-qa", qaOptions);
+      expect(qa.ok && qa.value.status).toBe("completed");
+      expect(await readFile(fixture.counterPath, "utf8")).toBe("xxx");
+      expect((await manager.revokeSession(identity)).ok).toBe(true);
+    } finally { await fixture.cleanup(); }
+  });
+
+  it("retains timed-out browser mutations across manager restart without replay", async () => {
+    const fixture = await createActualScopedGatewayFixture("unknown", true);
+    try {
+      const baseGrant = scopeSearchPolicyAndGrant(fixture.serviceId, fixture.actualScope).grant;
+      const registered = await fixture.registrationManager.ensureForRole(identity, { role: "tester", provider: "codex", environmentId: "env-tester",
+        serviceIds: [fixture.serviceId], allowedTools: ["search"], configDigest: "a".repeat(64),
+        toolGrants: [{ ...baseGrant, role: "tester", triggers: ["browser_inspection"] }] });
+      expect(registered.ok).toBe(true);
+      const options = { timeoutMs: 100, browserTransaction: { id: "tester-timeout", resourceKey: "actual-browser-profile" } };
+      const result = await fixture.registrationManager.invokeTool(identity, "tester", undefined, fixture.serviceId,
+        "search", { query: "mutation" }, "browser-timeout", options);
+      expect(result.ok ? result.value.status : result.error.code).toMatch(/unknown/);
+      const revoked = await fixture.registrationManager.revokeSession(identity);
+      expect(revoked).toMatchObject({ ok: false, error: { code: "unknown_delivery" } });
+      const retained = await fixture.runtimeControl.list(fixture.actualScope);
+      expect(retained.ok && retained.value).toHaveLength(1);
+      // New manager reads the retained registration and browser intent; it must only observe the original call.
+      const restarted = new GatewayRegistrationManager({ control: fixture.runtimeControl as GatewayControlPort, endpoint: ENDPOINT });
+      expect((await restarted.invokeTool(identity, "tester", undefined, fixture.serviceId,
+        "search", { query: "mutation" }, "browser-next", options)).ok).toBe(false);
+      const reconciled = await restarted.reconcileToolCall(identity, "tester", undefined, fixture.serviceId,
+        "search", { query: "mutation" }, "browser-timeout", options);
+      expect(reconciled.ok ? reconciled.value.status : reconciled.error.code).toMatch(/unknown/);
+      expect(await readFile(fixture.counterPath, "utf8")).toBe("x");
+    } finally { await fixture.cleanup(); }
   });
 
   it("blocks malformed required stdio schemas without exposing provider launch material", async () => {

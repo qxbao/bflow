@@ -1,3 +1,4 @@
+import { BrowserResourceTransactions, type GatewayToolOperationOptions } from "./browser-resource-transactions.js";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -82,6 +83,7 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
   private readonly now: () => Date;
   private readonly ttlMs: number;
   private readonly tokens = new Map<string, string>();
+  private readonly browserTransactions: BrowserResourceTransactions;
   private readonly heldLeases = new Map<string, MCPResourceLease>();
   private readonly exclusiveServices = new Set<string>();
   private chain: Promise<unknown> = Promise.resolve();
@@ -96,6 +98,7 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
     this.control = options.control;
     this.endpoint = endpoint.data;
     this.now = options.now ?? (() => new Date());
+    this.browserTransactions = new BrowserResourceTransactions(this.control, this.now);
     this.ttlMs = ttl;
   }
 
@@ -221,24 +224,28 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       for (const generation of await generationDirectories(identity.stateDirectory)) {
         const path = join(identity.stateDirectory, generation, LEDGER_FILE);
         const entries = (await readLedger(path)).entries;
-        await this.revokeEntries(identity, path, entries, Object.values(entries), scope, options);
+        await this.revokeEntries({ ...identity, generation: Number(generation.slice(4)) }, path, entries, Object.values(entries), scope, options);
       }
       return ok(undefined);
     }));
   }
 
   async invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    operation: string, input: JsonValue, callId: string, options?: GatewayToolOperationOptions): Promise<OperationResult<MCPToolCallResult>> {
     return this.callRegisteredTool(identity, role, taskId, serviceId, operation, input, callId, false, options);
   }
 
   async reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: JsonValue, callId: string, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    operation: string, input: JsonValue, callId: string, options?: GatewayToolOperationOptions): Promise<OperationResult<MCPToolCallResult>> {
     return this.callRegisteredTool(identity, role, taskId, serviceId, operation, input, callId, true, options);
   }
 
+  async finishToolTransaction(identity: PlatformSessionIdentity, role: AgentRole, transactionId: string): Promise<OperationResult<void>> {
+    return this.serialize(() => this.browserTransactions.finish(identity, role, transactionId));
+  }
+
   private async callRegisteredTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: JsonValue, callId: string, reconcile: boolean, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    operation: string, input: JsonValue, callId: string, reconcile: boolean, options?: GatewayToolOperationOptions): Promise<OperationResult<MCPToolCallResult>> {
     return this.serialize(() => this.guard(async () => {
       const path = ledgerPath(identity), entries = (await readLedger(path)).entries;
       const entry = Object.values(entries).find(item => item.state === "registered" && item.role === role && item.taskId === taskId &&
@@ -248,6 +255,9 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
       if (!entry?.registration) throw new GatewayPortError({ code: "not_found", retryable: false,
         message: "No current Gateway registration grants this role, task, service and operation" });
       const registration = entry.registration;
+      if (options?.browserTransaction) return this.browserTransactions.invoke(identity, registration,
+        MCPToolCallSchema.parse({ schemaVersion: 3, registrationId: registration.registrationId, serviceId,
+          tool: operation, input, callId, idempotencyKey: callId }), options.browserTransaction, reconcile, options);
       let lease = this.heldLeases.get(callId);
       if (lease && (lease.registrationId !== entry.registrationId || lease.serviceId !== serviceId)) {
         lease = undefined;
@@ -472,6 +482,12 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
     let failure: ContractError | undefined;
     for (const entry of targets) {
       if (entry.state === "revoked") continue;
+      const browserCleanup = await this.browserTransactions.finish(identity, entry.role, undefined, entry.registrationId, true);
+      if (!browserCleanup.ok) {
+        // Retain the registration and bearer authority until every pending browser call has a conclusive observation.
+        failure ??= browserCleanup.error;
+        continue;
+      }
       for (const [callId, lease] of this.heldLeases) {
         if (lease.registrationId === entry.registrationId) {
           this.heldLeases.delete(callId);

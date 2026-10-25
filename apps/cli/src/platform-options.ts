@@ -226,6 +226,9 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     roles,
     ...(toolPolicy ? { toolPolicy } : {}),
     ...(toolGrants.length ? { toolGrants } : {}),
+    exclusiveMcpResources: Object.fromEntries((deps.context.mcpServices ?? []).map(raw => MCPServiceDefinitionSchema.parse(raw))
+      .filter(service => toolGrants.some(grant => grant.serviceId === service.serviceId) && service.tool.resource.sharing === "exclusive")
+      .map(service => [service.serviceId, service.tool.resource.sharing === "exclusive" ? service.tool.resource.resourceKey : ""])),
     codexHomeDirectory: deps.context.codexHomeDirectory,
     codexProcessHomeDirectory: deps.context.codexProcessHomeDirectory,
     codexHookApprovalPath: deps.context.codexHookApprovalPath,
@@ -462,15 +465,6 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
           : "multiple approved services match; specify serviceId";
         report();
         if (requirement.requiredness === "required" && strictRequired) throw new Error(`Required tool '${requirement.toolId}' for role '${role}' is unavailable: ${reason}`);
-        warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);
-        continue;
-      }
-      if (matches[0]!.tool.resource.sharing === "exclusive" &&
-          (canonicalToolId === "chrome-devtools-mcp" || requirement.triggers.includes("browser_inspection"))) {
-        reason = "exclusive MCP resources are not yet supported by the Runtime tool-action lease path";
-        report();
-        if (requirement.requiredness === "required" && strictRequired)
-          throw new Error(`Required tool '${requirement.toolId}' for role '${role}' is unavailable: ${reason}`);
         warn?.(`Optional tool '${requirement.toolId}' for role '${role}' is degraded: ${reason}`);
         continue;
       }

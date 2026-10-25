@@ -69,7 +69,7 @@ describe("profile selection ingress", () => {
     const browserGrant = ResolvedToolGrantSchema.parse({ ...grant, grantId: "browser-grant", toolId: "browser", policyDigest: browserPolicy.digest,
       serviceId: "chrome-service", operations: ["list_pages"], triggers: ["browser_inspection"] });
     expect(describeToolActions("coordinator", { ...platform, toolPolicy: browserPolicy, toolGrants: [browserGrant] }, "session-1", "/repo")[0])
-      .toMatchObject({ status: "degraded", reasonCode: "exclusive_resource_lease_unsupported" });
+      .toMatchObject({ status: "available" });
   });
   it("routes pre-run planning memory reads through an activated session grant", async () => {
     const calls: unknown[][] = [];
@@ -111,6 +111,35 @@ describe("profile selection ingress", () => {
     expect(validateMemoryActionOutput(grant, "mempalace_search", result.value.output as never)?.[0]?.provenance)
       .toMatchObject({ wing: "engineering", repositoryId: options.platform.repositoryId, sourceId: "drawer-stub",
         repositoryBinding: "approved_wing_policy" });
+  });
+  it("binds browser transactions to the trusted resource and forwards completion", async () => {
+    const calls: unknown[][] = [], finished: unknown[][] = [];
+    const service = fakeService({
+      status: () => ({ generation: 1, launches: [{ launchId: "launch-coord", role: "coordinator", provider: "codex", state: "activated" }] }),
+      assertFresh: () => ({ ok: true, value: {} as never }),
+      verifyGateway: async () => ({ ok: true, value: { checkedAt: at, healthy: true, lost: [], uncertain: false } }),
+      invokeTool: async (...args: unknown[]) => { calls.push(args); return { ok: true, value: { schemaVersion: 3,
+        callId: "browser-call", status: "completed", output: {}, observedAt: at } }; },
+      finishToolTransaction: async (...args: unknown[]) => { finished.push(args); return { ok: true, value: undefined }; }
+    });
+    const { options } = await session(service);
+    const scope = { kind: "session" as const, machineId: options.platform.machineId, repositoryId: options.platform.repositoryId,
+      workspaceRoot: options.repositoryPath, sessionId: options.sessionId };
+    const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: options.platform.repositoryId,
+      scope: { kind: "repository", machineId: scope.machineId, repositoryId: scope.repositoryId, workspaceRoot: scope.workspaceRoot }, digest: "b".repeat(64), requirements: [{ toolId: "chrome-devtools-mcp",
+        kind: "stdio_mcp", serviceId: "chrome", operations: ["list_pages"], requiredness: "optional", roles: ["coordinator"], triggers: ["browser_inspection"] }] });
+    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "browser-grant", policyDigest: policy.digest,
+      toolId: "chrome-devtools-mcp", kind: "stdio_mcp", requiredness: "optional", role: "coordinator", scope,
+      triggers: ["browser_inspection"], serviceId: "chrome", operations: ["list_pages"] });
+    const host = new HostPlatformSession({ ...options, platform: { ...platform, toolPolicy: policy, toolGrants: [grant], exclusiveMcpResources: { chrome: "machine-profile" } } });
+    await host.prepare();
+    expect((await host.invokeTool("coordinator", undefined, "chrome-devtools-mcp", "chrome", "list_pages", "browser_inspection", {}, "browser-call")).ok).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect((await host.invokeTool("coordinator", undefined, "chrome-devtools-mcp", "chrome", "list_pages", "browser_inspection", {}, "browser-call", false,
+      undefined, "authenticated-attempt")).ok).toBe(true);
+    expect(calls[0]?.at(-1)).toMatchObject({ timeoutMs: 5_000, browserTransaction: { id: "authenticated-attempt", resourceKey: "machine-profile" } });
+    expect((await host.finishToolTransaction("coordinator", "authenticated-attempt")).ok).toBe(true);
+    expect(finished[0]).toMatchObject([expect.anything(), "coordinator", "authenticated-attempt"]);
   });
   it("registers exact MCP operations while preserving catalog tool IDs", () => {
     const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-context7", policyDigest: "a".repeat(64), toolId: "context7",

@@ -595,3 +595,13 @@ hoặc sai provider sẽ chặn khởi chạy trước khi thực thi provider; 
 profile cô lập một cách tường minh trước khi chọn. Developer được khởi chạy động mà không
 có role đã cấu hình chỉ kế thừa profile được chọn của Coordinator khi dùng cùng provider
 với Coordinator.
+
+## Browser MCP resource readiness
+
+`bflow up` resolves `chrome-devtools-mcp` for tester/QA when the approved machine service is ready
+and exposes the requested operations. Exclusive sharing is supported through Runtime browser
+transactions; the CLI carries the machine-defined resource key rather than accepting one from role
+tool arguments. A ready grant enables the dependent `browser-inspection` skill. Missing/unready
+optional services still degrade; required services block startup. Tool readiness does not prove
+browser verification or task success. Local control/stdio fixture tests are not live Chrome or
+provider/Herdr acceptance. Existing hosts must reload the rebuilt Runtime to use this integration.

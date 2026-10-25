@@ -46,7 +46,7 @@ import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
 import { evaluateWatchdog } from "./run-watchdog.js";
 import { HostConversationIntake } from "./host-conversation.js";
 import { HostDevelopment } from "./host-development.js";
-import { describeToolActions, nextToolActionInvocationId, rtkRequirement, toolActionInvocationId, uninvokedToolDispositions,
+import { browserTransactionId, describeToolActions, nextToolActionInvocationId, rtkRequirement, toolActionInvocationId, uninvokedToolDispositions,
   validateMemoryActionInput, validateMemoryActionOutput, visibleToolUsage } from "./tool-action-policy.js";
 import { patchFilePaths } from "./patch-paths.js";
 import { redactString } from "../resilience/redaction.js";
@@ -876,6 +876,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if ((!terminalStatus && !resultMessage) || !message.run_id || message.sender.role === "conversation") return;
     const binding = await principal(AgentRoleSchema.parse(message.sender.role), textField(message.sender.pane_id));
     const state = await requireWorkspace().runtime.inspect();
+    const completed = message.causation_id ? taskLogAssignmentContext(state, binding,
+      { runId: message.run_id, assignmentMessageId: message.causation_id, correlationId: message.correlation_id }) : undefined;
+    if (completed?.attemptId && platformSession && configuration.platform?.toolPolicy?.requirements.some(item =>
+        item.roles.includes(binding.role) && item.triggers.includes("browser_inspection"))) {
+      const released = await platformSession.finishToolTransaction(binding.role,
+        browserTransactionId(configuration.sessionId, binding.role, completed));
+      // Delivery is already acknowledged. Resource cleanup failure must never be relabelled as transport uncertainty.
+      if (!released.ok) process.stderr.write(`Browser transaction cleanup incomplete (${released.error.code}); reconcile retained resource state.\n`);
+    }
     const assignment = taskLogAssignmentContext(state, binding, { runId: message.run_id });
     if (assignment) await finalizeUninvokedToolActions(binding, assignment.runId, assignment.taskId, assignment.attemptId);
     else if (message.sender.role === "coordinator" && (record(state).runs as Record<string, unknown>[]).some(run => run.runId === message.run_id))
@@ -912,13 +921,6 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error(requirement?.requiredness === "required"
         ? `Required tool grant for ${request.toolId}.${request.operation} is unavailable`
         : `Tool action is not granted for ${request.toolId}.${request.operation}`);
-    }
-    if (trigger === "browser_inspection") {
-      const required = requirement.requiredness === "required";
-      await recordDisposition({ role, toolId: grant.toolId, operation: request.operation,
-        status: required ? "blocked" : "degraded", reasonCode: "exclusive_resource_lease_unsupported",
-        ...(grant.serviceId ? { serviceId: grant.serviceId } : {}) });
-      throw new Error("Browser tool action is unavailable because Runtime does not yet acquire and release Gateway resource leases");
     }
     if (grant.kind === "cli_only") {
       await recordDisposition({ role, toolId: grant.toolId, operation: request.operation,
@@ -957,7 +959,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           })()
         : request.input;
       const result = await platformSession.invokeTool(role, gatewayTaskId, grant.toolId, serviceId, request.operation,
-        trigger, normalizedInput, invocationId, reconcile);
+        trigger, normalizedInput, invocationId, reconcile, undefined,
+        trigger === "browser_inspection" && assignment ? browserTransactionId(configuration.sessionId, role, assignment) : undefined);
       if (!result.ok) {
         const uncertain = result.error.code === "timeout" || result.error.code === "unknown_delivery" || result.error.code === "cancelled" ||
           ("retrySafety" in result.error && result.error.retrySafety === "observation_only");

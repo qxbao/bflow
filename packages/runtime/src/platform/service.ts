@@ -1,3 +1,4 @@
+import type { GatewayToolOperationOptions } from "./browser-resource-transactions.js";
 import { lstat, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -524,7 +525,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   }
 
   async invokeTool(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions) {
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: GatewayToolOperationOptions) {
     if (!this.deps.gateway) return fail("transport_unavailable", "Gateway control endpoint unavailable");
     const current = this.identities.get(identity.stateDirectory);
     if (!current || current.sessionId !== identity.sessionId || current.generation !== identity.generation || current.repositoryId !== identity.repositoryId)
@@ -532,8 +533,13 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     return this.deps.gateway.invokeTool(identity, role, taskId, serviceId, operation, input, callId, options);
   }
 
+  async finishToolTransaction(identity: PlatformSessionIdentity, role: AgentRole, transactionId: string) {
+    if (!this.deps.gateway?.finishToolTransaction) return fail("validation", "Gateway resource transactions are unavailable");
+    return this.deps.gateway.finishToolTransaction(identity, role, transactionId);
+  }
+
   async reconcileToolCall(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, serviceId: string,
-    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: OperationOptions) {
+    operation: string, input: import("@bflow/contracts").JsonValue, callId: string, options?: GatewayToolOperationOptions) {
     if (!this.deps.gateway) return fail("transport_unavailable", "Gateway control endpoint unavailable");
     const current = this.identities.get(identity.stateDirectory);
     if (!current || current.sessionId !== identity.sessionId || current.generation !== identity.generation || current.repositoryId !== identity.repositoryId)

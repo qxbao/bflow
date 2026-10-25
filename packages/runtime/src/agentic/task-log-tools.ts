@@ -53,11 +53,13 @@ export function taskLogBusinessTaskId(out: { readonly taskId?: unknown; readonly
 }
 
 /** Finds this pane's current durable assignment, including native session continuity. */
-export function taskLogAssignmentContext(raw: unknown, binding: PaneBinding, filter?: { runId?: string; taskId?: string }): TaskLogAssignment | undefined {
+export function taskLogAssignmentContext(raw: unknown, binding: PaneBinding, filter?: { runId?: string; taskId?: string; assignmentMessageId?: string; correlationId?: string }): TaskLogAssignment | undefined {
   const state = recordOf(raw);
   if (!Array.isArray(state.outbound)) return undefined;
   const candidates = state.outbound.map(recordOf).filter(out => assignedTo(binding, out) &&
     (filter?.runId === undefined || recordOf(out.message).run_id === filter.runId) &&
+    (filter?.assignmentMessageId === undefined || recordOf(out.message).message_id === filter.assignmentMessageId) &&
+    (filter?.correlationId === undefined || recordOf(out.message).correlation_id === filter.correlationId) &&
     (filter?.taskId === undefined || out.taskId === filter.taskId || taskLogBusinessTaskId(out) === filter.taskId));
   const out = candidates.at(-1);
   if (!out) return undefined;

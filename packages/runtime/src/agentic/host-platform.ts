@@ -1,3 +1,4 @@
+import type { GatewayToolOperationOptions } from "../platform/browser-resource-transactions.js";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { chmod, copyFile, mkdir, open, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
@@ -547,7 +548,7 @@ export class HostPlatformSession {
   }
 
   async invokeTool(role: AgentRole, taskId: string | undefined, toolId: string, serviceId: string, operation: string,
-    trigger: ToolTrigger, input: JsonValue, callId: string, reconcile = false, options?: OperationOptions): Promise<OperationResult<MCPToolCallResult>> {
+    trigger: ToolTrigger, input: JsonValue, callId: string, reconcile = false, options?: OperationOptions, transactionId?: string): Promise<OperationResult<MCPToolCallResult>> {
     const identity = this.identity, policy = this.options.platform.toolPolicy, grants = this.options.platform.toolGrants;
     if (!identity || !policy || !grants) return { ok: false, error: { code: "validation", retryable: false, message: "Tool actions require an active explicit repository policy and resolved grants" } };
     const requirement = policy.requirements.find(item => item.toolId === toolId && item.roles.includes(role) && item.kind !== "cli_only" &&
@@ -570,7 +571,11 @@ export class HostPlatformSession {
       return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action needs the matching activated role launch" } };
     const health = this.options.service.assertFresh(launchId);
     if (!health.ok) return health;
-    const boundedOptions: OperationOptions = {
+    const resourceKey = this.options.platform.exclusiveMcpResources?.[serviceId];
+    if (trigger === "browser_inspection" && (!transactionId || !resourceKey))
+      return { ok: false, error: { code: "validation", retryable: false, message: "Browser action needs an authenticated assignment and trusted machine resource key" } };
+    const boundedOptions: GatewayToolOperationOptions = {
+      ...(trigger === "browser_inspection" ? { browserTransaction: { id: transactionId!, resourceKey: resourceKey! } } : {}),
       timeoutMs: Math.min(options?.timeoutMs ?? 5_000, 5_000),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.deadline ? { deadline: options.deadline } : {})
@@ -581,6 +586,12 @@ export class HostPlatformSession {
       return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action Gateway registrations are lost or uncertain" } };
     if (reconcile) return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
     return this.options.service.invokeTool(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
+  }
+
+  async finishToolTransaction(role: AgentRole, transactionId: string): Promise<OperationResult<void>> {
+    if (!this.identity || !this.options.service.finishToolTransaction)
+      return { ok: false, error: { code: "validation", retryable: false, message: "Browser transaction cleanup requires an active resource lease service" } };
+    return this.options.service.finishToolTransaction(this.identity, role, transactionId);
   }
 
   async reconcileToolCall(role: AgentRole, taskId: string | undefined, serviceId: string, operation: string,

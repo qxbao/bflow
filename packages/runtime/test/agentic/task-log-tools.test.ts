@@ -46,6 +46,13 @@ describe("authenticated task activity log tools", () => {
     await expect(handleTaskLogTool(stale, "log_task_step", { runId: "run-1", taskId: "task-1", action: "work" })).rejects.toThrow("outside this pane");
   });
 
+  it("attributes a completed reply to its exact historical assignment rather than a newer attempt", () => {
+    const observed = state();
+    Object.assign(observed.outbound[0]!.message, { message_id: "assignment-old", correlation_id: "correlation-1" });
+    observed.outbound.push({ ...observed.outbound[0]!, attemptId: "attempt-new", message: { ...observed.outbound[0]!.message, message_id: "assignment-new" } });
+    expect(taskLogAssignmentContext(observed, binding(), { runId: "run-1", assignmentMessageId: "assignment-old", correlationId: "correlation-1" })?.attemptId).toBe("attempt-1");
+    expect(taskLogAssignmentContext(observed, binding(), { runId: "run-1", assignmentMessageId: "assignment-old", correlationId: "foreign" })).toBeUndefined();
+  });
   it("requires specialist progress notes to name their task so the note is readable back", async () => {
     const f = await fixture();
     await expect(handleTaskLogTool(f.context, "log_task_step", { runId: "run-1", action: "started implementation" })).rejects.toThrow("taskId");

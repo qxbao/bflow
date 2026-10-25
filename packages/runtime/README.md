@@ -935,11 +935,25 @@ Host cấu hình cũ không có `toolPolicy` tiếp tục chạy runner gốc m�
 generation. Một lần `check_work` mới sau invocation RTK đã kết thúc có invocation ID riêng; invocation
 đang `started`/`unknown` vẫn chặn lần chạy tiếp theo cho tới khi được đối soát.
 
-Giới hạn: Runtime chưa có lifecycle acquire/renew/release cho Gateway resource lease. Các action có
-trigger `browser_inspection` vì vậy được báo `degraded` hoặc `blocked` với
-`exclusive_resource_lease_unsupported`; chúng không được quảng bá là usable khi Gateway có thể từ chối
-vì thiếu lease. Tool MCP và RTK local ở trên chưa chứng minh live provider delivery hoặc full SDLC
-acceptance.
+Browser MCP dùng resource lease của Gateway theo từng assignment attempt đã xác thực. CLI chuyển
+resource key từ service definition đã duyệt; role không được chọn lease/fence hay resource key.
+Runtime acquire trước thao tác đầu, giữ và renew qua các call cùng assignment, release sau kết quả
+terminal hoặc khi revoke registration/shutdown. Transaction tối đa năm phút; hết hạn không tự lấy
+lại browser state đã có thể đổi chủ. Role khác nhận lỗi busy có giới hạn thay vì đan xen thao tác.
+GitNexus tiếp tục dùng lease theo từng call.
+
+Ledger riêng `gen-N/browser-resource-transactions.json` ghi request gốc (có thể chứa URL/input browser, file private 0600), digest và
+đúng lease gốc trước dispatch. Kết quả unknown, timeout, lỗi transport hoặc phản hồi không hợp lệ
+chặn call mới và giữ trạng thái để reconcile; manager khởi tạo lại đọc cùng intent và không resend.
+Reconcile dùng lease của call gốc kể cả khi transaction đã renew. Host daemon restart đối soát pending call một lần trước khi thu hồi
+launch/registration cũ; còn unknown thì giữ registration và chặn lifecycle để tránh mất thẩm quyền
+recovery. Ledger không phục hồi provider token hay tự resume assignment. Gateway quarantine vẫn là hàng rào cho mutation chưa rõ kết quả sau lease expiry/revoke.
+Release lỗi không mở lại transaction và không biến receipt giao thông điệp đã ACK thành timeout.
+
+Các test local bao phủ Runtime session, manager, control endpoint thật và stdio worker fixture,
+tranh chấp tester/QA, custom resource key, timeout và manager restart. Chưa có live Chrome/provider/
+Herdr acceptance hoặc bằng chứng full SDLC cho browser. Muốn dùng mã mới, host cần được build và
+nạp lại qua lifecycle hiện có.
 
 Giới hạn: kế thừa environment của hook, mở rộng header `${VAR}` của Claude và `bearer_token_env_var` của Codex
 chỉ được xác minh bằng các hook spawn cục bộ và config đã render, không phải provider hay Herdr live.
