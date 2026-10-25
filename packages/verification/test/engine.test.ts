@@ -508,6 +508,23 @@ describe("VerificationEngine", () => {
     expect(outcome.result.metadata?.integrationCommitHash).toBe(change.headCommitHash);
     expect(outcome.result.metadata?.integratedTaskIds).toEqual(["task-1"]);
   });
+
+  it("engine re-validation accepts waived plan and rejects tampered waiver", async () => {
+    const f = await fixture({
+      reviewWaiver: { kind: "deterministic_coverage", reason: "All criteria automated" }
+    });
+    const engine = new VerificationEngine(f.ports);
+    const cycle = engine.start(f.plan, "cycle-waived");
+    const outcome = await engine.verify(f.plan, cycle, await f.change());
+    expect(outcome.result.status).toBe("passed");
+    expect(outcome.cycle.status).toBe("passed");
+
+    const tampered = {
+      ...f.plan,
+      reviewWaiver: { kind: "deterministic_coverage" as const, reason: "Tampered reason" }
+    };
+    expect(() => engine.start(tampered, "cycle-tampered")).toThrow("Verification plan was modified");
+  });
 });
 
 describe("verification planning", () => {

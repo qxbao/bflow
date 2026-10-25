@@ -58,6 +58,14 @@ export const ObservationSchema = z.object({
 }).strict();
 export type Observation = z.infer<typeof ObservationSchema>;
 
+export const ReviewWaiverSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("deterministic_coverage"), reason: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("identical_integrated_tree"), reason: z.string().min(1),
+    taskVerificationIds: z.array(IdentifierSchema).length(1),
+    taskTree: z.string().regex(/^[a-f0-9]{40}$/), integratedTree: z.string().regex(/^[a-f0-9]{40}$/) }).strict()
+]);
+export type ReviewWaiver = z.infer<typeof ReviewWaiverSchema>;
+
 export const PlanInputSchema = z.object({
   runId: IdentifierSchema,
   taskId: IdentifierSchema,
@@ -66,7 +74,8 @@ export const PlanInputSchema = z.object({
   strategy: TestStrategySchema,
   checks: z.array(QualityGateDefinitionSchema).min(1),
   implementerIds: z.array(IdentifierSchema).min(1),
-  maxIterations: z.number().int().min(1).max(10).default(3)
+  maxIterations: z.number().int().min(1).max(10).default(3),
+  reviewWaiver: ReviewWaiverSchema.optional()
 }).strict();
 export type VerificationPlan = z.infer<typeof PlanInputSchema> & {
   planId: string;
@@ -170,7 +179,34 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
     if (config.dependsOnPaths?.some(path => !safePath(path))) throw new Error("Unsafe check dependency path");
     return config;
   });
-  if (!configs.some(c => c.kind === "review")) throw new Error("An independent Reviewer or QA check is required");
+  if (!value.reviewWaiver) {
+    if (!configs.some(c => c.kind === "review")) throw new Error("An independent Reviewer or QA check is required");
+  } else {
+    if (configs.some(c => c.kind === "review"))
+      throw new Error("review_waiver_with_review: Review waiver cannot be combined with a review check");
+    if (value.reviewWaiver.kind === "deterministic_coverage") {
+      if (value.scope !== "task")
+        throw new Error("review_waiver_scope: deterministic_coverage waiver is only valid for task verification");
+      if (strategy.tddDecision.mode === "required")
+        throw new Error("review_waiver_tdd_required: deterministic_coverage waiver is not allowed when TDD is required");
+      if (strategy.targetCommands.length === 0)
+        throw new Error("review_waiver_no_commands: deterministic_coverage waiver requires at least one target command");
+      if (spec.acceptanceCriteria.some(c => c.required !== false && c.status !== "waived" && c.verificationMethod === "manual_review"))
+        throw new Error("review_waiver_manual_criterion: deterministic_coverage waiver cannot cover manual_review criteria");
+      for (const criterion of spec.acceptanceCriteria) {
+        if (criterion.required === false || criterion.status === "waived") continue;
+        const names = mappings.get(criterion.id);
+        if (!names || !configs.some(c => c.kind === "deterministic" && c.method === criterion.verificationMethod && c.criterionIds.includes(criterion.id) &&
+            names.every(name => c.testNames.includes(name))))
+          throw new Error(`review_waiver_unmapped_criterion: deterministic_coverage waiver requires a deterministic check mapping for ${criterion.id}`);
+      }
+    } else if (value.reviewWaiver.kind === "identical_integrated_tree") {
+      if (value.scope !== "workflow")
+        throw new Error("review_waiver_scope: identical_integrated_tree waiver is only valid for workflow verification");
+      if (value.reviewWaiver.integratedTree !== value.reviewWaiver.taskTree)
+        throw new Error("review_waiver_tree_mismatch: integrated tree does not match verified task tree");
+    }
+  }
   for (const criterion of spec.acceptanceCriteria) {
     if (criterion.required === false || criterion.status === "waived") continue;
     const names = mappings.get(criterion.id);
