@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, opendir, open, readFile, realpath, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
@@ -24,10 +25,22 @@ const directoryCursor = z.number().int().min(0).max(MAX_DIRECTORY_CURSOR).option
 const gitLimit = z.number().int().min(1).max(50).default(20);
 
 export const RepositoryReadInputSchema = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("read"), path: relativePath, offset: z.number().int().min(0).max(MAX_FILE_BYTES).default(0), limit: boundedLimit }).strict(),
+  z.object({
+    op: z.literal("read"),
+    path: relativePath,
+    offset: z.number().int().min(0).max(MAX_FILE_BYTES).default(0),
+    limit: boundedLimit,
+    view: z.enum(["content", "stat", "outline"]).optional(),
+    startLine: z.number().int().min(1).max(1_000_000).optional(),
+    endLine: z.number().int().min(1).max(1_000_000).optional()
+  }).strict(),
   z.object({ op: z.literal("list"), path: listPath, limit: listLimit, cursor: directoryCursor }).strict(),
   z.object({ op: z.literal("git"), action: z.enum(["status", "log", "head", "files", "diff"]), limit: gitLimit }).strict()
-]);
+]).superRefine((value, ctx) => {
+  if (value.op === "read" && value.startLine !== undefined && value.endLine !== undefined && value.endLine < value.startLine) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "endLine must be greater than or equal to startLine" });
+  }
+});
 
 type ReaderInput = z.infer<typeof RepositoryReadInputSchema>;
 const EXCLUDED_SEGMENTS = new Set([
@@ -45,7 +58,7 @@ function assertAllowedPath(path: string, allowRoot = false): string {
   if (path === "." && allowRoot) return path;
   const segments = path.split("/");
   if (segments.some(segment => segment.length === 0 || segment === "." || segment === ".." || EXCLUDED_SEGMENTS.has(segment.toLowerCase()) || SECRET_NAME.test(segment))) {
-    throw new Error("repository path is not readable");
+    throw new Error("repository path is not readable (sensitive or excluded)");
   }
   return segments.join("/");
 }
@@ -97,7 +110,69 @@ function decodeUtf8Chunk(bytes: Buffer, requestedOffset: number, maxBytes: numbe
   throw new Error("file is not valid UTF-8 text");
 }
 
-async function readText(root: string, path: string, offset: number, limit: number): Promise<JsonValue> {
+const CODE_DECLARATION_PATTERN =
+  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|enum|namespace|module|def|fn|pub\s+fn|struct|impl|trait)\b.+/;
+const MARKDOWN_HEADING_PATTERN = /^#{1,6}\s+.+/;
+
+function countLines(text: string): number {
+  if (text.length === 0) return 0;
+  const lines = text.split(/\r?\n/);
+  return text.endsWith("\n") ? lines.length - 1 : lines.length;
+}
+
+function extractOutlineEntries(
+  path: string,
+  text: string,
+  limitBytes: number
+): { outline: Array<{ line: number; byteOffset: number; text: string }>; truncated: boolean } {
+  const isMarkdown = /\.(?:md|mdx|markdown)$/i.test(path);
+  const pattern = isMarkdown ? MARKDOWN_HEADING_PATTERN : CODE_DECLARATION_PATTERN;
+  const lines = text.split(/\r?\n/);
+  const outline: Array<{ line: number; byteOffset: number; text: string }> = [];
+  let byteOffset = 0;
+  let usedBytes = 0;
+  let truncated = false;
+  let inFence = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i]!;
+    const lineBytes = Buffer.byteLength(rawLine, "utf8") + 1;
+    if (isMarkdown && /^\s*(?:```|~~~)/.test(rawLine)) {
+      inFence = !inFence;
+      byteOffset += lineBytes;
+      continue;
+    }
+    if ((!isMarkdown || !inFence) && pattern.test(rawLine)) {
+      const entry = {
+        line: i + 1,
+        byteOffset,
+        text: rawLine.trim().slice(0, 200)
+      };
+      const entryBytes = Buffer.byteLength(JSON.stringify(entry), "utf8");
+      if (usedBytes + entryBytes > limitBytes) {
+        truncated = true;
+        break;
+      }
+      outline.push(entry);
+      usedBytes += entryBytes;
+    }
+    byteOffset += lineBytes;
+  }
+
+  return { outline, truncated };
+}
+
+async function readText(
+  root: string,
+  path: string,
+  offset: number,
+  limit: number,
+  options?: {
+    readonly view?: "content" | "stat" | "outline";
+    readonly startLine?: number;
+    readonly endLine?: number;
+  }
+): Promise<JsonValue> {
   const target = await resolveRegularFile(root, path);
   // O_NONBLOCK prevents a path replacement with a FIFO from hanging this process; O_NOFOLLOW
   // closes the final-component symlink race on platforms that provide it.
@@ -106,13 +181,84 @@ async function readText(root: string, path: string, offset: number, limit: numbe
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.size > MAX_FILE_BYTES) throw new Error("repository path is not a bounded regular file");
-    const requested = Math.min(limit + 3, Math.max(0, opened.size - offset));
-    const buffer = Buffer.alloc(requested);
-    const { bytesRead } = requested === 0 ? { bytesRead: 0 } : await handle.read(buffer, 0, requested, offset);
-    const bytes = buffer.subarray(0, bytesRead);
-    if (bytes.includes(0)) throw new Error("binary files are not readable");
-    const decoded = decodeUtf8Chunk(bytes, offset, limit);
-    return { op: "read", path, offset: decoded.offset, requestedOffset: offset, bytes: decoded.bytes, content: decoded.content, truncated: decoded.offset + decoded.bytes < opened.size };
+    const view = options?.view ?? "content";
+    const hasLineRange = options?.startLine !== undefined || options?.endLine !== undefined;
+
+    if (view === "content" && !hasLineRange) {
+      const requested = Math.min(limit + 3, Math.max(0, opened.size - offset));
+      const buffer = Buffer.alloc(requested);
+      const { bytesRead } = requested === 0 ? { bytesRead: 0 } : await handle.read(buffer, 0, requested, offset);
+      const bytes = buffer.subarray(0, bytesRead);
+      if (bytes.includes(0)) throw new Error("binary files are not readable");
+      const decoded = decodeUtf8Chunk(bytes, offset, limit);
+      return { op: "read", path, offset: decoded.offset, requestedOffset: offset, bytes: decoded.bytes, content: decoded.content, truncated: decoded.offset + decoded.bytes < opened.size };
+    }
+
+    const fullBuffer = Buffer.alloc(opened.size);
+    const { bytesRead } = opened.size === 0 ? { bytesRead: 0 } : await handle.read(fullBuffer, 0, opened.size, 0);
+    const allBytes = fullBuffer.subarray(0, bytesRead);
+    if (allBytes.includes(0)) throw new Error("binary files are not readable");
+    let fullText: string;
+    try {
+      fullText = new TextDecoder("utf-8", { fatal: true }).decode(allBytes);
+    } catch {
+      throw new Error("file is not valid UTF-8 text");
+    }
+    const sha256 = createHash("sha256").update(allBytes).digest("hex");
+    const lineCount = countLines(fullText);
+
+    if (view === "stat") {
+      return {
+        op: "read",
+        view: "stat",
+        path,
+        totalBytes: allBytes.length,
+        lineCount,
+        sha256,
+        truncated: false
+      };
+    }
+
+    if (view === "outline") {
+      const { outline, truncated } = extractOutlineEntries(path, fullText, limit);
+      return {
+        op: "read",
+        view: "outline",
+        path,
+        totalBytes: allBytes.length,
+        lineCount,
+        sha256,
+        outline,
+        truncated
+      };
+    }
+
+    // Line-range read (startLine / endLine)
+    const rawLines = fullText.length === 0 ? [] : fullText.split(/\r?\n/);
+    const lines = fullText.endsWith("\n") ? rawLines.slice(0, -1) : rawLines;
+    const startLine = Math.min(Math.max(1, options?.startLine ?? 1), Math.max(1, lines.length));
+    const endLine = Math.min(Math.max(startLine, options?.endLine ?? lines.length), Math.max(1, lines.length));
+    const selectedLines = lines.length === 0 ? [] : lines.slice(startLine - 1, endLine);
+    const joinedSlice = selectedLines.join("\n");
+    const sliceBytes = Buffer.from(joinedSlice, "utf8");
+    const decoded = decodeUtf8Chunk(sliceBytes, 0, limit);
+    const prefixText = startLine > 1 ? lines.slice(0, startLine - 1).join("\n") + "\n" : "";
+    const startByteOffset = Buffer.byteLength(prefixText, "utf8");
+    const truncated = decoded.bytes < sliceBytes.length || endLine < lines.length;
+    return {
+      op: "read",
+      path,
+      startLine,
+      endLine,
+      offset: startByteOffset,
+      nextOffset: truncated ? startByteOffset + decoded.bytes : null,
+      bytes: decoded.bytes,
+      totalBytes: allBytes.length,
+      lineCount,
+      sha256,
+      content: decoded.content,
+      truncated
+    };
   } finally {
     await handle.close();
   }
@@ -316,7 +462,12 @@ export async function repositoryRead(repositoryPath: string, input: unknown): Pr
   const parsed: ReaderInput = RepositoryReadInputSchema.parse(input);
   const root = await canonicalRoot(repositoryPath);
   switch (parsed.op) {
-    case "read": return readText(root, parsed.path, parsed.offset, parsed.limit);
+    case "read":
+      return readText(root, parsed.path, parsed.offset, parsed.limit, {
+        ...(parsed.view !== undefined ? { view: parsed.view } : {}),
+        ...(parsed.startLine !== undefined ? { startLine: parsed.startLine } : {}),
+        ...(parsed.endLine !== undefined ? { endLine: parsed.endLine } : {})
+      });
     case "list": return listDirectory(root, parsed.path, parsed.limit, parsed.cursor);
     case "git": return gitRead(root, parsed.action, parsed.limit);
   }

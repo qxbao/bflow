@@ -220,3 +220,10 @@ Every specialist agent handoff and final task evaluation must emit a structured 
 - `assumptions` *(optional)*: Array of reversible, low-risk assumptions recorded during autonomous execution.
 
 Direct messaging from specialist panes to the user is strictly forbidden. All user-visible outcomes, clarification prompts, and approval decisions must be routed exclusively through Conversation via Herdr.
+
+## MCP Tool Discovery & Compact Output Discipline
+
+- Never dump `ALL_TOOLS` or enumerate the entire MCP tool catalog via shell or `mcp-cli`; inspect only the 1-3 tool schemas required for your current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)` without printing raw result envelopes.
+- Prefer `planning_reference({ section: "all", view: "compact" })` (or `view: "compact"` / `"schema_only"` per section) instead of loading full raw template and schema files.
+- Prefer `inspect({ runId, view: "summary", cursor })` (or `view: "status" | "tasks" | "blockers"`) when polling run progress so unchanged state returns a compact `{ unchanged: true, cursor }` receipt.
+- Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `read_task_log({ runId, view: "compact", cursor })` with `nextCursor`, `repository_read({ op: "read", path, view: "stat" | "outline" })` or `startLine`/`endLine`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` for project policy discovery.

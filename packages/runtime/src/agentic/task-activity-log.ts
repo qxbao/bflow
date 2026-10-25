@@ -17,7 +17,7 @@ type ScopeField = "runId" | "taskId" | "attemptId";
 interface StoredTaskActivityEntry extends TaskActivityEntry { readonly scopes?: Partial<Record<ScopeField, string>>; }
 const SCOPE_FIELDS: readonly ScopeField[] = ["runId", "taskId", "attemptId"];
 const scopeKey = (value: string): string => createHash("sha256").update(value).digest("hex");
-export interface TaskActivityFilter { readonly runId?: string; readonly taskId?: string; readonly lines?: number; readonly maxBytes?: number; }
+export interface TaskActivityFilter { readonly runId?: string; readonly taskId?: string; readonly lines?: number; readonly maxBytes?: number; readonly afterId?: string; }
 const DEFAULT_ENTRIES = 1000, DEFAULT_BYTES = 512 * 1024, MAX_LINE_BYTES = 4096;
 const KINDS = new Set<TaskActivityKind>(["admission", "planning", "assignment", "progress", "tool", "specification", "tdd", "verification", "review", "approval", "recovery", "cancellation", "result", "error", "transport", "notice"]);
 function clean(value: string, limit = 240): string {
@@ -112,19 +112,25 @@ export class TaskActivityLog {
     } catch { return []; }
   }
   async read(filter: TaskActivityFilter = {}): Promise<TaskActivityEntry[]> {
+    let entries: TaskActivityEntry[];
     try {
-      const entries = (await this.readStored()).filter(entry => (["runId", "taskId"] as const).every(field =>
+      entries = (await this.readStored()).filter(entry => (["runId", "taskId"] as const).every(field =>
         filter[field] === undefined || (entry.scopes?.[field] !== undefined ? entry.scopes[field] === scopeKey(filter[field]) : entry[field] === filter[field])))
         .map(({ scopes: _scopes, ...entry }) => entry);
-      const maxBytes = Math.min(this.maxBytes, filter.maxBytes ?? 16 * 1024), lines = Math.min(this.maxEntries, filter.lines ?? 100);
-      const selected: TaskActivityEntry[] = [];
-      let used = 0;
-      for (const entry of entries.slice(-lines).reverse()) {
-        const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
-        if (used + size > maxBytes) break;
-        selected.unshift(entry); used += size;
-      }
-      return selected;
     } catch { return []; }
+    if (filter.afterId !== undefined && filter.afterId !== "none") {
+      const idx = entries.findIndex(entry => entry.id === filter.afterId);
+      if (idx === -1) throw new Error("Task log cursor does not match any entry in the requested scope");
+      entries = entries.slice(idx + 1);
+    }
+    const maxBytes = Math.min(this.maxBytes, filter.maxBytes ?? 16 * 1024), lines = Math.min(this.maxEntries, filter.lines ?? 100);
+    const selected: TaskActivityEntry[] = [];
+    let used = 0;
+    for (const entry of entries.slice(-lines).reverse()) {
+      const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
+      if (used + size > maxBytes) break;
+      selected.unshift(entry); used += size;
+    }
+    return selected;
   }
 }

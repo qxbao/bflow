@@ -32,8 +32,8 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 ## Procedure
 
 1. Read the current role manifest and approved service inventory. Distinguish CLI-only tools, external workers, remote MCP, bridged stdio and exclusive resources.
-2. Discover the permitted operations through the registered Gateway and inspect negotiated schemas. A guessed hidden tool name remains forbidden; reachability alone does not establish protocol readiness.
-3. Select only tools needed for the immediate task and validate input/output. Acquire required resource leases for exclusive effects and preserve call correlation; inter-role communication remains Runtime/Herdr.
+2. Discover the permitted operations through the registered Gateway and inspect negotiated schemas. Never dump `ALL_TOOLS` or enumerate the full MCP tool catalog in shell scripts; inspect only the 1-3 tool schemas required for the current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)` without printing raw result envelopes. A guessed hidden tool name remains forbidden; reachability alone does not establish protocol readiness.
+3. Select only tools needed for the immediate task and validate input/output. Prefer compact views and cursors (`planning_reference` with `view: "compact"`, `inspect` with `view: "summary"` and `cursor`, `assignment_context` with `view: "compact"` and `surveyView: "summary"`, `repository_read` with `view: "stat"` or `view: "outline"` and `startLine`/`endLine`, `read_task_log` with `view: "compact"` and `cursor`, and `read_project_policy` with `view: "toc"` or `view: "section"` and `knownDigests`). Acquire required resource leases for exclusive effects and preserve call correlation; inter-role communication remains Runtime/Herdr.
 
 ## Bflow commands
 

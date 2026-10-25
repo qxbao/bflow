@@ -3,6 +3,7 @@ import { z } from "zod";
 import { record, strings, textField } from "./journal.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
+import { InspectInputSchema, summarizeInspectRun, summarizeInspectState } from "./mcp-output-views.js";
 
 // Keep tool-argument paths distinct from the nested public contract fields. The Runtime
 // also validates direct callers; provider discovery is guidance, never ingress proof.
@@ -54,7 +55,14 @@ export class CoordinatorTools {
     if (principal.role !== "coordinator" && !(principal.role === "developer" && name === "authorize_implementation"))
       throw new Error("Only Coordinator may invoke orchestration tools");
     switch (name) {
-      case "inspect": return this.runtime.inspect(args.runId === undefined ? undefined : textField(args.runId));
+      case "inspect": {
+        const query = InspectInputSchema.parse(args);
+        const raw = await this.runtime.inspect(query.runId);
+        if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
+          return raw;
+        }
+        return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+      }
       case "report_progress": return this.runtime.reportProgress(textField(args.runId), textField(args.headline), args.questions === undefined ? [] : strings(args.questions));
       case "assess": {
         const { specification } = AssessArgumentsSchema.parse(args);

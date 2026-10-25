@@ -58,6 +58,15 @@ import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNa
 import { inspectNativeDelivery, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
 import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
+import {
+  AssignmentContextInputSchema,
+  PlanningReferenceInputSchema,
+  ReadProjectPolicyInputSchema,
+  buildRoleBriefing,
+  compactAssignmentContext,
+  planningReferenceView,
+  readProjectPolicy
+} from "./mcp-output-views.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
 import { FileToolUsageLedger } from "../platform/tool-usage-ledger.js";
 import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
@@ -284,6 +293,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (role !== "conversation") {
       systemPrompt += " Never ask the user questions directly or wait for user responses in your pane; make and record reversible low-risk assumptions. To escalate a blocker, send a `task.status` RoleMessage to coordinator with payload status \"blocked\" and the blockers, with the original correlation_id and causation_id set to the assignment message_id. For a human decision use request_user_decision through Runtime and Conversation, then end your turn; Coordinator may also clarify through report_progress questions. Never invent message types. Emit structured results (status, summary, evidence, artifacts, blockers, requested_action, next_role) with verification evidence before claiming completion.";
       systemPrompt += roleReplyGuidance(role);
+      systemPrompt += buildRoleBriefing(role, provider);
     }
     if (provider === "agy") systemPrompt += "\n\nExact Bflow MCP tool definitions follow. Native file and shell tools are denied, including reads of MCP schema files or saved large outputs. Use these definitions directly with call_mcp_tool: ServerName=\"bflow\", ToolName=name, Arguments matching inputSchema. Do not guess parameter names. Request bounded repository_read output (limit at most 2048) to keep source observations inline.\n" + JSON.stringify(availableTools(role, provider));
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
@@ -1156,17 +1166,40 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (role !== "coordinator") throw new Error("Only Coordinator or an authenticated Conversation resume request may resume a blocked run");
       return host.runtime.resumeBlockedRun(runId, textField(parameters.actionId));
     }
+    if (name === "read_project_policy") {
+      if (role === "conversation") throw new Error("Conversation does not read repository project policy");
+      const query = ReadProjectPolicyInputSchema.parse(parameters);
+      let policyRoot = binding.worktreePath ?? configuration.repositoryPath;
+      if (["reviewer", "qa", "tester"].includes(role)) {
+        const state = record(await host.runtime.inspect());
+        const activeVerification = [...assignmentsForBinding(state.outbound as unknown[], binding)].reverse().find(out =>
+          ["accepted", "released"].includes(String(out.status)) && record(out.message).type === "verification.requested"
+        );
+        if (activeVerification) {
+          const payload = record(record(activeVerification.message).payload);
+          const candidateWorktree = typeof record(payload.input ?? {}).sourceWorktreePath === "string"
+            ? String(record(payload.input).sourceWorktreePath)
+            : typeof payload.worktreePath === "string"
+              ? payload.worktreePath
+              : undefined;
+          if (candidateWorktree && candidateWorktree.trim().length > 0) {
+            policyRoot = candidateWorktree.trim();
+          }
+        }
+      }
+      const isAgy = providerForRole(role) === "agy";
+      return json(await readProjectPolicy(policyRoot, query, isAgy ? { maxTotalBytes: 16_384 } : undefined));
+    }
     if (name === "planning_reference") {
       if (role !== "coordinator") throw new Error("Only Coordinator reads host planning guidance");
-      const section = textField(parameters.section);
-      const references: Record<string, string[]> = { specification:["../../../../templates/node-typescript/specifications/docs.spec.json","../../../specification/dist/schema.js","../../../specification/dist/classification.js"],
-        test_strategy:["../../../test-strategy/dist/schema.js","../../../../templates/node-typescript/specifications/bugfix.spec.json"], workflow:["../../../contracts/dist/workflow.js"] };
-      const selected = references[section]; if (!selected) throw new Error("Unknown planning section: choose specification, test_strategy, workflow");
+      const query = PlanningReferenceInputSchema.parse(parameters);
       await testRunners.refresh();
-      return json({ references: await Promise.all(selected.map(async path => ({source:path,content:await readFile(new URL(path,import.meta.url),"utf8")}))),
-        ...describeTestRunners(testRunners), verificationSandbox,
+      return planningReferenceView(query, {
+        runnerInfo: describeTestRunners(testRunners),
+        verificationSandbox,
         behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
-          ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" })) });
+          ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" }))
+      });
     }
     if (name === "host_status") return json({ active: !!workspace, quiesced, taskLogPane: taskLogPane.status(), ...schedulerStatusReport({ timerAlive: schedulerTimerAlive, quiesced, workspaceOpen: !!workspace, tickInFlight: !!scheduler, lastTickAt: schedulerLastTickAt, error: schedulerError }), inboundError: inboundError ?? null, conversationDeliveryFailures: (await receipts.conversationDeliveryFailures()).slice(-5) });
     if (name === "read_role_pane") {
@@ -1250,6 +1283,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return nativeDeliver(message);
     }
     if (name === "assignment_context") {
+      const query = AssignmentContextInputSchema.parse(parameters);
       const state = record(await host.runtime.inspect());
       const outbound = assignmentsForBinding(state.outbound as unknown[], binding);
       const conflictResolution = role === "developer" ? await development.conflictResolutionContext(binding) : undefined;
@@ -1263,105 +1297,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         toolActions, toolActionsNote: "Host-resolved scoped tool actions for this role. Invoke only when the listed trigger applies; grants do not require every action to be used. No Gateway credential or executable identity is included.",
         ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
         assignments: outbound.map(out => ({ ...out, envelopeDigest: digest(out.message) })), runs: assignedRuns };
+      if (query.view !== undefined && query.view !== "full" || query.surveyView !== undefined && query.surveyView !== "full" || query.includeReleased !== undefined) {
+        return compactAssignmentContext(fullReply, query);
+      }
       if (providerForRole(role) === "agy" && exceedsAgyInlineReply(fullReply)) {
-        const activeOutbound = outbound.filter(out => out.status === "accepted");
-        const selectedOutbound = activeOutbound.length > 0 ? activeOutbound : outbound.slice(-1);
-        const compactAssignments = selectedOutbound.map(out => {
-          const msg = record(out.message);
-          const payload = msg.payload !== null && typeof msg.payload === "object" && !Array.isArray(msg.payload)
-            ? (() => {
-                const { artifacts: _artifacts, specification: _spec, ...restPayload } = record(msg.payload);
-                if (restPayload.testStrategy !== null && typeof restPayload.testStrategy === "object" && !Array.isArray(restPayload.testStrategy)) {
-                  const ts = record(restPayload.testStrategy);
-                  const { metadata: _meta, ...restTs } = ts;
-                  return { ...restPayload, testStrategy: restTs };
-                }
-                return restPayload;
-              })()
-            : msg.payload;
-          return {
-            status: out.status,
-            taskId: out.taskId,
-            attemptId: out.attemptId,
-            handle: out.handle,
-            envelopeDigest: digest(out.message),
-            message: { ...msg, payload }
-          };
-        });
-        const compactRuns = assignedRuns.map(run => {
-          const delegation = record(run.delegation ?? {});
-          const workflowSpec = record(run.workflowSpec ?? {});
-          const spec = record(workflowSpec.specification ?? {});
-          const criteria = Array.isArray(spec.acceptanceCriteria)
-            ? spec.acceptanceCriteria.map(c => {
-                const item = record(c);
-                return { id: item.id, description: item.description, status: item.status, verificationMethod: item.verificationMethod };
-              })
-            : undefined;
-          const tasks = Array.isArray(run.tasks)
-            ? run.tasks.map(t => {
-                const task = record(t);
-                const taskSpec = record(task.spec ?? {});
-                const strategy = record(taskSpec.strategy ?? {});
-                const cycle = task.cycle !== null && typeof task.cycle === "object" ? record(task.cycle) : undefined;
-                return {
-                  taskId: task.taskId,
-                  writerReleased: task.writerReleased,
-                  worktrees: task.worktrees,
-                  ...(task.reworkResolutions ? { reworkResolutions: task.reworkResolutions } : {}),
-                  ...(cycle ? { cycle: { cycleId: cycle.cycleId, iteration: cycle.iteration, maxIterations: cycle.maxIterations, status: cycle.status } } : {}),
-                  spec: {
-                    request: taskSpec.request,
-                    decision: taskSpec.decision,
-                    strategy: {
-                      mode: strategy.mode,
-                      rationale: strategy.rationale,
-                      requiredVerificationMethods: strategy.requiredVerificationMethods,
-                      targetCommands: strategy.targetCommands
-                    }
-                  }
-                };
-              })
-            : [];
-          return {
-            runId: run.runId,
-            status: run.status,
-            baseRevision: run.baseRevision,
-            maxIterations: run.maxIterations,
-            ...(run.approvalKind ? { approvalKind: run.approvalKind } : {}),
-            ...(run.pendingAction ? { pendingAction: run.pendingAction } : {}),
-            ...(run.error ? { error: run.error } : {}),
-            delegation: {
-              runId: delegation.runId,
-              title: delegation.title,
-              objective: delegation.objective,
-              sddLevel: delegation.sddLevel,
-              specificationId: delegation.specificationId,
-              affectedPaths: record(delegation.metadata ?? {}).affectedPaths
-            },
-            ...(spec.specId ? {
-              specification: {
-                specId: spec.specId,
-                title: spec.title,
-                level: spec.level,
-                summary: spec.summary,
-                affectedPaths: spec.affectedPaths,
-                acceptanceCriteria: criteria
-              }
-            } : {}),
-            tasks
-          };
-        });
-        return json({
-          ...(repositorySurvey === undefined ? {} : { repositorySurvey }),
-          policyEvidence: fullReply.policyEvidence,
-          policyEvidenceNote: fullReply.policyEvidenceNote,
-          toolActions,
-          toolActionsNote: fullReply.toolActionsNote,
-          ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
-          assignments: compactAssignments,
-          runs: compactRuns
-        });
+        return compactAssignmentContext(fullReply, { view: "compact", surveyView: "full", includeReleased: false });
       }
       return json(fullReply);
     }
@@ -2248,7 +2188,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
   else if (["specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role)) tools.push(
     { name: "repository_read", description: "Bounded read-only repository files/listing and safe Git status/log/head/files/diff. Never executes arbitrary commands." });
   if (["coordinator", "developer", "specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role)) tools.push(
-    { name: "read_pinned_instructions", description: "Read this authenticated role's exact policy and verified pinned skill instructions for the active launch." });
+    { name: "read_pinned_instructions", description: "Read this authenticated role's exact policy and verified pinned skill instructions for the active launch." },
+    { name: "read_project_policy", description: "Read hierarchical repository policy files (AGENTS.md, CLAUDE.md, .github/copilot-instructions.md) from workspace root to filePath with full, toc, section, or digests views and knownDigests deduplication." });
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
   if (role === "developer") tools.push(
     { name: "workspace_status", description: "Inspect your assigned task worktree, current Git HEAD and recorded TDD phases; runId,taskId" },
@@ -2297,16 +2238,18 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     read_updates:{properties:{ref:{type:"string",minLength:1,maxLength:64},detail:{type:"boolean"}},required:[]},
     conversation_decide:{properties:{messageId:string,decision:chatDecision},required:["decision"]},
     read_role_pane:{properties:{role:string,paneId:string,lines:{type:"integer",minimum:1,maximum:200}},required:["role"]},
-    read_task_log:{properties:{runId:string,taskId:string,lines:{type:"integer",minimum:1,maximum:100},maxBytes:{type:"integer",minimum:256,maximum:16384}},required:[]},
+    assignment_context:{properties:{view:{type:"string",enum:["full","compact","active_only"]},surveyView:{type:"string",enum:["full","summary","anchors_only"]},includeReleased:{type:"boolean"}},required:[]},
+    read_task_log:{properties:{runId:string,taskId:string,lines:{type:"integer",minimum:1,maximum:100},maxBytes:{type:"integer",minimum:256,maximum:16384},cursor:{type:"string",minLength:1,maxLength:128},view:{type:"string",enum:["full","compact"]}},required:[]},
     log_task_step:{properties:{runId:string,taskId:string,action:{type:"string",minLength:1,maxLength:120}},required:["runId","action"]},
-    planning_reference:{properties:{section:{type:"string",enum:["specification","test_strategy","workflow"]}},required:["section"]},
+    planning_reference:{properties:{section:{type:"string",enum:["specification","test_strategy","workflow","all"]},view:{type:"string",enum:["full","compact","schema_only"]},includeRunners:{type:"boolean"}},required:["section"]},
     read_pinned_instructions:{properties:{skillId:{type:"string",minLength:1},offset:{type:"integer",minimum:0,maximum:1048576},limit:{type:"integer",minimum:1,maximum:16384}},required:[]},
-    repository_read:{properties:{op:{type:"string",enum:["read","list","git"]},path:string,offset:{type:"integer",minimum:0},cursor:{type:"integer",minimum:0,maximum:1000000},limit:{type:"integer",minimum:1,maximum:65536},action:{type:"string",enum:["status","log","head","files","diff"]}},required:["op"]},
+    read_project_policy:{properties:{filePath:{type:"string",minLength:1,maxLength:512},view:{type:"string",enum:["full","toc","section","digests"]},heading:{type:"string",minLength:1,maxLength:200},knownDigests:{type:"object",additionalProperties:{type:"string",pattern:"^[a-f0-9]{64}$"}}},required:[]},
+    repository_read:{properties:{op:{type:"string",enum:["read","list","git"]},path:string,offset:{type:"integer",minimum:0},cursor:{type:"integer",minimum:0,maximum:1000000},limit:{type:"integer",minimum:1,maximum:65536},action:{type:"string",enum:["status","log","head","files","diff"]},view:{type:"string",enum:["content","stat","outline"]},startLine:{type:"integer",minimum:1,maximum:1000000},endLine:{type:"integer",minimum:1,maximum:1000000}},required:["op"]},
     resume_run:{properties:{runId:string,actionId:string,messageId:string},required:role === "conversation" ? ["runId"] : ["runId","actionId"]},
     [USER_DECISION_TOOL]:{properties:{runId:string,taskId:string,question:{type:"string",minLength:1,maxLength:2000},
       options:{type:"array",items:{type:"string",minLength:1,maxLength:200},minItems:2,maxItems:6},
       context:{type:"string",maxLength:4000},expiresInMinutes:{type:"integer",minimum:1,maximum:1440}},required:["runId","taskId","question"]},
-    inspect:{properties:{runId:string},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
+    inspect:{properties:{runId:string,view:{type:"string",enum:["full","summary","status","tasks","blockers"]},taskId:string,cursor:{type:"string",minLength:1,maxLength:128}},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
     assess:{properties:{specification:assessmentSpecificationToolSchema},required:["specification"]},
     request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array},required:["runId","role","objective","requiredCapabilities"]},
     propose_workflow:{properties:{runId:string,specification:specificationToolSchema,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},

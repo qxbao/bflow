@@ -34,6 +34,7 @@ Skills are instruction-only and model-neutral. They do not grant tools, permissi
 1. Read the assigned role, task scope and current manifest references. Load only the skill needed for the next operation; retain the original role prompt.
 2. Inspect existing command help and repository status before choosing an operation. Separate environment health, workflow state, human approval and transport completion.
 3. Use the existing Runtime capability for authorized workflow mutations. A documented command remains subject to its own authority checks; discovering a command does not authorize running it.
+4. Prefer compact MCP views and cursors to avoid redundant context bloat: use `assignment_context` with `view: "compact"`, `surveyView: "summary"`, `includeReleased: false`; use `read_project_policy` with `view: "toc"` or `view: "section"` and `knownDigests` to inspect repository policy files; use `read_task_log` with `view: "compact"` and `cursor` (`nextCursor`); for Coordinator use `planning_reference` with `section: "all"`, `view: "compact"` and `inspect` with `view: "summary"` and `cursor`; for repository reads use `repository_read` with `view: "stat"` or `view: "outline"` and `startLine`/`endLine`.
 
 ## Bflow commands
 

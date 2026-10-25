@@ -32,10 +32,11 @@ import {
   toAssignedQualityFindings, validateAndStoreReworkResolution, verifyStoredReworkDossier,
   type ReworkResolutionDossier
 } from "./rework-causality.js";
+import { InspectInputSchema, summarizeInspectRun, summarizeInspectState, type InspectInput } from "./mcp-output-views.js";
 
 /** Existing receipt and diagnostic operations that may drain after scheduling is quiesced. */
 export const QUIESCED_RECEIPT_DRAIN_OPERATIONS: readonly string[] = Object.freeze([
-  "inspect_native_delivery", "host_status", "assignment_context", "repository_read", "read_pinned_instructions", "read_task_log", "log_task_step",
+  "inspect_native_delivery", "host_status", "assignment_context", "repository_read", "read_pinned_instructions", "read_project_policy", "read_task_log", "log_task_step",
   "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "record_behavioral_verification", "submit_implementation"
 ]);
 
@@ -1068,10 +1069,20 @@ export class AgenticWorkflowRuntime {
       } finally { if (timer) clearTimeout(timer); if (dispatchTimer) clearInterval(dispatchTimer); options?.signal?.removeEventListener("abort", abort); this.gateWaiters.delete(key); }
     } };
   }
-  async inspect(runId?: string): Promise<JsonValue> {
-    return this.journal.exclusive(async state => json(runId ? this.run(state, runId) : {
+  async inspect(runIdOrQuery?: string | InspectInput): Promise<JsonValue> {
+    if (typeof runIdOrQuery === "string" || runIdOrQuery === undefined) {
+      return this.journal.exclusive(async state => json(runIdOrQuery ? this.run(state, runIdOrQuery) : {
+        runs: state.runs, outbound: state.outbound, inbox: state.inbox
+      }));
+    }
+    const query = InspectInputSchema.parse(runIdOrQuery);
+    const raw = await this.journal.exclusive(async state => json(query.runId ? this.run(state, query.runId) : {
       runs: state.runs, outbound: state.outbound, inbox: state.inbox
     }));
+    if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
+      return raw;
+    }
+    return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
   }
   /** Read-only receipt view: no Core restore, coroutine recovery or semantic writes as part of diagnostics. */
   async nativeDeliveryInbox(): Promise<JournalState["inbox"]> {
