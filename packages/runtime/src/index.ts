@@ -120,6 +120,9 @@ export type {
   GitNexusImpactIndexOptions
 } from "./agentic/impact-index.js";
 
+export { selectRegressionTests } from "./agentic/regression-selection.js";
+export type { RegressionSelection } from "./agentic/regression-selection.js";
+
 // P30: platform readiness composition (no concrete provider adapter classes are exported).
 export * from "./platform/index.js";
 
