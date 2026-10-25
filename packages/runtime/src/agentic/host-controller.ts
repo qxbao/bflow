@@ -199,12 +199,13 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   }
   let configuration = await readHostConfiguration(configPath);
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
-  if (options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (digest(parseBehavioralCommands(configuration.behavioralCommands)) !== digest(parseBehavioralCommands(options.behavioralCommands)))
     throw new Error("Persisted behavioral commands differ from owner configuration; quiesce and reconcile before changing verification authority");
-  // Platform changes are only admissible while no host process owns the endpoint.
+  // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
+  const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
+  const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
   const request = (method: string, params: unknown = {}, op?: OperationOptions) => {
     const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000),
       op?.deadline === undefined ? Infinity : Math.max(1, Date.parse(op.deadline) - Date.now()));
@@ -216,6 +217,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
     alive = false;
   }
+  if (alive && options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy))
+    throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
   if (!alive) {
     try {
@@ -230,8 +233,11 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
       try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
       catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
     } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
-    if (platformChanged) {
-      await rewritePersistedPlatform(configPath, requestedPlatform);
+    if (platformChanged || policyChanged || impactIndexChanged) {
+      await rewritePersistedPlatform(configPath, requestedPlatform, {
+        ...(options.policy !== undefined ? { policy: options.policy } : {}),
+        ...(options.impactIndex !== undefined ? { impactIndex: options.impactIndex } : {})
+      });
       configuration = await readHostConfiguration(configPath);
     }
     const log = await open(join(directory, "host.log"), "a", 0o600);

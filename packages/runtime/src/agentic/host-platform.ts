@@ -904,8 +904,20 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
   return session;
 }
 
-/** Writes `host.json` with a new platform block, keeping socket, token and directory. Caller holds the boot lock. */
-export async function rewritePersistedPlatform(path: string, platform: AgenticHostPlatformOptions | undefined): Promise<void> {
+/** Writes `host.json` with updated startup authority while keeping socket, token and directory. Caller holds the boot lock. */
+export async function rewritePersistedPlatform(
+  path: string,
+  platform: AgenticHostPlatformOptions | undefined,
+  extras?: { readonly policy?: unknown; readonly impactIndex?: unknown }
+): Promise<void> {
   const current = z.record(z.unknown()).parse(JSON.parse(await readFile(path, "utf8")));
-  await writePrivateAtomic(path, JSON.stringify({ ...current, platform }));
+  await writePrivateAtomic(
+    path,
+    JSON.stringify({
+      ...current,
+      platform,
+      ...(extras && "policy" in extras ? { policy: extras.policy } : {}),
+      ...(extras && "impactIndex" in extras ? { impactIndex: extras.impactIndex } : {})
+    })
+  );
 }

@@ -2,11 +2,10 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureAgenticHost } from "../../dist/agentic/host-controller.js";
+import { ensureAgenticHost, openPersistedAgenticHost } from "../../dist/agentic/host-controller.js";
 import {
   effectiveFastPathMode,
   effectiveRegressionScope,
-  openPersistedAgenticHost,
   readHostConfiguration,
   type AgenticHostOptions
 } from "../../src/agentic/host-controller.js";
@@ -121,10 +120,35 @@ describe("persisted host policy regressionScope recovery", () => {
     if (process.platform === "linux") {
       const binary = join(root, "herdr-fixture.mjs");
       await writeFile(binary, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n', { mode: 0o700 });
+      await writeFile(
+        hostJsonPath,
+        JSON.stringify({
+          repositoryPath: root,
+          sessionId,
+          directory,
+          socketPath: join(directory, "host.sock"),
+          token: "secret-token",
+          herdrBinary: binary,
+          policy: basePolicy
+        }),
+        { mode: 0o600 }
+      );
+      const recovered = await openPersistedAgenticHost({ repositoryPath: root, sessionId });
+      cleanup.push(() => recovered.shutdown().catch(() => undefined));
+      const afterRecover = await readHostConfiguration(hostJsonPath);
+      expect(effectiveFastPathMode(afterRecover.policy, true)).toBe("off");
+      await recovered.shutdown();
+
+      const impactIndex = {
+        executable: join(root, "bin", "gitnexus"),
+        home: join(root, "state", "gitnexus", "gitnexus-home"),
+        storageLockPath: join(root, "state", "gitnexus", "gitnexus-storage-test.lock")
+      };
       const reopened = await ensureAgenticHost({
         repositoryPath: root,
         sessionId,
         herdrBinary: binary,
+        impactIndex,
         policy: {
           ...basePolicy,
           verification: { ...basePolicy.verification, regressionScope: "affected" },
@@ -133,7 +157,9 @@ describe("persisted host policy regressionScope recovery", () => {
       });
       cleanup.push(() => reopened.shutdown().catch(() => undefined));
       const afterReopen = await readHostConfiguration(hostJsonPath);
-      expect(effectiveFastPathMode(afterReopen.policy, true)).toBe("off");
+      expect(effectiveFastPathMode(afterReopen.policy, true)).toBe("auto");
+      expect(effectiveRegressionScope(afterReopen.policy, true)).toBe("affected");
+      expect(afterReopen.impactIndex).toEqual(impactIndex);
     }
   });
 
