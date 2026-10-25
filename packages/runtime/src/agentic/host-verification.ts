@@ -210,7 +210,7 @@ export class HostVerification {
     const owner = behavioralChecks(this.runners.owner);
     if (!this.runners.automatic) return owner;
     const profiles = this.runners.profilesForRevision(originalRevision);
-    const regression = this.regression.scope === "affected"
+    const regression = this.regression.scope !== "mapped_only"
       ? regressionChecks(specification && strategy ? profiles : this.runners.availableProfiles)
       : [];
     if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles), ...regression];
@@ -394,7 +394,7 @@ export class HostVerification {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
       ...(this.runners.automatic ? [
         ...this.runners.availableProfiles.map(runner => this.automaticGate(runner)),
-        ...(this.regression.scope === "affected"
+        ...(this.regression.scope !== "mapped_only"
           ? this.runners.availableProfiles.filter(profile => !profile.adapter).map(profile => this.regressionGate(profile))
           : []),
         ...AUTOMATIC_STATIC_COMMANDS.map(command => this.policyDeterministicGate(staticGateId(command), command))

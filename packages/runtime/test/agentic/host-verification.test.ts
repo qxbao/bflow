@@ -164,6 +164,15 @@ describe("trusted host observations",()=>{
     expect(affectedHost.behavioralGates().map(g=>g.id)).toContain("host-regression-node-tap-pnpm");
     expect(affectedHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-pytest-adapter");
 
+    const fullHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
+      scope:"full",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(fullHost.behavioralChecks().map(c=>c.id)).toContain("host-regression-node-tap-pnpm");
+    expect(fullHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-pytest-adapter");
+    expect(fullHost.behavioralGates().map(g=>g.id)).toContain("host-regression-node-tap-pnpm");
+    expect(fullHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-pytest-adapter");
+
     const mappedOnlyHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
       scope:"mapped_only",
       index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
