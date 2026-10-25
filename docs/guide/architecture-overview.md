@@ -7,6 +7,8 @@ Kiến trúc Bflow được cấu thành từ năm thành phần cốt lõi:
 4. **Herdr**: Tầng điều phối tiến trình và môi trường hiển thị đa pane vật lý; vận hành các tiến trình agent trong các terminal pane riêng biệt và vận chuyển thông điệp theo giao thức chuẩn.
 5. **ArtifactStore**: Kho lưu trữ bất biến có định danh theo nội dung (content-addressed) và xác thực mã băm SHA-256; lưu trữ an toàn các tài liệu đặc tả, bản vá (patch) và kết quả kiểm thử.
 
+CLI lifecycle hiện ghép persistent host và platform P30. Setup tạo machine inventory/Gateway/skills; repo chọn desired config; session pin grant/manifest/generation. Tool policy D-TOOLS-01 phân biệt catalog ID, service và upstream operation, còn inter-role messages vẫn qua Herdr. Context khảo sát source là bằng chứng implementation, không là business intent đã duyệt. Xem [trạng thái hiện tại](../implementation-status.md) và [tool integration](../tools-sdlc-integration.md).
+
 Thành phần Core của Bflow hoàn toàn mang tính tất định (deterministic), không phụ thuộc trực tiếp vào Herdr; Runtime kết hợp các gói thành phần thông qua các hợp đồng giao tiếp chuẩn hóa (`@bflow/contracts`).
 
 ---
@@ -23,6 +25,9 @@ flowchart LR
     R --> S[P15 SDD / P16 TDD]
     R --> V[P17 Verification / P18 Git Integration]
     R --> F[ArtifactStore]
+    R --> L[Platform · provider readiness · skill manifests]
+    R -->|Scoped tool action| G[Shared MCP Gateway]
+    G --> T[Remote MCP / stdio backends / resource leases]
     R <-->|Tầng truyền tải Herdr| H[Specialist / Developer / Reviewer / QA Panes]
 ```
 

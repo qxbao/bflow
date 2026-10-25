@@ -1,5 +1,7 @@
 # macOS Runtime portability audit and acceptance
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Post-delivery review found and fixed Unicode permission/TDD aliases, native read-only
 authorization and helper-cache recovery defects. See the [review report](2026-10-24-macos-portability-review.md)
 for the current patch and validation. The live SDLC evidence below records the earlier accepted

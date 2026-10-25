@@ -21,11 +21,11 @@ Bảng trên phản ánh kết quả đánh giá thực tế khi chạy qua bộ
 
 ## 2. Các cấp độ đặc tả yêu cầu
 
-Chi tiết xác thực được quy định tại [P15 validator](../../packages/specification/src/schema.ts):
-- **Cấp độ Lightweight**: Bắt buộc nêu rõ bài toán cần giải quyết, phạm vi (scope), các đường dẫn bị ảnh hưởng (affected paths), danh sách tiêu chí nghiệm thu (acceptance criteria) và khả năng truy vết (traceability).
-- **Cấp độ Standard**: Kế thừa toàn bộ cấp độ Lightweight, bổ sung thêm yêu cầu chức năng (functional requirements) và chiến lược kiểm thử đề xuất (proposed test strategy).
-- **Cấp độ Full**: Kế thừa cấp độ Standard, bổ sung thiết kế kiến trúc, phân tích bảo mật, phương án rollback, chiến lược kiểm thử chi tiết (`TestStrategy`) và quyết định TDD (`TddDecision`).
-- **Cấp độ Complex**: Kế thừa cấp độ Full, yêu cầu bổ sung thiết kế chi tiết, các ràng buộc kỹ thuật, phân tích hợp đồng giao tiếp, đánh đổi kiến trúc (tradeoffs) và chiến lược di chuyển dữ liệu nếu có thay đổi về lược đồ dữ liệu.
+[Contract](../../packages/contracts/src/sdlc.ts) chỉ có hai `level`: `lightweight` và `full`. `trivial`, `standard`, `complex` là **complexity**, không phải các level thêm vào cấu hình:
+
+- **Lightweight:** giữ problem/scope/affected paths, acceptance criteria và traceability theo validator.
+- **Full:** bổ sung architecture notes, security considerations, rollback plan, TestStrategy và TddDecision.
+- **P15 metadata:** thay đổi non-trivial cần functional requirements và proposed test strategy; `complex` cần design/constraints/API-data contracts/tradeoffs, cùng migration strategy khi có data impact. Các điều kiện này nằm trong `metadata.sdd`, không tạo level mới. [P15 validator](../../packages/specification/src/schema.ts).
 
 Các tệp `sdd/*.assessment.json` trong [thư mục mẫu](../../templates/node-typescript/sdd/) đóng vai trò là đầu vào cho `ChangeAssessmentSchema`. Các tệp `specifications/*.spec.json` là các bản thảo hợp lệ cho `SpecificationDocumentSchema`, chứa `metadata.sdd` và `metadata.conditionalTdd`. Tuyệt đối không giả mạo trường `approvedBy` hay URI artifact. Các giá trị định danh run/session và dấu thời gian trong mẫu chỉ nhằm mục đích kiểm tra tính hợp lệ của schema/policy; host có trách nhiệm liên kết lại phiên thực tế và giải quyết lại chiến lược thay vì chỉ thay đổi ID của một quyết định đã băm.
 
@@ -47,3 +47,10 @@ Các tệp `sdd/*.assessment.json` trong [thư mục mẫu](../../templates/node
 > - Các tác vụ logic nghiệp vụ (domain logic) hoặc sửa lỗi (bugfix) không bao giờ được resolver cho phép gán `not_applicable`. Không có cờ boolean tự khai báo nào có thể dùng để bỏ qua kiểm tra.
 
 Bằng chứng kỹ thuật thực tế được ghi nhận thông qua các phương thức `recordEvidence`, `assertReadyToImplement` và `assertEvidenceComplete`. Host có trách nhiệm xác thực runner, phiên bản mã nguồn (revision), thời gian thực thi và nội dung nhật ký log; đồng thời chuyển đổi `ArtifactProposal` thông qua `ArtifactStore` để lấy tham chiếu tin cậy `artifact://`. Một bản JSON chiến lược hợp lệ hay lời khẳng định của agent rằng "tests passed" hoàn toàn không được coi là bằng chứng. Xem thêm tại [Vòng lặp kiểm tra (Verification Loop)](verification-loop.md).
+
+
+## 4. NFR và chọn phép kiểm tra theo rủi ro
+
+Các reference mới hướng dẫn làm rõ outcome, metric/hành vi quan sát, nguồn ngưỡng, workload/environment, cách đo và evidence. Oracle/điều kiện nằm trong `AcceptanceCriterion.description` và prose của Specification; không thêm schema NFR hoặc default SLA. Chưa được duyệt thì vẫn proposed/pending; thiếu runner hoặc kết quả không được coi là pass.
+
+Tester/QA chọn viewpoints liên quan và map exact criterion/test/check; phần không liên quan ghi N/A có lý do. TDD vẫn do resolver quyết định, independent verification và approvals giữ nguyên. Xem [NFR/test design](../nfr-and-test-design.md) và các [criterion mẫu canonical](../../skills/sdlc/specification-driven-development/nfr-examples.md).

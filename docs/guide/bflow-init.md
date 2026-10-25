@@ -40,7 +40,11 @@ Quy trình di chuyển cấu hình:
 
 ---
 
-## 3. Tính lũy thừa và cờ ghi đè cấu hình
+## 3. Giữ cấu hình, cập nhật và ghi đè
+
+`bflow init --update` (hoặc `-u`) tái tạo YAML/comment và bổ sung default fields trong khi giữ giá trị đã có, đồng thời reconcile identity theo checkout hiện tại. Xem lại diff trước khi commit; không dùng để nhận authority của session cũ ở checkout khác. `--provider` tường minh khi update đổi provider của các role; với Agy, field effort riêng bị bỏ theo schema.
+
+Các defaults mới: Codex, `workspace_auto`, `trustedWorkspace: true`, optional integrated tools/Context7, concurrency 2, verification 3 vòng và startup 300.000 ms. [Config reference](configuration-reference.md) ghi giới hạn mà persistent host thực sự nhận.
 
 Theo cơ chế mặc định, lệnh `init` sẽ bảo lưu nguyên vẹn tệp cấu hình nếu đã tồn tại từ trước. **Tuy nhiên trong phiên bản hiện tại, khi truyền các cờ `--force`, `-f`, `--yes` hoặc `-y`, hệ thống sẽ ghi đè toàn bộ cấu hình về các giá trị mặc định ban đầu** (dù nội dung trợ giúp ở một số tài liệu cũ ghi là luôn bảo lưu). Hành vi ghi đè này đã được kiểm chứng thực tế trong môi trường tạm thời. Tuyệt đối không dùng các cờ này để khôi phục hoặc khắc phục lỗi phiên; hãy chủ động sao lưu và so sánh diff nếu muốn tái tạo lại cấu hình.
 
@@ -53,7 +57,8 @@ Các trường như `environment.repositoryId`, `workspaceRoot`, `sessionName` �
 Trước khi thực hiện lệnh `bflow up` lần đầu tiên, bạn có thể áp dụng các mẫu quy trình công việc có sẵn:
 
 ```bash
-node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . feature
+export BFLOW_SOURCE=/absolute/path/to/bflow
+node "$BFLOW_SOURCE/templates/node-typescript/apply.mjs" . feature
 ```
 
 Kịch bản hỗ trợ này sẽ giữ nguyên các thông tin môi trường, định danh và lưu trữ từ bước `init`, đồng thời cập nhật `defaultWorkflow` cùng các chính sách liên quan từ fragment. Kịch bản luôn xác thực tính hợp lệ của cấu hình mới bằng trình nạp thực tế trước khi ghi tệp và tự động tạo bản sao lưu trong thư mục `.bflow/data/`. Kịch bản sẽ từ chối thực thi nếu phát hiện thư mục `.bflow/state` đã tồn tại (kể cả liên kết mềm dangling symlink). Nếu checkout của bạn vẫn còn tệp cấu hình cũ, hãy chạy `bflow config-migrate` trước khi áp dụng mẫu.

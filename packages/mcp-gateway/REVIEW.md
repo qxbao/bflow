@@ -1,5 +1,7 @@
 # Phase P27 (`@bflow/mcp-gateway`) — Review Code, Giao thức và Bảo mật của Argon
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 ## 1. Phạm vi và quy trình review
 
 - **Quy trình**: Plan (Argon) → Implement (Flash subagents `2a6693a6-1250-44b1-89c9-e86a92cd9e98`, `a1a838ab-7e41-4af7-81db-2f88b375dfa0`, `25470f7b-7420-4822-ab34-d77bfd74c8e5`) → Review (Argon) → Fix (Flash subagent `88faf3b5-03f1-4088-b484-270c801e1aa0`) → Final Acceptance (Argon).

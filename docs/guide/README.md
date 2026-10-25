@@ -1,6 +1,6 @@
 # Hướng dẫn sử dụng Bflow
 
-Tài liệu này cung cấp hướng dẫn toàn diện cho việc thiết lập và vận hành Bflow trên một repository mới, dựa trên mã nguồn thực tế hiện tại. Lưu ý rằng tầng quản lý vòng đời CLI và máy chủ P19 host là hai luồng vận hành độc lập; các tính năng chưa được tự động tích hợp đều được chú thích rõ là **dự kiến / chưa triển khai**. Hệ thống hợp đồng giao tiếp công khai (Public Contracts) và các bản ghi quyết định kiến trúc (ADR) luôn là nguồn tham chiếu chuẩn mực cao nhất.
+Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin.js setup` một lần, nạp lại shell rồi dùng lệnh tắt `bflow`. CLI lifecycle đã ghép persistent P19 host/platform; legacy workflow commands dùng Runtime store riêng. [Trạng thái source và bằng chứng](../implementation-status.md), [mục lục toàn bộ tài liệu](../README.md) và exported contracts là các điểm tham chiếu khi đối chiếu hành vi.
 
 | Chủ đề | Nội dung tóm tắt |
 | --- | --- |
@@ -9,12 +9,15 @@ Tài liệu này cung cấp hướng dẫn toàn diện cho việc thiết lập
 | [Khởi tạo dự án (`bflow init`)](bflow-init.md) | Cấu trúc tệp config.yml có chú thích, định danh Git, chuyển đổi phiên bản, tính lũy thừa và cờ ghi đè |
 | [Khởi động dịch vụ (`bflow up`)](bflow-up.md) | Quản lý phiên có tên (named session), các vai trò thường trực, điều kiện sẵn sàng và các giới hạn khi khởi động host |
 | [Gắn kết phiên (`bflow attach`)](bflow-attach.md) | Cơ chế gắn kết trực tiếp vào pane của Conversation Agent |
+| [Cập nhật trong Conversation](conversation-updates.md) | Thẻ tiếng Việt, mã `#n`/`Việc #k`, lựa chọn, chi tiết và Log |
 | [Khôi phục sự cố sau Ctrl+C](troubleshooting.md) | Cơ chế khoá kernel (kernel lock), lệnh `recover --yes`, hộp thoại khởi động native và nhãn định danh pane |
 | [Hạ dịch vụ (`bflow down`)](bflow-down.md) | Rào chắn an toàn (barrier), điểm kiểm tra (checkpoint) và các giới hạn khi dừng hệ thống |
 | [Tham chiếu cấu hình (Configuration Reference)](configuration-reference.md) | Chi tiết các trường cấu hình thực tế cho CLI, Runtime host và Herdr |
 | [Các vai trò Agent (Agent Roles)](agent-roles.md) | Danh mục 8 vai trò chính thức và ánh xạ định danh theo hợp đồng (contracts) |
 | [Chính sách SDD & TDD](sdd-tdd-policies.md) | Phân loại rủi ro, xác định mức độ đặc tả, các chế độ kiểm thử required/recommended/not_applicable |
 | [Vòng lặp kiểm tra (Verification Loop)](verification-loop.md) | Cơ chế kiểm thử độc lập, kiểm soát giới hạn số lần thử lại (retry), sửa lỗi (rework) và vòng lặp |
+| [Rework và giải trình nguyên nhân](../rework-causality.md) | Finding identity, source/evidence, reviewer verdict và giới hạn guard hiện tại |
+| [NFR và risk-based test design](../nfr-and-test-design.md) | Oracle/điều kiện đo, traceability và viewpoints có điều kiện |
 | [Khôi phục phiên làm việc (Session Recovery)](session-recovery.md) | Xử lý khởi động lại, tình trạng truyền tin bất định (uncertain delivery), biên nhận và phát lại điểm kiểm tra |
 | [Giao tiếp qua Herdr (Herdr Communication)](herdr-communication.md) | Cấu trúc RoleMessage, biên nhận native đã xác thực và các giới hạn của tầng truyền tải |
 | [Xử lý sự cố (Troubleshooting)](troubleshooting.md) | Cẩm nang chẩn đoán và khắc phục lỗi thực tế theo từng thành phần |
@@ -35,9 +38,11 @@ Tài liệu này cung cấp hướng dẫn toàn diện cho việc thiết lập
 | Quản lý vòng đời (Up / Attach / Status / Doctor) qua P12 + P13 | Đã triển khai; môi trường nhà cung cấp (provider) và agent cần được cài đặt, đăng nhập độc lập |
 | Hạ dịch vụ (`bflow down`) của CLI adapter mặc định | Đã tích hợp cơ chế rút cạn/điểm kiểm tra của host cùng quy trình tắt P13; vượt qua kiểm thử smoke; `--yes` không bỏ qua barrier an toàn |
 | Tổ hợp quy trình SDLC (P14–P19) | Đã cung cấp API `openAgenticWorkspace`; đòi hỏi host tin cậy và cơ chế đăng ký/xác thực công cụ của provider |
-| Thực thi chính sách SDD / Conditional TDD / Verification | Chính sách môi trường được chuyển tiếp tới host; hỗ trợ rà soát thủ công và runner kiểm thử Node TAP/Vitest trên Linux |
-| CLI tự động khởi động và tắt host P19 | Đã triển khai với các native Claude hook và dịch vụ MCP; vượt qua kiểm thử chu trình up/down/restart |
+| Thực thi chính sách SDD / Conditional TDD / Verification | Policy được chuyển tới host; tự phát hiện runner theo [ma trận](../verification-runners.md), JS/TS có Linux Bubblewrap và macOS Seatbelt |
+| CLI tự động khởi động và tắt host P19 | Đã triển khai provider-aware prepare/activate và native hooks/MCP; probe/lifecycle reports có phạm vi riêng |
 | Tầng truyền tải thông điệp Herdr có chữ ký số | Đã kiểm chứng thực tế; việc truyền tải thông điệp không thay thế cho bằng chứng nghiệm thu kết quả của AI |
+| Conversation plaintext/alias/Log | Có source và local hook/RPC/render tests; receipt hiển thị không là human approval hay live-provider acceptance |
+| Rework/NFR/risk references | Có source/local coverage; [main updates](../main-updates-2026-10-25.md) ghi mốc và giới hạn, bao gồm missing verdict-coverage guard |
 | Nghiệm thu Agentic SDLC đầu-cuối với mô hình trực tiếp | **Chưa kiểm chứng đầy đủ trong đợt phát hành này** |
 | Tự động tích hợp, merge và triển khai nhánh được bảo vệ | Runtime hiện tại không cấp quyền thực thi tự động các thao tác đẩy nhánh/triển khai lên remote |
 

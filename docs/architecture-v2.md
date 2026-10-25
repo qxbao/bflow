@@ -1,5 +1,7 @@
 # Kiến Trúc Hệ Thống bflow v2: Agentic SDLC Multi-Agent Framework
 
+> **Cách đọc:** quyết định/spec và audit gốc bên dưới giữ phạm vi lịch sử. [Implementation status](implementation-status.md) mô tả source tích hợp hiện tại, gồm các thay đổi sau baseline; không suy một plan hoặc acceptance criterion là kết quả đã nghiệm thu.
+
 Tài liệu này xác lập đặc tả kiến trúc kỹ thuật chuẩn mực và có thẩm quyền (authoritative architectural specification) cho phiên bản nâng cấp v2 của nền tảng **bflow**. Kiến trúc này nâng tầm bflow từ một workflow engine đơn lẻ (P00–P10) thành một khung điều phối đa tác tử thông minh (Agentic SDLC Multi-Agent Framework, P11–P19), tích hợp chặt chẽ với Herdr để quản lý môi trường multi-pane, tương tác đàm thoại tự nhiên với người dùng (Conversation Agent), phân rã bài toán và điều phối chiến lược (Coordinator Agent), phát triển hướng đặc tả (Spec-Driven Development), TDD có điều kiện (Conditional TDD), và vòng lặp kiểm chuẩn có chặn (Bounded Verification Loop).
 
 ---
@@ -237,8 +239,8 @@ flowchart LR
     S_ver --> S_rev["reviewing"]
     S_rev --> S_app["awaiting_approval"]
     S_app --> S_succ["completed / succeeded"]
-    S_ver -. Lỗi .- -> S_fail["failed"]
-    S_app -. Yêu cầu làm lại .- -> S_rework["implementing (Gen+1)"]
+    S_ver -. Lỗi .-> S_fail["failed"]
+    S_app -. Yêu cầu làm lại .-> S_rework["implementing (Gen+1)"]
   end
 
   subgraph D3["3. ConversationSessionStatus (Hội thoại người dùng)"]
@@ -248,7 +250,7 @@ flowchart LR
     C_del --> C_rep["reporting_progress"]
     C_rep --> C_app["awaiting_user_approval"]
     C_app --> C_comp["completed"]
-    C_del -. Tạm dừng .- -> C_pause["paused"]
+    C_del -. Tạm dừng .-> C_pause["paused"]
     C_comp --> C_arch["closed / archived"]
   end
 
@@ -401,7 +403,7 @@ flowchart TD
 
   subgraph Storage_Layer["Tầng Dữ Liệu & Bằng Chứng Bất Biến (Storage & Persistence)"]
     RuntimeService <-->|ACID Events & Snapshots| RunStore["@bflow/persistence<br/>• SQLite Transactional Store<br/>• Recovery Checkpoints"]
-    RuntimeService <-->|artifact://store/{id}| ArtifactStore["@bflow/artifact-store<br/>• Specification & Git Patches<br/>• Test Results & Verification Logs"]
+    RuntimeService <-->|"artifact://store/{id}"| ArtifactStore["@bflow/artifact-store<br/>• Specification & Git Patches<br/>• Test Results & Verification Logs"]
   end
 ```
 

@@ -22,7 +22,7 @@ Khi gặp sự cố, bước đầu tiên là kiểm tra hiện trạng bằng c
 | `Named session exists without ownership evidence` | Tồn tại phiên Herdr trùng tên nhưng thiếu bằng chứng sở hữu từ repo hiện tại; không tự tiện tiếp nhận hoặc xoá session đó; kiểm tra lại đường dẫn checkout và manifest. |
 | Khóa vòng đời (lifecycle lock) sót lại từ phiên bản cũ | Dừng lệnh up/down cũ trước, sau đó thực thi `bflow recover --yes`. Chỉ thư mục khóa rỗng cũ mới bị dọn dẹp; trạng thái dữ liệu, worktree và agent được bảo toàn nguyên vẹn. |
 | `Another up/down is still running` | Khóa kernel vẫn đang thuộc sở hữu của một tiến trình thực tế. Hãy đợi hoặc nhấn `Ctrl+C` lệnh đó; không được xoá tệp `lifecycle.guard` vì sẽ phá vỡ tính tuần tự an toàn. |
-| Lỗi `spawn flock ENOENT` | Cài đặt gói `util-linux` và đảm bảo lệnh `flock` có sẵn trong biến môi trường `PATH`; cơ chế khóa vòng đời trên Linux bắt buộc cần công cụ này. |
+| Lỗi `spawn flock ENOENT` | Linux cần `flock` util-linux trên PATH; macOS cần bản hỗ trợ inherited file descriptor. Cài đúng nền tảng, không thay flock bằng lock file tự chế. |
 | Codex hiển thị hộp thoại Update CLI / trust / login | Lỗi chỉ rõ role, pane và session. Hãy mở đúng session bằng lệnh được gợi ý, xử lý hộp thoại tương tác thủ công rồi chạy lại `bflow up`. Bflow không tự động chấp nhận cập nhật, tin cậy hay phân quyền. |
 | Quá trình hạ dịch vụ bị gián đoạn (Interrupted shutdown) | Chạy lại lệnh `bflow down --yes`; hệ thống sẽ quan sát các pane còn sống, thực hiện rút cạn/ghi checkpoint và chỉ đóng các thành phần còn sót lại. |
 | Lệnh down thiếu rào chắn an toàn (shutdown barrier) | Kiểm tra cấu hình host tùy biến; host Claude mặc định có rào chắn an toàn thực sự, cờ `--yes` không bao giờ bỏ qua bước rút cạn/checkpoint. |
@@ -36,6 +36,18 @@ Khi gặp sự cố, bước đầu tiên là kiểm tra hiện trạng bằng c
 | Lệnh `pnpm install` trong ví dụ không cài phụ thuộc | Thư mục ví dụ không thuộc workspace gốc; hãy sao chép ra repository độc lập hoặc sử dụng cờ `pnpm install --ignore-workspace --frozen-lockfile`. |
 
 ---
+
+Các lỗi mới theo platform/tool policy:
+
+| Hiện tượng | Xử lý |
+| --- | --- |
+| `bflow: command not found` sau bootstrap | Mở terminal mới hoặc reload đúng file shell setup thông báo; launcher cần source checkout/build còn ở vị trí đã setup |
+| Mất account/config khi dùng `BFLOW_HOME` làm đường dẫn source | `BFLOW_HOME` chọn isolated environment; dùng `BFLOW_SOURCE` cho script source theo [installation](installation.md), giữ selector isolation nhất quán |
+| Tool optional degraded / required blocked | Đọc reason theo inventory, repo allowance, grant và readiness; không thêm skill để giả quyền tool |
+| `exclusive_resource_lease_unsupported` cho browser | Runtime browser task actions còn unsupported; Gateway API riêng không đóng điều kiện task lease |
+| GitNexus stale hoặc storage lock bận | Maintenance để nhả reader/writer, rồi setup đúng repo; không tự rebuild index dưới role đang active |
+| Yêu cầu sửa lightweight/full SDD | Trả lời revision gợi ý cho đúng run trong Conversation; không lặp resume để bỏ policy |
+| `agy_onboarding_incomplete` | Kiểm tra onboarding/auth trong đúng profile/HOME launch; Agy Conversation vẫn unsupported |
 
 ## 2. Các nguyên tắc xử lý kỹ thuật quan trọng
 

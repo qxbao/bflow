@@ -1,5 +1,7 @@
 # Ma trận tương thích Provider (Platform v3)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Tài liệu này ghi lại các capability đã được audit, hành vi CLI quan sát được và các đảm bảo tích hợp cho những agent provider bên ngoài được đánh giá theo Bflow Platform v3 (P24/P25).
 
 ---

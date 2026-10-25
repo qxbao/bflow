@@ -1,5 +1,7 @@
 # Danh mục giới hạn đã biết (Known Limitations sau P22)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Các lỗi gián đoạn do `Ctrl+C`, kiểm tra điều kiện sẵn sàng (readiness), điều chỉnh bố cục giao diện và nạp prompt nguyên bản đã được khắc phục hoàn toàn; chi tiết kết quả kiểm chứng và các giới hạn riêng biệt được ghi nhận tại [Báo cáo trải nghiệm khởi động vòng đời](acceptance/2026-10-16-lifecycle-startup-ux.md). 
 
 Các số liệu và baseline kỹ thuật dưới đây phản ánh chính xác phạm vi nghiệm thu của giai đoạn P22 trước các đợt khắc phục tiếp theo:

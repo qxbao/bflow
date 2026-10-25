@@ -5,29 +5,21 @@ Giai đoạn P24 bổ sung thiết kế kiến trúc, các lược đồ schema,
 
 ---
 
-## 1. Trạng thái Triển khai (Cập nhật ngày 18/10/2026)
+## 1. Trạng thái triển khai (đối chiếu 2026-10-25)
 
-Phần này ghi nhận hiện trạng mã nguồn thực tế sau đường cơ sở P24; các quyết định thiết kế đã đóng băng bên dưới được giữ nguyên vẹn. Các cấp độ bằng chứng kỹ thuật được phân định rạch ròi:
-- **`source`**: Đã có mã nguồn thực tế trong repository.
-- **`local test`**: Kiểm thử cục bộ với runner giả lập (fake runner / mock / fixture).
-- **`live probe`**: Kiểm thử trực tiếp với tệp thực thi nhị phân, Herdr và provider thực tế.
-- **`full SDLC acceptance`**: Nghiệm thu toàn diện chu trình SDLC đa mô hình từ đầu đến cuối.
+P24 là baseline contracts/design; các quyết định D24-01 và phần audit lịch sử bên dưới giữ nguyên. Hiện đã có P25–P30, D-TOOLS-01 và các bản sửa tích hợp tiếp theo. [Implementation status](implementation-status.md) là bản đồ source/evidence hiện tại; báo cáo P25–P29 ngày 2026-10-17 không mô tả HEAD.
 
-*Lưu ý: Hiện chưa có hồ sơ nghiệm thu live hoặc full SDLC cho bất kỳ giai đoạn nào từ P25–P30.*
+| Phạm vi | Source hiện tại | Giới hạn bằng chứng |
+| --- | --- | --- |
+| P25 | Claude/Codex/Agy discovery/auth/capability, launch profiles, native hooks và attestations | Agy Conversation/unattended unsupported; native specialist binding có source/local tests; không suy full SDLC từ probe |
+| P26 | Setup plan/apply/repair/receipts, managed launcher/PATH, pinned installers, MemPalace venv | Dependency transitive và native-plugin rollback còn giới hạn; Windows mutation blocked |
+| P27 | Gateway/control/stdio/remote services, exact grants/schemas, ledger, leases/fencing và structured output | Runtime đã nối GitNexus resource lease; browser task actions còn unsupported |
+| P28 | Canonical catalog, approved role bindings, exact bundle pins, session manifests | Tool skill phụ thuộc grant; load instruction không chứng minh tuân thủ |
+| P29/P30 | Persistent host prepare/activate, platform preflight, dynamic Developer, Gateway registration/revocation, user-decision routing | Có package/local integration tests và hồ sơ probe riêng; full provider SDLC/active crash acceptance còn mở |
+| Sau P30 | Optional integrated tool defaults, `init --update`, polyglot detection, macOS helper/Seatbelt, bounded repository survey, actionable blockers; thêm rework dossiers, Conversation cards/aliases/read_updates/Log và NFR/risk references | [Commit audit](main-updates-2026-10-25.md) ghi phần sau mốc docs; local tests không đóng live acceptance hoặc mọi guard còn thiếu |
+| P31 | Coverage platform nằm trong E2E e11–e16 và package tests; chưa có cây `tests/platform-v3/**` riêng | Chưa đóng conformance/fault/live acceptance campaign |
 
-| Giai đoạn | Package / Đường dẫn sở hữu | Hiện trạng mã nguồn (`source`) | Hạn chế còn tồn đọng & Công việc cần hoàn thiện |
-| :--- | :--- | :--- | :--- |
-| **P25** | `packages/agent-providers` | Đã triển khai: adapter cho Claude/Codex/Agy, kiểm tra `checkHealth` tiền trạm/kích hoạt, tổng hợp profile phân quyền, cấu hình khởi chạy, chứng thư khởi động Ed25519, `buildHerdrAgentStartCommand`, registry mặc định. | Runtime host gọi tiền kiểm tra, `prepareLaunch` và kiểm tra sức khỏe kích hoạt (P30); adapter kết xuất MCP host, Gateway HTTP và 4 hook native. Agy báo `unsupported` cho chế độ unattended và chưa hỗ trợ chứng thực native attestation. Chưa có bằng chứng đăng nhập/khởi chạy provider thật trong hồ sơ nghiệm thu. |
-| **P26** | `packages/machine-setup`, `packages/tool-installer` | Đã triển khai: kho lưu trữ trạng thái, nhật ký journal, biên nhận, quy trình plan/preview/apply/reconcile, quản lý PATH, registry MCP, trình quản lý dịch vụ, công cụ doctor, `ManagedToolInstaller` (RTK, GitNexus, Chrome DevTools MCP, Superpowers), `FileToolCapabilityRegistry`. | Kiểm thử sử dụng installer/command runner giả lập; Windows mới ở mức thiết kế chưa kiểm chứng (`designed_unverified`); các phụ thuộc bắc cầu của npm chưa được khóa chặt chẽ; rollback thủ công đối với native plugin; chưa thẩm định bản quyền thương mại của GitNexus. |
-| **P27** | `packages/mcp-gateway`, `packages/mcp-services` | Đã triển khai: loopback Streamable HTTP gateway, cầu nối stdio, thu hồi client, chính sách chia sẻ, lease độc quyền kèm fencing token, cách ly cuộc gọi lạ, chặn elicitation; quản lý dịch vụ OS, hồ tài nguyên (resource pool), runtime trình duyệt Chrome riêng biệt. | Kiểm thử mang tính tất định với driver/launcher giả lập hoặc cục bộ; Runtime đăng ký client Gateway theo vai trò qua điểm cuối điều khiển (P30); chưa có kiểm thử E2E trực tiếp với Chrome hoặc dịch vụ OS trong hồ sơ nghiệm thu. |
-| **P28** | `packages/skills`, `skills/**` | Đã triển khai: danh mục 20 kỹ năng dùng chung + 12 kỹ năng theo vai trò, kho lưu trữ bundle bất biến, cơ chế cố định phiên bản/phụ thuộc, manifest vai trò, kết xuất theo provider, `SkillsSetupSynchronizer`, `recover(exactDigest)`. | Runtime đối soát và lưu trữ manifest theo thế hệ phiên làm việc (P30); chưa kiểm chứng cơ chế khám phá kỹ năng bản địa (native skill discovery) trực tiếp. |
-| **P29** | `apps/cli` | Đã triển khai: `setup`, `repo inspect`, `task plan`, `task implement`, `verify`, `git prepare`, `mcp status`, `tool status`, `skills sync/list`, `agent check`; mở rộng `up` và `doctor` với các bước thẩm định provider/binary/auth/permission/MCP/skills; các lệnh cấp cao có biên nhận, tuần tự hóa và phong bì JSON. | CLI chỉ đóng vai trò là giao diện điều khiển (UX), không có bộ lập lịch hay cổng kiểm soát riêng. Các động cơ P25–P28 được nạp động từ `dist/` hoặc tiêm phụ thuộc; lệnh `up` chặn theo báo cáo tiền kiểm tra của Runtime host (P30), không lọc theo tên provider. |
-| **P30** | `packages/runtime`, `packages/pane-manager`, `packages/conversation`, `agents/**` (kèm control endpoint trong `apps/cli`) | Đã triển khai (mã nguồn + kiểm thử cục bộ): `runtime/src/platform/**` (môi trường, session skills, Gateway registrations + control client, điều kiện sẵn sàng của provider, nhật ký khởi chạy, bộ ký chứng thư, `PlatformReadinessService`, hợp đồng dây CLI↔host); host `prepare`/`activate`/`platform_status`, cấp phát Developer động, thu hồi quyền khi dừng dịch vụ; kích hoạt chấp nhận `herdr:<provider>`; Pane Manager khởi chạy từ dữ liệu launch; cơ chế `request_user_decision` và chặn `AskUserQuestion`. | Chưa kiểm chứng trực tiếp với provider/Herdr; tệp `platform-launches.json` chưa được đọc lại sau khi khởi động lại; khởi chạy Developer động và quét hết hạn quyết định chưa được kiểm thử đầu-cuối; danh sách lệnh hỗ trợ là bản sao chép tĩnh. |
-| **P31** | `tests/platform-v3/**`, `tests/acceptance/platform-v3/**` | **Chưa triển khai**: các thư mục kiểm thử này chưa được khởi tạo trong mã nguồn. | Cần bổ sung kiểm thử tương thích đa nhà cung cấp, kiểm thử lỗi/bảo mật/bằng chứng trực tiếp và báo cáo nghiệm thu tổng thể. |
-
-Tham khảo thêm tài liệu [Danh mục hạn chế đã biết](known-limitations.md), [Lộ trình phát triển](next-roadmap.md) và [Hồ sơ trạng thái P25–P29](acceptance/2026-10-17-p25-p29.md). Cần nhấn mạnh rằng việc một lệnh CLI của P29 chạy thành công không đồng nghĩa với việc toàn bộ quy trình công việc đã được nghiệm thu; hệ thống vẫn giữ kết luận **Chưa sẵn sàng (Not Ready)** cho Agentic SDLC MVP v2/v3.
-
----
+SDD/TDD/verification/concurrency của repository đã được CLI truyền vào persistent host. `up` mặc định không inference ping; activated health vẫn bắt buộc. [Compatibility matrix](compatibility-matrix.md), [limitations](known-limitations-v3.md), [roadmap](next-roadmap.md) ghi các điều kiện còn mở.
 
 ## 2. Kiểm toán P00–P23 và Quyết định Tái sử dụng
 
@@ -72,7 +64,8 @@ flowchart LR
   Providers[Provider Adapters] -->|Launch Profiles đã xác thực| Herdr
   Setup[Machine Setup & Tool Installers] --> Providers
   Skills[Role Skill Resolver] --> Providers
-  Roles -->|Lệnh gọi công cụ có giới hạn| Gateway[Shared MCP Gateway]
+  Roles -->|Scoped tool action| Runtime
+  Runtime -->|Grant theo role và service| Gateway[Shared MCP Gateway]
   Gateway --> Services[Workers hiện có / Remote MCP / Stdio Bridges]
 ```
 

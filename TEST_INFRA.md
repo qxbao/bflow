@@ -1,5 +1,7 @@
 # Integration Test Infrastructure Specification (`TEST_INFRA.md`)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 ## 1. Overview & Mission
 
 `@bflow/runtime` is the composition engine of the bflow architecture, integrating `@bflow/contracts`, `@bflow/core`, `@bflow/persistence`, `@bflow/artifact-store`, `@bflow/agent-registry`, `@bflow/herdr-adapter`, and `@bflow/quality-gates`.

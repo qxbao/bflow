@@ -1,6 +1,6 @@
 # Tool installer và kiểm kê capability
 
-`@bflow/tool-installer` là bản triển khai leaf P26 của `ToolInstaller`. Package chỉ phụ thuộc vào `@bflow/contracts`. Nó không thay đổi ProviderAdapter, MCP Gateway, provider home hay cấu hình build gốc của repo. P30 phải ghép nó thông qua MachineSetup/Runtime; P27 sở hữu việc thương lượng MCP và các lease.
+`@bflow/tool-installer` là bản triển khai leaf P26 của `ToolInstaller`. Package chỉ phụ thuộc vào `@bflow/contracts`. Nó không thay đổi ProviderAdapter, MCP Gateway, provider home hay cấu hình build gốc của repo. CLI setup đã ghép nó qua MachineSetup; Runtime đọc inventory/receipt mà không cài tool khi `up`. Xem [trạng thái hiện tại](../../docs/implementation-status.md). P27 sở hữu việc thương lượng MCP và các lease.
 
 ## Thiết lập
 
@@ -85,15 +85,10 @@ Superpowers dùng `NativeProvidersToolInstaller`, ghép một bản cài đặt 
 và các policy overlay của Bflow. Metadata native của bundle đã duyệt được lưu trước khi
 provider bị thay đổi, để một lệnh bị timeout có thể được đối chiếu với inventory đã bật của provider
 và active cache chính xác. Chỉ riêng metadata không bao giờ xác lập việc đã cài đặt. Reconciliation
-cũng kiểm tra bản cài được giữ lại khi một thư mục staging bị gián đoạn cũ thiếu metadata;
-nó chỉ chấp nhận một pin mong muốn đã được xác minh độc lập và không bao giờ tạo receipt còn thiếu. Các
-quan sát này để nguyên pending intent và các file staged. Một bản cài đầu tiên legacy có
+cũng kiểm tra bản cài được giữ lại khi staging bị gián đoạn thiếu metadata. Từ `2357669`, nếu stage chưa từng có `.bflow-native.json`, diagnostic được lấy từ installed destination thay vì lỗi của stage chưa ghi nhận. Nó chỉ chấp nhận pin mong muốn đã xác minh độc lập, không tạo native receipt giả. Check/reconcile giữ nguyên pending intent và stage; apply mới có nhánh cleanup giới hạn dưới đây. Một bản cài đầu tiên legacy có
 plugin đã đăng ký và không có native receipt ở cả hai vị trí vẫn là `unknown` và cần operator
 rà soát. Việc giao native không rõ kết quả được giữ lại
-và không bao giờ tự động phát lại, với một ngoại lệ: khi inventory plugin của chính provider
-đọc được và chứng minh không có phần nào của plugin được đăng ký, lần apply kế tiếp lưu trữ intent bị gián đoạn
-(`<destination>.native-pending.json.reviewed-<id>`), bỏ thư mục staging của nó và cài
-lại. Inventory không đọc được hoặc plugin đã đăng ký giữ step ở `unknown`. Việc validate plugin Agy
+và không tự động phát lại mutation uncertain. Có hai nhánh được phép giải quyết stage của chính intent khi apply giữ destination lock: (1) inventory chứng minh plugin không hề được đăng ký, archive intent rồi bỏ stage để cài lại; (2) stage chưa ghi native metadata, destination có ownership marker và provider verify được exact desired pin đang active, archive intent cũ và bỏ stage không còn cần thiết. Các intent được lưu dạng `<destination>.native-pending.json.reviewed-<id>`. Registered plugin thiếu receipt/không đủ exact-pin proof hoặc inventory không đọc được vẫn cần reconcile/operator review; không coi mọi intent cũ là safe-to-retry. Việc validate plugin Agy
 chạy không có `--strict` vì Superpowers upstream phát hành kèm các warning mà strict mode từ chối; các lỗi
 manifest thật vẫn thất bại. Các thay đổi config provider native cần machine
 setup approval. Isolated setup truyền `NativeRuntimeOptions.isolation` (HOME cùng

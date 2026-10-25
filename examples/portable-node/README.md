@@ -28,17 +28,16 @@ Bflow, dùng `pnpm install --ignore-workspace --frozen-lockfile` để cài depe
 example riêng. Nếu chỉ chạy `pnpm install` từ đây, pnpm sẽ chọn root workspace và
 không cài example vì nó không nằm trong workspace packages.
 
-Đặt `BFLOW_HOME` trỏ tới Bflow đã build và khởi tạo:
+Sau [setup một lần](../../docs/guide/installation.md), dùng lệnh tắt `bflow`. Đặt `BFLOW_SOURCE` trỏ tới source Bflow đã build để gọi template helper (không dùng `BFLOW_HOME`, vì biến đó chọn isolated state/provider environment):
 
 ```sh
-node "$BFLOW_HOME/apps/cli/dist/bin.js" init --name calculator
-node "$BFLOW_HOME/templates/node-typescript/apply.mjs" . bugfix
-node "$BFLOW_HOME/apps/cli/dist/bin.js" status --json
-node "$BFLOW_HOME/apps/cli/dist/bin.js" doctor --json
+bflow init --name calculator
+node "$BFLOW_SOURCE/templates/node-typescript/apply.mjs" . bugfix
+bflow status --json
+bflow doctor --json
 ```
 
-Config.yaml được ignore vì nó bind absolute path/Git directory của clone. Template
-portable nằm ở checkout Bflow; helper giữ identity mới của repo này. State/log/DB/
+`.gitignore` của example chỉ ignore file legacy `.bflow/config.yaml`; canonical `.bflow/config.yml` vẫn có thể được track. Review rồi commit config và `.bflow/.gitignore` trong checkout thử nghiệm để working tree sạch; không copy identity đó sang clone/worktree khác. Template portable nằm ở checkout Bflow; helper giữ identity mới của repo này. State/log/DB/
 artifact được nested ignore do init tạo bảo vệ khỏi commit nhầm. Không commit
 `dist/`, `node_modules/`, `.bflow/state`, key hoặc secret.
 
@@ -54,11 +53,10 @@ cần; không trộn thay đổi khác scope:
 
 Draft/workflow tương ứng ở [templates](../../templates/node-typescript/README.md)
 trong source Bflow; khi đã copy repository riêng, mở hướng dẫn bằng
-`$BFLOW_HOME/templates/node-typescript/README.md`. Các relative links sang Bflow
+`$BFLOW_SOURCE/templates/node-typescript/README.md`. Các relative links sang Bflow
 chỉ dùng trong source checkout; example tự build/test được mà không có Bflow.
 
-`up`/`attach` cần Herdr + agent CLI/login. Chúng quản lý panes, chưa tự nối provider
-tools/P19 host. `down` mặc định vẫn thiếu shutdown integration; xem
+`up`/`attach` cần Herdr + provider CLI đã đăng nhập và platform readiness. CLI đã nối persistent P19 host, provider tools và shutdown barrier. Chuẩn bị backend của repository bằng `bflow setup --dir .`; commit config/ignore file nếu cần để giữ working tree sạch trước khi cấp worktree Developer. Xem
 [Getting Started](../../docs/guide/getting-started.md) và
 [validation report](../../templates/node-typescript/VALIDATION.md) để biết phạm vi
 đã kiểm chứng. Chưa tuyên bố đã có AI thực hiện bốn bài tập hay model review thật.

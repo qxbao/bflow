@@ -1,5 +1,7 @@
 # Bằng chứng tích hợp P19 — 2026-10-16
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Source implementation được kiểm thử: `a44d2a1c414842a77f652af767ac97323a6b85a1`.
 Baseline Wave B đã được phê duyệt: `9de64924790bd4bfab7ee7fc6388e8463eb149f0`.
 Branch: `agent/runtime/p19-coordinator`; worktree triển khai: `/tmp/bflow-p19-runtime`.

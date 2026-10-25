@@ -1,5 +1,7 @@
 # Bflow iso acceptance — 2026-10-20
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 This records the original standalone isolation milestone. The subsequent
 configured-profile and setup synchronization acceptance is in
 [iso-profile-acceptance.md](iso-profile-acceptance.md), which supersedes its

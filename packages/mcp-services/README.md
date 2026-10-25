@@ -7,7 +7,7 @@
 - **Platform Version**: Version 3 (`CURRENT_PLATFORM_SCHEMA_VERSION = 3`)
 - **Protocol Baseline**: Model Context Protocol Specification `2025-11-25`
 - **Package Type**: ESM (`type: module`)
-- **Trạng thái xác minh**: 4 test suite unit và integration bao phủ vòng đời OS service, quản lý resource, dedicated browser runtime, và cả 11 kịch bản end-to-end bắt buộc.
+- **Trạng thái xác minh**: Unit/integration tests bao phủ OS service, resource và dedicated browser runtime. Đây không phải full provider workflow acceptance; Runtime browser task actions vẫn bị chặn/degraded vì task lease chưa được nối. Xem [implementation status](../../docs/implementation-status.md).
 
 ---
 

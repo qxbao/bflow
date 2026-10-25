@@ -1,5 +1,7 @@
 # Bflow tools trong SDLC — đặc tả và kế hoạch nghiệm thu
 
+> **Cách đọc:** quyết định/spec và audit gốc bên dưới giữ phạm vi lịch sử. [Implementation status](../../implementation-status.md) mô tả source tích hợp hiện tại, gồm các thay đổi sau baseline; không suy một plan hoặc acceptance criterion là kết quả đã nghiệm thu.
+
 Ngày: 2026-10-24. Owner thiết kế/nghiệm thu/tích hợp: root. Implementer: Luna.
 Baseline: `1c7954267aab7b45e0bf5679a591862a126176e7`, main = origin/main lúc audit;
 P24 `8dbb056` là ancestor. Worktree tích hợp: `/tmp/bflow-tools-sdlc`, branch

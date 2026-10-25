@@ -1,5 +1,7 @@
 # Đặc tả hạ tầng kiểm thử tích hợp (`TEST_INFRA.md`)
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 ## 1. Tổng quan & Sứ mệnh
 
 `@bflow/runtime` là engine composition của kiến trúc bflow, tích hợp `@bflow/contracts`, `@bflow/core`, `@bflow/persistence`, `@bflow/artifact-store`, `@bflow/agent-registry`, `@bflow/herdr-adapter` và `@bflow/quality-gates`.

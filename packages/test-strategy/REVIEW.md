@@ -1,5 +1,7 @@
 # Review và tích hợp P16 — 2026-10-16
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Đã review policy resolver, evidence ingress, tương thích contract, hướng dẫn prompt,
 đăng ký package và bản bàn giao gốc trước khi tích hợp cục bộ.
 Các commit triển khai/báo cáo gốc: `02e6ca5`, `c91a139`.

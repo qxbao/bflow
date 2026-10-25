@@ -1,5 +1,7 @@
 # DX validation evidence — 2026-10-16
 
+> **Phạm vi hồ sơ:** báo cáo/kế hoạch tại baseline và môi trường được ghi bên dưới; giữ nguyên kết quả và lệnh gốc. Không dùng các kết luận triển khai cũ làm trạng thái của HEAD. Xem [trạng thái source và bằng chứng hiện tại](../../docs/implementation-status.md) trước khi vận hành hoặc giao việc mới.
+
 Follow-up fixes and validation against the newer main baseline are recorded in
 [REVIEW.md](REVIEW.md). The evidence below describes the original implementation
 pass and remains scoped to its stated tested HEAD.
