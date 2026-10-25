@@ -19,9 +19,11 @@ import type {
   ProviderAdapterOptions
 } from "./types.js";
 import { codexHookPolicyPath, inspectCodexHooks } from "./codex-hook-trust.js";
+import { parseCodexEnabledPlugins } from "./codex-hook-toml.js";
 import { managedCodexPluginArgs } from "./codex-plugin-policy.js";
 import { codexProbeConfigDependencies } from "./codex-probe-config.js";
 import { checkCodexBackendAuthentication } from "./backend-authentication.js";
+import { computeFileSha256 } from "./attestation.js";
 import type { OperationOptions } from "@bflow/contracts";
 
 /** Observe metadata only: no credential bytes are read or retained. Symlinks/special files and
@@ -86,6 +88,7 @@ const MCP_NOT_ISOLATED_CODE = "codex_global_mcp_not_isolated";
 const BARE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MCP_TABLE_PATTERN = /^\s*\[\s*mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*(?:\.[^\]]*)?\]/gm;
 const CODEX_HOOK_DIGEST_METADATA_KEY = "bflowCodexHookSnapshotDigest";
+const CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY = "bflowCodexPreloadedDocDigest";
 
 function linkedBackendOverrides(url: string, hasApiKey: boolean): string[] {
   const root = url.replace(/\/+$/, "").replace(/\/backend-api\/codex$/, "").replace(/\/v1$/, "");
@@ -342,6 +345,65 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     }
   }
 
+  private async unpinnedEnabledPlugins(home: string): Promise<string[]> {
+    try {
+      const text = await readFile(join(home, "config.toml"), "utf8");
+      const enabled = parseCodexEnabledPlugins(text);
+      const allowedSkills = new Set(
+        (this.options.skillManifest?.skills ?? []).map((skill) => skill.skillId)
+      );
+      return enabled.filter((id) => {
+        const pluginName = id.split("@")[0] ?? id;
+        return !allowedSkills.has(id) && !allowedSkills.has(pluginName);
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  private async computeCodexPreloadedDocDigest(
+    home: string,
+    environment: AgentEnvironment,
+    probeConfigFiles: readonly string[]
+  ): Promise<string> {
+    const candidatePaths: string[] = [
+      join(home, "AGENTS.md"),
+      join(home, "AGENTS.override.md")
+    ];
+    if (environment.role !== "conversation") {
+      const deps = await codexProbeConfigDependencies(probeConfigFiles);
+      const fallbackNames = deps?.fallbackNames ?? [];
+      const workspaceRoot = resolve(environment.scope.workspaceRoot);
+      for (let directory = resolve(environment.cwd); ; directory = dirname(directory)) {
+        candidatePaths.push(
+          join(directory, "AGENTS.md"),
+          join(directory, "AGENTS.override.md"),
+          ...fallbackNames.map((name) => join(directory, name))
+        );
+        if (directory === workspaceRoot || dirname(directory) === directory) break;
+      }
+      if (deps?.requiredFiles) {
+        candidatePaths.push(...deps.requiredFiles);
+      }
+    }
+    const hash = createHash("sha256");
+    hash.update(environment.role === "conversation" ? "project_docs:disabled" : "project_docs:enabled");
+    for (const path of [...new Set(candidatePaths)].sort()) {
+      hash.update(path);
+      try {
+        const info = await lstat(path);
+        if (info.isFile()) {
+          hash.update(await computeFileSha256(path));
+        } else {
+          hash.update("non_file");
+        }
+      } catch {
+        hash.update("absent");
+      }
+    }
+    return hash.digest("hex");
+  }
+
   /**
    * Per-invocation isolation: every global MCP server not used by the Bflow launch is disabled with
    * `-c mcp_servers.<name>.enabled=false` (verified against codex-cli 0.162.0: the override is honored by
@@ -356,7 +418,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     launchProfile?: AgentLaunchProfile
   ): Promise<InheritedIsolation> {
     const home = this.codexHome();
-    const pluginArgs = managedCodexPluginArgs();
+    const unpinnedPlugins = await this.unpinnedEnabledPlugins(home);
+    const pluginArgs = managedCodexPluginArgs(unpinnedPlugins);
     const globalServers = await this.enumerateGlobalMcpServers(home, pluginArgs);
 
     let mcpFailure: InheritedIsolationFailure | undefined;
@@ -409,31 +472,6 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       };
     }
 
-    const settingsMetadata = { [CODEX_HOOK_DIGEST_METADATA_KEY]: hookReview.digest };
-    if (launchProfile !== undefined && hookFailure === undefined) {
-      const settingsPath = join(_environment.stateDirectory, `${_environment.role}.settings.json`);
-      try {
-        if (!launchProfile.configFiles.some(file => file.path === settingsPath)) throw new Error("launch profile does not bind the private provider settings snapshot");
-        const handle = await open(settingsPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-        let content: string;
-        try {
-          const stat = await handle.stat();
-          if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > 256 * 1024)
-            throw new Error("private provider settings file is not a safe regular 0600 file");
-          content = await handle.readFile("utf8");
-        } finally { await handle.close(); }
-        const settings = JSON.parse(content) as Record<string, unknown>;
-        if (settings[CODEX_HOOK_DIGEST_METADATA_KEY] !== hookReview.digest)
-          throw new Error("Codex hook snapshot changed after the prepared launch profile");
-      } catch (error) {
-        hookFailure = {
-          code: "codex_global_hooks_snapshot_drift",
-          message: `Prepared Codex hook snapshot cannot be verified: ${error instanceof Error ? error.message : String(error)}`,
-          remediation: "Prepare a new launch and re-run provider activation after the exact hook inventory is approved."
-        };
-      }
-    }
-
     // A trust-all policy deliberately omits the hook inventory; there is no exact dependency
     // observation to share in that mode. Every role still performs the normal trust/drift review.
     const requiredProbeFiles = new Set([join(home, "config.toml"), join(home, "auth.json")]);
@@ -451,6 +489,41 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       probeConfigFiles.push(join(directory, ".codex", "config.toml"));
       probeFiles.push(join(directory, ".codex", "config.toml"), join(directory, "AGENTS.md"), join(directory, "AGENTS.override.md"));
       if (dirname(directory) === directory) break;
+    }
+
+    const preloadedDocDigest = await this.computeCodexPreloadedDocDigest(home, _environment, probeConfigFiles);
+    const settingsMetadata = {
+      [CODEX_HOOK_DIGEST_METADATA_KEY]: hookReview.digest,
+      [CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY]: preloadedDocDigest
+    };
+    if (launchProfile !== undefined && hookFailure === undefined) {
+      const settingsPath = join(_environment.stateDirectory, `${_environment.role}.settings.json`);
+      try {
+        if (!launchProfile.configFiles.some(file => file.path === settingsPath)) throw new Error("launch profile does not bind the private provider settings snapshot");
+        const handle = await open(settingsPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        let content: string;
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > 256 * 1024)
+            throw new Error("private provider settings file is not a safe regular 0600 file");
+          content = await handle.readFile("utf8");
+        } finally { await handle.close(); }
+        const settings = JSON.parse(content) as Record<string, unknown>;
+        if (settings[CODEX_HOOK_DIGEST_METADATA_KEY] !== hookReview.digest)
+          throw new Error("Codex hook snapshot changed after the prepared launch profile");
+        if (
+          settings[CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY] !== undefined &&
+          settings[CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY] !== preloadedDocDigest
+        ) {
+          throw new Error("Codex preloaded instruction documents changed after the prepared launch profile");
+        }
+      } catch (error) {
+        hookFailure = {
+          code: "codex_global_hooks_snapshot_drift",
+          message: `Prepared Codex hook snapshot cannot be verified: ${error instanceof Error ? error.message : String(error)}`,
+          remediation: "Prepare a new launch and re-run provider activation after the exact hook inventory is approved."
+        };
+      }
     }
     const executionProbeSnapshot = hookReview.approvalMode === "trust_all" ? undefined : async () => {
       const beforeConfigRead = await probeFileSnapshot(probeFiles, requiredProbeFiles, home);
@@ -517,7 +590,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           ))
         : []),
       "-c",
-      `model_instructions_file=${JSON.stringify(configFiles.promptFile)}`
+      `model_instructions_file=${JSON.stringify(configFiles.promptFile)}`,
+      ...(environment.role === "conversation" ? ["-c", "project_doc_max_bytes=0"] : [])
     ];
 
     try {

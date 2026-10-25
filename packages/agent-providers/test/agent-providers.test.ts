@@ -2668,7 +2668,9 @@ describe("@bflow/agent-providers", () => {
       if (health.ok) expect(health.value.status).toBe("ready");
       const probe = invocations.find((args) => args.includes("ping"));
       expect(probe).toEqual(["-c", "plugins.claude-mem@claude-mem-local.enabled=false",
-        "-c", "plugins.claude-mem@thedotmack.enabled=false", "-c", "mcp_servers.gitnexus.enabled=false", "exec", "ping"]);
+        "-c", "plugins.claude-mem@thedotmack.enabled=false",
+        "-c", "plugins.bflow-superpowers@bflow-superpowers.enabled=false",
+        "-c", "mcp_servers.gitnexus.enabled=false", "exec", "ping"]);
     });
 
     it("fails closed with codex_global_mcp_not_isolated when a global server name cannot be disabled safely", async () => {
@@ -2926,6 +2928,167 @@ describe("@bflow/agent-providers", () => {
 
       expect(await listFiles(home)).toEqual(before);
       expect(await readFile(join(home, "config.toml"), "utf8")).toBe(beforeContent);
+    });
+
+    it("disables bflow-superpowers@bflow-superpowers and non-manifest plugins in config.toml across MCP enumeration, probes and launches", async () => {
+      const config = [
+        '[plugins."bflow-superpowers@bflow-superpowers"]',
+        "enabled = true",
+        '[plugins."extra-skills@local"]',
+        "enabled = true",
+        ""
+      ].join("\n");
+      const home = await freshCodexHome({ "config.toml": config });
+      const pluginDir = join(home, "plugins", "cache", "local", "extra-skills", "1", ".codex-plugin");
+      await mkdir(pluginDir, { recursive: true, mode: 0o700 });
+      await writeFile(join(pluginDir, "plugin.json"), JSON.stringify({ name: "extra-skills", hooks: {} }), { mode: 0o600 });
+
+      const invocations: Array<readonly string[]> = [];
+      const adapter = codexAdapter(codexRunner({ globalServers: [], invocations }), home, { hostMcpServers: bflowServer });
+      const env = createTestEnvironment("codex", "workspace_auto");
+
+      const health = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: env,
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      expect(health.ok && health.value.status).toBe("ready");
+
+      const superpowersDisable = "plugins.bflow-superpowers@bflow-superpowers.enabled=false";
+      const extraPluginDisable = "plugins.extra-skills@local.enabled=false";
+      expect(invocations.find(args => args.includes("mcp"))).toEqual(
+        expect.arrayContaining([superpowersDisable, extraPluginDisable])
+      );
+      expect(invocations.find(args => args.includes("ping"))).toEqual(
+        expect.arrayContaining([superpowersDisable, extraPluginDisable])
+      );
+
+      const launch = await adapter.prepareLaunch(env);
+      expect(launch.ok).toBe(true);
+      if (launch.ok) {
+        expect(launch.value.argv).toEqual(expect.arrayContaining(["-c", superpowersDisable, "-c", extraPluginDisable]));
+        expect(health.ok && health.value.configFingerprint).toBe(launch.value.environment.configFingerprint);
+      }
+      expect(await readFile(join(home, "config.toml"), "utf8")).toBe(config);
+    });
+
+    it("passes -c project_doc_max_bytes=0 for conversation role and synchronizes configFiles/configFingerprint/launchFingerprint", async () => {
+      const home = await freshCodexHome({
+        "config.toml": 'project_doc_fallback_filenames = ["RTK.md"]\n'
+      });
+      const workspaceDir = join(testBaseDir, "workspace-project-docs");
+      await mkdir(workspaceDir, { recursive: true, mode: 0o700 });
+      const agentsDocPath = join(workspaceDir, "AGENTS.md");
+      const rtkDocPath = join(workspaceDir, "RTK.md");
+      await writeFile(agentsDocPath, "# Project AGENTS v1\n", { mode: 0o600 });
+      await writeFile(rtkDocPath, "# Project RTK v1\n", { mode: 0o600 });
+
+      const adapter = codexAdapter(codexRunner({ globalServers: [] }), home, {
+        hostMcpServers: bflowServer,
+        trustedIssuerKeys: { [testIssuerId]: testPublicKeyPem },
+        liveObservation: { paneId: "pane-conv-1", transportState: "idle", interactiveReady: true }
+      });
+
+      const testScope = {
+        kind: "session" as const,
+        machineId: "mach-1",
+        repositoryId: "repo-1",
+        workspaceRoot: workspaceDir,
+        sessionId: "sess-1"
+      };
+      const convEnv = createTestEnvironment("codex", "restricted", {
+        role: "conversation",
+        cwd: workspaceDir,
+        scope: testScope,
+        permissionProfile: {
+          schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
+          profileId: "perm-codex-conv",
+          mode: "restricted",
+          scope: testScope,
+          filesystem: "read_only",
+          readableRoots: [workspaceDir],
+          writableRoots: [],
+          deniedRoots: [],
+          isolation: "provider_policy",
+          network: { mode: "deny", allowedHosts: [] },
+          allowedTools: [],
+          deniedAction: "request_via_conversation",
+          allowGlobalPermissionBypass: false
+        }
+      });
+
+      const devEnv = createTestEnvironment("codex", "workspace_auto", {
+        role: "developer",
+        cwd: workspaceDir,
+        scope: testScope,
+        permissionProfile: {
+          schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION,
+          profileId: "perm-codex-dev",
+          mode: "workspace_auto",
+          scope: testScope,
+          filesystem: "workspace_write",
+          readableRoots: [workspaceDir],
+          writableRoots: [workspaceDir],
+          deniedRoots: [],
+          isolation: "provider_policy",
+          network: { mode: "deny", allowedHosts: [] },
+          allowedTools: ["Read", "Edit"],
+          deniedAction: "request_via_conversation",
+          allowGlobalPermissionBypass: false
+        }
+      });
+
+      const convHealth = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: convEnv,
+        stage: "preflight",
+        requestedAt: new Date().toISOString()
+      });
+      expect(convHealth.ok && convHealth.value.status).toBe("ready");
+
+      const convLaunch1 = await adapter.prepareLaunch(convEnv);
+      const devLaunch1 = await adapter.prepareLaunch(devEnv);
+      expect(convLaunch1.ok && devLaunch1.ok).toBe(true);
+      if (!convLaunch1.ok || !devLaunch1.ok || !convHealth.ok) return;
+
+      expect(convLaunch1.value.argv).toContain("project_doc_max_bytes=0");
+      expect(devLaunch1.value.argv).not.toContain("project_doc_max_bytes=0");
+      expect(convHealth.value.configFingerprint).toBe(convLaunch1.value.environment.configFingerprint);
+
+      // Mutating repository AGENTS.md / RTK.md must not change conversation's launchFingerprint (project docs disabled),
+      // while developer's launchFingerprint reflects the loaded project docs.
+      await writeFile(agentsDocPath, "# Project AGENTS v2 changed\n", { mode: 0o600 });
+      await writeFile(rtkDocPath, "# Project RTK v2 changed\n", { mode: 0o600 });
+
+      const convLaunch2 = await adapter.prepareLaunch(convEnv);
+      const devLaunch2 = await adapter.prepareLaunch(devEnv);
+      expect(convLaunch2.ok && devLaunch2.ok).toBe(true);
+      if (!convLaunch2.ok || !devLaunch2.ok) return;
+
+      expect(convLaunch2.value.launchFingerprint).toBe(convLaunch1.value.launchFingerprint);
+      expect(devLaunch2.value.launchFingerprint).not.toBe(devLaunch1.value.launchFingerprint);
+
+      const attestation = createSignedLaunchAttestation({
+        receiptId: "conv-attestation-1",
+        issuerId: testIssuerId,
+        launchId: convLaunch2.value.launchId,
+        launchFingerprint: convLaunch2.value.launchFingerprint,
+        sessionId: convEnv.scope.sessionId,
+        paneId: "pane-conv-1",
+        nativeSession: { source: "codex", kind: "id", value: "conv-native-session" },
+        observedAt: new Date().toISOString(),
+        privateKeyPem: testPrivateKeyPem
+      });
+      const activated = await adapter.checkHealth({
+        schemaVersion: 3,
+        environment: convEnv,
+        stage: "activated",
+        launchProfile: convLaunch2.value,
+        launchAttestation: attestation,
+        requestedAt: new Date().toISOString()
+      });
+      expect(activated.ok && activated.value.status).toBe("ready");
     });
   });
 });

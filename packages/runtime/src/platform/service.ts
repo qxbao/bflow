@@ -18,6 +18,11 @@ import {
   type OperationResult
 } from "@bflow/contracts";
 import { computeFileSha256, providerSessionEnvironment, resolveAndVerifyExecutable, type LiveReadinessObservation } from "@bflow/agent-providers";
+import {
+  preparePrivateCodexHome,
+  type CodexInstructionHomeMode,
+  type PreparedCodexHome
+} from "./codex-home.js";
 import { sha256Hex } from "./environment.js";
 import { fail, failWith, ok } from "./errors.js";
 import { IsolatorProfileResolver, type ResolvedIsolatorProfile } from "./isolator-profile.js";
@@ -43,6 +48,12 @@ import type {
   SkillSessionPort
 } from "./ports.js";
 import { tokenEnvironmentName } from "./gateway-registrations.js";
+
+export {
+  preparePrivateCodexHome,
+  type CodexInstructionHomeMode,
+  type PreparedCodexHome
+};
 
 export interface DefaultPlatformReadinessServiceDeps {
   readonly environments: RoleEnvironmentResolverPort;
@@ -762,17 +773,17 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       mcpServiceIds: mediated ? [] : requirement.mcpServiceIds.filter(serviceId => readyServiceIds.includes(serviceId)),
       mcpOperations: requirement.toolGrants.filter(grant => grant.kind !== "cli_only" && readyServiceIds.includes(grant.serviceId!)).flatMap(grant => grant.operations)
     };
-    const environmentRequirement = isolatorProfile === undefined
+    const baseEnvironmentRequirement = isolatorProfile === undefined
       ? effectiveRequirement
       : { ...effectiveRequirement, isolatorProfileIdentity: isolatorProfile.identity };
-    const environment = this.deps.environments.resolve(identity, environmentRequirement, {
+    const preliminaryEnvironment = this.deps.environments.resolve(identity, baseEnvironmentRequirement, {
       skillManifestDigest: skills.value.manifest.digest
     });
-    if (!environment.ok) return blocked(environment.error);
+    if (!preliminaryEnvironment.ok) return blocked(preliminaryEnvironment.error);
 
     // The role state directory must exist before preflight; it is private and holds no launch side effect yet.
     try {
-      await mkdir(environment.value.stateDirectory, { recursive: true, mode: 0o700 });
+      await mkdir(preliminaryEnvironment.value.stateDirectory, { recursive: true, mode: 0o700 });
     } catch (error) {
       return blocked({
         code: "validation",
@@ -781,19 +792,77 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       });
     }
 
+    const codexLaunchEnvironment = requirement.provider === "codex" && this.deps.codexLaunchEnvironment !== undefined
+      ? this.deps.codexLaunchEnvironment
+      : undefined;
+    let preparedCodexHome: PreparedCodexHome | undefined;
+    if (requirement.provider === "codex" && isolatorProfile === undefined) {
+      const sourceProcessHome =
+        codexLaunchEnvironment?.["HOME"] ??
+        join(identity.stateDirectory, "default-codex-process-home");
+      const sourceCodexHome =
+        codexLaunchEnvironment?.["CODEX_HOME"] ??
+        (codexLaunchEnvironment?.["HOME"] !== undefined
+          ? join(codexLaunchEnvironment["HOME"], ".codex")
+          : join(identity.stateDirectory, "default-codex-home"));
+      try {
+        preparedCodexHome = await preparePrivateCodexHome(
+          preliminaryEnvironment.value.stateDirectory,
+          sourceCodexHome,
+          sourceProcessHome,
+          {
+            ...(codexLaunchEnvironment ?? {}),
+            ...(requirement.environmentVariables ?? {})
+          }
+        );
+      } catch (error) {
+        return blocked({
+          code: "validation",
+          retryable: false,
+          message: `private Codex home could not be prepared: ${error instanceof Error ? error.message : String(error)}`
+        });
+      }
+    }
+
+    const environmentRequirement = preparedCodexHome === undefined
+      ? baseEnvironmentRequirement
+      : {
+          ...baseEnvironmentRequirement,
+          codexInstructionHomeIdentity: {
+            mode: preparedCodexHome.mode,
+            codexHome: preparedCodexHome.CODEX_HOME,
+            home: preparedCodexHome.HOME,
+            configDigest: preparedCodexHome.configDigest ?? null
+          }
+        };
+    const environment = preparedCodexHome === undefined
+      ? preliminaryEnvironment
+      : this.deps.environments.resolve(identity, environmentRequirement, {
+          skillManifestDigest: skills.value.manifest.digest
+        });
+    if (!environment.ok) return blocked(environment.error);
+
     const rolePrompt = this.deps.rolePrompt?.(requirement.role);
     const hookCommand = this.deps.nativeSessionHookCommand?.(requirement.role, requirement.taskId);
     const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId);
     const tokenNames = Object.fromEntries(gateway.registrations.map(registration =>
       [registration.registrationId, tokenEnvironmentName(registration.registrationId)]));
-    const codexLaunchEnvironment = requirement.provider === "codex" && this.deps.codexLaunchEnvironment !== undefined
-      ? this.deps.codexLaunchEnvironment
-      : undefined;
     const profileLaunchEnvironment = isolatorProfile === undefined
       ? undefined
       : { ...isolatorProfile.environment };
     const launchEnvironmentValues: Record<string, string> = {
       ...(codexLaunchEnvironment ?? {}),
+      ...(preparedCodexHome !== undefined
+        ? {
+            BFLOW_INSTRUCTION_HOME: preparedCodexHome.BFLOW_INSTRUCTION_HOME,
+            ...(preparedCodexHome.mode === "private" || codexLaunchEnvironment !== undefined
+              ? {
+                  CODEX_HOME: preparedCodexHome.CODEX_HOME,
+                  HOME: preparedCodexHome.HOME
+                }
+              : {})
+          }
+        : {}),
       ...(profileLaunchEnvironment ?? {})
     };
     if (requirement.provider === "agy") {

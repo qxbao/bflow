@@ -1,7 +1,10 @@
 /** P30 platform readiness: composed launch preparation, activation and release. Concrete adapters stay internal. */
 export {
   DefaultPlatformReadinessService,
-  type DefaultPlatformReadinessServiceDeps
+  preparePrivateCodexHome,
+  type CodexInstructionHomeMode,
+  type DefaultPlatformReadinessServiceDeps,
+  type PreparedCodexHome
 } from "./service.js";
 export {
   createPlatformReadinessService,
