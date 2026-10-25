@@ -193,10 +193,11 @@ export class HerdrOutbox {
     if (out.status === "released") return;
     if (out.leaseReacquisition) await this.reconcileLeaseAcquisition(out);
     if (out.lease && !out.parentAssignmentId) {
+      // A conflict on an already expired lease means this execution no longer holds it; any other failure stays visible.
+      const expired = Date.parse(out.lease.expiresAt) <= Date.parse(this.now());
       if (out.leaseRenewal) {
         const reconciled = await this.ports.registry.renewLease(out.leaseRenewal);
-        if (!reconciled.ok && !(reconciled.error.code === "conflict" && reconciled.error.message === "Lease expired or released"))
-          unwrap(reconciled);
+        if (!reconciled.ok && !(reconciled.error.code === "conflict" && expired)) unwrap(reconciled);
         if (reconciled.ok) {
           out.lease = AgentLeaseSchema.parse(reconciled.value);
           for (const child of this.state.outbound) if (child.parentAssignmentId === out.message.message_id) child.lease = out.lease;
@@ -210,8 +211,7 @@ export class HerdrOutbox {
       });
       await this.save();
       const released = await this.ports.registry.releaseLease(out.leaseRelease);
-      if (!released.ok && !(released.error.code === "conflict" && released.error.message === "Lease expired or already released"))
-        unwrap(released);
+      if (!released.ok && !(released.error.code === "conflict" && Date.parse(out.lease.expiresAt) <= Date.parse(this.now()))) unwrap(released);
       delete out.leaseRelease;
     }
     delete out.error;

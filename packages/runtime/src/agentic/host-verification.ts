@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityFindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
@@ -17,6 +19,7 @@ import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomat
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
+import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 const execFileAsync = promisify(execFile);
 function staticGateId(command: string): string {
   return `host-static-${command.replace(/[^a-z0-9_-]/gi, "-")}`;
@@ -24,24 +27,11 @@ function staticGateId(command: string): string {
 function staticAnalysisCheckDefinition(command: string) {
   return QualityGateDefinitionSchema.parse({
     id: staticGateId(command),
-    name: `Independent static analysis (${command})`,
+    name: `Host syntax check of changed JavaScript/JSON files (${command})`,
     evaluator: "host-static-analysis",
     required: true,
     timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
     configuration: { kind: "deterministic", method: "static_analysis", command, criterionIds: [], testNames: [], role: "quality_gate", levels: [] }
-  });
-}
-function policyRunnerGateId(profileId: string): string {
-  return `host-policy-${profileId}`;
-}
-function policyRunnerCheckDefinition(runner: AutomaticRunner) {
-  return QualityGateDefinitionSchema.parse({
-    id: policyRunnerGateId(runner.id),
-    name: `Independent policy ${runner.command}`,
-    evaluator: "host-policy-runner",
-    required: true,
-    timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
-    configuration: { kind: "deterministic", method: runner.method, command: runner.command, criterionIds: [], testNames: [], role: "quality_gate", levels: [...runner.levels] }
   });
 }
 export function boundQaReviewCommands(commands: readonly BoundBehavioralCommand[], budgetMs: number): BoundBehavioralCommand[] {
@@ -137,22 +127,32 @@ export class HostVerification {
     if ((await this.git(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await this.git(cwd, ["status", "--porcelain=v1", "-z"])) throw new Error("Verification revision changed during capture");
     return { cwd, base, revision, command: whitespaceCommand, exitCode, output, diff };
   }
+  /**
+   * `auto:static` is only a syntax check: `git diff --check`, `node --check` for changed JavaScript and JSON parsing.
+   * A changed file it cannot analyze fails the check instead of passing unexamined; such repositories need an owner-configured analyzer.
+   */
   private async captureStaticAnalysis(cwd: string, base: string, revision: string, command: string) {
     const baseCapture = await this.capture(cwd, base, revision);
     if (baseCapture.exitCode !== 0) return { ...baseCapture, command };
     const changed = (await this.git(cwd, ["diff", "--name-only", "--diff-filter=ACMR", base, revision, "--"]))
-      .split(/\r?\n/).map(line => line.trim()).filter(line => /\.[cm]?js$/i.test(line));
+      .split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0 && !/\.(md|txt|rst)$/i.test(line));
+    const unsupported = changed.filter(file => !/\.([cm]?js|json)$/i.test(file));
+    if (unsupported.length) return { ...baseCapture, command, exitCode: 1,
+      output: `${command} cannot analyze ${unsupported.join(", ")}; configure an owner static_analysis runner for these files` };
+    const checked: string[] = [];
     for (const file of changed) {
       try {
-        await execFileAsync(process.execPath, ["--check", file], { cwd, timeout: 15_000 });
+        if (/\.json$/i.test(file)) JSON.parse(await readFile(join(cwd, file), "utf8"));
+        else await execFileAsync(process.execPath, ["--check", file], { cwd, timeout: 15_000 });
+        checked.push(file);
       } catch (error) {
         const failure = error as { code?: unknown; stdout?: string; stderr?: string };
         const exitCode = typeof failure.code === "number" ? failure.code : 1;
-        const output = ((failure.stdout ?? "") + (failure.stderr ?? "")).trim() || `Syntax check failed for ${file}`;
+        const output = ((failure.stdout ?? "") + (failure.stderr ?? "")).trim() || `Syntax check failed for ${file}: ${String(error)}`;
         return { ...baseCapture, command, exitCode, output };
       }
     }
-    return { ...baseCapture, command };
+    return { ...baseCapture, command, output: checked.length ? `Syntax check passed for ${checked.join(", ")}` : "No changed code files to check" };
   }
   private parseCapture(input: unknown) {
     const value = record(input);
@@ -193,7 +193,7 @@ export class HostVerification {
           metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
             sourceRevision: observed.revision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
             executorId: "bflow-host-git-check", role: "quality_gate", method: config.method, command: expectedCommand, exitCode: observed.exitCode,
-            testNames: [], criteria: [], summary: observed.output || `Independent host check (${expectedCommand}) passed` },
+            testNames: [], criteria: [], summary: observed.output },
             hostExecution: json(observed) } });
         await this.trustGate(result);
         return { ok: true, value: result };
@@ -212,12 +212,7 @@ export class HostVerification {
       return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true },
         configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
     });
-    const policyChecks = strategy.targetCommands.flatMap(targetCommand => {
-      if (commands.some(item => item.command === targetCommand)) return [];
-      if (isAutomaticStaticCommand(targetCommand)) return [staticAnalysisCheckDefinition(targetCommand)];
-      const profile = profiles.find(item => item.command === targetCommand);
-      return profile ? [policyRunnerCheckDefinition(profile)] : [];
-    });
+    const policyChecks = strategy.targetCommands.filter(isAutomaticStaticCommand).map(staticAnalysisCheckDefinition);
     return [...owner, ...boundChecks, ...policyChecks];
   }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
@@ -240,7 +235,7 @@ export class HostVerification {
       this.assertDetectedSupported(spec, automated, strategyInput);
       return;
     }
-    if (strategyInput !== undefined) this.assertPolicyMethods(TestStrategySchema.parse(strategyInput));
+    if (strategyInput !== undefined) this.assertPolicyMethods(TestStrategySchema.parse(strategyInput), spec);
     for (const criterion of automated) if (!this.runners.owner.some(command => command.method === criterion.verificationMethod)) throw new Error(`No owner-configured behavioral runner for ${criterion.verificationMethod}`);
     if (strategyInput !== undefined) {
       const strategy = TestStrategySchema.parse(strategyInput);
@@ -312,24 +307,30 @@ export class HostVerification {
       });
     }
   }
-  private assertPolicyMethods(strategy: TestStrategy) {
+  private assertPolicyMethods(strategy: TestStrategy, specification: Specification) {
     const policy = strategy.metadata?.conditionalTdd;
     if (policy === undefined) return;
     const policyRecord = record(policy);
     const infraCommands = Array.isArray(record(record(policyRecord.assessment).infrastructure).commands)
       ? (record(record(policyRecord.assessment).infrastructure).commands as unknown[]).map(record)
       : [];
+    const required = strings(policyRecord.requiredVerificationMethods);
     const configured = this.configuredMethods();
+    const criterionMethods = new Set(specification.acceptanceCriteria
+      .filter(criterion => criterion.required !== false && criterion.status !== "waived").map(criterion => criterion.verificationMethod));
     const hasRunnerFor = (method: string): boolean => {
       if (this.runners.automatic && method === "static_analysis") {
         return infraCommands.some(cmd => cmd.method === "static_analysis" && isAutomaticStaticCommand(textField(cmd.command)));
       }
       if (!configured.includes(method)) return false;
-      return !this.runners.automatic || infraCommands.some(cmd => cmd.method === method);
+      // Detected runners only execute test identities mapped from accepted criteria; a method without such a criterion has no evidence.
+      return !this.runners.automatic || infraCommands.some(cmd => cmd.method === method) && criterionMethods.has(method as never);
     };
-    const missing = strings(policyRecord.requiredVerificationMethods).filter(method => method !== "manual_review" && !hasRunnerFor(method));
+    // Behavioral evidence never records a manual review observation, so a manual_review policy could only stall after implementation.
+    const missing = required.filter(method => method === "manual_review" || !hasRunnerFor(method));
     if (missing.length) throw new WorkflowProposalRejected({ code: "unsupported_method",
-      reason: `Test strategy policy requires independent ${missing.join(", ")} checks with configured runners before design approval. Preserve the assessed policy and accepted criteria; provision the missing checks (in automatic mode, add {"method":"static_analysis","command":"auto:static"} and {"method":"integration_test","command":"auto:integration","level":"integration"} to metadata.conditionalTdd.infrastructure.commands) before proposing executable work.`,
+      reason: `Test strategy policy requires independent ${missing.join(", ")} checks with configured runners before design approval. Preserve the assessed policy and accepted criteria; provision the missing checks before proposing executable work. In automatic mode, static_analysis uses {"method":"static_analysis","command":"auto:static"} in metadata.conditionalTdd.infrastructure.commands (a syntax check of changed JavaScript/JSON files only), and each behavioral method needs an accepted criterion with that verificationMethod mapped to committed tests.` +
+        (missing.includes("manual_review") ? " Behavioral verification cannot record manual_review evidence: split the manually reviewed change into a separate documentation task, or escalate the policy to the user." : ""),
       methods: missing, options: [] });
   }
   private assertDetectedSupported(spec: Specification, automated: Specification["acceptanceCriteria"], strategyInput: unknown) {
@@ -345,7 +346,7 @@ export class HostVerification {
     const ids = automated.map(criterion => criterion.id).join(", ");
     if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
     const strategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
-    if (strategy) this.assertPolicyMethods(strategy);
+    if (strategy) this.assertPolicyMethods(strategy, spec);
     for (const criterion of automated) {
       const candidates = profiles.filter(item => item.method === criterion.verificationMethod);
       const profile = candidates.find(item => strategy?.targetCommands.includes(item.command)) ?? candidates[0];
@@ -385,7 +386,6 @@ export class HostVerification {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
       ...(this.runners.automatic ? [
         ...this.runners.availableProfiles.map(runner => this.automaticGate(runner)),
-        ...this.runners.availableProfiles.map(runner => this.policyDeterministicGate(policyRunnerGateId(runner.id), runner.command)),
         ...AUTOMATIC_STATIC_COMMANDS.map(command => this.policyDeterministicGate(staticGateId(command), command))
       ] : [])];
   }
@@ -482,7 +482,18 @@ export class HostVerification {
       const targetNames = new Set(strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames));
       if (measured.some(item => item.testResults.some(test => !test.passed && !targetNames.has(test.name)))) throw new Error("Red failure belongs to an unrelated test rather than an accepted target criterion");
     }
-    const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId });
+    // Static target commands are measured here; every other target command must come from a measured runner above.
+    const staticAnalyses = [];
+    if (phase !== "red") for (const command of strategy.targetCommands.filter(isAutomaticStaticCommand)) {
+      const analysis = await this.captureStaticAnalysis(cwd, textField(run.baseRevision), revision, command);
+      staticAnalyses.push({ command, exitCode: analysis.exitCode, output: analysis.output });
+    }
+    if (staticAnalyses.some(item => item.exitCode !== 0)) {
+      const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, staticAnalyses, verifiedBy: binding.agentId, accepted: false });
+      for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
+      throw new HostBehavioralFailure(`Static analysis failed: ${staticAnalyses.filter(item => item.exitCode !== 0).map(item => `${item.command}: ${item.output}`).join("; ")}`, evidence, []);
+    }
+    const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured, ...(staticAnalyses.length ? { staticAnalyses } : {}), verifiedBy: binding.agentId });
     for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
     const observations: Array<{ method: string; criterionId: string; evidenceArtifactId: string; command?: string; exitCode?: number; summary: string }> = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
       strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
@@ -490,41 +501,8 @@ export class HostVerification {
     // Commands without a primary criterion still produce evidence for the strategy's required methods/commands.
     for (const item of measured) if (!observations.some(observation => observation.command === item.command)) observations.push({ method: item.method, criterionId: criteria[0]!.id,
       evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` });
-    if (phase !== "red") {
-      const policyRecord = record(strategy.metadata?.conditionalTdd);
-      const requiredMethods = strings(policyRecord.requiredVerificationMethods);
-      const infraCommands = Array.isArray(record(record(policyRecord.assessment).infrastructure).commands)
-        ? (record(record(policyRecord.assessment).infrastructure).commands as unknown[]).map(record)
-        : [];
-      for (const targetCommand of strategy.targetCommands) {
-        if (observations.some(item => item.command === targetCommand)) continue;
-        const declared = infraCommands.find(cmd => textField(cmd.command) === targetCommand);
-        const method = declared ? textField(declared.method) : isAutomaticStaticCommand(targetCommand) ? "static_analysis" : undefined;
-        if (!method) continue;
-        if (isAutomaticStaticCommand(targetCommand)) {
-          const staticObs = await this.captureStaticAnalysis(cwd, textField(run.baseRevision), revision, targetCommand);
-          if (staticObs.exitCode !== 0) throw new Error(`Static analysis check (${targetCommand}) failed: ${staticObs.output}`);
-        }
-        observations.push({
-          method,
-          criterionId: criteria[0]!.id,
-          evidenceArtifactId: artifact.artifactId,
-          command: targetCommand,
-          exitCode: 0,
-          summary: isAutomaticStaticCommand(targetCommand)
-            ? "Independent static analysis check passed"
-            : `${measured[0]?.passed ?? 0}/${measured[0]?.tests ?? 0} observed tests and integration check passed`
-        });
-      }
-      if (requiredMethods.includes("manual_review") && !observations.some(item => item.method === "manual_review")) {
-        observations.push({
-          method: "manual_review",
-          criterionId: criteria[0]!.id,
-          evidenceArtifactId: artifact.artifactId,
-          summary: "Independent verifier diff inspection passed"
-        });
-      }
-    }
+    for (const item of staticAnalyses) observations.push({ method: "static_analysis", criterionId: criteria[0]!.id, evidenceArtifactId: artifact.artifactId,
+      command: item.command, exitCode: item.exitCode, summary: item.output });
     const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId, runId, taskId, cycleNumber: prior[0]?.cycleNumber ?? 1, attemptId: randomUUID(),
       status: phase === "red" ? "failed" : "passed", independentExecution: true, evaluatedCriteria: criteria.map(criterion => {
         const matching = observations.find(observation => observation.criterionId === criterion.id && observation.method === criterion.verificationMethod && observation.command !== undefined && observation.exitCode !== undefined);
@@ -605,7 +583,7 @@ export class HostVerification {
     const fullReply = { reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
     const isAgy = binding.provider === "agy" || binding.agentKind === "agy";
     const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number";
-    if (!hasDiffPagination && (!isAgy || Buffer.byteLength(JSON.stringify(fullReply), "utf8") <= 8500)) {
+    if (!hasDiffPagination && (!isAgy || !exceedsAgyInlineReply(fullReply))) {
       return json(fullReply);
     }
     const rawDiff = observation.diff;
@@ -658,9 +636,7 @@ export class HostVerification {
               }
             })),
             verificationOutcome: {
-              status: reworkResolution.verificationOutcome.status === "escalated_blocked"
-                ? "pending_independent_verification"
-                : reworkResolution.verificationOutcome.status,
+              status: reworkResolution.verificationOutcome.status,
               openFindingIds: reworkResolution.verificationOutcome.openFindingIds,
               closedFindingIds: reworkResolution.verificationOutcome.closedFindingIds
             }
@@ -685,9 +661,9 @@ export class HostVerification {
       };
     };
     let bounded = buildBounded(maxChars, false);
-    const shouldCompactDossier = isAgy && Buffer.byteLength(JSON.stringify(bounded), "utf8") > 8500 && Boolean(reworkResolution);
+    const shouldCompactDossier = isAgy && exceedsAgyInlineReply(bounded) && Boolean(reworkResolution);
     if (shouldCompactDossier) bounded = buildBounded(maxChars, true);
-    while (isAgy && maxChars > 512 && Buffer.byteLength(JSON.stringify(bounded), "utf8") > 8500) {
+    while (isAgy && maxChars > 512 && exceedsAgyInlineReply(bounded)) {
       maxChars = Math.max(512, Math.floor(maxChars * 0.75));
       bounded = buildBounded(maxChars, shouldCompactDossier);
     }

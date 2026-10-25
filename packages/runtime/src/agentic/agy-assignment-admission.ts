@@ -3,6 +3,12 @@ import type { AgentRole, PaneBinding, RoleMessage } from "@bflow/contracts";
 import { isCoordinatorTrigger } from "./host-receipts.js";
 import { digest, record, textField } from "./journal.js";
 
+/** Agy truncates MCP tool replies above about 10 KB, so host replies to Agy stay within this UTF-8 byte budget. */
+export const AGY_INLINE_REPLY_BYTES = 8500;
+export function exceedsAgyInlineReply(value: unknown): boolean {
+  return Buffer.byteLength(JSON.stringify(value), "utf8") > AGY_INLINE_REPLY_BYTES;
+}
+
 export interface AgyAdmissionSelection {
   readonly role: AgentRole;
   readonly binding: PaneBinding;

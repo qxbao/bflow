@@ -50,7 +50,11 @@ export class BrowserResourceTransactions {
       const known = ledger.transactions.flatMap(item => item.calls.map(record => ({ owner: item, record }))).find(item => item.record.callId === call.callId);
       if (known && (known.owner !== entry || known.record.requestDigest !== requestDigest)) reject("Browser call ID is bound to another principal or request");
       if (entry && (entry.role !== reg.role || entry.resourceKey !== transaction.resourceKey)) reject("Browser transaction resource identity changed");
-      if (!entry && !reconcile && ledger.transactions.some(item => item.state !== "closed" && item.serviceId === call.serviceId && item.resourceKey === transaction.resourceKey))
+      // An expired transaction without unresolved delivery no longer holds the Gateway lease, so it must not block reassignment.
+      const nowMs = this.now().getTime();
+      if (!entry && !reconcile && ledger.transactions.some(item => item.state !== "closed" && item.serviceId === call.serviceId &&
+          item.resourceKey === transaction.resourceKey &&
+          (Date.parse(item.lease.expiresAt) > nowMs || item.calls.some(record => record.state === "pending"))))
         reject("Browser resource is owned by another transaction; finish or reconcile it before reassignment");
       if (reconcile) {
         if (!entry || !known) reject("No durable browser call exists for reconciliation");

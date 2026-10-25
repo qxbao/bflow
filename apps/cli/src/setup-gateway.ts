@@ -715,6 +715,13 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
       },
       onRemoveRepositoryService: async ({ serviceId, operation: repoOp }): Promise<OperationResult<void>> => {
         try {
+          if (repoOp.scope.kind !== "repository") throw new Error("Repository service removal requires repository scope");
+          if (configured.services.some(service => service.serviceId === serviceId)) throw new Error("Machine services cannot be removed as repository services");
+          // A persisted service that failed to activate is not tracked by the control; still bind removal to its own repository.
+          const persisted = (await readGatewayRepositoriesState(configured.paths.state, machineId)).state?.repositories
+            .find(entry => entry.service.serviceId === serviceId);
+          if (persisted && (persisted.repositoryId !== repoOp.scope.repositoryId || persisted.workspaceRoot !== repoOp.scope.workspaceRoot))
+            throw new Error("Repository service belongs to a different workspace");
           await gateway.serviceManager.stop(serviceId, repoServices.get(serviceId)?.operation ?? repoOp);
           gateway.registry.unregisterService(serviceId);
           repoServices.delete(serviceId);

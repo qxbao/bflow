@@ -12,6 +12,7 @@ import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./run
 import { digest, json, record, strings, textField } from "./journal.js";
 import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
 import { darwinWorkspaceFile } from "./workspace-file-darwin.js";
+import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 
 const execute = promisify(execFile);
 /** Rules every conflict resolver receives in assignment_context and workspace_status. */
@@ -290,7 +291,7 @@ export class HostDevelopment {
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
         tddDecision: task.spec.strategy.tddDecision, recordedEvidence: fullEvidence,
         ...(rawRework !== undefined ? { reworkContext: rawRework } : {}) };
-      if ((context.binding.agentKind === "agy" || context.binding.provider === "agy") && Buffer.byteLength(JSON.stringify(fullReply), "utf8") > 8500) {
+      if ((context.binding.agentKind === "agy" || context.binding.provider === "agy") && exceedsAgyInlineReply(fullReply)) {
         const compactEvidence = Array.isArray(fullEvidence) ? fullEvidence.map(item => {
           const entry = record(item);
           return {

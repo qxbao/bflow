@@ -7,6 +7,7 @@ import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema,
   type OperationResult, type PaneBinding, type RoleMessage } from "@bflow/contracts";
 import { AgenticJournal, digest, type JournalState, type Outbound, type RunRecord } from "../../src/agentic/journal.js";
 import { CoreSession } from "../../src/agentic/core-session.js";
+import { HerdrOutbox } from "../../src/agentic/outbox.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { routeNativeConversationMessage } from "../../src/agentic/workspace.js";
 import { evaluateWatchdog } from "../../src/agentic/run-watchdog.js";
@@ -106,7 +107,7 @@ async function fixture(options: { deliveryFails?: boolean; runs?: RunRecord[]; c
     .filter(out => out.message.recipient.role === "conversation" && out.message.type === "conversation.progress" &&
       (out.message.payload as { kind?: string; runId?: string }).kind === kind && (out.message.payload as { runId?: string }).runId === runId);
   return {
-    runtime, panes, transport, registry, delivered, conversation, journal, outboundOf, notices,
+    runtime, ports, panes, transport, registry, delivered, conversation, journal, outboundOf, notices,
     setCapabilityAllowed: (value: boolean) => { capabilityAllowed = value; },
     now: () => now, setNow: (ms: number) => { now = ms; }, advance: (ms: number) => { now += ms; }
   };
@@ -486,13 +487,9 @@ describe("escalated verification retry and design approval", () => {
     if (!leaseRes.ok) throw new Error(leaseRes.error.message);
     await f.journal.exclusive(async (state: JournalState, save: () => Promise<void>) => {
       state.runs[0]!.tasks.push({
-        taskId: "task-1", spec: { specification, strategy: { schemaVersion: 2, strategyId: "strat-1", runId: "run-1", taskId: "task-1",
-          specId: specification.specId, tddDecision: { schemaVersion: 2, decisionId: "tdd-1", runId: "run-1", taskId: "task-1",
-            specId: specification.specId, mode: "not_applicable", rationale: "test", verifiableConditions: ["c"],
-            changeClassification: "bugfix", requiresFailingTestFirst: false, decidedBy: "coordinator", decidedAt: T0 },
-          testTypes: ["unit"], targetCommands: ["auto:unit"], criterionMappings: [{ criterionId: specification.acceptanceCriteria[0]!.id,
-            verificationMethod: "automated_test", testNames: ["t1"] }], alternativeVerifications: [{ method: "automated_test",
-            description: "unit test", command: "auto:unit", requiredArtifactKind: "test-result" }], createdAt: T0 } },
+        taskId: "task-1", spec: { specification, strategy: specification.testStrategy!, request: ApprovalRequestSchema.parse({
+          schemaVersion: 2, approvalId: "approval-task-1", runId: "run-1", target: { type: "run" }, revision: 1, generation: 0,
+          requestedBy: "coordinator", requestedAt: T0, reason: "Accept design", evidence: [], idempotencyKey: "approve-task-1" }) },
         worktrees: [], outboundIds: ["assign-dev-1"], writerReleased: true
       } as never);
       const assignMsg = message("assign-dev-1", {
@@ -511,15 +508,18 @@ describe("escalated verification retry and design approval", () => {
           timeout: { executionTimeoutMs: 60_000, onTimeout: "block" },
           idempotency: { key: "assign-dev-1", scope: "agent-request", fingerprint: digest(assignMsg) }, createdAt: T0 },
         handle: { executionId: "exec-dev-1", requestId: "req-dev-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-1",
-          role: "developer", target: { transport: "herdr", agentId: "developer-agent", paneId: "pane-developer", workspaceId: "workspace-1", tabId: "tab-1" },
-          acceptedAt: T0, transportState: "idle", correlationVerified: true }
+          idempotencyKey: "assign-dev-1", target: { transport: "herdr", agentId: "developer-agent", paneId: "pane-developer", workspaceId: "workspace-1", tabId: "tab-1" },
+          correlation: { token: "corr-dev-1", provenance: "transport", verified: true }, acceptedAt: T0 }
       });
       await save();
     });
     f.advance(5 * MINUTE);
-    await f.runtime.flushOutbound();
+    // Core binding is covered elsewhere; this exercises only the outbox lease reconciliation.
+    await f.journal.exclusive(async (state: JournalState, save: () => Promise<void>) =>
+      new HerdrOutbox(f.ports, state, save).flush(async () => {}));
     const state = await f.runtime.inspect() as unknown as JournalState;
     const assigned = state.outbound.find(item => item.message.message_id === "assign-dev-1")!;
+    expect(assigned.error).toBeUndefined();
     expect(assigned.status).toBe("released");
     expect(assigned.leaseRenewal).toBeUndefined();
     expect(assigned.leaseRelease).toBeUndefined();
@@ -541,7 +541,7 @@ describe("escalated verification retry and design approval", () => {
     const makeSnapshot = () => ({
       runId: "run-1",
       workflowId: "wf-1",
-      workflowVersion: 1,
+      workflowVersion: "1",
       status: "running" as const,
       tasks: [{ taskId: "task-1", status: "running" as const, attempt: 1, generation: 0, version: currentVersion }],
       createdAt: T0,

@@ -352,6 +352,11 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   and enforces the aggregate 540s task budget. Detection and binding do not prove sandbox readiness
   or test success: independent execution and authenticated evidence remain required.
   Automatic detection is retried on each proposal while unsupported and refreshed after repository HEAD changes. Dynamic checks/gates use the same VerificationEngine when each plan is frozen, so no host restart is needed.
+  Policy-required methods need real measurements: in automatic mode `auto:static` is only `git diff --check`
+  plus a syntax check of changed JavaScript (`node --check`) and JSON files, and fails when another code file
+  changed; each required behavioral method needs an accepted criterion mapped to committed tests. A policy
+  requiring `manual_review` alongside automated criteria is refused at proposal time, because behavioral
+  verification never records manual review evidence.
   An owner-configured runner (`.bflow/verification.json`, optional override) is pinned when the host is
   created (`docs/verification-runners.md`), so changing that file later requires quiescing the host.
 - **Hang watchdog** (`src/agentic/run-watchdog.ts`, pure `evaluateWatchdog`; host timer every 15 s).

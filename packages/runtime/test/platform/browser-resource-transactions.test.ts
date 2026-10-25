@@ -136,6 +136,20 @@ describe("browser resource transactions", () => {
     await transactions.finish(identity, "tester", transaction.id);
     expect((await invoke("after-close")).ok).toBe(false);
   });
+  it("lets another assignment acquire the browser after an abandoned transaction's lease expired", async () => {
+    await invoke("first");
+    const qa = registration("qa", "registration-qa");
+    now = new Date(now.getTime() + 301_000);
+    expect((await transactions.invoke(identity, qa, call("qa-late", qa.registrationId), { ...transaction, id: "qa-attempt" }, false)).ok).toBe(true);
+    expect(acquired).toBe(2);
+  });
+  it("keeps an expired transaction with unresolved delivery as the browser owner", async () => {
+    outcome = "unknown"; await invoke("pending");
+    const qa = registration("qa", "registration-qa");
+    now = new Date(now.getTime() + 301_000);
+    expect((await transactions.invoke(identity, qa, call("qa-late", qa.registrationId), { ...transaction, id: "qa-attempt" }, false)).ok).toBe(false);
+    expect(acquired).toBe(1);
+  });
   it("rejects a mismatched lease response before dispatch", async () => {
     const acquire = control.acquireResource!;
     control.acquireResource = async (...args) => { const result = await acquire(...args); return result.ok ? ok({ ...result.value, resourceKey: "wrong-profile" }) : result; };

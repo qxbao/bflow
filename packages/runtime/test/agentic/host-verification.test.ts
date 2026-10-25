@@ -3,11 +3,12 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PaneBindingSchema, QualityGateContextSchema } from "@bflow/contracts";
+import { PaneBindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { HostVerification, DEFAULT_HOST_CHECKS } from "../../src/agentic/host-verification.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
+import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 const cleanups:(()=>Promise<unknown>)[]=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse()) await cleanup();});
 async function fixture() {
@@ -83,53 +84,16 @@ describe("trusted host observations",()=>{
     f.git("add","guide.md");f.git("commit","-m","large-change");
     const largeHead=f.git("rev-parse","HEAD");
     const agyBinding={...f.binding,provider:"agy" as const,agentKind:"agy" as const};
-    const bigRework={
-      resolutionId:"res-1",
-      reworkGeneration:1,
-      developerAttemptId:"dev-attempt-2",
-      sourceRevision:largeHead,
-      baseRevision:f.base,
-      rootCauseSummary:"R".repeat(800),
-      fixSummary:"F".repeat(800),
-      changedFiles:["guide.md"],
-      checkWorkEvidence:{receiptId:"cw-1",sourceRevision:largeHead,exitCode:0,passed:true,rawEvidenceArtifact:"artifact://test/cw-1",checkedAt:new Date().toISOString()},
-      findingResolutions:Array.from({length:4},(_,i)=>({
-        findingId:`finding-1-${i+1}`,
-        rootCauseSummary:`Root cause ${i}: ${"C".repeat(450)}`,
-        fixExplanation:`Fix explanation ${i}: ${"E".repeat(450)}`,
-        changedFiles:["guide.md"],
-        sourceLocations:[{path:"guide.md",startLine:1,endLine:10,symbol:"line_0",summary:"S".repeat(200)}],
-        verificationSummary:`Verification ${i}: ${"V".repeat(450)}`,
-        evidenceArtifacts:["artifact://test/ev-1","artifact://test/ev-2","artifact://test/ev-3","artifact://test/ev-4"],
-        testRefs:["test/guide.test.ts"]
-      })),
-      verificationOutcome:{status:"pending_independent_re_verification"}
-    };
-    const bigArtifacts=Array.from({length:12},(_,i)=>({
-      artifactId:`art-${i}`,
-      uri:`artifact://test/art-${i}`,
-      kind:"test-result" as const,
-      mediaType:"application/json",
-      checksum:{algorithm:"sha256" as const,digest:"b".repeat(64)},
-      sizeBytes:1024,
-      createdAt:new Date().toISOString(),
-      createdBy:{agentId:"dev-1",role:"developer" as const,runId:"run",taskId:"task",attemptId:"attempt"},
-      extraMetadata:"M".repeat(300)
-    }));
     f.outbound[0]={
       ...f.outbound[0]!,
-      message:{
-        ...f.outbound[0]!.message,
-        payload:{...f.context,artifacts:bigArtifacts,input:{...(f.context.input as object),sourceRevision:largeHead,reworkResolution:bigRework}}
-      }
+      message:{...f.outbound[0]!.message,payload:{...f.context,input:{...(f.context.input as object),sourceRevision:largeHead}}}
     };
     const first=await f.host.inspectReview(agyBinding,{messageId:"request"}) as {
       reviewId:string;
-      reworkResolution?:{findingResolutions:Array<{findingId:string}>};
       observation:{diff:string;diffOffset:number;diffTotalChars:number;diffTruncated:boolean;nextDiffOffset:number|null};
     };
     expect(Buffer.byteLength(JSON.stringify(first),"utf8")).toBeLessThanOrEqual(8500);
-    expect(first.reworkResolution?.findingResolutions.map(r=>r.findingId)).toEqual(["finding-1-1","finding-1-2","finding-1-3","finding-1-4"]);
+    expect(first.observation.diffTotalChars).toBeGreaterThan(8500);
     expect(first.observation.diffTruncated).toBe(true);
     expect(first.observation.nextDiffOffset).toBeGreaterThan(0);
     const second=await f.host.inspectReview(agyBinding,{messageId:"request",diffOffset:first.observation.nextDiffOffset!}) as {
@@ -137,6 +101,7 @@ describe("trusted host observations",()=>{
       observation:{diff:string;diffOffset:number;diffTruncated:boolean;nextDiffOffset:number|null};
     };
     expect(second.reviewId).toBe(first.reviewId);
+    expect(second.observation.diffOffset).toBe(first.observation.nextDiffOffset);
     expect(Buffer.byteLength(JSON.stringify(second),"utf8")).toBeLessThanOrEqual(8500);
     const completed=await f.restore().completeReview(agyBinding,{
       messageId:"request",
@@ -145,6 +110,24 @@ describe("trusted host observations",()=>{
       summary:"Completed review for Agy large diff"
     });
     expect(completed.result.status).toBe("passed");
+  });
+
+  it("fails auto:static for changed files it cannot analyze instead of passing them unexamined",async()=>{
+    const f=await fixture();
+    const source=new TestRunnerSource([],f.repository,async()=>({status:"detected",profiles:[],notes:[]}));await source.refresh();
+    const host=new HostVerification(()=>({inspect:async()=>({outbound:f.outbound})}) as unknown as AgenticWorkflowRuntime,()=>{throw new Error("no artifacts");},undefined,source);
+    const gate=host.behavioralGates().find(item=>item.id==="host-static-auto-static")!;
+    const definition=QualityGateDefinitionSchema.parse({id:"host-static-auto-static",name:"static",evaluator:"host-static-analysis",required:true,
+      timeout:{executionTimeoutMs:30_000,onTimeout:"block"},configuration:{kind:"deterministic",method:"static_analysis",command:"auto:static",criterionIds:[],testNames:[],role:"quality_gate",levels:[]}});
+    const evaluate=async(revision:string)=>{const result=await gate.evaluate({...f.context,definition,input:{...f.context.input as object,sourceRevision:revision}});
+      if(!result.ok) throw new Error(result.error.message);return result.value;};
+    expect((await evaluate(f.head)).status).toBe("passed");
+    await writeFile(join(f.repository,"feature.ts"),"export const value: number = 1;\n");f.git("add","feature.ts");f.git("commit","-m","ts");
+    const ts=await evaluate(f.git("rev-parse","HEAD"));
+    expect(ts.status).toBe("failed");
+    expect((ts.metadata?.verification as {summary:string}).summary).toContain("cannot analyze feature.ts");
+    f.git("rm","-q","feature.ts");await writeFile(join(f.repository,"broken.js"),"const value = ;\n");f.git("add","broken.js");f.git("commit","-m","js");
+    expect((await evaluate(f.git("rev-parse","HEAD"))).status).toBe("failed");
   });
 
 });

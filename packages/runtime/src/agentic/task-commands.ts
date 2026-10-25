@@ -146,7 +146,7 @@ export function describeTestRunners(source: TestRunnerSource) {
       })),
       ...(source.automatic && detection?.status === "detected" ? [{
         id: "auto-static", command: "auto:static", method: "static_analysis", levels: [] as string[], reporter: "host_static", source: "detected",
-        testPathRule: "Host-verified Git diff integrity and syntax check on changed files.",
+        testPathRule: "Host git diff --check plus syntax check of changed JavaScript (node --check) and JSON files; any other changed code file fails this check.",
         testNameRule: "Policy static_analysis check; include {\"method\":\"static_analysis\",\"command\":\"auto:static\"} in metadata.conditionalTdd.infrastructure.commands when high-risk or security-sensitive policy requires static_analysis."
       }] : [])
     ],
