@@ -11,12 +11,13 @@ import { callHost } from "../../src/agentic/host-protocol.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-async function hostFixture(includeDeveloper = false) {
+async function hostFixture(includeDeveloper = false, conversationProvider: "claude" | "codex" = "claude") {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-chat-rpc-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "pipe" });
   execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "fixture baseline"], { cwd: root, stdio: "pipe" });
   const sessionId = "chat-rpc", binary = join(root, "herdr-fixture.mjs");
+  const convSource = `herdr:${conversationProvider}`;
   await writeFile(binary, [
     '#!/usr/bin/env node',
     'import { appendFileSync } from "node:fs";',
@@ -27,7 +28,7 @@ async function hostFixture(includeDeveloper = false) {
     'if(rest[0]==="--version") console.log("herdr test-fixture");',
     'else if(rest[0]==="api") console.log("protocol: 22\\nschema_version: 1");',
     'else if(rest[0]==="plugin" && rest[1]==="config-dir") console.log(join(root,"plugin"));',
-    'else if(rest[0]==="agent" && rest[1]==="get") { const conversation=rest[2]==="pane-chat", developer=rest[2]==="pane-developer"; console.log(JSON.stringify({result:{agent:{name:conversation?"chat":developer?"developer":"coordinator",pane_id:rest[2],workspace_id:"workspace",tab_id:"tab",agent_status:"working",agent_session:{source:"herdr:claude",kind:"id",value:conversation?"native-chat":developer?"native-developer":"native-coordinator"}}}})); }',
+    `else if(rest[0]==="agent" && rest[1]==="get") { const conversation=rest[2]==="pane-chat", developer=rest[2]==="pane-developer"; console.log(JSON.stringify({result:{agent:{name:conversation?"chat":developer?"developer":"coordinator",pane_id:rest[2],workspace_id:"workspace",tab_id:"tab",agent_status:"working",agent_session:{source:conversation?${JSON.stringify(convSource)}:"herdr:claude",kind:"id",value:conversation?"native-chat":developer?"native-developer":"native-coordinator"}}}})); }`,
     'else if(rest[0]==="pane" && rest[1]==="read") console.log("coordinator waiting for architect reply token=sk-ant-abcdefghijklmnopqrstuvwxyz0123456789");',
     'else if(rest[0]==="pane") process.exitCode=1;',
     'else console.log(JSON.stringify({running:false,socket:join(root,"herdr.sock")}));'
@@ -37,16 +38,23 @@ async function hostFixture(includeDeveloper = false) {
   const launches = await controller.prepare(), hostDirectory = join(root, ".bflow/state/host", sessionId);
   expect(launches.roleLaunch.conversation!.systemPrompt).toContain("conversation_decide");
   const chat = JSON.parse(await readFile(join(hostDirectory, "conversation.json"), "utf8"));
+  if (conversationProvider !== "claude") {
+    chat.provider = conversationProvider;
+    await writeFile(join(hostDirectory, "conversation.json"), JSON.stringify(chat), { mode: 0o600 });
+  }
   const coordinator = JSON.parse(await readFile(join(hostDirectory, "coordinator.json"), "utf8"));
   const at = new Date().toISOString();
   const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId, workspaceRoot: root, projectName: "chat-rpc",
     herdrWorkspaceId: "workspace", herdrTabId: "tab", status: "up", conversationSessionId: "chat-session", activeRunIds: [],
     attachTarget: { role: "conversation", paneId: "pane-chat" }, createdAt: at, updatedAt: at,
-    panes: ["conversation", "coordinator", ...(includeDeveloper ? ["developer"] : [])].map(role => ({ schemaVersion: 2, bindingId: `binding-${role}`, sessionId, role,
-      agentId: role === "conversation" ? "chat" : role, paneId: role === "conversation" ? "pane-chat" : `pane-${role}`,
-      workspaceId: "workspace", tabId: "tab", provider: "claude", agentKind: "claude", cwd: root, permanent: true, readOnlyWorkspace: true,
-      isolationMode: "dedicated_pane", transportState: "idle", boundAt: at,
-      session: { source: "herdr:claude", kind: "id", value: role === "conversation" ? "native-chat" : `native-${role}` } })) });
+    panes: ["conversation", "coordinator", ...(includeDeveloper ? ["developer"] : [])].map(role => {
+      const provider = role === "conversation" ? conversationProvider : "claude";
+      return { schemaVersion: 2, bindingId: `binding-${role}`, sessionId, role,
+        agentId: role === "conversation" ? "chat" : role, paneId: role === "conversation" ? "pane-chat" : `pane-${role}`,
+        workspaceId: "workspace", tabId: "tab", provider, agentKind: provider, cwd: root, permanent: true, readOnlyWorkspace: true,
+        isolationMode: "dedicated_pane", transportState: "idle", boundAt: at,
+        session: { source: `herdr:${provider}` as "herdr:claude" | "herdr:codex", kind: "id", value: role === "conversation" ? "native-chat" : `native-${role}` } };
+    }) });
   const manifestDirectory = join(root, ".bflow/state/panes"); await mkdir(manifestDirectory, { recursive: true });
   await writeFile(join(manifestDirectory, `${sessionId}.manifest.json`), JSON.stringify(manifest));
   const developer = includeDeveloper ? JSON.parse(await readFile(join(hostDirectory, "developer.json"), "utf8")) : undefined;
@@ -445,4 +453,198 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     expect(paged.remaining).toBe(12 - paged.updates.length);
     expect((await receipts.unsurfacedConversationNotices()).length).toBe(paged.remaining);
   }, 20_000);
+
+  it("delivers dynamic turnContext and updates through read_updates and recoverableUserTurns through conversation_decide on codex while keeping UserPromptSubmit fixed", async () => {
+    const { root, sessionId, hostDirectory, chat, at } = await hostFixture(false, "codex");
+    const { CODEX_CONVERSATION_NUDGE_MARKER, CODEX_CONVERSATION_USER_TURN_MARKER } = await import("../../src/agentic/host.js");
+    const { HostReceiptJournal } = await import("../../src/agentic/host-receipts.js");
+    const receipts = new HostReceiptJournal(join(hostDirectory, "authentication-receipts"), root, sessionId);
+    const invoke = (name: string, args: unknown) => callHost(chat.socketPath, chat.token, "role_call", { paneId: "pane-chat", name, arguments: args });
+    const runHook = (prompt: string) => JSON.parse(execFileSync(process.execPath, [
+      fileURLToPath(new URL("../../dist/agentic/host.js", import.meta.url)),
+      "hook", join(hostDirectory, "conversation.json"), "UserPromptSubmit"
+    ], {
+      input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt }),
+      env: { ...process.env, HERDR_PANE_ID: "pane-chat", HERDR_SOCKET_PATH: "" },
+      encoding: "utf8"
+    })).hookSpecificOutput.additionalContext as string;
+
+    const firstHookOut = runHook("Yêu cầu 1 chưa xử lý");
+    expect(firstHookOut).toBe(CODEX_CONVERSATION_USER_TURN_MARKER);
+
+    await receipts.appendConversationNotice(RoleMessageSchema.parse({
+      schema_version: 2, message_id: "codex-decision-1", correlation_id: "corr-codex", run_id: "run-codex",
+      sender: { role: "coordinator" }, recipient: { role: "conversation" }, type: "approval.request",
+      payload: {
+        approvalId: "apr-codex-1", runId: "run-codex",
+        expiresAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+        metadata: { kind: "user_decision", requestedByRole: "coordinator", question: "Chọn phương án cache nào?", options: ["Fixed marker", "Giữ hook động"] }
+      },
+      artifact_references: [], occurred_at: at, idempotency_key: "codex-decision-1"
+    }));
+
+    const nudgeHookOut = runHook("🔔 Bflow có tin mới");
+    expect(nudgeHookOut).toBe(CODEX_CONVERSATION_NUDGE_MARKER);
+    // Notice was NOT surfaced by the codex UserPromptSubmit hook; it awaits read_updates or Stop.
+    expect((await receipts.unsurfacedConversationNotices()).map(n => n.messageId)).toEqual(["codex-decision-1"]);
+
+    const nudgeUpdates = await invoke("read_updates", {}) as {
+      updates: { messageId: string; kind: string; text: string }[];
+      remaining: number;
+      turnContext: Record<string, any>;
+    };
+    expect(nudgeUpdates.updates).toHaveLength(1);
+    expect(nudgeUpdates.updates[0]!.messageId).toBe("codex-decision-1");
+    expect(nudgeUpdates.updates[0]!.text).toContain("Chọn phương án cache nào?");
+    expect(nudgeUpdates.updates[0]!.text).toMatch(/còn \d+ phút \(hết hạn lúc /u);
+    expect(nudgeUpdates.turnContext).toMatchObject({
+      requiresConversationDecision: false,
+      runtimeNudge: true,
+      recoverableUserTurns: [{ content: "Yêu cầu 1 chưa xử lý" }],
+      context: { session: { sessionId: "chat-session" } }
+    });
+    expect(await receipts.unsurfacedConversationNotices()).toEqual([]);
+
+    const secondHookOut = runHook("Kiểm tra trạng thái trước");
+    expect(secondHookOut).toBe(CODEX_CONVERSATION_USER_TURN_MARKER);
+    expect(secondHookOut).toBe(firstHookOut);
+
+    const userTurnUpdates = await invoke("read_updates", {}) as {
+      updates: { messageId: string; kind: string; text: string }[];
+      remaining: number;
+      turnContext: Record<string, any>;
+    };
+    expect(userTurnUpdates.turnContext).toMatchObject({
+      messageId: expect.stringMatching(/^user-/),
+      requiresConversationDecision: true,
+      recoverableUserTurns: [{ content: "Yêu cầu 1 chưa xử lý" }],
+      context: { session: { sessionId: "chat-session" } }
+    });
+
+    const decided = await invoke("conversation_decide", {
+      decision: { intent: "conversation_only", directReply: "Đã kiểm tra trạng thái" }
+    }) as Record<string, any>;
+    expect(decided).toMatchObject({
+      ok: true,
+      recoverableUserTurns: [{ content: "Yêu cầu 1 chưa xử lý" }],
+      turnContext: {
+        requiresConversationDecision: false,
+        recoverableUserTurns: [{ content: "Yêu cầu 1 chưa xử lý" }]
+      }
+    });
+    const firstTurnId = decided.recoverableUserTurns[0]!.messageId as string;
+    await invoke("conversation_decide", {
+      messageId: firstTurnId,
+      decision: { intent: "conversation_only", directReply: "Đã xử lý yêu cầu 1" }
+    });
+
+    const submitUserTurn = (prompt: string) => callHost(chat.socketPath, chat.token, "user_prompt", {
+      paneId: "pane-chat",
+      hook: { hook_event_name: "UserPromptSubmit", session_id: "native-chat", prompt }
+    });
+
+    // Approval failure on codex: read_updates and conversation_decide expose the failure details.
+    await submitUserTurn("apr-missing-99: 1");
+    const failedUpdates = await invoke("read_updates", {}) as { turnContext: Record<string, any> };
+    expect(failedUpdates.turnContext).toMatchObject({
+      requiresConversationDecision: false,
+      approvalFailed: true,
+      approvalFailure: {
+        error: expect.stringContaining("apr-missing-99"),
+        note: expect.stringContaining("The approval was NOT recorded")
+      }
+    });
+    await expect(invoke("conversation_decide", {
+      decision: { intent: "conversation_only", directReply: "Thử lại" }
+    })).rejects.toThrow(/Trusted approval failed:.*The approval was NOT recorded.*apr-missing-99/);
+
+    // Unrecorded approval warning (turnWarnings) + valid trusted_approval on codex + CONVERSATION_CONTEXT_BUDGET bounding.
+    const { AgenticJournal } = await import("../../src/agentic/journal.js");
+    const { CONVERSATION_CONTEXT_BUDGET } = await import("../../src/agentic/conversation-context-budget.js");
+    const { buildUserDecisionRequest } = await import("../../src/agentic/decision-routing.js");
+    const { draft } = await import("../../../specification/test/fixtures.js");
+    const journal = new AgenticJournal(join(root, ".bflow/state/agentic/journal"), root);
+    const runId = "run-codex-approval";
+    const correlationId = "corr-codex-approval";
+    const delegation = DelegationRequestSchema.parse({
+      schemaVersion: 2,
+      delegationId: "del-codex-approval",
+      messageId: "msg-codex-approval",
+      correlationId,
+      runId,
+      sessionId: "chat-session",
+      requestedBy: "conversation",
+      targetRole: "coordinator",
+      title: "Kiểm thử cache prefix",
+      objective: "Kiểm tra approval và budget trên codex",
+      specificationId: "spec-codex-approval",
+      sddLevel: "lightweight",
+      acceptanceCriteria: draft().acceptanceCriteria,
+      inputArtifacts: [],
+      priority: "normal",
+      requestedAt: at,
+      idempotencyKey: "msg-codex-approval"
+    });
+    const reqA = buildUserDecisionRequest({
+      input: { runId, taskId: "task-a", question: "Câu hỏi A?", options: ["Phương án A", "Phương án B"], expiresInMinutes: 20 },
+      role: "coordinator",
+      sessionId: "chat-session",
+      revision: 1,
+      generation: 1,
+      now: at
+    });
+    const reqB = buildUserDecisionRequest({
+      input: { runId, taskId: "task-b", question: "Câu hỏi B?", options: ["Phương án C", "Phương án D"], expiresInMinutes: 20 },
+      role: "coordinator",
+      sessionId: "chat-session",
+      revision: 1,
+      generation: 1,
+      now: at
+    });
+    await expect.poll(async () => {
+      try {
+        await journal.exclusive(async (state, save) => {
+          state.runs.push({
+            runId,
+            delegation,
+            status: "implementing",
+            tasks: [],
+            coreCreated: false,
+            cancelled: false,
+            maxIterations: 3,
+            userDecisions: {
+              [reqA.approvalId]: { request: reqA, role: "coordinator", agentId: "coordinator", paneId: "pane-coordinator", taskId: "task-a", status: "pending" },
+              [reqB.approvalId]: { request: reqB, role: "coordinator", agentId: "coordinator", paneId: "pane-coordinator", taskId: "task-b", status: "pending" }
+            }
+          });
+          await save();
+        });
+        return true;
+      } catch (error) {
+        if (String(error).includes("runtime busy")) return false;
+        throw error;
+      }
+    }, { timeout: 10_000, interval: 25 }).toBe(true);
+
+    // Bare "1" with 2 pending approvals cannot be auto-recorded -> sets turnWarnings on both read_updates and conversation_decide.
+    await submitUserTurn("1");
+    const ambiguousDecided = await invoke("conversation_decide", {
+      decision: { intent: "conversation_only", directReply: `Hiện có 2 câu hỏi đang chờ, bạn chọn mã cụ thể nhé. ${"Chi tiết ".repeat(650)}` }
+    }) as Record<string, any>;
+    expect(ambiguousDecided.approvalWarnings?.some((w: string) => w.includes(reqA.approvalId) && w.includes(reqB.approvalId))).toBe(true);
+
+    // Exact approval reply "<approvalId>: 1" succeeds in the trusted hook -> read_updates exposes result and bounds turnContext within CONVERSATION_CONTEXT_BUDGET.
+    await submitUserTurn(`${reqA.approvalId}: 1`);
+    const approvedUpdates = await invoke("read_updates", {}) as { turnContext: Record<string, any> };
+    expect(approvedUpdates.turnContext).toMatchObject({
+      requiresConversationDecision: false,
+      result: { ok: true, value: { recognizedIntent: "approval_response" } },
+      context: { messagesOmitted: expect.any(Number) }
+    });
+    expect(approvedUpdates.turnContext.context.messagesOmitted).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(approvedUpdates.turnContext), "utf8")).toBeLessThanOrEqual(CONVERSATION_CONTEXT_BUDGET);
+    await expect(invoke("conversation_decide", {
+      decision: { intent: "conversation_only", directReply: "Không được phép ghi đè" }
+    })).rejects.toThrow(/Conflicting Conversation decision.*requiresConversationDecision=false.*"recognizedIntent":"approval_response"/);
+  }, 30_000);
 });

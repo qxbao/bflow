@@ -97,6 +97,95 @@ describe("trusted raw turns and model decision receipts", () => {
     expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
     expect(await f.journal().humanDecisions()).toEqual([]);
   });
+  it("exposes turn state and bounded context via inspectTurn and returns remaining recoverableUserTurns from decide", async () => {
+    const f = await fixture();
+    expect(await f.intake.inspectTurn(f.binding)).toEqual({
+      requiresConversationDecision: false,
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    await f.intake.receive(f.binding, f.turn("user-unfinished", "Yêu cầu ban đầu"));
+    expect(await f.reopen().inspectTurn(f.binding)).toEqual({
+      messageId: "user-unfinished",
+      requiresConversationDecision: true,
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    await f.intake.runtimeNudge(f.binding);
+    expect(await f.reopen().inspectTurn(f.binding)).toEqual({
+      requiresConversationDecision: false,
+      runtimeNudge: true,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }],
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    await f.reopen().receive(f.binding, f.turn("user-new", "Kiểm tra tiến độ trước"));
+    expect(await f.reopen().inspectTurn(f.binding)).toEqual({
+      messageId: "user-new",
+      requiresConversationDecision: true,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }],
+      context: { pendingClarifications: { "corr-existing": { unresolvedQuestions: ["A or B?"] } } }
+    });
+    const firstDecided = await f.reopen().decide(f.binding, { decision: { intent: "conversation_only", directReply: "Đã kiểm tra tiến độ" } });
+    expect(firstDecided).toMatchObject({
+      ok: true,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }]
+    });
+    expect(await f.reopen().inspectTurn(f.binding)).toMatchObject({
+      messageId: "user-new",
+      requiresConversationDecision: false,
+      result: firstDecided,
+      recoverableUserTurns: [{ messageId: "user-unfinished", content: "Yêu cầu ban đầu" }]
+    });
+  });
+  it("exposes approvalFailure, committed/queued trusted_approval result, and physical fence result via inspectTurn and surfaces full details when decide is called", async () => {
+    const f = await fixture();
+    let mode: "fail" | "queued" | "committed" = "fail";
+    const intake = () => new HostConversationIntake(f.journal(), () => f.port, async (_turn, operationId) => ({
+      ok: true, value: { disposition: "fenced_without_delivery_claim", operationId }
+    }));
+    f.port.handleTrustedApproval = async () => {
+      if (mode === "fail") return { ok: false, error: { code: "expired", retryable: false, message: "Approval apr-expired has expired" } };
+      return { ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: mode === "queued" } };
+    };
+    await intake().receive(f.binding, f.turn("turn-fail", "apr-expired: 1"));
+    expect(await intake().inspectTurn(f.binding)).toMatchObject({
+      messageId: "turn-fail",
+      requiresConversationDecision: false,
+      approvalFailed: true,
+      approvalFailure: {
+        error: expect.stringContaining("Approval apr-expired has expired"),
+        note: expect.stringContaining("The approval was NOT recorded")
+      }
+    });
+    await expect(intake().decide(f.binding, { decision: { intent: "conversation_only", directReply: "Retry" } }))
+      .rejects.toThrow(/Trusted approval failed:.*The approval was NOT recorded.*Approval apr-expired has expired/);
+
+    mode = "queued";
+    await intake().receive(f.binding, f.turn("turn-queued", "apr-1: 1"));
+    expect(await f.journal().conversationDecision("turn-queued")).toEqual({ decision: { intent: "trusted_approval" } });
+    expect(await intake().inspectTurn(f.binding)).toMatchObject({
+      messageId: "turn-queued",
+      requiresConversationDecision: false,
+      result: { ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: true } }
+    });
+    await expect(intake().decide(f.binding, { decision: { intent: "conversation_only", directReply: "Approve" } }))
+      .rejects.toThrow(/Conflicting Conversation decision.*requiresConversationDecision=false.*"queuedBecauseBusy":true/);
+
+    mode = "committed";
+    await intake().receive(f.binding, f.turn("turn-committed", "apr-2: 1"));
+    expect(await intake().inspectTurn(f.binding)).toMatchObject({
+      messageId: "turn-committed",
+      requiresConversationDecision: false,
+      result: { ok: true, value: { recognizedIntent: "approval_response", queuedBecauseBusy: false } }
+    });
+    await expect(intake().decide(f.binding, { decision: { intent: "conversation_only", directReply: "Approve" } }))
+      .rejects.toThrow(/Conflicting Conversation decision.*requiresConversationDecision=false.*"queuedBecauseBusy":false/);
+
+    await intake().receive(f.binding, f.turn("turn-fence", "fence diagnostic op-99"));
+    expect(await intake().inspectTurn(f.binding)).toMatchObject({
+      messageId: "turn-fence",
+      requiresConversationDecision: false,
+      result: { ok: true, value: { disposition: "fenced_without_delivery_claim", operationId: "op-99" } }
+    });
+  });
   it.each([{ mode: "failed", priorIntent: false }, { mode: "queued", priorIntent: false }, { mode: "queued", priorIntent: true }] as const)(
     "keeps the newer $mode decision ahead of an older suspended turn (prior intent: $priorIntent) until its result commits", async ({ mode, priorIntent }) => {
     const f = await fixture();

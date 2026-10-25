@@ -1222,11 +1222,24 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (args.deferSurfacedAck !== true && surfacedToMark.length) {
         await receipts.markConversationNoticesSurfaced(surfacedToMark);
       }
-      return json({ updates, remaining });
+      const isCodexConversation = providerForRole(role) === "codex" || binding.provider === "codex" || binding.agentKind === "codex";
+      return json({
+        updates,
+        remaining,
+        ...(isCodexConversation
+          ? { turnContext: boundConversationContext(await conversationIntake.inspectTurn(binding), CONVERSATION_CONTEXT_BUDGET) }
+          : {})
+      });
     }
     if (name === "conversation_decide") {
       if (role !== "conversation") throw new Error("Only Conversation decides user intent");
-      return conversationIntake.decide(binding, parameters);
+      const decided = await conversationIntake.decide(binding, parameters);
+      const isCodexConversation = providerForRole(role) === "codex" || binding.provider === "codex" || binding.agentKind === "codex";
+      if (!isCodexConversation || typeof decided !== "object" || decided === null || Array.isArray(decided)) return decided;
+      return json({
+        ...(decided as Record<string, unknown>),
+        turnContext: boundConversationContext(await conversationIntake.inspectTurn(binding), CONVERSATION_CONTEXT_BUDGET)
+      });
     }
     if (name === "send_role_message") {
       // Identity comes from the authenticated pane, never from the model: a missing agent_id/pane_id is filled in, a wrong one is still refused.
@@ -2623,7 +2636,19 @@ function stopNoticeReason(notices: readonly NoticeLike[]): string {
   return head + cards.join("\n\n") + (rest ? `\n\n(Còn ${rest} cập nhật nữa: gọi read_updates để lấy.)` : "\n\n(Gọi read_updates nếu cần xem lại.)");
 }
 
-/** Shared inbox-nudge hook context for Claude, Codex, and Agy: rendered text only, never raw notice JSON or internal IDs. */
+export const CODEX_CONVERSATION_USER_TURN_MARKER =
+  "Trusted Bflow user turn: requiresConversationDecision=true unless the host recorded a trusted approval or fence command. " +
+  "If the user message is an approval/decision reply (#n, apr-..., đồng ý, từ chối), an explicit tiếp tục/resume request, a physical fence command, or references existing workflows/clarifications, call read_updates FIRST to inspect turnContext (messageId, requiresConversationDecision, result, approvalFailure, workflows, pendingClarifications, recoverableUserTurns) and pending Runtime updates. " +
+  "When turnContext.requiresConversationDecision is false, do NOT call conversation_decide; report turnContext.result or turnContext.approvalFailure to the user. " +
+  "For an ordinary new user turn (requiresConversationDecision=true), call conversation_decide (messageId is optional; the host binds the latest trusted user turn automatically). Never fabricate provenance or approval.";
+
+export const CODEX_CONVERSATION_NUDGE_MARKER =
+  "Trusted Bflow inbox nudge, not a user message and not an approval. requiresConversationDecision=false. " +
+  "Do not call conversation_decide or resume_run, and do not reuse an earlier user turn. " +
+  "Trả lời ngắn bằng nội dung cập nhật từ read_updates, không chào hỏi; do not ask the user to repeat. " +
+  "Call read_updates now to fetch pending Runtime updates.";
+
+/** Shared inbox-nudge hook context for Claude and Agy: rendered text only, never raw notice JSON or internal IDs. */
 function buildConversationNudgeContext(reply: unknown): string {
   const pending = undisplayedNotices(reply).map(item => item.notice);
   const notices = [...(record(reply).notices as unknown[] ?? []), ...pending] as NoticeLike[];
@@ -2814,6 +2839,10 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   if (event === "UserPromptSubmit" && configuration.role === "conversation" && textField(hook.prompt).trim() === BFLOW_INBOX_NUDGE) {
     // A host-typed nudge is not human input: it never reaches user_prompt, so it cannot create a trusted turn or approval.
     const reply = await callHost(configuration.socketPath, configuration.token, "conversation_runtime_nudge", { paneId, nativeSessionId: textField(hook.session_id) });
+    if (configuration.provider === "codex") {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: CODEX_CONVERSATION_NUDGE_MARKER } }) + "\n");
+      return;
+    }
     const ids = noticeIds(reply);
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: buildConversationNudgeContext(reply) } }) + "\n");
     if (ids.length) await callHost(configuration.socketPath, configuration.token, "conversation_notices_surfaced", { paneId, nativeSessionId: textField(hook.session_id), messageIds: ids });
@@ -2863,6 +2892,10 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
+    if (configuration.provider === "codex") {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: CODEX_CONVERSATION_USER_TURN_MARKER } }) + "\n");
+      return;
+    }
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: buildConversationUserTurnContext(result, textField(hook.prompt)) } }) + "\n");
     // Marked only after the context reached the provider; a crash before this line re-surfaces the notices.
     const ids = noticeIds(result);

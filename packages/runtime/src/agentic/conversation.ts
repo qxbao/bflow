@@ -191,9 +191,11 @@ export async function createAgenticConversationHost(options: {
   };
   /** Why the current user turn's approval-shaped reply was not recorded; replaced on every trusted turn. */
   let turnWarnings: string[] = [];
-  const withWarnings = (result: unknown) =>
-    result && typeof result === "object" ? { ...(result as object), runtimeStatus: runtimeStatus(),
-      ...([...approvalWarnings, ...projectionWarnings].length ? { approvalWarnings: [...approvalWarnings, ...projectionWarnings] } : {}) } : result;
+  const withWarnings = (result: unknown) => {
+    const warnings = [...turnWarnings, ...approvalWarnings, ...projectionWarnings];
+    return result && typeof result === "object" ? { ...(result as object), runtimeStatus: runtimeStatus(),
+      ...(warnings.length ? { approvalWarnings: warnings } : {}) } : result;
+  };
   return {
     reconcileApprovals,
     async handleUserTurn(input) {
