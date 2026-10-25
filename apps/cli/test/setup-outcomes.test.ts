@@ -75,6 +75,29 @@ describe("standard setup composition", () => {
   });
 });
 
+describe("setup check provider login", () => {
+  it("reports the injected read-only login probe instead of an unconditional warning", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { detectPlatform, defaultHostEnvironment, defaultMachineConfig, ToolInstallerRegistry } = await import("@bflow/machine-setup");
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-setup-login-"))); roots.push(root);
+    const bin = join(root, "fixtures"); await mkdir(bin);
+    for (const name of ["node", "git", "pnpm", "herdr", "claude"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const platform = detectPlatform({ ...defaultHostEnvironment(), homeDir: root,
+      env: { PATH: bin, SHELL: "/bin/bash", XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"), XDG_STATE_HOME: join(root, "state") } });
+    const runner = { run: async (argv: readonly string[]) => ({ exitCode: 0, timedOut: false, stderr: "",
+      stdout: argv[0]!.endsWith("/pnpm") ? "12.5.1" : argv[0]!.endsWith("/git") ? "git version 2.45.0" : argv[0]!.endsWith("/herdr") ? "herdr 0.9.5"
+        : argv[0]!.endsWith("/claude") ? "2.1.310 (Claude Code)" : "v24.16.0" }) };
+    const probed: string[] = [];
+    const output = await executeSetupCommand({ command: "setup", mode: "check", yes: false, json: true, help: false }, {
+      cwd: root, setup: { platform, runner, machineConfig: { ...defaultMachineConfig(), providers: ["claude"] }, toolInstaller: new ToolInstallerRegistry(),
+        probeProviderLogin: async observation => { probed.push(observation.toolId); return { verified: true, detail: "ok" }; } }
+    });
+    expect(probed).toEqual(["claude"]);
+    expect(output.doctor?.checks.find(check => check.checkId === "provider-auth-claude"))
+      .toEqual({ checkId: "provider-auth-claude", status: "passed", summary: "claude login verified" });
+  });
+});
+
 describe("required skills catalog", () => {
   it("reports an unavailable explicit catalog before setup writes", async () => {
     const ctx = await context({ outcome: "healthy" });

@@ -178,6 +178,8 @@ export interface SetupIntegrationOptions {
   readonly skillManager?: any;
   readonly machineSetup?: any;
   readonly isolatedRoot?: string | undefined;
+  /** Read-only provider login probe for the doctor; defaults to each provider adapter's own status command. */
+  readonly probeProviderLogin?: import("@bflow/machine-setup").ProviderLoginProbe | undefined;
   /** A Context7 API key supplied by the caller instead of standard input or the environment. */
   readonly context7ApiKey?: string | undefined;
 }

@@ -38,6 +38,13 @@ export interface SetupDoctor {
   run(ctx: SetupContext, input: DoctorInput): Promise<MachineDoctorReport>;
 }
 
+/** Read-only provider login evidence supplied by the composition root; setup never creates credentials. */
+export interface ProviderLoginObservation {
+  verified: boolean;
+  detail: string;
+}
+export type ProviderLoginProbe = (observation: ToolObservation) => Promise<ProviderLoginObservation | undefined>;
+
 const PROVIDER_TOOLS = ["claude", "codex", "agy"];
 const COMPONENT_CHECKS: readonly { componentId: string; checkId: string; label: string; fix: string }[] = [
   { componentId: "path", checkId: "path-block", label: "managed PATH block", fix: "Run `bflow setup --repair`." },
@@ -47,6 +54,9 @@ const COMPONENT_CHECKS: readonly { componentId: string; checkId: string; label: 
 ];
 
 export class BuiltinSetupDoctor implements SetupDoctor {
+  readonly #probeLogin: ProviderLoginProbe | undefined;
+  constructor(options?: { probeLogin?: ProviderLoginProbe }) { this.#probeLogin = options?.probeLogin; }
+
   /** Read-only: components are only observed, never applied. */
   async run(ctx: SetupContext, input: DoctorInput): Promise<MachineDoctorReport> {
     const checks: DoctorCheck[] = (input.componentFailures ?? []).map((failure) => ({
@@ -62,6 +72,9 @@ export class BuiltinSetupDoctor implements SetupDoctor {
         if (observed.valid && observed.stateDigest === desired.digest) ownedPathDirs = await pathComponent.desiredDirs();
       } catch { /* The component check below reports the observation failure. */ }
     }
+    // Provider status commands can take seconds each (Agy fetches its model list); run them concurrently.
+    const logins = new Map(input.observations.filter(o => PROVIDER_TOOLS.includes(o.toolId) && ["present", "path_missing"].includes(o.status) && this.#probeLogin)
+      .map(o => [o, this.#probeLogin!(o).catch((e: unknown) => ({ verified: false, detail: e instanceof Error ? e.message : String(e) }))]));
     for (const o of input.observations) {
       const managedPath = o.status === "path_missing" && o.pathMissingDir !== null && ownedPathDirs.includes(o.pathMissingDir);
       const ok = o.status === "present" || managedPath;
@@ -77,10 +90,13 @@ export class BuiltinSetupDoctor implements SetupDoctor {
         ...(ok ? {} : { remediation: deferred ? o.ownerAction! : `Install or fix ${o.toolId} manually, then rerun setup.` })
       });
       if (PROVIDER_TOOLS.includes(o.toolId) && ok) {
-        checks.push({
+        const login = await logins.get(o);
+        checks.push(login?.verified ? {
+          checkId: `provider-auth-${o.toolId}`, status: "passed", summary: `${o.toolId} login verified`
+        } : {
           checkId: `provider-auth-${o.toolId}`,
           status: "warning",
-          summary: `login not verified by setup; run \`${o.toolId}\` interactively`,
+          summary: login ? `${o.toolId} login not verified: ${login.detail}` : `login not verified by setup; run \`${o.toolId}\` interactively`,
           remediation: `Run \`${o.toolId}\` interactively and complete its own login flow.`
         });
       }

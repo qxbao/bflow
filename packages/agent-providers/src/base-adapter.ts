@@ -188,6 +188,32 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     });
   }
 
+  /**
+   * Read-only login check for machine setup: the provider's own status command, with no launch
+   * environment and no model execution. It never establishes launch readiness.
+   */
+  async checkNativeLogin(options?: OperationOptions): Promise<{ verified: boolean; detail: string }> {
+    try {
+      const executable = (await resolveAndVerifyExecutable(this.getExecutablePath(), this.executableVerificationOptions())).canonicalPath;
+      // Agy's `models` initializes first-run state; never let a check create it in a home that was never onboarded.
+      if (this.descriptor.provider === "agy" && this.options.isolatorEnvironment?.HOME === undefined) {
+        const home = process.env.HOME;
+        const onboarded = home !== undefined &&
+          await lstat(join(home, ".gemini", "antigravity-cli", "cache", "onboarding.json")).then(info => info.isFile(), () => false);
+        if (!onboarded) return { verified: false, detail: "agy onboarding is not complete" };
+      }
+      const outcome = await this.nativeAuthenticationOutcome(executable, options);
+      const output = `${outcome.stdout}\n${outcome.stderr}`;
+      if (outcome.failure === "timeout") return { verified: false, detail: "login status check timed out" };
+      if (!outcome.started || outcome.failure !== undefined || outcome.exitCode !== 0 || /expired/i.test(output) ||
+          !this.nativeAuthenticationConfirmed(outcome.stdout, outcome.stderr))
+        return { verified: false, detail: "provider reports no active login" };
+      return { verified: true, detail: "provider reports an active login" };
+    } catch (err) {
+      return { verified: false, detail: `login status check failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
   protected nativeAuthenticationConfirmed(stdout: string, stderr: string): boolean {
     if (/\b(?:unauthori[sz]ed|unauthenticated|not logged in|auth(?:entication)? required)\b/i.test(stdout + "\n" + stderr)) return false;
     if (this.descriptor.provider === "claude") {

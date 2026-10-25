@@ -388,7 +388,8 @@ export class ManagedToolInstaller implements ToolInstaller {
         // The retained installation may still prove this exact desired pin in the active cache.
         if (!observation.ready && observationPath !== destination) {
           const existing = await this.#providerPlugin!.verify(pin, destination);
-          if (existing.ready) { observation = existing; observationPath = destination; }
+          // The installed destination is what the owner relies on; an unrecorded stage cannot explain its failure.
+          if (existing.ready || !(await this.#hasNativeRecord(observationPath))) { observation = existing; observationPath = destination; }
         }
         if (!observation.ready && await this.#providerPlugin!.registered?.(pin) === false)
           return observed( "blocked", [observation.diagnostic, "Interrupted native activation left nothing registered with the provider; the next apply discards it and retries"],
@@ -597,9 +598,17 @@ export class ManagedToolInstaller implements ToolInstaller {
     let observationPath = intent.stage;
     try { await lstat(observationPath); } catch { observationPath = destination; }
     const observation = await this.#providerPlugin!.verify(pin, observationPath);
-    if (observation.ready || await this.#providerPlugin!.registered?.(pin) !== false) return;
+    // A stage that never recorded native metadata made no provider mutation of its own: once the owned
+    // destination proves this exact pin in the provider's active cache, the intent is resolved.
+    const resolved = !observation.ready && observationPath !== destination && !(await this.#hasNativeRecord(observationPath)) &&
+      await this.#marker(destination) !== null && (await this.#providerPlugin!.verify(pin, destination)).ready;
+    if (!resolved && (observation.ready || await this.#providerPlugin!.registered?.(pin) !== false)) return;
     await rename(pendingPath, `${pendingPath}.reviewed-${randomUUID()}`);
     await rm(intent.stage, { recursive: true, force: true });
+  }
+
+  async #hasNativeRecord(stage: string): Promise<boolean> {
+    try { return (await lstat(join(stage, ".bflow-native.json"))).isFile(); } catch { return false; }
   }
 
   /** Explicit operator recovery after inspecting an uncertain native mutation; never called by apply/reconcile. */
