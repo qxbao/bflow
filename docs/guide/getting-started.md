@@ -63,6 +63,8 @@ Dùng nội dung trong `requests/bugfix.md`, `feature.md`, `refactor.md` hoặc 
 
 Conversation nhận yêu cầu, Coordinator khảo sát và đề xuất đặc tả/kế hoạch qua Runtime. Các seed trong template không phải đặc tả đã duyệt: host vẫn liên kết run, đóng băng tiêu chí, giải quyết TDD, yêu cầu approval và kiểm chứng độc lập. Khi Conversation trình quyết định, trả lời đúng lựa chọn và phạm vi. Không có shortcut `bflow run --kind bugfix` cho luồng P19.
 
+Conversation dùng nhãn như `Việc #2` và mã thẻ như `#3`. Trả lời theo đúng lựa chọn/hạn của thẻ, hoặc hỏi “xem chi tiết #3”; bạn không cần tự chép run/approval ID nội bộ. NFR liên quan phải có oracle và điều kiện được chấp nhận trước khi đo; số mẫu trong skill không là SLA. [Conversation updates](conversation-updates.md) · [NFR/test design](../nfr-and-test-design.md).
+
 ## 4. Theo dõi, xử lý blocker và kết thúc
 
 Trong terminal khác:
@@ -72,7 +74,7 @@ bflow status --json
 bflow doctor --json
 ```
 
-Conversation báo tiến độ, blocker và bước tiếp theo. Nếu cần sửa yêu cầu, gửi revision qua cùng cuộc hội thoại. Chỉ dùng `tiếp tục`/`resume <run-id>` khi pending action cho phép; resume không thay thế approval đang chờ. Legacy `bflow resume <run-id>` dùng store khác, không dùng để phục hồi run P19.
+Conversation báo tiến độ, blocker và bước tiếp theo. Nếu cần sửa yêu cầu, gửi revision qua cùng cuộc hội thoại. Chỉ dùng `tiếp tục việc #2` theo nhãn của phiên (hoặc `tiếp tục` nếu chỉ có một việc rõ ràng) khi pending action cho phép; resume không thay thế approval đang chờ. Legacy `bflow resume <run-id>` dùng store khác, không dùng để phục hồi run P19.
 
 Khi kết thúc:
 

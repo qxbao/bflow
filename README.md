@@ -81,7 +81,7 @@ Trong Conversation, bắt đầu bằng một yêu cầu có thể kiểm chứn
 
 > Sửa `sum` để ném `RangeError` khi kết quả vượt giới hạn số nguyên an toàn. Giữ nguyên API hiện tại và bổ sung kiểm thử hồi quy cho lỗi này.
 
-Conversation sẽ làm rõ yêu cầu khi cần và trình các quyết định thuộc quyền bạn. Xem [bài hướng dẫn với repository mẫu](docs/guide/getting-started.md).
+Conversation sẽ làm rõ yêu cầu khi cần và trình các quyết định thuộc quyền bạn bằng tiếng Việt dễ hiểu. Mỗi việc có nhãn như `Việc #2`, thẻ cần quyết định có mã như `#3`; trả lời theo hướng dẫn của thẻ, ví dụ `#3: 1`. Bạn có thể hỏi “xem chi tiết #3” hoặc mở tab Logs để điều tra thêm. [Đọc cập nhật và trả lời](docs/guide/conversation-updates.md) · [Repository mẫu](docs/guide/getting-started.md).
 
 ### 3. Theo dõi và kết thúc phiên
 
@@ -95,7 +95,7 @@ bflow down                   # Dừng an toàn khi không còn công việc acti
 
 `mcp status` hiện đọc cấu hình nhưng chưa có kết nối kiểm tra health mặc định, nên có thể báo `configured: false` dù Gateway đang chạy. Dùng `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe Context7; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
 
-Nếu cần dừng khi còn công việc, `bflow down --yes` xác nhận việc dừng có checkpoint; Runtime vẫn thực thi shutdown barrier. Với run bị chặn, đọc hướng dẫn trong Conversation trước khi trả lời `tiếp tục` hoặc `resume <run-id>`. [Khôi phục phiên →](docs/guide/session-recovery.md)
+Nếu cần dừng khi còn công việc, `bflow down --yes` xác nhận việc dừng có checkpoint; Runtime vẫn thực thi shutdown barrier. Với run bị chặn, đọc hướng dẫn trong Conversation trước khi trả lời `tiếp tục việc #2` theo nhãn đang hiển thị. [Khôi phục phiên →](docs/guide/session-recovery.md)
 
 ## Luồng thực thi
 
@@ -112,7 +112,8 @@ flowchart TD
     R --> D["Developer · worktree riêng<br/>Red → Green → Refactor khi bắt buộc"]
     D --> V["Kiểm chứng task · test độc lập · Reviewer và QA"]
     V --> Q{"Đạt tiêu chí?"}
-    Q -->|Sửa trong giới hạn| D
+    Q -->|Còn lượt| X["Giải trình từng lỗi · nguyên nhân gốc<br/>bản sửa và bằng chứng trước/sau"]
+    X --> D
     Q -->|Hết lượt hoặc bị chặn| C
     Q -->|Đạt| G["Tích hợp Git theo phụ thuộc"]
     G --> W["Kiểm chứng trên commit tích hợp"]
@@ -131,6 +132,9 @@ Herdr quản lý tiến trình và các pane; Runtime quyết định điều g�
 - **Provider và model:** chọn theo role trong `.bflow/config.yml`; hỗ trợ profile đã tạo qua `bflow iso`. [Vai trò](docs/guide/agent-roles.md) · [Cấu hình](docs/guide/configuration-reference.md)
 - **Kiểm thử:** Runtime phát hiện các runner được hỗ trợ; `.bflow/verification.json` là override tùy chọn của owner. Mức hỗ trợ khác nhau theo runner/OS. [Verification runners](docs/verification-runners.md)
 - **Công cụ:** các tích hợp mặc định là tùy chọn; công cụ thiếu sẽ báo degraded, công cụ bắt buộc thiếu sẽ chặn. Grant vẫn phụ thuộc inventory, scope và readiness. [Tool policy](docs/tools-sdlc-integration.md)
+- **NFR và test design:** chỉ làm rõ metric/oracle, workload và góc nhìn rủi ro liên quan; thiếu ngưỡng hay evidence vẫn chưa được pass. [Hướng dẫn](docs/nfr-and-test-design.md)
+- **Rework có dẫn chứng:** mỗi finding cần giải trình gắn với source/revision và verification độc lập; xem [cơ chế và giới hạn enforcement](docs/rework-causality.md).
+
 - **Nâng cấp cấu hình:** dùng `bflow init --update` để bổ sung defaults/comment và giữ giá trị đã có; dùng `bflow config-migrate` cho file `.yaml`/`.json` cũ. [Hướng dẫn init](docs/guide/bflow-init.md)
 
 ## Tài liệu
@@ -141,7 +145,7 @@ Herdr quản lý tiến trình và các pane; Runtime quyết định điều g�
 | Tra cứu lệnh | `bflow --help` · [CLI reference](apps/cli/COMMAND_REFERENCE.md) |
 | Vận hành và xử lý lỗi | [Runbook](docs/operations-runbook.md) · [Troubleshooting](docs/guide/troubleshooting.md) |
 | Hiểu cơ chế hoạt động | [Architecture overview](docs/guide/architecture-overview.md) · [Runtime v3](docs/runtime-architecture-v3.md) |
-| Kiểm tra mức hỗ trợ | [Implementation status](docs/implementation-status.md) · [Compatibility](docs/compatibility-matrix.md) · [Known limitations](docs/known-limitations-v3.md) |
+| Kiểm tra mức hỗ trợ | [Implementation status](docs/implementation-status.md) · [Compatibility](docs/compatibility-matrix.md) · [Known limitations](docs/known-limitations-v3.md) · [Các commit mới đã đối chiếu](docs/main-updates-2026-10-25.md) |
 | Phát triển Bflow | [Documentation index](docs/README.md) · [AGENTS.md](AGENTS.md) |
 
 ## Phát triển từ source

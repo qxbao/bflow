@@ -64,9 +64,15 @@ Nếu hệ thống sập nguồn trong quá trình xác minh, host bắt buộc 
 
 ## 6. Tiếp tục qua Conversation và cancellation
 
-Với P19, gửi `tiếp tục` hoặc `resume <run-id>` trong Conversation khi pending action cho phép. Host gắn yêu cầu vào đúng human turn đã xác thực; giữ run/action/receipt và kiểm lại capability, lease/fence, approval và delivery. Nếu notice nói Runtime tự resume thì không cần gửi thêm lệnh tiếp tục. Blocker cần sửa yêu cầu (ví dụ project policy full SDD) phải nhận revision qua Conversation; lặp resume không sửa spec hoặc cấp approval.
+Với P19, gửi `tiếp tục việc #2` theo nhãn đã lưu của phiên (hoặc `tiếp tục`/`resume <run-id>` khi target đã rõ) trong Conversation khi pending action cho phép. Host gắn yêu cầu vào đúng human turn đã xác thực; giữ run/action/receipt và kiểm lại capability, lease/fence, approval và delivery. Nếu notice nói Runtime tự resume thì không cần gửi thêm lệnh tiếp tục. Blocker cần sửa yêu cầu (ví dụ project policy full SDD) phải nhận revision qua Conversation; lặp resume không sửa spec hoặc cấp approval.
 
 Cancellation cũng đi qua Conversation. Runtime lưu control trước khi áp dụng, khôi phục control queued qua restart, không dispatch thêm task sau khi đã hủy. `cancelled` xác nhận intent được áp dụng; chờ reconciliation report để biết `fully stopped` hay còn native delivery/writer cần xử lý. Không cleanup worktree chỉ từ nhãn cancelled.
+
+### Giữ notice aliases và rework evidence khi phục hồi
+
+Alias `#n`/`Việc #k` đến từ immutable notice receipts và được đồng bộ vào context của cùng phiên. Khôi phục giữ mapping; không dùng mã ở phiên khác hoặc tự cấp alias mặc định cho receipt cũ. Notice đã surfaced cho model vẫn có thể chưa được hiển thị; đọc lại/Stop reminder không tạo human turn hay quyết định.
+
+Rework dossiers có finding/revision/generation riêng, được journal/checkpoint riêng và ArtifactStore giữ lại. Legacy record chưa có `reworkResolutions` vẫn đọc được; không suy thiếu field là đã xử lý finding. Khi recover, kiểm lại receipt/artifact và revision đúng trước khi tiếp tục verification; không tạo dossier giả hoặc reset maxIterations. [Rework reference](../rework-causality.md) · [Conversation updates](conversation-updates.md).
 
 ## 7. Lệnh khôi phục của CLI Runtime cũ
 

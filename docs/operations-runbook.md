@@ -33,6 +33,14 @@ bflow docs status
 
 Tool installation, repo allowance, resolved grant, readiness, invocation và consumption là các quan sát riêng. Context7 hosted dùng chung giữa worktrees; backend local vẫn gắn workspace đã setup. GitNexus cần fresh index và lease/fence; không rebuild index dưới reader đang active. [Tool integration](tools-sdlc-integration.md).
 
+## Cập nhật dễ đọc và chẩn đoán qua Log
+
+Conversation giải thích bằng tiếng Việt, dùng `#n` cho thẻ và `Việc #k` cho công việc. Hỏi “xem chi tiết #3”, “tiến độ việc #2” hoặc “tiếp tục việc #2” ngay trong Conversation theo bước đang chờ. Các câu này không phải subcommand shell; không có `bflow read_updates`.
+
+Default notice flow giữ raw detail khỏi nội dung hiển thị thường lệ. Tab Log có notice type/role/reason/artifacts đã che bí mật và giới hạn độ dài; đây là best-effort diagnostics, không thay journal hay gate evidence. Nếu cần đúng một notice, Conversation lấy detail theo alias qua host; query theo việc chọn notice liên quan gần nhất, không là history dump.
+
+Host phân biệt received → surfaced cho model → displayed trong final response. Stop reminder mang card plaintext và có bound; alias match nguyên token, không nhầm `#1` với `#12`/`Việc #1`. Chỉ đọc/hiển thị notice không thể approve. [Conversation guide](guide/conversation-updates.md).
+
 ## Dừng phiên
 
 ```bash
@@ -66,11 +74,13 @@ Trên Linux kiểm tra `systemctl --user status bflow-mcp-gateway.service`; macO
 
 ## Tiếp tục và hủy workflow
 
-Với P19, gửi `tiếp tục` hoặc `resume <run-id>` trong Conversation khi đã xử lý đúng pending action. Runtime xác thực human turn, capability, approval, lease/fence và delivery state. Blocker cần revision chờ người dùng sửa yêu cầu; nếu notice báo Runtime tự resume thì không cần gửi thêm lệnh tiếp tục.
+Với P19, gửi `tiếp tục việc #2` theo alias của phiên, hoặc `tiếp tục`/`resume <run-id>` khi target đã rõ trong Conversation khi đã xử lý đúng pending action. Runtime xác thực human turn, capability, approval, lease/fence và delivery state. Blocker cần revision chờ người dùng sửa yêu cầu; nếu notice báo Runtime tự resume thì không cần gửi thêm lệnh tiếp tục.
 
 Cancellation qua Conversation lưu control bền vững; `cancelled` nghĩa là intent hủy đã áp dụng, chưa tự chứng minh mọi native process dừng hẳn. Chờ reconciliation report `fully stopped` hoặc blocker. Giữ worktree cho tới khi xác minh writer đã dừng.
 
 Legacy `bflow resume`/`cancel`/`approve` thao tác store khác; không dùng cho P19. [Session recovery](guide/session-recovery.md) giải thích recovery/backup và giới hạn durability.
+
+Khi verification trả rework, dùng dossier theo exact finding ID thay vì chỉ báo “đã sửa”. Kiểm tra commit/revision, nguyên nhân và phép kiểm tra trước/sau; Reviewer/QA vẫn phải xác minh. Giới hạn verdict coverage hiện tại cần được theo dõi như [rework reference](rework-causality.md), không bỏ qua gate để thông pipeline.
 
 ## Lệnh cấp cao cho operator/automation
 

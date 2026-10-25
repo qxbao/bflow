@@ -26,6 +26,14 @@ Setup có thể cài Herdr, provider CLI và tools từ [catalog installer](../p
 
 Chạy lại khi môi trường đã hội tụ trả `noop`/`already_satisfied`; chạy `bflow setup --repair --yes` khi cần sửa owned config/state theo plan. Giữ receipt không rõ kết quả để reconcile, không xóa state nhằm ép cài lại.
 
+### Kiểm tra native login và intent Superpowers
+
+Từ mốc `2357669`, setup doctor có thể báo native login đã verified khi CLI chạy trong môi trường tài khoản thông thường. Nó dùng status command của provider (`codex login status`, Claude structured auth status, Agy model-list check khi đã onboarding), chạy các provider probe độc lập đồng thời và không thực hiện model inference hoặc tạo credential.
+
+Installed binary vẫn là một quan sát riêng. Login chưa xác minh báo warning và hướng dẫn operator đăng nhập; login verified không chứng minh model quota, profile trong config, launch/activated readiness hoặc task success. Với `BFLOW_HOME`/isolated setup hay injected platform, mặc định giữ warning nếu không có login probe phù hợp, không lấy login của tài khoản ngoài để chứng nhận scope cô lập. Agy chưa có native onboarding file thì không gọi `agy models`, tránh tạo first-run state từ phép kiểm tra.
+
+`setup --check` cũng không còn dùng stage Superpowers chưa từng ghi native metadata để che diagnostic của installed destination. Nếu owned destination chứng minh exact pin đã được kích hoạt, lần apply được duyệt có thể archive intent cũ và bỏ stage của chính nó. Check không làm thao tác cleanup này. Intent đã có native metadata, destination chưa đủ bằng chứng hoặc kết quả mutation vẫn uncertain phải tiếp tục reconciliation theo receipt; không xóa cache/intent thủ công. [Installer reference](../packages/tool-installer/README.md).
+
 ## 2. Chuẩn bị repository và Gateway
 
 ```bash

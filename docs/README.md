@@ -8,6 +8,7 @@ Bắt đầu từ [README](../README.md), [cài đặt](guide/installation.md) v
 | --- | --- |
 | Build, bootstrap `bin.js setup`, dùng lệnh tắt `bflow` | [Installation](guide/installation.md) |
 | Setup máy, Gateway, đăng nhập và profile | [Setup guide](setup-guide.md) |
+| Cập nhật, mã thẻ/việc và câu trả lời | [Conversation updates](guide/conversation-updates.md) |
 | Chạy phiên đầu tiên trong repo độc lập | [Getting started](guide/getting-started.md) |
 | Init, up, attach, down, config và recovery | [User guide](guide/README.md) |
 | Cú pháp và phạm vi các lệnh | [CLI reference](../apps/cli/COMMAND_REFERENCE.md) · [High-level commands](../apps/cli/docs/command-reference.md) |
@@ -27,6 +28,9 @@ Bắt đầu từ [README](../README.md), [cài đặt](guide/installation.md) v
 | SDD, Conditional TDD, bounded verification và approval | [SDLC policies](sdlc-policies.md) |
 | Public ports, recovery và event/checkpoint | [Contracts](contracts.md) · [ADR 0001](adr/0001-p00-contract-hardening.md) · [ADR 0002](adr/0002-p01-recovery-rework.md) |
 | Tool policy D-TOOLS-01, invocation và consumption | [Integration guide](tools-sdlc-integration.md) · [Accepted design](superpowers/specs/2026-10-24-tools-sdlc-design.md) |
+| Nguyên nhân gốc và evidence trong rework | [Rework causality](rework-causality.md) |
+| NFR và kiểm thử tương xứng rủi ro | [NFR/test design](nfr-and-test-design.md) |
+| Commit mới so với mốc docs ban đầu | [Main updates audit](main-updates-2026-10-25.md) |
 | Shared MCP và skills được pin | [Gateway architecture](shared-mcp-architecture.md) · [Skills architecture](skills-architecture.md) · [Canonical catalog](../skills/README.md) |
 
 ## Bằng chứng và báo cáo lịch sử
@@ -36,6 +40,8 @@ Các báo cáo bên dưới **không phải ma trận hỗ trợ của HEAD**. G
 - [P11–P21 acceptance](acceptance/2026-10-16-p11-p21.md), [startup UX](acceptance/2026-10-16-lifecycle-startup-ux.md), [P25–P29 audit](acceptance/2026-10-17-p25-p29.md).
 - [P22 release report](release-readiness.md), [v3 release report](release-readiness-v3.md), [E2E report](e2e-report.md), [provider probes](provider-compatibility.md).
 - [macOS portability](acceptance/2026-10-24-macos-portability.md) và [follow-up review](acceptance/2026-10-24-macos-portability-review.md).
+- [NFR guidance handoff](../packages/skills/NFR_GUIDANCE_HANDOFF.md): hồ sơ lịch sử về catalog/schema/local integration, giữ cả các timeout và full run chưa hoàn tất; digest trong hồ sơ không thay catalog hiện hành.
+
 - [Security review](security-review.md), [v3 security audit](security-audit-v3.md), [MCP memory benchmark](mcp-memory-benchmark.md).
 
 Hướng dẫn API P00–P10 có đánh số nằm trong [mục legacy của user guide](guide/README.md). Chúng mô tả Runtime/demo cũ; luồng sử dụng hiện tại bắt đầu bằng `bflow up` và `bflow attach`.

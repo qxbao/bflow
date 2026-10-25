@@ -548,3 +548,12 @@ Quyết định được duyệt trong [tools design](superpowers/specs/2026-10-
 | [`tool-usage.ts`](../packages/contracts/src/tool-usage.ts) | `ToolUsageRecordSchema`; invocation disposition, consumption và trusted artifact evidence riêng |
 
 Các schema parse ingress/egress; Runtime/Gateway vẫn xác minh authority, digest, lease/fence và runtime provenance. Schema hợp lệ không chứng minh tool đã invoked, output consumed hoặc task thành công. [Integration guide](tools-sdlc-integration.md) mô tả default-policy composition và migration hiện tại.
+
+
+## Runtime-private additions after the documentation baseline
+
+[Rework dossiers](rework-causality.md) use strict Runtime-local codecs (`schemaVersion: 1`) and an optional journal/checkpoint `reworkResolutions` history. They are not new exports of `@bflow/contracts` and do not change RoleMessage v2, SessionManifest v2, RuntimeService, Core event/checkpoint codecs or SQL schema. The host validates their identity/revision/generation and trusted artifact references at its ingress.
+
+Conversation short aliases are optional fields in its private snapshot/notice receipts, not replacement wire IDs. `read_updates` is a host MCP tool, not a new `BflowCommand` or independent approval API. [Conversation guide](guide/conversation-updates.md).
+
+NFR guidance uses the existing `AcceptanceCriterion.description`, categories and verificationMethod enum; it adds no metric/threshold fields, SLA defaults or metadata protocol. [NFR/test design](nfr-and-test-design.md).

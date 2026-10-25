@@ -192,3 +192,10 @@ Giá trị proposed/unknown vẫn pending; thiếu tool và thiếu evidence là
 trống riêng. Không thêm schema, metadata protocol, gate hoặc thay đổi TddDecision.
 Digest bao phủ toàn bundle được tính lại khi load catalog; setup phải cài version/pin
 mới theo approval hiện có, không ghi đè generation đang chạy.
+
+
+## Conditional risk-based test design references
+
+Các bundle `test-planning`, `review-code`, `security-review`, `browser-inspection` có entrypoint gọn và references theo nhu cầu cho check design/review. Chọn viewpoint theo criterion và changed surface, dùng N/A có lý do khi không liên quan; giữ chuỗi criterion → risk → exact check identity → observation → evidence. Cùng catalog hiện hành kết hợp NFR guidance; không lấy một digest của nhánh/phiên bản kết hợp cũ làm approval cho byte hiện tại.
+
+Viewpoints bổ sung boundary/state/decision/concurrency/fault/compatibility/wiring và UI/security cases khi phù hợp, không bắt mọi task chạy browser/live tooling. Nếu criterion thật yêu cầu browser/live proof, thiếu grant/lease/origin/environment phải là prerequisite gap, không đổi nhãn unit/static test thành E2E. [Guide tổng hợp](../../docs/nfr-and-test-design.md) liên kết các tài nguyên canonical và giới hạn Runtime.

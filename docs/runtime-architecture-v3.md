@@ -16,7 +16,7 @@ P24 là baseline contracts/design; các quyết định D24-01 và phần audit 
 | P27 | Gateway/control/stdio/remote services, exact grants/schemas, ledger, leases/fencing và structured output | Runtime đã nối GitNexus resource lease; browser task actions còn unsupported |
 | P28 | Canonical catalog, approved role bindings, exact bundle pins, session manifests | Tool skill phụ thuộc grant; load instruction không chứng minh tuân thủ |
 | P29/P30 | Persistent host prepare/activate, platform preflight, dynamic Developer, Gateway registration/revocation, user-decision routing | Có package/local integration tests và hồ sơ probe riêng; full provider SDLC/active crash acceptance còn mở |
-| Sau P30 | Optional integrated tool defaults, `init --update`, polyglot detection, macOS helper/Seatbelt, bounded repository survey, actionable blockers | Xem từng source/test/report, không gộp các mức bằng chứng |
+| Sau P30 | Optional integrated tool defaults, `init --update`, polyglot detection, macOS helper/Seatbelt, bounded repository survey, actionable blockers; thêm rework dossiers, Conversation cards/aliases/read_updates/Log và NFR/risk references | [Commit audit](main-updates-2026-10-25.md) ghi phần sau mốc docs; local tests không đóng live acceptance hoặc mọi guard còn thiếu |
 | P31 | Coverage platform nằm trong E2E e11–e16 và package tests; chưa có cây `tests/platform-v3/**` riêng | Chưa đóng conformance/fault/live acceptance campaign |
 
 SDD/TDD/verification/concurrency của repository đã được CLI truyền vào persistent host. `up` mặc định không inference ping; activated health vẫn bắt buộc. [Compatibility matrix](compatibility-matrix.md), [limitations](known-limitations-v3.md), [roadmap](next-roadmap.md) ghi các điều kiện còn mở.

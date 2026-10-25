@@ -41,7 +41,15 @@ CLI đã chuyển `environment.verification.maxIterations` sang persistent host.
 
 ---
 
-## 3. Xử lý khi cạn kiệt số lần thử và khôi phục trạng thái
+## 3. Rework có giải trình theo finding
+
+Sau cycle thất bại cần sửa, Runtime giao `reworkContext` với exact finding ID, revision/generation và ngân sách còn lại. Developer nộp `findingResolutions` theo từng finding: nguyên nhân, source location, repair summary, phép kiểm tra phân biệt trước/sau và evidence. `addressed` cần commit sạch mới và ràng buộc revision đúng; `disputed`/`blocked` phải có lý do và bằng chứng tương ứng.
+
+Hồ sơ được host kiểm tra cấu trúc/provenance và lưu vào ArtifactStore; report này chưa tự chứng minh causal claim đúng. Reviewer/QA nhận dossier và dùng `findingVerdicts` để xác nhận hoặc bác bỏ. Source hiện từ chối ID verdict lạ/trùng nhưng chưa bắt buộc đủ verdict cho mọi finding khi gate pass; cần giữ rõ khoảng trống enforcement này, không gọi instruction trong prompt là hard gate đã đóng. [Rework reference](../rework-causality.md).
+
+Test plan mới dùng chuỗi criterion → risk/viewpoint → exact test/check → observation → evidence. NFR có thêm điều kiện/oracle đã được duyệt; skill reference không thay runner khả dụng hoặc TddDecision. [NFR/test design](../nfr-and-test-design.md).
+
+## 4. Xử lý khi cạn kiệt số lần thử và khôi phục trạng thái
 
 Khi đã cạn kiệt số vòng lặp tối đa, Runtime sẽ tự động leo thang thông qua Conversation Agent để yêu cầu con người can thiệp. Trong mọi tình huống, hệ thống:
 - Tuyệt đối không tự ý cắt giảm tiêu chí nghiệm thu, thay đổi đặc tả hay sửa đổi chiến lược kiểm thử chỉ nhằm mục đích làm "xanh" kết quả kiểm thử.

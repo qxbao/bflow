@@ -109,3 +109,8 @@ chain or another workflow engine.
 Every specialist routes missing information, permissions and approvals through
 Runtime → Herdr → Conversation. Do not open native direct user questions or elicitation.
 All examples preserve waiting state until an authenticated current answer arrives.
+
+
+## NFR and conditional test-design guidance
+
+The canonical references now include NFR outcome/oracle/measurement briefs and conditional risk viewpoints. See the [integrated guide](../docs/nfr-and-test-design.md) for the consumer/reference map and compatibility limits. Load the relevant pinned reference on demand; instructions, valid example schemas and rendered distribution are not measurement results or tool permissions. Existing sessions retain their immutable generation; differing bytes under an already installed version require owner reconciliation, never overwrite.

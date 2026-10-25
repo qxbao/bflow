@@ -8,6 +8,22 @@ setup/install là bước riêng. Bootstrap một lần qua `node apps/cli/dist/
 launcher `bflow`. Xem [trạng thái hiện tại](../../docs/implementation-status.md),
 [tool policy](../../docs/tools-sdlc-integration.md) và [runner matrix](../../docs/verification-runners.md).
 
+## Bổ sung sau mốc docs 355a998
+
+Đối chiếu upstream mốc `a7686be` ngày 2026-10-25: [commit audit](../../docs/main-updates-2026-10-25.md) ghi phạm vi source và bằng chứng.
+
+- [Rework causality](../../docs/rework-causality.md): assignment mang finding identity/revision/generation; submission cần `findingResolutions`, host lưu dossier và reviewer có `findingVerdicts`. Structural/provenance guards đã có, nhưng guard coverage đủ verdict trước pass còn thiếu; không coi prompt requirement là enforcement đã hoàn thiện.
+- [Conversation cards](../../docs/guide/conversation-updates.md): thẻ tiếng Việt, mã `#n`, nhãn `Việc #k`, alias receipts qua restart, structured notice detail trong Log. Không suy display ACK thành human approval.
+- [NFR/risk-based references](../../docs/nfr-and-test-design.md): instruction được pin hỗ trợ oracle/conditions/check mapping, không tạo runner, quyền tool hoặc gate mới.
+
+`read_updates` là tool của Conversation trên Bflow host MCP. Gọi `{}` nhận bounded `{updates: [{messageId, kind, text}], remaining}`; mỗi `text` là card đã render. MCP server trả reply trước rồi ACK các message đã surfaced cho model. Các đợt chưa hiển thị có thể được đọc/nhắc lại; nếu còn `remaining`, lấy đợt tiếp theo.
+
+Gọi `{ref: "#3", detail: true}` hoặc `{ref: "Việc #2", detail: true}` nhận một `{detail, note}` riêng, không lặp detail trong danh sách updates. Detail query là đọc chẩn đoán, không acknowledge display hoặc cấp quyền; theo work alias chọn notice liên quan gần nhất. Không có subcommand CLI `bflow read_updates`.
+
+Hook không nhúng raw notice list vào context thường lệ. Lượt người dùng vẫn có private structured context/provenance; phần này không phải nội dung để trích ra màn hình. Stop refusal cần mang card plaintext trước khi mark surfaced, để không mất nội dung khi model chưa gọi tool. Display matching dùng whole tokens và giữ exact legacy IDs nếu receipt chưa có alias; append alias được serialize trong host hiện tại, không phải distributed/multi-host allocation.
+
+Chỉ callback `conversation_notices_surfaced` có thể thiếu native-session argument trong đường ACK sau reply; current authenticated pane vẫn phải có binding/session. Các endpoint khác giữ kiểm tra native session, và ACK này không thể nộp human decision. Prompt tiếng Việt và local hook tests không chứng nhận provider thật đã tuân thủ hoặc toàn bộ live workflow đã pass.
+
 ## Composition và thực thi
 
 Coordinator và Developer cùng các specialist đọc policy và skill đã pin qua
@@ -299,8 +315,7 @@ nhả journal lock, vì Gateway có thể drain một lượt người dùng đa
 vào Runtime. Gateway khử trùng lặp theo `message_id`, nên một lần giao bị lỗi hoặc gián đoạn được
 xếp hàng lại và thử lại, kết thúc ở trạng thái terminal `delivered`. Mỗi thông điệp được áp dụng
 được giữ như một notice bền vững (summary giới hạn 4096 ký tự) cho đến khi model đã
-thấy nó: trong hook context của lượt người dùng kế tiếp, trong lý do `block` của Stop-hook, hoặc sau một
-lần nhắc inbox `[bflow]` do host gõ. Inbox được kiểm tra mỗi 2 s (`BFLOW_INBOX_CHECK_MS`,
+thấy nó qua card plaintext của hook/Stop hoặc tool `read_updates` sau một lần nhắc inbox `[bflow]`. Raw notice list không còn được nhúng vào context thường lệ; private user-turn/provenance context vẫn là dữ liệu nội bộ. Inbox được kiểm tra mỗi 2 s (`BFLOW_INBOX_CHECK_MS`,
 500 ms–30 s): nó hiển thị một thông báo Herdr và chỉ gửi lần nhắc khi Conversation
 agent đang idle và ô nhập Claude của nó được xác minh là trống. Ô nhập được đọc dưới dạng ANSI để gợi ý
 prompt kế tiếp mờ (SGR 2) của Claude được tính là trống trong khi bản nháp đã gõ thì không. Một
@@ -314,10 +329,7 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   question up to 2000 characters, at most 10 options of 500 characters, deadline) beside the
   4096-character summary, so a long question stays answerable. Receipts written before this field
   still render from their summary, or degrade to a generic update that says it was cut short.
-- **Display acknowledgement.** A surfaced user decision or block counts as displayed only when the
-  final Conversation turn names it (its approval id). Undisplayed notices are re-blocked on Stop at
-  most twice and re-shown with reminder backoff. Last assistant text is read back to the last
-  genuine user prompt, skipping tool-result entries.
+- **Display acknowledgement.** Final assistant text is checked against the rendered card/work identity and its content rules. Current receipts use whole-token `#n`/`Việc #k`; legacy receipts keep their exact IDs. `#1`, `#12` and `Việc #1` are distinct. Undisplayed notices retain bounded Stop reminders; reading/surfacing a notice never approves it or proves human attention. Last assistant text is read back to the genuine user prompt, skipping tool-result entries.
 - **Rejected workflow proposals.** `propose_workflow` pre-checks (project policy, then verification
   support) return a structured error `{ code, reason, methods?, criteria?, options }` to the
   Coordinator. Runtime retains a validated private rejection record while allowing correction
@@ -714,7 +726,7 @@ Runtime ghi một JSONL activity log tại `task-activity.jsonl` trong private R
 Trong một host đã activate, pane `task-log` hiển thị các dòng mới nhất trong tab Logs. Các role có thể gọi `read_task_log`; Conversation và Coordinator đọc theo session/run, còn specialist phải lọc theo run/task được giao. `log_task_step` ghi một dòng tiến độ ngắn gắn với assignment hiện tại. Các dòng tự báo cáo và log không phải approval, receipt hay verification evidence. Nội dung đã được redaction, chuẩn hóa một dòng, giới hạn kích thước/dung lượng; lỗi ghi log không làm thay đổi kết quả nghiệp vụ.
 
 Lỗi `assess` ghi diagnostic có schema path đã biết và hướng dẫn `planning_reference` thay vì chỉ tên `Error`;
-viewer giữ tối đa 120 ký tự outcome. Không ghi tool arguments. Các pha chưa chạy không có
+viewer rút gọn reason/artifacts trong dòng chẩn đoán có giới hạn; notice rows có shortId, runLabel, messageType, reason và artifact refs. Không ghi tool arguments hoặc coi dòng log là full payload. Các pha chưa chạy không có
 bằng chứng từ log: intake/planning/blockage không chứng minh implementation, verification
 hay review đã hoàn tất. Milestone riêng cho thay đổi `run.workflowCycle` hiện chưa được ghi
 (khác với task verification cycle); cần bổ sung và kiểm thử trước khi khẳng định log bao phủ

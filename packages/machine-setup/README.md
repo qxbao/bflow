@@ -55,6 +55,12 @@ Node thật trong home tạm. Các test này không xác lập acceptance provid
 
 ---
 
+## Native provider login trong setup doctor
+
+`BuiltinSetupDoctor({ probeLogin })` nhận callback `ProviderLoginProbe` tùy chọn từ composition root. Với provider binary quan sát được, callback trả `{verified, detail}` từ native status command; các provider checks được khởi chạy đồng thời. `verified: true` tạo check auth passed; thiếu callback, status thất bại hoặc chưa xác minh giữ warning/remediation, không biến installed CLI thành authenticated readiness.
+
+CLI setup mới inject helper `checkNativeLogin()` của provider adapter ở môi trường tài khoản thông thường; isolated/injected platform không tự mượn auth ngoài scope. Callback chỉ là setup diagnostic, không phải launch environment hay một port/phiên bản mới của `AgentProviderAdapter` trong contracts. Setup không tự đăng nhập, tạo credentials hoặc inference để làm check pass. [Hướng dẫn và giới hạn](../../docs/setup-guide.md#kiểm-tra-native-login-và-intent-superpowers).
+
 ## Ranh giới kiến trúc và quyền sở hữu
 
 Theo [AGENTS.md](../../AGENTS.md) và [docs/runtime-architecture-v3.md](../../docs/runtime-architecture-v3.md):

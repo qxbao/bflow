@@ -1,6 +1,6 @@
 # Trạng thái triển khai hiện tại
 
-Đối chiếu tài liệu ngày **2026-10-25** với source baseline **`355a998c97aa301c39f7f5f08791a0bf2f3e3a7a`**. Đây là bản đồ source và bằng chứng đã lưu trong repo, không phải một lần nghiệm thu provider mới. Khi source thay đổi, kiểm tra lại các liên kết triển khai trước khi nâng mức hỗ trợ.
+Đối chiếu bổ sung ngày **2026-10-25** với upstream mốc **`a7686be06e68458aa9cc93381584752ea68e250c`**, đã có trong checkout `duc` source baseline `cc61ab39582b9edbdd3394f2c6b6f37a8d84eee4`. Đợt đọc đầu tiên chốt ở `1cb5954`; trước delivery đã đối chiếu thêm commit setup `2357669`. Đợt docs trước dựa trên `355a998c97aa301c39f7f5f08791a0bf2f3e3a7a`; [bảng commit mới](main-updates-2026-10-25.md) ghi phần bổ sung. Đây là bản đồ source và bằng chứng đã lưu, không phải nghiệm thu provider mới. Khi source thay đổi, kiểm tra lại các liên kết triển khai trước khi nâng mức hỗ trợ.
 
 ## Cách đọc bằng chứng
 
@@ -18,6 +18,7 @@ Không suy mức cuối từ `tools/list`, Herdr `idle`/`done`, setup receipt, m
 | Phạm vi | Hiện trạng và nguồn |
 | --- | --- |
 | Bootstrap CLI | `node apps/cli/dist/bin.js setup` tạo launcher `bflow`, managed PATH, setup receipts và Gateway. Xem [path-manager](../packages/machine-setup/src/path-manager.ts), [setup integration](../apps/cli/src/setup-integration.ts). `BFLOW_HOME` chọn isolated state/provider source, không phải đường dẫn source checkout. |
+| Setup native login/recovery | Setup doctor ở môi trường tài khoản thông thường có thể kiểm tra native login không inference; isolated/injected setup không tự dùng auth của tài khoản ngoài. Intent stage chưa có native metadata có thể được giải quyết ở apply khi owned destination xác minh exact pin; check chỉ chẩn đoán. [Setup guide](setup-guide.md#kiểm-tra-native-login-và-intent-superpowers). |
 | Repository config | `.bflow/config.yml`, provider mặc định Codex, `workspace_auto`, `trustedWorkspace: true`, concurrency 2, verification 3 vòng, startup 300.000 ms. `init --update` bổ sung defaults/comment và giữ giá trị cũ; [schema/defaults](../apps/cli/src/environment-config.ts) là nguồn chuẩn. |
 | Lifecycle và P30 | `up` mở persistent host, chuẩn bị platform trước launch, xác minh native binding, startup attestation và activated health. SDD/TDD/verification/concurrency được truyền vào host; `down` mở policy đã lưu để quiesce/checkpoint/revoke. [Host wiring](../apps/cli/src/agentic-host.ts), [platform](../packages/runtime/src/platform), [host platform](../packages/runtime/src/agentic/host-platform.ts). |
 | Providers | Claude/Codex có đường Conversation và specialist. Agy có native launch/hook/shim/binding ở source và local tests; Conversation thiếu trusted human-input provenance, unattended vẫn unsupported. [Provider README](../packages/agent-providers/README.md), [compatibility](compatibility-matrix.md). |
@@ -29,13 +30,17 @@ Không suy mức cuối từ `tools/list`, Herdr `idle`/`done`, setup receipt, m
 | Context khảo sát | `assignment_context` cung cấp source/test/docs/dependency tĩnh có giới hạn cho Coordinator/specifier/architect/planner, gắn HEAD/fingerprint/line evidence, mức observed/inferred/unknown và drift. Không tự thay spec, approval hoặc trạng thái task. [Assignment survey](../packages/runtime/src/agentic/assignment-survey.ts), [ProjectContextService](../packages/runtime/src/context/project-context-service.ts). |
 | Verification | Tự phát hiện runner, `.bflow/verification.json` là owner override tùy chọn. Polyglot adapters và parser có phạm vi riêng; JS/TS có Linux Bubblewrap và macOS Seatbelt. Native polyglot mounts và dependency warming vẫn Linux-only. [Runner matrix](verification-runners.md). |
 | Workspace file tools | Developer đọc/ghi UTF-8 theo ownership, lease/fence và TDD; Linux/macOS helper chống traversal/symlink/hardlink/special file, giới hạn 128 KiB. Không có arbitrary shell/file permission từ skill. [Runtime README](../packages/runtime/README.md). |
-| Recovery và Conversation | Durable inbox/outbox, approval, cancellation và bounded resume; notice nêu blocker, pending action, cách trả lời cho đúng run. Yêu cầu revision chờ quyết định qua Conversation; resume không thay approval. [Recovery guide](guide/session-recovery.md), [Runtime reference](../packages/runtime/README.md). |
+| Recovery và Conversation | Durable inbox/outbox và bounded resume; thẻ tiếng Việt, alias `#n`/`Việc #k`, `read_updates` và chi tiết tại Log/on-demand. Surfaced, displayed và human approval là các mốc riêng; alias không là authority. [Conversation updates](guide/conversation-updates.md), [recovery](guide/session-recovery.md). |
+| Rework causality | Context theo finding/revision/generation, `findingResolutions`, artifact dossier và independent verdict. Có structural/provenance guards; coverage đầy đủ của `findingVerdicts` chưa được bắt buộc trước pass. [Rework reference](rework-causality.md). |
+| NFR và risk-based test design | References có oracle/measurement conditions, criterion/check/evidence traceability và viewpoints có điều kiện; catalog/pin/schema tests. Không tạo SLA, runner, gate hoặc quyền tool mới. [Guide](nfr-and-test-design.md), [canonical references](nfr-and-test-design.md#reference-đã-được-phân-phối). |
 
 ## Nghiệm thu còn mở
 
 - P31 chưa có cây `tests/platform-v3/**` hoặc `tests/acceptance/platform-v3/**`. Đã có coverage platform trong [E2E scenarios](../tests/e2e/scenarios) và test của package; không gọi toàn bộ platform là chưa có test.
 - Chưa có hồ sơ đóng đầy đủ live SDLC đa provider, từ input Conversation đến human delivery approval, hoặc chiến dịch active provider fault/restart. Các báo cáo [v3](release-readiness-v3.md), [tools design](superpowers/specs/2026-10-24-tools-sdlc-design.md) và [macOS](acceptance/2026-10-24-macos-portability.md) ghi rõ giới hạn riêng.
 - macOS có source fix, local tests và phép đo sandbox/workspace thật được ghi lại; không đồng nghĩa đã nghiệm thu full SDLC. Windows vẫn `designed_unverified` cho machine mutation.
+- Plain-language/alias/Stop recovery mới có source và local regression, chưa chứng nhận provider thật trình bày/nhận quyết định đầy đủ. NFR references không phải số đo thật. Rework host còn thiếu guard bắt buộc đủ per-finding verdict; xem [limitations](known-limitations-v3.md).
+
 - Chưa nâng cam kết hostile same-UID, network filesystem, multi-host hay power-loss durability. `P02-RA01` và `P03-RA01` vẫn thuộc owner ban đầu, xem [limitations](known-limitations-v3.md).
 - Thành công một lệnh high-level không phải thành công workflow. Legacy `run`/`approve`/`resume`/`cancel` dùng Runtime store riêng; vận hành P19 qua Conversation và host status.
 

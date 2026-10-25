@@ -35,7 +35,7 @@ bflow setup --check
 
 Từ đó dùng alias/lệnh tắt **`bflow …`** ở repository bất kỳ. Về kỹ thuật đây là executable wrapper do setup quản lý, không cần khai báo shell alias thủ công hoặc `pnpm link --global`. Launcher trỏ đến Node và `apps/cli/dist/bin.js` đã setup: giữ checkout tại vị trí đó, rebuild sau cập nhật source, chạy lại setup khi cần cập nhật launcher/tool/Gateway.
 
-Không tương tác: xem trước bằng `node apps/cli/dist/bin.js setup --dry-run`, rồi dùng `setup --yes` khi đã chấp thuận plan. `--check`/`--dry-run` chỉ đọc; `--yes` không thực hiện đăng nhập provider hoặc phê duyệt Codex global hooks. [Setup guide](../setup-guide.md) giải thích từng bước.
+Không tương tác: xem trước bằng `node apps/cli/dist/bin.js setup --dry-run`, rồi dùng `setup --yes` khi đã chấp thuận plan. `--check`/`--dry-run` chỉ đọc; `--yes` không thực hiện đăng nhập provider hoặc phê duyệt Codex global hooks. Setup doctor có thể xác minh login đang có ở tài khoản thông thường qua status command không inference; setup cô lập không tự dùng login của tài khoản ngoài. [Native login/recovery](../setup-guide.md#kiểm-tra-native-login-và-intent-superpowers). [Setup guide](../setup-guide.md) giải thích từng bước.
 
 ## Provider, Herdr và repository
 

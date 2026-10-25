@@ -36,6 +36,12 @@ Kiến trúc v2 tiếp nhận quyết định phê duyệt thông qua Conversati
 
 ---
 
+### Mã thẻ không phải quyền phê duyệt
+
+Conversation trình bày câu hỏi/approval bằng mã `#n`, kèm lựa chọn và hạn địa phương của host. `#3: 1` chỉ có giá trị trong ngữ cảnh thẻ đang chờ và human turn đã xác thực; số lựa chọn phải theo đúng nhãn. `Việc #3` là nhãn run khác miền với thẻ `#3`. Mã sai, hết hạn, đã đóng hoặc của phiên khác không được fallback sang approval đang chờ khác.
+
+`read_updates`, Log và surfaced/display receipts chỉ hỗ trợ đọc/trình bày dữ liệu. Chúng không cấp approval, resume hoặc cancellation. Notice cũ chưa có alias giữ ID gốc, không đoán `#1`. [Hướng dẫn trả lời](conversation-updates.md).
+
 ## 3. Lệnh phê duyệt của CLI Runtime cũ
 
 ```bash
