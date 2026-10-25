@@ -66,7 +66,8 @@ Options:
   --check               Read-only check of .bflow/config.yml and repository GitNexus readiness
   --remove              Remove this repository's GitNexus service registration from the shared Gateway
   --no-gitnexus         Skip GitNexus indexing and Gateway service registration
-  -f, --force, -y, --yes  Explicitly replace existing configuration with fresh defaults
+  -f, --force           Explicitly replace existing configuration with fresh defaults
+  -y, --yes             Same as --force, and accept the GitNexus PolyForm-Noncommercial license without prompting
   -u, --update          Rebuild .bflow/config.yml with fresh comments and new default fields while preserving existing values
   -j, --json            Output response in JSON envelope format
   -h, --help            Show help for init command

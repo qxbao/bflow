@@ -262,3 +262,15 @@ it("rejects unknown and repository-scoped services in the host machine-sharing g
   const otherMachineService = { ...service, scope: { kind: "machine", machineId: "other-machine" } };
   await expect(startGatewayControl({ ...options, services: [otherMachineService], machineSharedServiceIds: [service.serviceId] })).rejects.toThrow(/machine/i);
 });
+
+it("never starts a caller-supplied repository service without the trusted host's validating handler", async () => {
+  const repositoryScope = { kind: "repository", machineId: "machine", repositoryId: "repo", workspaceRoot: root };
+  const repositoryService = MCPServiceDefinitionSchema.parse({ ...service, serviceId: "gitnexus-unvalidated", scope: repositoryScope,
+    tool: { ...service.tool, resource: { sharing: "exclusive", resourceKey: "gitnexus-unvalidated" } } });
+  const repositoryOperation = { schemaVersion: 3, scope: repositoryScope, idempotencyKey: "register-unvalidated" };
+  const registered = await rpc("register_repository_service", { service: repositoryService, operation: repositoryOperation });
+  expect(registered).toMatchObject({ ok: false, error: { code: "validation" } });
+  expect(gateway.registry.getService("gitnexus-unvalidated")).toBeUndefined();
+  const removed = await rpc("remove_repository_service", { serviceId: "gitnexus-unvalidated", operation: repositoryOperation });
+  expect(removed).toMatchObject({ ok: false, error: { code: "validation" } });
+});

@@ -92,6 +92,8 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly check?: boolean | undefined;
   readonly remove?: boolean | undefined;
   readonly noGitnexus?: boolean | undefined;
+  /** Accepts the GitNexus license and repository index without prompting. */
+  readonly yes?: boolean | undefined;
 }
 
 export interface ConfigMigrateCommandArgs extends GlobalCliFlags {
@@ -405,7 +407,8 @@ export type FlowRepositoryConfig = BflowRepositoryConfig;
 
 export interface InitCommandOutput {
   readonly configPath: string;
-  readonly config: BflowRepositoryConfig;
+  /** Absent only for `init --remove` of a repository that no longer exists on disk. */
+  readonly config?: BflowRepositoryConfig | undefined;
   readonly overwritten: boolean;
   readonly updated?: boolean | undefined;
   readonly mode?: "init" | "check" | "remove" | undefined;

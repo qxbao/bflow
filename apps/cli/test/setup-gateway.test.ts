@@ -268,7 +268,7 @@ it("retains registered repository GitNexus services and reader locks across Gate
   const { input, ctx, platform } = fixture();
   await installFixtureTools(["query", "context", "impact"], { executableName: "gitnexus" });
   await installFixtureTools(["mempalace_status", "mempalace_search"]);
-  const withoutMempalace = wrapSetupComponents([], { ...input, launchRequirements: [] });
+  const withoutMempalace = wrapSetupComponents([], { ...input, launchRequirements: input.launchRequirements.filter(item => item.toolId === "gitnexus") });
   for (const component of withoutMempalace) expect((await component.apply(ctx)).diagnostics).toEqual([]);
 
   const repoReport = await prepareRepositoryGitNexus({ repository: await identifyRepository(root), platform });
@@ -381,8 +381,8 @@ it("registers multiple repositories concurrently via bflow init, reloads them on
   initializeGitRepository(repoA);
   initializeGitRepository(repoB);
 
-  const initA = await runCli(["init", "--json"], { cwd: repoA, setup: { platform } });
-  const initB = await runCli(["init", "--json"], { cwd: repoB, setup: { platform } });
+  const initA = await runCli(["init", "--yes", "--json"], { cwd: repoA, setup: { platform } });
+  const initB = await runCli(["init", "--yes", "--json"], { cwd: repoB, setup: { platform } });
   expect(initA.exitCode).toBe(0);
   expect(initB.exitCode).toBe(0);
 
@@ -423,12 +423,68 @@ it("registers multiple repositories concurrently via bflow init, reloads them on
   expect(runtime.observations.map(item => item.serviceId)).toContain(gitNexusServiceId(repoB));
 
   // Re-init repoA, then delete repoB directory from disk and restart Gateway -> Gateway skips deleted repoB without failing
-  expect((await runCli(["init", "--json"], { cwd: repoA, setup: { platform } })).exitCode).toBe(0);
+  expect((await runCli(["init", "--yes", "--json"], { cwd: repoA, setup: { platform } })).exitCode).toBe(0);
   await rm(repoB, { recursive: true, force: true });
   await runtime.stop();
   runtime = await startSetupGatewayRuntime(gatewayConfigPath);
   expect(runtime.observations.map(item => item.serviceId)).toContain(gitNexusServiceId(repoA));
   expect(runtime.observations.map(item => item.serviceId)).not.toContain(gitNexusServiceId(repoB));
+  // A deleted repository is pruned from persisted state instead of being retried on every restart.
+  const pruned = await readGatewayRepositoriesState(platform.paths.state, platform.machineId);
+  expect(pruned.state?.repositories.map(item => item.service.serviceId)).toEqual([gitNexusServiceId(repoA)]);
+
+  // A repository deleted while the Gateway runs can still be unregistered by its former path.
+  const repoC = join(root, "repo-c");
+  await mkdir(repoC);
+  initializeGitRepository(repoC);
+  expect(JSON.parse((await runCli(["init", "--yes", "--json"], { cwd: repoC, setup: { platform } })).stdout).data.gitnexus.status).toBe("ready");
+  await rm(repoC, { recursive: true, force: true });
+  const removeC = await runCli(["init", "--remove", "--dir", repoC, "--json"], { cwd: root, setup: { platform } });
+  expect(removeC.exitCode).toBe(0);
+  expect(JSON.parse(removeC.stdout).data.gitnexus.status).toBe("removed");
+  expect(runtime.observations.map(item => item.serviceId)).not.toContain(gitNexusServiceId(repoC));
+  expect((await readGatewayRepositoriesState(platform.paths.state, platform.machineId)).state?.repositories
+    .map(item => item.service.serviceId)).toEqual([gitNexusServiceId(repoA)]);
+});
+
+it("asks before the first GitNexus index, skips unapproved indexing and does not ask again for a registered repository", async () => {
+  const { components, ctx, platform } = fixture();
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+
+  const declined = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  expect(declined.exitCode).toBe(0);
+  const declinedData = JSON.parse(declined.stdout).data;
+  expect(declinedData.gitnexus.status).toBe("skipped");
+  expect(declinedData.diagnostics.join(" ")).toContain("--yes");
+  expect(await readdir(root)).not.toContain(".gitnexus");
+  expect(await readFile(join(root, ".bflow", "config.yml"), "utf8")).toContain("schemaVersion");
+
+  const prompts: string[] = [];
+  const approved = await runCli(["init", "--json"], { cwd: root, setup: { platform, confirm: async prompt => { prompts.push(prompt); return true; } } });
+  expect(JSON.parse(approved.stdout).data.gitnexus.status).toBe("ready");
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0]).toContain("PolyForm-Noncommercial");
+
+  const repeated = await runCli(["init", "--json"], { cwd: root, setup: { platform, confirm: async prompt => { prompts.push(prompt); return false; } } });
+  expect(JSON.parse(repeated.stdout).data.gitnexus.status).toBe("ready");
+  expect(prompts).toHaveLength(1);
+});
+
+it("keeps the written repository configuration and reports GitNexus as blocked when registration fails", async () => {
+  const { components, ctx, platform } = fixture();
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+  await writeFile(join(platform.paths.state, "gateway-repositories.json"), "{}\n", { mode: 0o600 });
+
+  const result = await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } });
+  expect(result.exitCode).toBe(0);
+  const data = JSON.parse(result.stdout).data;
+  expect(data.gitnexus).toMatchObject({ status: "blocked", registered: false, gatewayReady: false });
+  expect(data.diagnostics.join(" ")).toContain("GitNexus repository preparation failed");
+  expect(await readFile(join(root, ".bflow", "config.yml"), "utf8")).toContain("schemaVersion");
 });
 
 it("observes stale repository indexes in bflow init --check without rerunning analysis or rewriting state", async () => {
@@ -437,7 +493,7 @@ it("observes stale repository indexes in bflow init --check without rerunning an
   await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
   for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
 
-  expect((await runCli(["init", "--json"], { cwd: root, setup: { platform } })).exitCode).toBe(0);
+  expect((await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } })).exitCode).toBe(0);
   const reposFile = join(platform.paths.state, "gateway-repositories.json");
   const before = await readFile(reposFile, "utf8");
   await writeFile(join(root, "stale-index"), "stale");
@@ -458,7 +514,7 @@ it("uses canonical repository identity for symlinked init paths", async () => {
 
   const alias = join(root, "repo-alias");
   await symlink(root, alias);
-  const initRes = await runCli(["init", "--dir", alias, "--json"], { cwd: root, setup: { platform } });
+  const initRes = await runCli(["init", "--dir", alias, "--yes", "--json"], { cwd: root, setup: { platform } });
   expect(initRes.exitCode).toBe(0);
   const persisted = await readGatewayRepositoriesState(platform.paths.state, platform.machineId);
   expect(persisted.state?.repositories[0]?.workspaceRoot).toBe(root);
@@ -550,7 +606,7 @@ it("migrates a legacy session-scoped setup-gateway.json to machine scope on bflo
 it("writes .bflow/config.yml and emits clear diagnostics when bflow init runs before bflow setup or when Gateway is not running", async () => {
   const { platform, input, ctx } = fixture();
   // Case A: before bflow setup (no machine.json / gitnexus binary)
-  const beforeSetup = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  const beforeSetup = await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } });
   expect(beforeSetup.exitCode).toBe(0);
   const beforeData = JSON.parse(beforeSetup.stdout).data;
   expect(beforeData.gitnexus.status).toBe("missing");
@@ -558,9 +614,9 @@ it("writes .bflow/config.yml and emits clear diagnostics when bflow init runs be
 
   // Case B: machine.json and gitnexus binary exist, but Gateway is not running
   await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
-  const mcpOnly = wrapSetupComponents([], { ...input, launchRequirements: [] });
+  const mcpOnly = wrapSetupComponents([], { ...input, launchRequirements: input.launchRequirements.filter(item => item.toolId === "gitnexus") });
   expect((await mcpOnly[0]!.apply(ctx)).diagnostics).toEqual([]);
-  const gatewayStopped = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  const gatewayStopped = await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } });
   expect(gatewayStopped.exitCode).toBe(0);
   const stoppedData = JSON.parse(gatewayStopped.stdout).data;
   expect(stoppedData.gitnexus.indexed).toBe(true);
@@ -689,7 +745,7 @@ it("defers GitNexus in a repository without commits during bflow init, writes .b
   await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
   for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
 
-  const unbornInit = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  const unbornInit = await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } });
   expect(unbornInit.exitCode).toBe(0);
   const unbornData = JSON.parse(unbornInit.stdout).data;
   expect(unbornData.gitnexus.status).toBe("deferred");
@@ -697,7 +753,7 @@ it("defers GitNexus in a repository without commits during bflow init, writes .b
   expect(await readFile(join(root, ".bflow", "config.yml"), "utf8")).toContain("schemaVersion:");
 
   execFileSync("git", ["-C", root, "-c", "user.name=Gateway Test", "-c", "user.email=gateway@example.test", "commit", "--quiet", "--allow-empty", "-m", "First commit"]);
-  const committedInit = await runCli(["init", "--json"], { cwd: root, setup: { platform } });
+  const committedInit = await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } });
   expect(committedInit.exitCode).toBe(0);
   const committedData = JSON.parse(committedInit.stdout).data;
   expect(committedData.gitnexus.status).toBe("ready");

@@ -1754,6 +1754,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
       const check = optRes.value.flags.has("--check");
       const remove = optRes.value.flags.has("--remove");
       const noGitnexus = optRes.value.flags.has("--no-gitnexus");
+      const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
 
       if (check && remove) {
         return makeValidationError("Conflicting init mode flags '--check' and '--remove' cannot be combined.", json, "init");
@@ -1777,6 +1778,7 @@ export function parseCliArgs(argv: readonly string[]): ParseCliResult {
         ...(check ? { check: true } : {}),
         ...(remove ? { remove: true } : {}),
         ...(noGitnexus ? { noGitnexus: true } : {}),
+        ...(yes ? { yes: true } : {}),
         json,
         help: false
       };
