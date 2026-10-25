@@ -110,6 +110,8 @@ Mỗi check trả về `status: "passed" | "failed" | "unknown"`. Trạng thái 
 | `skills` | preflight, activated | Xác minh skill manifest đã resolve khớp `environment.skillManifestDigest` và các binding role/provider được phép. |
 | `native_binding` | **chỉ activated** | Xác minh chữ ký Ed25519 trên `AgentLaunchAttestation`, digest executable/config khớp trên đĩa, và readiness tương tác của pane đang chạy. |
 
+`checkNativeLogin()` chỉ chạy lệnh auth status của check `authentication` cho machine setup, không có launch environment hay gọi model, và không chứng minh readiness. Với Agy ở HOME thật, nó không chạy `agy models` nếu chưa có `~/.gemini/antigravity-cli/cache/onboarding.json`, để tránh tạo trạng thái first-run.
+
 ---
 
 ## Tái sử dụng tùy chọn của Codex model execution probe

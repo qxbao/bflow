@@ -259,7 +259,8 @@ locator when present) to the host, and it never reads or prints launch environme
 values. The host
 survives CLI process exit and owns scheduling, authenticated message ingress, run
 queries and shutdown checkpoints. `doctor` and environment `status` inspect
-topology without starting a daemon. `up` and `doctor` check `codex login status`,
+topology without starting a daemon. `up`, `doctor` and `setup --check` (real account only; isolated
+setup keeps a login warning) check `codex login status`,
 Claude's structured `auth status`, or Agy's read-only `models` command. Agy has no
 `auth status` or `auth login` subcommand; complete its login flow by running `agy`
 interactively. A successful Agy check requires a returned model list, while network,

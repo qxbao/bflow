@@ -10,6 +10,7 @@ import type {
   ToolInstaller
 } from "@bflow/contracts";
 import {
+  BuiltinSetupDoctor,
   MachineSetupService,
   SetupStateStore,
   ToolInstallerRegistry,
@@ -36,10 +37,14 @@ import {
   type CommandRunner,
   type MachineConfig,
   type ServiceManager,
-  type ToolObservation
+  type ToolObservation,
+  type ProviderLoginProbe
 } from "@bflow/machine-setup";
 import {
-  AgentProviderRegistry
+  AgentProviderRegistry,
+  AgyProviderAdapter,
+  ClaudeProviderAdapter,
+  CodexProviderAdapter
 } from "@bflow/agent-providers";
 import { wrapSetupComponents, setupGatewayDiagnostics, type SetupGatewayRemoteRequirement } from "./setup-gateway.js";
 import { context7KeyFingerprint, readKeyFromStream, readStoredContext7Key, validateContext7ApiKey } from "./context7-secret.js";
@@ -56,6 +61,16 @@ export type { SetupCommandOutput };
 /** Aliases for compatibility and prompt conformance */
 export const SpawnCommandRunner = NodeCommandRunner;
 export const DefaultProviderAdapterRegistry = AgentProviderRegistry;
+
+/** Asks the observed provider binary for its own login status; never logs in or writes credentials. */
+const probeNativeProviderLogin: ProviderLoginProbe = async observation => {
+  const executablePath = observation.realPath ?? observation.resolvedPath ?? undefined;
+  const options = executablePath ? { executablePath } : {};
+  const adapter = observation.toolId === "claude" ? new ClaudeProviderAdapter(options)
+    : observation.toolId === "codex" ? new CodexProviderAdapter(options)
+      : observation.toolId === "agy" ? new AgyProviderAdapter(options) : undefined;
+  return adapter?.checkNativeLogin();
+};
 
 async function loadSkillsModule(): Promise<any> {
   return import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href);
@@ -351,6 +366,9 @@ export async function executeSetupCommand(
       skills: synchronizer,
       ...(additionalToolObservations ? { additionalToolObservations } : {}),
       serviceManager,
+      // Isolated or injected machines keep provider state elsewhere; only the real account's login can be read here.
+      ...(context?.setup?.probeProviderLogin || (!isolatedRoot && !context?.setup?.platform)
+        ? { doctor: new BuiltinSetupDoctor({ probeLogin: context?.setup?.probeProviderLogin ?? probeNativeProviderLogin }) } : {}),
       persistMachineConfig: launchRequirements.length === 0 && remoteServices.length === 0,
       decorateComponents,
       approver: args.yes
