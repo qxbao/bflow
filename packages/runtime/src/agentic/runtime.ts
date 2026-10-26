@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentLeaseSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
   AgentResultSchema, AgentRoleSchema, AgentTransportCapabilitiesSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
@@ -8,7 +9,7 @@ import {
   type ArtifactReference, type CancellationRequest, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
   type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
-import { AgenticJournal, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
+import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
   type ConflictResolverAttempt, type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
@@ -46,6 +47,16 @@ export const QUIESCED_RECEIPT_DRAIN_OPERATIONS: readonly string[] = Object.freez
   "inspect_native_delivery", "host_status", "assignment_context", "repository_read", "read_pinned_instructions", "read_project_policy", "read_task_log", "log_task_step",
   "inspect_review", "complete_review", "inspect_alternative_verification", "record_alternative_verification", "record_behavioral_verification", "submit_implementation"
 ]);
+
+const testIntegrityExceptionQuerySchema = TestIntegrityExceptionBindingSchema.pick({
+  runId: true, taskId: true, attemptId: true, baseRevision: true, candidateRevision: true, specFingerprint: true, scope: true
+});
+const testIntegrityExceptionRequestSchema = z.object({
+  messageId: z.string().min(1), context: QualityGateContextSchema, findingId: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(10).max(1000), evidence: ArtifactReferenceSchema
+}).strict();
+const TEST_INTEGRITY_APPROVE_OPTION = "Approve test-integrity exception";
+const TEST_INTEGRITY_REJECT_OPTION = "Reject test-integrity exception";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
@@ -2509,6 +2520,75 @@ export class AgenticWorkflowRuntime {
       return json(this.userDecisionReceipt(request.approvalId));
     });
   }
+  /** Only the independently assigned Reviewer can ask for an owner exception at a pinned candidate. */
+  async requestTestIntegrityException(bindingInput: PaneBinding, input: {
+    messageId: string; context: unknown; findingId: string; reason: string; evidence: ArtifactReference
+  }): Promise<JsonValue> {
+    const binding = PaneBindingSchema.parse(bindingInput), args = testIntegrityExceptionRequestSchema.parse(input);
+    if (binding.role !== "reviewer") throw new Error("Independent Reviewer required for a test-integrity exception");
+    const context = args.context, details = record(context.input), config = record(context.definition.configuration);
+    if (config.kind !== "review" || config.role !== "reviewer") throw new Error("Reviewer context required");
+    const exception = TestIntegrityExceptionBindingSchema.parse({ runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+      baseRevision: details.baseRevision, candidateRevision: details.sourceRevision, specFingerprint: details.specFingerprint,
+      scope: details.scope, findingId: args.findingId, reviewMessageId: args.messageId, evidence: args.evidence });
+    if (args.evidence.runId !== exception.runId || args.evidence.taskId !== exception.taskId)
+      throw new Error("Test-integrity evidence belongs to another run or task");
+    return this.transaction(async (state, save, _core, outbox) => {
+      if (this.quiesced) throw new Error("Runtime is quiesced");
+      const run = this.run(state, exception.runId); this.live(run);
+      const assigned = state.outbound.find(out => out.message.message_id === args.messageId && out.message.type === "verification.requested" &&
+        out.message.run_id === run.runId && !out.reviewReplacement && ["accepted", "released"].includes(out.status) && out.handle &&
+        out.handle.target.agentId === binding.agentId && out.handle.target.paneId === binding.paneId &&
+        digest(out.handle.target.session) === digest(binding.session));
+      if (!assigned) throw new Error("No independent review assigned to this native Reviewer");
+      const originalContext = (raw: unknown) => {
+        const parsed = QualityGateContextSchema.parse(raw), { hostQaBehavioralObservation: _qa, hostTestIntegrityObservation: _integrity, ...original } = record(parsed.input);
+        return { ...parsed, input: original };
+      };
+      if (digest(originalContext(assigned.message.payload)) !== digest(originalContext(context)))
+        throw new Error("Test-integrity exception context differs from the assigned review");
+      const decisions = run.userDecisions ?? (run.userDecisions = {});
+      const revision = Object.values(decisions).filter(item => item.taskId === exception.taskId && item.status !== "pending").length + 1;
+      const request = buildUserDecisionRequest({ role: "reviewer", sessionId: run.delegation.sessionId, revision,
+        generation: run.approval?.generation ?? 0, now: this.now(), input: { runId: run.runId, taskId: exception.taskId,
+          question: `Test-integrity exception ${exception.findingId} for ${exception.scope} ${exception.baseRevision} → ${exception.candidateRevision}: ${args.reason}`,
+          options: [TEST_INTEGRITY_APPROVE_OPTION, TEST_INTEGRITY_REJECT_OPTION], context: JSON.stringify(exception), expiresInMinutes: 60 } });
+      request.metadata = { ...request.metadata, testIntegrityException: json(exception) };
+      request.evidence = [args.evidence];
+      const existing = decisions[request.approvalId];
+      if (existing) {
+        if (existing.status !== "pending" || existing.paneId !== binding.paneId || existing.agentId !== binding.agentId ||
+            digest(existing.request.metadata?.testIntegrityException) !== digest(exception)) throw new Error("Conflicting test-integrity exception request");
+        return json(this.userDecisionReceipt(request.approvalId));
+      }
+      decisions[request.approvalId] = { request: ApprovalRequestSchema.parse(request), role: "reviewer", agentId: binding.agentId,
+        paneId: binding.paneId, taskId: exception.taskId, status: "pending" };
+      const message = buildDecisionRequestMessage({ request, correlationId: run.delegation.correlationId, sender: { role: "runtime" }, conversation: { role: "conversation" } });
+      outbox.enqueue(RoleMessageSchema.parse({ ...message, artifact_references: [args.evidence] }), "conversation");
+      this.progress(state, outbox, run, "Waiting for an owner decision on a test-integrity exception");
+      await save();
+      return json(this.userDecisionReceipt(request.approvalId));
+    });
+  }
+  /** Reauthenticate durable human receipts; no candidate-owned metadata or generic user decision grants a waiver. */
+  async testIntegrityExceptions(input: { runId: string; taskId: string; attemptId: string; baseRevision: string; candidateRevision: string;
+    specFingerprint: string; scope: string }): Promise<Array<{ findingId: string; approvalId: string; reason: string; decidedBy: string }>> {
+    const query = testIntegrityExceptionQuerySchema.parse(input);
+    return this.journal.exclusive(async state => {
+      const run = this.run(state, query.runId), grants: Array<{ findingId: string; approvalId: string; reason: string; decidedBy: string }> = [];
+      for (const entry of Object.values(run.userDecisions ?? {})) {
+        if (entry.status !== "answered" || entry.role !== "reviewer" || !entry.decision) continue;
+        const parsed = TestIntegrityExceptionBindingSchema.safeParse(entry.request.metadata?.testIntegrityException);
+        if (!parsed.success || Object.entries(query).some(([key, value]) => parsed.data[key as keyof typeof query] !== value)) continue;
+        const decision = ApprovalDecisionSchema.parse(entry.decision);
+        if (decision.decision !== "approved" || decision.metadata?.selectedOption !== TEST_INTEGRITY_APPROVE_OPTION ||
+            !decision.reason?.trim() || !decision.decidedBy.trim() || !await this.ports.authorizeHuman(decision)) continue;
+        validateUserDecisionAnswer(entry.request, decision, decision.decidedAt);
+        grants.push({ findingId: parsed.data.findingId, approvalId: decision.approvalId, reason: decision.reason, decidedBy: decision.decidedBy });
+      }
+      return grants;
+    });
+  }
   private userDecisionReceipt(approvalId: string) {
     return { approvalId, status: "pending", instruction: "End your turn; Runtime resumes you with the answer." };
   }
@@ -2522,6 +2602,12 @@ export class AgenticWorkflowRuntime {
     }
     // Throws on any approvalId, revision, generation, target, option or timing mismatch; nothing is mutated before this.
     const answer = validateUserDecisionAnswer(entry.request, decision, now);
+    if (entry.request.metadata?.testIntegrityException !== undefined && decision.decision === "approved") {
+      if (!decision.reason?.trim()) throw new Error("Test-integrity exception approval requires an owner reason");
+      if (decision.metadata?.selectedOption !== TEST_INTEGRITY_APPROVE_OPTION)
+        throw new Error("Test-integrity exception approval must select the approve option");
+    }
+    entry.decision = decision;
     entry.status = answer.outcome === "rejected" ? "rejected" : "answered";
     entry.answer = answer;
     this.resumeUserDecisionAsker(state, outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: answer.outcome,
@@ -3225,8 +3311,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     workflowTrees?: { taskTree?: string; integratedTree?: string; treeError?: boolean },
     outbox?: HerdrOutbox
   ): VerificationPlan {
-    if (task?.verificationPlan) return task.verificationPlan;
-    if (!task && run.workflowVerificationPlan) return run.workflowVerificationPlan;
+    const cached = task?.verificationPlan ?? (!task ? run.workflowVerificationPlan : undefined);
+    if (cached) {
+      const currentChecks = task ? this.ports.taskChecks : this.ports.workflowChecks;
+      if (currentChecks.some(check => check.id === "host-test-integrity") &&
+          (!cached.checks.some(check => check.id === "host-test-integrity") || cached.reviewWaiver !== undefined ||
+            !cached.checks.some(check => record(check.configuration).kind === "review" && record(check.configuration).role === "reviewer")))
+        throw new Error("Persisted verification plan predates required test-integrity review; reconcile with the owner before retrying. Old evidence cannot be upgraded into an integrity receipt.");
+      return cached;
+    }
     const dossier = task?.spec ?? run.workflowSpec!;
     const allChecks = ([...(task ? this.ports.taskChecks : this.ports.workflowChecks), ...(this.ports.behavioralChecks?.(dossier.specification, dossier.strategy, task?.worktrees.at(-1)?.baseCommitHash ?? run.baseRevision) ?? [])]).flatMap(check => {
       if (check.metadata?.bindAcceptedCriteria !== true) return [check];
@@ -3255,6 +3348,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       maxIterations: run.maxIterations
     };
     const prevFastPathStatus = run.fastPath?.status;
+    if (run.fastPath?.status === "active" && allChecks.some(check => check.id === "host-test-integrity")) {
+      run.fastPath = { ...run.fastPath, status: "downgraded", downgrade: {
+        reason: "test_integrity_requires_independent_review", at: this.now(), scope: task ? "task" : "workflow"
+      } };
+    }
     let plan: VerificationPlan | undefined;
     if (task && run.fastPath?.status === "active") {
       const activeRequired = dossier.specification.acceptanceCriteria.filter(c => c.required !== false && c.status !== "waived");

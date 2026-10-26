@@ -149,6 +149,7 @@ async function setupFixture(options: {
   humanApproval?: boolean;
   automatedRefactor?: boolean;
   failDeterministicOnce?: boolean;
+  customWaiverPolicy?: boolean;
 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-fast-path-run-")));
   const repository = join(root, "repo");
@@ -200,7 +201,8 @@ async function setupFixture(options: {
   };
 
   const checks = [
-    ...DEFAULT_HOST_CHECKS,
+    // Explicit injected legacy policy exercises the underlying waiver engine; the default host policy always keeps integrity.
+    ...DEFAULT_HOST_CHECKS.filter(check => !options.customWaiverPolicy || check.id !== "host-test-integrity"),
     ...(options.automatedRefactor ? [deterministicCheck] : [])
   ] as any[];
 
@@ -209,6 +211,7 @@ async function setupFixture(options: {
   const verification = new HostVerification(() => runtime, () => artifacts, receipts, []);
 
   const gates: QualityGate[] = [
+    verification.testIntegrityGate(),
     ...DEFAULT_HOST_CHECKS.filter(c => (c.configuration as any).kind === "review").map(check => ({
       id: check.id,
       evaluate: async (context: QualityGateContext) => {
@@ -785,8 +788,21 @@ describe("Task 3, 5, 6: Runtime fast-path decision, autonomous design approval, 
     expect(revisedRun.fastPath.reasons).toContain("recomputed for follow-up or requirement revision");
   });
 
-  it("retains the frozen fast-path waiver but cannot pass rework without independent finding verdicts", async () => {
-    const f = await setupFixture({ automatedRefactor: true, humanApproval: true, failDeterministicOnce: true });
+  it("default host policy never waives independent review while test integrity is required", async () => {
+    const f=await setupFixture({automatedRefactor:true,humanApproval:true});
+    await f.runtime.proposeWorkflow("run-1",f.spec,f.def);await f.runtime.tick();
+    await f.submit({file:"src/helper.ts",content:"export const v = 2;\n"});await f.evidence("implement");
+    await f.runtime.tick();await f.runtime.tick();
+    const run=await f.inspect();
+    expect(run.fastPath).toMatchObject({status:"downgraded",downgrade:{reason:"test_integrity_requires_independent_review",scope:"task"}});
+    expect(run.tasks[0].verificationPlan.reviewWaiver).toBeUndefined();expect(run.workflowVerificationPlan.reviewWaiver).toBeUndefined();
+    for(const plan of [run.tasks[0].verificationPlan,run.workflowVerificationPlan])expect(plan.checks.map((check:any)=>check.id)).toEqual(expect.arrayContaining(["host-test-integrity","host-reviewer","host-qa"]));
+    expect(run.tasks[0].cycle.history[0].qualityGateResults.find((gate:any)=>gate.gateId==="host-test-integrity").status).toBe("passed");
+    expect(f.calls.filter(c=>c.definition.id==="host-reviewer")).toHaveLength(2);
+  });
+
+  it("an explicit custom waiver preserves its plan but requires independent rework verdicts", async () => {
+    const f = await setupFixture({ automatedRefactor: true, humanApproval: true, failDeterministicOnce: true, customWaiverPolicy: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
     await f.runtime.tick();
     await f.submit({ file: "src/helper.ts", content: "export const v = 2;\n" });
@@ -822,8 +838,8 @@ describe("Task 3, 5, 6: Runtime fast-path decision, autonomous design approval, 
     expect(f.conversationInbox.filter(m => m.type === "approval.request")).toHaveLength(0);
   });
 
-  it("keeps task-level review for docs-only fast-path and skips workflow-level review on identical tree", async () => {
-    const f = await setupFixture({ humanApproval: true });
+  it("an explicit custom policy without integrity retains docs task review and identical-tree workflow waiver", async () => {
+    const f = await setupFixture({ humanApproval: true, customWaiverPolicy: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
     await f.runtime.tick();
     await f.submit({ file: "guide.md", content: "updated docs\n" });
@@ -869,8 +885,8 @@ describe("Task 3, 5, 6: Runtime fast-path decision, autonomous design approval, 
     expect(inspected.workflowVerificationPlan.checks.map((c: any) => c.id)).toContain("host-reviewer");
   });
 
-  it("downgrades when P17 rejects task waiver and emits downgrade progress notice", async () => {
-    const f = await setupFixture({ automatedRefactor: true, humanApproval: true });
+  it("an explicit custom policy without integrity still downgrades on P17 waiver rejection", async () => {
+    const f = await setupFixture({ automatedRefactor: true, humanApproval: true, customWaiverPolicy: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
     const origCreate = f.policies.createVerificationPlan.bind(f.policies);
     f.policies.createVerificationPlan = (input: any) => {
@@ -901,8 +917,8 @@ describe("Task 3, 5, 6: Runtime fast-path decision, autonomous design approval, 
     ).toBe(true);
   });
 
-  it("downgrades workflow plan on tree mismatch and when task cycle is not passed", async () => {
-    const f = await setupFixture({ automatedRefactor: true, humanApproval: true });
+  it("an explicit custom policy without integrity still downgrades workflow waiver on tree mismatch or incomplete task", async () => {
+    const f = await setupFixture({ automatedRefactor: true, humanApproval: true, customWaiverPolicy: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
     let callCount = 0;
     f.policies.git.treeOf = async () => (callCount++ === 0 ? "a".repeat(40) : "b".repeat(40));

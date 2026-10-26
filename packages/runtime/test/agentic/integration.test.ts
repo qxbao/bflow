@@ -90,6 +90,7 @@ async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd
   let failReview = options.failReview ?? false;
   let reviewerExecutorId = "independent-test-host";
   const calls: QualityGateContext[] = [];
+  const integrityCalls: QualityGateContext[] = [];
   const checks = [
     { id: "review", name: "review", evaluator: "review", required: true, timeout: { executionTimeoutMs: 3000, onTimeout: "block" },
       configuration: { kind: "review", method: "manual_review", criterionIds: ["ac-1"], testNames: ["ac-1: The requested outcome is independently verifiable"], role: "reviewer", levels: [] } },
@@ -122,7 +123,9 @@ async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd
   const actualGates = options.behavioral ? [
     ...DEFAULT_HOST_CHECKS.filter(check => (check.configuration as any).kind === "review").map(check => ({ id: check.id,
       evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(check.id).evaluate(...args) })),
-    verification.deterministicGate(), ...verification.behavioralGates().map(gate => ({ id: gate.id, evaluate: async (context: QualityGateContext) => {
+    verification.deterministicGate(), { id: "host-test-integrity", evaluate: async (context: QualityGateContext) => {
+      integrityCalls.push(context); return verification.testIntegrityGate().evaluate(context);
+    } }, ...verification.behavioralGates().map(gate => ({ id: gate.id, evaluate: async (context: QualityGateContext) => {
       calls.push(context); return gate.evaluate(context);
     } }))
   ] : options.remoteReview ? gates.map(gate => gate.id === "review" ? { id: gate.id,
@@ -248,7 +251,7 @@ async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd
   }
   return { enableDynamicGate: () => { dynamicReady = true; }, root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox,
     reenterOnConversationDelivery(action: (message: RoleMessage) => Promise<unknown>) { conversationReentry = action; }, spec, def, envelope, inspect, dossier, evidence, submit, approve, verification, receipts,
-    calls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
+    calls, integrityCalls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
     setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },
     reopenStorage: () => { store.close(); store = unwrap(openSqliteRunStore({ filename: join(root, "runs.db") })); ports.runStore = store; },
     restart: () => { runtime = new AgenticWorkflowRuntime({ ...ports, engine: new DeterministicWorkflowEngine({ bindingReceiptKeys }) }, runtimeOptions); return runtime; } };
@@ -553,7 +556,7 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
     return completed.result;
   }
   /** Reply through Runtime to real Reviewer/QA gate requests while tick awaits them outside its lock. */
-  async function tickWithReviews() {
+  async function tickWithReviews(confirmProvenIntegrity = false) {
     let done = false;
     const ticking = f.runtime.tick().finally(() => { done = true; }); void ticking.catch(() => undefined);
     let cursor = 0; const deadline = Date.now() + 60_000;
@@ -572,10 +575,30 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
         const observed = await f.verification.inspectReview(binding, { messageId: out.message.message_id }) as any;
         expect(observed.observation.revision).toBe(out.message.payload.input.sourceRevision);
         expect(observed.observation.diff).toContain("double.cjs");
+        const integrity = observed.context.input.hostTestIntegrityObservation?.report;
+        const testIntegrityVerdicts = binding.role === "reviewer" && integrity ? integrity.findings.map((finding: any) => {
+          const revision = finding.side === "base" ? integrity.baseRevision : integrity.candidateRevision;
+          const excerpt = git(developer.worktreePath!, "show", `${revision}:${finding.path}`).split(/\r?\n/)[finding.line - 1]!.trim();
+          if (finding.ruleId === "TI_SHADOWED_TEST_API" && reporter === "node_tap") {
+            // This specific CJS fixture imports Node's strict assertion module; the committed fixed oracle is checked here.
+            expect(finding.path).toBe(testPath); expect(excerpt).toBe(testSource.trim());
+            expect(excerpt).toContain("const assert=require('node:assert/strict')"); expect(excerpt).toContain("assert.equal(double(2),4)");
+            return { findingId: finding.id, verdict: "equivalent", reason: "The committed CJS binding imports node:assert/strict and still checks double(2) equals 4; this parser coverage gap does not weaken that fixed oracle.",
+              evidence: [{ revision, path: finding.path, line: finding.line, excerpt }] };
+          }
+          if (confirmProvenIntegrity && finding.ruleId === "TI_LITERAL_TAUTOLOGY" && finding.classification === "proven_violation") {
+            expect(excerpt).toContain("expect(1).toBe(1)");
+            return { findingId: finding.id, verdict: "confirmed_violation", reason: "Both operands are literal 1, so this added assertion cannot detect any incorrect product output; no owner exception was requested.",
+              evidence: [{ revision, path: finding.path, line: finding.line, excerpt }] };
+          }
+          throw new Error(`Unexpected test-integrity finding requires independent fixture analysis: ${JSON.stringify(finding)}`);
+        }) : undefined;
         const completed = await f.verification.completeReview(binding, { reviewId: observed.reviewId,
           ...(observed.reworkResolution ? {findingVerdicts: observed.reworkResolution.reworkContext.findings.map((finding: {findingId:string}) => ({
             findingId:finding.findingId,verdict:"confirmed",summary:"Independently checked the exact repaired source and immutable acceptance test"}))} : {}),
-          summary: "Reviewed the exact committed implementation and immutable acceptance test", criteria: observed.context.definition.configuration.criterionIds.map((criterionId: string) => ({ criterionId, passed: true, summary: "The observed committed diff doubles the input and retains the spec-derived acceptance test" })) });
+          summary: "Reviewed the exact committed implementation and immutable acceptance test",
+          ...(testIntegrityVerdicts ? { testIntegrityVerdicts } : {}),
+          criteria: observed.context.definition.configuration.criterionIds.map((criterionId: string) => ({ criterionId, passed: true, summary: "The observed committed diff doubles the input and retains the spec-derived acceptance test" })) });
         await f.runtime.receiveHerdr(f.envelope("review.verdict", completed.result, { causation_id: out.message.message_id,
           sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId }, artifact_references: [completed.artifact] }));
       }
@@ -588,6 +611,46 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
 
 // AgenticJournal persists changes under POSIX flock; these integration cases exercise that boundary.
 describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("connected independent policy phases", () => {
+  it("runs the registered host test-integrity gate at task and integrated workflow revisions with stored evidence", async () => {
+    const f = await connectedPhaseFixture("node_tap");
+    await f.addTests(); expect((await f.measure("red")).status).toBe("failed");
+    await f.edit(f.sourcePath); await writeFile(join(f.developer.worktreePath!, f.sourcePath), "module.exports=x=>x*2;\n"); await f.commit("Green: double the input");
+    await f.measure("green"); await f.measure("refactor");
+    await f.submit("implement", null); await f.tickWithReviews(); await f.tickWithReviews();
+    const run = await f.inspect();
+    expect(run.tasks[0].cycle.status).toBe("passed"); expect(run.workflowCycle.status).toBe("passed");
+    expect(f.integrityCalls.map(context => (context.input as any).scope)).toEqual(["task", "workflow"]);
+    const scopes = [{ result: run.tasks[0].cycle.history[0], candidate: f.currentHead(), base: run.tasks[0].worktrees[0].baseCommitHash },
+      { result: run.workflowCycle.history[0], candidate: run.workflowChange.headCommitHash, base: run.baseRevision }];
+    for (const { result, candidate, base } of scopes) {
+      const gate = result.qualityGateResults.find((gate: any) => gate.gateId === "host-test-integrity");
+      expect(gate.status).toBe("passed"); expect(gate.metadata.verification.sourceRevision).toBe(candidate);
+      const reference = gate.metadata.evidence;
+      expect(unwrap(await f.ports.artifactStore.resolve(reference.artifactId))).toEqual(reference);
+      const chunks: Buffer[] = []; for await (const chunk of f.ports.artifactStore.get(reference)) chunks.push(Buffer.from(unwrap(chunk)));
+      expect(JSON.parse(Buffer.concat(chunks).toString("utf8")).testIntegrity).toMatchObject({ baseRevision: base, candidateRevision: candidate });
+    }
+  }, 120_000);
+
+  it("sends a candidate with a literal-tautology assertion to bounded rework despite passing behavioral measurements", async () => {
+    const f = await connectedPhaseFixture("vitest_json");
+    await f.addTests(); expect((await f.measure("red")).status).toBe("failed");
+    await f.edit(f.sourcePath); await writeFile(join(f.developer.worktreePath!, f.sourcePath), "module.exports=x=>x*2;\n"); await f.commit("Green: double the input");
+    await f.measure("green"); await f.measure("refactor");
+    // Model an untrusted producer bypassing HostDevelopment's frozen-test guard: Runtime still has to inspect the actual committed candidate.
+    await writeFile(join(f.developer.worktreePath!, f.testPath), f.testSource.replace("()=>expect(double(2)).toBe(4)", "()=>{expect(double(2)).toBe(4);expect(1).toBe(1);}"));
+    git(f.developer.worktreePath!, "add", f.testPath); git(f.developer.worktreePath!, "commit", "-m", "Adversarial literal assertion");
+    await f.submit("implement", null); await f.tickWithReviews(true);
+    const run = await f.inspect();
+    expect(run.tasks[0].cycle.status, JSON.stringify({ error: run.error, findings: run.tasks[0].cycle.history[0]?.findings })).toBe("rework_required");
+    const result = run.tasks[0].cycle.history[0];
+    const gate = result.qualityGateResults.find((gate: any) => gate.gateId === "host-test-integrity");
+    expect(gate.status).toBe("failed"); expect(gate.findings.some((finding: any) => finding.code === "TI_LITERAL_TAUTOLOGY" && finding.severity === "error")).toBe(true);
+    expect(result.qualityGateResults.find((gate: any) => gate.gateId === "host-behavioral-real-regression").status).toBe("passed");
+    expect(run.workflowCycle).toBeUndefined();
+    expect(f.integrityCalls.map(context => (context.input as any).scope)).toEqual(["task"]);
+  }, 120_000);
+
   it("freezes Red test files bound by an automatic runner profile exactly like owner test files", async () => {
     const f = await connectedPhaseFixture("node_tap", 3, true);
     await f.addTests();

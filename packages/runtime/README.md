@@ -1200,3 +1200,80 @@ giảm token/lỗi.
 Khi `fastPathMode: "auto"` (truyền từ `environment.fastPath.mode` của CLI; `host.json` cũ thiếu trường này được `effectiveFastPathMode` xử lý là `"off"`), `evaluateFastPath` trong `packages/runtime/src/agentic/fast-path.ts` đánh giá thuần điều kiện fast-path tại `assess` (preview hướng dẫn cho Coordinator) và đóng băng `RunRecord.fastPath` tại `proposeWorkflow` ([ADR 0004](../../docs/adr/0004-fast-path-review-waiver.md)). Mọi cờ `fastPath` do agent gửi trong `metadata` đều bị bỏ qua. Run chỉ đạt `active` khi P15 phân loại `trivial`, không có `unresolvedQuestions`, SDD `lightweight`, đúng 1 Developer task không dependency và không `requiresApproval`, tối đa 5 đường dẫn literal trong `affectedPaths`, `tddDecision.mode !== "required"` và chưa gọi `request_specialist` (do đó `bugfix`/`feature` và TDD `required` không đủ điều kiện).
 
 Khi `run.fastPath.status === "active"`, Runtime tự duyệt thiết kế (`designNeedsHuman` bỏ qua `projectApprovalRequired` nhưng vẫn giữ `classification.humanApprovalRequired` và luôn giữ phê duyệt `delivery` của người dùng). Trong `verificationPlan`, Runtime chỉ gửi waiver `deterministic_coverage` ở mức task khi mọi tiêu chí bắt buộc đều tự động hóa (`verificationMethod !== "manual_review"`) và có `targetCommands`; thay đổi chỉ gồm tài liệu (`manual_review`) vẫn chạy Reviewer/QA ở mức task. Ở mức workflow, nếu cây Git sau tích hợp (`policies.git.treeOf`) trùng khớp với cây của task duy nhất đã `passed`, Runtime gửi waiver `identical_integrated_tree` để bỏ Reviewer/QA lặp lại trong khi vẫn chạy `host-git-integrity` và regression gate. Nếu P17 từ chối waiver hoặc tree hash không khớp (`tree_mismatch`), Runtime hạ cấp một chiều (`status: "downgraded"`) về plan đầy đủ và phát notice tiếng Việt. Hiện trạng bằng chứng ở mức source + local/fake-runner tests, chưa có live Herdr/provider acceptance.
+
+### Gate toàn vẹn test theo revision (TI-01)
+
+Host đăng ký `host-test-integrity` như một check bắt buộc ở cả task và workflow,
+độc lập với việc chọn behavioral/regression runner. Check dùng Git blob ở đúng
+`baseRevision` và `sourceRevision`, nhận diện rename/move và giữ multiplicity của
+các test trùng nhau; không quét từ khóa trên toàn working tree. Task rework giữ base
+ban đầu của task, workflow giữ run base, để attempt bị từ chối không biến thành
+oracle đáng tin của attempt sau. `baseRevision` trong report là base được bảo vệ này. TypeScript 5.9.3
+là parser thuộc host, không load config/plugin từ candidate. Report được ghi qua
+ArtifactStore, có rule/finding ID, vị trí và phía revision, hai SHA, before/after
+và lý do. File test dạng symlink, revision/working tree không còn khớp, parse/input
+không đo được hoặc vượt giới hạn không được coi là bằng chứng sạch.
+
+Các form JS/JSX/TS/TSX được test gồm Vitest/Jest `test`/`it`/`describe` và `expect`
+(global hoặc ESM alias), ESM Node `test`/`assert`, cùng Playwright test modifiers
+và các action trên `page`/locator dẫn xuất. So sánh tìm test bị xóa, assertion bị
+xóa/đổi oracle/nới numeric bound, skip/fixme/todo/expected-failure mới, test focus,
+parameterized inputs, discovery/script thay đổi, coverage threshold giảm và
+`force: true` mới trên browser action nhận diện được. Fixture dữ liệu nhị phân
+bị xóa không bị hiểu là test bị xóa. Truthy assertion hữu ích, guard mới, comment,
+chuỗi ký tự, test đổi tên/di chuyển và primitive equality tương đương không bị
+cấm theo từ khóa hay tổng số test.
+
+Chỉ literal tautology hẹp là `proven_violation` và tự làm gate thất bại nếu chưa
+có ngoại lệ owner hợp lệ. Các delta khác là `review_required` hoặc `coverage_gap`:
+check deterministic không tự kết luận chúng là lỗi. `inspect_review` cung cấp
+`testIntegrityObservation`; Reviewer phải trả lời **đủ và đúng từng ID** trong
+`complete_review.testIntegrityVerdicts`, gồm `verdict` (`equivalent` hoặc
+`confirmed_violation`), `reason` và `evidence: [{ revision, path, line, excerpt }]`.
+Evidence phải chỉ vào base/candidate, file Git thường có thật và đúng nguyên dòng
+đã trim; host kiểm tra trước khi lưu receipt bất biến. `equivalent` giải thích
+false positive/oracle được giữ nguyên, không miễn một vi phạm đã xác định.
+QA và Developer không thể thay Reviewer cung cấp verdict này. Phiên bản đầu
+conservatively downgrade fast-path khi gate hiện diện, kể cả candidate sạch,
+để giữ đường Reviewer độc lập.
+
+Reviewer có thể gọi `request_test_integrity_exception` với `reviewId`, `findingId`
+và `reason`; host lấy report/evidence đã lưu và Runtime chuyển yêu cầu qua
+Conversation. Reviewer kết thúc lượt khi chờ owner. Approval dùng chính authority
+người dùng đã xác thực của Runtime, phải có lý do, và được ghim vào run/task/attempt,
+base/candidate, spec fingerprint, scope, finding và report evidence. Quyết định gốc
+được lưu và xác thực lại sau restart. Comment/ticket, Developer metadata, generic
+user-decision hay chuỗi `approvedBy` không cấp ngoại lệ. Không chuyển ngoại lệ từ
+task sang workflow hoặc sang candidate/attempt khác. Chờ quyết định giữ semantics
+human-wait/timeout có sẵn: timeout không chứng minh agent đã dừng và không cấp phép
+bỏ qua approval; có thể cần đối soát/retry luồng review hiện có. Không gửi verdict
+cuối cùng trước khi có quyết định nếu đang xin ngoại lệ.
+
+Giới hạn: đây không phải chứng minh semantic equivalence tổng quát. CommonJS
+`require` aliases, custom assertions/helpers, generated tests và computed config
+chưa có phân tích đầy đủ; ngôn ngữ khác chưa có assertion parser mặc dù behavioral
+runner có hỗ trợ. Các form opaque/config hoặc ngôn ngữ test không phân tích được có coverage gap;
+không có parser đầy đủ cho mọi runner config polyglot.
+Repeated config keys ở nhiều scope có thể ghép heuristic sai; sửa thân test đã skip
+có thể báo lại skip; marker multiset không chứng minh marker giữ nguyên testcase.
+Import helper semantics và di chuyển test kèm sửa lớn cần Reviewer kiểm tra.
+Discovery thay đổi không tự chứng minh discovery bị thu hẹp. Browser syntax
+analysis không phải live browser evidence. Input host giới hạn 256 changed files,
+1 MiB/blob và 8 MiB tổng; vượt giới hạn phải chia candidate/đối soát thay vì PASS.
+Report giới hạn 2.000 findings / 2 MB, excerpt 256 ký tự và lý do 512 ký tự;
+vượt giới hạn chặn thay vì cắt mất finding rồi PASS. Source anchor chỉ tới blob đầy đủ.
+Agy nhận finding pages qua `integrityOffset`/`nextFindingOffset`, excerpt được giới
+hạn ở response; report đầy đủ giữ trong ArtifactStore.
+
+Kiểm chứng local (build trước các ca dùng `dist/`):
+
+```sh
+pnpm build
+pnpm exec vitest run packages/runtime/test/agentic/test-integrity.test.ts packages/runtime/test/agentic/host-test-integrity.test.ts packages/runtime/test/agentic/test-integrity-authority.test.ts packages/runtime/test/agentic/host-verification.test.ts
+```
+
+Các ca này dùng Git thật và filesystem ArtifactStore ở boundary host; chúng không
+chứng nhận live Herdr/provider hoặc full SDLC acceptance.
+
+Plan được lưu trước nâng cấp mà thiếu integrity check/Reviewer hoặc còn review waiver
+bị fence và cần owner đối soát; host không nâng evidence cũ thành receipt integrity.
