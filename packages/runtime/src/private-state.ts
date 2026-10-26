@@ -25,11 +25,12 @@ function makeDirectory(path: string): void {
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   directory(path);
 }
-function privateAncestors(path: string): void {
+function privateAncestors(path: string, create = true): void {
   let current = parse(path).root;
   for (const part of path.slice(current.length).split("/").filter(Boolean)) {
     current = join(current, part);
-    makeDirectory(current);
+    if (create) makeDirectory(current);
+    else directory(current);
     const stat = fs.lstatSync(current);
     const stickyRoot = stat.uid === 0 && (stat.mode & 0o1000) !== 0;
     if ((uid() !== undefined && stat.uid !== uid() && stat.uid !== 0) || ((stat.mode & 0o022) !== 0 && !stickyRoot))
@@ -100,7 +101,7 @@ function readObject(path: string, privateFile: boolean): unknown {
     return JSON.parse(fs.readFileSync(fd, "utf8"));
   } finally { fs.closeSync(fd); }
 }
-function readPinnedLocation(locator: string, repository: string, repositoryHash: string, local: string): string {
+function readPinnedLocation(locator: string, repository: string, repositoryHash: string, local: string, readOnly = false): string {
   const pinned = LocationSchema.parse(readObject(locator, false));
   const external = pinned.directory;
   if (pinned.repositoryPath !== repository || pinned.repositoryHash !== repositoryHash || !isAbsolute(external) ||
@@ -108,7 +109,7 @@ function readPinnedLocation(locator: string, repository: string, repositoryHash:
     throw new Error(`Foreign Runtime state locator; preserve ${locator} and reconcile before retrying`);
   if (!exists(external)) throw new Error(`Missing pinned Runtime authority; preserve ${locator} and reconcile before retrying`);
   const application = resolve(external, "../../..");
-  privateAncestors(resolve(application, ".."));
+  privateAncestors(resolve(application, ".."), !readOnly);
   for (const path of [application, join(application, "repositories"), resolve(external, ".."), external]) privateDirectory(path);
   const hosts = join(external, "host");
   const relocated = new Map<string, z.infer<typeof HostEndpointSchema>>();
@@ -170,4 +171,17 @@ export function resolvePrivateRuntimeStateDirectory(repositoryPath: string): str
   makeDirectory(local);
   pinLocation(locator, repository, repositoryHash, external);
   return readPinnedLocation(locator, repository, repositoryHash, local);
+}
+
+/** Locate already-published authority without probing permissions, creating directories or pinning state. */
+export function findPrivateRuntimeStateDirectory(repositoryPath: string): string | undefined {
+  const repository = fs.realpathSync(repositoryPath);
+  const metadata = join(repository, ".bflow"), local = join(metadata, "state");
+  if (!exists(metadata)) return undefined;
+  directory(metadata);
+  if (!exists(local)) return undefined;
+  directory(local);
+  const locator = join(local, "private-runtime-state.json");
+  const repositoryHash = createHash("sha256").update(repository).digest("hex");
+  return exists(locator) ? readPinnedLocation(locator, repository, repositoryHash, local, true) : local;
 }

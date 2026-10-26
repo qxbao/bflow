@@ -160,6 +160,7 @@ Tham số (Arguments):
   [run-id]              Định danh lượt chạy tùy chọn để kiểm tra chi tiết một lượt chạy cụ thể
 
 Tùy chọn (Options):
+  --telemetry          Báo cáo metric chỉ đọc cho <run-id>; dùng --json để xuất dữ liệu có cấu trúc
   --status <statuses>   Lọc lượt chạy theo trạng thái (phân tách bằng dấu phẩy: queued, running, waiting, blocked, succeeded, failed, cancelling, cancelled)
   --workflow-id <id>    Lọc lượt chạy theo định danh định nghĩa quy trình
   --limit <n>           Số lượng lượt chạy tối đa trả về (1-500)
@@ -171,6 +172,7 @@ Tùy chọn (Options):
 Ví dụ / Examples:
   bflow status
   bflow status run-123
+  bflow status run-123 --telemetry --json
   bflow status --status waiting,blocked
   bflow status --limit 10`;
 

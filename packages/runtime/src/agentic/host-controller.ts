@@ -1,3 +1,4 @@
+import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
@@ -10,7 +11,7 @@ import {
   type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
-import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
+import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
@@ -289,4 +290,26 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     }
   };
   } finally { await bootLock.close(); }
+}
+
+/** Connect-only observation. Never ensures/starts a host, changes config, or repairs sockets. */
+export async function readExistingAgenticTelemetry(options: { repositoryPath: string; sessionId: string; runId: string; asOf?: string }): Promise<WorkflowTelemetryReport> {
+  const asOf = options.asOf ?? new Date().toISOString();
+  try {
+    if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Invalid session");
+    const repositoryPath = await realpath(options.repositoryPath);
+    const stateDirectory = findPrivateRuntimeStateDirectory(repositoryPath);
+    if (!stateDirectory) throw new Error("No existing state");
+    const directory = resolve(stateDirectory, "host", options.sessionId);
+    const configuration = await readHostConfiguration(join(directory, "host.json"));
+    if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+      throw new Error("Foreign host");
+    const report = WorkflowTelemetryReportSchema.parse(await callHost(configuration.socketPath, configuration.token,
+      "telemetry_report", { runId: options.runId, asOf }, 10_000));
+    if (report.runId !== options.runId || report.source !== "agentic" || report.asOf !== asOf) throw new Error("Foreign report");
+    return report;
+  } catch {
+    return buildWorkflowTelemetry({ runId: options.runId, asOf, source: "agentic", events: [], taskIds: [],
+      complete: false, diagnostics: ["host_unavailable"] });
+  }
 }

@@ -1,4 +1,5 @@
 import { HandoverBindingSchema, TaskHandoverStore, admitHandover, selectHandover, handoverRevision, type HandoverBinding } from "./task-handover.js";
+import { readWorkflowTelemetry } from "../telemetry/report.js";
 import { z } from "zod";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentLeaseSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
@@ -1098,6 +1099,19 @@ export class AgenticWorkflowRuntime {
         return { ok: true, value: outcome };
       } finally { if (timer) clearTimeout(timer); if (dispatchTimer) clearInterval(dispatchTimer); options?.signal?.removeEventListener("abort", abort); this.gateWaiters.delete(key); }
     } };
+  }
+  /** Read-only projection: no Core restore/flush, tick, transaction save or acceptance decision. */
+  async telemetryReport(runId: string, asOf: string) {
+    const context = await this.journal.exclusive(async state => {
+      const run = state.runs.find(run => run.runId === runId);
+      return { status: run?.status, supersededApprovalIds: run?.supersededApprovals?.map(item => item.approvalId) ?? [] };
+    });
+    const report = await readWorkflowTelemetry(this.ports.runStore, runId, { source: "agentic", asOf, supersededApprovalIds: context.supersededApprovalIds });
+    report.hostWorkStatus = context.status ?? null;
+    if (report.coverage.events === 0 && context.status && ["completed", "failed", "cancelled", "escalated"].includes(context.status)) {
+      report.outcome = context.status; report.outcomeSource = "host_journal";
+    }
+    return report;
   }
   async inspect(runIdOrQuery?: string | InspectInput): Promise<JsonValue> {
     if (typeof runIdOrQuery === "string" || runIdOrQuery === undefined) {

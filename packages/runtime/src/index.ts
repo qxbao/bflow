@@ -144,4 +144,9 @@ export { regressionChecks } from "./agentic/task-commands.js";
 export * from "./platform/index.js";
 
 // Private state placement for the host and CLI recovery composition.
-export { resolvePrivateRuntimeStateDirectory } from "./private-state.js";
+export { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "./private-state.js";
+
+// Read-only telemetry reports; independent of workflow acceptance.
+export { buildWorkflowTelemetry, readWorkflowTelemetry, WorkflowTelemetryReportSchema } from "./telemetry/report.js";
+export type { WorkflowTelemetryReport } from "./telemetry/report.js";
+export { readExistingAgenticTelemetry } from "./agentic/host-controller.js";

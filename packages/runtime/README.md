@@ -1351,3 +1351,51 @@ approval, revision hoặc nội dung sẽ làm cursor cũ bị từ chối với
 và nằm dưới ngân sách reply Agy 8.500 byte, không cắt âm thầm authority hoặc nội
 dung đã lưu. Proposal acknowledgement không echo lại toàn bộ context. Đây là
 phân trang presentation riêng, không thay đổi schema hay lifecycle checkpoint.
+
+
+## Telemetry hiệu quả workflow
+
+`bflow status <run-id> --telemetry [--json]` đọc report qua host agentic **đang tồn tại**.
+Không khởi động host, chạy scheduler, phục hồi Core hay tạo receipt để đo. Projection
+không tham gia acceptance/task success. Lỗi nguồn trả coverage không đầy đủ cùng mã lý do;
+không ghi exception/prompt/command/output vào report.
+
+Định nghĩa, mẫu số và Conditional TDD nằm trong [Specification](TELEMETRY-SPEC.md).
+Các số đo Core gồm khoảng thời gian trạng thái task, rework theo generation, retry riêng,
+first-pass trong nhóm task Core `succeeded` có lịch sử đầy đủ, approval wait và gate
+turnaround (proxy timestamp event, không phải gate execution/persistence latency). Report luôn kèm cohort
+failed/cancelled/incomplete; first-pass không phải tỷ lệ thành công toàn workflow.
+
+Core ghi gate event bằng `evaluatedAt`; một số evaluator lấy mốc này trước khi chạy
+xong. Vì vậy gate turnaround luôn `partial`, không chứng minh thời gian chạy lệnh thuần
+hay latency ghi receipt.
+
+Host receipts bổ sung thời gian operation verification theo phase/role và regression
+widening theo evaluation ID. Chúng mang nhãn `partial`: inventory receipt không có mốc
+publication bất biến, không chứng minh toàn bộ operation lỗi/gián đoạn đều được ghi.
+Tổng thời gian các operation có thể chồng nhau. Chỉ nhận timestamp phase do host measurement
+path sinh cùng binding role, không dùng timestamp agent tự khai. Reason widening được
+chuẩn hóa thành mã; không xuất file path. Artifact delivery ACK không chứng minh evidence
+reuse. Thiếu proof reuse, cặp clarification, per-gate start/end hoặc provider usage thì
+metric tương ứng là `null/unavailable`. Chưa ước tính chi phí hay có bảng giá.
+
+Projection loại duplicate theo run/eventId và run/sequence, dùng validator batch hiện có,
+chặn xung đột identity và báo coverage khi mất event/time. RunStore reader chốt high-water
+mark rồi đọc tối đa 200 trang × 500 events. Nó không bám đuôi run đang tiếp tục ghi.
+Superseded approval thiếu timestamp không được đóng duration; pending approval có deadline
+đã qua được đếm riêng (không coi là quyết định human); cancellation/terminal không sinh
+approval duration giả. Run chỉ có journal vẫn giữ business outcome cùng provenance.
+
+Legacy standalone trả `legacy_readonly_source_unavailable`: factory Persistence hiện tại
+không có read-only open, còn Runtime composition có thể seed registry. Không mở composition
+đó chỉ để xem telemetry, không đọc SQLite bằng SQL riêng. Hỗ trợ legacy cần owner Persistence
+cung cấp đường mở chỉ đọc; không có migration/public event mới trong thay đổi này.
+
+Kiểm tra tập trung sau build:
+
+```bash
+pnpm build
+pnpm exec vitest run packages/runtime/test/telemetry apps/cli/test/telemetry.test.ts
+```
+
+Đây là bằng chứng source/local fixtures, không phải live Herdr/provider hay full SDLC acceptance.

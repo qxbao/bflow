@@ -1,3 +1,4 @@
+import { HostTelemetryObservationsSchema, type HostTelemetryObservations } from "../telemetry/host-observations.js";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -1171,6 +1172,44 @@ export class HostReceiptJournal {
       marked.push(id);
     }
     return marked;
+  }
+  /** Bounded, metadata-only read of existing host observations. Never creates the receipt directory. */
+  async telemetryObservations(runId: string, asOf: string): Promise<HostTelemetryObservations> {
+    const out: HostTelemetryObservations = { complete: true, regression: [], phases: [] };
+    try {
+      const info = await lstat(this.directory);
+      if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()) throw new Error("Unsafe receipt directory");
+      const names = (await readdir(this.directory)).filter(name => /^(gate|evidence)-[a-f0-9]{64}\.json$/.test(name)).sort();
+      if (names.length > 2000) out.complete = false;
+      for (const name of names.slice(0, 2000)) {
+        try {
+          const kind = name.startsWith("gate-") ? "gate" : "evidence";
+          const id = await this.receiptId(kind, name);
+          const payload = await this.read(kind, id, false);
+          if (kind === "gate") {
+            const result = QualityGateResultSchema.parse(payload);
+            if (result.runId !== runId || Date.parse(result.evaluatedAt) > Date.parse(asOf)) continue;
+            const verification = record(result.metadata?.verification ?? {});
+            if (verification.executorId !== "bflow-host-regression-check" || verification.independentExecution !== true || !result.gateId.startsWith("host-regression-")) continue;
+            const regression = z.object({ widening: z.array(z.object({ tier: z.enum(["package", "full"]), reason: z.string() }).passthrough()) }).passthrough().safeParse(result.metadata?.regression);
+            if (!regression.success) { out.complete = false; continue; }
+            out.regression.push({ evaluationId: result.evaluationId, widening: regression.data.widening.map(w => ({ tier: w.tier,
+              reason: w.reason.startsWith("root_config:") ? "root_config" : w.reason.startsWith("index_unavailable:") ? "index_unavailable" :
+                w.reason === "package_manifest" || w.reason === "non_code_change" ? w.reason : "other" })) });
+          } else {
+            const result = VerificationResultSchema.parse(payload);
+            if (result.runId !== runId || Date.parse(result.completedAt) > Date.parse(asOf)) continue;
+            const binding = PaneBindingSchema.safeParse(result.metadata?.hostVerifierBinding);
+            const phase = z.enum(["red", "green", "refactor", "verification"]).safeParse(record(result.metadata?.conditionalTdd ?? {}).phase);
+            // These fields are minted together only by HostIndependentVerification's measured phase path.
+            if (!binding.success || !phase.success || binding.data.sessionId !== this.sessionId || binding.data.role !== result.verifiedBy || !Array.isArray(result.metadata?.hostBehavioralMeasurements)) continue;
+            out.phases.push({ verificationId: result.verificationId, phase: phase.data, role: result.verifiedBy,
+              startedAt: result.startedAt, completedAt: result.completedAt });
+          }
+        } catch { out.complete = false; }
+      }
+    } catch { out.complete = false; }
+    return HostTelemetryObservationsSchema.parse(out);
   }
   async recordGate(result: QualityGateResult): Promise<void> { const parsed = QualityGateResultSchema.parse(result); await this.write("gate", parsed.evaluationId, parsed); }
   async authenticateGate(input: QualityGateResult): Promise<boolean> { const result = QualityGateResultSchema.parse(input); return digest(await this.read("gate", result.evaluationId)) === digest(result); }

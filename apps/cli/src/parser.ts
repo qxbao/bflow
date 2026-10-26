@@ -2039,8 +2039,9 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
     }
 
     case "status": {
-      const booleanFlags = new Set(["--json", "-j", "--help", "-h"]);
+      const booleanFlags = new Set(["--telemetry", "--json", "-j", "--help", "-h"]);
       const allowedFlags = new Set([
+        "--telemetry",
         "--status",
         "--workflow-id",
         "--limit",
@@ -2129,8 +2130,11 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         );
       }
 
+      const telemetry = optRes.value.flags.has("--telemetry");
+      if (telemetry && runId === undefined) return makeValidationError("--telemetry requires <run-id>.", json, "status");
       const value: StatusCommandArgs = {
         command: "status",
+        ...(telemetry ? { telemetry: true } : {}),
         runId,
         statusFilter,
         workflowId: rawWorkflowId,

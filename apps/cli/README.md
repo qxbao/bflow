@@ -613,3 +613,29 @@ provider/Herdr acceptance. Existing hosts must reload the rebuilt Runtime to use
 ## Fast-path policy (`environment.fastPath.mode`)
 
 `.bflow/config.yml` includes `environment.fastPath.mode: "auto" | "off"` (default `"auto"` for new and updated configs via `bflow init` / `bflow init --update`). When set to `"auto"`, `bflow up` passes `policy.fastPath` to the Runtime host so eligible single-task `trivial` changes can auto-accept design approval and use P17 review waivers (`deterministic_coverage` / `identical_integrated_tree`) while preserving human delivery approval ([ADR 0004](../../docs/adr/0004-fast-path-review-waiver.md)). Persisted `host.json` files written before `fastPath` existed are treated as `"off"` on host recovery. Evidence level is source implementation and local tests, not live provider/Herdr acceptance.
+
+
+## Báo cáo telemetry workflow
+
+```bash
+bflow status <run-id> --telemetry
+bflow status <run-id> --telemetry --json
+```
+
+Tùy chọn yêu cầu một run ID, không kết hợp filter/phân trang. Nó chọn nguồn agentic từ
+state của repository và chỉ kết nối host đang tồn tại, không gọi `up` hay khởi động daemon.
+Host đang dừng/phiên bản cũ trả `host_unavailable`; không thay bằng dữ liệu legacy. Legacy
+standalone hiện trả `legacy_readonly_source_unavailable` để tránh seed registry hoặc mở
+storage ở chế độ ghi. `status` không có `--telemetry` giữ đường xử lý hiện tại.
+
+JSON dùng envelope CLI hiện có với `data.reportVersion: 1`, source, as-of, outcome/provenance,
+coverage từng nguồn, cohort, metric value/unit/quality/numerator/denominator và limitation.
+`measured`, `estimated`, `partial`, `unavailable` là các mức chất lượng khác nhau; hiện chưa
+phát ước tính giá. Thiếu token/USD là `null`, không phải 0. Số 0 rework/retry chỉ được báo
+khi nguồn đủ lịch sử; source thiếu có số quan sát dương thì ghi `partial`.
+
+CLI exit 0 nghĩa là đã xuất report, không khẳng định task thành công hoặc host sẵn sàng.
+Lỗi telemetry được thể hiện trong coverage/diagnostics cố định; không đổi business state
+hay exit behavior của status thông thường. Chi tiết định nghĩa và giới hạn độ chính xác:
+[telemetry Specification](../../packages/runtime/TELEMETRY-SPEC.md) và
+[Runtime telemetry](../../packages/runtime/README.md#telemetry-hiệu-quả-workflow).

@@ -550,6 +550,11 @@ async function executeCommandWithProgress(
   if (parsed.command === "up" || parsed.command === "down" || parsed.command === "attach" || parsed.command === "doctor" || parsed.command === "recover") {
     throw new Error("Unreachable environment command");
   }
+  if (parsed.command === "status" && parsed.telemetry && parsed.runId) {
+    const { executeTelemetryStatus } = await import("./telemetry.js");
+    const report = await executeTelemetryStatus(parsed.runId, context);
+    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", report, undefined, isJson, io, presentation);
+  }
   if (context?.runtime === undefined) {
     const error: ContractError = {
       code: "transport_unavailable",

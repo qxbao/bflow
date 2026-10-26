@@ -1,4 +1,6 @@
 import { TaskHandoverReadInputSchema, taskHandoverView, taskHandoverAcknowledgement, deferredTaskHandover } from "./task-handover-view.js";
+import { enrichHostTelemetry } from "../telemetry/host-observations.js";
+import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema } from "../telemetry/report.js";
 import { AssignmentSurvey, assignmentsForBinding } from "./assignment-survey.js";
 import { policyEvidenceView } from "./policy-evidence-view.js";
 import { execFile } from "node:child_process";
@@ -1826,6 +1828,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         })();
         try { return await preparation; }
         finally { preparation = undefined; startupDraining = false; }
+      }
+      case "telemetry_report": {
+        const request = z.object({ runId: z.string().min(1).max(200), asOf: z.string().datetime({ offset: true }) }).strict().parse(params);
+        // Observation must not call host(), activate, flush or recover a workspace.
+        if (!workspace) return buildWorkflowTelemetry({ ...request, source: "agentic", events: [], taskIds: [],
+          complete: false, diagnostics: ["workspace_inactive"] });
+        try { const report = WorkflowTelemetryReportSchema.parse(await workspace.runtime.telemetryReport(request.runId, request.asOf));
+          return enrichHostTelemetry(report, await receipts.telemetryObservations(request.runId, request.asOf)); }
+        catch { return buildWorkflowTelemetry({ ...request, source: "agentic", events: [], taskIds: [],
+          complete: false, diagnostics: ["source_unavailable"] }); }
       }
       case "platform_status": {
         // Legacy hosts (no platform) keep the original response shape exactly.

@@ -1,3 +1,4 @@
+import { formatTelemetryReport } from "./telemetry.js";
 import type {
   ContractError,
   EnvironmentDoctorReport,
@@ -1343,6 +1344,8 @@ export function formatCommandSuccess(
   if (isSessionManifest(data)) {
     return formatUpOutput(data, useColor, debug);
   }
+
+  if ("reportVersion" in data && data.reportVersion === 1) return formatTelemetryReport(data);
 
   if (isSnapshot(data)) {
     const runFormatted = formatWorkflowRun(data, useColor, debug);
