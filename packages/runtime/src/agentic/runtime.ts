@@ -1,3 +1,4 @@
+import { HandoverBindingSchema, TaskHandoverStore, admitHandover, selectHandover, handoverRevision, type HandoverBinding } from "./task-handover.js";
 import { z } from "zod";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentLeaseSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
@@ -2953,6 +2954,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: pane.agentId, pane_id: pane.paneId },
         type: "task.assignment", payload: { task: definition, specification: task.spec.specification,
           testStrategy: task.spec.strategy, worktree: tree,
+          handoverBinding: HandoverBindingSchema.parse({ runId: run.runId, taskId: task.taskId, assignmentId: messageId,
+            attempt: taskState.attempt, attemptId: taskState.attemptId, generation: taskState.generation, reworkGeneration: reworkContext?.reworkGeneration ?? 0,
+            worktreePath: tree.worktreePath, revision: tree.baseCommitHash, specId: task.spec.specification.specId,
+            specVersion: task.spec.specification.version ?? null, specFingerprint: digest(task.spec.specification),
+            requirementFingerprint: digest(run.delegation) }),
           findings: reworkContext ? toAssignedQualityFindings(reworkContext) : (task.cycle?.history.at(-1)?.findings ?? []),
           ...(reworkContext ? { reworkContext } : {}),
           implementationAuthorizationRequired: task.spec.strategy.tddDecision.mode === "required",
@@ -3018,6 +3024,71 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         submittedAt: this.now(),
         artifactStore: this.ports.artifactStore
       });
+    });
+  }
+  /** Optional historical context only. Existing journal lock serializes selection/proposals with retries and decisions. */
+  async taskHandover(bindingInput: PaneBinding, input: unknown): Promise<JsonValue> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    const args = z.object({ runId: z.string().min(1).optional(), taskId: z.string().min(1).optional(), proposal: z.unknown().optional() }).strict().parse(input);
+    return this.transaction(async (state, _save, core, outbox) => {
+      if (binding.role !== "developer" || !binding.worktreePath) throw new Error("A current Developer assignment is required for task handover");
+      const candidates = state.outbound.filter(out => (out.status === "accepted" || args.proposal === undefined && out.status === "released") && !out.parentAssignmentId && out.message.type === "task.assignment" &&
+        out.handle?.target.agentId === binding.agentId && out.handle.target.paneId === binding.paneId &&
+        out.handle.target.worktreePath === binding.worktreePath && digest(out.handle.target.session) === digest(binding.session) &&
+        (args.runId === undefined || out.message.run_id === args.runId) && (args.taskId === undefined || out.taskId === args.taskId));
+      const out = candidates.length === 1 ? candidates[0] : undefined;
+      if (!out?.handle || !out.taskId || !out.message.run_id || isConflictResolverAssignment(out.message)) {
+        if (args.proposal !== undefined) throw new Error("No unique current Developer task assignment");
+        return json({ handover: { status: "absent", code: "handover_assignment_unavailable" } });
+      }
+      const run = this.run(state, out.message.run_id), task = run.tasks.find(t => t.taskId === out.taskId);
+      const current = (await core.snapshot(run.runId)).tasks.find(t => t.taskId === out.taskId);
+      const liveAssignment = state.outbound.find(source => source.handle?.requestId === current?.agentExecution?.requestId && source.status === "accepted");
+      const authority = { requirement: run.delegation, task: run.definition?.tasks.find(t => t.id === out.taskId), specification: task?.spec.specification, strategy: task?.spec.strategy,
+        approval: run.approval, approvalKind: run.approvalKind, decision: run.decision, taskApproval: task?.spec.request,
+        taskDecision: task?.spec.decision, userDecisions: run.userDecisions, pendingAction: run.pendingAction,
+        blocker: run.error, verificationCycle: task?.cycle,
+        reworkContext: liveAssignment ? record(liveAssignment.message.payload).reworkContext : undefined, status: run.status, cancelled: run.cancelled };
+      if (!task || out.status !== "accepted" || current?.status !== "running" || current.agentExecution?.requestId !== out.handle.requestId ||
+          task.worktrees.at(-1)?.worktreePath !== binding.worktreePath || task.spec.specification.status !== "approved") {
+        if (args.proposal !== undefined) throw new Error("No current Developer assignment owns this task handover");
+        return json({ authority, handover: { status: "withheld", code: "handover_assignment_inactive" } });
+      }
+      let revision: string;
+      try { revision = await handoverRevision(binding.worktreePath); }
+      catch { return json({ authority, handover: { status: "withheld", code: "handover_revision_unavailable" } }); }
+      const currentBinding = HandoverBindingSchema.parse({ runId: run.runId, taskId: task.taskId, assignmentId: out.message.message_id,
+        attempt: current.attempt, attemptId: current.attemptId, generation: current.generation,
+        reworkGeneration: authority.reworkContext === undefined ? 0 : ReworkAssignmentContextSchema.parse(authority.reworkContext).reworkGeneration,
+        worktreePath: binding.worktreePath,
+        revision, specId: task.spec.specification.specId, specVersion: task.spec.specification.version ?? null,
+        specFingerprint: digest(task.spec.specification), requirementFingerprint: digest(run.delegation) });
+      const sources: HandoverBinding[] = state.outbound.flatMap(source => {
+        if (source.message.type !== "task.assignment" || source.message.run_id !== run.runId || source.taskId !== task.taskId || !source.handle) return [];
+        const parsed = HandoverBindingSchema.safeParse(record(source.message.payload).handoverBinding);
+        if (!parsed.success || parsed.data.assignmentId !== source.message.message_id || parsed.data.attemptId !== source.handle.attemptId ||
+            parsed.data.worktreePath !== source.handle.target.worktreePath) return [];
+        return [parsed.data];
+      });
+      const store = new TaskHandoverStore(join(this.journal.directory, "task-handover"));
+      if (args.proposal !== undefined) {
+        if (this.quiesced || run.cancelled) throw new Error("Task handover proposals are quiesced or cancelled");
+        this.live(run);
+        await outbox.renew(out);
+        const admitted = admitHandover(args.proposal, currentBinding);
+        if ("envelope" in admitted) {
+          // Legacy assignments have no durable generation marker: do not manufacture source history.
+          if (!sources.some(source => digest({ ...source, revision }) === digest(currentBinding)))
+            return json({ binding: currentBinding, authority, handover: { status: "rejected", code: "handover_unknown_assignment" } });
+          try { await store.write(admitted.envelope); }
+          catch { return json({ binding: currentBinding, authority, handover: { status: "rejected", code: "handover_storage_unavailable" } }); }
+        }
+        await this.activityLog.record({ kind: "progress", role: "runtime", action: "task_handover_proposal", runId: run.runId,
+          taskId: task.taskId, attemptId: currentBinding.attemptId, outcome: "code" in admitted ? admitted.code : "accepted" });
+        return json({ binding: currentBinding, authority, handover: admitted });
+      }
+      const selected = selectHandover(await store.read(run.runId, task.taskId), currentBinding, sources);
+      return json({ binding: currentBinding, authority, handover: selected });
     });
   }
   /** Trusted local tool guard. Keep current ownership and lease checks adjacent

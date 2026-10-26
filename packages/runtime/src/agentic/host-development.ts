@@ -1,3 +1,4 @@
+import { deferredTaskHandover } from "./task-handover-view.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
@@ -285,9 +286,12 @@ export class HostDevelopment {
     const context = await this.identity(binding, input);
     if (context.resolver) return (await this.conflictResolutionContext(binding))!;
     const rawRework = record(context.message.payload).reworkContext;
+    const rawResumeContext = await this.runtime().taskHandover(binding, input);
+    const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
+    const resumeContext = isAgy ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
     return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
       const fullEvidence = task.spec.strategy.metadata?.tddEvidence ?? [];
-      const fullReply = { runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
+      const fullReply = { resumeContext, runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
         tddDecision: task.spec.strategy.tddDecision, recordedEvidence: fullEvidence,
         ...(rawRework !== undefined ? { reworkContext: rawRework } : {}) };
@@ -303,7 +307,9 @@ export class HostDevelopment {
             ...(entry.occurredAt !== undefined ? { occurredAt: entry.occurredAt } : {})
           };
         }) : [];
-        return json({ ...fullReply, recordedEvidence: compactEvidence });
+        const compact = { ...fullReply, recordedEvidence: compactEvidence };
+        if (exceedsAgyInlineReply(compact)) return json({ runId: context.runId, taskId: context.taskId, resumeContext });
+        return json(compact);
       }
       return json(fullReply);
     });

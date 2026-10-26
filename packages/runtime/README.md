@@ -1277,3 +1277,77 @@ chứng nhận live Herdr/provider hoặc full SDLC acceptance.
 
 Plan được lưu trước nâng cấp mà thiếu integrity check/Reviewer hoặc còn review waiver
 bị fence và cần owner đối soát; host không nâng evidence cũ thành receipt integrity.
+
+### Task handover nội bộ
+
+Developer của Core task có `read_task_handover` và `propose_task_handover`.
+`assignment_context` và `workspace_status` trả `resumeContext`: handover được host
+chọn cùng yêu cầu, specification, strategy, approval/decision, blocker và rework
+context hiện hành. Các view compact/active_only giữ phần này; compact task dossier
+cũng giữ specification và acceptance criteria khi không còn assignment đang chạy.
+Pane đã nghỉ chỉ được đọc authority của assignment của mình, không ghi handover.
+Conflict resolver và specialist ngoài Core task không dùng cơ chế này.
+
+Schema riêng của Runtime (`src/agentic/task-handover.ts`, không export qua public
+package contracts) là `{schemaVersion:1,binding,content}`:
+
+- `binding`: `runId`, `taskId`, `assignmentId`, `attempt`, `attemptId`, `generation`, `reworkGeneration`,
+  `worktreePath`, `revision` (Git HEAD), `specId`, `specVersion` (`null` nếu bản gốc
+  không khai version), `specFingerprint`, `requirementFingerprint`. Host suy ra
+  binding; proposal phải khớp chính xác binding từ lần đọc hiện tại.
+- `content`: `nextAction`, `decisions`, `disprovedHypotheses`, `untestedAngles`,
+  `references`. Mỗi chuỗi nội dung tối đa 768 ký tự; mỗi danh sách nội dung tối đa
+  8 mục; references tối đa 16 source locations hoặc evidence artifact IDs.
+  Evidence IDs chỉ là gợi ý tra cứu, không phải trusted ArtifactReference/proof.
+- Toàn bộ envelope tối đa 16 KiB UTF-8; schema strict từ chối trường lạ. Không
+  trích xuất log hoặc tự suy diễn lịch sử từ transcript.
+
+Agent đề xuất trước khi nhường lượt hoặc rút gọn context, và cập nhật sau commit.
+Host kiểm tra assignment hiện hành và gia hạn lease/fence, validate proposal, rồi
+lưu một bản mới nhất cho mỗi run/task tại
+`<journalDirectory>/task-handover/<hash(runId,taskId)>.json`, ngoài task worktree.
+Khóa journal hiện có tuần tự hóa ghi/đọc với retry; ghi file tạm độc quyền,
+fsync/rename và fsync thư mục theo nền tảng local POSIX hiện được kiểm chứng.
+Đọc giới hạn byte, không theo symlink, không đọc special file/hardlink.
+
+Sau retry/restart/context compaction, host đọc lại và kiểm tra provenance với
+assignment đã lưu. Chỉ nhận attempt hiện hành hoặc attempt trước **cùng Core
+generation và rework generation**, cùng HEAD/specification/requirement fingerprint. Worktree path của
+attempt trước phải khớp assignment cũ; host không đổi nhãn attempt nguồn. Generation
+mới, revision/specification/yêu cầu thay đổi hoặc binding không khớp sẽ bị giữ lại
+với diagnostic `handover_*`; không tự chuyển handover sang generation mới.
+Revision ở đây là HEAD, không chứng nhận nội dung chưa commit hay tình trạng source
+reference hiện tại. Mọi reference cần được kiểm tra lại trước khi dùng làm evidence.
+
+Handover luôn là JSON context chưa đáng tin kèm cảnh báo; chuỗi yêu cầu đổi policy,
+approval, specification hoặc khai thành công không có authority. Nội dung không
+được đưa vào system prompt hay acceptance proof. Trạng thái authority và các gate
+hiện có vẫn quyết định có được tiếp tục hay không.
+
+Không đổi checkpoint codec, journal version, public contract hoặc memory Gateway.
+Checkpoint và dossier rework giữ vai trò hiện có; memory có provenance vẫn đi qua
+Gateway, không được coi là nguồn handover chuẩn. State cũ không có file handover
+trả `handover_absent`; assignment cũ không có marker provenance tiếp tục recovery
+nhưng không được bịa generation để nhận proposal (`handover_unknown_assignment`).
+File hỏng/quá cỡ hoặc revision không đọc được trả diagnostic và bỏ context tùy
+chọn; không làm hỏng Core recovery. Nếu agent chưa đề xuất trước khi process chết,
+host không thể khôi phục handover chưa từng được lưu. Đây là source/local tests,
+chưa phải live-provider/Herdr/full-workflow acceptance.
+
+Kiểm chứng sau build:
+
+```sh
+pnpm build
+pnpm exec vitest run packages/runtime/test/agentic/task-handover.test.ts packages/runtime/test/agentic/task-handover-view.test.ts packages/runtime/test/agentic/rework-causality.test.ts packages/runtime/test/agentic/core-checkpoint-restore.test.ts packages/runtime/test/agentic/conversation-context-budget.test.ts packages/runtime/test/agentic/mcp-output-trim.test.ts packages/runtime/test/agentic/tool-action-policy.test.ts
+```
+
+Với Agy, context tự động trả chỉ dẫn `handover_context_deferred` tới
+`read_task_handover`. Reader tự chia reply lớn thành `handover_context_paged`
+(`page`, `cursor`, `offset`, `nextOffset`, `totalBytes`); ghép các chuỗi page rồi
+parse JSON đầy đủ trước khi tiếp việc. Có thể yêu cầu `{view:"page"}` trên provider
+khác. Trang tiếp dùng cùng `cursor` và `offset:nextOffset`; thay đổi requirement,
+approval, revision hoặc nội dung sẽ làm cursor cũ bị từ chối với
+`handover_cursor_stale`, phải đọc lại từ offset 0. Mỗi trang giữ UTF-8 nguyên vẹn
+và nằm dưới ngân sách reply Agy 8.500 byte, không cắt âm thầm authority hoặc nội
+dung đã lưu. Proposal acknowledgement không echo lại toàn bộ context. Đây là
+phân trang presentation riêng, không thay đổi schema hay lifecycle checkpoint.

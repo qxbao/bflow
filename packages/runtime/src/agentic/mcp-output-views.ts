@@ -907,6 +907,7 @@ export function compactAssignmentContext(
                   }
                 : {}),
               spec: {
+                ...(taskSpec.specification === undefined ? {} : { specification: taskSpec.specification }),
                 request: requestSummary,
                 ...(taskSpec.decision !== undefined ? { decision: taskSpec.decision } : {}),
                 strategy: {
@@ -966,6 +967,7 @@ export function compactAssignmentContext(
               : {}),
             ...(run.error !== undefined ? { error: run.error } : {}),
             delegation: {
+              ...(delegation.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: delegation.acceptanceCriteria }),
               ...(delegation.delegationId !== undefined ? { delegationId: delegation.delegationId } : {}),
               ...(delegation.messageId !== undefined ? { messageId: delegation.messageId } : {}),
               ...(delegation.correlationId !== undefined ? { correlationId: delegation.correlationId } : {}),
@@ -1005,6 +1007,7 @@ export function compactAssignmentContext(
 
   return json({
     ...(repositorySurvey === undefined ? {} : { repositorySurvey }),
+    ...(fullReplyInput.resumeContext === undefined ? {} : { resumeContext: fullReplyInput.resumeContext }),
     policyEvidence: fullReplyInput.policyEvidence,
     policyEvidenceNote: fullReplyInput.policyEvidenceNote,
     toolActions: fullReplyInput.toolActions,
