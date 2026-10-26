@@ -80,7 +80,9 @@ Cancellation qua Conversation lưu control bền vững; `cancelled` nghĩa là 
 
 Legacy `bflow resume`/`cancel`/`approve` thao tác store khác; không dùng cho P19. [Session recovery](guide/session-recovery.md) giải thích recovery/backup và giới hạn durability.
 
-Khi verification trả rework, dùng dossier theo exact finding ID thay vì chỉ báo “đã sửa”. Kiểm tra commit/revision, nguyên nhân và phép kiểm tra trước/sau; Reviewer/QA vẫn phải xác minh. Giới hạn verdict coverage hiện tại cần được theo dõi như [rework reference](rework-causality.md), không bỏ qua gate để thông pipeline.
+Khi verification trả rework, dùng dossier theo exact finding ID thay vì chỉ báo “đã sửa”. Kiểm tra commit/revision, nguyên nhân và phép kiểm tra trước/sau; Reviewer/QA vẫn phải xác minh. Reviewer/QA phải nộp verdict cho đủ mọi finding; thiếu verdict cho kết quả `inconclusive` thay vì pass ([rework reference](rework-causality.md)). Không bỏ qua gate để thông pipeline.
+
+Sau khi nâng cấp lên bản có `host-test-integrity`, run đang dở có plan verification cũ sẽ báo "Persisted verification plan predates required test-integrity review". Không sửa journal để chèn gate: dừng run hiện tại qua Conversation/cancel và tạo lại workflow (hoặc chạy bản host cũ để hoàn tất run đó), vì evidence cũ không thể nâng thành integrity receipt. Khi gate báo vượt giới hạn kích thước, chia candidate thành task nhỏ hơn.
 
 ## Lệnh cấp cao cho operator/automation
 

@@ -11,6 +11,14 @@ describe("revision-relative test integrity AST analysis", () => {
     expect(rules(wrap('expect(result).toBe("toBe(5)");'),wrap('expect(result).toBe("toEqual(5)");'))).toContain("TI_ASSERTION_CHANGED");
   });
 
+  it("keeps finding IDs unique when identical assertions are removed from one test so every one can be adjudicated",()=>{
+    const report=compare(wrap("expect(add(1, 1)).toBe(2);\nexpect(add(1, 1)).toBe(2);"),wrap("expect(add(1, 2)).toBeDefined();"));
+    const ids=report.findings.filter(f=>f.ruleId==="TI_ASSERTION_REMOVED").map(f=>f.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(report.findings.map(f=>f.id)).size).toBe(report.findings.length);
+    expect(compare(wrap("expect(add(1, 1)).toBe(2);\nexpect(add(1, 1)).toBe(2);"),wrap("expect(add(1, 2)).toBeDefined();")).findings.map(f=>f.id)).toEqual(report.findings.map(f=>f.id));
+  });
+
   it("fails explicitly instead of truncating excessive findings into a clean report",()=>{
     expect(()=>compare(wrap("run();"),wrap("expect(1).toBe(1);".repeat(2001)))).toThrow(/report bounds/);
   });

@@ -903,9 +903,7 @@ export class HostVerification {
     if (task && record(task.result).attemptId !== attemptId) {
       throw new Error("Stale rework review attempt or generation");
     }
-    if (!dossier && (hasReworkAssignment(Array.isArray(state.outbound) ? state.outbound : [], runId, taskId, attemptId) ||
-        task?.cycle && Array.isArray(record(task.cycle).history) &&
-        (record(task.cycle).history as unknown[]).some(r => record(r).status === "failed"))) {
+    if (!dossier && hasReworkAssignment(Array.isArray(state.outbound) ? state.outbound : [], runId, taskId, attemptId)) {
       throw new Error("Missing rework dossier; historical state cannot supply independent finding evidence");
     }
     return dossier;

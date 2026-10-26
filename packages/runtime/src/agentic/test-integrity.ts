@@ -247,7 +247,11 @@ export function analyzeTestIntegrity(raw:Input):TestIntegrityReport {
       baseRevision:input.baseRevision,candidateRevision:input.candidateRevision,reason:reason.slice(0,512),...(oldText===undefined?{}:{before:oldText}),...(newText===undefined?{}:{after:newText})};
     findingBytes+=Buffer.byteLength(JSON.stringify(value))+64;
     if(findings.length>=2000||findingBytes>2_000_000)throw new Error("Test integrity report bounds exceeded; split the candidate for independent review");
-    findings.push({...value,id:`ti-${hash(value)}`});
+    // Identical excerpts (e.g. two removed copies of one assertion) differ only by source origin; IDs must stay unique for Reviewer verdicts.
+    const origin=(item:Located|string|undefined)=>typeof item==="object"?[item.source.side,item.source.path,item.node.getStart(item.source.file)]:undefined;
+    const base=`ti-${hash({...value,origins:[origin(old),origin(newer)]})}`;
+    let id=base;for(let n=2;findings.some(finding=>finding.id===id);n++)id=`${base}-${n}`;
+    findings.push({...value,id});
   };
   for(const file of input.files) {
     for(const side of ["base","candidate"] as const) {
