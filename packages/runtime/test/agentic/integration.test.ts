@@ -1640,6 +1640,26 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
     expect((await f.inspect()).tasks[0].cycle).toBeUndefined(); expect(f.calls).toHaveLength(0);
     await f.evidence("implement"); await f.runtime.tick(); expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
   });
+  it("starts a dependent task from its dependency's verified head", async () => {
+    // Live run bf-b5679f4f2e725cadfef1: task-integration depended on task-unit but started from the run base, so its
+    // Developer re-implemented the module and integration had to merge two unrelated versions of the same file.
+    const f = await fixture({ parallel: true });
+    f.def.dependencies = [{ taskId: "other", dependsOnTaskId: "implement", condition: "succeeded" }] as any;
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    expect(f.transport.sentRequests.filter(req => req.role === "developer")).toHaveLength(1);
+    await f.evidence("implement"); await f.submit(); await f.runtime.tick(); await f.runtime.tick();
+    const run = await f.inspect();
+    const implement = run.tasks.find((task: any) => task.taskId === "implement");
+    const other = run.tasks.find((task: any) => task.taskId === "other");
+    expect(implement.cycle.status).toBe("passed");
+    expect(other.worktrees).toHaveLength(1);
+    expect(other.worktrees[0].baseCommitHash).toBe(implement.changeSet.headCommitHash);
+    expect(other.worktrees[0].baseCommitHash).not.toBe(run.baseRevision);
+    await f.evidence("other"); await f.submit("other", "second file\n"); await f.runtime.tick(); await f.runtime.tick();
+    const integrated = await f.inspect();
+    expect(integrated.workflowCycle.status).toBe("passed");
+    expect(integrated.workflowChange.filesChanged).toHaveLength(2);
+  });
   it("parallel branches integrate and are independently verified on the exact merged revision", async () => {
     const f = await fixture({ parallel: true }); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     await f.evidence("implement"); await f.evidence("other"); await f.submit(); await f.submit("other", "second file\n");

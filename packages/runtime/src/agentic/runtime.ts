@@ -2941,8 +2941,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (state.outbound.some(out => out.message.idempotency_key === id)) continue;
       const agentName = `dev-${digest([run.runId, taskState.attemptId]).slice(0, 20)}`;
       const prior = task.changeSet;
+      // A rework attempt continues its own previous head. A first attempt with exactly one dependency builds on that
+      // dependency's verified change: starting from the run base would make the Developer redo it and leave integration
+      // to merge two unrelated versions of the same files. Several dependencies still start from the run base and are
+      // combined by dependency-ordered integration.
+      const dependencies = run.definition!.dependencies.filter(dep => dep.taskId === task.taskId);
+      const dependencyHead = dependencies.length === 1
+        ? run.tasks.find(item => item.taskId === dependencies[0]!.dependsOnTaskId)?.changeSet?.headCommitHash : undefined;
       const tree = await this.ports.policies.git.prepareTask({ runId: run.runId, taskId: task.taskId,
-        attemptId: taskState.attemptId!, baseRevision: prior?.headCommitHash ?? run.baseRevision!,
+        attemptId: taskState.attemptId!, baseRevision: prior?.headCommitHash ?? dependencyHead ?? run.baseRevision!,
         ownedPaths: strings(record(definition.metadata).ownedPaths),
         forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName });
       if (!task.worktrees.some(item => item.key === tree.key)) task.worktrees.push(tree);
