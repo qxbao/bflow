@@ -2556,6 +2556,36 @@ export class AgenticWorkflowRuntime {
       out.handle?.target.agentId === entry.agentId && out.handle.target.paneId === entry.paneId) : undefined;
     if (parent) outbox.enqueueTaskNotice(message, parent);
     else outbox.enqueue(message, entry.role, entry.taskId, `attempt-${id}`);
+    // When Coordinator asked request_user_decision to resolve a blocked active Developer task.assignment,
+    // also enqueue a task notice to that Developer under its active writer lease so it can resume.
+    if (entry.role === "coordinator" && payload.outcome === "approved") {
+      const blockedTaskParent = [...state.outbound].reverse().find(out =>
+        out.message.type === "task.assignment" &&
+        out.message.run_id === run.runId &&
+        out.status === "accepted" &&
+        out.handle !== undefined &&
+        (entry.taskId === undefined || out.taskId === entry.taskId) &&
+        state.inbox.some(item =>
+          item.status === "applied" &&
+          item.message.run_id === run.runId &&
+          item.message.type === "task.status" &&
+          item.message.sender.role === "developer" &&
+          item.message.causation_id === out.message.message_id &&
+          specialistBlockage(item.message.payload) !== undefined));
+      if (blockedTaskParent?.handle) {
+        const devId = `user-decision-dev-notice-${digest([run.runId, entry.request.approvalId, entry.status, blockedTaskParent.message.message_id])}`;
+        const devMessage = RoleMessageSchema.parse({
+          schema_version: 2, message_id: devId, correlation_id: run.delegation.correlationId,
+          causation_id: blockedTaskParent.message.message_id, run_id: run.runId,
+          sender: { role: "coordinator" },
+          recipient: { role: "developer", agent_id: blockedTaskParent.handle.target.agentId, pane_id: blockedTaskParent.handle.target.paneId },
+          type: "task.status",
+          payload: json({ ...payload, question: entry.request.reason, resumedTaskId: blockedTaskParent.taskId }),
+          artifact_references: [], occurred_at: this.now(), idempotency_key: devId
+        });
+        try { outbox.enqueueTaskNotice(devMessage, blockedTaskParent); } catch { /* lease expired; normal recovery handles task */ }
+      }
+    }
   }
   private async applyDecision(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, decision: ApprovalDecision): Promise<void> {
