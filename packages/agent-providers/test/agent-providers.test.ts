@@ -829,6 +829,26 @@ describe("@bflow/agent-providers", () => {
       expect(calls.some(args => args.includes("ping") || args.includes("--print") || args.includes("exec"))).toBe(false);
     });
 
+    // Agy silently starts its default model for an id missing from its catalog, so the native catalog is the only
+    // launch-side proof that the configured model will actually run.
+    it.each([
+      ["gemini-1.5-pro", "passed", "auth_native_ok"],
+      ["gemini-3.1-pro-high", "failed", "incompatible_model"]
+    ] as const)("checks configured Agy model %s against the native catalog", async (model, status, code) => {
+      const runner = createFakeProviderRunner();
+      const result = await new AgyProviderAdapter({ runner, executablePath: fakeBinaryPath, executionProbe: "disabled",
+        allowTestFilesystemOwnership: true, model }).checkHealth({ schemaVersion: 3,
+        environment: createTestEnvironment("agy"), stage: "preflight", requestedAt: new Date().toISOString() });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const check = result.value.checks.find(item => item.check === "authentication");
+      expect(check).toMatchObject({ status, code });
+      if (status === "failed") {
+        expect(check?.message).toContain("gemini-1.5-pro");
+        expect(result.value.status).not.toBe("ready");
+      }
+    });
+
     it.each(['{"loggedIn":false}', '{}', 'not json'])("rejects unproven Claude native authentication: %s", async stdout => {
       const runner = createFakeProviderRunner({ customHandler: invocation => invocation.args.join(" ") === "auth status --json"
         ? { exitCode: 0, started: true, stdout, stderr: "" } : undefined });
