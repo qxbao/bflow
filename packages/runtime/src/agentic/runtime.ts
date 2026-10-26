@@ -1090,8 +1090,7 @@ export class AgenticWorkflowRuntime {
           const task = this.run(state, context.runId).tasks.find(t => t.taskId === context.taskId);
           const dossier = task?.reworkResolutions?.find(d => d.attemptId === context.attemptId);
           if (dossier) validateReworkGate(dossier, outcome);
-          else if (task?.cycle?.history.some(r => r.status === "failed") ||
-              context.taskId && context.attemptId && hasReworkAssignment(state.outbound, context.runId, context.taskId, context.attemptId)) throw new Error("Missing rework dossier for independent finding verification");
+          else if (context.taskId && context.attemptId && hasReworkAssignment(state.outbound, context.runId, context.taskId, context.attemptId)) throw new Error("Missing rework dossier for independent finding verification");
           });
         } catch (error) {
           return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
@@ -3827,8 +3826,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         try {
           const dossier = task.reworkResolutions?.find(d => d.attemptId === result.attemptId);
           if (dossier) reworkVerificationVerdicts(dossier, result, cycle);
-          else if (job.cycle.history.some(r => r.status === "failed") ||
-              hasReworkAssignment(state.outbound, run.runId, task.taskId, result.attemptId)) throw new Error("Missing historical rework dossier and independent verdicts");
+          else if (hasReworkAssignment(state.outbound, run.runId, task.taskId, result.attemptId)) throw new Error("Missing historical rework dossier and independent verdicts");
         } catch (error) {
           const reason = `Missing or invalid independent rework evidence: ${String(error)}`;
           result = VerificationResultSchema.parse({ ...result, status: "inconclusive",

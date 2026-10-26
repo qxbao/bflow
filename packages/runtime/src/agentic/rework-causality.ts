@@ -828,14 +828,18 @@ export async function verifyStoredReworkDossier(options: {
   return dossier;
 }
 
-/** Assignment history survives verification retries which intentionally reset the cycle history. */
+/**
+ * Assignment history survives verification retries which intentionally reset the cycle history.
+ * Only an assignment carrying `reworkContext` asks the Developer for findingResolutions; a plain redispatch
+ * that merely forwards prior findings (e.g. warnings or an escalated cycle) must not demand a dossier.
+ */
 export function hasReworkAssignment(outbound: readonly unknown[], runId: string, taskId: string, attemptId: string): boolean {
   return outbound.some(value => {
     const out = recordMaybe(value), message = recordMaybe(out?.message), payload = recordMaybe(message?.payload);
     const handle = recordMaybe(out?.handle), task = recordMaybe(payload?.task);
     return message?.run_id === runId && message.type === "task.assignment" && task?.id === taskId &&
       (out?.attemptId === attemptId || handle?.attemptId === attemptId || recordMaybe(payload?.worktree)?.attemptId === attemptId) &&
-      (payload?.reworkContext !== undefined || Array.isArray(payload?.findings) && payload.findings.length > 0);
+      payload?.reworkContext !== undefined;
   });
 }
 

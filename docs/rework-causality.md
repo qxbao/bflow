@@ -12,7 +12,7 @@ flowchart TD
     S --> H["Host kiểm tra phạm vi, identity và artifact<br/>lưu hồ sơ vào ArtifactStore"]
     H --> V["Reviewer và QA kiểm chứng độc lập<br/>findingVerdicts · tiêu chí · revision"]
     V --> Q{"Kết quả verification?"}
-    Q -->|Đạt| P["Settlement đóng dossier<br/>xem giới hạn verdict coverage bên dưới"]
+    Q -->|Đạt + đủ verdict confirmed| P["Settlement đóng từng finding<br/>theo verdict độc lập"]
     Q -->|Còn lỗi, còn lượt| C
     Q -->|Bị chặn hoặc hết lượt| E["Escalation qua Conversation"]
 ```
@@ -51,11 +51,11 @@ Các kiểm tra này xác minh cấu trúc, provenance, scope và ràng buộc r
 
 ## Reviewer/QA và đóng finding
 
-`inspect_review` đưa dossier hiện hành cho reviewer/QA. `complete_review` nhận `findingVerdicts` theo exact finding ID, gồm `confirmed` hoặc `rejected` và summary. Host từ chối ID lạ/trùng trong các verdict được gửi; prompt yêu cầu reviewer/QA đối chiếu từng finding. Không gửi verdict rework cho review ban đầu không có dossier.
+`inspect_review` đưa dossier hiện hành cho reviewer/QA và ghim `hostReworkVerification` (dossier, task, attempt, `reworkGeneration`, Core generation, submitted revision, danh sách finding bắt buộc, fingerprint dossier) vào observation. Với attempt rework, `complete_review` **bắt buộc** `findingVerdicts` phủ đúng và đủ mọi finding trong `reworkContext.findings` của generation hiện hành (`confirmed` hoặc `rejected` kèm summary); thiếu, partial, ID lạ, ID trùng hoặc verdict không hợp lệ đều bị từ chối trước khi phát receipt. Reviewer không được là Developer đã nộp bản sửa. Review ban đầu không có dossier không nhận verdict rework.
 
-**Giới hạn enforcement hiện tại:** `findingVerdicts` vẫn là input tùy chọn; `complete_review` chưa kiểm tra coverage đủ toàn bộ finding khi cho gate pass. Hàm settlement đóng toàn dossier nếu result/cycle pass, kể cả khi thiếu verdict tường minh. Vì vậy không quảng bá yêu cầu “mọi finding phải có verdict” như một hard gate đã hoàn thiện. Reviewer/QA vẫn phải nộp đủ verdict theo prompt; Runtime owner cần bổ sung guard và regression thiếu/partial verdict trước khi chứng nhận enforcement này. Xem [known limitations](known-limitations-v3.md).
+Runtime kiểm tra lại mỗi gate `manual_review` (reviewer/QA) trước khi nhận kết quả và khi hoàn tất verification, kể cả outcome bền vững do host cũ tạo: binding/verdict thiếu hoặc lệch được xếp `inconclusive` (escalate để retry), không phải lỗi implementation và không tự tạo rework. Gate pass mà có verdict `rejected` bị coi là mâu thuẫn. Attempt được coi là rework khi assignment của nó mang `reworkContext`; giao lại việc thông thường chỉ chuyển tiếp finding cũ (ví dụ warning, cycle đã escalate) không đòi dossier.
 
-Reviewer/QA kiểm tra nguyên nhân, diff/source location, reproduction hoặc tranh chấp, evidence và tiêu chí trên đúng revision. Verdict bác bỏ tạo finding cần sửa; deterministic check thất bại không được che bởi nhận xét tốt. Cycle/result độc lập phải pass mới đóng toàn bộ dossier theo logic settlement hiện tại; giới hạn coverage ở trên vẫn áp dụng.
+Reviewer/QA kiểm tra nguyên nhân, diff/source location, reproduction hoặc tranh chấp, evidence và tiêu chí trên đúng revision. Verdict bác bỏ tạo finding lỗi theo bounded rework; deterministic check thất bại không được che bởi nhận xét tốt. Settlement chỉ đóng finding có verdict `confirmed` độc lập; cycle pass không tự bù verdict còn thiếu (finding đó giữ `unverified`, dossier `escalated_blocked`).
 
 | Trạng thái dossier | Ý nghĩa |
 | --- | --- |

@@ -292,6 +292,19 @@ it("retains mandatory finding evidence after a retry clears cycle history and th
   await expect(f.restore().completeReview(f.binding,{...f.input,findingVerdicts:undefined})).rejects.toThrow("Missing rework dossier");
 });
 
+it("does not demand a rework dossier for a plain redispatch that only forwards prior findings", async () => {
+  const f = await reworkFixture();
+  f.task.reworkResolutions = [];
+  f.task.cycle.history = [{verificationId:"failed",status:"failed"} as any];
+  f.state.outbound.push({attemptId:"attempt",message:{run_id:"run",type:"task.assignment",
+    payload:{task:{id:"task"},findings:[{code:"prior_warning",severity:"warning",message:"Carried from the escalated cycle"}]}}});
+  const restored = f.restore();
+  const inspected = await restored.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string;reworkResolution?:unknown};
+  expect(inspected.reworkResolution).toBeUndefined();
+  const completed = await restored.completeReview(f.binding,{...f.input,reviewId:inspected.reviewId,findingVerdicts:undefined});
+  expect(completed.result.status).toBe("passed");
+});
+
 it("fences a persisted rework observation after its native review is replaced", async () => {
   const f = await reworkFixture();
   f.outbound[0]!.reviewReplacement = {disposition:"replaced_without_verdict_claim"};
