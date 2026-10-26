@@ -559,7 +559,12 @@ async function identifyRepository(repositoryRoot: string): Promise<SurveyReposit
 /** Read repository content through a confined regular-file descriptor. */
 async function readRepositoryFile(repositoryRoot: string, fullPath: string): Promise<Buffer> {
   const rootReal = await fs.promises.realpath(repositoryRoot);
-  const lexicalRelative = path.relative(rootReal, path.resolve(fullPath));
+  // fullPath is joined under the configured root, which may itself sit below a symlinked ancestor (macOS /var, /tmp).
+  // Relate it to that lexical root, then check components from the canonical root.
+  const lexicalRelative = path.relative(path.resolve(repositoryRoot), path.resolve(fullPath));
+  if (lexicalRelative === ".." || lexicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(lexicalRelative)) {
+    throw new Error("Path escapes repository root");
+  }
   if (isSensitivePath(lexicalRelative)) throw new Error("Sensitive repository file excluded");
   // Reject symlink components and nested repositories/worktrees even when inside the root.
   let current = rootReal;
