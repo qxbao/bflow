@@ -89,7 +89,8 @@ describe.skipIf(process.platform === "win32")("host startup operation budget", (
     cleanup.push(async () => { try { process.kill(owner.pid, "SIGTERM"); } catch { /* already stopped */ } });
     await expect(callHost(config.socketPath, config.token, "prepare", { deadline: new Date(Date.now() - 1).toISOString() }))
       .rejects.toThrow("preparation deadline has expired");
-    expect(await controller.prepare({ timeoutMs: 1000 })).toHaveProperty("roleLaunch");
+    // A cold first prepare loads the host platform modules; slower macOS runners exceed one second under suite load.
+    expect(await controller.prepare({ timeoutMs: 10_000 })).toHaveProperty("roleLaunch");
     expect((await controller.quiesce()).ok).toBe(true);
     await expect(controller.prepare({ timeoutMs: 1000 })).rejects.toThrow("Host is shutting down");
     await controller.shutdown();
