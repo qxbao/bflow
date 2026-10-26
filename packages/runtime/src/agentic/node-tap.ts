@@ -11,15 +11,19 @@ export class NodeTapTestCodeFailure extends Error {
 }
 
 /** Supported measurement protocol: complete, flat Node test-runner TAP with assertion diagnostics. */
-export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false) {
+export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false, selectedPaths: readonly string[] = []) {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) throw new Error("Behavioral runner infrastructure failure (spawn, deadline, signal or truncated output)");
   const output = outcome.stdout.replace(/\r\n/g, "\n");
   if (!output.startsWith("TAP version 13\n") || /^Bail out!/m.test(output)) throw new Error("Behavioral runner requires complete Node TAP output");
   const allResults = [...output.matchAll(/^(not ok|ok) (\d+) - (.+)\n([\s\S]*?)(?=^(?:not ok|ok) \d+ - |^1\.\.\d+\s*$)/gm)];
   const count = (label: string) => { const matches = [...output.matchAll(new RegExp(`^# ${label} (\\d+)$`, "gm"))]; if (matches.length !== 1) throw new Error("Incomplete TAP counters"); return Number(matches[0]![1]); };
   const filtered = nameSelection ? allResults.filter(result => result[1] === "ok" && result[3]!.endsWith(" # SKIP test name does not match pattern") && !expectedNames.includes(result[3]!.replace(/ # SKIP test name does not match pattern$/, ""))) : [];
-  const results = allResults.filter(result => !filtered.includes(result));
-  const total = count("tests"), tests = results.length, passed = count("pass"), failed = count("fail");
+  // Node 22 reports a selected file without any matching test as a passing top-level test named after the file. Only an
+  // exact selected path qualifies; a failing file entry (for example a load error) remains a failure.
+  const unmatchedFiles = nameSelection ? allResults.filter(result => result[1] === "ok" && selectedPaths.includes(result[3]!) &&
+    !expectedNames.includes(result[3]!) && /^\s+type: 'test'$/m.test(result[4]!)) : [];
+  const results = allResults.filter(result => !filtered.includes(result) && !unmatchedFiles.includes(result));
+  const total = count("tests"), tests = results.length, passed = count("pass") - unmatchedFiles.length, failed = count("fail");
   if (!tests || count("cancelled") || count("skipped") !== filtered.length || count("todo") || total !== allResults.length || passed + failed !== tests || !new RegExp(`^1\\.\\.${total}$`, "m").test(output) || allResults.some((result, index) => Number(result[2]) !== index + 1)) throw new Error("Zero, nested, skipped or incomplete tests cannot prove behavior");
   const names = results.map(result => result[3]!);
   if (digest([...names].sort()) !== digest([...expectedNames].sort())) throw new Error("Observed test names differ from owner-configured identities");

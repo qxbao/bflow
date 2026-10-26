@@ -278,14 +278,14 @@ function rspecResults(input: string): TestResult[] {
 }
 
 /** Parses only complete structured per-test evidence; process success alone is never accepted. */
-export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandOutcome, expectedNames: readonly string[], reports?: readonly string[], failureExitCodes?: readonly number[]): ParsedRunnerResult {
+export function parseRunnerResult(format: ResultFormat, outcome: QualityCommandOutcome, expectedNames: readonly string[], reports?: readonly string[], failureExitCodes?: readonly number[], selectedPaths: readonly string[] = []): ParsedRunnerResult {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) invalid("runner infrastructure failure (spawn, deadline, signal or truncated output)");
   if (reports !== undefined && (!reports.length || reports.length > 1024 || reports.reduce((total, report) => total + Buffer.byteLength(report), 0) > 4_194_304)) invalid("missing or oversized structured reports");
   if (Buffer.byteLength(outcome.stdout) > 4_194_304) invalid("oversized runner output");
   let results: TestResult[];
   const output = outcome.stdout.replace(/\r\n/g, "\n");
   switch (format) {
-    case "node_tap": return parseNodeTap(outcome, expectedNames, true);
+    case "node_tap": return parseNodeTap(outcome, expectedNames, true, selectedPaths);
     case "vitest_json": return parseVitestJson(outcome, expectedNames, true);
     case "junit": results = junitResults(reports ?? [output]); break;
     case "trx": results = trxResults(reports ?? [output]); break;
