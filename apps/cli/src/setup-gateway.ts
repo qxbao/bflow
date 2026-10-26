@@ -279,13 +279,19 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     ...(approval.remoteServices.length > 0 ? { remoteServices: approval.remoteServices } : {}), services: operatorServices });
   // OS service managers (systemd --user, launchd) do not inherit the shell PATH. Backends launched through
   // `#!/usr/bin/env node` shims (chrome-devtools-mcp, GitNexus) then never start, so the unit carries the directory
-  // of the exact Node running setup, the managed bin and the system defaults.
-  const gatewayEnv: Record<string, string> = { PATH: [dirname(process.execPath), platform.paths.managedBin,
-    ...(process.platform === "win32" ? [] : ["/usr/local/bin", "/usr/bin", "/bin"])].join(delimiter) };
+  // of the exact Node running setup, the managed bin and the system defaults. The call ledger and repository locks
+  // spawn flock, which macOS only ships outside the defaults (Homebrew: /opt/homebrew/bin), so its directory follows.
+  const systemPath = process.platform === "win32" ? [] : ["/usr/local/bin", "/usr/bin", "/bin"];
+  const basePath = [dirname(process.execPath), platform.paths.managedBin, ...systemPath];
+  const flockDir = process.platform === "win32" ? undefined : platform.pathEntries.find(dir =>
+    isAbsolute(dir) && !basePath.includes(dir) && isExecutableFile(join(dir, "flock")));
+  const gatewayEnv: Record<string, string> = { PATH: [...basePath, ...(flockDir ? [flockDir] : [])].join(delimiter) };
   const service: ServiceDefinition = { serviceId: "mcp-gateway", program: process.execPath,
     args: [fileURLToPath(new URL("../dist/setup-gateway.js", import.meta.url)), "--serve", configPath, desiredDigest], env: gatewayEnv, keepAlive: true };
-  // A generated definition from before the PATH fix carries an empty env; anything else is operator-defined.
-  const generatedEnv = (env: Record<string, string>) => Object.keys(env).length === 0 || digest(env) === digest(gatewayEnv);
+  // A generated definition from before the PATH fix carries an empty env, and one from before flock resolution
+  // carries exactly the base PATH; anything else is operator-defined.
+  const generatedEnv = (env: Record<string, string>) => Object.keys(env).length === 0 || digest(env) === digest(gatewayEnv) ||
+    digest(env) === digest({ PATH: basePath.join(delimiter) });
   if (config.services.some(item => item.serviceId === service.serviceId &&
     (item.program !== service.program || digest(item.args.slice(0, 3)) !== digest(service.args.slice(0, 3)) ||
       item.args.length !== 4 || !/^[a-f0-9]{64}$/.test(item.args[3]!) || !generatedEnv(item.env) || !item.keepAlive))) {
@@ -779,4 +785,14 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   void startSetupGatewayRuntime(configPath, process.argv[4]).then(runtime => {
     for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => { void runtime.stop().then(() => process.exit(0)); });
   }).catch(error => { process.stderr.write(`Gateway startup failed: ${why(error)}\n`); process.exitCode = 1; });
+}
+
+function isExecutableFile(file: string): boolean {
+  try {
+    if (!statSync(file).isFile()) return false;
+    accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }

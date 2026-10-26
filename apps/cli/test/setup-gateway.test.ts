@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
@@ -320,6 +321,20 @@ it("preserves an unowned existing gateway user service", async () => {
   expect((await components[1]!.apply(ctx)).diagnostics.join(" ")).toMatch(/unowned/i);
   expect(runtime).toBeUndefined();
   expect(await readFile(unitPath, "utf8")).toContain("/operator-owned/worker");
+});
+
+it("upgrades a generated gateway unit whose PATH predates flock resolution but still preserves operator environments", () => {
+  const { input, platform } = fixture();
+  const generated = (env: Record<string, string>) => ({ serviceId: "mcp-gateway", program: process.execPath,
+    args: [join(dirname(fileURLToPath(import.meta.url)), "../dist/setup-gateway.js"), "--serve",
+      join(platform.paths.config, "setup-gateway.json"), "f".repeat(64)], env, keepAlive: true });
+  const legacyPath = [dirname(process.execPath), platform.paths.managedBin, "/usr/local/bin", "/usr/bin", "/bin"].join(delimiter);
+  const withService = (env: Record<string, string>) => ({ ...input, launchRequirements: [],
+    config: { ...input.config, services: [generated(env)] } });
+  expect(() => wrapSetupComponents([], withService({ PATH: legacyPath }))).not.toThrow();
+  expect(() => wrapSetupComponents([], withService({ PATH: legacyPath, NODE_OPTIONS: "--inspect" })))
+    .toThrow(/operator-defined mcp-gateway/);
+  expect(() => wrapSetupComponents([], withService({ PATH: "/operator/bin" }))).toThrow(/operator-defined mcp-gateway/);
 });
 
 it.each(["argv", "environment", "cwd", "lockPath", "owner", "profile"])("rejects a self-checksummed Chrome spec with changed %s", async field => {
@@ -719,11 +734,13 @@ it.runIf(Boolean(process.env.BFLOW_GATEWAY_LIVE_TOOL_ROOT))("verifies installed 
 
 it("composes the full setup service without overwriting generated gateway config", async () => {
   const { input, platform } = fixture();
-  const account = { ...platform, homeDir: root, shell: "bash" as const, pathEntries: [join(root, "fixtures")] };
-  await mkdir(account.pathEntries[0]!);
+  // flock lives outside the system defaults (Homebrew on Apple Silicon installs it under /opt/homebrew/bin).
+  const account = { ...platform, homeDir: root, shell: "bash" as const, pathEntries: [join(root, "fixtures"), join(root, "brew")] };
+  await mkdir(account.pathEntries[0]!); await mkdir(account.pathEntries[1]!);
   for (const name of ["node", "pnpm", "git", "herdr"]) {
     const file = join(account.pathEntries[0]!, name); await writeFile(file, "#!/bin/sh\nexit 0\n"); await chmod(file, 0o700);
   }
+  await writeFile(join(account.pathEntries[1]!, "flock"), "#!/bin/sh\nexit 0\n"); await chmod(join(account.pathEntries[1]!, "flock"), 0o700);
   const runner = { run: async (argv: readonly string[]) => ({ exitCode: 0, timedOut: false, stderr: "", stdout:
     argv[0]!.endsWith("/pnpm") ? "12.5.1" : argv[0]!.endsWith("/git") ? "git version 2.45.0" : argv[0]!.endsWith("/herdr") ? "herdr 0.9.5" : "v24.16.0" }) };
   const setup = new MachineSetupService({ platform: account, runner, config: defaultMachineConfig(),
@@ -737,6 +754,8 @@ it("composes the full setup service without overwriting generated gateway config
   const gatewayService = machine.services.find((service: { serviceId: string }) => service.serviceId === "mcp-gateway");
   expect(gatewayService.env.PATH.split(delimiter)[0]).toBe(dirname(process.execPath));
   expect(gatewayService.env.PATH.split(delimiter)).toContain(account.paths.managedBin);
+  // The Gateway call ledger and repository locks spawn flock; the unit must resolve the one setup found.
+  expect(gatewayService.env.PATH.split(delimiter)).toContain(account.pathEntries[1]);
   const manifest = JSON.parse(await readFile(join(account.paths.state, "environment.json"), "utf8"));
   expect(manifest.serviceIds).toContain("mcp-gateway");
   expect(manifest.lastPlan.planId).toBe(result.plan?.planId);
