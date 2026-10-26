@@ -16,7 +16,7 @@ import {
   type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest, type ReleaseAgentLeaseRequest
 } from "@bflow/contracts";
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
-import { isUserDecisionRequest, type UserDecisionAnswer } from "./decision-routing.js";
+import { isUserDecisionRequest, validateUserDecisionAnswer, type UserDecisionAnswer } from "./decision-routing.js";
 import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
 import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./native-diagnostic-fence.js";
 import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
@@ -155,9 +155,16 @@ function parseConflictResolution(value: unknown): void {
     if (attempt.settled !== undefined && typeof attempt.settled !== "boolean") throw new Error("Invalid conflict resolver settlement");
   }
 }
+/** Runtime-private evidence binding; only the dedicated host request method authors this marker. */
+export const TestIntegrityExceptionBindingSchema = z.object({
+  runId: z.string().min(1), taskId: z.string().min(1), attemptId: z.string().min(1),
+  baseRevision: z.string().regex(/^[a-f0-9]{40}$/), candidateRevision: z.string().regex(/^[a-f0-9]{40}$/),
+  specFingerprint: z.string().regex(/^[a-f0-9]{64}$/), scope: z.enum(["task", "workflow"]),
+  findingId: z.string().min(1).max(200), reviewMessageId: z.string().min(1), evidence: ArtifactReferenceSchema
+}).strict();
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
-  status: "pending" | "answered" | "rejected" | "expired" | "cancelled"; answer?: UserDecisionAnswer;
+  status: "pending" | "answered" | "rejected" | "expired" | "cancelled"; answer?: UserDecisionAnswer; decision?: ApprovalDecision;
 }
 function parseUserDecisions(value: unknown, runId: string): void {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid user decision journal");
@@ -175,6 +182,16 @@ function parseUserDecisions(value: unknown, runId: string): void {
     if (item.answer !== undefined) {
       const answer = record(item.answer); textField(answer.outcome);
       if (answer.selectedOption !== undefined) textField(answer.selectedOption);
+    }
+    if (item.decision !== undefined) {
+      const decision = ApprovalDecisionSchema.parse(item.decision);
+      if (!mustBeAnswered || digest(validateUserDecisionAnswer(request, decision, decision.decidedAt)) !== digest(item.answer))
+        throw new Error("Invalid authenticated user decision receipt");
+    }
+    if (request.metadata?.testIntegrityException !== undefined) {
+      const binding = TestIntegrityExceptionBindingSchema.parse(request.metadata.testIntegrityException);
+      if (binding.runId !== runId || binding.taskId !== item.taskId || item.role !== "reviewer" ||
+          (mustBeAnswered && item.decision === undefined)) throw new Error("Invalid test-integrity exception journal binding");
     }
   }
 }

@@ -222,6 +222,7 @@ async function createIntegrationHarness(options: {
       }
     })),
     verification.deterministicGate(),
+    verification.testIntegrityGate(),
     {
       id: "host-behavioral-unit",
       evaluate: async (context: QualityGateContext) => {
@@ -645,7 +646,7 @@ async function createIntegrationHarness(options: {
 }
 
 describe("Task 7: End-to-end fast-path integration tests", { timeout: 120_000 }, () => {
-  it("Scenario A: refactor with behavioral runner auto-approves design, skips task & workflow review, and requests delivery approval", async () => {
+  it("Scenario A: refactor auto-approves design then integrity policy retains task and workflow review before delivery", async () => {
     const h = await createIntegrationHarness({ scenario: "refactor", fastPathMode: "auto" });
     const principal = { role: "coordinator" as const };
 
@@ -677,12 +678,16 @@ describe("Task 7: End-to-end fast-path integration tests", { timeout: 120_000 },
     expect(finalRun.approvalKind).toBe("delivery");
 
     const sentRoles = h.transport.sentRequests.map(r => r.role);
-    expect(sentRoles.filter(r => r === "reviewer")).toHaveLength(0);
-    expect(sentRoles.filter(r => r === "qa").length).toBeLessThanOrEqual(1);
+    expect(finalRun.fastPath.status).toBe("downgraded");
+    expect(finalRun.fastPath.downgrade.reason).toBe("test_integrity_requires_independent_review");
+    expect(sentRoles.filter(r => r === "reviewer")).toHaveLength(2);
+    expect(sentRoles.filter(r => r === "qa")).toHaveLength(2);
+    expect(finalRun.tasks[0].cycle.history[0].qualityGateResults.find((gate:any)=>gate.gateId==="host-test-integrity").status).toBe("passed");
+    expect(finalRun.workflowCycle.history[0].qualityGateResults.find((gate:any)=>gate.gateId==="host-test-integrity").status).toBe("passed");
     expect(h.conversationInbox.filter(m => m.type === "approval.request")).toHaveLength(1);
   });
 
-  it("Scenario B & C: docs-only fast-path skips workflow review vs mode=off baseline runs review at both levels", async () => {
+  it("Scenario B & C: docs-only integrity review runs at both levels with auto and off modes", async () => {
     const runDocsFlow = async (mode: "auto" | "off") => {
       const h = await createIntegrationHarness({ scenario: "docs", fastPathMode: mode });
       const principal = { role: "coordinator" as const };
@@ -719,8 +724,8 @@ describe("Task 7: End-to-end fast-path integration tests", { timeout: 120_000 },
     };
 
     const fastCounts = await runDocsFlow("auto");
-    expect(fastCounts.reviewer).toBe(1);
-    expect(fastCounts.qa).toBeLessThanOrEqual(2);
+    expect(fastCounts.reviewer).toBe(2);
+    expect(fastCounts.qa).toBe(2);
 
     const offCounts = await runDocsFlow("off");
     expect(offCounts.reviewer).toBe(2);
@@ -738,8 +743,11 @@ describe("Task 7: End-to-end fast-path integration tests", { timeout: 120_000 },
     const beforeRestart = await h.inspect();
     const savedFastPath = beforeRestart.fastPath;
     const savedPlanId = beforeRestart.tasks[0].verificationPlan.planId;
-    expect(savedFastPath.status).toBe("active");
-    expect(beforeRestart.tasks[0].verificationPlan.reviewWaiver).toMatchObject({ kind: "deterministic_coverage" });
+    expect(savedFastPath.status).toBe("downgraded");
+    expect(savedFastPath.downgrade.reason).toBe("test_integrity_requires_independent_review");
+    expect(beforeRestart.tasks[0].verificationPlan.reviewWaiver).toBeUndefined();
+    expect(beforeRestart.tasks[0].verificationPlan.checks.map((check:any)=>check.id)).toContain("host-test-integrity");
+    expect(beforeRestart.tasks[0].verificationPlan.checks.map((check:any)=>check.id)).toContain("host-reviewer");
 
     await h.restartRuntime();
     const afterRestart = await h.inspect();

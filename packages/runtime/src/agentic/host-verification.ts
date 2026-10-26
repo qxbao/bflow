@@ -24,6 +24,9 @@ import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow
 import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
+import { z } from "zod";
+import { TEST_INTEGRITY_CHECK, TestIntegrityObservationSchema, TestIntegrityGrantSchema, adjudicateTestIntegrity,
+  measureTestIntegrity, testIntegrityAuthorityInput, validateTestIntegrityEvidence, type TestIntegrityObservation } from "./host-test-integrity.js";
 const execFileAsync = promisify(execFile);
 function staticGateId(command: string): string {
   return `host-static-${command.replace(/[^a-z0-9_-]/gi, "-")}`;
@@ -63,7 +66,8 @@ export const DEFAULT_HOST_CHECKS = [
     configuration: { kind: "review", method: "manual_review", criterionIds: [], testNames: [], role, levels: [] } })),
   QualityGateDefinitionSchema.parse({ id: "host-git-integrity", name: "Integrated Git diff integrity", evaluator: "host-git-diff", required: true,
     timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
-    configuration: { kind: "deterministic", method: "integration_test", command: whitespaceCommand, criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } })
+    configuration: { kind: "deterministic", method: "integration_test", command: whitespaceCommand, criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } }),
+  TEST_INTEGRITY_CHECK
 ];
 export interface HostVerificationReceipts {
   recordGate(result: QualityGateResult): Promise<unknown>;
@@ -165,8 +169,8 @@ export class HostVerification {
     return { cwd: textField(value.cwd), base: textField(value.base), revision: textField(value.revision), command: whitespaceCommand,
       exitCode: Number(value.exitCode), output: value.output, diff: value.diff };
   }
-  private async artifact(runId: string, taskId: string, body: unknown) {
-    const bytes = Buffer.from(JSON.stringify(body)); const id = `host-observation-${randomUUID()}`;
+  private async artifact(runId: string, taskId: string, body: unknown, artifactId?: string) {
+    const bytes = Buffer.from(JSON.stringify(body)); const id = artifactId ?? `host-observation-${randomUUID()}`;
     return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: id, runId, taskId, kind: "test-result", mediaType: "application/json",
       expectedIntegrity: { checksum: { algorithm: "sha256", value: createHash("sha256").update(bytes).digest("hex") }, sizeBytes: bytes.length }, idempotencyKey: id }),
       content: (async function* () { yield bytes; })() })));
@@ -186,6 +190,45 @@ export class HostVerification {
         return { ok: true, value: result };
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
     } };
+  }
+  /** Mandatory host-owned comparison. Warnings are adjudicated by the assigned Reviewer, never self-waived. */
+  testIntegrityGate(): QualityGate {
+    return { id: TEST_INTEGRITY_CHECK.id, evaluate: async raw => {
+      try {
+        const context = QualityGateContextSchema.parse(raw), input = record(context.input);
+        if (context.definition.id !== TEST_INTEGRITY_CHECK.id || record(context.definition.configuration).command !== "host:test-integrity") throw new Error("Test integrity gate definition mismatch");
+        const before = await this.capture(textField(input.sourceWorktreePath), textField(input.baseRevision), textField(input.sourceRevision));
+        const report = await this.measureIntegrity(context, before.cwd, before.base, before.revision);
+        const grants = await this.integrityGrants(context);
+        const after = await this.capture(before.cwd, before.base, before.revision);
+        if (digest(before) !== digest(after)) throw new Error("Test integrity source changed during capture");
+        const violations = report.findings.filter(finding => finding.classification === "proven_violation" && !grants.some(grant => grant.findingId === finding.id));
+        const evidence = await this.artifact(context.runId, context.taskId!, { testIntegrity: report, ownerExceptions: grants });
+        return { ok: true, value: QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId,
+          evaluationId: randomUUID(), status: violations.length ? "failed" : "passed", findings: report.findings.map(finding => QualityFindingSchema.parse({
+            code: finding.ruleId, severity: violations.includes(finding) ? "error" : "warning", message: finding.reason,
+            details: json(finding), location: `${finding.path}:${finding.line}:${finding.column}` })), producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          metadata: { evidence: json(evidence), testIntegrity: json(report), testIntegrityExceptions: json(grants),
+            verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+              sourceRevision: before.revision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
+              executorId: "bflow-host-test-integrity", role: "quality_gate", method: "static_analysis", command: "host:test-integrity", exitCode: violations.length ? 1 : 0,
+              testNames: [], criteria: [], summary: `${report.findings.length} test integrity findings; ${violations.length} proven violations without an owner exception. Heuristics require independent Reviewer dispositions.` } } }) };
+      } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+    } };
+  }
+  private async integrityGrants(context: import("@bflow/contracts").QualityGateContext) {
+    const runtime = this.runtime();
+    // Old test harnesses have no authority port; absence can never grant a waiver.
+    return z.array(TestIntegrityGrantSchema).parse(typeof runtime.testIntegrityExceptions === "function"
+      ? await runtime.testIntegrityExceptions(testIntegrityAuthorityInput(context)) : []);
+  }
+  private async measureIntegrity(context: import("@bflow/contracts").QualityGateContext, cwd: string, fallbackBase: string, revision: string) {
+    const run = record(await this.runtime().inspect(context.runId));
+    const task = Array.isArray(run.tasks) ? run.tasks.map(record).find(item => item.taskId === context.taskId) : undefined;
+    const firstTree = task && Array.isArray(task.worktrees) ? record(task.worktrees[0]) : undefined;
+    // A rejected attempt must never become the trusted oracle baseline on the next repair.
+    const protectedBase = textField(firstTree?.baseCommitHash ?? run.baseRevision ?? fallbackBase);
+    return measureTestIntegrity(cwd, protectedBase, revision);
   }
   private policyDeterministicGate(id: string, expectedCommand: string): QualityGate {
     return { id, evaluate: async raw => {
@@ -867,6 +910,15 @@ export class HostVerification {
     const details = record(context.input), config = record(context.definition.configuration);
     if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
+    const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
+    const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
+    if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
+    let testIntegrityObservation: TestIntegrityObservation | undefined;
+    if (integrityReport.findings.length) {
+      const evidence = await this.artifact(context.runId, context.taskId!, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
+      testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
+      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+    }
     let qaBehavioralObservation: JsonValue | undefined;
     if (binding.role === "qa" && details.scope === "workflow") {
       const dossier = await this.dossierFor(context.runId, context.taskId);
@@ -888,7 +940,7 @@ export class HostVerification {
           evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
             tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,
             ...(item.rtk ? { rtk: item.rtk } : {}) })) });
-        context = QualityGateContextSchema.parse({ ...context, input: { ...details, hostQaBehavioralObservation: qaBehavioralObservation } });
+        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostQaBehavioralObservation: qaBehavioralObservation } });
       }
     }
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
@@ -902,10 +954,11 @@ export class HostVerification {
     const reviewId = existingReviewId ?? randomUUID();
     await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
     this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
-    const fullReply = { reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
+    const fullReply = { reviewId, ...(testIntegrityObservation ? { testIntegrityObservation } : {}), ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
     const isAgy = binding.provider === "agy" || binding.agentKind === "agy";
-    const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number";
-    if (!hasDiffPagination && (!isAgy || !exceedsAgyInlineReply(fullReply))) {
+    const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number" || typeof args.integrityOffset === "number";
+    const oversizedReply = isAgy ? exceedsAgyInlineReply(fullReply) : Buffer.byteLength(JSON.stringify(fullReply)) > 65_536;
+    if (!hasDiffPagination && !oversizedReply) {
       return json(fullReply);
     }
     const rawDiff = observation.diff;
@@ -964,11 +1017,24 @@ export class HostVerification {
             }
           }
         : reworkResolution;
-      const boundedContext = compactDossier
+      const dossierContext = compactDossier
         ? { ...context, artifacts: context.artifacts.map(a => ({ artifactId: a.artifactId, kind: a.kind })) }
         : context;
+      const findingOffset = typeof args.integrityOffset === "number" && Number.isInteger(args.integrityOffset) && args.integrityOffset >= 0 ? args.integrityOffset : 0;
+      const pageSize = isAgy ? 1 : 20;
+      const boundedIntegrity = testIntegrityObservation ? { ...testIntegrityObservation,
+        report: { ...testIntegrityObservation.report, findings: testIntegrityObservation.report.findings.slice(findingOffset, findingOffset + pageSize).map(finding => ({
+          ...finding, reason: finding.reason.slice(0, 512), ...(finding.before === undefined ? {} : { before: finding.before.slice(0, 256) }),
+          ...(finding.after === undefined ? {} : { after: finding.after.slice(0, 256) }) })) },
+        displayedExcerptsBounded: true,
+        reportDigest: digest(testIntegrityObservation.report), findingOffset, findingTotal: testIntegrityObservation.report.findings.length,
+        nextFindingOffset: findingOffset + pageSize < testIntegrityObservation.report.findings.length ? findingOffset + pageSize : null } : undefined;
+      // The complete observation remains immutable in the receipt journal and ArtifactStore; response pages carry its digest.
+      const boundedContext = testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
+        hostTestIntegrityObservation: { evidence: testIntegrityObservation.evidence, reportDigest: digest(testIntegrityObservation.report), findingTotal: testIntegrityObservation.report.findings.length } } } : dossierContext;
       return {
         reviewId,
+        ...(boundedIntegrity ? { testIntegrityObservation: boundedIntegrity } : {}),
         ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
         ...(boundedRework ? { reworkResolution: boundedRework } : {}),
         context: boundedContext,
@@ -991,6 +1057,20 @@ export class HostVerification {
     }
     return json(bounded);
   }
+  async requestTestIntegrityException(binding: PaneBinding, input: unknown) {
+    if (binding.role !== "reviewer") throw new Error("Independent Reviewer required for a test-integrity exception request");
+    const args = z.object({ reviewId: z.string().min(1), findingId: z.string().min(1), reason: z.string().trim().min(10).max(1000) }).strict().parse(input);
+    const stored = await this.receipts?.getObservation("review", args.reviewId);
+    const pending = stored ? { binding: stored.binding, sourceMessageId: stored.sourceMessageId, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(args.reviewId);
+    if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) throw new Error("Review observation belongs to another pane or is missing");
+    const context = QualityGateContextSchema.parse(pending.context);
+    const observation = TestIntegrityObservationSchema.parse(record(context.input).hostTestIntegrityObservation);
+    if (!observation.report.findings.some(finding => finding.id === args.findingId)) throw new Error("Unknown test-integrity finding ID");
+    const current = await this.capture(pending.observation.cwd, pending.observation.base, pending.observation.revision);
+    if (digest(current) !== digest(pending.observation)) throw new Error("Test-integrity exception source changed");
+    return this.runtime().requestTestIntegrityException(binding, { messageId: textField(pending.sourceMessageId), context,
+      findingId: args.findingId, reason: args.reason, evidence: observation.evidence });
+  }
   async completeReview(binding: PaneBinding, input: unknown) {
     const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
     const pending = stored ? { binding: stored.binding, sourceMessageId: stored.sourceMessageId, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
@@ -1002,7 +1082,7 @@ export class HostVerification {
         record(out.message).message_id === args.messageId && record(record(out.handle).target).paneId === binding.paneId &&
         record(record(out.handle).target).agentId === binding.agentId && digest(record(record(out.handle).target).session) === digest(binding.session));
       const originalContext = (context: unknown) => {
-        const parsed = QualityGateContextSchema.parse(context), { hostQaBehavioralObservation: _measurement, ...input } = record(parsed.input);
+        const parsed = QualityGateContextSchema.parse(context), { hostQaBehavioralObservation: _measurement, hostTestIntegrityObservation: _integrity, ...input } = record(parsed.input);
         return { ...parsed, input };
       };
       const candidates = assigned ? [...this.reviews].filter(([, review]) => review.sourceMessageId === args.messageId &&
@@ -1018,9 +1098,18 @@ export class HostVerification {
     const context = QualityGateContextSchema.parse(pending.context), configuration = record(context.definition.configuration), details = record(context.input);
     const state = record(await this.runtime().inspect());
     if ((state.outbound as Record<string, unknown>[]).some(out => out.reviewReplacement && out.handle &&
-        record(record(out.handle).target).paneId === pending.binding.paneId && digest(record(record(out.handle).target).session) === digest(pending.binding.session) && digest(record(out.message).payload) === digest(context)))
+        record(record(out.handle).target).paneId === pending.binding.paneId && digest(record(record(out.handle).target).session) === digest(pending.binding.session) &&
+        (record(out.message).message_id === pending.sourceMessageId || digest(record(out.message).payload) === digest(context))))
       throw new Error("Replaced workflow review cannot complete a stored observation");
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
+    const integrityReport = await this.measureIntegrity(context, pending.observation.cwd, pending.observation.base, pending.observation.revision);
+    const integrityObservation = details.hostTestIntegrityObservation === undefined ? undefined : TestIntegrityObservationSchema.parse(details.hostTestIntegrityObservation);
+    if (integrityReport.findings.length && !integrityObservation) throw new Error("Test-integrity verdict requires a new inspect_review observation");
+    if (integrityObservation && digest(integrityObservation.report) !== digest(integrityReport)) throw new Error("Test-integrity report changed since review observation");
+    if (binding.role !== "reviewer" && args.testIntegrityVerdicts !== undefined) throw new Error("Only Reviewer may submit test-integrity verdicts");
+    const integrityJudgment = binding.role === "reviewer"
+      ? adjudicateTestIntegrity(integrityReport, args.testIntegrityVerdicts, await this.integrityGrants(context)) : undefined;
+    if (integrityJudgment) await validateTestIntegrityEvidence(pending.observation.cwd, integrityReport, integrityJudgment.verdicts);
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
     const findingVerdicts = args.findingVerdicts === undefined ? [] : (() => {
@@ -1098,11 +1187,17 @@ export class HostVerification {
         })
       });
     });
-    const allFindings = [...verdictFindings, ...explicitFindings];
+    const integrityFindings = integrityJudgment?.unresolved.map(verdict => {
+      const finding = integrityReport.findings.find(item => item.id === verdict.findingId)!;
+      return QualityFindingSchema.parse({ code: finding.ruleId, severity: "error", message: `Reviewer confirmed test weakening: ${verdict.reason}; owner exception required`,
+        details: json(finding), location: `${finding.path}:${finding.line}:${finding.column}` });
+    }) ?? [];
+    const allFindings = [...verdictFindings, ...explicitFindings, ...integrityFindings];
     const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;
     const submission = digest({
       criteria,
       summary: textField(args.summary),
+      ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts } : {}),
       ...(findingVerdicts.length ? { findingVerdicts } : {}),
       ...(explicitFindings.length ? { findings: explicitFindings } : {})
     });
@@ -1122,6 +1217,8 @@ export class HostVerification {
       observation: observed,
       criteria,
       reviewedBy: binding.agentId,
+      ...(integrityObservation ? { testIntegrityObservation: integrityObservation } : {}),
+      ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts, testIntegrityExceptions: integrityJudgment.grants } : {}),
       ...(qaBehavioralObservation === undefined ? {} : { qaBehavioralObservation }),
       ...(findingVerdicts.length ? { findingVerdicts } : {}),
       ...(allFindings.length ? { findings: allFindings } : {})
@@ -1130,6 +1227,7 @@ export class HostVerification {
       status: criteria.every(criterion => criterion.passed) && observed.exitCode === 0 && qaPassed && !reworkRejected ? "passed" : "failed",
       findings: allFindings, producedArtifacts: [], evaluatedAt: new Date().toISOString(),
       metadata: {
+        ...(integrityJudgment ? { testIntegrityVerdicts: json(integrityJudgment.verdicts), testIntegrityExceptions: json(integrityJudgment.grants) } : {}),
         ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }),
         ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts) } : {}),
         verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
