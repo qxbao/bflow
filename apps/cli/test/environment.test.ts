@@ -332,6 +332,33 @@ describe("P12 repository environment lifecycle", () => {
     expect(requests.filter(request => request.args.join(" ") === "models")).toHaveLength(2);
     expect(requests.some(request => request.args[0] === "auth" || request.args[0] === "status")).toBe(false);
   });
+  it("stops an idle host whose provider preflight was rejected so a corrected configuration can start", async () => {
+    // The host pins the rejected platform; leaving it alive makes the next up fail with "Persisted host platform differs".
+    const order: string[] = [];
+    const prepareRoles = vi.fn(async () => { order.push("prepare"); throw new Error("Model 'x' is not in the native agy model catalog"); });
+    const quiesce = vi.fn(async () => { order.push("quiesce"); return { ok: true as const, value: undefined }; });
+    const shutdownHost = vi.fn(async () => { order.push("shutdown"); });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles,
+      runtime: mockRuntime(), quiesce, shutdownHost } });
+
+    await expect(composed.up()).rejects.toThrow("not in the native agy model catalog");
+
+    expect(order).toEqual(["prepare", "quiesce", "shutdown"]);
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
+  });
+  it("keeps a host that still owns active workflows when provider preflight is rejected", async () => {
+    const prepareRoles = vi.fn(async () => { throw new Error("Agy native capability unavailable"); });
+    const quiesce = vi.fn(async () => ({ ok: true as const, value: undefined }));
+    const shutdownHost = vi.fn(async () => {});
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles,
+      runtime: mockRuntime([activeRun]), quiesce, shutdownHost } });
+
+    await expect(composed.up()).rejects.toThrow("Agy native capability unavailable");
+
+    expect(quiesce).not.toHaveBeenCalled();
+    expect(shutdownHost).not.toHaveBeenCalled();
+  });
   linuxIt("preserves a saved manifest and active run when offline provider preparation fails", async () => {
     const saved = fixture.create(); saved.activeRunIds = [activeRun.runId];
     await mkdir(join(dir, ".bflow/state"), { recursive: true, mode: 0o700 });

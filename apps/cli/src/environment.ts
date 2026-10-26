@@ -606,7 +606,8 @@ export class EnvironmentLifecycle {
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
           if (needsRoleStartup && integration.prepareRoles) {
             this.progress("Đang chuẩn bị môi trường provider và kiểm tra mức sẵn sàng...");
-            await deadline.call(opts => integration.prepareRoles!(opts));
+            try { await deadline.call(opts => integration.prepareRoles!(opts)); }
+            catch (error) { await this.releaseRejectedHost(integration, deadline); throw error; }
             roleStartupPrepared = true;
           }
           cleanupEligible = true;
@@ -870,6 +871,23 @@ export class EnvironmentLifecycle {
       return stopped;
     } finally { await deadline.call(() => integration.close?.() ?? Promise.resolve()); }
   }
+  /**
+   * Preparation starts the persistent host before provider preflight. A rejected preflight leaves no session or pane, but the
+   * host would keep the rejected platform pinned and refuse the corrected configuration. Stop it only while it owns no
+   * active workflow, using the same quiesce barrier as down; otherwise keep it for explicit reconciliation.
+   */
+  private async releaseRejectedHost(integration: EnvironmentIntegration, deadline: Deadline): Promise<void> {
+    if (!integration.shutdownHost || !integration.runtime || !integration.quiesce) return;
+    try {
+      const page = unwrap(await deadline.call(opts => integration.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 1 }, opts)));
+      if (page.items.length || page.nextCursor) return;
+      unwrap(await deadline.call(opts => integration.quiesce!(opts)));
+      await deadline.call(() => integration.shutdownHost!());
+    } catch {
+      // The preflight failure is the actionable error; bflow down still reconciles a host that could not be stopped here.
+    }
+  }
+
   private async downLocked(repository: RepositoryIdentity, config: EnvironmentConfig, confirmed: boolean, timeoutMs?: number, signal?: AbortSignal,
     suppliedIntegration?: EnvironmentIntegration, force = false): Promise<SessionManifest | EnvironmentStatus> {
       const deadline = new Deadline(timeoutMs ?? config.environment.shutdownTimeoutMs, signal);
