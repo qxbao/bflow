@@ -1,7 +1,7 @@
 # Bàn giao task handover nội bộ
 
-Worktree: `/mnt/01DCE9A4D6522BD0/Project/AI/AI-flow-SDLC/.worktrees/task-handover`.
-Branch: `agent/runtime/task-handover`.
+Worktree triển khai ban đầu: `/mnt/01DCE9A4D6522BD0/Project/AI/AI-flow-SDLC/.worktrees/task-handover`.
+Nhánh triển khai ban đầu: `agent/runtime/task-handover`.
 Baseline/tested HEAD: `bc29647917b0f8a32b6172cb4b277ab81d393361`, cùng các thay đổi chưa commit của worktree này.
 Baseline ban đầu sạch, chứa P24 `8dbb056` theo ancestry; local main có ba commit chưa có ở origin/main (đã kiểm tra cherry equivalence), giữ nguyên các sửa rework/test-integrity.
 Node `v24.16.0`, pnpm `12.5.1`, Linux/local filesystem.
@@ -69,3 +69,15 @@ Fingerprint của 9 file TypeScript source/test đã đổi (SHA-256 trên danh 
 ## Tích hợp được owner cho phép — 2026-10-27
 
 Owner đã yêu cầu merge main và dọn worktree sau bản bàn giao trên, cho phép tạo commit và merge local. Main trước tích hợp là `62b4e6cdb1a7a0890feb67b18591c18620544e9a`; nhánh handover giữ nguyên sửa rework/test-integrity mới này. Kết quả dirty-HEAD và environment ở trên là lịch sử kiểm chứng trước authorization, không phải kết quả sau commit. Không push/PR; worktree workflow-telemetry của tác vụ khác nằm ngoài phạm vi cleanup.
+
+### Kết quả sau commit và đồng bộ main
+
+Tested integration commit: `94ed51d` (merge `main` tại `62b4e6c` vào handover), clean working tree. `pnpm check:deps` và `pnpm typecheck` exit 0.
+
+```sh
+env -u AI_ISOLATOR -u AI_ISOLATOR_REAL_HOME -u AI_ISOLATOR_HOME -u AI_ISOLATOR_PROFILE -u AI_ISOLATOR_TOOL TMPDIR=/tmp pnpm test --maxWorkers=6 --minWorkers=1
+```
+
+Exit 0: **284 files passed, 7 skipped; 5.404 tests passed, 80 skipped, 0 failed** (5.484 tests), 818,45 giây. Đây là kết quả full validation sau integration, thay thế trạng thái chưa xanh của lần bàn giao chưa commit ở trên. Các gate và test runner giữ nguyên; không commit generated files, không đổi quyền hay cấu hình global. Commit cập nhật bản ghi này chỉ thay đổi tài liệu package-local, không thay đổi mã đã kiểm chứng.
+
+Owner đã cho phép merge local vào main và dọn worktree/nhánh handover. Không đụng worktree workflow-telemetry; không push/PR.
