@@ -23,6 +23,17 @@ describe("VerificationEngine", () => {
     expect(VerificationCycleSchema.safeParse(outcome.cycle).success).toBe(true);
   });
 
+  it.each(["validation", "transport_unavailable"] as const)("classifies a gate %s error without inventing an implementation failure", async code => {
+    const f = await fixture();
+    f.runners[0]!.evaluate = async () => ({ok:false,error: code === "validation"
+      ? {code,retryable:false,message:"Independent evidence admission failed"}
+      : {code,retryable:true,message:"Independent runner unavailable"}});
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(f.plan,engine.start(f.plan,"cycle-errors"),await f.change());
+    expect(outcome.result.status).toBe(code === "validation" ? "inconclusive" : "blocked");
+    expect(outcome.cycle.status).toBe("escalated");
+  });
+
   it("records failed verification and a scoped developer repair before a fresh successful attempt", async () => {
     const f = await fixture();
     const runner = f.runners[0]!;

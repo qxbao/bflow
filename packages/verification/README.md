@@ -96,3 +96,5 @@ pnpm --filter @bflow/verification test
 ```
 
 Lệnh này build package trước các unit test của nó. Bàn giao repository cũng yêu cầu `pnpm check:deps`, `pnpm typecheck`, `pnpm test`, `git diff --check` và `git status --short`. Ghi lại kết quả thực tế và commit đã kiểm thử vào evidence bàn giao; không diễn giải một lần chạy test của package là tích hợp hay đóng remote.
+
+Gate admission errors with code `validation` are insufficient evidence (`inconclusive`), not implementation failures. Unavailable/timeout runners remain `blocked`; explicit failed checks retain bounded rework semantics.

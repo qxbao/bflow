@@ -194,7 +194,10 @@ export class VerificationEngine {
         timer = setTimeout(() => { controller.abort(); reject(new VerificationUnavailable("Verification runner timed out; remote stop is unproven")); }, ms);
       });
       const response = OperationResultSchema(QualityGateResultSchema).parse(await Promise.race([operation, timeout]));
-      if (!response.ok) throw new VerificationUnavailable(response.error.message);
+      if (!response.ok) {
+        if (response.error.code === "validation") throw new Error(response.error.message);
+        throw new VerificationUnavailable(response.error.message);
+      }
       const result = response.value;
       if (Date.parse(result.evaluatedAt) < Date.parse(dispatchedAt) || Date.parse(result.evaluatedAt) > Date.parse(this.now()))
         throw new Error("Gate evidence was evaluated outside the current execution window");

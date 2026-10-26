@@ -785,7 +785,7 @@ describe("Task 3, 5, 6: Runtime fast-path decision, autonomous design approval, 
     expect(revisedRun.fastPath.reasons).toContain("recomputed for follow-up or requirement revision");
   });
 
-  it("waives task-level review when active fast-path has full deterministic coverage and retains waived plan across rework", async () => {
+  it("retains the frozen fast-path waiver but cannot pass rework without independent finding verdicts", async () => {
     const f = await setupFixture({ automatedRefactor: true, humanApproval: true, failDeterministicOnce: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
     await f.runtime.tick();
@@ -813,18 +813,13 @@ describe("Task 3, 5, 6: Runtime fast-path decision, autonomous design approval, 
 
     const afterIter2 = await f.inspect();
     expect(afterIter2.tasks[0].verificationPlan.planId).toBe(firstPlan.planId);
-    expect(afterIter2.tasks[0].cycle.status).toBe("passed");
-    expect(afterIter2.status).toBe("awaiting_approval");
-    expect(afterIter2.approvalKind).toBe("delivery");
-    expect(afterIter2.workflowVerificationPlan.reviewWaiver).toMatchObject({
-      kind: "identical_integrated_tree"
-    });
-    expect(
-      f.conversationInbox.some(
-        m => m.type === "conversation.progress" && (m.payload as any)?.headline === FAST_PATH_WORKFLOW_WAIVER_NOTICE
-      )
-    ).toBe(true);
-    expect(f.conversationInbox.filter(m => m.type === "approval.request")).toHaveLength(1);
+    expect(afterIter2.tasks[0].cycle.status).toBe("escalated");
+    expect(afterIter2.tasks[0].cycle.history.at(-1).status).toBe("inconclusive");
+    expect(afterIter2.status).toBe("escalated");
+    expect(afterIter2.tasks[0].reworkResolutions[0].verificationOutcome.status).toBe("escalated_blocked");
+    expect(afterIter2.tasks[0].reworkResolutions[0].verificationOutcome.closedFindingIds).toEqual([]);
+    expect(afterIter2.workflowVerificationPlan).toBeUndefined();
+    expect(f.conversationInbox.filter(m => m.type === "approval.request")).toHaveLength(0);
   });
 
   it("keeps task-level review for docs-only fast-path and skips workflow-level review on identical tree", async () => {

@@ -10,7 +10,7 @@ import {
   type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
-import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
+import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
 import { behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
   type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
@@ -25,6 +25,11 @@ import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 const execFileAsync = promisify(execFile);
+function originalReviewContext(context: unknown) {
+  const parsed = QualityGateContextSchema.parse(context);
+  const { hostQaBehavioralObservation: _measurement, hostReworkVerification: _rework, ...input } = record(parsed.input);
+  return { ...parsed, input };
+}
 function staticGateId(command: string): string {
   return `host-static-${command.replace(/[^a-z0-9_-]/gi, "-")}`;
 }
@@ -850,8 +855,17 @@ export class HostVerification {
     if (!taskId || !attemptId || !Array.isArray(state.runs)) return undefined;
     const run = state.runs.map(record).find(item => item.runId === runId);
     const task = Array.isArray(run?.tasks) ? run!.tasks.map(record).find(item => item.taskId === taskId) : undefined;
-    if (!Array.isArray(task?.reworkResolutions)) return undefined;
-    return task!.reworkResolutions.map(item => ReworkResolutionDossierSchema.parse(item)).find(item => item.attemptId === attemptId);
+    const dossiers = Array.isArray(task?.reworkResolutions) ? task.reworkResolutions.map(item => ReworkResolutionDossierSchema.parse(item)) : [];
+    const dossier = dossiers.find(item => item.attemptId === attemptId);
+    if (task && record(task.result).attemptId !== attemptId) {
+      throw new Error("Stale rework review attempt or generation");
+    }
+    if (!dossier && (hasReworkAssignment(Array.isArray(state.outbound) ? state.outbound : [], runId, taskId, attemptId) ||
+        task?.cycle && Array.isArray(record(task.cycle).history) &&
+        (record(task.cycle).history as unknown[]).some(r => record(r).status === "failed"))) {
+      throw new Error("Missing rework dossier; historical state cannot supply independent finding evidence");
+    }
+    return dossier;
   }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
   private readonly reviews = new Map<string, { binding: PaneBinding; sourceMessageId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
@@ -892,6 +906,10 @@ export class HostVerification {
       }
     }
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
+    if (reworkResolution) {
+      if (reworkResolution.submittedRevision !== observation.revision) throw new Error("Rework dossier revision mismatch");
+      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
+    }
     const sourceMessageId = textField(args.messageId);
     const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
       rev.sourceMessageId === sourceMessageId &&
@@ -1001,13 +1019,9 @@ export class HostVerification {
         ["accepted", "released"].includes(String(out.status)) && record(out.message).type === "verification.requested" &&
         record(out.message).message_id === args.messageId && record(record(out.handle).target).paneId === binding.paneId &&
         record(record(out.handle).target).agentId === binding.agentId && digest(record(record(out.handle).target).session) === digest(binding.session));
-      const originalContext = (context: unknown) => {
-        const parsed = QualityGateContextSchema.parse(context), { hostQaBehavioralObservation: _measurement, ...input } = record(parsed.input);
-        return { ...parsed, input };
-      };
       const candidates = assigned ? [...this.reviews].filter(([, review]) => review.sourceMessageId === args.messageId &&
         digest(this.bindingIdentity(review.binding)) === digest(this.bindingIdentity(binding)) &&
-        digest(originalContext(review.context)) === digest(originalContext(record(assigned.message).payload)))
+        digest(originalReviewContext(review.context)) === digest(originalReviewContext(record(assigned.message).payload)))
         .slice(-3).map(([reviewId]) => reviewId) : [];
       throw new Error("Review observation belongs to another pane or is missing" + (candidates.length
         ? `; this pane's observation IDs for the exact assigned message: ${candidates.join(", ")}. Retry complete_review with the chosen reviewId and independent judgments.`
@@ -1018,25 +1032,24 @@ export class HostVerification {
     const context = QualityGateContextSchema.parse(pending.context), configuration = record(context.definition.configuration), details = record(context.input);
     const state = record(await this.runtime().inspect());
     if ((state.outbound as Record<string, unknown>[]).some(out => out.reviewReplacement && out.handle &&
-        record(record(out.handle).target).paneId === pending.binding.paneId && digest(record(record(out.handle).target).session) === digest(pending.binding.session) && digest(record(out.message).payload) === digest(context)))
+        record(record(out.handle).target).paneId === pending.binding.paneId && digest(record(record(out.handle).target).session) === digest(pending.binding.session) && digest(originalReviewContext(record(out.message).payload)) === digest(originalReviewContext(context))))
       throw new Error("Replaced workflow review cannot complete a stored observation");
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
-    const findingVerdicts = args.findingVerdicts === undefined ? [] : (() => {
+    const pinnedRework = details.hostReworkVerification;
+    if (reworkResolution || pinnedRework !== undefined) {
+      if (!reworkResolution || binding.agentId === reworkResolution.submittedByAgentId ||
+          reworkResolution.submittedRevision !== pending.observation.revision ||
+          digest(pinnedRework) !== digest(reworkVerificationBinding(reworkResolution))) {
+        throw new Error("Missing or stale rework observation binding");
+      }
+    }
+    const findingVerdicts = reworkResolution ? parseRequiredFindingVerdicts(reworkResolution, args.findingVerdicts) : args.findingVerdicts === undefined ? [] : (() => {
       if (!Array.isArray(args.findingVerdicts)) throw new Error("findingVerdicts must be an array");
       const parsed = args.findingVerdicts.map(item => ReworkFindingVerdictSchema.parse(item));
       if (new Set(parsed.map(item => item.findingId)).size !== parsed.length) throw new Error("Duplicate findingId in findingVerdicts");
-      if (reworkResolution) {
-        const validIds = new Set(reworkResolution.reworkContext.findings.map(item => item.findingId));
-        for (const item of parsed) {
-          if (!validIds.has(item.findingId)) {
-            throw new Error(`Review findingVerdict references unknown findingId '${item.findingId}' not in reworkGeneration ${reworkResolution.reworkGeneration}`);
-          }
-        }
-      } else if (parsed.length > 0) {
-        throw new Error("findingVerdicts cannot be submitted for an initial non-rework review");
-      }
+      if (parsed.length > 0) throw new Error("findingVerdicts cannot be submitted for an initial non-rework review");
       return parsed;
     })();
     const explicitFindings = args.findings === undefined ? [] : (() => {
@@ -1131,7 +1144,7 @@ export class HostVerification {
       findings: allFindings, producedArtifacts: [], evaluatedAt: new Date().toISOString(),
       metadata: {
         ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }),
-        ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts) } : {}),
+        ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts), reworkVerification: pinnedRework } : {}),
         verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
           sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
           role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) },

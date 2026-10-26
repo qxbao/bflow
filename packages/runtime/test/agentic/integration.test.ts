@@ -24,6 +24,8 @@ import { parseBehavioralCommands, type BehavioralCommand, type RunnerProfile } f
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { digest } from "../../src/agentic/journal.js";
+import type { RunRecord } from "../../src/agentic/journal.js";
+import { reworkVerificationBinding } from "../../src/agentic/rework-causality.js";
 import { buildUserDecisionRequest } from "../../src/agentic/decision-routing.js";
 import { WorkflowProposalRejected } from "../../src/agentic/workflow-rejection.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
@@ -99,9 +101,15 @@ async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd
   const gates: QualityGate[] = checks.map((check: any) => ({ id: check.id, evaluate: async context => {
     calls.push(context); const config = context.definition.configuration as any; const input = context.input as any;
     const passed = !(failReview && config.role === "reviewer");
+    const run = config.kind === "review" && input.scope === "task"
+      ? await runtime.inspect(context.runId) as unknown as RunRecord : undefined;
+    const dossier = run?.tasks.find(task => task.taskId === context.taskId)?.reworkResolutions?.find(item => item.attemptId === context.attemptId);
+    const reworkEvidence = dossier ? { reworkVerification: reworkVerificationBinding(dossier),
+      findingVerdicts: dossier.reworkContext.findings.map(finding => ({findingId:finding.findingId,
+        verdict: passed ? "confirmed" : "rejected", summary:"Scripted independent review of the exact submitted repair"})) } : {};
     return { ok: true, value: { gateId: context.definition.id, runId: context.runId, taskId: context.taskId!,
       evaluationId: randomUUID(), status: passed ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
-      metadata: { verification: { schemaVersion: 2, checkId: check.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+      metadata: { ...reworkEvidence, verification: { schemaVersion: 2, checkId: check.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
         sourceRevision: input.sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope,
         independentExecution: true, isolated: true, executorId: config.role === "reviewer" ? reviewerExecutorId : "independent-test-host", role: config.role, method: config.method,
         ...(config.command ? { command: config.command, exitCode: passed ? 0 : 1 } : {}), testNames: config.testNames,
@@ -564,7 +572,10 @@ async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIt
         const observed = await f.verification.inspectReview(binding, { messageId: out.message.message_id }) as any;
         expect(observed.observation.revision).toBe(out.message.payload.input.sourceRevision);
         expect(observed.observation.diff).toContain("double.cjs");
-        const completed = await f.verification.completeReview(binding, { reviewId: observed.reviewId, summary: "Reviewed the exact committed implementation and immutable acceptance test", criteria: observed.context.definition.configuration.criterionIds.map((criterionId: string) => ({ criterionId, passed: true, summary: "The observed committed diff doubles the input and retains the spec-derived acceptance test" })) });
+        const completed = await f.verification.completeReview(binding, { reviewId: observed.reviewId,
+          ...(observed.reworkResolution ? {findingVerdicts: observed.reworkResolution.reworkContext.findings.map((finding: {findingId:string}) => ({
+            findingId:finding.findingId,verdict:"confirmed",summary:"Independently checked the exact repaired source and immutable acceptance test"}))} : {}),
+          summary: "Reviewed the exact committed implementation and immutable acceptance test", criteria: observed.context.definition.configuration.criterionIds.map((criterionId: string) => ({ criterionId, passed: true, summary: "The observed committed diff doubles the input and retains the spec-derived acceptance test" })) });
         await f.runtime.receiveHerdr(f.envelope("review.verdict", completed.result, { causation_id: out.message.message_id,
           sender: { role: binding.role, agent_id: binding.agentId, pane_id: binding.paneId }, artifact_references: [completed.artifact] }));
       }
@@ -822,6 +833,7 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
     f.setFailReview(false); await f.runtime.tick(); await f.submit("implement", "repaired\n"); await f.runtime.tick();
     expect((await f.inspect()).error).toBeUndefined();
     expect((await f.inspect()).tasks[0].cycle.history.map((r: any) => r.status)).toEqual(["failed", "passed"]);
+    expect((await f.inspect()).tasks[0].reworkResolutions[0].verificationOutcome.status).toBe("verified_closed");
   });
   it("rejects a repair Developer as Reviewer even when the original plan predates that identity", async () => {
     const f = await fixture({ failReview: true }); await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();

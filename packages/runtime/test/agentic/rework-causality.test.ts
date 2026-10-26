@@ -158,7 +158,7 @@ interface ReviewerScriptResult {
   readonly findings?: readonly QualityFinding[];
 }
 
-async function createReworkFixture(options: { maxIterations?: number } = {}) {
+async function createReworkFixture(options: { maxIterations?: number; legacyVerdicts?: "partial" | "absent" | "durable" } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-rework-causality-")));
   const repository = join(root, "repo");
   await mkdir(repository);
@@ -340,6 +340,15 @@ async function createReworkFixture(options: { maxIterations?: number } = {}) {
             ...(scripted.findingVerdicts ? { findingVerdicts: scripted.findingVerdicts } : {}),
             ...(scripted.findings ? { findings: scripted.findings } : {})
           });
+          if (inspected.reworkResolution && options.legacyVerdicts && options.legacyVerdicts !== "durable") {
+            // A trusted old host receipt: authentication alone does not prove per-finding coverage.
+            completed.result = {...completed.result, evaluationId: `legacy-${completed.result.evaluationId}`,
+              metadata: {...completed.result.metadata, findingVerdicts: options.legacyVerdicts === "partial"
+                ? scripted.findingVerdicts?.slice(0,1) : undefined}} as any;
+            if (options.legacyVerdicts === "absent") delete completed.result.metadata!.findingVerdicts;
+            delete completed.result.metadata!.reworkVerification;
+            await receipts.recordGate(completed.result);
+          }
           await runtime.receiveHerdr(
             envelope("review.verdict", completed.result, {
               sender: {
@@ -364,6 +373,30 @@ async function createReworkFixture(options: { maxIterations?: number } = {}) {
     loadSpecification: id => runtime.loadSpecification(id),
     authorizeApprover: decision => ["coordinator", "human-1"].includes(decision.decidedBy)
   });
+
+  const verify = policies.verification.verify.bind(policies.verification);
+  let durableFailureInjected = false;
+  policies.verification.verify = async (...args) => {
+    const outcome = await verify(...args);
+    if (options.legacyVerdicts === "durable" && args[1].history.length && outcome.result.status === "passed") {
+      const legacy = structuredClone(outcome);
+      for (const gate of legacy.result.qualityGateResults) {
+        delete gate.metadata?.findingVerdicts;
+        delete gate.metadata?.reworkVerification;
+      }
+      legacy.cycle.history[legacy.cycle.history.length - 1] = legacy.result;
+      if (!durableFailureInjected) {
+        durableFailureInjected = true;
+        const resolve = artifacts.resolve.bind(artifacts);
+        artifacts.resolve = async (...resolveArgs) => {
+          artifacts.resolve = resolve;
+          throw new Error("Injected crash boundary after pending outcome persistence");
+        };
+      }
+      return legacy;
+    }
+    return outcome;
+  };
 
   const conversationInbox: RoleMessage[] = [];
   const ports: AgenticRuntimePorts = {
@@ -588,6 +621,7 @@ async function createReworkFixture(options: { maxIterations?: number } = {}) {
     },
     ports,
     artifacts,
+    clearLegacyVerdicts() { delete options.legacyVerdicts; },
     development,
     verification,
     panes,
@@ -608,8 +642,8 @@ async function createReworkFixture(options: { maxIterations?: number } = {}) {
 }
 
 describe("Rework root-cause explanation & independent verification through Runtime/host", () => {
-  it("keeps distinct findings with the same code separate, validates root-cause explanations via HostDevelopment/Runtime, and closes findings only after independent Reviewer/QA verification", async () => {
-    const f = await createReworkFixture();
+  it.each([undefined, "partial", "absent", "durable"] as const)("enforces independent finding coverage through Runtime/host (legacy verdicts: %s)", async legacyVerdicts => {
+    const f = await createReworkFixture({legacyVerdicts});
     await f.recordAlternativeEvidence("implement");
 
     // Initial implementation attempt (cycle 1)
@@ -841,7 +875,35 @@ describe("Rework root-cause explanation & independent verification through Runti
 
     await f.runtime.tick();
 
-    const afterVerifyRun = await f.inspectRun();
+    let afterVerifyRun = await f.inspectRun();
+    if (legacyVerdicts === "durable") {
+      const persisted = JSON.parse(await readFile(join(f.root,"journal","state.json"),"utf8"));
+      expect(persisted.pendingVerifications).toHaveLength(1);
+      expect(persisted.pendingVerifications[0].outcome.result.status).toBe("passed");
+      f.restart();
+      await f.runtime.tick();
+      afterVerifyRun = await f.inspectRun();
+    }
+    if (legacyVerdicts) {
+      expect(afterVerifyRun.tasks[0].cycle.status).toBe("escalated");
+      expect(afterVerifyRun.tasks[0].cycle.history.at(-1).status).toBe("inconclusive");
+      expect(afterVerifyRun.tasks[0].reworkResolutions[0].verificationOutcome.status).toBe("escalated_blocked");
+      expect(afterVerifyRun.tasks[0].reworkResolutions[0].verificationOutcome.closedFindingIds).toEqual([]);
+      f.restart();
+      const recovered = await f.inspectRun();
+      expect(recovered.tasks[0].reworkResolutions[0].verificationOutcome.findingVerdicts).toEqual([]);
+      expect(recovered.tasks[0].cycle.status).toBe("escalated");
+      const originalGeneration = recovered.tasks[0].reworkResolutions[0].reworkGeneration;
+      f.clearLegacyVerdicts();
+      await f.runtime.retryVerification("run-1");
+      await f.runtime.tick();
+      const retried = await f.inspectRun();
+      expect(retried.tasks[0].cycle.status).toBe("passed");
+      expect(retried.tasks[0].cycle.currentIteration).toBe(1);
+      expect(retried.tasks[0].reworkResolutions[0].reworkGeneration).toBe(originalGeneration);
+      expect(retried.tasks[0].reworkResolutions[0].verificationOutcome.status).toBe("verified_closed");
+      return;
+    }
     expect(afterVerifyRun.tasks[0].cycle.status).toBe("passed");
     const settledDossier = ReworkResolutionDossierSchema.parse(
       afterVerifyRun.tasks[0].reworkResolutions[0]

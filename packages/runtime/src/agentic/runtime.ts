@@ -35,7 +35,7 @@ import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-i
 import { NativeDiagnosticFenceAuthoritySchema, NativeDiagnosticFenceSchema } from "./native-diagnostic-fence.js";
 import { requirementRevisionGuidance } from "./requirement-revision-guidance.js";
 import {
-  buildReworkAssignmentContext, ReworkAssignmentContextSchema, settleReworkVerificationOutcome,
+  buildReworkAssignmentContext, ReworkAssignmentContextSchema, settleReworkVerificationOutcome, validateReworkGate, reworkVerificationVerdicts, hasReworkAssignment,
   toAssignedQualityFindings, validateAndStoreReworkResolution, verifyStoredReworkDossier,
   type ReworkResolutionDossier
 } from "./rework-causality.js";
@@ -1072,6 +1072,18 @@ export class AgenticWorkflowRuntime {
         const outcome = await Promise.race([reply, new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => reject(new Error("Herdr verification reply timeout; delivery remains reconcilable")), context.definition.timeout.executionTimeoutMs);
         })]);
+        // Authentication proves the host origin, not complete per-finding judgment (including old receipts).
+        try {
+          await this.journal.exclusive(async state => {
+          const task = this.run(state, context.runId).tasks.find(t => t.taskId === context.taskId);
+          const dossier = task?.reworkResolutions?.find(d => d.attemptId === context.attemptId);
+          if (dossier) validateReworkGate(dossier, outcome);
+          else if (task?.cycle?.history.some(r => r.status === "failed") ||
+              context.taskId && context.attemptId && hasReworkAssignment(state.outbound, context.runId, context.taskId, context.attemptId)) throw new Error("Missing rework dossier for independent finding verification");
+          });
+        } catch (error) {
+          return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
+        }
         return { ok: true, value: outcome };
       } finally { if (timer) clearTimeout(timer); if (dispatchTimer) clearInterval(dispatchTimer); options?.signal?.removeEventListener("abort", abort); this.gateWaiters.delete(key); }
     } };
@@ -3396,8 +3408,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               const plan = this.verificationPlan(state, run, task, undefined, outbox);
               task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, task.taskId])}`));
               const latestReworkDossier = task.reworkResolutions?.find(item => item.attemptId === current.attemptId);
-              if (task.cycle.history.length > 0 && record(out.message.payload).reworkContext !== undefined && !latestReworkDossier) {
-                throw new Error(`Rework attempt ${current.attemptId} for ${task.taskId} cannot enter verification without a validated rework resolution dossier`);
+              if (hasReworkAssignment(state.outbound, run.runId, task.taskId, current.attemptId!) && !latestReworkDossier) {
+                this.escalateForRetry(state, outbox, run, task.taskId, `${VERIFICATION_RETRY_PREFIX} Missing validated rework resolution dossier for ${current.attemptId}; independent finding evidence remains required`);
+                continue;
               }
               task.verificationPending = true; run.status = "verifying";
               jobs.push({ runId: run.runId, taskId: task.taskId, plan, cycle: task.cycle, change,
@@ -3601,8 +3614,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     return { result: VerificationResultSchema.parse(value.result), cycle: VerificationCycleSchema.parse(value.cycle), messages: [] };
   }
   private async finishVerification(job: VerificationJob, outcome: { result: unknown; cycle: unknown; messages: RoleMessage[] }): Promise<void> {
-    const result = VerificationResultSchema.parse(outcome.result);
-    const cycle = VerificationCycleSchema.parse(outcome.cycle);
+    let result = VerificationResultSchema.parse(outcome.result);
+    let cycle = VerificationCycleSchema.parse(outcome.cycle);
     if (result.runId !== job.runId || result.taskId !== job.taskId || cycle.runId !== job.runId || cycle.taskId !== job.taskId ||
         cycle.cycleId !== job.cycle.cycleId || result.changeSet?.changeSetId !== job.change.changeSetId) throw new Error("Verification outcome mismatch");
     await this.transaction(async (state, save, core, outbox) => {
@@ -3640,6 +3653,22 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const currentCycle = task?.cycle ?? run.workflowCycle;
       // A superseded job (e.g. a coroutine of a lost process, or a cycle replaced by a retry) finishing late is stale, not a new failure.
       if (digest(currentCycle) !== digest(job.cycle) && digest(currentCycle) !== digest(cycle)) { clearPending(); await save(); return; }
+      // Durable outcomes may have been produced by an older host. Never recover a pass from absent verdicts.
+      if (task && ["passed", "failed"].includes(result.status)) {
+        try {
+          const dossier = task.reworkResolutions?.find(d => d.attemptId === result.attemptId);
+          if (dossier) reworkVerificationVerdicts(dossier, result, cycle);
+          else if (job.cycle.history.some(r => r.status === "failed") ||
+              hasReworkAssignment(state.outbound, run.runId, task.taskId, result.attemptId)) throw new Error("Missing historical rework dossier and independent verdicts");
+        } catch (error) {
+          const reason = `Missing or invalid independent rework evidence: ${String(error)}`;
+          result = VerificationResultSchema.parse({ ...result, status: "inconclusive",
+            metadata: { ...result.metadata, runtimeReworkEvidenceError: reason } });
+          cycle = VerificationCycleSchema.parse({ ...cycle, status: "escalated",
+            history: cycle.history.map(r => r.verificationId === result.verificationId ? result : r),
+            escalation: { escalatedAt: result.completedAt, reason, target: "human_operator", evidenceArtifacts: result.evidenceArtifacts } });
+        }
+      }
       await this.verifyReferences(result.evidenceArtifacts, run.runId);
       // An environment/timeout block is no verdict: Core keeps its gate open so the bounded retry can evaluate the same attempt again.
       const retryable = retryableVerificationCycle(cycle);

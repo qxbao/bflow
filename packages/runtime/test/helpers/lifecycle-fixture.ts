@@ -11,6 +11,7 @@ import { openSqliteRunStore } from "@bflow/persistence";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
+import { reworkVerificationBinding } from "../../src/agentic/rework-causality.js";
 import type { JournalState, RunRecord } from "../../src/agentic/journal.js";
 import { FakeAgentTransport } from "./fake-transport.js";
 import { draft, workflow } from "../../../specification/test/fixtures.js";
@@ -70,9 +71,16 @@ export async function lifecycleFixture(cleanups: (() => Promise<void>)[]) {
     const config = context.definition.configuration as any, input = context.input as any;
     const hold = holds.get(input.scope); if (hold) { holds.delete(input.scope); hold.reached(); await hold.released; }
     const passed = config.role !== failingRole;
+    const run = config.kind === "review" && input.scope === "task"
+      ? await runtime.inspect(context.runId) as unknown as RunRecord : undefined;
+    const dossier = run?.tasks.find(task => task.taskId === context.taskId)?.reworkResolutions?.find(item => item.attemptId === context.attemptId);
+    // This scripted independent reviewer must explicitly judge every repair, just like the real host fixture.
+    const reworkEvidence = dossier ? { reworkVerification: reworkVerificationBinding(dossier),
+      findingVerdicts: dossier.reworkContext.findings.map(finding => ({findingId:finding.findingId,
+        verdict: passed ? "confirmed" : "rejected", summary:"Scripted independent review of the exact submitted repair"})) } : {};
     return { ok: true, value: { gateId: context.definition.id, runId: context.runId, taskId: context.taskId!,
       evaluationId: randomUUID(), status: passed ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
-      metadata: { verification: { schemaVersion: 2, checkId: check.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+      metadata: { ...reworkEvidence, verification: { schemaVersion: 2, checkId: check.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
         sourceRevision: input.sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope,
         independentExecution: true, isolated: true, executorId: "independent-test-host", role: config.role, method: config.method,
         ...(config.command ? { command: config.command, exitCode: passed ? 0 : 1 } : {}), testNames: config.testNames,
