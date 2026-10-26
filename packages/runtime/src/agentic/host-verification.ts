@@ -65,9 +65,14 @@ export function boundQaReviewCommands(commands: readonly BoundBehavioralCommand[
 }
 const whitespaceCommand = "git diff --check";
 /** Default checks support documentation only. Behavioral checks require owner configuration. */
+/**
+ * An agent review reads the dossier, diff and evidence before submitting; a workflow review of several tasks routinely
+ * exceeds five minutes, and workflow QA also runs its measurements (capped at 540s) inside this deadline.
+ */
+const INDEPENDENT_REVIEW_TIMEOUT_MS = 900_000;
 export const DEFAULT_HOST_CHECKS = [
   ...["reviewer", "qa"].map(role => QualityGateDefinitionSchema.parse({ id: `host-${role}`, name: `Independent ${role}`, evaluator: "native-herdr-review", required: true,
-    timeout: { executionTimeoutMs: 300_000, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
+    timeout: { executionTimeoutMs: INDEPENDENT_REVIEW_TIMEOUT_MS, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
     configuration: { kind: "review", method: "manual_review", criterionIds: [], testNames: [], role, levels: [] } })),
   QualityGateDefinitionSchema.parse({ id: "host-git-integrity", name: "Integrated Git diff integrity", evaluator: "host-git-diff", required: true,
     timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },

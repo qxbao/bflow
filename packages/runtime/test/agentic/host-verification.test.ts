@@ -310,3 +310,12 @@ it("fences a persisted rework observation after its native review is replaced", 
   f.outbound[0]!.reviewReplacement = {disposition:"replaced_without_verdict_claim"};
   await expect(f.restore().completeReview(f.binding,f.input)).rejects.toThrow("Replaced workflow review");
 });
+describe("default independent review deadlines", () => {
+  // Live run bf-b5679f4f2e725cadfef1: an Agy reviewer needed ~282s for a task review and ~420s for the workflow review,
+  // so the 300s gate blocked workflow verification although every deterministic and QA check passed.
+  it("give reviewer and QA time for a workflow-scope review and the bounded QA measurement budget", () => {
+    const reviews = DEFAULT_HOST_CHECKS.filter(check => (check.configuration as { kind?: string }).kind === "review");
+    expect(reviews.map(check => check.id)).toEqual(["host-reviewer", "host-qa"]);
+    for (const check of reviews) expect(check.timeout.executionTimeoutMs).toBeGreaterThanOrEqual(900_000);
+  });
+});
