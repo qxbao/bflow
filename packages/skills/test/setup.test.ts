@@ -136,7 +136,7 @@ describe("P26 setup bridge and repository init data", () => {
     ]);
     await setup.sync({ mode: "apply" });
     const latest = await manager.validate(source, "builtin");
-    expect(latest.version).toBe("1.0.2");
+    expect(latest.version).toBe("1.0.3");
     expect(await manager.list()).toEqual([previous, latest]);
     expect(await manager.recover(generation.manifest.digest)).toEqual(
       generation.manifest,

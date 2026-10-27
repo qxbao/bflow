@@ -77,8 +77,8 @@ describe("canonical role catalog", () => {
     };
     for (const [skillId, refPath] of Object.entries(expectedReferences)) {
       const entry = catalog.find((item) => item.definition.skillId === skillId);
-      // test-planning and review-code advanced to 1.0.2 (discriminating race-test rule).
-      const expectedVersion = skillId === "test-planning" || skillId === "review-code" ? "1.0.2" : "1.0.1";
+      // test-planning and review-code advanced to 1.0.3 (discriminating race-test rule and mutationChecks pointer).
+      const expectedVersion = skillId === "test-planning" || skillId === "review-code" ? "1.0.3" : "1.0.1";
       expect(entry?.definition.version).toBe(expectedVersion);
       expect(entry?.files[refPath]).toBeDefined();
       expect(entry?.files["worked-example.md"]).toBeDefined();

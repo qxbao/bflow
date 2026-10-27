@@ -141,6 +141,42 @@ verdict thành công. Host đã persist pin digest của cấu hình. Thay đổ
 tạo sẽ bị từ chối; hãy giữ state và reconcile/migrate host một cách tường minh. Không xóa
 journal của host để vượt qua sự không khớp cấu hình.
 
+## Mutation checks (`mutationChecks`)
+
+An owner may add `mutationChecks` to `.bflow/verification.json` to enforce the negative control of a race or lock criterion:
+the protection is replaced by a no-op in one committed file, and the named tests must **fail**. If they still pass, the test
+does not prove the protection is needed, and the gate fails with `non_discriminating_test`.
+
+```json
+{
+  "schemaVersion": 1,
+  "behavioralCommands": [
+    { "id": "unit", "command": "owner:test-unit", "executable": "/usr/bin/node", "args": ["--test", "--test-reporter=tap", "test/bucket.test.cjs"],
+      "method": "unit_test", "levels": ["unit"], "testNames": ["ac-1: concurrent takes grant one token"],
+      "testPaths": ["test/bucket.test.cjs"], "timeoutMs": 60000 }
+  ],
+  "mutationChecks": [
+    { "id": "bucket-lock", "commandId": "unit", "file": "src/bucket.ts",
+      "find": "this.lock.runExclusive(", "replace": "((fn) => fn())(",
+      "expectFailingTests": ["ac-1: concurrent takes grant one token"] }
+  ]
+}
+```
+
+- `id` is a safe identifier, unique among checks. `commandId` must reference a configured behavioral command, and every name in
+  `expectFailingTests` must be one of that command's `testNames`.
+- `file` is a repository-relative path with no `..`, leading `/`, backslash or `:`. `find` (1 to 4096 characters) must occur
+  **exactly once** in the committed file; zero occurrences make the check not applicable and more than one is a configuration error.
+  `replace` (at most 4096 characters) must differ from `find`.
+- The mutated bytes are committed as a dangling child of the candidate revision (fixed `bflow` identity, no ref, the candidate worktree,
+  its HEAD and its index are not modified). The owner command then runs on that commit in a temporary detached checkout that is removed afterwards.
+- Gate `host-mutation-<id>` is required, binds no acceptance criteria and reports `metadata.mutation` with `killed` and `mutatedRevision`.
+  The check passes only when every expected test fails. A failure that is not an assertion (`NodeTapTestCodeFailure`, infrastructure
+  error) is a gate error, not a kill. With `scope: "task"` an absent file or pattern is `passed` (not applicable); with
+  `scope: "workflow"` it fails validation so the owner updates the pattern.
+- Budget: each mutation run counts `command.timeoutMs + 90000` against the same 540 s aggregate as the behavioral commands. A configuration that exceeds it is rejected.
+- Like `behavioralCommands`, the configuration is pinned in the persisted host. Changing `mutationChecks` after the host exists is refused until the host is quiesced and reconciled.
+
 ## Ví dụ Node TAP
 
 Thay `/absolute/path/to/node` bằng executable Node đã cài. Giữ đúng đường dẫn test đã commit

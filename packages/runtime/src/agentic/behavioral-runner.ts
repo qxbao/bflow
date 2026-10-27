@@ -168,7 +168,11 @@ export function behavioralChecks(commands: readonly BehavioralCommand[]): Qualit
 /** Launcher failures (bubblewrap or sandbox-exec) are infrastructure errors, never test results. */
 const SANDBOX_ERROR = /^(?:bwrap|sandbox-exec):/;
 const execute = promisify(execFile);
-export async function verificationGit(cwd: string, args: string[]): Promise<string> {
+/**
+ * `input` feeds stdin (for `hash-object --stdin`); `indexFile` points GIT_INDEX_FILE at a private scratch index so
+ * callers can build trees without touching the repository's own index. Both are applied after the sanitized env.
+ */
+export async function verificationGit(cwd: string, args: string[], extra: { readonly input?: string; readonly indexFile?: string } = {}): Promise<string> {
   // The host passes the verified session root (or the new canonical detached checkout on recursive calls).
   // Git's global/system config is deliberately omitted, so trust only this exact root for this process.
   const canonicalCwd = await realpath(cwd);
@@ -196,7 +200,14 @@ export async function verificationGit(cwd: string, args: string[]): Promise<stri
     catch (error) { await verificationGit(cwd, ["worktree", "remove", "--force", checkout]).catch(() => undefined); throw error; }
     return created.stdout;
   }
-  return (await execute("git", [...fixed, ...args], options)).stdout;
+  const runOptions = extra.indexFile === undefined ? options : { ...options, env: { ...env, GIT_INDEX_FILE: extra.indexFile } };
+  if (extra.input === undefined) return (await execute("git", [...fixed, ...args], runOptions)).stdout;
+  return new Promise<string>((resolve, reject) => {
+    const child = execFile("git", [...fixed, ...args], runOptions, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
+    // A broken pipe means git exited early; its exit status is the authoritative failure.
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(extra.input);
+  });
 }
 export async function assertPinnedRevision(cwd: string, revision: string) {
   if (!/^[a-f0-9]{40}$/.test(revision) || (await verificationGit(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await verificationGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"])) throw new Error("Verification needs a clean worktree at the pinned revision");

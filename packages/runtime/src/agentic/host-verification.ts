@@ -15,6 +15,7 @@ import { unwrap } from "./outbox.js";
 import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
   type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
+import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
 import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { unconfiguredImpactIndex, type ImpactIndex } from "./impact-index.js";
 import { selectRegressionTests } from "./regression-selection.js";
@@ -104,7 +105,9 @@ export class HostVerification {
   constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly store: () => ArtifactStore,
     private readonly receipts?: HostVerificationReceipts, runners: TestRunnerSource | readonly BehavioralCommand[] = [],
     private readonly rtk?: RtkOutputIntegration,
-    private readonly regression: { scope: RegressionScope; index: ImpactIndex } = { scope: "mapped_only", index: unconfiguredImpactIndex }) {
+    private readonly regression: { scope: RegressionScope; index: ImpactIndex } = { scope: "mapped_only", index: unconfiguredImpactIndex },
+    /** Owner-configured mutation checks; each references one of `runners.owner` by command id. */
+    private readonly mutations: readonly MutationCheck[] = []) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
   /** Ownership of a task from its run definition; undefined for workflow-level checks. */
@@ -261,7 +264,7 @@ export class HostVerification {
   }
   /** Owner-configured checks always; automatic checks only when no owner file exists (static definitions, bound at plan time). */
   behavioralChecks(specification?: Specification, strategy?: TestStrategy, originalRevision?: string) {
-    const owner = behavioralChecks(this.runners.owner);
+    const owner = [...behavioralChecks(this.runners.owner), ...mutationCheckDefinitions(this.mutations, this.runners.owner)];
     if (!this.runners.automatic) return owner;
     const profiles = this.runners.profilesForRevision(originalRevision);
     const regression = this.regression.scope !== "mapped_only"
@@ -444,8 +447,59 @@ export class HostVerification {
       return bound;
     });
   }
+  /**
+   * Owner mutation check. The candidate is never modified: a mutated commit is built from its committed bytes, measured
+   * through the same owner command, and the named tests must fail. A surviving test is `non_discriminating_test`.
+   */
+  private mutationGate(check: MutationCheck): QualityGate {
+    const id = `host-mutation-${check.id}`;
+    return { id, evaluate: async raw => {
+      try {
+        const context = QualityGateContextSchema.parse(raw), config = record(context.definition.configuration), input = record(context.input);
+        const command = this.runners.owner.find(item => item.id === check.commandId);
+        if (context.definition.id !== id || !command || config.command !== command.command || config.method !== command.method ||
+            !Array.isArray(config.testNames) || config.testNames.length !== check.expectFailingTests.length ||
+            config.testNames.some((name, index) => name !== check.expectFailingTests[index])) throw new Error("Mutation check does not match owner configuration");
+        const cwd = textField(input.sourceWorktreePath), sourceRevision = textField(input.sourceRevision);
+        const verification = (summary: string, extra: Record<string, JsonValue> = {}) => ({ schemaVersion: 2, checkId: id, runId: context.runId, taskId: context.taskId,
+          attemptId: context.attemptId, sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
+          executorId: "bflow-host-mutation-check", role: "quality_gate", method: command.method, command: command.command, testNames: [...check.expectFailingTests],
+          criteria: [], summary, ...extra });
+        const mutation = await createMutatedRevision(cwd, sourceRevision, check);
+        if (mutation.status === "not_applicable") {
+          // Task scope: the protection is not in this candidate, so there is nothing to prove. Workflow scope must still find it.
+          if (input.scope === "workflow") throw new Error(`Mutation ${check.id} target not found in the integrated revision (${mutation.reason}); update .bflow/verification.json`);
+          const summary = `Mutation ${check.id} not applicable at ${sourceRevision} (${mutation.reason})`;
+          const result = QualityGateResultSchema.parse({ gateId: id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
+            status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+            metadata: { verification: verification(summary), mutation: json({ id: check.id, file: check.file, notApplicable: mutation.reason }) } });
+          await this.trustGate(result);
+          return { ok: true, value: result };
+        }
+        const measured = await measureMutation(command, cwd, mutation.revision);
+        const assessed = assessMutation(check, measured);
+        const summary = assessed.killed
+          ? `Mutation ${check.id} killed: ${assessed.killedCount} expected test(s) failed with the protection replaced`
+          : `Mutation ${check.id} survived: ${assessed.survivors.join(", ")} still pass with the protection replaced`;
+        const result = QualityGateResultSchema.parse({ gateId: id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
+          status: assessed.killed ? "passed" : "failed",
+          findings: assessed.killed ? [] : [QualityFindingSchema.parse({ code: "non_discriminating_test", severity: "error",
+            message: `Mutation ${check.id} survived: ${assessed.survivors.join(", ")} still pass with the protection replaced; the test does not prove the protection is needed`,
+            location: check.file })],
+          producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          metadata: { verification: verification(summary, { exitCode: measured.outcome.exitCode ?? null }),
+            mutation: json({ id: check.id, file: check.file, mutatedRevision: mutation.revision, killed: assessed.killed, expectFailingTests: check.expectFailingTests, survivors: assessed.survivors }),
+            hostExecution: json(measured) } });
+        await this.trustGate(result);
+        return { ok: true, value: result };
+      } catch (error) {
+        return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
+      }
+    } };
+  }
   behavioralGates(): QualityGate[] {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
+      ...this.mutations.map(check => this.mutationGate(check)),
       ...(this.runners.automatic ? [
         ...this.runners.availableProfiles.map(runner => this.automaticGate(runner)),
         ...(this.regression.scope !== "mapped_only"
