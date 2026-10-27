@@ -2868,10 +2868,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
   }
   private async bind(state: JournalState, core: CoreSession, out: Outbound, handle: AgentExecutionHandle): Promise<void> {
-    if (out.message.recipient.role === "developer" && this.ports.bindDeveloperExecutionScope) {
+    // A released writer or closed pane has nothing left to bind; the host caches an established link, so repeated flushes stay cheap.
+    const owner = state.runs.find(item => item.runId === handle.runId);
+    if (out.message.recipient.role === "developer" && this.ports.bindDeveloperExecutionScope && !(owner && this.writerSettled(owner, out))) {
       const binding = unwrap(await this.ports.panes.getRoleBinding(handle.target.paneId!));
-      if (!binding) throw new Error("Developer process-scope binding is unavailable");
-      await this.ports.bindDeveloperExecutionScope(handle, binding);
+      if (binding) await this.ports.bindDeveloperExecutionScope(handle, binding);
     }
     if (out.message.type !== "task.assignment" || isConflictResolverAssignment(out.message)) return; // a resolver is not a Core task
     const run = this.run(state, handle.runId);
@@ -4120,6 +4121,26 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const attempt = out && run.conflictResolution?.attempts.find(item => item.messageId === out.message.message_id);
     return attempt && run.conflictResolution ? { resolution: run.conflictResolution, attempt } : undefined;
   }
+  /** Metadata-only release of a proven-stopped allocation: pane and worktree are retained, dirty work is never discarded. */
+  private async releaseCancelledAllocation(allocationTaskId: string): Promise<void> {
+    const release = this.ports.panes.releaseCancelledDeveloper ?? this.ports.panes.releaseDeveloper;
+    unwrap(await release.call(this.ports.panes, { taskId: allocationTaskId, closePane: false, removeWorktree: false }));
+  }
+  /** The Developer writer behind this execution is released (task) or its resolver attempt is settled. */
+  private writerSettled(run: RunRecord, out: Outbound): boolean {
+    return !!(run.tasks.find(task => task.taskId === out.taskId)?.writerReleased || this.currentResolver(run, out)?.attempt.settled);
+  }
+  /**
+   * An unsettled delivery that could still wake this exact execution/allocation: same recipient role, and the same pane or
+   * task. Deliveries to other roles cannot reach it and are reported separately by finishCancellation.
+   */
+  private uncertainDeliveryTo(state: JournalState, run: RunRecord, role: string, target: { paneId?: string | undefined; taskId?: string | undefined }): boolean {
+    return !!run.nativeDeliveries?.some(item => item.message.recipient.role === role) ||
+      state.outbound.some(item => item.message.run_id === run.runId && item.message.recipient.role === role &&
+        ["sending", "unknown_delivery"].includes(item.status) &&
+        (!item.request || (target.taskId !== undefined && `${run.runId}-${item.taskId}` === target.taskId) ||
+          (target.paneId !== undefined && item.request?.target.paneId === target.paneId)));
+  }
   private failConflictResolver(state: JournalState, outbox: HerdrOutbox, run: RunRecord, attempt: ConflictResolverAttempt, reason: string): void {
     if (attempt.status !== "assigned") return;
     attempt.status = "failed"; attempt.reason = redactString(reason).slice(0, 1000);
@@ -4294,6 +4315,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   private async requestStop(state: JournalState, core: CoreSession, outbox: HerdrOutbox, save: () => Promise<void>, run: RunRecord, out: Outbound,
     reason: string): Promise<void> {
     if (!out.handle || out.cancelRequested || out.reviewReplacement) return;
+    let scopeError: string | undefined;
     if (out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope) {
       try {
         const binding = unwrap(await this.ports.panes.getRoleBinding(out.handle.target.paneId!));
@@ -4306,16 +4328,20 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           state.version = 6; out.cancelRequested = true; out.cancellationStopProof = proof; out.error = "Namespace stop confirmed; allocation cleanup pending";
           await save(); return;
         }
-      } catch (error) { out.cancelRequested = true; out.error = `Namespace stop requires reconciliation: ${String(error)}`; await save(); return; }
+      } catch (error) {
+        // No namespace proof: still deliver the at-most-once transport interrupt below, never mark cancelRequested without it.
+        scopeError = `Namespace stop requires reconciliation: ${String(error)}`;
+      }
     }
-    try { await outbox.renew(out); } catch (error) { out.error = `Cancellation lease unresolved: ${String(error)}`; await save(); return; }
+    try { await outbox.renew(out); }
+    catch (error) { out.error = `${scopeError ? scopeError + "; " : ""}Cancellation lease unresolved: ${String(error)}`; await save(); return; }
     out.cancelRequested = true; await save();
     const version = run.coreCreated ? (await core.snapshot(run.runId)).version : 0;
     const request = CancellationRequestSchema.parse({ schemaVersion: 1, cancellationId: `cancel-${digest(out.message.message_id)}`,
       runId: run.runId, taskId: out.taskId, requestedBy: "runtime", requestedAt: this.now(), expectedVersion: version,
       reason, idempotencyKey: `cancel:${out.message.message_id}` });
     const response = await this.ports.transport.cancel(out.handle, request);
-    out.error = response.ok ? "Interrupt requested; stop unconfirmed" : response.error.message;
+    out.error = `${scopeError ? scopeError + "; " : ""}${response.ok ? "Interrupt requested; stop unconfirmed" : response.error.message}`;
   }
   /**
    * Herdr `done` is turn completion and a timeout or error is no evidence either, so only an observed `idle` or `cancelled` from
@@ -4349,8 +4375,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   private async releaseCancelledExecution(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox,
     run: RunRecord, out: Outbound): Promise<boolean> {
-    const uncertain = !!run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === run.runId &&
-      item.message.recipient.role !== "conversation" && ["sending", "unknown_delivery"].includes(item.status));
+    const uncertain = this.uncertainDeliveryTo(state, run, out.message.recipient.role,
+      { paneId: out.handle!.target.paneId, taskId: `${run.runId}-${out.taskId}` });
     let justObserved = false;
     if (!out.cancellationStopProof) {
       const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
@@ -4372,13 +4398,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const task = run.tasks.find(item => item.taskId === out.taskId);
       const resolver = this.currentResolver(run, out);
       if (!task && !resolver) throw new Error("Cancelled Developer has no owned task or resolver attempt");
-      if (!(task?.writerReleased || resolver?.attempt.settled)) {
+      if (!this.writerSettled(run, out)) {
         const binding = unwrap(await this.ports.panes.getRoleBinding(out.handle!.target.paneId!));
         if (binding) {
           if (!ownsCancellationPane(out.handle!, binding)) throw new Error("Cancelled Developer binding was replaced; writer retained");
           // P13 rejects dirty worktrees. Never delete/overwrite work to make cancellation succeed.
-          const release = this.ports.panes.releaseCancelledDeveloper ?? this.ports.panes.releaseDeveloper;
-          unwrap(await release.call(this.ports.panes, { taskId: `${run.runId}-${out.taskId}`, closePane: false, removeWorktree: false }));
+          await this.releaseCancelledAllocation(`${run.runId}-${out.taskId}`);
         } else {
           const manifest = unwrap(await this.ports.panes.getManifest());
           if (!manifest || manifest.panes.some(pane => pane.role === "developer" &&
@@ -4401,25 +4426,28 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (executions.some(out => out.handle && ownsCancellationPane(out.handle, binding))) continue;
       const taskId = textField(binding.metadata!.taskId);
       try {
+        const uncertain = this.uncertainDeliveryTo(state, run, "developer", { paneId: binding.paneId, taskId });
         let receipt = run.cancelledAllocations?.find(item => item.binding.bindingId === binding.bindingId);
         if (!receipt) {
           const observed = await this.ports.stopUnboundDeveloperScope?.(binding);
-          if (!observed) throw new Error("No authenticated namespace stop proof for the unbound Developer");
+          if (!observed) {
+            // No supervised scope (legacy/unsupported host) or a sealed scope whose provider never started: nothing was
+            // dispatched, so this is not a stop blocker. Keep the allocation and its worktree; it is reported as retained.
+            if (uncertain) throw new Error("Uncertain delivery may still wake this unsupervised allocation");
+            continue;
+          }
           const proof = NamespaceExitProofSchema.parse(observed);
           receipt = { binding, proof }; state.version = 6;
           (run.cancelledAllocations ??= []).push(receipt); await save();
           receipt = run.cancelledAllocations!.find(item => item.binding.bindingId === binding.bindingId)!;
         }
-        if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId &&
-            out.message.recipient.role !== "conversation" && ["sending", "unknown_delivery"].includes(out.status)))
-          throw new Error("Uncertain delivery still owns this allocation");
+        if (uncertain) throw new Error("Uncertain delivery still owns this allocation");
         if (!receipt.released) {
           const old = receipt.binding;
           if (old.agentId !== binding.agentId || old.paneId !== binding.paneId || old.worktreePath !== binding.worktreePath ||
               digest(old.session) !== digest(binding.session) || old.metadata?.launchId !== binding.metadata?.launchId)
             throw new Error("Unbound Developer allocation was replaced");
-          const release = this.ports.panes.releaseCancelledDeveloper ?? this.ports.panes.releaseDeveloper;
-          unwrap(await release.call(this.ports.panes, { taskId, closePane: false, removeWorktree: false }));
+          await this.releaseCancelledAllocation(taskId);
           receipt.released = true;
           const task = run.tasks.find(item => `${run.runId}-${item.taskId}` === taskId);
           if (task) task.writerReleased = true;
@@ -4440,7 +4468,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       let waiting = false;
       for (const out of executions.filter(item => item.handle && (item.status === "accepted" ||
           item.status === "released" && item.cancelRequested && item.message.recipient.role === "developer" &&
-          !(run.tasks.find(task => task.taskId === item.taskId)?.writerReleased || this.currentResolver(run, item)?.attempt.settled)))) {
+          !this.writerSettled(run, item)))) {
         const attempts = out.cancelObservations ?? 0;
         try {
           if (!out.cancelRequested && !explicitRunId) await this.requestStop(state, core, outbox, save, run, out, run.error ?? "Run cancelled");
@@ -4489,14 +4517,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       unresolved.push(`${out.message.recipient.role} delivery is uncertain (${out.message.message_id}); no mutation was resent`);
     for (const out of executions) {
       if (out.status === "accepted" && out.handle) unresolved.push(out.cancellationStopProof?.source === "linux_pid_namespace"
-        ? `${run.tasks.find(task => task.taskId === out.taskId)?.writerReleased || this.currentResolver(run, out)?.attempt.settled
+        ? `${this.writerSettled(run, out)
           ? "Developer namespace stopped and writer allocation released; lease settlement remains pending"
           : "Developer namespace stopped; pane allocation quarantined pending delivery/lease reconciliation"} for ${out.taskId}: ${out.error ?? "cleanup pending"}`
         : `${out.error ? out.error + "; " : ""}${out.message.recipient.role} execution ${out.handle.executionId} for ${out.taskId} is not confirmed stopped after ${CANCEL_STOP_OBSERVATION_LIMIT} observations; lease ${out.lease?.leaseId ?? "none"} is retained`);
       else if (["sending", "unknown_delivery"].includes(out.status)) unresolved.push(`${out.message.recipient.role} delivery for ${out.taskId} is uncertain (${out.message.message_id})`);
     }
     for (const out of executions.filter(item => item.status === "released" && item.cancelRequested && item.message.recipient.role === "developer"))
-      if (!(run.tasks.find(task => task.taskId === out.taskId)?.writerReleased || this.currentResolver(run, out)?.attempt.settled)) unresolved.push(`Developer writer allocation for ${out.taskId} is not released`);
+      if (!this.writerSettled(run, out)) unresolved.push(`Developer writer allocation for ${out.taskId} is not released`);
     const released = executions.filter(out => out.cancelRequested && out.status === "released" && out.lease && out.cancellationLeaseDisposition === "released").length;
     const expired = executions.filter(out => out.cancellationLeaseDisposition === "expired").length;
     if (run.coreCreated && unresolved.length === 0) {

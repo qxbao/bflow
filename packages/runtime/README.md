@@ -1475,6 +1475,20 @@ process-containment acceptance. A launch-bound process-supervision/stop-proof
 integration requires a separate architecture/contract decision; this change does
 not introduce one or claim the current live session is recovered.
 
+**Developer process supervision availability:** on a Linux host whose Bubblewrap
+user namespaces (including AppArmor `apparmor_restrict_unprivileged_userns`) and
+Python pidfd support pass the readiness probe, new Developer launches run inside a
+launch-bound PID-namespace scope. A host without that backend, and every pane
+launched before it, keeps the previous unsupervised behavior: launches are not
+refused, dispatch is not gated on a scope, and cancellation uses the transport
+interrupt path. `platform_status` reports `developerProcessSupervisionUnavailable`
+with the probe failure. Only a binding that carries a `processScopeId` is held to
+scope proof. An undispatched allocation without a scope (or whose sealed scope
+never admitted its provider) is not a stop blocker; its worktree is reported as
+retained. Uncertain deliveries retain only the Developer allocation they could
+wake, not every Developer of the run. The connect-only reconcile call waits up to
+10 minutes; a client timeout does not mean the host stopped applying it.
+
 Private journal compatibility: v1–v5 are still read without manufacturing stop
 proofs. The first real correlated cancellation proof writes **v6**. V6 pins each
 proof to its exact cancelled execution and records lease disposition. Older

@@ -212,9 +212,14 @@ export class HerdrOutbox {
       });
       await this.save();
       const released = await this.ports.registry.releaseLease(out.leaseRelease);
-      if (out.cancellationStopProof && !released.ok && released.error.message !== "Lease expired or already released") unwrap(released);
-      if (!released.ok && !(released.error.code === "conflict" && Date.parse(out.lease.expiresAt) <= Date.parse(this.now()))) unwrap(released);
-      disposition = released.ok ? "released" : "expired";
+      // A retried write-ahead release replays its idempotency receipt (ok). For a proven-stopped execution only the Registry's
+      // own inactive-lease conflict is settled; a fence/version mismatch means another holder and stays visible regardless of TTL.
+      const ttlExpired = Date.parse(out.lease.expiresAt) <= Date.parse(this.now());
+      const inactive = !released.ok && released.error.code === "conflict" && (out.cancellationStopProof
+        ? released.error.message === "Lease expired or already released" : ttlExpired);
+      if (!released.ok && !inactive) unwrap(released);
+      // Inactive before its TTL means the grant was already released, not expired.
+      disposition = released.ok || !ttlExpired ? "released" : "expired";
       if (out.cancellationStopProof) out.cancellationLeaseDisposition = disposition;
       delete out.leaseRelease;
     }

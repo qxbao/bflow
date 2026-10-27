@@ -29,6 +29,9 @@ async function privateJSON(path: string): Promise<unknown> {
   try { const stat = await file.stat(); if (!stat.isFile() || stat.size > 65536 || (stat.mode & 0o077) || stat.uid !== process.getuid?.()) throw new Error("Unsafe process-scope record");
     return JSON.parse(await file.readFile("utf8")); } finally { await file.close(); }
 }
+async function optionalPrivateJSON(path: string): Promise<unknown> {
+  return privateJSON(path).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+}
 async function writeRecord(path: string, value: unknown): Promise<void> {
   const temporary = path + "." + randomUUID() + ".tmp";
   const file = await open(temporary, "wx", 0o600);
@@ -59,6 +62,7 @@ async function executable(name: string): Promise<string> {
 /** Future Linux Developer launches only. No recovery proof is manufactured for legacy native sessions. */
 export class DeveloperProcessScopes {
   private ready: Promise<{ python: string; bwrap: string }> | undefined;
+  private readonly linked = new Set<string>();
   private readonly directory: string;
   constructor(options: { directory: string }) { this.directory = resolve(options.directory); }
   assertReady(): Promise<{ python: string; bwrap: string }> {
@@ -95,27 +99,22 @@ export class DeveloperProcessScopes {
     await writeFilePrivate(join(root, "bin", name), `#!/bin/sh\nexec ${quote(tools.python)} ${quote(script)} launch ${quote(config)} "$@"\n`, 0o500);
     return HostLaunchMaterialSchema.parse({ ...material, env: { ...material.env, PATH: join(root, "bin") + delimiter + originalPath, BFLOW_PROCESS_SCOPE_ID: scopeId } });
   }
-  private async entries(binding: PaneBinding): Promise<{ root: string; config: z.infer<typeof ConfigSchema> }[]> {
-    const scope = z.string().uuid().safeParse(binding.metadata?.processScopeId);
-    if (!scope.success) return [];
-    const entries = [scope.data];
-    const found = [];
-    for (const id of entries) {
-      if (!z.string().uuid().safeParse(id).success) throw new Error("Malformed process-scope identity");
-      const root = join(this.directory, id);
-      const raw = await privateJSON(join(root, "config.json")).catch(async error => {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        try { await lstat(join(root, "started")); throw new Error("Started process scope lost its configuration"); }
-        catch (missing) { if ((missing as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw missing; }
-      });
-      if (raw === undefined) continue;
-      const config = ConfigSchema.parse(raw);
-      if (config.scopeId !== id || hash(await readFile(join(root, "supervisor.py"))) !== config.supervisorDigest) throw new Error("Process-scope bootstrap integrity mismatch");
-      if (config.launchId === binding.metadata?.launchId && config.launchFingerprint === binding.metadata?.launchFingerprint &&
-          config.runId === binding.metadata?.runId && config.taskId === binding.metadata?.taskId)
-        found.push({ root, config });
+  /** Bindings launched under a scope carry its id; legacy/unsupervised panes have none and keep pre-scope semantics. */
+  private static supervised(binding: PaneBinding): boolean { return binding.metadata?.processScopeId !== undefined; }
+  private async scope(binding: PaneBinding): Promise<{ root: string; config: z.infer<typeof ConfigSchema> } | undefined> {
+    if (!DeveloperProcessScopes.supervised(binding)) return undefined;
+    const id = z.string().uuid().safeParse(binding.metadata?.processScopeId);
+    if (!id.success) throw new Error("Malformed process-scope identity");
+    const root = join(this.directory, id.data);
+    const raw = await optionalPrivateJSON(join(root, "config.json"));
+    if (raw === undefined) {
+      try { await lstat(join(root, "started")); throw new Error("Started process scope lost its configuration"); }
+      catch (missing) { if ((missing as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw missing; }
     }
-    return found;
+    const config = ConfigSchema.parse(raw);
+    if (config.scopeId !== id.data || hash(await readFile(join(root, "supervisor.py"))) !== config.supervisorDigest) throw new Error("Process-scope bootstrap integrity mismatch");
+    return config.launchId === binding.metadata?.launchId && config.launchFingerprint === binding.metadata?.launchFingerprint &&
+      config.runId === binding.metadata?.runId && config.taskId === binding.metadata?.taskId ? { root, config } : undefined;
   }
   private async signed<T>(root: string, name: string, config: z.infer<typeof ConfigSchema>, schema: z.ZodType<T>): Promise<T> {
     const value = z.object({ payload: z.unknown(), signature: sha }).strict().parse(await privateJSON(join(root, name)));
@@ -125,17 +124,22 @@ export class DeveloperProcessScopes {
   }
   async assertBindingReady(bindingInput: PaneBinding): Promise<void> {
     const binding = PaneBindingSchema.parse(bindingInput);
-    const entries = await this.entries(binding);
-    for (const { root, config } of entries.reverse()) {
-      let witness; try { witness = await this.signed(root, "witness.json", config, WitnessSchema); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
-      if (witness.scopeId !== config.scopeId || witness.launchId !== config.launchId || witness.launchFingerprint !== config.launchFingerprint) throw new Error("Foreign namespace launch witness");
-      const native = NativeSchema.parse({ witnessDigest: hash(canonicalReceiptJson(witness)), paneId: binding.paneId, agentId: binding.agentId,
-        ...(binding.terminalId ? { terminalId: binding.terminalId } : {}), session: binding.session });
-      const saved = await privateJSON(join(root, "native.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (saved !== undefined && canonicalReceiptJson(NativeSchema.parse(saved)) !== canonicalReceiptJson(native)) continue;
-      await execute(config.python, [join(root, "supervisor.py"), "inspect", join(root, "config.json")], { timeout: 5000, maxBuffer: 8192 });
-      if (saved === undefined) await writeImmutable(join(root, "native.json"), native);
-      return;
+    if (!DeveloperProcessScopes.supervised(binding)) return;
+    const entry = await this.scope(binding);
+    if (entry) {
+      const { root, config } = entry;
+      let witness; try { witness = await this.signed(root, "witness.json", config, WitnessSchema); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (witness) {
+        if (witness.scopeId !== config.scopeId || witness.launchId !== config.launchId || witness.launchFingerprint !== config.launchFingerprint) throw new Error("Foreign namespace launch witness");
+        const native = NativeSchema.parse({ witnessDigest: hash(canonicalReceiptJson(witness)), paneId: binding.paneId, agentId: binding.agentId,
+          ...(binding.terminalId ? { terminalId: binding.terminalId } : {}), session: binding.session });
+        const saved = await optionalPrivateJSON(join(root, "native.json"));
+        if (saved === undefined || canonicalReceiptJson(NativeSchema.parse(saved)) === canonicalReceiptJson(native)) {
+          await execute(config.python, [join(root, "supervisor.py"), "inspect", join(root, "config.json")], { timeout: 5000, maxBuffer: 8192 });
+          if (saved === undefined) await writeImmutable(join(root, "native.json"), native);
+          return;
+        }
+      }
     }
     throw new Error("Developer has no started, authenticated process-scope witness; reconcile launch readiness before dispatch");
   }
@@ -144,29 +148,27 @@ export class DeveloperProcessScopes {
     if (request.role !== "developer" || binding.metadata?.runId !== request.runId || request.target.paneId !== binding.paneId || request.target.agentId !== binding.agentId ||
         request.target.worktreePath !== binding.worktreePath || binding.metadata?.taskId !== `${request.runId}-${request.taskId}` ||
         canonicalReceiptJson(request.target.session ?? null) !== canonicalReceiptJson(binding.session ?? null)) throw new Error("Foreign process-scope dispatch");
+    if (!DeveloperProcessScopes.supervised(binding)) return;
     await this.assertBindingReady(binding);
-    for (const { root } of (await this.entries(binding)).reverse()) {
-      const raw = await privateJSON(join(root, "native.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (raw === undefined) continue;
-      const native = NativeSchema.parse(raw);
-      if (canonicalReceiptJson(native.session) !== canonicalReceiptJson(binding.session)) continue;
-      const pin = RequestPinSchema.parse({ requestId: request.requestId, runId: request.runId, taskId: request.taskId, attemptId: request.attemptId,
-        idempotencyKey: request.idempotency.key, target: request.target, nativeDigest: hash(canonicalReceiptJson(native)) });
-      const previous = await privateJSON(join(root, "request.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (previous !== undefined && canonicalReceiptJson(RequestPinSchema.parse(previous)) !== canonicalReceiptJson(pin)) throw new Error("Process scope already owns another dispatch");
-      if (previous === undefined) await writeImmutable(join(root, "request.json"), pin);
-      return;
-    }
-    throw new Error("Process scope has no authenticated native binding");
+    const entry = await this.scope(binding);
+    const raw = entry && await optionalPrivateJSON(join(entry.root, "native.json"));
+    if (!entry || raw === undefined) throw new Error("Process scope has no authenticated native binding");
+    const native = NativeSchema.parse(raw);
+    if (canonicalReceiptJson(native.session) !== canonicalReceiptJson(binding.session)) throw new Error("Process scope has no authenticated native binding");
+    const pin = RequestPinSchema.parse({ requestId: request.requestId, runId: request.runId, taskId: request.taskId, attemptId: request.attemptId,
+      idempotencyKey: request.idempotency.key, target: request.target, nativeDigest: hash(canonicalReceiptJson(native)) });
+    const previous = await optionalPrivateJSON(join(entry.root, "request.json"));
+    if (previous !== undefined && canonicalReceiptJson(RequestPinSchema.parse(previous)) !== canonicalReceiptJson(pin)) throw new Error("Process scope already owns another dispatch");
+    if (previous === undefined) await writeImmutable(join(entry.root, "request.json"), pin);
   }
   private async linkExecution(root: string, handle: AgentExecutionHandle): Promise<boolean> {
-    const raw = await privateJSON(join(root, "request.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+    const raw = await optionalPrivateJSON(join(root, "request.json"));
     if (raw === undefined) return false;
     const pin = RequestPinSchema.parse(raw);
     if (pin.requestId !== handle.requestId || pin.runId !== handle.runId || pin.taskId !== handle.taskId || pin.attemptId !== handle.attemptId ||
         pin.idempotencyKey !== handle.idempotencyKey || canonicalReceiptJson(pin.target) !== canonicalReceiptJson(handle.target)) return false;
     const next = ExecutionSchema.parse({ nativeDigest: pin.nativeDigest, handle });
-    const old = await privateJSON(join(root, "execution.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+    const old = await optionalPrivateJSON(join(root, "execution.json"));
     if (old !== undefined && canonicalReceiptJson(ExecutionSchema.parse(old)) !== canonicalReceiptJson(next)) return false;
     if (old === undefined) await writeImmutable(join(root, "execution.json"), next);
     return true;
@@ -174,77 +176,77 @@ export class DeveloperProcessScopes {
   async bindExecution(handleInput: AgentExecutionHandle, bindingInput: PaneBinding): Promise<void> {
     const handle = AgentExecutionHandleSchema.parse(handleInput), binding = PaneBindingSchema.parse(bindingInput);
     if (!ownsCancellationPane(handle, binding)) throw new Error("Foreign Developer process-scope binding");
-    for (const { root } of await this.entries(binding)) if (await this.linkExecution(root, handle)) return;
-    throw new Error("Developer process scope lacks a started witness/pinned dispatch");
+    if (!DeveloperProcessScopes.supervised(binding)) return;
+    // execution.json is immutable once linked: later outbox passes need not re-read and re-hash the scope.
+    const key = `${String(binding.metadata?.processScopeId)}:${canonicalReceiptJson(JsonValueSchema.parse(JSON.parse(JSON.stringify(handle))))}`;
+    if (this.linked.has(key)) return;
+    const entry = await this.scope(binding);
+    if (!entry || !(await this.linkExecution(entry.root, handle))) throw new Error("Developer process scope lacks a started witness/pinned dispatch");
+    this.linked.add(key);
   }
   async stop(handleInput: AgentExecutionHandle, bindingInput: PaneBinding): Promise<CancellationStopProof | undefined> {
     const handle = AgentExecutionHandleSchema.parse(handleInput), binding = PaneBindingSchema.parse(bindingInput);
     if (!ownsCancellationPane(handle, binding)) return undefined;
-    for (const { root, config } of await this.entries(binding)) {
-      const raw = await privateJSON(join(root, "execution.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (raw === undefined && !(await this.linkExecution(root, handle))) continue;
-      const execution = ExecutionSchema.parse(raw ?? await privateJSON(join(root, "execution.json")));
-      if (canonicalReceiptJson(execution.handle) !== canonicalReceiptJson(handle)) continue;
-      const native = NativeSchema.parse(await privateJSON(join(root, "native.json")));
-      const witness = await this.signed(root, "witness.json", config, WitnessSchema);
-      if (execution.nativeDigest !== hash(canonicalReceiptJson(native)) || native.witnessDigest !== hash(canonicalReceiptJson(witness))) throw new Error("Process-scope binding integrity mismatch");
-      const exit = await this.exitScope(root, config, witness);
-      const previous = await privateJSON(join(root, "execution-stop-proof.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (previous !== undefined) {
-        const proof = CancellationStopProofSchema.parse(previous);
-        if (proof.source !== "linux_pid_namespace" || canonicalReceiptJson(proof.handle) !== canonicalReceiptJson(handle) ||
-            proof.scopeId !== exit.scopeId || proof.receiptDigest !== exit.receiptDigest || proof.bootId !== exit.bootId ||
-            proof.initPid !== exit.initPid || proof.initStartTime !== exit.initStartTime || proof.namespace !== exit.namespace)
-          throw new Error("Foreign execution stop proof");
-        return proof;
-      }
-      const proof = CancellationStopProofSchema.parse({ ...exit, handle, observedAt: new Date().toISOString() });
-      await writeImmutable(join(root, "execution-stop-proof.json"), proof); return proof;
+    const entry = await this.scope(binding);
+    if (!entry) return undefined;
+    const { root, config } = entry;
+    const raw = await optionalPrivateJSON(join(root, "execution.json"));
+    if (raw === undefined && !(await this.linkExecution(root, handle))) return undefined;
+    const execution = ExecutionSchema.parse(raw ?? await privateJSON(join(root, "execution.json")));
+    if (canonicalReceiptJson(execution.handle) !== canonicalReceiptJson(handle)) return undefined;
+    const native = NativeSchema.parse(await privateJSON(join(root, "native.json")));
+    const witness = await this.signed(root, "witness.json", config, WitnessSchema);
+    if (execution.nativeDigest !== hash(canonicalReceiptJson(native)) || native.witnessDigest !== hash(canonicalReceiptJson(witness))) throw new Error("Process-scope binding integrity mismatch");
+    const exit = await this.exitScope(root, config, witness);
+    const previous = await optionalPrivateJSON(join(root, "execution-stop-proof.json"));
+    if (previous !== undefined) {
+      const proof = CancellationStopProofSchema.parse(previous);
+      if (proof.source !== "linux_pid_namespace" || canonicalReceiptJson(proof.handle) !== canonicalReceiptJson(handle) ||
+          proof.scopeId !== exit.scopeId || proof.receiptDigest !== exit.receiptDigest || proof.bootId !== exit.bootId ||
+          proof.initPid !== exit.initPid || proof.initStartTime !== exit.initStartTime || proof.namespace !== exit.namespace)
+        throw new Error("Foreign execution stop proof");
+      return proof;
     }
-    return undefined;
+    const proof = CancellationStopProofSchema.parse({ ...exit, handle, observedAt: new Date().toISOString() });
+    await writeImmutable(join(root, "execution-stop-proof.json"), proof); return proof;
   }
+  /**
+   * Seals admission, then stops the witnessed namespace. Undefined means no scope, a linked execution (use stop), or a sealed
+   * scope without a witness: the supervisor writes its witness before checking the seal and never admits the provider after it,
+   * so a witness absent after the durable seal proves the provider never ran. No polling under the journal lock.
+   */
   async stopUnbound(bindingInput: PaneBinding): Promise<NamespaceExitProof | undefined> {
     const binding = PaneBindingSchema.parse(bindingInput);
-    for (const { root, config } of await this.entries(binding)) {
-      const execution = await privateJSON(join(root, "execution.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (execution !== undefined) continue;
-      await this.seal(root, config);
-      let witness;
-      const deadline = Date.now() + 1500;
-      while (!witness) {
-        try { witness = await this.signed(root, "witness.json", config, WitnessSchema); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          if (Date.now() >= deadline) throw new Error("Prepared scope admission is sealed; bootstrap stop lacks a namespace witness and requires reconciliation");
-          await new Promise(resolveWait => setTimeout(resolveWait, 25));
-        }
-      }
-      return this.exitScope(root, config, witness);
-    }
-    return undefined;
+    const entry = await this.scope(binding);
+    if (!entry || await optionalPrivateJSON(join(entry.root, "execution.json")) !== undefined) return undefined;
+    const { root, config } = entry;
+    await this.seal(root, config);
+    let witness;
+    try { witness = await this.signed(root, "witness.json", config, WitnessSchema); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    return this.exitScope(root, config, witness);
   }
   async hasStoppedProof(bindingInput: PaneBinding): Promise<boolean> {
     const binding = PaneBindingSchema.parse(bindingInput);
-    for (const { root, config } of await this.entries(binding)) {
-      const raw = await privateJSON(join(root, "namespace-proof.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (raw === undefined) continue;
-      const proof = NamespaceExitProofSchema.parse(raw), witness = await this.signed(root, "witness.json", config, WitnessSchema),
-        closed = await this.signed(root, "closed.json", config, ClosedSchema);
-      const sealed = await this.signed(root, "sealed.json", config, z.object({ scopeId: z.string().uuid() }).strict());
-      if (sealed.scopeId !== config.scopeId || proof.scopeId !== config.scopeId || witness.scopeId !== config.scopeId ||
-          witness.launchId !== config.launchId || witness.launchFingerprint !== config.launchFingerprint || closed.scopeId !== config.scopeId ||
-          proof.bootId !== witness.bootId || proof.initPid !== witness.initPid || proof.initStartTime !== witness.initStartTime ||
-          proof.namespace !== witness.namespace || closed.witnessDigest !== hash(canonicalReceiptJson(witness)) ||
-          proof.receiptDigest !== hash(canonicalReceiptJson(closed))) throw new Error("Stopped allocation proof does not match its exact namespace");
-      const native = await privateJSON(join(root, "native.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-      if (native !== undefined) {
-        const pin = NativeSchema.parse(native);
-        if (pin.witnessDigest !== hash(canonicalReceiptJson(witness)) || pin.paneId !== binding.paneId || pin.agentId !== binding.agentId || pin.terminalId !== binding.terminalId ||
-            canonicalReceiptJson(pin.session) !== canonicalReceiptJson(binding.session ?? null)) return false;
-      }
-      return true;
+    const entry = await this.scope(binding);
+    const raw = entry && await optionalPrivateJSON(join(entry.root, "namespace-proof.json"));
+    if (!entry || raw === undefined) return false;
+    const { root, config } = entry;
+    const proof = NamespaceExitProofSchema.parse(raw), witness = await this.signed(root, "witness.json", config, WitnessSchema),
+      closed = await this.signed(root, "closed.json", config, ClosedSchema);
+    const sealed = await this.signed(root, "sealed.json", config, z.object({ scopeId: z.string().uuid() }).strict());
+    if (sealed.scopeId !== config.scopeId || proof.scopeId !== config.scopeId || witness.scopeId !== config.scopeId ||
+        witness.launchId !== config.launchId || witness.launchFingerprint !== config.launchFingerprint || closed.scopeId !== config.scopeId ||
+        proof.bootId !== witness.bootId || proof.initPid !== witness.initPid || proof.initStartTime !== witness.initStartTime ||
+        proof.namespace !== witness.namespace || closed.witnessDigest !== hash(canonicalReceiptJson(witness)) ||
+        proof.receiptDigest !== hash(canonicalReceiptJson(closed))) throw new Error("Stopped allocation proof does not match its exact namespace");
+    const native = await optionalPrivateJSON(join(root, "native.json"));
+    if (native !== undefined) {
+      const pin = NativeSchema.parse(native);
+      if (pin.witnessDigest !== hash(canonicalReceiptJson(witness)) || pin.paneId !== binding.paneId || pin.agentId !== binding.agentId || pin.terminalId !== binding.terminalId ||
+          canonicalReceiptJson(pin.session) !== canonicalReceiptJson(binding.session ?? null)) return false;
     }
-    return false;
+    return true;
   }
   private async seal(root: string, config: z.infer<typeof ConfigSchema>): Promise<void> {
     const payload = { scopeId: config.scopeId }, signature = createHmac("sha256", Buffer.from(config.secret, "hex")).update(canonicalReceiptJson(payload)).digest("hex");
@@ -256,7 +258,7 @@ export class DeveloperProcessScopes {
     for (const id of ids) {
       if (!z.string().uuid().safeParse(id).success) throw new Error("Malformed process-scope identity");
       const root = join(this.directory, id);
-      const raw = await privateJSON(join(root, "config.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+      const raw = await optionalPrivateJSON(join(root, "config.json"));
       if (raw === undefined) continue;
       const config = ConfigSchema.parse(raw);
       if (config.taskId === taskId && config.launchId === launchId) await this.seal(root, config);
@@ -270,7 +272,7 @@ export class DeveloperProcessScopes {
     await execute(config.python, [join(root, "supervisor.py"), "stop", join(root, "config.json")], { timeout: 10000, maxBuffer: 8192 });
     const closed = await this.signed(root, "closed.json", config, ClosedSchema);
     if (closed.scopeId !== config.scopeId || closed.witnessDigest !== witnessDigest) throw new Error("Foreign namespace exit receipt");
-    const cached = await privateJSON(join(root, "namespace-proof.json")).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+    const cached = await optionalPrivateJSON(join(root, "namespace-proof.json"));
     if (cached !== undefined) {
       const proof = NamespaceExitProofSchema.parse(cached);
       if (proof.scopeId !== config.scopeId || proof.bootId !== witness.bootId || proof.initPid !== witness.initPid ||

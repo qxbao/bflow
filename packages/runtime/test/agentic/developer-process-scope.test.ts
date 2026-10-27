@@ -120,7 +120,8 @@ finally:
     await once(child, "exit");
     expect(child.exitCode).not.toBe(0);
     expect(await readFile(marker, "utf8").catch(() => undefined)).toBeUndefined();
-    expect(String((await stopping).error)).toContain("admission is sealed");
+    // Sealed before any witness: the provider provably never ran, so there is no stop to prove and nothing to wait for.
+    expect(await stopping).toEqual({ value: undefined, error: undefined });
   });
   it("does not authorize provider execution when Bubblewrap's block pipe reaches EOF without an acknowledgement", async () => {
     const f = await fixture("require('node:fs').writeFileSync(process.env.MARKER,'started')");
@@ -188,5 +189,28 @@ finally:
     const f = await fixture("console.log('unused')");
     await expect(f.manager.bindExecution(f.handle, f.binding)).rejects.toThrow(/started|witness/i);
     expect(await f.manager.stop(f.handle, f.binding)).toBeUndefined();
+  });
+});
+describe("legacy Developer bindings without a process scope", () => {
+  it("keep pre-scope dispatch and stop semantics instead of failing closed or manufacturing proof", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-process-scope-legacy-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const manager = new DeveloperProcessScopes({ directory: join(root, "scopes") });
+    const binding = PaneBindingSchema.parse({ schemaVersion: 2, bindingId: "binding-dev", sessionId: "session-1", role: "developer", paneGroup: "developer_worktree",
+      agentId: "dev-1", workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p2", terminalId: "terminal-1", provider: "herdr", agentKind: "codex", cwd: root,
+      worktreePath: root, session: { source: "herdr:codex", kind: "id", value: "native-1" }, isolationMode: "dedicated_pane", readOnlyWorkspace: false,
+      transportState: "idle", boundAt: new Date().toISOString(), metadata: { runId: "run-1", taskId: "run-1-task-1", launchId: "launch-1", launchFingerprint: "a".repeat(64) } });
+    const handle = AgentExecutionHandleSchema.parse({ executionId: "exec-1", requestId: "req-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-1",
+      idempotencyKey: "req-1", target: { transport: "herdr", agentId: binding.agentId, workspaceId: binding.workspaceId, tabId: binding.tabId,
+        paneId: binding.paneId, terminalId: binding.terminalId, worktreePath: root, session: binding.session },
+      correlation: { token: "req-1", provenance: "orchestrator", verified: false }, acceptedAt: new Date().toISOString() });
+    await expect(manager.assertBindingReady(binding)).resolves.toBeUndefined();
+    await expect(manager.bindExecution(handle, binding)).resolves.toBeUndefined();
+    expect(await manager.stop(handle, binding)).toBeUndefined();
+    expect(await manager.stopUnbound(binding)).toBeUndefined();
+    expect(await manager.hasStoppedProof(binding)).toBe(false);
+    // A binding that claims a scope still fails closed when that scope is absent.
+    const claimed = PaneBindingSchema.parse({ ...binding, metadata: { ...binding.metadata, processScopeId: "00000000-0000-4000-8000-000000000000" } });
+    await expect(manager.assertBindingReady(claimed)).rejects.toThrow("no started, authenticated process-scope witness");
   });
 });

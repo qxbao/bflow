@@ -2627,9 +2627,11 @@ export class RolePaneManager {
       const retainsWorktreeData = request.removeWorktree !== true;
       const ignoredOnly = inspected.value.dirtyFiles.length > 0 && inspected.value.ignoredFiles !== undefined &&
         inspected.value.dirtyFiles.every(path => inspected.value.ignoredFiles!.includes(path));
-      const stoppedRetained = retainsWorktreeData && request.closePane !== true && this.#config.reuseIdleDeveloperPanes !== false &&
+      // The host stop proof is consulted only when it is what permits the release: a clean worktree never depends on it.
+      const needsStopProof = !inspected.value.isClean && !(retainsWorktreeData && ignoredOnly);
+      const stoppedRetained = needsStopProof && retainsWorktreeData && request.closePane !== true && this.#config.reuseIdleDeveloperPanes !== false &&
         await this.#authorizeStoppedRetainedRelease?.(PaneBindingSchema.parse(binding)) === true;
-      if (!inspected.value.isClean && !(retainsWorktreeData && ignoredOnly) && !stoppedRetained) {
+      if (needsStopProof && !stoppedRetained) {
         return conflictError(
           `Cannot release, close, or remove developer worktree containing uncommitted changes: ${inspected.value.dirtyFiles.join(", ")}`
         );

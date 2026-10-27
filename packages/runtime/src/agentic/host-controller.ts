@@ -322,6 +322,7 @@ export async function readExistingAgenticTelemetry(options: { repositoryPath: st
   }
 }
 
+const RECONCILE_CANCELLATION_TIMEOUT_MS = 600_000;
 /** Explicit operator mutation, connect-only. Never bootstraps a daemon, changes platform configuration or resumes work. */
 export async function reconcileExistingAgenticCancellation(options: { repositoryPath: string; sessionId: string; runId: string }): Promise<import("./cancellation-stop.js").CancellationReconciliationReport> {
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Invalid host session ID");
@@ -334,7 +335,8 @@ export async function reconcileExistingAgenticCancellation(options: { repository
     throw new Error("Foreign host configuration");
   const { CancellationReconciliationReportSchema } = await import("./cancellation-stop.js");
   const report = CancellationReconciliationReportSchema.parse(await callHost(configuration.socketPath, configuration.token,
-    "reconcile_cancellation", { runId: textField(options.runId) }, 60_000));
+    // Bounded per-execution stops run under the journal lock; a client timeout does not mean the host stopped applying them.
+    "reconcile_cancellation", { runId: textField(options.runId) }, RECONCILE_CANCELLATION_TIMEOUT_MS));
   if (report.runId !== options.runId) throw new Error("Foreign cancellation report");
   return report;
 }

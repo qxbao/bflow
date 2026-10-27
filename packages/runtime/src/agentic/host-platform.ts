@@ -104,7 +104,9 @@ export const HostPlatformStatusSchema = z.object({
   /** In-process MCP tool reachability per prepared role with Gateway registrations. Carries no tokens. */
   toolReachability: z.array(RoleToolReachabilitySchema).optional(),
   /** Per permanent non-Developer role: which proof path (SessionStart hook or MCP bootstrap) established startup. */
-  startupProof: z.array(StartupProofSchema).optional()
+  startupProof: z.array(StartupProofSchema).optional(),
+  /** Why the latest Developer launch ran without launch-bound process supervision (legacy stop semantics apply). */
+  developerProcessSupervisionUnavailable: z.string().optional()
 }).strict();
 export type HostPlatformStatus = z.infer<typeof HostPlatformStatusSchema>;
 
@@ -469,8 +471,8 @@ export class HostPlatformSession {
    */
   async allocateDeveloper(taskId: string, worktreePath: string, runId?: string): Promise<DeveloperLaunchMaterial> {
     if (this.identity === undefined) throw new Error("Platform has no prepared generation; run bflow up again");
-    await this.options.processScopes?.assertReady();
-    if (this.options.processScopes && !runId) throw new Error("A supervised Developer launch requires its exact run identity");
+    const processScopes = await this.availableProcessScopes();
+    if (processScopes && !runId) throw new Error("A supervised Developer launch requires its exact run identity");
     const template = this.options.platform.roles.find(option => option.role === "developer");
     if (template === undefined) throw new Error("Platform configuration has no developer template for dynamic Developer launches");
     // Re-allocation for the same task (e.g. after restart) must not orphan the previous launch and its Gateway registration.
@@ -488,8 +490,8 @@ export class HostPlatformSession {
       throw error;
     }
     let material = launchMaterial(result.value);
-    if (this.options.processScopes) {
-      try { material = await this.options.processScopes.prepare({ runId: runId!, taskId, material, executable: result.value.profile.executable,
+    if (processScopes) {
+      try { material = await processScopes.prepare({ runId: runId!, taskId, material, executable: result.value.profile.executable,
         executableDigest: result.value.profile.executableDigest, configFiles: result.value.profile.configFiles }); }
       catch (error) {
         await this.options.service.releaseLaunch(launchId);
@@ -504,6 +506,19 @@ export class HostPlatformSession {
       references: result.value.skills.rendered.references.map(reference => ({ ...reference })) });
     this.rememberNativeAgyHome(result.value);
     return material;
+  }
+  /**
+   * The supervision backend when this host can run it. A host without it (no Bubblewrap user namespaces, AppArmor
+   * restriction, no Python pidfd) launches Developers unsupervised exactly as before: their bindings carry no process
+   * scope, dispatch is not gated on one, and cancellation keeps the transport-interrupt path. Never a silent proof.
+   */
+  /** Reason the last Developer launch ran without process supervision; undefined when supervised or never attempted. */
+  private processSupervisionUnavailable: string | undefined;
+  private async availableProcessScopes(): Promise<DeveloperProcessScopes | undefined> {
+    const scopes = this.options.processScopes;
+    if (!scopes) return undefined;
+    try { await scopes.assertReady(); this.processSupervisionUnavailable = undefined; return scopes; }
+    catch (error) { this.processSupervisionUnavailable = String(error); return undefined; }
   }
   async assertDeveloperProcessReady(binding: PaneBinding): Promise<void> { await this.options.processScopes?.assertBindingReady(binding); }
   async pinDeveloperDispatch(request: AgentRequest, binding: PaneBinding): Promise<void> { await this.options.processScopes?.pinDispatch(request, binding); }
@@ -687,7 +702,8 @@ export class HostPlatformSession {
       gatewayDiagnostic: this.options.gatewayDiagnostic ?? null,
       ...(this.gatewayCheck !== undefined ? { gateway: this.gatewayCheck } : {}),
       ...(this.restartRecovery !== undefined
-        ? { restartRecovery: { recoveredAt: this.restartRecovery.recoveredAt, releasedLaunchIds: [...this.restartRecovery.releasedLaunchIds] } } : {})
+        ? { restartRecovery: { recoveredAt: this.restartRecovery.recoveredAt, releasedLaunchIds: [...this.restartRecovery.releasedLaunchIds] } } : {}),
+      ...(this.processSupervisionUnavailable !== undefined ? { developerProcessSupervisionUnavailable: this.processSupervisionUnavailable } : {})
     };
   }
 

@@ -754,6 +754,51 @@ describe("cancellation allocation ownership", () => {
   });
 });
 
+describe("cancellation without a supervised process scope", () => {
+  it("does not block Core cancellation on an undispatched legacy Developer allocation", async () => {
+    const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.definition);
+    await f.panes.allocateDeveloper({ runId: "run-1", taskId: "run-1-implement", worktreePath: f.repository, agentName: "legacy-dev" });
+    let probed = 0;
+    Object.assign(f.ports, { stopUnboundDeveloperScope: async () => { probed++; return undefined; } });
+    await f.runtime.cancel("run-1", "Cancel before task dispatch"); await f.runtime.tick();
+    expect(probed).toBeGreaterThan(0);
+    const report = await f.runtime.reconcileCancellation("run-1");
+    expect(report).toMatchObject({ fullyStopped: true, blockers: [] });
+    expect(report.retainedWorktrees).toContain(f.repository);
+    expect((await f.state()).runs[0].cancelledAllocations).toBeUndefined();
+    expect(f.panes.releases).toHaveLength(0);
+  });
+  it("still sends the transport interrupt when the scoped stop fails", async () => {
+    const f = await fixture(); const developer = await f.dispatch();
+    Object.assign(f.ports, { stopDeveloperExecutionScope: async () => { throw new Error("scope record mode 0644"); } });
+    await f.runtime.cancel("run-1", "Cancel with a broken scope"); await f.runtime.tick();
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+    const out = (await f.state()).outbound.find((item: any) => item.message.message_id === developer.message.message_id);
+    expect(out.cancelRequested).toBe(true);
+    expect(out.error).toContain("scope record mode 0644");
+  });
+  it("releases a proven-stopped Developer although another role's delivery is still uncertain", async () => {
+    const f = await fixture(); const developer = await f.dispatch();
+    await f.runtime.cancel("run-1", "Cancel with a lost Coordinator ACK");
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.outbound.push({ message: RoleMessageSchema.parse({ schema_version: 2, message_id: "lost-coordinator-ack", correlation_id: "correlation-1",
+        run_id: "run-1", sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "task.status", payload: { status: "working" },
+        artifact_references: [], idempotency_key: "lost-coordinator-ack" }), status: "unknown_delivery", selector: "coordinator",
+        taskId: "coordination", attemptId: "lost-coordinator-ack", capabilities: [],
+        request: { ...developer.request, requestId: "lost-coordinator-ack", role: "coordinator", target: { ...developer.request.target, paneId: "coordinator-pane" } } });
+      await save();
+    });
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    const report = await f.runtime.reconcileCancellation("run-1");
+    expect(f.panes.releases).toEqual([{ taskId: "run-1-implement", closePane: false, removeWorktree: false }]);
+    expect((await f.state()).outbound.find((item: any) => item.message.message_id === developer.message.message_id).status).toBe("released");
+    // The Coordinator delivery itself remains an honest blocker.
+    expect(report.fullyStopped).toBe(false);
+    expect(report.blockers.join(" ")).toContain("coordinator delivery is uncertain");
+  });
+});
+
 describe("cancelled resolver cleanup", () => {
   it("settles the resolver's allocation even though it is not a normal Core task", async () => {
     const f = await fixture(); await f.dispatch();
