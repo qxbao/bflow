@@ -18,7 +18,9 @@ import { HostBehavioralFailure, HostVerification, boundQaReviewCommands } from "
 import { HostDevelopment } from "../../src/agentic/host-development.js";
 import { FileToolUsageLedger } from "../../src/platform/tool-usage-ledger.js";
 import { parseVitestJson } from "../../src/agentic/vitest-json.js";
-import { measureBehavior, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
+import { BehavioralMeasurementError, measureBehavior, measurementDiagnostics, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
+import { BehavioralIdentityMismatch, parseNodeTap } from "../../src/agentic/node-tap.js";
+import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -395,6 +397,13 @@ exit 2
     expect(() => parseVitestJson({ ...measured.outcome, timedOut: true }, names)).toThrow("infrastructure");
     expect(() => parseVitestJson(measured.outcome, ["different identity"])).toThrow("identities");
   });
+  it("attaches expected and observed names with a bounded stdout tail to identity mismatches", async () => {
+    const f = await fixture();
+    const error = await measureBehavior({ ...f.command, testNames: ["renamed behavior"] }, f.cwd, f.redRevision).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(BehavioralMeasurementError);
+    expect(String(error)).toBe(`Error: Observed test names differ from owner-configured identities`);
+    expect(error).toMatchObject({ diagnostics: { expectedNames: ["renamed behavior"], observedNames: [testName], stdoutTail: expect.stringContaining(`ok 1 - ${testName}`) } });
+  });
   it("rejects unsupported owner configuration and unmapped automated specification methods", async () => {
     const f = await fixture();
     expect(() => parseBehavioralCommands([{ ...f.command, executable: "node" }])).toThrow("absolute");
@@ -404,5 +413,22 @@ exit 2
     expect(parseBehavioralCommands([{ ...f.command, reporter: "node_tap" }])[0]?.reporter).toBe("node_tap");
     expect(f.command.reporter).toBeUndefined();
     expect(() => f.host.assertSupported({ ...f.specification, acceptanceCriteria: [{ ...f.specification.acceptanceCriteria[0], verificationMethod: "static_analysis" }] })).toThrow("No owner-configured");
+  });
+});
+
+describe("behavioral measurement diagnostics", () => {
+  const stdout = "TAP version 13\nok 1 - observed behavior\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n";
+  const outcome: QualityCommandOutcome = { executable: process.execPath, args: [], cwd: "/repo", exitCode: 0, signal: null, stdout, stderr: "",
+    combinedOutput: stdout, durationMs: 1, timedOut: false, aborted: false, outputTruncated: false };
+  it("keeps expected and observed identities with bounded raw output tails", () => {
+    const command = { command: "owner:test-unit", testNames: ["expected behavior"] };
+    let error: unknown;
+    try { parseNodeTap(outcome, command.testNames); } catch (value) { error = value; }
+    expect(error).toBeInstanceOf(BehavioralIdentityMismatch);
+    expect(measurementDiagnostics(command, outcome, error)).toEqual({ command: "owner:test-unit", cwd: "/repo", exitCode: 0, signal: null, timedOut: false,
+      stdoutTail: stdout, stderrTail: "", expectedNames: ["expected behavior"], observedNames: ["observed behavior"] });
+    const long = "x".repeat(10_000) + stdout;
+    expect(measurementDiagnostics(command, { ...outcome, stdout: long, stderr: long }, error)).toMatchObject({
+      stdoutTail: long.slice(-4096), stderrTail: long.slice(-4096) });
   });
 });
