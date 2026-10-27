@@ -44,8 +44,9 @@ Các lỗi mới theo platform/tool policy:
 | `bflow: command not found` sau bootstrap | Mở terminal mới hoặc reload đúng file shell setup thông báo; launcher cần source checkout/build còn ở vị trí đã setup |
 | Mất account/config khi dùng `BFLOW_HOME` làm đường dẫn source | `BFLOW_HOME` chọn isolated environment; dùng `BFLOW_SOURCE` cho script source theo [installation](installation.md), giữ selector isolation nhất quán |
 | Tool optional degraded / required blocked | Đọc reason theo inventory, repo allowance, grant và readiness; không thêm skill để giả quyền tool |
-| `exclusive_resource_lease_unsupported` cho browser | Runtime browser task actions còn unsupported; Gateway API riêng không đóng điều kiện task lease |
-| GitNexus stale hoặc storage lock bận | Maintenance để nhả reader/writer, rồi setup đúng repo; không tự rebuild index dưới role đang active |
+| `browser_lease_busy` hoặc lease trình duyệt `quarantined` | Mỗi attempt được xác thực chỉ giữ tối đa một lease `BrowserResourceTransactions` (TTL 5 phút); chờ cuộc gọi hiện tại kết thúc hoặc đối soát mục `quarantined`/`release_uncertain` trong `browser-resource-transactions.json`, không dùng profile Chrome cá nhân |
+| GitNexus chưa đăng ký, stale hoặc storage lock bận | Chạy `bflow init --check`, nhả reader/writer nếu bận rồi chạy `bflow init` để lập chỉ mục và đăng ký `gitnexus-<repo>` trên Gateway (`bflow init --remove` khi gỡ repo); không tự rebuild index dưới role đang active |
+| `bwrap_userns_restricted` trên Ubuntu/Debian | Hạn chế AppArmor chặn `bwrap` tạo user namespace (`setting up uid map: Permission denied` / `RTM_NEWADDR: Operation not permitted`). Cài profile `packages/runtime/support/bflow-bwrap.apparmor` cho `/usr/bin/bwrap` rồi chạy lại `bflow doctor` ([Runtime README](../../packages/runtime/README.md#linux-verification-sandbox-prerequisites)) |
 | Yêu cầu sửa lightweight/full SDD | Trả lời revision gợi ý cho đúng run trong Conversation; không lặp resume để bỏ policy |
 | `agy_onboarding_incomplete` | Kiểm tra onboarding/auth trong đúng profile/HOME launch; Agy Conversation vẫn unsupported |
 
@@ -67,12 +68,13 @@ Các pane được gắn nhãn vai trò trực quan; tab đầu tiên được �
 
 ## 4. Các lỗi phổ biến khi khởi động hệ thống
 
-- **`The machine Gateway is bound to workspace ...`**: Gateway trên máy hiện đang được liên kết với một repository khác. Hãy thực thi:
+- **Dịch vụ GitNexus của repository chưa được đăng ký trên Gateway**: `bflow setup` có phạm vi cấp máy, còn chỉ mục và dịch vụ `gitnexus-<repo>` được đăng ký theo từng kho mã qua `bflow init`. Hãy thực thi:
   ```bash
-  bflow setup --apply --yes --dir <đường dẫn repo hiện tại>
+  bflow init --dir <đường dẫn repo hiện tại>
+  bflow init --check --dir <đường dẫn repo hiện tại>
   ```
 - **`Repository trust confirmation is waiting for your choice`**: Claude đang chờ người dùng xác nhận tin cậy repository tại pane. Hãy mở pane để xác nhận (thông qua `bflow attach` hoặc lệnh `herdr` được gợi ý), hoặc cấu hình `environment.permissions.trustedWorkspace: true` trong tệp cấu hình.
-- **`No supported test runner detected`**: Runtime không nhận diện được bộ chạy kiểm thử. Cú pháp `node --test` được hỗ trợ kể cả khi có các cờ bổ sung như `--experimental-strip-types` hoặc `--disable-warning=<tên>`; Vitest bắt buộc phải là phiên bản 2.x và được cài đặt tại thư mục gốc. Việc đo kiểm hành vi đòi hỏi môi trường Linux với `bwrap` hoặc macOS với `sandbox-exec`.
+- **`No supported test runner detected`**: Runtime không nhận diện được bộ chạy kiểm thử. Hãy kiểm tra [runner matrix](../verification-runners.md) (hỗ trợ JS/TS với Vitest 1/2/3, Jest, Mocha, `node --test` kể cả dự án lồng nhau, cùng các adapter polyglot Python/Go/Rust/JVM/.NET/Ruby/PHP/CTest) hoặc cấu hình `.bflow/verification.json`. Việc đo kiểm hành vi đòi hỏi môi trường Linux với `bwrap` (kèm quyền AppArmor `userns` trên Ubuntu/Debian) hoặc macOS với `sandbox-exec`.
 - **Gateway bị sập lặp đi lặp lại khi khởi động (macOS/Linux)**: Khởi chạy lệnh sau ở chế độ trực quan (foreground) để quan sát chi tiết lỗi:
   ```bash
   node apps/cli/dist/setup-gateway.js --serve ~/.config/bflow/setup-gateway.json <digest>

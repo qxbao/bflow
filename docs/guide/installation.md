@@ -6,7 +6,7 @@ Bflow hiện được build từ source; các package còn `private`. Cần **No
 
 | Môi trường | Điều kiện |
 | --- | --- |
-| Linux | Git, filesystem cục bộ, `systemd --user`, `flock` của util-linux; `/usr/bin/bwrap` và user namespaces cho verification |
+| Linux | Git, filesystem cục bộ, `systemd --user`, `flock` của util-linux; `/usr/bin/bwrap` và user namespaces cho verification (trên Ubuntu/Debian bật `kernel.apparmor_restrict_unprivileged_userns=1` cần profile AppArmor `packages/runtime/support/bflow-bwrap.apparmor`, xem [Runtime README](../../packages/runtime/README.md#linux-verification-sandbox-prerequisites)) |
 | macOS | Git, `launchd`, Apple Command Line Tools (`xcode-select --install`), `/usr/bin/sandbox-exec`, `flock` có hỗ trợ inherited file descriptor; Python ≥3.11 có `tomllib` cho profile sync |
 | Windows native | Machine mutation vẫn `designed_unverified` và bị chặn; không coi Git Bash là nghiệm thu Windows |
 
@@ -44,13 +44,13 @@ Setup dùng [catalog đã review](../../packages/tool-installer/src) để chu�
 ```bash
 cd /path/to/your-project
 bflow init --provider codex
-bflow setup --dir .
+bflow init --check
 bflow doctor
 ```
 
 Standalone `bflow agent check codex` là diagnostic riêng: adapter có thể chạy model probe và dùng account mặc định, không chọn role/profile/model từ `.bflow/config.yml`. `doctor`/`up` là đường kiểm tra cấu hình host thực tế.
 
-`--dir` chuẩn bị index/backend cục bộ cho repository; installation vẫn thuộc machine. Context7 hosted dùng chung giữa worktrees, GitNexus/Chrome/local backend vẫn cần đúng workspace đã setup. Herdr phải đáp ứng protocol 22/schema 1 và hành vi thực tế; release label chỉ phục vụ chẩn đoán.
+`bflow setup` có phạm vi cấp máy (`setup --check` cho cùng kết quả từ mọi thư mục); trong khi đó `bflow init` chuẩn bị chỉ mục GitNexus và đăng ký `gitnexus-<repo>` cho từng repository (`--check`, `--remove`, `--no-gitnexus`). Context7 và MemPalace (phân vùng theo `wing` mặc định là repository ID) được dùng chung giữa các repository/worktree; GitNexus và Chrome profile vẫn gắn riêng theo từng repository/session. Herdr phải đáp ứng protocol 22/schema 1 và hành vi thực tế; release label chỉ phục vụ chẩn đoán.
 
 Với Agy specialist, cấu hình Conversation bằng Claude/Codex; Agy Conversation và unattended hiện unsupported. Profile riêng phải được tạo/đăng nhập trước qua `bflow iso`, rồi chọn `profile-name` trong config. [Cấu hình](configuration-reference.md) · [Provider adapters](../../packages/agent-providers/README.md).
 
