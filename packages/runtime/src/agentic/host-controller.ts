@@ -14,6 +14,7 @@ import { callHost } from "./host-protocol.js";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
+import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
 import type { RegressionScope } from "./regression-changes.js";
@@ -24,6 +25,8 @@ export type FastPathMode = "auto" | "off";
 export interface AgenticHostOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
   behavioralCommands?: readonly BehavioralCommand[];
+  /** Owner mutation checks (`.bflow/verification.json`); pinned with the behavioral commands. */
+  mutationChecks?: readonly MutationCheck[];
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
@@ -90,7 +93,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
   const value = record(JSON.parse(await readFile(path, "utf8")));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
-  parseBehavioralCommands(value.behavioralCommands);
+  parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
   if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
   if (value.policy !== undefined) {
@@ -141,6 +144,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.manifestDirectory !== undefined ? { manifestDirectory: persisted.manifestDirectory } : {}),
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
     ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
+    ...(persisted.mutationChecks !== undefined ? { mutationChecks: persisted.mutationChecks } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}) });
@@ -203,6 +207,9 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
   if (digest(parseBehavioralCommands(configuration.behavioralCommands)) !== digest(parseBehavioralCommands(options.behavioralCommands)))
     throw new Error("Persisted behavioral commands differ from owner configuration; quiesce and reconcile before changing verification authority");
+  if (digest(parseMutationChecks(configuration.mutationChecks, parseBehavioralCommands(configuration.behavioralCommands))) !==
+      digest(parseMutationChecks(options.mutationChecks, parseBehavioralCommands(options.behavioralCommands))))
+    throw new Error("Persisted mutation checks differ from owner configuration; quiesce and reconcile before changing verification authority");
   // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);

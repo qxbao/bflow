@@ -107,6 +107,8 @@ export {
   bindRegressionProfile,
   measureRegression
 } from "./agentic/behavioral-runner.js";
+export { parseMutationChecks } from "./agentic/mutation-check.js";
+export type { MutationCheck } from "./agentic/mutation-check.js";
 export type {
   BehavioralCommand,
   RegressionCommand,

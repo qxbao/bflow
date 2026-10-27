@@ -44,6 +44,7 @@ import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, defaultHostChecks } from "./host-verification.js";
 import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { parseMutationChecks } from "./mutation-check.js";
 import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
 import { disposeDetectedDependencies } from "./runner-detection.js";
 import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
@@ -459,6 +460,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
   };
   const behavioralCommands = parseBehavioralCommands(configuration.behavioralCommands);
+  const mutationChecks = parseMutationChecks(configuration.mutationChecks, behavioralCommands);
   // Owner commands are an optional override; without them Runtime detects the repository's test runner (no user configuration).
   const testRunners = new TestRunnerSource(behavioralCommands, configuration.repositoryPath);
   await testRunners.refresh();
@@ -528,7 +530,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   } };
   const impactIndex = configuration.impactIndex ? createGitNexusImpactIndex(configuration.impactIndex) : unconfiguredImpactIndex;
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners, rtkUsageIntegration,
-    { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex });
+    { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex }, mutationChecks);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration);
   const activePolicyMeasurements = new Set<string>();
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation, async (turn, operationId) => {

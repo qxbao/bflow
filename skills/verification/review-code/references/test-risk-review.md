@@ -46,4 +46,6 @@ Checklist for any criterion or changed code containing race, concurrency, lock, 
 - [ ] **Negative control:** with the lock/protection removed or replaced by a pass-through, the same named test fails. Require the observed result, or a planned mutation check with its expected failure when the role cannot run it.
 - [ ] **Not sufficient alone:** `Promise.all` over synchronous critical sections, final-count-only assertions, or tests that pass without the protection are `invariant coverage`, not race proof.
 
+Owners can enforce the negative control with an owner-configured `mutationChecks` entry in the repository's owner verification configuration (documented in the Runtime verification-runners guide).
+
 If any box is missing for a required criterion, raise a blocking finding that the criterion's evidence is non-discriminating, naming the test and the missing interleaving point or negative control. Do not invent a mutation result; if the reviewer cannot run the mutation, report a prerequisite gap (`blocked`/`inconclusive`). When rechecking a rework fix for such a finding, rerun the discriminating checks on the revised candidate, as in `fix-review-findings`.
