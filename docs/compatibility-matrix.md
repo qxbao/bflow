@@ -44,7 +44,7 @@ Standalone `agent check` dùng adapter environment riêng, không đọc role/pr
 | GitNexus | Stdio MCP, query/context/impact theo policy | Fresh repo index, workspace phù hợp, Runtime resource lease/fence theo registration; không tự rebuild trong task |
 | MemPalace | Managed Python venv, MCP search qua Gateway | Read-only wing được resolve (mặc định repo ID), provenance/trusted artifact bắt buộc; memory không thay current spec/test |
 | Context7 | Hosted MCP qua Gateway, anonymous/API key | Dùng chung giữa worktrees; optional cache, không OAuth; version/quota/network failure phải hiển thị |
-| Chrome DevTools | Dedicated profile/resource APIs ở Gateway/services | **Runtime browser task actions chưa usable**: `exclusive_resource_lease_unsupported`; không dùng profile cá nhân |
+| Chrome DevTools | Dedicated profile/resource APIs ở Gateway/services | Runtime browser tool actions có Gateway lease theo assignment transaction (source + test local, chưa live Chrome/provider/Herdr acceptance); gate `appChecks` dùng Chrome riêng trong sandbox; không dùng profile cá nhân |
 | Canonical skills | Exact bundle pins, role bindings, manifests, `read_pinned_instructions` | Nội dung được load không chứng minh tuân thủ; không cấp capability/tool permission |
 
 Phiên bản installer thực tế nằm trong [catalog đã review](../packages/tool-installer/README.md); đừng suy machine receipt đúng chỉ từ binary cùng tên trên PATH. [D-TOOLS-01](tools-sdlc-integration.md) quy định trigger, grant, usage và consumption.

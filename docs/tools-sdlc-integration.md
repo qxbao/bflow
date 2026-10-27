@@ -64,8 +64,10 @@ a configured `environment.tools.mempalace.wing` must bind a reviewed alternative
 wing is not an excuse to search the whole palace or manufacture retrieval evidence.
 
 GitNexus now uses Runtime-managed Gateway resource acquire/renew/release with generation-bound
-registration, fencing and unknown/quarantine handling. Browser task actions still return
-`exclusive_resource_lease_unsupported`; the Gateway browser APIs alone do not make them usable.
+registration, fencing and unknown/quarantine handling. Browser tool actions acquire, renew and release a
+Gateway resource lease per authenticated assignment attempt, with a durable intent ledger and reconciliation of
+unknown calls (source and local tests; no live Chrome/provider/Herdr acceptance). The owner real-app gate
+(`appChecks`) runs its own sandboxed Chrome under a host-local fenced lease instead of the Gateway profile.
 
 GitNexus, Context7 and browser operations require their own policy requirements,
 task triggers and current readiness. A small arithmetic task does not itself

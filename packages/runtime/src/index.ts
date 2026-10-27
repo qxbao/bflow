@@ -109,6 +109,8 @@ export {
 } from "./agentic/behavioral-runner.js";
 export { parseMutationChecks } from "./agentic/mutation-check.js";
 export type { MutationCheck } from "./agentic/mutation-check.js";
+export { parseAppChecks, appCheckDefinitions, appCheckIdentity, parseAppCheckIdentity } from "./agentic/app-check-config.js";
+export type { AppCheck, AppCheckSuite, AppCheckUi, AppCheckApi } from "./agentic/app-check-config.js";
 export type {
   BehavioralCommand,
   RegressionCommand,

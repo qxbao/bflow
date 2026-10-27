@@ -177,6 +177,51 @@ does not prove the protection is needed, and the gate fails with `non_discrimina
 - Budget: each mutation run counts `command.timeoutMs + 90000` against the same 540 s aggregate as the behavioral commands. A configuration that exceeds it is rejected.
 - Like `behavioralCommands`, the configuration is pinned in the persisted host. Changing `mutationChecks` after the host exists is refused until the host is quiesced and reconciled.
 
+## Kiểm tra ứng dụng thật (`appChecks`)
+
+Owner có thể thêm `appChecks` vào `.bflow/verification.json` để kiểm chứng UI/API trên entrypoint thật của ứng dụng.
+Với `behavioralCommands: []`, Runtime vẫn tự phát hiện runner; `appChecks` chỉ thêm gate.
+
+```json
+{
+  "schemaVersion": 1,
+  "behavioralCommands": [],
+  "appChecks": [
+    { "id": "web",
+      "app": { "executable": "/usr/bin/node", "args": ["server.mjs"], "port": 4173, "readyPath": "/health",
+               "startTimeoutMs": 20000, "env": { "NODE_ENV": "test" }, "dependencyRoots": [] },
+      "browser": { "executable": "/opt/google/chrome/chrome", "resourceKey": "app-check-browser" },
+      "contract": { "kind": "openapi", "path": "/openapi.json" },
+      "timeoutMs": 120000,
+      "checks": [
+        { "id": "home", "kind": "ui", "path": "/", "viewport": { "width": 1280, "height": 800 },
+          "expect": { "selectors": ["[data-testid=title]"], "text": ["Welcome"] }, "timeoutMs": 15000 },
+        { "id": "items", "kind": "api", "request": { "method": "GET", "path": "/api/items" },
+          "expect": { "status": 200, "json": [{ "pointer": "/0/name", "equals": "apple" }] }, "timeoutMs": 5000 }
+      ] }
+  ]
+}
+```
+
+- **Chọn check.** Mỗi suite là gate bắt buộc `host-app-<suite>` (method `e2e_test`, command `app:<suite>`). Một check chỉ chạy
+  khi một tiêu chí `e2e_test` đang hoạt động map tới định danh `app:<suite>:<check>` và strategy có `app:<suite>` trong
+  `targetCommands` (assessment liệt kê `{ "method": "e2e_test", "command": "app:<suite>" }` trong `infrastructure.commands`).
+  Mapping trộn định danh app với test khác, check không tồn tại, hoặc TDD `required` mà mọi tiêu chí tự động đều là app bị từ chối ở ingress.
+- **Thực thi.** App chạy từ checkout của revision đã commit (không từ worktree developer) trong Bubblewrap không có mạng ngoài,
+  nhận `HOST=127.0.0.1` và `PORT`; sẵn sàng khi `readyPath` trả 2xx. UI chạy Chrome headless qua CDP pipe trong cùng sandbox,
+  chờ theo điều kiện (load, selector hiển thị, text đã render, mạng yên) và không có thao tác click. Lỗi trang, `console.error`,
+  HTTP ≥ 400, request lỗi, selector/text thiếu, sai viewport, tràn ngang (khi bật) đều fail. API cần assertion hành vi ngoài status;
+  contract OpenAPI (nếu có) phải khai báo route và method. Selector theo vị trí (`:nth-child`, XPath) bị từ chối.
+- **Bằng chứng.** HTML tĩnh, app dựng lại trong test hay screenshot tồn tại không được tính là pass. Evidence `test-result` được
+  sanitize rồi lưu qua ArtifactStore, gắn revision/tree, app instance, origin, command, tên biến env (không lưu giá trị), check và
+  tiêu chí, fencing token và hash driver. Pha Tester (P16) cũng đo các check này để evidence phủ `app:<suite>`; Red vẫn cần assertion
+  failure của runner.
+- **Prerequisite.** Thiếu sandbox, app, dependency, browser, lease bận/mất/hết hạn hoặc quá hạn trả `blocked` với mã `app_check_*`;
+  không bao giờ là pass. Chrome được tuần tự hóa bằng lease host-local có fencing token (cùng UID, không phân tán).
+- **Giới hạn.** Chỉ Linux; chưa có thao tác tương tác; contract chỉ OpenAPI; app của candidate chạy chung sandbox với driver nên mô hình
+  chống pass giả do agent chứ không chống code độc. Bằng chứng hiện tại là source + test local và chạy thử trên app fixture, không phải
+  live provider/Herdr hay full SDLC acceptance. Chi tiết trong [README runtime](../packages/runtime/README.md).
+
 ## Ví dụ Node TAP
 
 Thay `/absolute/path/to/node` bằng executable Node đã cài. Giữ đúng đường dẫn test đã commit

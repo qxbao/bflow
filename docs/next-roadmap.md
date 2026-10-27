@@ -8,7 +8,7 @@ Roadmap theo [source hiện tại](implementation-status.md), cập nhật 2026-
 | P1 | Platform-v3 conformance/fault campaign (P31) | QA sở hữu test mới; root CI/discovery cần integration review. Tái sử dụng e11–e16 và package tests đã có |
 | P1 | Active provider crash/restart/cancellation | Lifecycle + QA: dirty worktree, waiting approval, delivery uncertain; không double dispatch, không mất authority |
 | P1 | Tool invocation và consumption thật | Runtime/Gateway/CLI: exact grant, trigger, scope, trusted artifact; chứng minh dataflow vào output được chấp nhận; unavailable/degraded/restart cases |
-| P1 | Browser task lease integration | Runtime + MCP services: acquire/renew/release, task URL/profile scope, fencing/quarantine và live race probes; hiện browser actions còn unsupported |
+| P1 | Browser lease live acceptance | Lease theo assignment transaction đã có ở source + test local; còn thiếu task URL/profile scope, live Chrome/provider/Herdr race probes. Gate `appChecks`: thêm thao tác tương tác, macOS, contract ngoài OpenAPI |
 | P2 | macOS integration acceptance rộng hơn | Có helper/Seatbelt và phép đo thật; bổ sung full provider SDLC, platform matrix; polyglot mounts/warming cần thiết kế riêng nếu mở hỗ trợ |
 | P1 | Rework verdict-coverage hardening | Runtime owner: reject missing/partial per-finding verdicts before review pass, cover recovery/settlement; current source/prompt distinction is documented in [rework reference](rework-causality.md) |
 | P2 | Conversation/NFR live acceptance | Validate plaintext cards, exact alias decisions, detail/Log delivery and genuine NFR measurement/independent confirmation with authorized providers/tools; existing instruction/render tests do not close these |

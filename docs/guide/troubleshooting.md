@@ -44,7 +44,7 @@ Các lỗi mới theo platform/tool policy:
 | `bflow: command not found` sau bootstrap | Mở terminal mới hoặc reload đúng file shell setup thông báo; launcher cần source checkout/build còn ở vị trí đã setup |
 | Mất account/config khi dùng `BFLOW_HOME` làm đường dẫn source | `BFLOW_HOME` chọn isolated environment; dùng `BFLOW_SOURCE` cho script source theo [installation](installation.md), giữ selector isolation nhất quán |
 | Tool optional degraded / required blocked | Đọc reason theo inventory, repo allowance, grant và readiness; không thêm skill để giả quyền tool |
-| `exclusive_resource_lease_unsupported` cho browser | Runtime browser task actions còn unsupported; Gateway API riêng không đóng điều kiện task lease |
+| Browser action báo resource busy / transaction expired | Role khác đang giữ lease browser, hoặc transaction quá 5 phút; hoàn tất/reconcile transaction cũ thay vì lấy lại state. Gate `host-app-*` báo `app_check_browser_busy`: một gate khác đang giữ lease host-local, thử lại sau |
 | GitNexus stale hoặc storage lock bận | Maintenance để nhả reader/writer, rồi setup đúng repo; không tự rebuild index dưới role đang active |
 | Yêu cầu sửa lightweight/full SDD | Trả lời revision gợi ý cho đúng run trong Conversation; không lặp resume để bỏ policy |
 | `agy_onboarding_incomplete` | Kiểm tra onboarding/auth trong đúng profile/HOME launch; Agy Conversation vẫn unsupported |

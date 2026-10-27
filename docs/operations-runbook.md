@@ -66,7 +66,7 @@ Nếu startup đã có side effect rồi thất bại/Ctrl+C, CLI thử safe dow
 | Local backend workspace mismatch | `bflow setup --dir <repo>` theo plan; không rebind Context7 chỉ vì đổi worktree |
 | `codex_global_hooks_not_isolated` | `bflow setup --codex-hooks --plan`, review rồi `--apply`; setup thường không duyệt hook |
 | `agy_onboarding_incomplete` | Kiểm tra đúng profile/HOME launch và onboarding; không copy receipt để giả readiness |
-| Browser `exclusive_resource_lease_unsupported` | Capability task chưa được Runtime hỗ trợ; không bỏ lease hoặc dùng profile cá nhân |
+| Browser lease busy/expired/unknown | Hoàn tất hoặc reconcile transaction cũ (ledger `gen-N/browser-resource-transactions.json`); không resend call unknown, không bỏ lease hoặc dùng profile cá nhân |
 | Profile Chrome bị khóa | Xác minh đúng process/profile/task và ownership; giữ quarantine/unknown, không xóa lock của process còn sống |
 | Conflict lightweight/full SDD | Trả lời revision được notice đề xuất trong Conversation; không resume lặp để bỏ project policy |
 

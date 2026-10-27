@@ -15,6 +15,7 @@ import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory }
 import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
+import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
 import type { RegressionScope } from "./regression-changes.js";
@@ -27,6 +28,8 @@ export interface AgenticHostOptions {
   behavioralCommands?: readonly BehavioralCommand[];
   /** Owner mutation checks (`.bflow/verification.json`); pinned with the behavioral commands. */
   mutationChecks?: readonly MutationCheck[];
+  /** Owner real-app checks (`appChecks` in `.bflow/verification.json`); pinned with the other verification authority. */
+  appChecks?: readonly AppCheckSuite[];
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
@@ -94,6 +97,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   const value = record(JSON.parse(await readFile(path, "utf8")));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
   parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
+  parseAppChecks(value.appChecks);
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
   if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
   if (value.policy !== undefined) {
@@ -145,6 +149,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
     ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
     ...(persisted.mutationChecks !== undefined ? { mutationChecks: persisted.mutationChecks } : {}),
+    ...(persisted.appChecks !== undefined ? { appChecks: persisted.appChecks } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}) });
@@ -210,6 +215,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   if (digest(parseMutationChecks(configuration.mutationChecks, parseBehavioralCommands(configuration.behavioralCommands))) !==
       digest(parseMutationChecks(options.mutationChecks, parseBehavioralCommands(options.behavioralCommands))))
     throw new Error("Persisted mutation checks differ from owner configuration; quiesce and reconcile before changing verification authority");
+  if (digest(parseAppChecks(configuration.appChecks)) !== digest(parseAppChecks(options.appChecks)))
+    throw new Error("Persisted real-app checks differ from owner configuration; quiesce and reconcile before changing verification authority");
   // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);

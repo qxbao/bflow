@@ -48,7 +48,7 @@ Test plan cần nối rõ **criterion → rủi ro/góc nhìn → exact check/te
 
 Tên test và method phải khớp `TestStrategy.criterionMappings`/check plan hiện có. Unit test với fake không thay integration qua entrypoint, browser runtime hoặc live provider evidence khi criterion yêu cầu những mức đó. Khi browser/live proof là bắt buộc nhưng thiếu grant, origin, lease/fence hoặc runner, ghi blocked/inconclusive và escalation theo luồng hiện có.
 
-Runtime browser task actions hiện vẫn bị giới hạn `exclusive_resource_lease_unsupported`; thêm reference browser không làm capability này usable. Không tự cài load generator, scanner, browser hoặc backend chỉ vì skill gợi ý một phương pháp. Conditional TDD, independent gates, approvals và iteration bounds vẫn giữ nguyên.
+Browser tool actions của role đã có Gateway resource lease trong Runtime ở mức source + test local (chưa live acceptance); kiểm chứng UI/API qua app thật dùng gate owner `appChecks` (Linux, bwrap + Chrome). Thêm reference browser không tự cấp capability hay grant nào. Không tự cài load generator, scanner, browser hoặc backend chỉ vì skill gợi ý một phương pháp. Conditional TDD, independent gates, approvals và iteration bounds vẫn giữ nguyên.
 
 ### Race condition: test phải phân biệt được có lock hay không
 
