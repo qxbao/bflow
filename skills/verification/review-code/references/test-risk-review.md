@@ -9,6 +9,7 @@ Verify that every required criterion is backed by the full chain `criterion → 
 - **Reject AC-tag-only coverage:** A test with `AC-1` in its name or comment that only checks happy-path inputs, asserts `expect(res).toBeTruthy()`, or recomputes expected output with the function under test does not cover the criterion.
 - **Reject over-mocked paths:** If a test mocks out the schema parser, authorization check, store adapter or router wiring that the criterion actually depends on, record a finding naming the bypassed boundary.
 - **Verify side effects:** When an operation mutates SQLite (`RunStore`), `ArtifactStore`, Git worktrees or transport bindings, tests must assert the persisted state or absence of mutation on error—not return values alone.
+- **Reject non-discriminating race evidence:** For race/concurrency/lock/atomic criteria, apply §4 below; a `Promise.all` over synchronous sections or a final-count-only assertion is not race evidence.
 
 ## 2. Conditional risk viewpoints for diff review
 
@@ -23,6 +24,7 @@ Check only the viewpoints that apply to the changed code and criteria (do not fl
 | **5. Failure/recovery, timeout & partial failure** | Multi-step persistence/transport, subprocess gates, locks, crash/restart recovery | Orphan lock, half-written state, swallowed error or timeout misclassified as `passed` | Injected mid-step failure, abort, timeout or checkpoint recovery; fail-closed `blocked`/`inconclusive` or clean rollback/recovery | Recovery/failure test receipt showing intact checkpoint, durable intent and no false pass |
 | **6. Brownfield before/after parity** | Refactoring, config/schema migration, replacing an adapter or updating an existing command | Status/exit `0` passes while response fields become `null`/`""`, error codes shift or `userSettings`/pins are lost | Representative baseline inputs compared field-by-field for output payload, preserved config keys and side effects | Regression or characterization test log proving field-level equivalence |
 | **7. Real entrypoint & component wiring** | New/changed CLI commands, routes, Runtime port wiring, quality gates or cross-component flows | Unit test calls internal helper directly while real CLI/Runtime entrypoint or built `dist/` omits wiring or middleware | Execution through the real entrypoint (after `pnpm build` when `dist/` is imported) exercising ingress-to-storage flow | `integration_test` or `e2e_test` receipt at the candidate revision |
+| **8. Concurrency, race & atomicity** | Locks/mutexes, atomic updates, read-check-write across an `await`, lease/fence ordering | Test still passes with the lock removed; `Promise.all` over synchronous sections; no interleaving point inside the critical section | Interleaving point inside the critical section plus negative control (protection removed or pass-through → same named test fails) | Test log naming the interleaving point and the mutation result at the candidate revision |
 
 ## 3. Unit vs integration/E2E boundaries and policy alignment
 
@@ -35,3 +37,13 @@ Check only the viewpoints that apply to the changed code and criteria (do not fl
 3. **Browser and live provider discipline:**
    - Never demand browser or live provider checks when the criterion does not require them or the role lacks the grant/lease.
    - If an accepted criterion requires browser UI or live provider verification and the environment/grant is unavailable, report a `blocked` or `inconclusive` prerequisite gap—never accept static HTML string parsing or a fake runner as a substitute.
+
+## 4. Race and concurrency criteria: discriminating evidence
+
+Checklist for any criterion or changed code containing race, concurrency, lock, mutex, mutual exclusion, atomic or ordering wording:
+
+- [ ] **Interleaving point:** the test forces two operations to overlap inside the critical section (an `await`, injected hook/clock/barrier, deferred promise or controllable fake between read and write). Name the point.
+- [ ] **Negative control:** with the lock/protection removed or replaced by a pass-through, the same named test fails. Require the observed result, or a planned mutation check with its expected failure when the role cannot run it.
+- [ ] **Not sufficient alone:** `Promise.all` over synchronous critical sections, final-count-only assertions, or tests that pass without the protection are `invariant coverage`, not race proof.
+
+If any box is missing for a required criterion, raise a blocking finding that the criterion's evidence is non-discriminating, naming the test and the missing interleaving point or negative control. Do not invent a mutation result; if the reviewer cannot run the mutation, report a prerequisite gap (`blocked`/`inconclusive`). When rechecking a rework fix for such a finding, rerun the discriminating checks on the revised candidate, as in `fix-review-findings`.
