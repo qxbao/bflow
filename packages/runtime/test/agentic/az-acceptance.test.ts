@@ -21,7 +21,7 @@ import { draft, workflow } from "../../../specification/test/fixtures.js";
 
 // A-Z acceptance for WORKFLOW-AZ-PLAN.md ("Nghiệm thu"): one delegation survives each recoverable fault once and reaches the
 // delivery approval with no human "tiếp tục"; a recurring fault is bounded; human gates and uncertain deliveries never auto-resume.
-// Runs on every platform (no describe.skipIf). The fixture mirrors integration.test.ts (real Core, SQLite RunStore, filesystem
+// Runs on every platform (no describe.skipIf). The fixture mirrors helpers/agentic-integration-fixture.ts (real Core, SQLite RunStore, filesystem
 // ArtifactStore, Git worktrees, P15-P18 policies) but verification uses its in-process independent gates plus injected
 // verification evidence, the path the cross-platform "Runtime task activity log integration" cases use; it does not need the
 // Linux behavioral sandbox. Backoff and watchdog windows elapse on an injected forward-only clock, never real sleeps.
