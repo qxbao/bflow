@@ -19,6 +19,7 @@ Sau [bootstrap một lần](../../docs/guide/installation.md) bằng `node apps/
 | `bflow init --update` | Bổ sung defaults/comment, giữ giá trị cũ; `--provider` tường minh đổi role providers |
 | `bflow init --check` hoặc `--remove` | `--check` chỉ đọc trạng thái repo/GitNexus; `--remove` gỡ đăng ký repo (kể cả repo đã xoá khỏi đĩa) |
 | `bflow init --force` hoặc `--yes` | Thay toàn bộ config bằng defaults mới; lần index GitNexus không tương tác cần `--yes`; khác nghĩa `setup --yes` |
+| `bflow init --accept-gitnexus-license` | Chỉ chấp nhận license và index GitNexus không tương tác, không ghi đè config; không kết hợp với `--no-gitnexus` hoặc `--check`/`--remove` |
 | `bflow config-migrate` | Chuyển `.yaml`/`.json` cũ sang `.yml`, giữ byte gốc trong `.bak` |
 | `bflow up [--timeout <ms>]` | Prepare persistent host/platform, preflight, launch qua Herdr, verify activated health |
 | `bflow attach` | TTY trực tiếp vào Conversation pane |

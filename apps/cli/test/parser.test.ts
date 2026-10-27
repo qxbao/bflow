@@ -468,6 +468,29 @@ describe("CLI Argument Parser - parseCliArgs", () => {
         expect(conflictRes.error.code).toBe("validation");
       }
     });
+
+    it("parses --accept-gitnexus-license without implying force and rejects conflicting combinations", () => {
+      const res = parseCliArgs(["init", "--accept-gitnexus-license"]);
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        const args = res.value as InitCommandArgs;
+        expect(args.force).toBe(false);
+        expect(args.acceptGitnexusLicense).toBe(true);
+        expect(args.yes).toBeUndefined();
+      }
+
+      const withNoGitnexus = parseCliArgs(["init", "--accept-gitnexus-license", "--no-gitnexus"]);
+      expect(withNoGitnexus.ok).toBe(false);
+      if (!withNoGitnexus.ok) {
+        expect(withNoGitnexus.error.code).toBe("validation");
+      }
+
+      const withCheck = parseCliArgs(["init", "--check", "--accept-gitnexus-license"]);
+      expect(withCheck.ok).toBe(false);
+      if (!withCheck.ok) {
+        expect(withCheck.error.code).toBe("validation");
+      }
+    });
   });
 
   describe("3. bflow run argument parsing", () => {

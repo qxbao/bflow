@@ -56,7 +56,7 @@ và xác minh việc thương lượng MCP upstream cùng khám phá tool; kết
 nhau ở mọi thư mục. Setup chỉ cài và duyệt binary GitNexus. `bflow init` trong từng repository
 mới index repository đó và thêm service `gitnexus-<repo>` vào Gateway đang chạy, không thay
 repository khác. Lần index đầu hỏi xác nhận license PolyForm-Noncommercial (không tương tác
-thì cần `--yes`; `--no-gitnexus` bỏ qua). `bflow init --check` báo trạng thái chỉ đọc,
+thì cần `--accept-gitnexus-license` (giữ nguyên cấu hình hiện có) hoặc `--yes`; `--no-gitnexus` bỏ qua). `bflow init --check` báo trạng thái chỉ đọc,
 `bflow init --remove` gỡ đăng ký, kể cả khi thư mục repository đã bị xoá; Gateway cũng tự
 dọn repository không còn trên đĩa khi khởi động lại. Chrome dùng một profile Bflow riêng. Các workflow role kết nối tới Gateway chạy nền qua bộ định vị riêng
 `gateway-control.json` trong thư mục state của Gateway. `bflow up` truyền bộ định vị đó
