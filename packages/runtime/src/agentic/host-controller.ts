@@ -20,6 +20,8 @@ import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type Agent
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
 import type { RegressionScope } from "./regression-changes.js";
 
+const HOST_STARTUP_TIMEOUT_MS = 120_000;
+
 export type { RegressionScope };
 export type FastPathMode = "auto" | "off";
 
@@ -257,15 +259,23 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
       configuration = await readHostConfiguration(configPath);
     }
     const log = await open(join(directory, "host.log"), "a", 0o600);
+    let exited: string | undefined;
     try {
       const child = spawn(process.execPath, [fileURLToPath(new URL("./host.js", import.meta.url)), "daemon", configPath],
         { detached: true, cwd: repositoryPath, stdio: ["ignore", log.fd, log.fd], env: { ...process.env } });
+      child.once("exit", (code, signal) => { exited = signal ? `signal ${signal}` : `exit code ${code}`; });
+      child.once("error", error => { exited = String(error); });
       child.unref();
     } finally { await log.close(); }
-    const deadline = Date.now() + 10_000;
+    // Daemon boot composes platform readiness before binding the socket and can exceed
+    // a few seconds; keep waiting while the child lives and fail fast once it exits.
+    const deadline = Date.now() + HOST_STARTUP_TIMEOUT_MS;
     while (true) {
       try { await request("ping"); break; }
-      catch (startupError) { if (Date.now() >= deadline) throw new Error(`Agentic host failed to start: ${String(startupError)}; see ${join(directory, "host.log")}`); }
+      catch (startupError) {
+        if (exited !== undefined) throw new Error(`Agentic host exited during startup (${exited}): ${String(startupError)}; see ${join(directory, "host.log")}`);
+        if (Date.now() >= deadline) throw new Error(`Agentic host failed to start within ${HOST_STARTUP_TIMEOUT_MS / 1000}s: ${String(startupError)}; the daemon may still be starting, retry shortly or see ${join(directory, "host.log")}`);
+      }
       await new Promise(accept => setTimeout(accept, 50));
     }
   }

@@ -956,7 +956,7 @@ describe("P12 repository environment lifecycle", () => {
       quiesce: async () => ({ ok: false, error: { code: "transport_unavailable", retryable: true, message: "Error: Persisted agentic work requires activation/reconciliation before safe shutdown" } }),
       terminateIncompatibleHost: async () => { events.push("terminate-unactivated"); }
     } });
-    await expect(unactivated.down(true, 3000)).rejects.toThrow("requires activation");
+    await expect(unactivated.down(true, 3000)).rejects.toThrow(/requires activation.*bflow down --force/);
     expect((await unactivated.down(false, 3000, true)).status).toBe("down");
     expect(events.at(-1)).toBe("terminate-unactivated");
     expect((await lifecycle.up()).status).toBe("up");

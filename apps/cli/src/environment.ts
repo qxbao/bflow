@@ -837,7 +837,10 @@ export class EnvironmentLifecycle {
       // Only a host that cannot run the barrier at all is bypassed: an incompatible build, or an unactivated host that
       // refuses to quiesce over persisted journal work or Core runs. Journal/run store stay on disk and the next `up` reconciles them.
       // Genuine barrier/checkpoint failures on an active host still abort a forced stop.
-      if (!force || !/Unknown host operation|requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(error instanceof Error ? error.message : String(error))) throw error;
+      const unactivated = /requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(error instanceof Error ? error.message : String(error));
+      if (!force && unactivated && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
+        message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
+      if (!force || !(unactivated || /Unknown host operation/.test(error instanceof Error ? error.message : String(error)))) throw error;
     }
     this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");
     return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
