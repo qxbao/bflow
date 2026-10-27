@@ -1073,13 +1073,15 @@ export class AgenticWorkflowRuntime {
         });
         await this.flushOutbound();
         // tick() awaits this gate. Keep its existing queued request dispatchable when a delivery hold or pane readiness
-        // recovers during the wait; Outbox retains all lease/fence, uncertainty, cancellation and backoff checks.
+        // recovers during the wait, and renew an accepted review's lease before it lapses (a review may outlive one lease
+        // period); Outbox retains all lease/fence, uncertainty, cancellation and backoff checks.
         dispatchTimer = setInterval(() => {
           if (dispatching || this.quiesced || options?.signal?.aborted) return;
           dispatching = true;
           void (async () => {
-            const queued = await this.journal.exclusive(async state => state.outbound.some(out => out.message.message_id === key && out.status === "queued"));
-            if (queued && !this.quiesced && !options?.signal?.aborted) await this.flushOutbound();
+            const due = await this.journal.exclusive(async state => state.outbound.some(out => out.message.message_id === key && (out.status === "queued" ||
+              out.status === "accepted" && out.lease !== undefined && Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)));
+            if (due && !this.quiesced && !options?.signal?.aborted) await this.flushOutbound();
           })().catch(rejectReply).finally(() => { dispatching = false; });
         }, 1_000);
         dispatchTimer.unref();

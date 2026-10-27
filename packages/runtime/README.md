@@ -791,6 +791,8 @@ script, runner configuration, imported Gradle/MSBuild definitions and helper blo
 revision; selected test files freeze after independent Red. Structured leaf results,
 assertion/error discrimination and independent Quality Gates remain mandatory.
 
+`verification.reviewTimeoutMs` (optional, 60000..3600000 ms, default 900000) sets the `executionTimeoutMs` of the independent `host-reviewer`/`host-qa` native review gates through `defaultHostChecks(policy)`; `DEFAULT_HOST_CHECKS` keeps the default. Runtime's review reply wait uses that gate timeout.
+
 `verification.regressionScope` controls host regression gates (`affected` default for new configs,
 `full`, `mapped_only`; a persisted `host.json` missing `regressionScope` defaults to `mapped_only`).
 When `affected` or `full`, `HostVerification` adds one required gate `host-regression-<profile.id>` per
@@ -1010,7 +1012,7 @@ by slirp; the helper must return exactly its documented readiness byte before np
 ## Workflow liveness và capability recovery
 
 Host cung cấp `repository_read` cho Coordinator và các role điều tra/verification, cùng
-`read_pinned_instructions` để đọc nội dung skill đã pin. Reader chỉ đọc file text có giới hạn,
+`read_pinned_instructions` để đọc nội dung skill đã pin. Reader chỉ đọc file text có giới hạn (một lệnh không có `skillId` trả policy và danh sách skill; mỗi trang skill theo UTF-8 byte và trả `nextOffset` khi `truncated`; Agy giữ mỗi phản hồi trong `AGY_INLINE_REPLY_BYTES`),
 listing có cursor và các thao tác Git cố định; không nhận shell hoặc argv tùy ý. Git status/diff
 fail closed khi repository cấu hình filter có thể chạy chương trình. Dispatch kiểm tra role,
 pane/native session, launch, Bflow tools/list, repository/Git và manifest trước lease/transport.
