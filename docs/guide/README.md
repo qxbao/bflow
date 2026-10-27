@@ -6,7 +6,7 @@ Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin
 | --- | --- |
 | [Khởi đầu nhanh (Getting Started)](getting-started.md) | Hướng dẫn trải nghiệm trên một repository Node.js/TypeScript độc lập |
 | [Cài đặt (Installation)](installation.md) | Cài đặt và biên dịch từ mã nguồn; yêu cầu Node, pnpm và Herdr |
-| [Khởi tạo dự án (`bflow init`)](bflow-init.md) | Cấu trúc tệp config.yml có chú thích, định danh Git, chuyển đổi phiên bản, tính lũy thừa và cờ ghi đè |
+| [Khởi tạo dự án (`bflow init`)](bflow-init.md) | Cấu trúc tệp config.yml có chú thích, lập chỉ mục/đăng ký GitNexus (`--check`, `--remove`, `--no-gitnexus`), định danh Git, chuyển đổi phiên bản và cờ ghi đè |
 | [Khởi động dịch vụ (`bflow up`)](bflow-up.md) | Quản lý phiên có tên (named session), các vai trò thường trực, điều kiện sẵn sàng và các giới hạn khi khởi động host |
 | [Gắn kết phiên (`bflow attach`)](bflow-attach.md) | Cơ chế gắn kết trực tiếp vào pane của Conversation Agent |
 | [Cập nhật trong Conversation](conversation-updates.md) | Thẻ tiếng Việt, mã `#n`/`Việc #k`, lựa chọn, chi tiết và Log |
@@ -16,7 +16,7 @@ Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin
 | [Các vai trò Agent (Agent Roles)](agent-roles.md) | Danh mục 8 vai trò chính thức và ánh xạ định danh theo hợp đồng (contracts) |
 | [Chính sách SDD & TDD](sdd-tdd-policies.md) | Phân loại rủi ro, xác định mức độ đặc tả, các chế độ kiểm thử required/recommended/not_applicable |
 | [Vòng lặp kiểm tra (Verification Loop)](verification-loop.md) | Cơ chế kiểm thử độc lập, kiểm soát giới hạn số lần thử lại (retry), sửa lỗi (rework) và vòng lặp |
-| [Rework và giải trình nguyên nhân](../rework-causality.md) | Finding identity, source/evidence, reviewer verdict và giới hạn guard hiện tại |
+| [Rework và giải trình nguyên nhân](../rework-causality.md) | Finding identity, source/evidence, bắt buộc đủ per-finding reviewer verdict và cổng `host-test-integrity` |
 | [NFR và risk-based test design](../nfr-and-test-design.md) | Oracle/điều kiện đo, traceability và viewpoints có điều kiện |
 | [Khôi phục phiên làm việc (Session Recovery)](session-recovery.md) | Xử lý khởi động lại, tình trạng truyền tin bất định (uncertain delivery), biên nhận và phát lại điểm kiểm tra |
 | [Giao tiếp qua Herdr (Herdr Communication)](herdr-communication.md) | Cấu trúc RoleMessage, biên nhận native đã xác thực và các giới hạn của tầng truyền tải |
@@ -42,7 +42,7 @@ Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin
 | CLI tự động khởi động và tắt host P19 | Đã triển khai provider-aware prepare/activate và native hooks/MCP; probe/lifecycle reports có phạm vi riêng |
 | Tầng truyền tải thông điệp Herdr có chữ ký số | Đã kiểm chứng thực tế; việc truyền tải thông điệp không thay thế cho bằng chứng nghiệm thu kết quả của AI |
 | Conversation plaintext/alias/Log | Có source và local hook/RPC/render tests; receipt hiển thị không là human approval hay live-provider acceptance |
-| Rework/NFR/risk references | Có source/local coverage; [main updates](../main-updates-2026-10-25.md) ghi mốc và giới hạn, bao gồm missing verdict-coverage guard |
+| Rework/NFR/risk references & test integrity | Có source/local coverage (bao gồm bắt buộc đủ per-finding verdict và cổng `host-test-integrity`); [main updates](../main-updates-2026-10-25.md) ghi các mốc và giới hạn nghiệm thu live |
 | Nghiệm thu Agentic SDLC đầu-cuối với mô hình trực tiếp | **Chưa kiểm chứng đầy đủ trong đợt phát hành này** |
 | Tự động tích hợp, merge và triển khai nhánh được bảo vệ | Runtime hiện tại không cấp quyền thực thi tự động các thao tác đẩy nhánh/triển khai lên remote |
 

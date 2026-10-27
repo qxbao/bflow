@@ -204,14 +204,17 @@ export async function promptConfirmOverwrite(configPath: string): Promise<boolea
   }
 }
 
-/** Asks before the first GitNexus index of a repository; non-interactive runs need --yes. */
+/**
+ * Asks before the first GitNexus index of a repository; non-interactive runs need --yes or
+ * --accept-gitnexus-license. Unlike --yes, --accept-gitnexus-license does not force config overwrite.
+ */
 async function approveGitNexusIndexing(
   args: InitCommandArgs,
   repositoryRoot: string,
   context: CliContext | undefined,
   progress: CliProgress | undefined
 ): Promise<boolean> {
-  if (args.yes) return true;
+  if (args.yes || args.acceptGitnexusLicense) return true;
   const prompt = `${GITNEXUS_POLYFORM_NOTICE}\n\nTạo chỉ mục '${repositoryRoot}' bằng GitNexus (ghi .gitnexus/ và .git/info/exclude) và đăng ký dịch vụ Gateway?`;
   const ask = async () => {
     if (context?.setup?.confirm) return context.setup.confirm(prompt);
@@ -479,7 +482,7 @@ async function executeCommandWithProgress(
             registered: false,
             gatewayReady: false,
             diagnostics: [GITNEXUS_POLYFORM_NOTICE,
-              "GitNexus indexing was not approved; rerun 'bflow init --yes' to accept the license and index this repository, or pass --no-gitnexus."]
+              "GitNexus indexing was not approved; rerun 'bflow init --accept-gitnexus-license' to accept the license and index this repository without overwriting .bflow/config.yml, or pass --no-gitnexus."]
           }
         : {
           status: "skipped" as const,
@@ -549,6 +552,11 @@ async function executeCommandWithProgress(
 
   if (parsed.command === "up" || parsed.command === "down" || parsed.command === "attach" || parsed.command === "doctor" || parsed.command === "recover") {
     throw new Error("Unreachable environment command");
+  }
+  if (parsed.command === "status" && parsed.telemetry && parsed.runId) {
+    const { executeTelemetryStatus } = await import("./telemetry.js");
+    const report = await executeTelemetryStatus(parsed.runId, context);
+    return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", report, undefined, isJson, io, presentation);
   }
   if (context?.runtime === undefined) {
     const error: ContractError = {

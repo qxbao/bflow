@@ -2,7 +2,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ApprovalDecisionSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema,
+import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema,
   type ApprovalDecision, type PaneBinding } from "@bflow/contracts";
 import { draft } from "../../../specification/test/fixtures.js";
 import { AgenticJournal, type JournalState } from "../../src/agentic/journal.js";
@@ -207,5 +207,85 @@ describe.skipIf(process.platform !== "linux")("P30 T9b runtime user decisions", 
     const f = await fixture();
     await f.journal.exclusive(async (state, save) => { state.runs[0]!.status = "completed"; await save(); });
     await expect(request(f.runtime(), developerPane())).rejects.toThrow("Run is completed");
+  });
+
+  it("also enqueues a task notice to a blocked active Developer assignment when Coordinator decision is approved", async () => {
+    const f = await fixture();
+    await f.journal.exclusive(async (state, save) => {
+      const specification = draft("api");
+      state.runs[0]!.tasks.push({
+        taskId: "task-implement",
+        spec: {
+          specification,
+          strategy: specification.testStrategy!,
+          request: ApprovalRequestSchema.parse({
+            schemaVersion: 2, approvalId: "approval-1", runId: "run-1", target: { type: "run" },
+            revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: T0,
+            reason: "Accept design", evidence: [], idempotencyKey: "approve-1"
+          })
+        },
+        worktrees: [],
+        outboundIds: ["task-assign-1"],
+        writerReleased: false
+      });
+      const target = { transport: "herdr" as const, agentId: "developer-agent", paneId: "pane-developer" };
+      const taskAssign = RoleMessageSchema.parse({
+        schema_version: 2, message_id: "task-assign-1", correlation_id: "correlation", run_id: "run-1",
+        sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: "developer-agent", pane_id: "pane-developer" },
+        type: "task.assignment", payload: { taskId: "task-implement" }, artifact_references: [], occurred_at: T0, idempotency_key: "task-assign-1"
+      });
+      state.outbound.push({
+        message: taskAssign, status: "accepted", selector: "developer", taskId: "task-implement", attemptId: "attempt-1",
+        capabilities: [],
+        assignment: {
+          schemaVersion: 2, assignmentId: "assignment-1", runId: "run-1", taskId: "task-implement",
+          delegationId: "delegation", role: "developer", agentId: "developer-agent", paneId: "pane-developer",
+          leaseId: "lease-1", fencingToken: 1, requiredCapabilities: [], assignedBy: "coordinator",
+          assignedAt: T0, status: "assigned", idempotencyKey: "task-assign-1"
+        },
+        request: {
+          requestId: "request-task-assign-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-implement",
+          role: "developer", target, instruction: JSON.stringify(taskAssign), workingDirectory: "/tmp",
+          inputs: [], context: taskAssign, attempt: 1,
+          retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
+          idempotency: { key: "task-assign-1", scope: "agent-request", fingerprint: "fp-1" },
+          createdAt: T0, metadata: { leaseId: "lease-1", fencingToken: 1 }
+        },
+        lease: {
+          leaseId: "lease-1", agentId: "developer-agent", runId: "run-1", taskId: "task-implement",
+          attemptId: "attempt-1", fencingToken: 1, version: 1,
+          acquiredAt: T0, expiresAt: "2026-10-18T11:00:00.000Z"
+        },
+        handle: {
+          executionId: "exec-1", requestId: "request-task-assign-1", attemptId: "attempt-1", runId: "run-1", taskId: "task-implement",
+          idempotencyKey: "task-assign-1", target,
+          correlation: { token: "task-assign-1", provenance: "transport", verified: true }, acceptedAt: T0
+        }
+      });
+      state.inbox.push({
+        message: RoleMessageSchema.parse({
+          schema_version: 2, message_id: "dev-blocked-1", correlation_id: "correlation", causation_id: "task-assign-1", run_id: "run-1",
+          sender: { role: "developer", agent_id: "developer-agent", pane_id: "pane-developer" }, recipient: { role: "coordinator" },
+          type: "task.status", payload: { status: "blocked", reason: "Ambiguous target file" },
+          artifact_references: [], occurred_at: T0, idempotency_key: "dev-blocked-1"
+        }),
+        status: "applied", receivedAt: T0
+      });
+      await save();
+    });
+    const receipt = await request(f.runtime(), coordinatorPane());
+    const approvalId = (receipt as unknown as { approvalId: string }).approvalId;
+    f.setNow(T1);
+    await deliver(f.runtime(), answer(approvalId));
+    const full = await f.journal.exclusive(async s => s);
+    const coordinatorResume = full.outbound.find(out => out.message.type === "task.status" && out.message.recipient.role === "coordinator");
+    const developerNotice = full.outbound.find(out => out.message.type === "task.status" && out.message.recipient.role === "developer");
+    expect(coordinatorResume).toBeDefined();
+    expect(developerNotice).toBeDefined();
+    expect(developerNotice!.parentAssignmentId).toBe("task-assign-1");
+    expect(developerNotice!.message.payload).toMatchObject({
+      kind: "user_decision_answer", approvalId, outcome: "approved", selectedOption: "SQLite", resumedTaskId: "task-implement"
+    });
   });
 });

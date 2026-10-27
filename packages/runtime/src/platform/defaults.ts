@@ -69,6 +69,25 @@ export function createProviderAdapterFactory(options: ProviderAdapterFactoryOpti
       ...(context.mcpTokenEnvironmentNames !== undefined ? { mcpTokenEnvironmentNames: context.mcpTokenEnvironmentNames } : {}),
       ...(context.isolatorEnvironment !== undefined ? { isolatorEnvironment: { ...context.isolatorEnvironment } } : {}),
       ...(context.codexBackendUrl !== undefined ? { codexBackendUrl: context.codexBackendUrl } : {}),
+      ...(provider === "codex" &&
+      context.launchEnvironment?.["BFLOW_INSTRUCTION_HOME"] === "private" &&
+      context.launchEnvironment["CODEX_HOME"] !== undefined
+        ? {
+            codexHomeDirectory: context.launchEnvironment["CODEX_HOME"],
+            codexHookEnvironment: {
+              ...(options.perProvider?.codex?.codexHookEnvironment ?? {}),
+              ...context.launchEnvironment,
+              HOME: context.launchEnvironment["HOME"] ?? "",
+              CODEX_HOME: context.launchEnvironment["CODEX_HOME"],
+              PATH:
+                options.perProvider?.codex?.codexHookEnvironment?.["PATH"] ??
+                process.env["PATH"] ??
+                "/usr/bin:/bin",
+              ORCA_AGENT_HOOK_ROOT: "",
+              ORCA_AGENT_HOOK_ENDPOINT: ""
+            }
+          }
+        : {}),
       ...(provider === "agy" ? {
         agyGatewayShimCommand: {
           command: process.execPath,

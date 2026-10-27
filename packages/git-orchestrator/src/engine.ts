@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import {
@@ -125,6 +125,13 @@ export class GitIntegrationEngine {
       return branch === undefined ? { path, locked } : { path, branch, locked };
     });
   }
+  private async ensureWorktreeRoot(): Promise<void> {
+    await mkdir(this.worktreeRoot, { recursive: true });
+    // A root inside the checkout must never make the main working tree dirty; the ignore file also covers itself.
+    await writeFile(join(this.worktreeRoot, ".gitignore"), "*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+  }
   private async provision(record: TaskRecord | IntegrationRecord): Promise<void> {
     const bindings = await this.worktrees();
     const existing = bindings.find(binding => binding.path === record.worktreePath);
@@ -137,11 +144,7 @@ export class GitIntegrationEngine {
       return;
     }
     requireCondition(!bindings.some(binding => binding.branch === record.branchName), "branch_in_use", "Branch already belongs to another worktree");
-    await mkdir(this.worktreeRoot, { recursive: true });
-    // A root inside the checkout must never make the main working tree dirty; the ignore file also covers itself.
-    await writeFile(join(this.worktreeRoot, ".gitignore"), "*\n", { flag: "wx" }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "EEXIST") throw error;
-    });
+    await this.ensureWorktreeRoot();
     if (await this.branchExists(record.branchName)) {
       requireCondition(await resolveCommit(this.repositoryPath, record.branchName) === record.baseCommitHash, "branch_collision", "Pending creation branch changed; manual reconciliation required");
       await git(this.repositoryPath, ["worktree", "add", record.worktreePath, record.branchName]);
@@ -169,7 +172,7 @@ export class GitIntegrationEngine {
         if (task.status === "active") { await this.assertBinding(task); return structuredClone(task); }
       } else {
         await assertClean(this.repositoryPath);
-        const baseCommitHash = await resolveCommit(this.repositoryPath, request.baseRevision);
+        const baseCommitHash = await this.taskBase(request, key);
         const branchName = taskBranchName(request);
         requireCondition(!await this.branchExists(branchName), "branch_collision", `Branch already exists: ${branchName}`);
         task = { key, request, baseCommitHash, branchName, worktreePath: this.taskPath(key), status: "creating" };
@@ -177,6 +180,46 @@ export class GitIntegrationEngine {
       }
       await this.provision(task); task.status = "active"; await this.save(state); return structuredClone(task);
     });
+  }
+
+  /**
+   * Base commit for a new task. One dependency head is the base itself; several are merged, in request order, into a synthetic
+   * commit so the Developer sees every dependency. Merge conflicts are reported before any task record or branch is created.
+   */
+  private async taskBase(request: z.output<typeof TaskRequestSchema>, key: string): Promise<string> {
+    const [first, ...rest] = request.dependencyHeads;
+    if (first === undefined) return resolveCommit(this.repositoryPath, request.baseRevision);
+    if (rest.length === 0) {
+      const head = await resolveCommit(this.repositoryPath, first);
+      requireCondition(head === await resolveCommit(this.repositoryPath, request.baseRevision), "dependency_base_mismatch", "A single dependency head must equal the task base");
+      return head;
+    }
+    const path = join(this.worktreeRoot, `dependency-${key}`);
+    await this.removeTemporaryWorktree(path); // An interrupted earlier merge leaves nothing reusable behind.
+    await this.ensureWorktreeRoot();
+    await git(this.repositoryPath, ["worktree", "add", "--detach", path, first]);
+    try {
+      for (const head of rest) {
+        try {
+          await git(path, ["-c", "user.name=bflow", "-c", "user.email=bflow@localhost", "merge", "--no-ff", "--no-edit", "--no-stat",
+            "-m", `bflow dependency base for ${request.taskId}`, "--", head]);
+        } catch (error) {
+          if (!await this.mergeHead(path)) throw error;
+          const conflicts = (await git(path, ["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").filter(Boolean);
+          await git(path, ["merge", "--abort"]);
+          throw new GitOrchestrationError("dependency_base_conflict",
+            `Dependency outputs conflict for ${request.taskId}: ${conflicts.length ? conflicts.join(", ") : "unknown paths"}`);
+        }
+      }
+      return await resolveCommit(path, "HEAD");
+    } finally {
+      await this.removeTemporaryWorktree(path);
+    }
+  }
+  /** Removes a managed temporary worktree, if registered, and its directory. Only the engine-owned `dependency-*` names reach here. */
+  private async removeTemporaryWorktree(path: string): Promise<void> {
+    if ((await this.worktrees()).some(binding => binding.path === path)) await git(this.repositoryPath, ["worktree", "remove", "--force", path]);
+    await rm(path, { recursive: true, force: true });
   }
 
   private async validateTaskHead(task: TaskRecord, expected?: string): Promise<{ head: string; files: GitChangeSet["filesChanged"]; patch: string; commits: string[] }> {
@@ -320,17 +363,27 @@ export class GitIntegrationEngine {
     delete record.currentTask; delete record.beforeMerge; record.conflictPaths = []; record.status = "ready"; await this.save(state);
   }
 
-  /** Base of the first attempt in a chain of same-run, same-task attempts, each based on the previous attempt's recorded head. */
-  private repairRoot(state: State, task: TaskRecord): string {
-    let base = task.baseCommitHash;
+  /** First attempt in a chain of same-run, same-task attempts, each based on the previous attempt's recorded head. */
+  private repairRoot(state: State, task: TaskRecord): TaskRecord {
+    let root = task;
     const seen = new Set([task.key]);
     for (let depth = 0; depth < MAX_REPAIR_CHAIN; depth++) {
+      const base = root.baseCommitHash;
       const earlier = Object.values(state.tasks).find(other => !seen.has(other.key) && other.request.runId === task.request.runId &&
         other.request.taskId === task.request.taskId && (other.changeSet?.headCommitHash ?? other.headCommitHash) === base);
-      if (!earlier) return base;
-      seen.add(earlier.key); base = earlier.baseCommitHash;
+      if (!earlier) return root;
+      seen.add(earlier.key); root = earlier;
     }
     throw new GitOrchestrationError("repair_chain", "Repair attempt chain is too long");
+  }
+
+  private async dependencyHeadsIntegrated(path: string, task: TaskRecord, expectedHead: string): Promise<boolean> {
+    const heads = task.request.dependencyHeads;
+    if (heads.length < 2) return false;
+    for (const head of heads) {
+      if (!await succeeds(path, ["merge-base", "--is-ancestor", head, expectedHead])) return false;
+    }
+    return true;
   }
 
   private async resume(state: State, record: IntegrationRecord): Promise<IntegrationRecord> {
@@ -368,8 +421,11 @@ export class GitIntegrationEngine {
         requireCondition(await resolveCommit(record.worktreePath, "HEAD") === record.expectedHead, "integration_drift", "Integration branch changed outside the engine");
         // A repair attempt is based on the previous attempt's (unmerged) head; its chain must root in integration history.
         // Merging the repair head brings in the earlier attempts' commits. A base from another task is never followed.
+        // A multi-dependency base is a synthetic merge of already-integrated dependency heads; its own commit never enters integration history.
+        const root = this.repairRoot(state, task);
         requireCondition(await succeeds(record.worktreePath, ["merge-base", "--is-ancestor", snapshot.baseCommitHash, record.expectedHead]) ||
-          await succeeds(record.worktreePath, ["merge-base", "--is-ancestor", this.repairRoot(state, task), record.expectedHead]),
+          await succeeds(record.worktreePath, ["merge-base", "--is-ancestor", root.baseCommitHash, record.expectedHead]) ||
+          await this.dependencyHeadsIntegrated(record.worktreePath, root, record.expectedHead),
           "missing_dependency", "Task base is not yet in integration history");
         record.currentTask = taskKey; record.beforeMerge = record.expectedHead; record.status = "merging"; await this.save(state);
       }

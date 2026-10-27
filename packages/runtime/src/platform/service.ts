@@ -1,5 +1,6 @@
 import type { GatewayToolOperationOptions } from "./browser-resource-transactions.js";
 import { lstat, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema,
@@ -18,6 +19,11 @@ import {
   type OperationResult
 } from "@bflow/contracts";
 import { computeFileSha256, providerSessionEnvironment, resolveAndVerifyExecutable, type LiveReadinessObservation } from "@bflow/agent-providers";
+import {
+  preparePrivateCodexHome,
+  type CodexInstructionHomeMode,
+  type PreparedCodexHome
+} from "./codex-home.js";
 import { sha256Hex } from "./environment.js";
 import { fail, failWith, ok } from "./errors.js";
 import { IsolatorProfileResolver, type ResolvedIsolatorProfile } from "./isolator-profile.js";
@@ -43,6 +49,12 @@ import type {
   SkillSessionPort
 } from "./ports.js";
 import { tokenEnvironmentName } from "./gateway-registrations.js";
+
+export {
+  preparePrivateCodexHome,
+  type CodexInstructionHomeMode,
+  type PreparedCodexHome
+};
 
 export interface DefaultPlatformReadinessServiceDeps {
   readonly environments: RoleEnvironmentResolverPort;
@@ -508,11 +520,27 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     let uncertain = false;
     let failure: ContractError | undefined;
     for (const identity of this.identities.values()) {
-      const verified = await gateway.verifyRegistrations(identity, options);
+      let verified = await gateway.verifyRegistrations(identity, options);
       if (!verified.ok) {
         uncertain = true;
         failure ??= verified.error;
         continue;
+      }
+      if (!verified.value.uncertain && verified.value.lost.length > 0) {
+        let refreshed = false;
+        for (const record of this.launches.values()) {
+          if (record.material?.identity.stateDirectory !== identity.stateDirectory) continue;
+          if (!verified.value.lost.some(item => item.role === record.role && item.taskId === record.taskId)) continue;
+          if (await this.refreshMediatedLaunchGateway(record, options)) refreshed = true;
+        }
+        if (refreshed) {
+          verified = await gateway.verifyRegistrations(identity, options);
+          if (!verified.ok) {
+            uncertain = true;
+            failure ??= verified.error;
+            continue;
+          }
+        }
       }
       uncertain ||= verified.value.uncertain;
       for (const registration of verified.value.lost) {
@@ -629,6 +657,48 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       record.state = "degraded";
       record.reason = GATEWAY_LOST_CODE;
     }
+  }
+
+  /**
+   * Mediated launches (`requirement.toolGrants !== undefined`) never pass Gateway bearer tokens into the provider
+   * process environment; all tool calls are brokered by the Runtime host. When a mediated registration expires,
+   * the host can renew its Gateway registration in-place without relaunching the role pane.
+   */
+  private async refreshMediatedLaunchGateway(record: LaunchRecord, options?: OperationOptions): Promise<boolean> {
+    const gateway = this.deps.gateway;
+    const material = record.material;
+    if (!gateway || !material || record.state === "released" || record.state === "failed") return false;
+    const { identity, requirement, environment } = material;
+    const grants = requirement.toolGrants;
+    if (grants === undefined || requirement.mcpServiceIds.length === 0) return false;
+    const groups = new Map<string, typeof grants[number][]>();
+    for (const grant of grants.filter(item => item.kind !== "cli_only")) {
+      if (grant.serviceId === undefined || !requirement.mcpServiceIds.includes(grant.serviceId)) return false;
+      const bucket = groups.get(grant.serviceId) ?? [];
+      bucket.push(grant);
+      groups.set(grant.serviceId, bucket);
+    }
+    if (groups.size === 0) return false;
+    const configDigest = sha256Hex(canonicalReceiptJson(requirement));
+    for (const [serviceId, serviceGrants] of groups) {
+      const operations = [...new Set(serviceGrants.flatMap(grant => grant.operations))].sort();
+      const granted = await gateway.ensureForRole(identity, {
+        role: requirement.role,
+        provider: requirement.provider,
+        ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
+        environmentId: environment.environmentId,
+        serviceIds: [serviceId],
+        allowedTools: operations,
+        toolGrants: serviceGrants,
+        configDigest
+      }, options);
+      if (!granted.ok) return false;
+    }
+    if (record.state === "degraded" && record.reason === GATEWAY_LOST_CODE) {
+      record.state = record.healthValidUntil !== undefined ? "activated" : "intent";
+      delete record.reason;
+    }
+    return true;
   }
 
   private track(identity: PlatformSessionIdentity): void {
@@ -762,17 +832,17 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       mcpServiceIds: mediated ? [] : requirement.mcpServiceIds.filter(serviceId => readyServiceIds.includes(serviceId)),
       mcpOperations: requirement.toolGrants.filter(grant => grant.kind !== "cli_only" && readyServiceIds.includes(grant.serviceId!)).flatMap(grant => grant.operations)
     };
-    const environmentRequirement = isolatorProfile === undefined
+    const baseEnvironmentRequirement = isolatorProfile === undefined
       ? effectiveRequirement
       : { ...effectiveRequirement, isolatorProfileIdentity: isolatorProfile.identity };
-    const environment = this.deps.environments.resolve(identity, environmentRequirement, {
+    const preliminaryEnvironment = this.deps.environments.resolve(identity, baseEnvironmentRequirement, {
       skillManifestDigest: skills.value.manifest.digest
     });
-    if (!environment.ok) return blocked(environment.error);
+    if (!preliminaryEnvironment.ok) return blocked(preliminaryEnvironment.error);
 
     // The role state directory must exist before preflight; it is private and holds no launch side effect yet.
     try {
-      await mkdir(environment.value.stateDirectory, { recursive: true, mode: 0o700 });
+      await mkdir(preliminaryEnvironment.value.stateDirectory, { recursive: true, mode: 0o700 });
     } catch (error) {
       return blocked({
         code: "validation",
@@ -781,19 +851,105 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       });
     }
 
+    const codexLaunchEnvironment = requirement.provider === "codex" && this.deps.codexLaunchEnvironment !== undefined
+      ? this.deps.codexLaunchEnvironment
+      : undefined;
+    let preparedCodexHome: PreparedCodexHome | undefined;
+    if (requirement.provider === "codex" && isolatorProfile === undefined) {
+      const hasExplicitSourceHome =
+        codexLaunchEnvironment?.["HOME"] !== undefined ||
+        codexLaunchEnvironment?.["CODEX_HOME"] !== undefined ||
+        requirement.environmentVariables?.["HOME"] !== undefined ||
+        requirement.environmentVariables?.["CODEX_HOME"] !== undefined ||
+        process.env["CODEX_HOME"] !== undefined;
+      const sourceProcessHome = hasExplicitSourceHome
+        ? codexLaunchEnvironment?.["HOME"] ??
+          requirement.environmentVariables?.["HOME"] ??
+          process.env["HOME"] ??
+          homedir()
+        : join(identity.stateDirectory, "default-codex-process-home");
+      const sourceCodexHome = hasExplicitSourceHome
+        ? codexLaunchEnvironment?.["CODEX_HOME"] ??
+          requirement.environmentVariables?.["CODEX_HOME"] ??
+          process.env["CODEX_HOME"] ??
+          join(sourceProcessHome, ".codex")
+        : join(identity.stateDirectory, "default-codex-home");
+      try {
+        preparedCodexHome = await preparePrivateCodexHome(
+          preliminaryEnvironment.value.stateDirectory,
+          sourceCodexHome,
+          sourceProcessHome,
+          {
+            ...(process.env["BFLOW_INSTRUCTION_HOME"] !== undefined
+              ? { BFLOW_INSTRUCTION_HOME: process.env["BFLOW_INSTRUCTION_HOME"] }
+              : {}),
+            ...(codexLaunchEnvironment ?? {}),
+            ...(requirement.environmentVariables ?? {})
+          }
+        );
+      } catch (error) {
+        return blocked({
+          code: "validation",
+          retryable: false,
+          message: `private Codex home could not be prepared: ${error instanceof Error ? error.message : String(error)}`
+        });
+      }
+      toolChecks.push(
+        toolCheck(
+          "passed",
+          preparedCodexHome.mode === "private"
+            ? "codex_instruction_home_private"
+            : "codex_instruction_home_native_auth_compatible",
+          preparedCodexHome.diagnostic,
+          "environment"
+        )
+      );
+    }
+
+    const environmentRequirement = preparedCodexHome === undefined
+      ? baseEnvironmentRequirement
+      : {
+          ...baseEnvironmentRequirement,
+          codexInstructionHomeIdentity: {
+            mode: preparedCodexHome.mode,
+            codexHome: preparedCodexHome.CODEX_HOME,
+            home: preparedCodexHome.HOME,
+            configDigest: preparedCodexHome.configDigest ?? null
+          }
+        };
+    const environment = preparedCodexHome === undefined
+      ? preliminaryEnvironment
+      : this.deps.environments.resolve(identity, environmentRequirement, {
+          skillManifestDigest: skills.value.manifest.digest
+        });
+    if (!environment.ok) return blocked(environment.error);
+
     const rolePrompt = this.deps.rolePrompt?.(requirement.role);
     const hookCommand = this.deps.nativeSessionHookCommand?.(requirement.role, requirement.taskId);
     const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId);
     const tokenNames = Object.fromEntries(gateway.registrations.map(registration =>
       [registration.registrationId, tokenEnvironmentName(registration.registrationId)]));
-    const codexLaunchEnvironment = requirement.provider === "codex" && this.deps.codexLaunchEnvironment !== undefined
-      ? this.deps.codexLaunchEnvironment
-      : undefined;
     const profileLaunchEnvironment = isolatorProfile === undefined
       ? undefined
       : { ...isolatorProfile.environment };
     const launchEnvironmentValues: Record<string, string> = {
       ...(codexLaunchEnvironment ?? {}),
+      ...(preparedCodexHome !== undefined
+        ? {
+            ...preparedCodexHome.authEnvironment,
+            BFLOW_INSTRUCTION_HOME: preparedCodexHome.BFLOW_INSTRUCTION_HOME,
+            ...(preparedCodexHome.mode === "private" ||
+            codexLaunchEnvironment !== undefined ||
+            requirement.environmentVariables?.["HOME"] !== undefined ||
+            requirement.environmentVariables?.["CODEX_HOME"] !== undefined ||
+            process.env["CODEX_HOME"] !== undefined
+              ? {
+                  CODEX_HOME: preparedCodexHome.CODEX_HOME,
+                  HOME: preparedCodexHome.HOME
+                }
+              : {})
+          }
+        : {}),
       ...(profileLaunchEnvironment ?? {})
     };
     if (requirement.provider === "agy") {

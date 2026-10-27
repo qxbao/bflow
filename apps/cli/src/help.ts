@@ -69,6 +69,7 @@ Tùy chọn (Options):
   --no-gitnexus         Bỏ qua lập chỉ mục GitNexus và đăng ký dịch vụ trên Gateway
   -f, --force           Ghi đè cấu hình hiện có bằng các giá trị mặc định mới
   -y, --yes             Tương đương --force, đồng thời chấp nhận giấy phép GitNexus PolyForm-Noncommercial không cần hỏi lại
+  --accept-gitnexus-license Chấp nhận giấy phép GitNexus PolyForm-Noncommercial và tạo chỉ mục mà không ghi đè cấu hình hiện có
   -u, --update          Tạo lại .bflow/config.yml với chú thích mới và các trường mặc định mới nhưng vẫn giữ nguyên giá trị hiện có
   -j, --json            Xuất kết quả theo định dạng phong bì JSON
       --debug           Hiển thị đầy đủ thông tin chi tiết và chẩn đoán kỹ thuật
@@ -160,6 +161,7 @@ Tham số (Arguments):
   [run-id]              Định danh lượt chạy tùy chọn để kiểm tra chi tiết một lượt chạy cụ thể
 
 Tùy chọn (Options):
+  --telemetry          Báo cáo metric chỉ đọc cho <run-id>; dùng --json để xuất dữ liệu có cấu trúc
   --status <statuses>   Lọc lượt chạy theo trạng thái (phân tách bằng dấu phẩy: queued, running, waiting, blocked, succeeded, failed, cancelling, cancelled)
   --workflow-id <id>    Lọc lượt chạy theo định danh định nghĩa quy trình
   --limit <n>           Số lượng lượt chạy tối đa trả về (1-500)
@@ -171,6 +173,7 @@ Tùy chọn (Options):
 Ví dụ / Examples:
   bflow status
   bflow status run-123
+  bflow status run-123 --telemetry --json
   bflow status --status waiting,blocked
   bflow status --limit 10`;
 

@@ -4,6 +4,12 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { diagnoseVerificationSandbox } from "@bflow/runtime";
+vi.mock("@bflow/runtime", async importOriginal => ({
+  ...await importOriginal<typeof import("@bflow/runtime")>(),
+  diagnoseVerificationSandbox: vi.fn(async () => ({ checkId: "runtime-verification-sandbox",
+    name: "Independent verification sandbox", status: "passed", message: "Sandbox probe passed" }))
+}));
 import {
   SessionManifestSchema,
   EnvironmentDoctorReportSchema,
@@ -175,6 +181,19 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
   });
 
   describe("runDoctorDiagnostics", () => {
+    it.each(["passed", "failed"] as const)("includes the actual verification sandbox capability (%s)", async status => {
+      vi.mocked(diagnoseVerificationSandbox).mockResolvedValueOnce({ checkId: "runtime-verification-sandbox",
+        name: "Independent verification sandbox", status,
+        message: status === "passed" ? "Sandbox probe passed" : "AppArmor denied Bubblewrap user namespace",
+        ...(status === "failed" ? { remediation: "Install the reviewed Bubblewrap AppArmor profile" } : {}) });
+      const report = await runDoctorDiagnostics({ repository, config: null, runner });
+      expect(report.checks.find(check => check.checkId === "runtime-verification-sandbox")).toMatchObject({ status });
+      expect(diagnoseVerificationSandbox).toHaveBeenLastCalledWith(repository.root);
+      if (status === "failed") {
+        expect(report.healthy).toBe(false);
+        expect(report.checks.find(check => check.checkId === "runtime-verification-sandbox")?.remediation).toContain("AppArmor");
+      }
+    });
     it.each([
       { selectedProfile: false, outcome: "success" },
       { selectedProfile: false, outcome: "failure" },

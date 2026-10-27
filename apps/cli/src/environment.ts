@@ -837,7 +837,10 @@ export class EnvironmentLifecycle {
       // Only a host that cannot run the barrier at all is bypassed: an incompatible build, or an unactivated host that
       // refuses to quiesce over persisted journal work or Core runs. Journal/run store stay on disk and the next `up` reconciles them.
       // Genuine barrier/checkpoint failures on an active host still abort a forced stop.
-      if (!force || !/Unknown host operation|requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(error instanceof Error ? error.message : String(error))) throw error;
+      const unactivated = /requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(error instanceof Error ? error.message : String(error));
+      if (!force && unactivated && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
+        message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
+      if (!force || !(unactivated || /Unknown host operation/.test(error instanceof Error ? error.message : String(error)))) throw error;
     }
     this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");
     return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
@@ -862,9 +865,12 @@ export class EnvironmentLifecycle {
       if (!saved) return { workspaceRoot: repository.root, sessionName: repository.sessionName, server: "stopped" as const,
         configuration: "valid" as const, manifest: null, liveObservation: true, issues: [] };
       const at = new Date().toISOString();
-      return await this.saveManifest(repository, { ...saved, status: "down", updatedAt: at, stoppedAt: at,
+      const stopped = await this.saveManifest(repository, { ...saved, status: "down", updatedAt: at, stoppedAt: at,
         panes: saved.panes.map(pane => ({ ...pane, transportState: "cancelled", lastHeartbeatAt: at })),
         metadata: { ...saved.metadata, shutdownMode: "force_incompatible_host" } });
+      const synced = await deadline.call(opts => integration.manager.init(stopped, opts));
+      if (synced && !synced.ok) throw new EnvironmentError(synced.error);
+      return stopped;
     } finally { await deadline.call(() => integration.close?.() ?? Promise.resolve()); }
   }
   private async downLocked(repository: RepositoryIdentity, config: EnvironmentConfig, confirmed: boolean, timeoutMs?: number, signal?: AbortSignal,
@@ -932,36 +938,52 @@ export class EnvironmentLifecycle {
       if (!running) {
         this.progress("Máy chủ phiên đã dừng; đang đối soát trạng thái...");
         const offline = await acquire();
-        if (offline?.shutdownHost) try {
-          if (!offline.runtime || !offline.quiesce) fail("Cannot drain the retained host safely; state was preserved.");
-          await this.writeIntent(repository, "stopping");
-          this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
-          unwrap(await deadline.call(opts => offline.quiesce!(opts)));
-          this.progress("Đang thu thập lại các luồng chạy đang hoạt động...");
-          const active = new Map<string, { version: number }>(); let cursor: string | undefined;
-          const seen = new Set<string>();
-          do {
-            const page = unwrap(await deadline.call(opts => offline.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 500, ...(cursor ? { cursor } : {}) }, opts)));
-            for (const input of page.items) { const run = WorkflowRunSnapshotSchema.parse(input); if (!["succeeded", "failed", "cancelled"].includes(run.status)) active.set(run.runId, { version: run.version }); }
-            if (!page.nextCursor) break;
-            if (seen.has(page.nextCursor)) fail("Runtime pagination did not advance during stopped-session recovery");
-            cursor = page.nextCursor; seen.add(cursor);
-          } while (true);
-          for (const runId of saved.activeRunIds) if (!active.has(runId)) {
-            const input = unwrap(await deadline.call(opts => offline.runtime!.getRun(runId, opts)));
-            if (!input) fail(`Retained host cannot resolve run '${runId}'; no recovery state was cleared.`);
-            const run = WorkflowRunSnapshotSchema.parse(input); if (!["succeeded", "failed", "cancelled"].includes(run.status)) active.set(runId, { version: run.version });
+        try {
+          if (offline?.shutdownHost) {
+            if (!offline.runtime || !offline.quiesce) fail("Cannot drain the retained host safely; state was preserved.");
+            await this.writeIntent(repository, "stopping");
+            this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
+            unwrap(await deadline.call(opts => offline.quiesce!(opts)));
+            this.progress("Đang thu thập lại các luồng chạy đang hoạt động...");
+            const active = new Map<string, { version: number }>(); let cursor: string | undefined;
+            const seen = new Set<string>();
+            do {
+              const page = unwrap(await deadline.call(opts => offline.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 500, ...(cursor ? { cursor } : {}) }, opts)));
+              for (const input of page.items) { const run = WorkflowRunSnapshotSchema.parse(input); if (!["succeeded", "failed", "cancelled"].includes(run.status)) active.set(run.runId, { version: run.version }); }
+              if (!page.nextCursor) break;
+              if (seen.has(page.nextCursor)) fail("Runtime pagination did not advance during stopped-session recovery");
+              cursor = page.nextCursor; seen.add(cursor);
+            } while (true);
+            for (const runId of saved.activeRunIds) if (!active.has(runId)) {
+              const input = unwrap(await deadline.call(opts => offline.runtime!.getRun(runId, opts)));
+              if (!input) fail(`Retained host cannot resolve run '${runId}'; no recovery state was cleared.`);
+              const run = WorkflowRunSnapshotSchema.parse(input); if (!["succeeded", "failed", "cancelled"].includes(run.status)) active.set(runId, { version: run.version });
+            }
+            if (active.size > 0) {
+              this.progress(`Đang lưu điểm khôi phục (checkpoint) cho ${active.size} luồng chạy đang hoạt động...`);
+            }
+            await this.checkpointRuns(offline, active, deadline);
+            this.progress("Đang tắt tiến trình Runtime nền...");
+            await deadline.call(() => offline.shutdownHost!());
           }
-          if (active.size > 0) {
-            this.progress(`Đang lưu điểm khôi phục (checkpoint) cho ${active.size} luồng chạy đang hoạt động...`);
+          await this.writeIntent(repository, "down");
+          this.cleanupMcpSession(repository);
+          const at = new Date().toISOString();
+          const stopped = await this.saveManifest(repository, {
+            ...saved,
+            status: "down",
+            updatedAt: at,
+            stoppedAt: at,
+            ...(force || saved.status !== "down"
+              ? { panes: saved.panes.map(pane => ({ ...pane, transportState: "cancelled", lastHeartbeatAt: at })) }
+              : {})
+          });
+          if (offline) {
+            const synced = await deadline.call(opts => offline.manager.init(stopped, opts));
+            if (synced && !synced.ok) throw new EnvironmentError(synced.error);
           }
-          await this.checkpointRuns(offline, active, deadline);
-          this.progress("Đang tắt tiến trình Runtime nền...");
-          await deadline.call(() => offline.shutdownHost!());
-        } finally { if (offline !== suppliedIntegration) await deadline.call(() => offline.close?.() ?? Promise.resolve()); }
-        await this.writeIntent(repository, "down");
-        this.cleanupMcpSession(repository);
-        return this.saveManifest(repository, { ...saved, status: "down", updatedAt: new Date().toISOString(), stoppedAt: new Date().toISOString() });
+          return stopped;
+        } finally { if (offline && offline !== suppliedIntegration) await deadline.call(() => offline.close?.() ?? Promise.resolve()); }
       }
       const integration = await acquire();
       if (!integration) fail("Runtime is unavailable; cannot inspect active runs/checkpoint safely. Session remains running.");
@@ -1051,6 +1073,10 @@ export class EnvironmentLifecycle {
         if (integration.shutdownHost) await deadline.call(() => integration.shutdownHost!());
         await this.writeIntent(repository, "down");
         const finalManifest = await this.saveManifest(repository, stopped);
+        if (force) {
+          const synced = await deadline.call(opts => integration.manager.init(finalManifest, opts));
+          if (synced && !synced.ok) throw new EnvironmentError(synced.error);
+        }
         this.cleanupMcpSession(repository);
         return finalManifest;
       } finally { if (integration !== suppliedIntegration) await deadline.call(() => integration.close?.() ?? Promise.resolve()); }

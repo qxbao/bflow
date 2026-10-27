@@ -67,6 +67,7 @@ export function stringifyConfigYaml(value: unknown): string {
       "sdd",
       "tdd",
       "verification",
+      "fastPath",
       "concurrency",
       "startupTimeoutMs",
       "shutdownTimeoutMs",
@@ -191,7 +192,18 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     "  #   - maxIterations : (integer: `1..100`, mặc định: `3`) Số vòng lặp kiểm chứng & sửa lỗi (rework) tối đa cho mỗi task.",
     "  #   - onExhausted   : (enum: `require_human`, mặc định: `require_human`)",
     "  #                     Khi vượt quá `maxIterations` mà chưa đạt tiêu chuẩn, leo thang để xin quyết định từ người dùng.",
+    "  #   - regressionScope: affected | full | mapped_only (mặc định: `affected`)",
+    "  #                      + `affected`    : Chạy kiểm thử liên quan đến các file thay đổi trong phạm vi task/run.",
+    "  #                      + `full`        : Chạy toàn bộ bộ kiểm thử (full regression suite) của repository.",
+    "  #                      + `mapped_only` : Chỉ chạy các lệnh kiểm thử được ánh xạ trực tiếp tới tiêu chí nghiệm thu.",
+    "  #   - reviewTimeoutMs : (integer ms: `60000..3600000`, mặc định: `900000`) Thời gian tối đa chờ một phiên Reviewer/QA độc lập trả kết quả.",
+    "  #                      Không ghi khóa này nếu dùng mặc định; tăng giá trị khi review trên repository lớn bị hết giờ.",
     "  verification:"
+  ].join("\n");
+
+  const fastPathBanner = [
+    "  # Fast-path: thay đổi nhỏ (trivial) chạy ít bước hơn và tự duyệt design; bạn vẫn duyệt bàn giao. mode: auto | off (mặc định: auto).",
+    "  fastPath:"
   ].join("\n");
 
   const concurrencyBanner = [
@@ -286,6 +298,7 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     .replace(/^  sdd:\n/m, `${sddBanner}\n`)
     .replace(/^  tdd:\n/m, `${tddBanner}\n`)
     .replace(/^  verification:\n/m, `${verificationBanner}\n`)
+    .replace(/^  fastPath:\n/m, `${fastPathBanner}\n`)
     .replace(/^  concurrency:\n/m, `${concurrencyBanner}\n`)
     .replace(/^  permissions:\n/m, `${permissionsBanner}\n`)
     .replace(/^  tools:\n/m, `${toolsBanner}\n`)

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { pinRunnerDefinitions } from "../../src/agentic/runner-provenance.js";
 import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
-import { bindRunnerProfile, measureBehavior, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
+import { bindRegressionProfile, bindRunnerProfile, measureBehavior, measureRegression, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -37,6 +37,17 @@ describe("bindRunnerProfile", () => {
     expect(() => bindRunnerProfile(profile("/repo"), { testNames: ["a", "a"], testPaths: ["pkg/test/a.test.cjs"] })).toThrow("unique and safe");
     expect(() => bindRunnerProfile(profile("/repo"), { testNames: ["a"], testPaths: ["pkg/test/a.test.cjs", "pkg/test/a.test.cjs"] })).toThrow("unique and safe");
     expect(() => bindRunnerProfile(profile("/repo"), { testNames: [""], testPaths: ["pkg/test/a.test.cjs"] })).toThrow("test names");
+  });
+  it("bindRegressionProfile rejects adapter profiles", () => {
+    const adapterProfile = profile("/repo", {
+      adapter: {
+        format: "node_tap",
+        projectDirectory: ".",
+        bind: () => ({ args: [] })
+      }
+    });
+    expect(() => bindRegressionProfile(adapterProfile, ["pkg/test/a.test.cjs"], 30_000)).toThrow(/adapter/i);
+    expect(() => bindRegressionProfile(profile("/repo"), [], 30_000)).toThrow("test paths");
   });
 });
 
@@ -111,5 +122,34 @@ describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("runner pro
     const command = bindRunnerProfile(await pinnedProfile(f.cwd, { prepare: { args: ["scripts/replace-and-restore.cjs"], timeoutMs: 30000 } }), { testNames: [depName], testPaths: [path] });
     await expect(measureBehavior(command, f.cwd, revision)).rejects.toThrow("clean worktree");
   }, 120000);
+  it("measureRegression runs whole files without a name filter", async () => {
+    const f = await pnpmLikeRepo();
+    await writeFile(
+      join(f.cwd, "pkg/test/multi.test.cjs"),
+      [
+        "const {test}=require('node:test'); const assert=require('node:assert/strict');",
+        "test('passes first',()=>assert.equal(1+1,2));",
+        "test('fails second',()=>assert.equal(2+2,5));",
+        ""
+      ].join("\n")
+    );
+    f.git("add", ".");
+    f.git("commit", "-m", "add multi test file");
+    const revision = f.git("rev-parse", "HEAD");
+    const command = bindRegressionProfile(await pinnedProfile(f.cwd), ["pkg/test/multi.test.cjs"], 30_000);
+    expect(command.args).not.toContainEqual(expect.stringContaining("--test-name-pattern"));
+    expect(command.testNames).toEqual([]);
+    expect(command.selection).toBe("regression");
+    const measured = await measureRegression(command, f.cwd, revision);
+    expect(measured.observation).toEqual({
+      tests: 2,
+      passed: 1,
+      failed: 1,
+      skipped: 0,
+      failures: [{ testPath: "pkg/test/multi.test.cjs", testName: "fails second" }]
+    });
+    expect(f.git("status", "--porcelain")).toBe("");
+    expect(f.git("worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+  }, 120_000);
 
 });

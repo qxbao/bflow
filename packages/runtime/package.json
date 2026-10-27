@@ -23,6 +23,7 @@
     "@bflow/machine-setup": "workspace:*",
     "@bflow/mcp-gateway": "workspace:*",
     "@bflow/skills": "workspace:*",
+    "typescript": "5.9.3",
     "zod": "^3.24.2"
   },
   "devDependencies": {

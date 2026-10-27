@@ -104,11 +104,29 @@ describe("assess tool Specification ingress", () => {
     const f = await fixture(), spec = draft("api");
     await expect(f.tools.invoke("assess", { specification: spec }, principal)).resolves.toMatchObject({
       complexity: "complex", level: "full", humanApprovalRequired: true, clarificationRequired: false,
-      suggestedRoles: ["architect", "planner"], availableCapabilities: { architect: ["repository.read"] }
+      suggestedRoles: ["architect", "planner"], availableCapabilities: { architect: ["repository.read"] },
+      fastPath: { eligible: false, blockers: expect.arrayContaining(["not_trivial", "full_sdd"]) }
     });
     expect(f.assess).toHaveBeenCalledTimes(1);
     expect(f.assess).toHaveBeenCalledWith(spec);
     expect(spec.acceptanceCriteria[0]!.status).toBe("pending");
+  });
+
+  it("assess returns fastPath preview without definition-only blockers", async () => {
+    const f = await fixture();
+    const trivialSpec = draft("documentation");
+    const trivialResult = await f.tools.invoke("assess", { specification: trivialSpec }, principal) as Record<string, unknown>;
+    expect(trivialResult.fastPath).toEqual({
+      eligible: true,
+      blockers: []
+    });
+
+    const complexSpec = draft("api");
+    const complexResult = await f.tools.invoke("assess", { specification: complexSpec }, principal) as Record<string, unknown>;
+    const fastPath = complexResult.fastPath as { eligible: boolean; blockers: string[] };
+    expect(fastPath.eligible).toBe(false);
+    expect(fastPath.blockers).not.toContain("multi_task");
+    expect(fastPath.blockers).not.toContain("task_approval");
   });
 
   it("reports every missing field of the recorded 2026-10-21 08:44:12 assess shape at the tool boundary", async () => {

@@ -100,6 +100,8 @@ describe.skipIf(process.platform === "win32")("whole-run lifecycle fault matrix 
     for (let pass = 0; pass < 3 && (await f.run()).status !== "awaiting_approval"; pass++) await f.runtime.tick();
     const repaired = await f.run();
     expect(repaired.status, `repaired task must integrate: ${repaired.error}`).toBe("awaiting_approval");
+    expect(repaired.tasks[0]!.reworkResolutions?.[0]?.verificationOutcome.status).toBe("verified_closed");
+    expect(repaired.tasks[0]!.reworkResolutions?.[0]?.verificationOutcome.findingVerdicts.length).toBeGreaterThan(0);
     await f.approve();
     expect((await f.run()).status).toBe("completed");
   });

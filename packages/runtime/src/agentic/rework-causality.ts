@@ -7,7 +7,7 @@ import { z } from "zod";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, IsoDateTimeSchema, JsonValueSchema,
   OperationResultSchema, QualityFindingSchema, type ArtifactReference, type ArtifactStore,
-  type QualityFinding, type VerificationCycle, type VerificationResult
+  type QualityFinding, type QualityGateResult, type VerificationCycle, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, textField } from "./journal.js";
 
@@ -829,118 +829,120 @@ export async function verifyStoredReworkDossier(options: {
 }
 
 /**
- * Settles a rework dossier's `verificationOutcome` ONLY after independent verification completes.
- * Developer self-reported "addressed" never closes a finding on its own; only an independent passed cycle
- * transitions finding outcomes from `pending_independent_verification` to `verified_closed`.
+ * Assignment history survives verification retries which intentionally reset the cycle history.
+ * Only an assignment carrying `reworkContext` asks the Developer for findingResolutions; a plain redispatch
+ * that merely forwards prior findings (e.g. warnings or an escalated cycle) must not demand a dossier.
  */
+export function hasReworkAssignment(outbound: readonly unknown[], runId: string, taskId: string, attemptId: string): boolean {
+  return outbound.some(value => {
+    const out = recordMaybe(value), message = recordMaybe(out?.message), payload = recordMaybe(message?.payload);
+    const handle = recordMaybe(out?.handle), task = recordMaybe(payload?.task);
+    return message?.run_id === runId && message.type === "task.assignment" && task?.id === taskId &&
+      (out?.attemptId === attemptId || handle?.attemptId === attemptId || recordMaybe(payload?.worktree)?.attemptId === attemptId) &&
+      payload?.reworkContext !== undefined;
+  });
+}
+
+/** Runtime-private proof binding. Old dossiers remain readable; old receipts are not upgraded into proof. */
+export function reworkVerificationBinding(dossier: ReworkResolutionDossier) {
+  const context = dossier.reworkContext;
+  if (dossier.runId !== context.runId || dossier.taskId !== context.taskId || dossier.attemptId !== context.attemptId ||
+      dossier.reworkGeneration !== context.reworkGeneration || dossier.coreGeneration !== context.coreGeneration ||
+      dossier.cycleId !== context.cycleId || dossier.failedVerificationId !== context.failedVerificationId ||
+      dossier.failedRevision !== context.failedRevision ||
+      context.findings.some(f => f.reworkGeneration !== context.reworkGeneration) ||
+      dossier.findingResolutions.length !== context.findings.length ||
+      new Set(dossier.findingResolutions.map(f => f.findingId)).size !== context.findings.length ||
+      context.findings.some(f => !dossier.findingResolutions.some(r => r.findingId === f.findingId))) {
+    throw new Error("Rework dossier identity, generation or required finding set mismatch");
+  }
+  return {
+    dossierId: dossier.dossierId, runId: dossier.runId, taskId: dossier.taskId, attemptId: dossier.attemptId,
+    reworkGeneration: dossier.reworkGeneration, coreGeneration: dossier.coreGeneration,
+    sourceRevision: dossier.submittedRevision,
+    requiredFindingIds: context.findings.map(f => f.findingId),
+    dossierFingerprint: digest({ ...dossier, verificationOutcome: undefined })
+  };
+}
+
+export function parseRequiredFindingVerdicts(dossier: ReworkResolutionDossier, input: unknown): ReworkFindingVerdict[] {
+  const requiredIds = new Set(dossier.reworkContext.findings.map(f => f.findingId));
+  const verdicts = z.array(ReworkFindingVerdictSchema).parse(input);
+  if (new Set(verdicts.map(v => v.findingId)).size !== verdicts.length) throw new Error("Duplicate findingId in findingVerdicts");
+  for (const verdict of verdicts) {
+    if (!requiredIds.has(verdict.findingId)) throw new Error(`Unknown findingId '${verdict.findingId}' in rework findingVerdicts`);
+  }
+  if (verdicts.length !== requiredIds.size) throw new Error("Missing required findingVerdicts for independent rework verification");
+  return verdicts;
+}
+
+/** Validate a host-authenticated independent gate against the exact submitted repair. */
+export function validateReworkGate(dossier: ReworkResolutionDossier, gate: QualityGateResult): ReworkFindingVerdict[] {
+  const observation = recordMaybe(gate.metadata?.verification);
+  if (gate.runId !== dossier.runId || gate.taskId !== dossier.taskId ||
+      observation?.runId !== dossier.runId || observation.taskId !== dossier.taskId ||
+      observation.attemptId !== dossier.attemptId || observation.sourceRevision !== dossier.submittedRevision ||
+      observation.checkId !== gate.gateId || observation.isolated !== true ||
+      observation.method !== "manual_review" || observation.independentExecution !== true || !["reviewer", "qa", "tester"].includes(String(observation.role)) ||
+      typeof observation.executorId !== "string" || observation.executorId === dossier.submittedByAgentId ||
+      digest(gate.metadata?.reworkVerification) !== digest(reworkVerificationBinding(dossier))) {
+    throw new Error("Missing or stale independent rework verification binding");
+  }
+  const verdicts = parseRequiredFindingVerdicts(dossier, gate.metadata?.findingVerdicts);
+  if (gate.status === "passed" && verdicts.some(v => v.verdict === "rejected")) throw new Error("Passed gate contradicts rejected finding verdict");
+  return verdicts;
+}
+
+export function reworkVerificationVerdicts(dossier: ReworkResolutionDossier, result: VerificationResult, cycle: VerificationCycle): ReworkFindingVerdict[] {
+  if (result.runId !== dossier.runId || result.taskId !== dossier.taskId || result.attemptId !== dossier.attemptId ||
+      result.independentExecution !== true || result.changeSet?.headCommitHash !== dossier.submittedRevision ||
+      cycle.runId !== dossier.runId || cycle.taskId !== dossier.taskId || cycle.currentIteration !== result.cycleNumber) {
+    throw new Error("Rework result task, generation or revision mismatch");
+  }
+  const gates = result.qualityGateResults.filter(g => ["reviewer", "qa", "tester"].includes(String(recordMaybe(g.metadata?.verification)?.role)) &&
+    recordMaybe(g.metadata?.verification)?.method === "manual_review");
+  if (!gates.length) throw new Error("Missing independent rework finding verdicts");
+  const verdictsByGate = gates.map(g => validateReworkGate(dossier, g));
+  return dossier.reworkContext.findings.map(f => {
+    const judgments = verdictsByGate.map(vs => vs.find(v => v.findingId === f.findingId)!);
+    return judgments.find(v => v.verdict === "rejected") ?? judgments[0]!;
+  });
+}
+
+/** Settle only explicit independent verdicts; a cycle-level pass never supplies missing proof. */
 export function settleReworkVerificationOutcome(
   dossier: ReworkResolutionDossier,
   result: VerificationResult,
   cycle: VerificationCycle
 ): ReworkResolutionDossier {
-  const verdictByFindingId = new Map<string, ReworkFindingVerdict>();
-  for (const gate of result.qualityGateResults) {
-    const verificationMeta = recordMaybe(gate.metadata?.verification);
-    const rawVerdicts = gate.metadata?.findingVerdicts ?? verificationMeta?.findingVerdicts;
-    if (Array.isArray(rawVerdicts)) {
-      for (const item of rawVerdicts) {
-        const parsed = ReworkFindingVerdictSchema.safeParse(item);
-        if (parsed.success) verdictByFindingId.set(parsed.data.findingId, parsed.data);
-      }
-    }
-  }
-  const rejectedPriorIds = new Set<string>();
-  for (const finding of result.findings.filter(item => item.severity === "error")) {
-    const details = recordMaybe(finding.details);
-    const original = recordMaybe(details?.original);
-    const priorId = typeof details?.priorFindingId === "string"
-      ? details.priorFindingId
-      : typeof original?.priorFindingId === "string"
-        ? original.priorFindingId
-        : undefined;
-    if (priorId) rejectedPriorIds.add(priorId);
-  }
-
-  if (result.status === "passed" && cycle.status === "passed") {
-    return ReworkResolutionDossierSchema.parse({
-      ...dossier,
-      verificationOutcome: {
-        status: "verified_closed",
-        verificationId: result.verificationId,
-        cycleNumber: result.cycleNumber,
-        verifiedBy: result.verifiedBy,
-        verifiedAt: result.completedAt,
-        remainingFindingCount: 0,
-        closedFindingIds: dossier.findingResolutions.map(item => item.findingId),
-        openFindingIds: [],
-        findingVerdicts: [...verdictByFindingId.values()],
-        findingOutcomes: dossier.findingResolutions.map(item => ({
-          findingId: item.findingId,
-          disposition: item.disposition,
-          status: "verified_closed",
-          ...(verdictByFindingId.get(item.findingId)?.summary ? { verdictSummary: verdictByFindingId.get(item.findingId)!.summary } : {})
-        }))
-      }
-    });
-  }
-
-  if (cycle.status === "rework_required") {
-    const errorCount = result.findings.filter(item => item.severity === "error").length;
-    const outcomes = dossier.findingResolutions.map(item => {
-      const explicitVerdict = verdictByFindingId.get(item.findingId);
-      const rejected = explicitVerdict?.verdict === "rejected" || rejectedPriorIds.has(item.findingId) || explicitVerdict === undefined;
-      return {
-        findingId: item.findingId,
-        disposition: item.disposition,
-        status: (rejected ? "rejected_by_verification" : "verified_closed") as "rejected_by_verification" | "verified_closed",
-        ...(explicitVerdict?.summary ? { verdictSummary: explicitVerdict.summary } : {})
-      };
-    });
-    return ReworkResolutionDossierSchema.parse({
-      ...dossier,
-      verificationOutcome: {
-        status: "rework_required",
-        verificationId: result.verificationId,
-        cycleNumber: result.cycleNumber,
-        verifiedBy: result.verifiedBy,
-        verifiedAt: result.completedAt,
-        remainingFindingCount: errorCount,
-        reason: "Independent verification found remaining or unconvincing rework repairs",
-        closedFindingIds: outcomes.filter(item => item.status === "verified_closed").map(item => item.findingId),
-        openFindingIds: outcomes.filter(item => item.status !== "verified_closed").map(item => item.findingId),
-        findingVerdicts: [...verdictByFindingId.values()],
-        findingOutcomes: outcomes
-      }
-    });
-  }
-
-  const exhausted =
-    cycle.status === "escalated" &&
-    (result.status === "failed" ||
-      cycle.currentIteration >= cycle.maxIterations ||
-      /iteration limit|max_iterations/i.test(cycle.escalation?.reason ?? ""));
+  let verdicts: ReworkFindingVerdict[] = [];
+  let evidenceError: string | undefined;
+  try { verdicts = reworkVerificationVerdicts(dossier, result, cycle); }
+  catch (error) { evidenceError = String(error); }
+  const outcomes = dossier.reworkContext.findings.map(finding => {
+    const resolution = dossier.findingResolutions.find(r => r.findingId === finding.findingId)!;
+    const verdict = verdicts.find(v => v.findingId === finding.findingId);
+    return {
+      findingId: finding.findingId, disposition: resolution.disposition,
+      status: (verdict?.verdict === "confirmed" ? "verified_closed" : verdict?.verdict === "rejected" ? "rejected_by_verification" : "unverified") as
+        "verified_closed" | "rejected_by_verification" | "unverified",
+      ...(verdict ? { verdictSummary: verdict.summary } : {})
+    };
+  });
+  const closedFindingIds = outcomes.filter(o => o.status === "verified_closed").map(o => o.findingId);
+  const openFindingIds = outcomes.filter(o => o.status !== "verified_closed").map(o => o.findingId);
+  const passed = result.status === "passed" && cycle.status === "passed" && !evidenceError && !openFindingIds.length;
+  const failed = result.status === "failed";
+  const status = passed ? "verified_closed" : evidenceError ? "escalated_blocked" : failed && cycle.status === "rework_required" ? "rework_required" :
+    failed && cycle.status === "escalated" ? "exhausted_failed" : "escalated_blocked";
   return ReworkResolutionDossierSchema.parse({
     ...dossier,
     verificationOutcome: {
-      status: exhausted ? "exhausted_failed" : "escalated_blocked",
-      verificationId: result.verificationId,
-      cycleNumber: result.cycleNumber,
-      verifiedBy: result.verifiedBy,
-      verifiedAt: result.completedAt,
-      remainingFindingCount: result.findings.filter(item => item.severity === "error").length,
-      reason: cycle.escalation?.reason ?? "Verification did not pass within bounded rework policy",
-      closedFindingIds: [],
-      openFindingIds: dossier.findingResolutions.map(item => item.findingId),
-      findingVerdicts: [...verdictByFindingId.values()],
-      findingOutcomes: dossier.findingResolutions.map(item => {
-        const explicitVerdict = verdictByFindingId.get(item.findingId);
-        return {
-          findingId: item.findingId,
-          disposition: item.disposition,
-          status: explicitVerdict?.verdict === "rejected" || rejectedPriorIds.has(item.findingId) ? "rejected_by_verification" : "unverified",
-          ...(explicitVerdict?.summary ? { verdictSummary: explicitVerdict.summary } : {})
-        };
-      })
+      status, verificationId: result.verificationId, cycleNumber: result.cycleNumber,
+      verifiedBy: result.verifiedBy, verifiedAt: result.completedAt,
+      remainingFindingCount: Math.max(openFindingIds.length, result.findings.filter(f => f.severity === "error").length),
+      ...(passed ? {} : {reason: evidenceError ?? cycle.escalation?.reason ?? "Independent verification requires further repairs or evidence"}),
+      closedFindingIds, openFindingIds, findingVerdicts: verdicts, findingOutcomes: outcomes
     }
   });
 }

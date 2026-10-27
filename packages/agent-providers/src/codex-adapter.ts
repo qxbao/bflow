@@ -19,9 +19,12 @@ import type {
   ProviderAdapterOptions
 } from "./types.js";
 import { codexHookPolicyPath, inspectCodexHooks } from "./codex-hook-trust.js";
+import { inspectCodexConfiguredAuth } from "./codex-home.js";
+import { parseCodexEnabledPlugins } from "./codex-hook-toml.js";
 import { managedCodexPluginArgs } from "./codex-plugin-policy.js";
 import { codexProbeConfigDependencies } from "./codex-probe-config.js";
 import { checkCodexBackendAuthentication } from "./backend-authentication.js";
+import { computeFileSha256 } from "./attestation.js";
 import type { OperationOptions } from "@bflow/contracts";
 
 /** Observe metadata only: no credential bytes are read or retained. Symlinks/special files and
@@ -86,6 +89,7 @@ const MCP_NOT_ISOLATED_CODE = "codex_global_mcp_not_isolated";
 const BARE_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MCP_TABLE_PATTERN = /^\s*\[\s*mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*(?:\.[^\]]*)?\]/gm;
 const CODEX_HOOK_DIGEST_METADATA_KEY = "bflowCodexHookSnapshotDigest";
+const CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY = "bflowCodexPreloadedDocDigest";
 
 function linkedBackendOverrides(url: string, hasApiKey: boolean): string[] {
   const root = url.replace(/\/+$/, "").replace(/\/backend-api\/codex$/, "").replace(/\/v1$/, "");
@@ -158,15 +162,24 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     return ["login", "status"];
   }
 
-  protected override getProviderCommandEnvironment(): Readonly<Record<string, string>> {
+  protected override getProviderCommandEnvironment(environment?: AgentEnvironment): Readonly<Record<string, string>> {
     if (this.options.isolatorEnvironment !== undefined) {
-      const environment = { ...this.options.isolatorEnvironment };
-      delete environment["CODEX_LB_API_KEY"];
+      const envVars = { ...this.options.isolatorEnvironment };
+      delete envVars["CODEX_LB_API_KEY"];
+      const extraEnv: Record<string, string> = {};
+      if (environment?.environmentVariables !== undefined) {
+        for (const [key, value] of Object.entries(environment.environmentVariables)) {
+          if (typeof value === "string" && key !== "CODEX_LB_API_KEY") {
+            extraEnv[key] = value;
+          }
+        }
+      }
       return {
-        ...environment,
+        ...extraEnv,
+        ...envVars,
         BFLOW_PROVIDER: this.descriptor.provider,
-        HOME: environment["HOME"] ?? "",
-        PATH: environment["PATH"] ?? "",
+        HOME: envVars["HOME"] ?? "",
+        PATH: envVars["PATH"] ?? "",
         ORCA_AGENT_HOOK_ROOT: "",
         ORCA_AGENT_HOOK_ENDPOINT: "",
         ORCA_PANE_KEY: "",
@@ -176,7 +189,30 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     }
 
     const selected = this.trustedHookEnvironment();
+    const extraEnv: Record<string, string> = {};
+    if (this.options.codexHookEnvironment !== undefined) {
+      for (const [key, value] of Object.entries(this.options.codexHookEnvironment)) {
+        if (typeof value === "string" && key !== "CODEX_LB_API_KEY") {
+          extraEnv[key] = value;
+        }
+      }
+    } else {
+      for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "BFLOW_INSTRUCTION_HOME"] as const) {
+        const value = selected[key];
+        if (typeof value === "string" && value.length > 0) {
+          extraEnv[key] = value;
+        }
+      }
+    }
+    if (environment?.environmentVariables !== undefined) {
+      for (const [key, value] of Object.entries(environment.environmentVariables)) {
+        if (typeof value === "string" && key !== "CODEX_LB_API_KEY") {
+          extraEnv[key] = value;
+        }
+      }
+    }
     return {
+      ...extraEnv,
       BFLOW_PROVIDER: this.descriptor.provider,
       HOME: selected["HOME"] ?? "",
       PATH: selected["PATH"] ?? "",
@@ -224,26 +260,49 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     };
   }
 
-  protected override getProviderExecutionEnvironment(): Readonly<Record<string, string>> {
-    const environment: Record<string, string> = { ...this.getProviderCommandEnvironment() };
+  protected override getProviderExecutionEnvironment(environment?: AgentEnvironment): Readonly<Record<string, string>> {
+    const executionEnvironment: Record<string, string> = { ...this.getProviderCommandEnvironment(environment) };
     if (this.options.codexBackendUrl !== undefined) {
       const key = this.options.isolatorEnvironment !== undefined
         ? this.options.isolatorEnvironment["CODEX_LB_API_KEY"]
         : process.env["CODEX_LB_API_KEY"];
-      if (key) environment["CODEX_LB_API_KEY"] = key;
+      if (key) executionEnvironment["CODEX_LB_API_KEY"] = key;
     }
-    return environment;
+    return executionEnvironment;
   }
 
   protected override shouldCheckNativeAuthentication(): boolean {
     return this.options.codexBackendUrl === undefined;
   }
 
-  protected override nativeAuthenticationOutcome(executable: string, options?: OperationOptions, _environment?: AgentEnvironment) {
-    if (this.options.codexBackendUrl === undefined) return super.nativeAuthenticationOutcome(executable, options, _environment);
-    const environment = this.getProviderExecutionEnvironment();
-    const apiKey = this.options.isolatorEnvironment !== undefined ? environment["CODEX_LB_API_KEY"] : process.env["CODEX_LB_API_KEY"];
-    return checkCodexBackendAuthentication(this.options.codexBackendUrl, apiKey, options);
+  protected override async nativeAuthenticationOutcome(executable: string, options?: OperationOptions, _environment?: AgentEnvironment) {
+    if (this.options.codexBackendUrl !== undefined) {
+      const environment = this.getProviderExecutionEnvironment(_environment);
+      const apiKey = this.options.isolatorEnvironment !== undefined ? environment["CODEX_LB_API_KEY"] : process.env["CODEX_LB_API_KEY"];
+      return checkCodexBackendAuthentication(this.options.codexBackendUrl, apiKey, options);
+    }
+    const outcome = await super.nativeAuthenticationOutcome(executable, options, _environment);
+    if (
+      _environment !== undefined &&
+      outcome.failure === undefined &&
+      (outcome.exitCode !== 0 ||
+        !outcome.started ||
+        !this.nativeAuthenticationConfirmed(outcome.stdout, outcome.stderr))
+    ) {
+      const authInfo = await inspectCodexConfiguredAuth(
+        this.codexHome(),
+        this.getProviderExecutionEnvironment(_environment)
+      );
+      if (!authInfo.hasAuthJsonFile && authInfo.hasNonFileAuth) {
+        return {
+          exitCode: 0,
+          stdout: "Logged in using configured Codex provider authentication\n",
+          stderr: "",
+          started: true
+        };
+      }
+    }
+    return outcome;
   }
 
   protected override getProbeCommand(_environment: AgentEnvironment): readonly string[] {
@@ -342,6 +401,57 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     }
   }
 
+  private async unpinnedEnabledPlugins(home: string): Promise<string[]> {
+    try {
+      const text = await readFile(join(home, "config.toml"), "utf8");
+      return parseCodexEnabledPlugins(text);
+    } catch {
+      return [];
+    }
+  }
+
+  private async computeCodexPreloadedDocDigest(
+    home: string,
+    environment: AgentEnvironment,
+    projectDirectories: readonly string[],
+    probeConfigFiles: readonly string[]
+  ): Promise<string> {
+    const candidatePaths: string[] = [
+      join(home, "AGENTS.md"),
+      join(home, "AGENTS.override.md")
+    ];
+    if (environment.role !== "conversation") {
+      const deps = await codexProbeConfigDependencies(probeConfigFiles);
+      const fallbackNames = deps?.fallbackNames ?? [];
+      for (const directory of projectDirectories) {
+        candidatePaths.push(
+          join(directory, "AGENTS.md"),
+          join(directory, "AGENTS.override.md"),
+          ...fallbackNames.map((name) => join(directory, name))
+        );
+      }
+      if (deps?.requiredFiles) {
+        candidatePaths.push(...deps.requiredFiles);
+      }
+    }
+    const hash = createHash("sha256");
+    hash.update(environment.role === "conversation" ? "project_docs:disabled" : "project_docs:enabled");
+    for (const path of [...new Set(candidatePaths)].sort()) {
+      hash.update(path);
+      try {
+        const info = await lstat(path);
+        if (info.isFile()) {
+          hash.update(await computeFileSha256(path));
+        } else {
+          hash.update("non_file");
+        }
+      } catch {
+        hash.update("absent");
+      }
+    }
+    return hash.digest("hex");
+  }
+
   /**
    * Per-invocation isolation: every global MCP server not used by the Bflow launch is disabled with
    * `-c mcp_servers.<name>.enabled=false` (verified against codex-cli 0.162.0: the override is honored by
@@ -356,7 +466,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     launchProfile?: AgentLaunchProfile
   ): Promise<InheritedIsolation> {
     const home = this.codexHome();
-    const pluginArgs = managedCodexPluginArgs();
+    const unpinnedPlugins = await this.unpinnedEnabledPlugins(home);
+    const pluginArgs = managedCodexPluginArgs(unpinnedPlugins);
     const globalServers = await this.enumerateGlobalMcpServers(home, pluginArgs);
 
     let mcpFailure: InheritedIsolationFailure | undefined;
@@ -392,7 +503,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       codexHomeDirectory: home,
       ...this.sharedNativeHookOptions(),
       ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
-      environment: this.trustedHookEnvironment()
+      environment: this.trustedHookEnvironment(),
+      disabledPluginIds: unpinnedPlugins
     });
     let hookFailure: InheritedIsolationFailure | undefined;
     if (hookReview.status === "unsupported") {
@@ -409,7 +521,46 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       };
     }
 
-    const settingsMetadata = { [CODEX_HOOK_DIGEST_METADATA_KEY]: hookReview.digest };
+    // A trust-all policy deliberately omits the hook inventory; there is no exact dependency
+    // observation to share in that mode. Every role still performs the normal trust/drift review.
+    const authInfo = await inspectCodexConfiguredAuth(home, this.getProviderExecutionEnvironment(_environment));
+    const requiredProbeFiles = new Set([
+      join(home, "config.toml"),
+      ...(!authInfo.hasAuthJsonFile && authInfo.hasNonFileAuth ? [] : [join(home, "auth.json")])
+    ]);
+    const probeConfigFiles = [join(home, "config.toml")];
+    const projectDirectories: string[] = [];
+    const probeFiles = [
+      join(home, "config.toml"),
+      join(home, "auth.json"),
+      home,
+      hookReview.approvalStorePath,
+      codexHookPolicyPath(hookReview.approvalStorePath),
+      join(home, "hooks.json"),
+      join(home, "AGENTS.md"),
+      join(home, "AGENTS.override.md"),
+      ...hookReview.sources.map(source => source.path),
+      ...hookReview.hooks.flatMap(hook => hook.dependencies.flatMap(dependency =>
+        dependency.resolvedPath === null ? [dependency.requestedPath] : [dependency.requestedPath, dependency.resolvedPath]))
+    ];
+    // Codex may discover repository configuration and instructions from any cwd ancestor.
+    for (let directory = resolve(_environment.cwd); ; directory = dirname(directory)) {
+      projectDirectories.push(directory);
+      probeConfigFiles.push(join(directory, ".codex", "config.toml"));
+      probeFiles.push(join(directory, ".codex", "config.toml"), join(directory, "AGENTS.md"), join(directory, "AGENTS.override.md"));
+      if (dirname(directory) === directory) break;
+    }
+
+    const preloadedDocDigest = await this.computeCodexPreloadedDocDigest(
+      home,
+      _environment,
+      projectDirectories,
+      probeConfigFiles
+    );
+    const settingsMetadata = {
+      [CODEX_HOOK_DIGEST_METADATA_KEY]: hookReview.digest,
+      [CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY]: preloadedDocDigest
+    };
     if (launchProfile !== undefined && hookFailure === undefined) {
       const settingsPath = join(_environment.stateDirectory, `${_environment.role}.settings.json`);
       try {
@@ -425,6 +576,12 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
         const settings = JSON.parse(content) as Record<string, unknown>;
         if (settings[CODEX_HOOK_DIGEST_METADATA_KEY] !== hookReview.digest)
           throw new Error("Codex hook snapshot changed after the prepared launch profile");
+        if (
+          settings[CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY] !== undefined &&
+          settings[CODEX_PRELOADED_DOC_DIGEST_METADATA_KEY] !== preloadedDocDigest
+        ) {
+          throw new Error("Codex preloaded instruction documents changed after the prepared launch profile");
+        }
       } catch (error) {
         hookFailure = {
           code: "codex_global_hooks_snapshot_drift",
@@ -432,25 +589,6 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           remediation: "Prepare a new launch and re-run provider activation after the exact hook inventory is approved."
         };
       }
-    }
-
-    // A trust-all policy deliberately omits the hook inventory; there is no exact dependency
-    // observation to share in that mode. Every role still performs the normal trust/drift review.
-    const requiredProbeFiles = new Set([join(home, "config.toml"), join(home, "auth.json")]);
-    const probeConfigFiles = [join(home, "config.toml")];
-    const projectDirectories: string[] = [];
-    const probeFiles = [...requiredProbeFiles, home, hookReview.approvalStorePath,
-      codexHookPolicyPath(hookReview.approvalStorePath), join(home, "hooks.json"),
-      join(home, "AGENTS.md"), join(home, "AGENTS.override.md"),
-      ...hookReview.sources.map(source => source.path),
-      ...hookReview.hooks.flatMap(hook => hook.dependencies.flatMap(dependency =>
-        dependency.resolvedPath === null ? [dependency.requestedPath] : [dependency.requestedPath, dependency.resolvedPath]))];
-    // Codex may discover repository configuration and instructions from any cwd ancestor.
-    for (let directory = resolve(_environment.cwd); ; directory = dirname(directory)) {
-      projectDirectories.push(directory);
-      probeConfigFiles.push(join(directory, ".codex", "config.toml"));
-      probeFiles.push(join(directory, ".codex", "config.toml"), join(directory, "AGENTS.md"), join(directory, "AGENTS.override.md"));
-      if (dirname(directory) === directory) break;
     }
     const executionProbeSnapshot = hookReview.approvalMode === "trust_all" ? undefined : async () => {
       const beforeConfigRead = await probeFileSnapshot(probeFiles, requiredProbeFiles, home);
@@ -465,7 +603,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
       const currentHooks = await inspectCodexHooks({ codexHomeDirectory: home,
         ...this.sharedNativeHookOptions(),
         ...(this.options.codexHookApprovalPath !== undefined ? { approvalStorePath: this.options.codexHookApprovalPath } : {}),
-        environment: this.trustedHookEnvironment() });
+        environment: this.trustedHookEnvironment(),
+        disabledPluginIds: unpinnedPlugins });
       if (currentHooks.digest !== hookReview.digest || currentHooks.status !== hookReview.status ||
           currentHooks.approvalMode !== hookReview.approvalMode ||
           await probeFileSnapshot(allProbeFiles, allRequiredFiles, home) !== files) return undefined;
@@ -517,7 +656,8 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           ))
         : []),
       "-c",
-      `model_instructions_file=${JSON.stringify(configFiles.promptFile)}`
+      `model_instructions_file=${JSON.stringify(configFiles.promptFile)}`,
+      ...(environment.role === "conversation" ? ["-c", "project_doc_max_bytes=0"] : [])
     ];
 
     try {

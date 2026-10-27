@@ -94,6 +94,8 @@ export interface CodexHookTrustOptions {
   /** Machine-selected native Codex source; only its exact linked hooks.json can reuse its existing policy. */
   readonly sharedNativeCodexHomeDirectory?: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
+  /** Additional plugin IDs disabled in Bflow-managed Codex processes via `-c plugins."<id>".enabled=false`. */
+  readonly disabledPluginIds?: readonly string[];
 }
 
 export interface CodexHookApprovalOptions extends CodexHookTrustOptions {
@@ -109,6 +111,18 @@ export function createManagedCodexHookEnvironment(
   return {
     HOME: homeDirectory,
     PATH: environment["PATH"] ?? "",
+    ...(environment["BFLOW_INSTRUCTION_HOME"] !== undefined
+      ? { BFLOW_INSTRUCTION_HOME: environment["BFLOW_INSTRUCTION_HOME"] }
+      : {}),
+    ...(environment["OPENAI_API_KEY"] !== undefined
+      ? { OPENAI_API_KEY: environment["OPENAI_API_KEY"] }
+      : {}),
+    ...(environment["CODEX_API_KEY"] !== undefined
+      ? { CODEX_API_KEY: environment["CODEX_API_KEY"] }
+      : {}),
+    ...(environment["CODEX_ACCESS_TOKEN"] !== undefined
+      ? { CODEX_ACCESS_TOKEN: environment["CODEX_ACCESS_TOKEN"] }
+      : {}),
     ORCA_AGENT_HOOK_ROOT: "",
     ORCA_AGENT_HOOK_ENDPOINT: "",
     ORCA_PANE_KEY: "",
@@ -750,10 +764,10 @@ async function buildInventory(options: CodexHookTrustOptions = {}): Promise<Omit
     diagnostics.push(hasTomlHooks ? "Codex executable TOML hook declarations are included in this snapshot." : "Codex executable TOML hook declarations are absent; native hooks.state metadata is excluded.");
     const entries = extractHooks({ hooks: tomlHooks }, unsupportedReasons);
     const pluginOrigins = new Map<(typeof entries)[number], string>();
-    const disabledPlugins = new Set(managedCodexDisabledPlugins(enabledPlugins));
+    const disabledPlugins = new Set(managedCodexDisabledPlugins(enabledPlugins, options.disabledPluginIds));
     for (const id of enabledPlugins) {
       if (disabledPlugins.has(id)) {
-        diagnostics.push(`Plugin ${id} is disabled only in Bflow-managed Codex processes (${managedCodexPluginArgs().join(" ")}); its hooks are excluded from this snapshot.`);
+        diagnostics.push(`Plugin ${id} is disabled only in Bflow-managed Codex processes (${managedCodexPluginArgs(options.disabledPluginIds).join(" ")}); its hooks are excluded from this snapshot.`);
         continue;
       }
       try {

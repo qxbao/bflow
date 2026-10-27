@@ -56,7 +56,7 @@ và xác minh việc thương lượng MCP upstream cùng khám phá tool; kết
 nhau ở mọi thư mục. Setup chỉ cài và duyệt binary GitNexus. `bflow init` trong từng repository
 mới index repository đó và thêm service `gitnexus-<repo>` vào Gateway đang chạy, không thay
 repository khác. Lần index đầu hỏi xác nhận license PolyForm-Noncommercial (không tương tác
-thì cần `--yes`; `--no-gitnexus` bỏ qua). `bflow init --check` báo trạng thái chỉ đọc,
+thì cần `--accept-gitnexus-license` (giữ nguyên cấu hình hiện có) hoặc `--yes`; `--no-gitnexus` bỏ qua). `bflow init --check` báo trạng thái chỉ đọc,
 `bflow init --remove` gỡ đăng ký, kể cả khi thư mục repository đã bị xoá; Gateway cũng tự
 dọn repository không còn trên đĩa khi khởi động lại. Chrome dùng một profile Bflow riêng. Các workflow role kết nối tới Gateway chạy nền qua bộ định vị riêng
 `gateway-control.json` trong thư mục state của Gateway. `bflow up` truyền bộ định vị đó
@@ -389,10 +389,22 @@ cho tiêu chí `unit_test`, `integration_test` và `e2e_test`, với label và q
 trong `planning_reference`. Thiếu runner/reporter của hệ sinh thái đã nhận diện được trả
 về Coordinator để tạo setup task có review; phát hiện được làm mới khi revision thay đổi.
 Owner vẫn có thể dùng `.bflow/verification.json` làm ghi đè Node TAP/Vitest tùy chọn.
+Owner cũng có thể khai báo `appChecks` trong cùng file để chạy kiểm tra ứng dụng thật (UI/API) trong sandbox
+thành gate `host-app-<suiteId>`; xem mục "Kiểm tra ứng dụng thật" trong [README của runtime](../../packages/runtime/README.md).
+Hiện chỉ hỗ trợ Linux với Bubblewrap và Chrome; các giới hạn được liệt kê ở đó.
 Executable và argv do Runtime quyết định, kết quả từng test có cấu trúc là bắt buộc.
 Phép đo yêu cầu sandbox: Linux Bubblewrap hoặc macOS Seatbelt cho các runner JS/owner
 được hỗ trợ. Mount/cache/report của adapter native và làm ấm dependency còn giới hạn Linux.
 Không có fallback chạy ngoài sandbox. Xem [ma trận và giới hạn verification](../../docs/verification-runners.md).
+`environment.verification.reviewTimeoutMs` (tùy chọn, số nguyên ms trong `60000..3600000`, mặc định `900000`) là thời gian tối đa chờ mỗi verdict Reviewer/QA độc lập; config không ghi khóa này thì giữ mặc định.
+`environment.verification.regressionScope` hỗ trợ ba giá trị: `affected` (mặc định khi `init`/đọc config thiếu trường),
+`full` (chạy toàn bộ test file runner nhận diện) và `mapped_only` (chỉ chạy test được map từ criterion;
+`host.json` cũ đã persist mà thiếu trường được giữ ở `mapped_only`). Ở chế độ `affected`, host chọn test theo
+ba tầng mở rộng an toàn (`graph` qua closure `IMPORTS` của GitNexus khi index fresh tại `base` → `package`
+khi file ngoài code/docs hoặc index không khả dụng → `full` khi chạm root config/lockfile; diff chỉ tài liệu
+là `none`). Khi khởi động host, CLI truyền `impactIndex` (`executable`, `home`, `storageLockPath`) nếu binary
+GitNexus đã duyệt và `gitnexus-home` tồn tại. Giới hạn: regression gate chỉ tạo cho runner JS/TS tự động
+(`vitest_json`, `node_tap`), và verification không bao giờ gọi `gitnexus analyze` để làm mới index.
 
 Chat/Coordinator nạp đầy đủ các prompt gốc đã cài trước lượt đầu tiên.
 Claude dùng một prompt file cục bộ theo launch; các file launch của Codex dùng
@@ -601,3 +613,37 @@ tool arguments. A ready grant enables the dependent `browser-inspection` skill. 
 optional services still degrade; required services block startup. Tool readiness does not prove
 browser verification or task success. Local control/stdio fixture tests are not live Chrome or
 provider/Herdr acceptance. Existing hosts must reload the rebuilt Runtime to use this integration.
+
+## Fast-path policy (`environment.fastPath.mode`)
+
+`.bflow/config.yml` includes `environment.fastPath.mode: "auto" | "off"` (default `"auto"` for new and updated configs via `bflow init` / `bflow init --update`). When set to `"auto"`, `bflow up` passes `policy.fastPath` to the Runtime host so eligible single-task `trivial` changes can auto-accept design approval and use P17 review waivers (`deterministic_coverage` / `identical_integrated_tree`) while preserving human delivery approval ([ADR 0004](../../docs/adr/0004-fast-path-review-waiver.md)). Note that because the default host check suite includes the mandatory `host-test-integrity` gate, which requires independent Reviewer adjudication of test/config weakening candidates, `fastPath` is conservatively downgraded (`test_integrity_requires_independent_review`) unless a custom host check policy omits `host-test-integrity`. Persisted `host.json` files written before `fastPath` existed are treated as `"off"` on host recovery. Evidence level is source implementation and local tests, not live provider/Herdr acceptance.
+
+
+## Báo cáo telemetry workflow
+
+```bash
+bflow status <run-id> --telemetry
+bflow status <run-id> --telemetry --json
+```
+
+Tùy chọn yêu cầu một run ID, không kết hợp filter/phân trang. Nó chọn nguồn agentic từ
+state của repository và chỉ kết nối host đang tồn tại, không gọi `up` hay khởi động daemon.
+Host đang dừng/phiên bản cũ trả `host_unavailable`; không thay bằng dữ liệu legacy. Legacy
+standalone hiện trả `legacy_readonly_source_unavailable` để tránh seed registry hoặc mở
+storage ở chế độ ghi. `status` không có `--telemetry` giữ đường xử lý hiện tại.
+
+JSON dùng envelope CLI hiện có với `data.reportVersion: 1`, source, as-of, outcome/provenance,
+coverage từng nguồn, cohort, metric value/unit/quality/numerator/denominator và limitation.
+`measured`, `estimated`, `partial`, `unavailable` là các mức chất lượng khác nhau; hiện chưa
+phát ước tính giá. Thiếu token/USD là `null`, không phải 0. Số 0 rework/retry chỉ được báo
+khi nguồn đủ lịch sử; source thiếu có số quan sát dương thì ghi `partial`.
+
+CLI exit 0 nghĩa là đã xuất report, không khẳng định task thành công hoặc host sẵn sàng.
+Với run agentic, `gateExecution` là trung bình ms của các native review gate đã đóng; mỗi
+nhóm gate/role/provider có một dòng `Review gate ...` (số lượt đóng, tổng/max ms, timeout,
+near-deadline, open). JSON có `data.reviewGateDetails`.
+
+Lỗi telemetry được thể hiện trong coverage/diagnostics cố định; không đổi business state
+hay exit behavior của status thông thường. Chi tiết định nghĩa và giới hạn độ chính xác:
+[telemetry Specification](../../packages/runtime/TELEMETRY-SPEC.md) và
+[Runtime telemetry](../../packages/runtime/README.md#telemetry-hiệu-quả-workflow).

@@ -7,20 +7,38 @@ import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, QualityFindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema,
   PaneBindingSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
   WorkflowDefinitionSchema,
-  type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
+  type ArtifactReference, type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
-import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
+import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
-import { behavioralChecks, verificationGit, measureBehavior, parseBehavioralCommands, testFilePattern, type BehavioralCommand,
-  type BoundBehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
+  type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
-import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
+import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { unconfiguredImpactIndex, type ImpactIndex } from "./impact-index.js";
+import { selectRegressionTests } from "./regression-selection.js";
+import { pinRunnerDefinitions } from "./runner-provenance.js";
+import type { RegressionScope } from "./host-controller.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
 import { NodeTapTestCodeFailure } from "./node-tap.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
+import { z } from "zod";
+import { appCheckDefinitions, appCheckIdentity, type AppCheckSuite } from "./app-check-config.js";
+import { AppCheckBrowserLeases } from "./app-check-lease.js";
+import { buildAppEvidence, sanitizeAppEvidence, type AppEvidenceCheck } from "./app-check-evidence.js";
+import { splitAppCriteria, type AppCriterionBinding } from "./app-check-selection.js";
+import { runAppSuite, type AppCheckRunCompleted } from "./app-check-runner.js";
+import { TEST_INTEGRITY_CHECK, TestIntegrityObservationSchema, TestIntegrityGrantSchema, adjudicateTestIntegrity,
+  measureTestIntegrity, testIntegrityAuthorityInput, validateTestIntegrityEvidence, type TestIntegrityObservation } from "./host-test-integrity.js";
 const execFileAsync = promisify(execFile);
+function originalReviewContext(context: unknown) {
+  const parsed = QualityGateContextSchema.parse(context);
+  const { hostQaBehavioralObservation: _measurement, hostReworkVerification: _rework, hostTestIntegrityObservation: _integrity, ...input } = record(parsed.input);
+  return { ...parsed, input };
+}
 function staticGateId(command: string): string {
   return `host-static-${command.replace(/[^a-z0-9_-]/gi, "-")}`;
 }
@@ -52,15 +70,22 @@ export function boundQaReviewCommands(commands: readonly BoundBehavioralCommand[
   });
 }
 const whitespaceCommand = "git diff --check";
+/** Owner-configurable budget for one independent Reviewer/QA verdict; absent policy keeps the 900 s default. */
+export const DEFAULT_REVIEW_TIMEOUT_MS = 900_000;
 /** Default checks support documentation only. Behavioral checks require owner configuration. */
-export const DEFAULT_HOST_CHECKS = [
-  ...["reviewer", "qa"].map(role => QualityGateDefinitionSchema.parse({ id: `host-${role}`, name: `Independent ${role}`, evaluator: "native-herdr-review", required: true,
-    timeout: { executionTimeoutMs: 300_000, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
-    configuration: { kind: "review", method: "manual_review", criterionIds: [], testNames: [], role, levels: [] } })),
-  QualityGateDefinitionSchema.parse({ id: "host-git-integrity", name: "Integrated Git diff integrity", evaluator: "host-git-diff", required: true,
-    timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
-    configuration: { kind: "deterministic", method: "integration_test", command: whitespaceCommand, criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } })
-];
+export function defaultHostChecks(policy?: { verification: { reviewTimeoutMs?: number | undefined } }) {
+  const reviewTimeoutMs = policy?.verification.reviewTimeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS;
+  return [
+    ...["reviewer", "qa"].map(role => QualityGateDefinitionSchema.parse({ id: `host-${role}`, name: `Independent ${role}`, evaluator: "native-herdr-review", required: true,
+      timeout: { executionTimeoutMs: reviewTimeoutMs, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
+      configuration: { kind: "review", method: "manual_review", criterionIds: [], testNames: [], role, levels: [] } })),
+    QualityGateDefinitionSchema.parse({ id: "host-git-integrity", name: "Integrated Git diff integrity", evaluator: "host-git-diff", required: true,
+      timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
+      configuration: { kind: "deterministic", method: "integration_test", command: whitespaceCommand, criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } }),
+    TEST_INTEGRITY_CHECK
+  ];
+}
+export const DEFAULT_HOST_CHECKS = defaultHostChecks();
 export interface HostVerificationReceipts {
   recordGate(result: QualityGateResult): Promise<unknown>;
   recordEvidence(result: VerificationResult): Promise<unknown>;
@@ -71,6 +96,11 @@ export interface HostVerificationReceipts {
   putObservation(kind: "review" | "alternative", id: string, value: { binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string; sourceMessageId?: string }): Promise<unknown>;
   getObservation(kind: "review" | "alternative", id: string): Promise<{ binding: PaneBinding; observation: JsonValue; context?: unknown; runId?: string; taskId?: string; sourceMessageId?: string } | undefined>;
 }
+/** Outcome of measuring one real-app suite: a prerequisite block, or the stored evidence and per-criterion verdicts. */
+type AppSuiteOutcome = { readonly status: "blocked"; readonly code: string; readonly message: string; readonly retryable: boolean }
+  | { readonly status: "completed"; readonly suiteId: string; readonly run: AppCheckRunCompleted; readonly evidence: ArtifactReference;
+      readonly screenshots: ArtifactReference[]; readonly criteria: { criterionId: string; identities: string[]; passed: boolean; summary: string }[];
+      readonly identities: string[]; readonly secrets: string[] };
 /** A completed, valid measurement that requires a bounded Developer repair. */
 export class HostBehavioralFailure extends Error {
   constructor(message: string, readonly evidence: import("@bflow/contracts").ArtifactReference,
@@ -84,8 +114,29 @@ export class HostVerification {
   readonly runners: TestRunnerSource;
   constructor(private readonly runtime: () => AgenticWorkflowRuntime, private readonly store: () => ArtifactStore,
     private readonly receipts?: HostVerificationReceipts, runners: TestRunnerSource | readonly BehavioralCommand[] = [],
-    private readonly rtk?: RtkOutputIntegration) {
+    private readonly rtk?: RtkOutputIntegration,
+    private readonly regression: { scope: RegressionScope; index: ImpactIndex } = { scope: "mapped_only", index: unconfiguredImpactIndex },
+    /** Owner-configured mutation checks; each references one of `runners.owner` by command id. */
+    private readonly mutations: readonly MutationCheck[] = [],
+    /** Owner real-app checks; `leaseDirectory` holds the host-local lease that serializes the single gate browser. */
+    appChecks: { suites: readonly AppCheckSuite[]; leaseDirectory?: string; now?: () => Date } = { suites: [] }) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
+    this.appSuites = appChecks.suites;
+    this.appLeases = appChecks.leaseDirectory === undefined ? undefined : new AppCheckBrowserLeases(appChecks.leaseDirectory, appChecks.now);
+  }
+  private readonly appSuites: readonly AppCheckSuite[];
+  private readonly appLeases: AppCheckBrowserLeases | undefined;
+  /** Runner-based ingress only sees criteria that no real-app gate verifies. */
+  private splitApp(specification: Specification, strategy: TestStrategy): { specification: Specification; strategy: TestStrategy } {
+    return splitAppCriteria(specification, strategy, this.appSuites).rest;
+  }
+  /** Stores bytes through the artifact store and returns the trusted reference (only ArtifactStore mints one). */
+  private async putBytes(input: { runId: string; taskId?: string; artifactId: string; kind: "test-result" | "report"; mediaType: string; bytes: Buffer }) {
+    const checksum = createHash("sha256").update(input.bytes).digest("hex");
+    return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: input.artifactId,
+      runId: input.runId, ...(input.taskId ? { taskId: input.taskId } : {}), kind: input.kind, mediaType: input.mediaType,
+      expectedIntegrity: { checksum: { algorithm: "sha256", value: checksum }, sizeBytes: input.bytes.length }, idempotencyKey: input.artifactId }),
+      content: (async function* () { yield input.bytes; })() })));
   }
   /** Ownership of a task from its run definition; undefined for workflow-level checks. */
   private ownedPathsOf(run: Record<string, unknown>, taskId?: string): string[] | undefined {
@@ -106,7 +157,8 @@ export class HostVerification {
     return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) };
   }
   private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string }): BoundBehavioralCommand[] {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), ...input }).map(command => input.originalRevision && command.checkoutDependencyRoots !== undefined ? { ...command, originalRevision: input.originalRevision } : command);
+    const rest = this.splitApp(input.specification, input.strategy);
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(input.originalRevision), ...input, specification: rest.specification, strategy: rest.strategy }).map(command => input.originalRevision && command.checkoutDependencyRoots !== undefined ? { ...command, originalRevision: input.originalRevision } : command);
   }
   async authenticateGate(result: QualityGateResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateGate(result) : this.gateReceipts.get(result.evaluationId) === digest(result); }
   async authenticateEvidence(result: VerificationResult): Promise<boolean> { return this.receipts ? this.receipts.authenticateEvidence(result) : this.evidenceReceipts.get(result.verificationId) === digest(result); }
@@ -160,8 +212,8 @@ export class HostVerification {
     return { cwd: textField(value.cwd), base: textField(value.base), revision: textField(value.revision), command: whitespaceCommand,
       exitCode: Number(value.exitCode), output: value.output, diff: value.diff };
   }
-  private async artifact(runId: string, taskId: string, body: unknown) {
-    const bytes = Buffer.from(JSON.stringify(body)); const id = `host-observation-${randomUUID()}`;
+  private async artifact(runId: string, taskId: string, body: unknown, artifactId?: string) {
+    const bytes = Buffer.from(JSON.stringify(body)); const id = artifactId ?? `host-observation-${randomUUID()}`;
     return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: id, runId, taskId, kind: "test-result", mediaType: "application/json",
       expectedIntegrity: { checksum: { algorithm: "sha256", value: createHash("sha256").update(bytes).digest("hex") }, sizeBytes: bytes.length }, idempotencyKey: id }),
       content: (async function* () { yield bytes; })() })));
@@ -181,6 +233,45 @@ export class HostVerification {
         return { ok: true, value: result };
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
     } };
+  }
+  /** Mandatory host-owned comparison. Warnings are adjudicated by the assigned Reviewer, never self-waived. */
+  testIntegrityGate(): QualityGate {
+    return { id: TEST_INTEGRITY_CHECK.id, evaluate: async raw => {
+      try {
+        const context = QualityGateContextSchema.parse(raw), input = record(context.input);
+        if (context.definition.id !== TEST_INTEGRITY_CHECK.id || record(context.definition.configuration).command !== "host:test-integrity") throw new Error("Test integrity gate definition mismatch");
+        const before = await this.capture(textField(input.sourceWorktreePath), textField(input.baseRevision), textField(input.sourceRevision));
+        const report = await this.measureIntegrity(context, before.cwd, before.base, before.revision);
+        const grants = await this.integrityGrants(context);
+        const after = await this.capture(before.cwd, before.base, before.revision);
+        if (digest(before) !== digest(after)) throw new Error("Test integrity source changed during capture");
+        const violations = report.findings.filter(finding => finding.classification === "proven_violation" && !grants.some(grant => grant.findingId === finding.id));
+        const evidence = await this.artifact(context.runId, context.taskId!, { testIntegrity: report, ownerExceptions: grants });
+        return { ok: true, value: QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId,
+          evaluationId: randomUUID(), status: violations.length ? "failed" : "passed", findings: report.findings.map(finding => QualityFindingSchema.parse({
+            code: finding.ruleId, severity: violations.includes(finding) ? "error" : "warning", message: finding.reason,
+            details: json(finding), location: `${finding.path}:${finding.line}:${finding.column}` })), producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          metadata: { evidence: json(evidence), testIntegrity: json(report), testIntegrityExceptions: json(grants),
+            verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
+              sourceRevision: before.revision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
+              executorId: "bflow-host-test-integrity", role: "quality_gate", method: "static_analysis", command: "host:test-integrity", exitCode: violations.length ? 1 : 0,
+              testNames: [], criteria: [], summary: `${report.findings.length} test integrity findings; ${violations.length} proven violations without an owner exception. Heuristics require independent Reviewer dispositions.` } } }) };
+      } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+    } };
+  }
+  private async integrityGrants(context: import("@bflow/contracts").QualityGateContext) {
+    const runtime = this.runtime();
+    // Old test harnesses have no authority port; absence can never grant a waiver.
+    return z.array(TestIntegrityGrantSchema).parse(typeof runtime.testIntegrityExceptions === "function"
+      ? await runtime.testIntegrityExceptions(testIntegrityAuthorityInput(context)) : []);
+  }
+  private async measureIntegrity(context: import("@bflow/contracts").QualityGateContext, cwd: string, fallbackBase: string, revision: string) {
+    const run = record(await this.runtime().inspect(context.runId));
+    const task = Array.isArray(run.tasks) ? run.tasks.map(record).find(item => item.taskId === context.taskId) : undefined;
+    const firstTree = task && Array.isArray(task.worktrees) ? record(task.worktrees[0]) : undefined;
+    // A rejected attempt must never become the trusted oracle baseline on the next repair.
+    const protectedBase = textField(firstTree?.baseCommitHash ?? run.baseRevision ?? fallbackBase);
+    return measureTestIntegrity(cwd, protectedBase, revision);
   }
   private policyDeterministicGate(id: string, expectedCommand: string): QualityGate {
     return { id, evaluate: async raw => {
@@ -202,43 +293,54 @@ export class HostVerification {
   }
   /** Owner-configured checks always; automatic checks only when no owner file exists (static definitions, bound at plan time). */
   behavioralChecks(specification?: Specification, strategy?: TestStrategy, originalRevision?: string) {
-    const owner = behavioralChecks(this.runners.owner);
+    const owner = [...behavioralChecks(this.runners.owner), ...mutationCheckDefinitions(this.mutations, this.runners.owner), ...appCheckDefinitions(this.appSuites)];
     if (!this.runners.automatic) return owner;
-    if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles)];
     const profiles = this.runners.profilesForRevision(originalRevision);
-    const commands = resolveTaskCommands({ owner: [], profiles, specification, strategy });
+    const regression = this.regression.scope !== "mapped_only"
+      ? regressionChecks(specification && strategy ? profiles : this.runners.availableProfiles)
+      : [];
+    if (!specification || !strategy) return [...owner, ...automaticChecks(this.runners.availableProfiles), ...regression];
+    const runnerRest = this.splitApp(specification, strategy);
+    const commands = resolveTaskCommands({ owner: [], profiles, specification: runnerRest.specification, strategy: runnerRest.strategy });
     const boundChecks = automaticChecks(commands).map(check => {
       const command = commands.find(item => `host-behavioral-${item.id}` === check.id)!;
       return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true },
         configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
     });
     const policyChecks = strategy.targetCommands.filter(isAutomaticStaticCommand).map(staticAnalysisCheckDefinition);
-    return [...owner, ...boundChecks, ...policyChecks];
+    return [...owner, ...boundChecks, ...policyChecks, ...regression];
   }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
-  configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method)])]; }
+  configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method),
+    // Owner real-app suites are the runner for e2e_test criteria (see appGate).
+    ...(this.appSuites.length ? ["e2e_test"] : [])])]; }
   /**
    * Fail closed at proposal ingress. Owner mode keeps the explicit owner checks. Automatic mode fails with structured
    * rejections: `no_test_runner_detected` is reported to the user; the other codes are Coordinator-fixable and silent.
    */
   assertSupported(input: unknown, strategyInput?: unknown, definitionInput?: unknown) {
-    const spec = SpecificationSchema.parse(input);
+    const parsedSpec = SpecificationSchema.parse(input);
     if (definitionInput !== undefined) WorkflowDefinitionSchema.parse(definitionInput);
+    const parsedStrategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
+    // Real-app criteria are verified by their own gate; the runner rules below apply to the remaining criteria only.
+    const split = parsedStrategy ? splitAppCriteria(parsedSpec, parsedStrategy, this.appSuites) : undefined;
+    const spec = split?.rest.specification ?? parsedSpec;
+    const strategy = split?.rest.strategy ?? parsedStrategy;
+    const realAppEvidence = (split?.app.length ?? 0) > 0;
     const active = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
     const automated = active.filter(criterion => criterion.verificationMethod !== "manual_review");
     if (!automated.length) {
-      if (spec.affectedPaths.some(path => !/\.(md|txt|rst)$/i.test(path))) throw new Error("Behavioral development requires configured independent behavioral acceptance checks");
+      if (spec.affectedPaths.some(path => !/\.(md|txt|rst)$/i.test(path)) && !realAppEvidence) throw new Error("Behavioral development requires configured independent behavioral acceptance checks");
       return;
     }
     if (active.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("Mixed manual and behavioral TDD criteria require separate tasks with complete independent evidence");
     if (this.runners.automatic) {
-      this.assertDetectedSupported(spec, automated, strategyInput);
+      this.assertDetectedSupported(spec, automated, strategy, new Set(split?.app.map(binding => binding.criterion.verificationMethod) ?? []));
       return;
     }
-    if (strategyInput !== undefined) this.assertPolicyMethods(TestStrategySchema.parse(strategyInput), spec);
+    if (strategy !== undefined) this.assertPolicyMethods(strategy, spec, new Set(split?.app.map(binding => binding.criterion.verificationMethod) ?? []));
     for (const criterion of automated) if (!this.runners.owner.some(command => command.method === criterion.verificationMethod)) throw new Error(`No owner-configured behavioral runner for ${criterion.verificationMethod}`);
-    if (strategyInput !== undefined) {
-      const strategy = TestStrategySchema.parse(strategyInput);
+    if (strategy !== undefined) {
       for (const criterion of automated) {
         const mapping = strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id);
         if (!mapping?.testNames.length || !this.runners.owner.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
@@ -247,8 +349,10 @@ export class HostVerification {
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
     }
   }
-  assertTaskSupported(taskSpec: Specification, strategy: TestStrategy, ownedPaths: readonly string[]) {
-    this.assertSupported(taskSpec, strategy);
+  assertTaskSupported(taskSpecInput: Specification, strategyInput: TestStrategy, ownedPaths: readonly string[]) {
+    this.assertSupported(taskSpecInput, strategyInput);
+    const rest = this.splitApp(taskSpecInput, strategyInput);
+    const taskSpec = rest.specification, strategy = rest.strategy;
     const automated = taskSpec.acceptanceCriteria.filter(c => c.required !== false && c.status !== "waived" && c.verificationMethod !== "manual_review");
     if (!automated.length) return;
     const profiles = this.runners.automatic ? (this.runners.current?.status === "detected" ? this.runners.current.profiles : []) : [];
@@ -307,7 +411,7 @@ export class HostVerification {
       });
     }
   }
-  private assertPolicyMethods(strategy: TestStrategy, specification: Specification) {
+  private assertPolicyMethods(strategy: TestStrategy, specification: Specification, realAppMethods: ReadonlySet<string> = new Set()) {
     const policy = strategy.metadata?.conditionalTdd;
     if (policy === undefined) return;
     const policyRecord = record(policy);
@@ -319,6 +423,8 @@ export class HostVerification {
     const criterionMethods = new Set(specification.acceptanceCriteria
       .filter(criterion => criterion.required !== false && criterion.status !== "waived").map(criterion => criterion.verificationMethod));
     const hasRunnerFor = (method: string): boolean => {
+      // A method verified by an owner real-app gate has its runner: the gate binds the accepted criteria of that method.
+      if (realAppMethods.has(method)) return true;
       if (this.runners.automatic && method === "static_analysis") {
         return infraCommands.some(cmd => cmd.method === "static_analysis" && isAutomaticStaticCommand(textField(cmd.command)));
       }
@@ -333,7 +439,7 @@ export class HostVerification {
         (missing.includes("manual_review") ? " Behavioral verification cannot record manual_review evidence: split the manually reviewed change into a separate documentation task, or escalate the policy to the user." : ""),
       methods: missing, options: [] });
   }
-  private assertDetectedSupported(spec: Specification, automated: Specification["acceptanceCriteria"], strategyInput: unknown) {
+  private assertDetectedSupported(spec: Specification, automated: Specification["acceptanceCriteria"], strategy: TestStrategy | undefined, realAppMethods: ReadonlySet<string> = new Set()) {
     const detection = this.runners.current;
     if (detection?.status !== "detected") {
       const reason = detection?.status === "unsupported" ? detection.reason : "Test runner detection has not run yet";
@@ -345,8 +451,7 @@ export class HostVerification {
     const testPaths = spec.affectedPaths.filter(path => testFilePattern.test(path));
     const ids = automated.map(criterion => criterion.id).join(", ");
     if (!testPaths.length) reject("missing_test_paths", `Automated acceptance criteria (${ids}) need their committed test files listed in specification.affectedPaths. Add the exact test file paths (for example packages/x/test/feature.test.ts) to affectedPaths and propose again.`);
-    const strategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
-    if (strategy) this.assertPolicyMethods(strategy, spec);
+    if (strategy) this.assertPolicyMethods(strategy, spec, realAppMethods);
     for (const criterion of automated) {
       const candidates = profiles.filter(item => item.method === criterion.verificationMethod);
       const profile = candidates.find(item => strategy?.targetCommands.includes(item.command)) ?? candidates[0];
@@ -382,12 +487,480 @@ export class HostVerification {
       return bound;
     });
   }
+  /**
+   * Owner mutation check. The candidate is never modified: a mutated commit is built from its committed bytes, measured
+   * through the same owner command, and the named tests must fail. A surviving test is `non_discriminating_test`.
+   */
+  private mutationGate(check: MutationCheck): QualityGate {
+    const id = `host-mutation-${check.id}`;
+    return { id, evaluate: async raw => {
+      try {
+        const context = QualityGateContextSchema.parse(raw), config = record(context.definition.configuration), input = record(context.input);
+        const command = this.runners.owner.find(item => item.id === check.commandId);
+        if (context.definition.id !== id || !command || config.command !== command.command || config.method !== command.method ||
+            !Array.isArray(config.testNames) || config.testNames.length !== check.expectFailingTests.length ||
+            config.testNames.some((name, index) => name !== check.expectFailingTests[index])) throw new Error("Mutation check does not match owner configuration");
+        const cwd = textField(input.sourceWorktreePath), sourceRevision = textField(input.sourceRevision);
+        const verification = (summary: string, extra: Record<string, JsonValue> = {}) => ({ schemaVersion: 2, checkId: id, runId: context.runId, taskId: context.taskId,
+          attemptId: context.attemptId, sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
+          executorId: "bflow-host-mutation-check", role: "quality_gate", method: command.method, command: command.command, testNames: [...check.expectFailingTests],
+          criteria: [], summary, ...extra });
+        const mutation = await createMutatedRevision(cwd, sourceRevision, check);
+        if (mutation.status === "not_applicable") {
+          // Task scope: the protection is not in this candidate, so there is nothing to prove. Workflow scope must still find it.
+          if (input.scope === "workflow") throw new Error(`Mutation ${check.id} target not found in the integrated revision (${mutation.reason}); update .bflow/verification.json`);
+          const summary = `Mutation ${check.id} not applicable at ${sourceRevision} (${mutation.reason})`;
+          const result = QualityGateResultSchema.parse({ gateId: id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
+            status: "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+            metadata: { verification: verification(summary), mutation: json({ id: check.id, file: check.file, notApplicable: mutation.reason }) } });
+          await this.trustGate(result);
+          return { ok: true, value: result };
+        }
+        const measured = await measureMutation(command, cwd, mutation.revision);
+        const assessed = assessMutation(check, measured);
+        const summary = assessed.killed
+          ? `Mutation ${check.id} killed: ${assessed.killedCount} expected test(s) failed with the protection replaced`
+          : `Mutation ${check.id} survived: ${assessed.survivors.join(", ")} still pass with the protection replaced`;
+        const result = QualityGateResultSchema.parse({ gateId: id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
+          status: assessed.killed ? "passed" : "failed",
+          findings: assessed.killed ? [] : [QualityFindingSchema.parse({ code: "non_discriminating_test", severity: "error",
+            message: `Mutation ${check.id} survived: ${assessed.survivors.join(", ")} still pass with the protection replaced; the test does not prove the protection is needed`,
+            location: check.file })],
+          producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          metadata: { verification: verification(summary, { exitCode: measured.outcome.exitCode ?? null }),
+            mutation: json({ id: check.id, file: check.file, mutatedRevision: mutation.revision, killed: assessed.killed, expectFailingTests: check.expectFailingTests, survivors: assessed.survivors }),
+            hostExecution: json(measured) } });
+        await this.trustGate(result);
+        return { ok: true, value: result };
+      } catch (error) {
+        return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
+      }
+    } };
+  }
+  /**
+   * Owner real-app check suite (one gate per suite). The app and the browser run in the sandbox runner. The gate binds the
+   * evidence to the candidate revision, the accepted criteria that selected these checks and the browser lease. A blocked
+   * prerequisite is never a pass; a candidate failure becomes findings that point at the stored evidence.
+   */
+  /**
+   * Measures one real-app suite for a task or workflow scope. Only the checks mapped by `bindings` run, on `revision` of
+   * `repository` (the app always runs from committed bytes). The sanitized evidence document and screenshots are stored
+   * through the ArtifactStore. Shared by the owner gate and by behavioral measurement, so both bind identical evidence.
+   * A blocked prerequisite is returned, never converted into a finding or a pass.
+   */
+  private async measureAppSuite(input: { suite: AppCheckSuite; bindings: readonly AppCriterionBinding[]; repository: string; revision: string;
+    runId: string; taskId?: string; attemptId: string; scope: "task" | "workflow"; specFingerprint: string; holder: string }): Promise<AppSuiteOutcome> {
+    const { suite, bindings, runId, taskId, attemptId, scope } = input;
+    const checkIds = [...new Set(bindings.flatMap(binding => binding.checkIds))];
+    const identities = [...new Set(bindings.flatMap(binding => binding.identities))];
+    const run = await runAppSuite({ repository: input.repository, revision: input.revision, suite, checkIds, holder: input.holder,
+      ...(this.appLeases ? { leases: this.appLeases } : {}) });
+    if (run.status === "blocked") return { status: "blocked", code: run.code, message: run.message, retryable: run.retryable };
+    const secrets = Object.values(suite.app.env), taskScope = taskId ? { taskId } : {};
+    const criteria = bindings.map(binding => {
+      const passed = binding.identities.every(identity => run.driver.checks.find(check => appCheckIdentity(suite.id, check.checkId) === identity)?.status === "passed");
+      return { criterionId: binding.criterion.id, identities: [...binding.identities], passed,
+        summary: passed ? "all mapped real-app checks passed" : "a mapped real-app check did not pass" };
+    });
+    const screenshots: ArtifactReference[] = [], screenshotIds = new Map<string, string>();
+    for (const shot of run.screenshots) {
+      const reference = await this.putBytes({ runId, ...taskScope, artifactId: `host-app-${suite.id}-shot-${randomUUID()}`,
+        kind: "report", mediaType: "image/png", bytes: shot.png });
+      screenshots.push(reference);
+      screenshotIds.set(shot.checkId, reference.artifactId);
+    }
+    const checks: AppEvidenceCheck[] = run.driver.checks.map(check => {
+      const identity = appCheckIdentity(suite.id, check.checkId), screenshot = screenshotIds.get(check.checkId);
+      return { identity, checkId: check.checkId, kind: check.kind, definitionDigest: digest(suite.checks.find(item => item.id === check.checkId)),
+        criterionIds: bindings.filter(binding => binding.identities.includes(identity)).map(binding => binding.criterion.id),
+        status: check.status, findings: check.findings.map(finding => ({ code: finding.code, message: finding.message, ...(finding.details ? { details: finding.details } : {}) })),
+        observations: check.observations, ...(screenshot ? { screenshotArtifactId: screenshot } : {}) };
+    });
+    const document = buildAppEvidence({ suiteId: suite.id, gateId: `host-app-${suite.id}`, runId, ...taskScope, attemptId, scope,
+      specFingerprint: input.specFingerprint, candidate: { sourceRevision: input.revision, checkoutTree: run.checkoutTree }, command: run.command,
+      port: suite.app.port, readyPath: suite.app.readyPath, ...(suite.browser ? { browser: { executable: suite.browser.executable, resourceKey: suite.browser.resourceKey } } : {}),
+      run, envValues: secrets, checks, criteria, startedAt: run.startedAt, finishedAt: run.finishedAt });
+    const evidence = await this.putBytes({ runId, ...taskScope, artifactId: `host-app-${suite.id}-${randomUUID()}`, kind: "test-result",
+      mediaType: "application/json", bytes: Buffer.from(JSON.stringify(document)) });
+    return { status: "completed", suiteId: suite.id, run, evidence, screenshots, criteria, identities, secrets };
+  }
+  /**
+   * Owner real-app check suite (one gate per suite). The app and the browser run in the sandbox runner. The gate binds the
+   * evidence to the candidate revision, the accepted criteria that selected these checks and the browser lease. A blocked
+   * prerequisite is never a pass; a candidate failure becomes findings that point at the stored evidence.
+   */
+  private appGate(suite: AppCheckSuite): QualityGate {
+    const id = `host-app-${suite.id}`;
+    const expected = record(appCheckDefinitions([suite])[0]!.configuration);
+    return { id, evaluate: async raw => {
+      try {
+        const context = QualityGateContextSchema.parse(raw), config = record(context.definition.configuration), input = record(context.input);
+        if (context.definition.id !== id || config.command !== expected.command || config.method !== "e2e_test" || config.kind !== "deterministic" ||
+            JSON.stringify(config.testNames) !== JSON.stringify(expected.testNames)) throw new Error("Real-app check does not match owner configuration");
+        const dossier = await this.dossierFor(context.runId, context.taskId);
+        const configuredCriteria = new Set(strings(config.criterionIds));
+        const selected = splitAppCriteria(dossier.specification, dossier.strategy, this.appSuites).app
+          .filter(binding => binding.suiteId === suite.id && configuredCriteria.has(binding.criterion.id));
+        if (!selected.length) throw new Error(`No accepted criterion selects real-app checks of ${suite.id}`);
+        const scope = z.enum(["task", "workflow"]).parse(input.scope);
+        const sourceRevision = textField(input.sourceRevision), taskScope = context.taskId ? { taskId: context.taskId } : {};
+        const identities = [...new Set(selected.flatMap(binding => binding.identities))];
+        const base = (summary: string, criteria: { criterionId: string; passed: boolean; summary: string }[]) => json({ schemaVersion: 2, checkId: id,
+          runId: context.runId, taskId: context.taskId, attemptId: context.attemptId, sourceRevision, specFingerprint: input.specFingerprint, scope,
+          independentExecution: true, isolated: true, executorId: "bflow-host-app-check", role: "quality_gate", method: "e2e_test",
+          command: `app:${suite.id}`, exitCode: null, testNames: identities, criteria, summary });
+        const outcome = await this.measureAppSuite({ suite, bindings: selected, repository: textField(input.sourceWorktreePath), revision: sourceRevision,
+          runId: context.runId, ...taskScope, attemptId: textField(context.attemptId), scope, specFingerprint: textField(input.specFingerprint),
+          holder: `${context.runId}/${context.taskId ?? "workflow"}/${context.attemptId}/${suite.id}` });
+        if (outcome.status === "blocked") {
+          const result = QualityGateResultSchema.parse({ gateId: id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(), status: "blocked",
+            findings: [QualityFindingSchema.parse({ code: outcome.code, severity: "error", location: `app:${suite.id}`,
+              message: `${outcome.message}. No real-app result was produced; nothing was faked.` })],
+            producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+            metadata: { verification: base(`Real-app checks ${suite.id} blocked: ${outcome.code}`, []) } });
+          await this.trustGate(result);
+          return { ok: true, value: result };
+        }
+        const { run, evidence, criteria } = outcome;
+        const findings = run.findings.map(finding => QualityFindingSchema.parse({ code: finding.code, severity: "error",
+          message: sanitizeAppEvidence(finding.message, outcome.secrets, "message") as string,
+          location: finding.checkId ? `app:${suite.id}:${finding.checkId}` : `app:${suite.id}`, artifactId: evidence.artifactId,
+          ...(finding.details ? { details: json(finding.details) } : {}) }));
+        const result = QualityGateResultSchema.parse({ gateId: id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
+          status: run.passed ? "passed" : "failed", findings: run.passed ? [] : findings.length ? findings : [QualityFindingSchema.parse({ code: "app_check_failed",
+            severity: "error", message: `Real-app checks ${suite.id} did not pass`, location: `app:${suite.id}`, artifactId: evidence.artifactId })],
+          producedArtifacts: [], evaluatedAt: new Date().toISOString(),
+          metadata: { verification: base(run.passed ? `Real-app checks ${suite.id} passed: ${identities.join(", ")}` : `Real-app checks ${suite.id} failed`, criteria),
+            appCheck: json({ evidence, instanceId: run.driver.instanceId, origin: run.driver.origin, status: run.passed ? "passed" : "failed" }) } });
+        await this.trustGate(result);
+        return { ok: true, value: result };
+      } catch (error) {
+        return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
+      }
+    } };
+  }
   behavioralGates(): QualityGate[] {
     return [...this.runners.owner.map(command => this.ownerGate(command)),
+      ...this.mutations.map(check => this.mutationGate(check)),
       ...(this.runners.automatic ? [
         ...this.runners.availableProfiles.map(runner => this.automaticGate(runner)),
+        ...(this.regression.scope !== "mapped_only"
+          ? this.runners.availableProfiles.filter(profile => !profile.adapter).map(profile => this.regressionGate(profile))
+          : []),
         ...AUTOMATIC_STATIC_COMMANDS.map(command => this.policyDeterministicGate(staticGateId(command), command))
-      ] : [])];
+      ] : []),
+      ...this.appSuites.map(suite => this.appGate(suite))];
+  }
+  private async resolveRegressionBase(runId: string, taskId: string | undefined, fallbackBase?: unknown): Promise<string> {
+    try {
+      const dossier = await this.dossierFor(runId, taskId);
+      return dossier.originalRevision;
+    } catch {
+      const effectiveTaskId = taskId === "workflow-verification" ? undefined : taskId;
+      try {
+        const inspected = record(await this.runtime().inspect(runId));
+        const runObj = inspected.run !== null && typeof inspected.run === "object" ? record(inspected.run) : inspected;
+        if (effectiveTaskId !== undefined && Array.isArray(runObj.tasks)) {
+          const task = runObj.tasks
+            .filter(item => item !== null && typeof item === "object")
+            .map(record)
+            .find(item => item.taskId === effectiveTaskId);
+          if (task && Array.isArray(task.worktrees) && task.worktrees.length > 0) {
+            const baseCommit = record(task.worktrees.at(-1)).baseCommitHash;
+            if (typeof baseCommit === "string" && baseCommit.trim().length > 0) return baseCommit.trim();
+          }
+        }
+        if (typeof runObj.baseRevision === "string" && runObj.baseRevision.trim().length > 0) {
+          return runObj.baseRevision.trim();
+        }
+      } catch {
+        // Fall through to input.baseRevision
+      }
+      return textField(fallbackBase);
+    }
+  }
+  private regressionGate(profile: RunnerProfile): QualityGate {
+    const id = `host-regression-${profile.id}`;
+    return {
+      id,
+      evaluate: async raw => {
+        try {
+          const context = QualityGateContextSchema.parse(raw);
+          const config = record(context.definition.configuration);
+          const meta = record(context.definition.metadata ?? {});
+          const input = record(context.input);
+          const selectionMode = meta.selection ?? config.selection;
+          if (
+            context.definition.id !== id ||
+            config.command !== profile.command ||
+            config.method !== profile.method ||
+            (selectionMode !== undefined && selectionMode !== "regression")
+          ) {
+            throw new Error("Regression check does not match host runner profile");
+          }
+
+          const cwd = textField(input.sourceWorktreePath);
+          const head = textField(input.sourceRevision);
+          const base = await this.resolveRegressionBase(context.runId, context.taskId, input.baseRevision);
+          const repositoryRoot = this.runners.repositoryRoot ?? profile.dependencySource ?? cwd;
+
+          const selection = await selectRegressionTests({
+            worktreePath: cwd,
+            repositoryRoot,
+            base,
+            head,
+            profile,
+            scope: this.regression.scope === "mapped_only" ? "affected" : this.regression.scope,
+            index: this.regression.index,
+            git: (dir, args) => this.git(dir, args)
+          });
+          const evaluatedAt = new Date().toISOString();
+
+          const buildRegressionMeta = (
+            counts: { testsRun: number; passed: number; failed: number; skipped: number },
+            failures: { testPath: string; testName: string; classification: "regression_failure" | "pre_existing" }[]
+          ) =>
+            json({
+              scope: selection.scope,
+              selectedTestPaths: [...selection.testPaths],
+              testPaths: [...selection.testPaths],
+              changedFiles: [...selection.changedFiles],
+              changedFilesTruncated: selection.changedFilesTruncated,
+              truncated: selection.changedFilesTruncated,
+              widening: selection.widening.map(w => ({
+                path: w.path,
+                scope: w.tier,
+                tier: w.tier,
+                reason: w.reason,
+                ...(w.packageRoot ? { packageRoot: w.packageRoot } : {})
+              })),
+              index: "commit" in selection.index ? { ...selection.index, probedAt: evaluatedAt } : selection.index,
+              base: selection.base,
+              baseRevision: selection.base,
+              head: selection.head,
+              headRevision: selection.head,
+              failures,
+              preExistingFailures: failures
+                .filter(f => f.classification === "pre_existing")
+                .map(({ testPath, testName }) => ({ testPath, testName })),
+              testsRun: counts.testsRun,
+              passed: counts.passed,
+              failed: counts.failed,
+              skipped: counts.skipped
+            });
+
+          const finishResult = async (params: {
+            status: "passed" | "failed" | "blocked";
+            findings: ReturnType<typeof QualityFindingSchema.parse>[];
+            exitCode: number;
+            summary: string;
+            regressionMeta: JsonValue;
+            hostExecution?: JsonValue;
+          }) => {
+            const result = QualityGateResultSchema.parse({
+              gateId: context.definition.id,
+              runId: context.runId,
+              taskId: context.taskId,
+              evaluationId: randomUUID(),
+              status: params.status,
+              findings: params.findings,
+              producedArtifacts: [],
+              evaluatedAt,
+              metadata: {
+                verification: {
+                  schemaVersion: 2,
+                  checkId: context.definition.id,
+                  runId: context.runId,
+                  taskId: context.taskId,
+                  attemptId: context.attemptId,
+                  sourceRevision: head,
+                  specFingerprint: input.specFingerprint,
+                  scope: input.scope,
+                  independentExecution: true,
+                  isolated: true,
+                  executorId: "bflow-host-regression-check",
+                  role: "quality_gate",
+                  method: profile.method,
+                  command: profile.command,
+                  exitCode: params.status === "passed" ? 0 : params.exitCode,
+                  testNames: [],
+                  criteria: [],
+                  summary: params.summary
+                },
+                regression: params.regressionMeta,
+                ...(params.hostExecution !== undefined ? { hostExecution: params.hostExecution } : {})
+              }
+            });
+            await this.trustGate(result);
+            return { ok: true as const, value: result };
+          };
+
+          if (selection.scope === "none" || selection.testPaths.length === 0) {
+            const findings =
+              selection.scope === "none"
+                ? [
+                    QualityFindingSchema.parse({
+                      severity: "info",
+                      code: "docs_only",
+                      message: "Only documentation files changed; no regression tests selected"
+                    })
+                  ]
+                : [];
+            const summary =
+              selection.scope === "none"
+                ? "Only documentation files changed; no regression tests selected"
+                : `No regression tests selected (scope: ${selection.scope})`;
+            return await finishResult({
+              status: "passed",
+              findings,
+              exitCode: 0,
+              summary,
+              regressionMeta: buildRegressionMeta({ testsRun: 0, passed: 0, failed: 0, skipped: 0 }, [])
+            });
+          }
+
+          const budgetMs = Math.min(540_000, profile.timeoutMs * 3);
+          const bindAtCurrentCheckout = async (testPaths: string[]) => {
+            const pinned = await pinRunnerDefinitions(cwd, {
+              status: "detected",
+              profiles: [profile],
+              notes: []
+            });
+            const activeProfile = pinned.status === "detected" ? pinned.profiles[0]! : profile;
+            return bindRegressionProfile(activeProfile, testPaths, budgetMs);
+          };
+
+          const handleInfraFailure = async (error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            const isBudgetExceeded = message.startsWith("regression_budget_exceeded:");
+            const code = isBudgetExceeded ? "regression_budget_exceeded" : "regression_infrastructure";
+            const findingMessage = isBudgetExceeded
+              ? `Regression suite exceeded budget (${budgetMs}ms); split the task or configure verification.regressionScope: "mapped_only" (${message})`
+              : `Regression runner infrastructure error: ${message}`;
+            return await finishResult({
+              status: "blocked",
+              findings: [
+                QualityFindingSchema.parse({
+                  severity: "error",
+                  code,
+                  message: findingMessage
+                })
+              ],
+              exitCode: 1,
+              summary: findingMessage,
+              regressionMeta: buildRegressionMeta({ testsRun: 0, passed: 0, failed: 0, skipped: 0 }, [])
+            });
+          };
+
+          let headMeasured: RegressionMeasurement;
+          try {
+            const headCommand = await bindAtCurrentCheckout([...selection.testPaths]);
+            headMeasured = await measureRegression(headCommand, cwd, head);
+          } catch (error) {
+            return await handleInfraFailure(error);
+          }
+
+          const headObs = headMeasured.observation;
+          if (headObs.failures.length === 0) {
+            const summary = `${headObs.passed}/${headObs.tests} regression tests passed at ${head} (scope: ${selection.scope})`;
+            return await finishResult({
+              status: "passed",
+              findings: [],
+              exitCode: 0,
+              summary,
+              regressionMeta: buildRegressionMeta(
+                { testsRun: headObs.tests, passed: headObs.passed, failed: headObs.failed, skipped: headObs.skipped },
+                []
+              ),
+              hostExecution: json(headMeasured)
+            });
+          }
+
+          const failingTestPaths = [...new Set(headObs.failures.map(f => f.testPath))];
+          const baseTestPaths: string[] = [];
+          for (const testPath of failingTestPaths) {
+            if (!testFilePattern.test(testPath)) continue;
+            try {
+              await this.git(cwd, ["cat-file", "-e", `${base}:${testPath}`]);
+              baseTestPaths.push(testPath);
+            } catch {
+              // Did not exist at base; cannot be pre_existing
+            }
+          }
+
+          let baseFailures: RegressionFailure[] = [];
+          if (baseTestPaths.length > 0) {
+            const symbolicBranch = (
+              await this.git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"]).catch(() => "")
+            ).trim();
+            try {
+              await this.git(cwd, ["checkout", "--detach", "--force", base]);
+              const baseCommand = await bindAtCurrentCheckout(baseTestPaths);
+              const baseMeasured = await measureRegression(baseCommand, cwd, base);
+              baseFailures = baseMeasured.observation.failures;
+            } catch (error) {
+              return await handleInfraFailure(error);
+            } finally {
+              if (symbolicBranch) {
+                await this.git(cwd, ["checkout", "--force", symbolicBranch]).catch(async () => {
+                  await this.git(cwd, ["checkout", "--detach", "--force", head]);
+                });
+              } else {
+                await this.git(cwd, ["checkout", "--detach", "--force", head]);
+              }
+            }
+          }
+
+          const baseFailureKeys = new Set(baseFailures.map(f => `${f.testPath}\0${f.testName}`));
+          const classifiedFailures = headObs.failures.map(f => ({
+            testPath: f.testPath,
+            testName: f.testName,
+            classification: (baseFailureKeys.has(`${f.testPath}\0${f.testName}`)
+              ? "pre_existing"
+              : "regression_failure") as "regression_failure" | "pre_existing"
+          }));
+
+          const findings = classifiedFailures.map(f =>
+            f.classification === "regression_failure"
+              ? QualityFindingSchema.parse({
+                  severity: "error",
+                  code: "regression_failure",
+                  message: `Regression test failed at head (${head}) but passed at base (${base}): ${f.testPath} :: ${f.testName}`,
+                  location: f.testPath,
+                  details: { testName: f.testName, testPath: f.testPath, base, head }
+                })
+              : QualityFindingSchema.parse({
+                  severity: "warning",
+                  code: "pre_existing_failure",
+                  message: `Pre-existing test failure also present at base (${base}): ${f.testPath} :: ${f.testName}`,
+                  location: f.testPath,
+                  details: { testName: f.testName, testPath: f.testPath, base, head }
+                })
+          );
+
+          const regressionFailures = classifiedFailures.filter(f => f.classification === "regression_failure");
+          const status = regressionFailures.length > 0 ? "failed" : "passed";
+          const summary =
+            regressionFailures.length > 0
+              ? `${regressionFailures.length} regression failure(s) detected across ${headObs.tests} tests at ${head}`
+              : `${headObs.passed}/${headObs.tests} regression tests passed (${classifiedFailures.length} pre-existing failure(s) ignored) at ${head}`;
+
+          return await finishResult({
+            status,
+            findings,
+            exitCode: status === "passed" ? 0 : headMeasured.outcome.exitCode || 1,
+            summary,
+            regressionMeta: buildRegressionMeta(
+              { testsRun: headObs.tests, passed: headObs.passed, failed: headObs.failed, skipped: headObs.skipped },
+              classifiedFailures
+            ),
+            hostExecution: json(headMeasured)
+          });
+        } catch (error) {
+          return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
+        }
+      }
+    };
   }
   private gate(id: string, resolveCommand: (context: { runId: string; taskId?: string | undefined }) => Promise<BoundBehavioralCommand>): QualityGate {
     return { id, evaluate: async raw => {
@@ -407,7 +980,10 @@ export class HostVerification {
             summary: `${measured.passed}/${measured.tests} observed tests passed at ${measured.sourceRevision}` }, hostExecution: json(measured) } });
         await this.trustGate(result);
         return { ok: true, value: result };
-      } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+      } catch (error) {
+        const details = error instanceof BehavioralMeasurementError ? { diagnostics: error.diagnostics } : undefined;
+        return { ok: false, error: { code: "validation", retryable: false, message: String(error), ...(details ? { details } : {}) } };
+      }
     } };
   }
   /** Execute an independent phase; no test command, revision or verdict is accepted from the agent. */
@@ -429,9 +1005,12 @@ export class HostVerification {
     const target = record(record(assignment.handle).target);
     if (target.agentId === binding.agentId || target.paneId === binding.paneId) throw new Error("Implementer cannot verify its own change");
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim(), startedAt = new Date().toISOString();
-    const criteria = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
+    const split = splitAppCriteria(spec, strategy, this.appSuites), appBindings = split.app;
+    const criteria = split.rest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
+    const allCriteria = [...criteria, ...appBindings.map(binding => binding.criterion)], attemptId = randomUUID();
     const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) });
-    if (!commands.length || criteria.some(criterion => criterion.verificationMethod === "manual_review")) throw new Error("This strategy requires independent alternative evidence");
+    // Real-app criteria need no runner command; a runner-verified criterion still does.
+    if (criteria.some(criterion => criterion.verificationMethod === "manual_review") || (!commands.length && (criteria.length > 0 || appBindings.length === 0))) throw new Error("This strategy requires independent alternative evidence");
     const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands])}`;
     const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);
     if (replay) {
@@ -464,6 +1043,15 @@ export class HostVerification {
     }
     const observation = await this.capture(cwd, textField(run.baseRevision), revision);
     if (observation.exitCode !== 0) throw new Error("Committed diff integrity check failed");
+    // Real-app criteria are measured on the same committed revision. A blocked prerequisite throws before any evidence is recorded.
+    const appSuites: Extract<AppSuiteOutcome, { status: "completed" }>[] = [];
+    for (const suite of this.appSuites.filter(item => appBindings.some(binding => binding.suiteId === item.id))) {
+      const outcome = await this.measureAppSuite({ suite, bindings: appBindings.filter(binding => binding.suiteId === suite.id), repository: cwd, revision,
+        runId, taskId, attemptId, scope: "task", specFingerprint: digest(spec), holder: `${runId}/${taskId}/${attemptId}/${suite.id}` });
+      if (outcome.status === "blocked") throw new Error(`Real-app prerequisite missing (${outcome.code}): ${outcome.message}; no behavioral evidence was recorded`);
+      appSuites.push(outcome);
+    }
+    const appFailed = appSuites.some(suite => suite.criteria.some(criterion => !criterion.passed));
     const red = prior[0], redDetails = red ? record(red.metadata?.conditionalTdd) : undefined;
     if (red) {
       const redMeasurements = red.metadata?.hostBehavioralMeasurements;
@@ -471,7 +1059,8 @@ export class HostVerification {
         digest(measured.map(item => ({ commandId: item.commandId, testNames: item.testNames, testBlobs: item.testBlobs })))) throw new Error("Green/Refactor must preserve the exact committed Red test files and observed identities");
       if (redDetails?.sourceRevision === revision) throw new Error("Green/Refactor require the implementation revision after Red");
     }
-    if (phase === "red" ? !measured.some(item => item.targetFailure) : measured.some(item => item.failed)) {
+    // Red needs a runner assertion failure: an app check can also fail because the app does not start, which proves no target behavior.
+    if (phase === "red" ? !measured.some(item => item.targetFailure) : (measured.some(item => item.failed) || appFailed)) {
       const evidence = await this.artifact(runId, taskId, { phase, observation, measurements: measured, verifiedBy: binding.agentId, accepted: false });
       for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, evidence);
       throw new HostBehavioralFailure(phase === "red" ? "Red requires an independently observed assertion failure" : "Behavioral acceptance failed; request repairs",
@@ -479,7 +1068,7 @@ export class HostVerification {
           ? [json({ commandId: item.commandId, exitCode: item.outcome.exitCode, compressedOutput: item.rtk.compressedOutput })] : []));
     }
     if (phase === "red") {
-      const targetNames = new Set(strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames));
+      const targetNames = new Set(strategy.criterionMappings.filter(mapping => allCriteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames));
       if (measured.some(item => item.testResults.some(test => !test.passed && !targetNames.has(test.name)))) throw new Error("Red failure belongs to an unrelated test rather than an accepted target criterion");
     }
     // Static target commands are measured here; every other target command must come from a measured runner above.
@@ -499,18 +1088,20 @@ export class HostVerification {
       strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
       .map(criterion => ({ method: item.method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` })));
     // Commands without a primary criterion still produce evidence for the strategy's required methods/commands.
-    for (const item of measured) if (!observations.some(observation => observation.command === item.command)) observations.push({ method: item.method, criterionId: criteria[0]!.id,
+    for (const item of measured) if (!observations.some(observation => observation.command === item.command)) observations.push({ method: item.method, criterionId: allCriteria[0]!.id,
       evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` });
-    for (const item of staticAnalyses) observations.push({ method: "static_analysis", criterionId: criteria[0]!.id, evidenceArtifactId: artifact.artifactId,
+    for (const suite of appSuites) for (const criterion of suite.criteria) observations.push({ method: "e2e_test", criterionId: criterion.criterionId,
+      evidenceArtifactId: suite.evidence.artifactId, command: `app:${suite.suiteId}`, exitCode: criterion.passed ? 0 : 1, summary: criterion.summary });
+    for (const item of staticAnalyses) observations.push({ method: "static_analysis", criterionId: allCriteria[0]!.id, evidenceArtifactId: artifact.artifactId,
       command: item.command, exitCode: item.exitCode, summary: item.output });
-    const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId, runId, taskId, cycleNumber: prior[0]?.cycleNumber ?? 1, attemptId: randomUUID(),
-      status: phase === "red" ? "failed" : "passed", independentExecution: true, evaluatedCriteria: criteria.map(criterion => {
+    const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId, runId, taskId, cycleNumber: prior[0]?.cycleNumber ?? 1, attemptId,
+      status: phase === "red" ? "failed" : "passed", independentExecution: true, evaluatedCriteria: allCriteria.map(criterion => {
         const matching = observations.find(observation => observation.criterionId === criterion.id && observation.method === criterion.verificationMethod && observation.command !== undefined && observation.exitCode !== undefined);
         if (!matching) throw new Error(`No measured evidence for ${criterion.id}`);
-        return { criterionId: criterion.id, passed: matching.exitCode === 0, evidenceArtifactId: artifact.artifactId, command: matching.command, exitCode: matching.exitCode, summary: matching.summary };
-      }), qualityGateResults: [], evidenceArtifacts: [artifact], findings: [], verifiedBy: binding.role, startedAt, completedAt: new Date().toISOString(),
+        return { criterionId: criterion.id, passed: matching.exitCode === 0, evidenceArtifactId: matching.evidenceArtifactId, command: matching.command, exitCode: matching.exitCode, summary: matching.summary };
+      }), qualityGateResults: [], evidenceArtifacts: [artifact, ...appSuites.flatMap(suite => [suite.evidence, ...suite.screenshots])], findings: [], verifiedBy: binding.role, startedAt, completedAt: new Date().toISOString(),
       metadata: { conditionalTdd: { phase, decisionId: strategy.tddDecision.decisionId, specId: strategy.specId, sourceRevision: revision, testRevision: redDetails?.testRevision ?? revision,
-        testNames: [...new Set(measured.flatMap(item => item.testNames))], ...(phase === "red" ? { failureKind: "target_behavior" } : {}), observations }, hostBehavioralMeasurements: json(measured), hostVerifierBinding: json(binding) } });
+        testNames: [...new Set([...measured.flatMap(item => item.testNames), ...appBindings.flatMap(binding => binding.identities)])], ...(phase === "red" ? { failureKind: "target_behavior" } : {}), observations }, hostBehavioralMeasurements: json(measured), hostVerifierBinding: json(binding) } });
     // Apply the same P16 validator before minting a host receipt; the Runtime will apply it again at ingress.
     this.runtime().ports.policies.recordEvidence(strategy, result);
     await this.trustEvidence(result);
@@ -528,8 +1119,15 @@ export class HostVerification {
     if (!taskId || !attemptId || !Array.isArray(state.runs)) return undefined;
     const run = state.runs.map(record).find(item => item.runId === runId);
     const task = Array.isArray(run?.tasks) ? run!.tasks.map(record).find(item => item.taskId === taskId) : undefined;
-    if (!Array.isArray(task?.reworkResolutions)) return undefined;
-    return task!.reworkResolutions.map(item => ReworkResolutionDossierSchema.parse(item)).find(item => item.attemptId === attemptId);
+    const dossiers = Array.isArray(task?.reworkResolutions) ? task.reworkResolutions.map(item => ReworkResolutionDossierSchema.parse(item)) : [];
+    const dossier = dossiers.find(item => item.attemptId === attemptId);
+    if (task && record(task.result).attemptId !== attemptId) {
+      throw new Error("Stale rework review attempt or generation");
+    }
+    if (!dossier && hasReworkAssignment(Array.isArray(state.outbound) ? state.outbound : [], runId, taskId, attemptId)) {
+      throw new Error("Missing rework dossier; historical state cannot supply independent finding evidence");
+    }
+    return dossier;
   }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
   private readonly reviews = new Map<string, { binding: PaneBinding; sourceMessageId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
@@ -545,6 +1143,15 @@ export class HostVerification {
     const details = record(context.input), config = record(context.definition.configuration);
     if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
+    const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
+    const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
+    if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
+    let testIntegrityObservation: TestIntegrityObservation | undefined;
+    if (integrityReport.findings.length) {
+      const evidence = await this.artifact(context.runId, context.taskId!, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
+      testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
+      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+    }
     let qaBehavioralObservation: JsonValue | undefined;
     if (binding.role === "qa" && details.scope === "workflow") {
       const dossier = await this.dossierFor(context.runId, context.taskId);
@@ -566,10 +1173,14 @@ export class HostVerification {
           evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
             tests: item.tests, passed: item.passed, failed: item.failed, exitCode: item.outcome.exitCode,
             ...(item.rtk ? { rtk: item.rtk } : {}) })) });
-        context = QualityGateContextSchema.parse({ ...context, input: { ...details, hostQaBehavioralObservation: qaBehavioralObservation } });
+        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostQaBehavioralObservation: qaBehavioralObservation } });
       }
     }
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
+    if (reworkResolution) {
+      if (reworkResolution.submittedRevision !== observation.revision) throw new Error("Rework dossier revision mismatch");
+      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
+    }
     const sourceMessageId = textField(args.messageId);
     const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
       rev.sourceMessageId === sourceMessageId &&
@@ -580,10 +1191,11 @@ export class HostVerification {
     const reviewId = existingReviewId ?? randomUUID();
     await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
     this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
-    const fullReply = { reviewId, ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
+    const fullReply = { reviewId, ...(testIntegrityObservation ? { testIntegrityObservation } : {}), ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
     const isAgy = binding.provider === "agy" || binding.agentKind === "agy";
-    const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number";
-    if (!hasDiffPagination && (!isAgy || !exceedsAgyInlineReply(fullReply))) {
+    const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number" || typeof args.integrityOffset === "number";
+    const oversizedReply = isAgy ? exceedsAgyInlineReply(fullReply) : Buffer.byteLength(JSON.stringify(fullReply)) > 65_536;
+    if (!hasDiffPagination && !oversizedReply) {
       return json(fullReply);
     }
     const rawDiff = observation.diff;
@@ -642,11 +1254,24 @@ export class HostVerification {
             }
           }
         : reworkResolution;
-      const boundedContext = compactDossier
+      const dossierContext = compactDossier
         ? { ...context, artifacts: context.artifacts.map(a => ({ artifactId: a.artifactId, kind: a.kind })) }
         : context;
+      const findingOffset = typeof args.integrityOffset === "number" && Number.isInteger(args.integrityOffset) && args.integrityOffset >= 0 ? args.integrityOffset : 0;
+      const pageSize = isAgy ? 1 : 20;
+      const boundedIntegrity = testIntegrityObservation ? { ...testIntegrityObservation,
+        report: { ...testIntegrityObservation.report, findings: testIntegrityObservation.report.findings.slice(findingOffset, findingOffset + pageSize).map(finding => ({
+          ...finding, reason: finding.reason.slice(0, 512), ...(finding.before === undefined ? {} : { before: finding.before.slice(0, 256) }),
+          ...(finding.after === undefined ? {} : { after: finding.after.slice(0, 256) }) })) },
+        displayedExcerptsBounded: true,
+        reportDigest: digest(testIntegrityObservation.report), findingOffset, findingTotal: testIntegrityObservation.report.findings.length,
+        nextFindingOffset: findingOffset + pageSize < testIntegrityObservation.report.findings.length ? findingOffset + pageSize : null } : undefined;
+      // The complete observation remains immutable in the receipt journal and ArtifactStore; response pages carry its digest.
+      const boundedContext = testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
+        hostTestIntegrityObservation: { evidence: testIntegrityObservation.evidence, reportDigest: digest(testIntegrityObservation.report), findingTotal: testIntegrityObservation.report.findings.length } } } : dossierContext;
       return {
         reviewId,
+        ...(boundedIntegrity ? { testIntegrityObservation: boundedIntegrity } : {}),
         ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
         ...(boundedRework ? { reworkResolution: boundedRework } : {}),
         context: boundedContext,
@@ -669,6 +1294,20 @@ export class HostVerification {
     }
     return json(bounded);
   }
+  async requestTestIntegrityException(binding: PaneBinding, input: unknown) {
+    if (binding.role !== "reviewer") throw new Error("Independent Reviewer required for a test-integrity exception request");
+    const args = z.object({ reviewId: z.string().min(1), findingId: z.string().min(1), reason: z.string().trim().min(10).max(1000) }).strict().parse(input);
+    const stored = await this.receipts?.getObservation("review", args.reviewId);
+    const pending = stored ? { binding: stored.binding, sourceMessageId: stored.sourceMessageId, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(args.reviewId);
+    if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) throw new Error("Review observation belongs to another pane or is missing");
+    const context = QualityGateContextSchema.parse(pending.context);
+    const observation = TestIntegrityObservationSchema.parse(record(context.input).hostTestIntegrityObservation);
+    if (!observation.report.findings.some(finding => finding.id === args.findingId)) throw new Error("Unknown test-integrity finding ID");
+    const current = await this.capture(pending.observation.cwd, pending.observation.base, pending.observation.revision);
+    if (digest(current) !== digest(pending.observation)) throw new Error("Test-integrity exception source changed");
+    return this.runtime().requestTestIntegrityException(binding, { messageId: textField(pending.sourceMessageId), context,
+      findingId: args.findingId, reason: args.reason, evidence: observation.evidence });
+  }
   async completeReview(binding: PaneBinding, input: unknown) {
     const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
     const pending = stored ? { binding: stored.binding, sourceMessageId: stored.sourceMessageId, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
@@ -679,13 +1318,9 @@ export class HostVerification {
         ["accepted", "released"].includes(String(out.status)) && record(out.message).type === "verification.requested" &&
         record(out.message).message_id === args.messageId && record(record(out.handle).target).paneId === binding.paneId &&
         record(record(out.handle).target).agentId === binding.agentId && digest(record(record(out.handle).target).session) === digest(binding.session));
-      const originalContext = (context: unknown) => {
-        const parsed = QualityGateContextSchema.parse(context), { hostQaBehavioralObservation: _measurement, ...input } = record(parsed.input);
-        return { ...parsed, input };
-      };
       const candidates = assigned ? [...this.reviews].filter(([, review]) => review.sourceMessageId === args.messageId &&
         digest(this.bindingIdentity(review.binding)) === digest(this.bindingIdentity(binding)) &&
-        digest(originalContext(review.context)) === digest(originalContext(record(assigned.message).payload)))
+        digest(originalReviewContext(review.context)) === digest(originalReviewContext(record(assigned.message).payload)))
         .slice(-3).map(([reviewId]) => reviewId) : [];
       throw new Error("Review observation belongs to another pane or is missing" + (candidates.length
         ? `; this pane's observation IDs for the exact assigned message: ${candidates.join(", ")}. Retry complete_review with the chosen reviewId and independent judgments.`
@@ -696,25 +1331,33 @@ export class HostVerification {
     const context = QualityGateContextSchema.parse(pending.context), configuration = record(context.definition.configuration), details = record(context.input);
     const state = record(await this.runtime().inspect());
     if ((state.outbound as Record<string, unknown>[]).some(out => out.reviewReplacement && out.handle &&
-        record(record(out.handle).target).paneId === pending.binding.paneId && digest(record(record(out.handle).target).session) === digest(pending.binding.session) && digest(record(out.message).payload) === digest(context)))
+        record(record(out.handle).target).paneId === pending.binding.paneId && digest(record(record(out.handle).target).session) === digest(pending.binding.session) &&
+        (record(out.message).message_id === pending.sourceMessageId || digest(originalReviewContext(record(out.message).payload)) === digest(originalReviewContext(context)))))
       throw new Error("Replaced workflow review cannot complete a stored observation");
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
+    const integrityReport = await this.measureIntegrity(context, pending.observation.cwd, pending.observation.base, pending.observation.revision);
+    const integrityObservation = details.hostTestIntegrityObservation === undefined ? undefined : TestIntegrityObservationSchema.parse(details.hostTestIntegrityObservation);
+    if (integrityReport.findings.length && !integrityObservation) throw new Error("Test-integrity verdict requires a new inspect_review observation");
+    if (integrityObservation && digest(integrityObservation.report) !== digest(integrityReport)) throw new Error("Test-integrity report changed since review observation");
+    if (binding.role !== "reviewer" && args.testIntegrityVerdicts !== undefined) throw new Error("Only Reviewer may submit test-integrity verdicts");
+    const integrityJudgment = binding.role === "reviewer"
+      ? adjudicateTestIntegrity(integrityReport, args.testIntegrityVerdicts, await this.integrityGrants(context)) : undefined;
+    if (integrityJudgment) await validateTestIntegrityEvidence(pending.observation.cwd, integrityReport, integrityJudgment.verdicts);
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
-    const findingVerdicts = args.findingVerdicts === undefined ? [] : (() => {
+    const pinnedRework = details.hostReworkVerification;
+    if (reworkResolution || pinnedRework !== undefined) {
+      if (!reworkResolution || binding.agentId === reworkResolution.submittedByAgentId ||
+          reworkResolution.submittedRevision !== pending.observation.revision ||
+          digest(pinnedRework) !== digest(reworkVerificationBinding(reworkResolution))) {
+        throw new Error("Missing or stale rework observation binding");
+      }
+    }
+    const findingVerdicts = reworkResolution ? parseRequiredFindingVerdicts(reworkResolution, args.findingVerdicts) : args.findingVerdicts === undefined ? [] : (() => {
       if (!Array.isArray(args.findingVerdicts)) throw new Error("findingVerdicts must be an array");
       const parsed = args.findingVerdicts.map(item => ReworkFindingVerdictSchema.parse(item));
       if (new Set(parsed.map(item => item.findingId)).size !== parsed.length) throw new Error("Duplicate findingId in findingVerdicts");
-      if (reworkResolution) {
-        const validIds = new Set(reworkResolution.reworkContext.findings.map(item => item.findingId));
-        for (const item of parsed) {
-          if (!validIds.has(item.findingId)) {
-            throw new Error(`Review findingVerdict references unknown findingId '${item.findingId}' not in reworkGeneration ${reworkResolution.reworkGeneration}`);
-          }
-        }
-      } else if (parsed.length > 0) {
-        throw new Error("findingVerdicts cannot be submitted for an initial non-rework review");
-      }
+      if (parsed.length > 0) throw new Error("findingVerdicts cannot be submitted for an initial non-rework review");
       return parsed;
     })();
     const explicitFindings = args.findings === undefined ? [] : (() => {
@@ -776,11 +1419,17 @@ export class HostVerification {
         })
       });
     });
-    const allFindings = [...verdictFindings, ...explicitFindings];
+    const integrityFindings = integrityJudgment?.unresolved.map(verdict => {
+      const finding = integrityReport.findings.find(item => item.id === verdict.findingId)!;
+      return QualityFindingSchema.parse({ code: finding.ruleId, severity: "error", message: `Reviewer confirmed test weakening: ${verdict.reason}; owner exception required`,
+        details: json(finding), location: `${finding.path}:${finding.line}:${finding.column}` });
+    }) ?? [];
+    const allFindings = [...verdictFindings, ...explicitFindings, ...integrityFindings];
     const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;
     const submission = digest({
       criteria,
       summary: textField(args.summary),
+      ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts } : {}),
       ...(findingVerdicts.length ? { findingVerdicts } : {}),
       ...(explicitFindings.length ? { findings: explicitFindings } : {})
     });
@@ -800,6 +1449,8 @@ export class HostVerification {
       observation: observed,
       criteria,
       reviewedBy: binding.agentId,
+      ...(integrityObservation ? { testIntegrityObservation: integrityObservation } : {}),
+      ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts, testIntegrityExceptions: integrityJudgment.grants } : {}),
       ...(qaBehavioralObservation === undefined ? {} : { qaBehavioralObservation }),
       ...(findingVerdicts.length ? { findingVerdicts } : {}),
       ...(allFindings.length ? { findings: allFindings } : {})
@@ -808,8 +1459,9 @@ export class HostVerification {
       status: criteria.every(criterion => criterion.passed) && observed.exitCode === 0 && qaPassed && !reworkRejected ? "passed" : "failed",
       findings: allFindings, producedArtifacts: [], evaluatedAt: new Date().toISOString(),
       metadata: {
+        ...(integrityJudgment ? { testIntegrityVerdicts: json(integrityJudgment.verdicts), testIntegrityExceptions: json(integrityJudgment.grants) } : {}),
         ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }),
-        ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts) } : {}),
+        ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts), reworkVerification: pinnedRework } : {}),
         verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
           sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
           role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) },

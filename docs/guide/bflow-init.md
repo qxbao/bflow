@@ -2,10 +2,13 @@
 
 ```bash
 bflow init --name my-project
+bflow init --check
+bflow init --remove
+bflow init --no-gitnexus
 bflow init --dir /absolute/path/to/my-project --json
 ```
 
-Lệnh `bflow init` bắt buộc phải được thực thi trong một checkout Git hợp lệ. Lệnh sẽ tự động phát hiện đường dẫn gốc chuẩn (canonical Git root) ngay cả khi được gọi từ một thư mục con, sau đó sinh tệp cấu hình `.bflow/config.yml` cùng tệp `.bflow/.gitignore`. Lệnh này chỉ thực hiện tạo cấu hình cục bộ; không tương tác với Herdr, không tạo pane và không khởi chạy bất kỳ tiến trình agent nào. Tham số tùy chọn `--config` chỉ chấp nhận đường dẫn trỏ chính xác tới tệp `.bflow/config.yml` của checkout hiện tại, không hỗ trợ chuyển hướng lưu trữ cấu hình môi trường sang vị trí khác.
+Lệnh `bflow init` bắt buộc phải được thực thi trong một checkout Git hợp lệ (trừ `--remove` khi thư mục kho mã đã bị xóa). Lệnh sẽ tự động phát hiện đường dẫn gốc chuẩn (canonical Git root) ngay cả khi được gọi từ một thư mục con, sau đó sinh tệp cấu hình `.bflow/config.yml` cùng tệp `.bflow/.gitignore`, lập chỉ mục kho mã bằng GitNexus (hỏi xác nhận giấy phép PolyForm-Noncommercial lần đầu, hoặc tự động chấp nhận khi truyền `--yes`; dùng `--no-gitnexus` để bỏ qua) và đăng ký dịch vụ `gitnexus-<repo>` vào machine Gateway đang chạy. Lệnh không tương tác với Herdr, không tạo pane và không khởi chạy tiến trình agent. `bflow init --check` kiểm tra chỉ đọc đối với `.bflow/config.yml` và mức sẵn sàng GitNexus của kho mã; `bflow init --remove` gỡ đăng ký dịch vụ GitNexus của kho mã khỏi Gateway dùng chung. Tham số tùy chọn `--config` chỉ chấp nhận đường dẫn trỏ chính xác tới tệp `.bflow/config.yml` của checkout hiện tại, không hỗ trợ chuyển hướng lưu trữ cấu hình môi trường sang vị trí khác.
 
 ---
 
@@ -44,7 +47,7 @@ Quy trình di chuyển cấu hình:
 
 `bflow init --update` (hoặc `-u`) tái tạo YAML/comment và bổ sung default fields trong khi giữ giá trị đã có, đồng thời reconcile identity theo checkout hiện tại. Xem lại diff trước khi commit; không dùng để nhận authority của session cũ ở checkout khác. `--provider` tường minh khi update đổi provider của các role; với Agy, field effort riêng bị bỏ theo schema.
 
-Các defaults mới: Codex, `workspace_auto`, `trustedWorkspace: true`, optional integrated tools/Context7, concurrency 2, verification 3 vòng và startup 300.000 ms. [Config reference](configuration-reference.md) ghi giới hạn mà persistent host thực sự nhận.
+Các defaults mới: Codex, `workspace_auto`, `trustedWorkspace: true`, optional integrated tools/Context7, `regressionScope: affected`, `fastPath.mode: auto`, concurrency 2, verification 3 vòng và startup 300.000 ms. [Config reference](configuration-reference.md) ghi giới hạn mà persistent host thực sự nhận.
 
 Theo cơ chế mặc định, lệnh `init` sẽ bảo lưu nguyên vẹn tệp cấu hình nếu đã tồn tại từ trước. **Tuy nhiên trong phiên bản hiện tại, khi truyền các cờ `--force`, `-f`, `--yes` hoặc `-y`, hệ thống sẽ ghi đè toàn bộ cấu hình về các giá trị mặc định ban đầu** (dù nội dung trợ giúp ở một số tài liệu cũ ghi là luôn bảo lưu). Hành vi ghi đè này đã được kiểm chứng thực tế trong môi trường tạm thời. Tuyệt đối không dùng các cờ này để khôi phục hoặc khắc phục lỗi phiên; hãy chủ động sao lưu và so sánh diff nếu muốn tái tạo lại cấu hình.
 

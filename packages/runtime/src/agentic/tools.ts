@@ -3,6 +3,7 @@ import { z } from "zod";
 import { record, strings, textField } from "./journal.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
+import { InspectInputSchema, summarizeInspectRun, summarizeInspectState } from "./mcp-output-views.js";
 
 // Keep tool-argument paths distinct from the nested public contract fields. The Runtime
 // also validates direct callers; provider discovery is guidance, never ingress proof.
@@ -18,7 +19,7 @@ export const COORDINATOR_ROLE_PROFILE = AgentRoleProfileSchema.parse({
 export const COORDINATOR_TOOLS = [
   { name: "inspect", description: "Read durable SDLC state, inbox, assignments, evidence and uncertain handoffs." },
   { name: "report_progress", description: "Send progress or clarification questions to Conversation through Herdr." },
-  { name: "assess", description: "Evaluate the actual P15 complexity policy. Requires Specification v2 with explicit metadata.sdd.assessment; read planning_reference(section=specification) for the P15 fields before calling. Never infer missing impact flags. availableRoles lists only specialist roles with a pane bound in this session, with their capabilities. This read-only assessment does not approve a specification or propose/dispatch a workflow." },
+  { name: "assess", description: "Evaluate the actual P15 complexity policy and fastPath preview. Requires Specification v2 with explicit metadata.sdd.assessment; read planning_reference(section=specification) for the P15 fields before calling. Never infer missing impact flags. availableRoles lists only specialist roles with a pane bound in this session, with their capabilities. This read-only assessment does not approve a specification or propose/dispatch a workflow." },
   { name: "request_specialist", description: "Queue a capability-constrained specialist delegation through Herdr. A role with no bound pane falls back security->reviewer and tester->qa when that pane has every required capability (the objective and result say so). Otherwise the call fails immediately with the roles that do have panes; nothing is dispatched and the run is unchanged, so choose another role in this turn. A bound pane missing a capability blocks the run for capability repair." },
   { name: "propose_workflow", description: "Submit draft Specification and implementation DAG; Runtime enforces SDD, approvals and TDD policy." },
   { name: "tick", description: "Schedule a background Runtime step and return immediately; yield the Coordinator turn so Herdr replies can arrive." },
@@ -54,7 +55,14 @@ export class CoordinatorTools {
     if (principal.role !== "coordinator" && !(principal.role === "developer" && name === "authorize_implementation"))
       throw new Error("Only Coordinator may invoke orchestration tools");
     switch (name) {
-      case "inspect": return this.runtime.inspect(args.runId === undefined ? undefined : textField(args.runId));
+      case "inspect": {
+        const query = InspectInputSchema.parse(args);
+        const raw = await this.runtime.inspect(query.runId);
+        if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
+          return raw;
+        }
+        return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+      }
       case "report_progress": return this.runtime.reportProgress(textField(args.runId), textField(args.headline), args.questions === undefined ? [] : strings(args.questions));
       case "assess": {
         const { specification } = AssessArgumentsSchema.parse(args);

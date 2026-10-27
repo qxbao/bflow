@@ -24,7 +24,7 @@ import { FileLaunchJournal } from "../../src/platform/launch-journal.js";
 import { GatewayRegistrationManager } from "../../src/platform/gateway-registrations.js";
 import { ProviderReadiness } from "../../src/platform/provider-readiness.js";
 import { SkillSessionStore } from "../../src/platform/skills-session.js";
-import { DefaultPlatformReadinessService } from "../../src/platform/service.js";
+import { DefaultPlatformReadinessService, preparePrivateCodexHome } from "../../src/platform/service.js";
 import { createProviderAdapterFactory, createSkillResolver } from "../../src/platform/defaults.js";
 import type {
   GatewayControlPort, GatewayRegistrationGrant, PlatformSessionIdentity, ProviderAdapterContext, ProviderAdapterFactory,
@@ -1609,6 +1609,216 @@ rl.on("line", line => {
     if (developer.ok) expect(developer.value.launch.env).toMatchObject({ HOME: home, CODEX_HOME: codexHome });
   });
 
+  it("falls back to BFLOW_INSTRUCTION_HOME=native_auth_compatible for ChatGPT OAuth refresh tokens or explicit override without claiming isolation", async () => {
+    const sourceProcessHome = join(baseDir, "operator-home");
+    const sourceCodexHome = join(sourceProcessHome, ".codex");
+    const stateDir = join(baseDir, "codex-oauth-state");
+    await mkdir(sourceCodexHome, { recursive: true, mode: 0o700 });
+    await mkdir(stateDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(sourceCodexHome, "config.toml"), 'model = "gpt-5.4"\n', { mode: 0o600 });
+    await writeFile(join(sourceCodexHome, "auth.json"), JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { access_token: "acc-123", refresh_token: "ref-single-use" }
+    }), { mode: 0o600 });
+    await writeFile(join(sourceCodexHome, "AGENTS.md"), "# Global AGENTS\n", { mode: 0o600 });
+
+    const oauthResult = await preparePrivateCodexHome(stateDir, sourceCodexHome, sourceProcessHome, {});
+    expect(oauthResult.mode).toBe("native_auth_compatible");
+    expect(oauthResult.BFLOW_INSTRUCTION_HOME).toBe("native_auth_compatible");
+    expect(oauthResult.CODEX_HOME).toBe(sourceCodexHome);
+    expect(oauthResult.HOME).toBe(sourceProcessHome);
+    expect(oauthResult.diagnostic).toContain("native_auth_compatible");
+    expect(oauthResult.diagnostic).toMatch(/not isolated/i);
+
+    const explicitResult = await preparePrivateCodexHome(stateDir, sourceCodexHome, sourceProcessHome, {
+      BFLOW_INSTRUCTION_HOME: "native_auth_compatible",
+      OPENAI_API_KEY: "sk-test-override"
+    });
+    expect(explicitResult.mode).toBe("native_auth_compatible");
+    expect(explicitResult.BFLOW_INSTRUCTION_HOME).toBe("native_auth_compatible");
+    expect(explicitResult.CODEX_HOME).toBe(sourceCodexHome);
+    expect(explicitResult.HOME).toBe(sourceProcessHome);
+  });
+
+  it("creates a sanitized 0700/0600 private CODEX_HOME when auth is isolatable and strips global instructions, hooks, plugins and mcp_servers", async () => {
+    const sourceProcessHome = join(baseDir, "runsystem-operator-home");
+    const sourceCodexHome = join(sourceProcessHome, ".codex");
+    const stateDir = join(baseDir, "codex-private-state");
+    await mkdir(join(sourceCodexHome, "skills", "global-skill"), { recursive: true, mode: 0o700 });
+    await mkdir(join(sourceCodexHome, "plugins", "cache"), { recursive: true, mode: 0o700 });
+    await mkdir(stateDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(sourceCodexHome, "config.toml"), [
+      'model = "gpt-5.4"',
+      'review_model = "gpt-5.4-mini"',
+      'model_provider = "runsystem"',
+      'model_reasoning_effort = "high"',
+      "",
+      "[model_providers.runsystem]",
+      'name = "RunSystem"',
+      'base_url = "https://api.example.com/v1"',
+      'wire_api = "responses"',
+      "",
+      "[model_providers.runsystem.auth]",
+      'command = "/usr/local/bin/codex-token"',
+      "",
+      '[plugins."bflow-superpowers@bflow-superpowers"]',
+      "enabled = true",
+      "",
+      "[mcp_servers.gitnexus]",
+      'command = "/usr/bin/true"',
+      "",
+      "[hooks]",
+      'SessionStart = [{ hooks = [{ type = "command", command = "/usr/bin/true" }] }]',
+      ""
+    ].join("\n"), { mode: 0o600 });
+    // Even if a stale chatgpt auth.json exists alongside runsystem auth, it must NOT be copied.
+    await writeFile(join(sourceCodexHome, "auth.json"), JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { refresh_token: "must-not-copy" }
+    }), { mode: 0o600 });
+    await writeFile(join(sourceCodexHome, "AGENTS.md"), "# Global AGENTS\n", { mode: 0o600 });
+    await writeFile(join(sourceCodexHome, "AGENTS.override.md"), "# Global Override\n", { mode: 0o600 });
+    await writeFile(join(sourceCodexHome, "RTK.md"), "# Global RTK\n", { mode: 0o600 });
+    await writeFile(join(sourceCodexHome, "hooks.json"), '{"hooks":{}}\n', { mode: 0o600 });
+
+    const prepared = await preparePrivateCodexHome(stateDir, sourceCodexHome, sourceProcessHome, {});
+    expect(prepared.mode).toBe("private");
+    expect(prepared.BFLOW_INSTRUCTION_HOME).toBe("private");
+    expect(prepared.CODEX_HOME).toBe(join(stateDir, "codex-home"));
+    expect(prepared.HOME).toBe(join(stateDir, "codex-process-home"));
+    expect((await stat(prepared.CODEX_HOME)).mode & 0o777).toBe(0o700);
+    expect((await stat(prepared.HOME)).mode & 0o777).toBe(0o700);
+
+    const sanitizedConfigPath = join(prepared.CODEX_HOME, "config.toml");
+    expect((await stat(sanitizedConfigPath)).mode & 0o777).toBe(0o600);
+    const sanitizedText = await readFile(sanitizedConfigPath, "utf8");
+    expect(sanitizedText).toContain("gpt-5.4");
+    expect(sanitizedText).toContain("gpt-5.4-mini");
+    expect(sanitizedText).toContain("runsystem");
+    expect(sanitizedText).toContain("/usr/local/bin/codex-token");
+    expect(sanitizedText).not.toContain("bflow-superpowers");
+    expect(sanitizedText).not.toContain("gitnexus");
+    expect(sanitizedText).not.toContain("SessionStart");
+
+    // Rotating chatgpt auth.json and global instructions/hooks/skills/plugins must not exist in private CODEX_HOME.
+    for (const forbidden of ["auth.json", "AGENTS.md", "AGENTS.override.md", "RTK.md", "hooks.json", "skills", "plugins"]) {
+      await expect(stat(join(prepared.CODEX_HOME, forbidden))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+
+    // When auth.json is a static API key (auth_mode = "apikey", no refresh_token), it is copied with 0600 mode.
+    await writeFile(join(sourceCodexHome, "auth.json"), JSON.stringify({
+      auth_mode: "apikey",
+      OPENAI_API_KEY: "sk-static-key-value"
+    }), { mode: 0o600 });
+    const stateDirStatic = join(baseDir, "codex-private-static-state");
+    await mkdir(stateDirStatic, { recursive: true, mode: 0o700 });
+    const staticPrepared = await preparePrivateCodexHome(stateDirStatic, sourceCodexHome, sourceProcessHome, {});
+    expect(staticPrepared.mode).toBe("private");
+    const copiedAuthPath = join(staticPrepared.CODEX_HOME, "auth.json");
+    expect((await stat(copiedAuthPath)).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await readFile(copiedAuthPath, "utf8"))).toEqual({
+      auth_mode: "apikey",
+      OPENAI_API_KEY: "sk-static-key-value"
+    });
+
+    // Verify DefaultPlatformReadinessService wires private CODEX_HOME across preflight and prepareLaunch
+    // even when source auth.json is ChatGPT OAuth (so private CODEX_HOME has no auth.json) and codex login status exits 1.
+    await writeFile(join(sourceCodexHome, "auth.json"), JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { refresh_token: "must-not-copy" }
+    }), { mode: 0o600 });
+    const fakeRunner = createFakeProviderRunner({
+      scenario: "healthy",
+      customHandler: (invocation) => {
+        if (invocation.args.join(" ") === "login status") {
+          return { exitCode: 1, stdout: "", stderr: "Not logged in\n", started: true };
+        }
+        return undefined;
+      }
+    });
+    const { service } = buildService({
+      gateway: false,
+      runner: fakeRunner,
+      codexLaunchEnvironment: { HOME: sourceProcessHome, CODEX_HOME: sourceCodexHome }
+    });
+    const sessionRes = await service.prepareSession(identity, [
+      requirement({ role: "conversation", provider: "codex", taskId: undefined, skillSelections: [], toolIds: [] }),
+      requirement({ role: "developer", provider: "codex", taskId: "t1" })
+    ]);
+    expect(sessionRes.ok).toBe(true);
+    if (!sessionRes.ok) return;
+    expect(sessionRes.value.report.ready).toBe(true);
+    for (const roleSummary of sessionRes.value.report.roles) {
+      expect(roleSummary.checks).toContainEqual(
+        expect.objectContaining({
+          check: "environment",
+          status: "passed",
+          code: "codex_instruction_home_private"
+        })
+      );
+    }
+    for (const launch of sessionRes.value.launches) {
+      const expectedCodexHome = join(launch.environment.stateDirectory, "codex-home");
+      const expectedProcessHome = join(launch.environment.stateDirectory, "codex-process-home");
+      await expect(stat(join(expectedCodexHome, "auth.json"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(launch.launch.env).toMatchObject({
+        BFLOW_INSTRUCTION_HOME: "private",
+        CODEX_HOME: expectedCodexHome,
+        HOME: expectedProcessHome
+      });
+      expect(launch.preflight.configFingerprint).toBe(launch.profile.environment.configFingerprint);
+      expect(launch.profile.configFiles.some(file => file.path === join(expectedCodexHome, "config.toml"))).toBe(true);
+    }
+    const convLaunch = sessionRes.value.launches.find(launch => launch.role === "conversation")!;
+    expect(convLaunch.launch.argv).toContain("project_doc_max_bytes=0");
+
+    // Verify OPENAI_API_KEY env-based isolation forwards OPENAI_API_KEY into probe and launch env.
+    const envKeyHome = join(baseDir, "env-key-operator-home");
+    const envKeyCodexHome = join(envKeyHome, ".codex");
+    await mkdir(envKeyCodexHome, { recursive: true, mode: 0o700 });
+    await writeFile(join(envKeyCodexHome, "config.toml"), 'model = "gpt-5.4"\n', { mode: 0o600 });
+    const observedProbeEnvs: Array<Readonly<Record<string, string | undefined>>> = [];
+    const envKeyRunner = createFakeProviderRunner({
+      scenario: "healthy",
+      customHandler: (invocation) => {
+        if (invocation.args.includes("ping")) {
+          observedProbeEnvs.push({ ...(invocation.env ?? {}) });
+        }
+        if (invocation.args.join(" ") === "login status") {
+          return { exitCode: 1, stdout: "", stderr: "Not logged in\n", started: true };
+        }
+        return undefined;
+      }
+    });
+    const { service: envKeyService } = buildService({
+      gateway: false,
+      runner: envKeyRunner,
+      codexLaunchEnvironment: {
+        HOME: envKeyHome,
+        CODEX_HOME: envKeyCodexHome,
+        OPENAI_API_KEY: "sk-env-isolated-key"
+      }
+    });
+    const envKeySession = await envKeyService.prepareSession(
+      { ...identity, generation: 2 },
+      [
+        requirement({
+          role: "developer",
+          provider: "codex",
+          taskId: "t-env-key"
+        })
+      ]
+    );
+    expect(envKeySession.ok).toBe(true);
+    if (!envKeySession.ok) return;
+    expect(envKeySession.value.report.ready).toBe(true);
+    expect(envKeySession.value.launches[0]?.launch.env).toMatchObject({
+      BFLOW_INSTRUCTION_HOME: "private",
+      OPENAI_API_KEY: "sk-env-isolated-key"
+    });
+    expect(observedProbeEnvs[0]?.["OPENAI_API_KEY"]).toBe("sk-env-isolated-key");
+  });
+
   it("launches Agy with a session and role private HOME outside untrusted role environment variables", async () => {
     const { service } = buildService({ gateway: false, providerFactory: contextProviderFactory(() => undefined) });
     const result = await service.prepareSession(identity, [requirement({ provider: "agy" })]);
@@ -1919,6 +2129,53 @@ rl.on("line", line => {
       const kinds = await journalKinds(journal);
       expect(kinds.filter(kind => kind === "released")).toHaveLength(1);
       expect(kinds[kinds.length - 1]).toBe("released");
+    });
+
+    it("renews expired Gateway registrations in-place for mediated launches without degrading the role", async () => {
+      let currentNow = new Date("2026-10-25T17:50:00.000Z");
+      const { service } = buildService({ now: () => currentNow });
+      const actualScope = {
+        kind: "session" as const,
+        machineId: identity.machineId,
+        repositoryId: identity.repositoryId,
+        workspaceRoot: identity.workspaceRoot,
+        sessionId: identity.sessionId
+      };
+      const { policy, grant } = scopeSearchPolicyAndGrant("svc-search", actualScope);
+      const prepared = await service.prepareSession(identity, [
+        requirement({
+          toolPolicy: policy,
+          toolGrants: [grant],
+          mcpServiceIds: ["svc-search"],
+          mcpOperations: ["search"],
+          toolIds: ["scope-search-tool"]
+        })
+      ]);
+      if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
+      const launchId = prepared.value.launches[0]?.launch.launchId ?? "";
+      const activation = await service.verifyActivated({
+        launchId,
+        paneId: PANE_ID,
+        nativeSession: NATIVE_SESSION,
+        observation: LIVE_READY
+      });
+      if (!activation.ok) throw new Error(JSON.stringify(activation.error));
+      const initialRegisterCalls = gatewayControl.registerCalls;
+
+      // Advance past the 1-hour Gateway registration TTL (DEFAULT_TTL_MS = 3_600_000).
+      currentNow = new Date(currentNow.getTime() + 3_600_000 + 1_000);
+      const verified = await service.verifyGateway();
+
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) return;
+      expect(verified.value.healthy).toBe(true);
+      expect(verified.value.lost).toEqual([]);
+      expect(gatewayControl.registerCalls).toBe(initialRegisterCalls + 1);
+      expect(service.status().launches[0]).toEqual(expect.objectContaining({
+        launchId,
+        state: "activated"
+      }));
+      expect(service.status().launches[0]?.reason).toBeUndefined();
     });
   });
 });

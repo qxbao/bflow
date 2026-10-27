@@ -16,7 +16,7 @@ import {
   type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest, type ReleaseAgentLeaseRequest
 } from "@bflow/contracts";
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
-import { isUserDecisionRequest, type UserDecisionAnswer } from "./decision-routing.js";
+import { isUserDecisionRequest, validateUserDecisionAnswer, type UserDecisionAnswer } from "./decision-routing.js";
 import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
 import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./native-diagnostic-fence.js";
 import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
@@ -49,6 +49,8 @@ export interface TaskRecord {
   verificationPlan?: VerificationPlan; verificationPending?: boolean; writerReleased?: boolean;
   /** Validated root-cause rework dossiers submitted per rework attempt; absent in legacy journals/checkpoints. */
   reworkResolutions?: ReworkResolutionDossier[];
+  /** Attempt whose dependency-base merge conflicted; it starts from the run base so final integration resolves the overlap. */
+  dependencyBaseFallback?: string;
 }
 export interface RunRecord {
   runId: string; delegation: DelegationRequest; status: SdlcWorkStatus;
@@ -98,8 +100,40 @@ export interface RunRecord {
   conflictResolution?: ConflictResolutionRecord;
   /** Structured rejection proof of the last rejected workflow proposal; cleared when a valid proposal is admitted. */
   lastWorkflowRejection?: ProposalRejectionRecord;
+  /** Host-evaluated fast-path eligibility and one-way downgrade state; absent in legacy journals. */
+  fastPath?: FastPathRecord;
+  /** Cached workflow-level verification plan for the current integration cycle. */
+  workflowVerificationPlan?: VerificationPlan;
+  /** Host-measured native review gate waits, newest last (at most 200). Absent in journals written before review telemetry. */
+  reviewTimings?: ReviewTiming[];
 }
+/** Host wall time of one native review gate wait: from the verification request to its settlement. Never a Reviewer claim. */
+export interface ReviewTiming {
+  key: string; gateId: string; role: string; taskId?: string | undefined; agentId?: string | undefined; provider?: string | undefined;
+  startedAt: string; completedAt?: string | undefined; timeoutMs: number;
+  outcome?: "verdict" | "rejected" | "timeout" | "aborted" | undefined; nearDeadlineAt?: string | undefined;
+}
+const ReviewTimingSchema = z.object({
+  key: z.string().min(1), gateId: z.string().min(1), role: z.string().min(1), taskId: z.string().min(1).optional(),
+  agentId: z.string().min(1).optional(), provider: z.string().min(1).optional(), startedAt: IsoDateTimeSchema,
+  completedAt: IsoDateTimeSchema.optional(), timeoutMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  outcome: z.enum(["verdict", "rejected", "timeout", "aborted"]).optional(), nearDeadlineAt: IsoDateTimeSchema.optional()
+}).strict();
 const rejectionText = z.string().min(1).max(2000);
+const FastPathDowngradeSchema = z.object({
+  reason: rejectionText,
+  at: IsoDateTimeSchema,
+  scope: z.enum(["task", "workflow"])
+}).strict();
+const FastPathRecordSchema = z.object({
+  status: z.enum(["active", "inactive", "downgraded"]),
+  decidedAt: IsoDateTimeSchema,
+  blockers: z.array(rejectionText).max(50),
+  reasons: z.array(rejectionText).max(50),
+  classificationDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  downgrade: FastPathDowngradeSchema.optional()
+}).strict();
+export type FastPathRecord = z.infer<typeof FastPathRecordSchema>;
 const ProposalRejectionSchema = z.object({
   code: WorkflowRejectionCodeSchema, reason: rejectionText,
   episodeNumber: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
@@ -137,9 +171,16 @@ function parseConflictResolution(value: unknown): void {
     if (attempt.settled !== undefined && typeof attempt.settled !== "boolean") throw new Error("Invalid conflict resolver settlement");
   }
 }
+/** Runtime-private evidence binding; only the dedicated host request method authors this marker. */
+export const TestIntegrityExceptionBindingSchema = z.object({
+  runId: z.string().min(1), taskId: z.string().min(1), attemptId: z.string().min(1),
+  baseRevision: z.string().regex(/^[a-f0-9]{40}$/), candidateRevision: z.string().regex(/^[a-f0-9]{40}$/),
+  specFingerprint: z.string().regex(/^[a-f0-9]{64}$/), scope: z.enum(["task", "workflow"]),
+  findingId: z.string().min(1).max(200), reviewMessageId: z.string().min(1), evidence: ArtifactReferenceSchema
+}).strict();
 export interface UserDecisionRecord {
   request: ApprovalRequest; role: AgentRole; agentId: string; paneId: string; taskId: string;
-  status: "pending" | "answered" | "rejected" | "expired" | "cancelled"; answer?: UserDecisionAnswer;
+  status: "pending" | "answered" | "rejected" | "expired" | "cancelled"; answer?: UserDecisionAnswer; decision?: ApprovalDecision;
 }
 function parseUserDecisions(value: unknown, runId: string): void {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid user decision journal");
@@ -157,6 +198,16 @@ function parseUserDecisions(value: unknown, runId: string): void {
     if (item.answer !== undefined) {
       const answer = record(item.answer); textField(answer.outcome);
       if (answer.selectedOption !== undefined) textField(answer.selectedOption);
+    }
+    if (item.decision !== undefined) {
+      const decision = ApprovalDecisionSchema.parse(item.decision);
+      if (!mustBeAnswered || digest(validateUserDecisionAnswer(request, decision, decision.decidedAt)) !== digest(item.answer))
+        throw new Error("Invalid authenticated user decision receipt");
+    }
+    if (request.metadata?.testIntegrityException !== undefined) {
+      const binding = TestIntegrityExceptionBindingSchema.parse(request.metadata.testIntegrityException);
+      if (binding.runId !== runId || binding.taskId !== item.taskId || item.role !== "reviewer" ||
+          (mustBeAnswered && item.decision === undefined)) throw new Error("Invalid test-integrity exception journal binding");
     }
   }
 }
@@ -306,6 +357,8 @@ function parseState(input: unknown, repository: string): JournalState {
       textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
     }
     if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
+    if (run.fastPath !== undefined) run.fastPath = FastPathRecordSchema.parse(run.fastPath);
+    if (run.reviewTimings !== undefined) run.reviewTimings = z.array(ReviewTimingSchema).max(200).parse(run.reviewTimings);
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {

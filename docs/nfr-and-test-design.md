@@ -48,7 +48,32 @@ Test plan cần nối rõ **criterion → rủi ro/góc nhìn → exact check/te
 
 Tên test và method phải khớp `TestStrategy.criterionMappings`/check plan hiện có. Unit test với fake không thay integration qua entrypoint, browser runtime hoặc live provider evidence khi criterion yêu cầu những mức đó. Khi browser/live proof là bắt buộc nhưng thiếu grant, origin, lease/fence hoặc runner, ghi blocked/inconclusive và escalation theo luồng hiện có.
 
-Runtime browser task actions hiện vẫn bị giới hạn `exclusive_resource_lease_unsupported`; thêm reference browser không làm capability này usable. Không tự cài load generator, scanner, browser hoặc backend chỉ vì skill gợi ý một phương pháp. Conditional TDD, independent gates, approvals và iteration bounds vẫn giữ nguyên.
+Runtime quản lý giao dịch lease trình duyệt độc quyền theo từng attempt (`BrowserResourceTransactions`), nhưng việc thêm reference browser không tự cấp quyền hay chứng nhận live Chrome/provider SDLC acceptance; khi thiếu grant, origin, lease/fence hoặc trình duyệt sẵn sàng thì công việc phải báo degraded/blocked theo đúng policy. Kiểm chứng UI/API qua app thật dùng gate owner `appChecks` ([verification runners](verification-runners.md#kiểm-tra-ứng-dụng-thật-appchecks)). Không tự cài load generator, scanner, browser hoặc backend chỉ vì skill gợi ý một phương pháp. Conditional TDD, independent gates, approvals và iteration bounds vẫn giữ nguyên.
+
+### Race condition: test phải phân biệt được có lock hay không
+
+Với tiêu chí về race condition, concurrency, lock, mutual exclusion, atomicity hoặc ordering, test chỉ là bằng chứng hợp lệ khi có đồng thời hai điều kiện:
+
+1. **Điểm xen kẽ thật trong critical section:** một `await`, hook/clock/barrier được inject, deferred promise hoặc fake có thể dừng giữa bước đọc và bước ghi, để hai thao tác thực sự chồng lên nhau.
+2. **Đối chứng âm (negative control):** khi bỏ bảo vệ hoặc thay bằng pass-through (ví dụ lock → no-op), đúng test đó phải fail. Ghi kết quả mutation, hoặc lập kế hoạch mutation check với kết quả fail mong đợi.
+
+`Promise.all` trên các thao tác đồng bộ hoặc chỉ assert invariant cuối cùng không đủ. Anti-pattern: 25 lần `bucket.tryAcquire(1)` trong `Promise.all`, rồi assert 5 lần thành công. Nếu `refill()` và giảm token nằm trong `runExclusive` đồng bộ, Node đơn luồng vẫn cho kết quả đúng khi `AsyncLock` bị bỏ. Test này chỉ là *invariant coverage*, không chứng minh lock cần thiết.
+
+Ví dụ đã sửa (pseudo-code; `betweenCheckAndTake` là test seam, không phải API runtime có sẵn):
+
+```js
+// Giữ hai thao tác ở giữa bước kiểm tra token và bước giảm token.
+const gate = deferred();
+const bucket = createTokenBucket({ capacity: 5, betweenCheckAndTake: () => gate.promise });
+
+const pending = Array.from({ length: 25 }, () => bucket.tryAcquire(1));
+gate.resolve();
+const results = await Promise.all(pending);
+
+assert.equal(results.filter(Boolean).length, 5);
+```
+
+Với lock đúng, chỉ 5 lần acquire thành công. Khi thay lock bằng pass-through, cả 25 lần cùng đọc được token trước khi giảm, nên cùng test phải fail (25 thay vì 5). Nếu implementation chưa có điểm inject, tester không tự sửa runtime code; báo prerequisite gap hoặc đề xuất seam qua Runtime → Herdr → Conversation. Nếu không được phép chạy mutation trong bản sao cách ly, không chấp nhận tiêu chí là đã chứng minh race safety.
 
 ## Reference đã được phân phối
 

@@ -1,3 +1,4 @@
+import { formatTelemetryReport } from "./telemetry.js";
 import type {
   ContractError,
   EnvironmentDoctorReport,
@@ -530,6 +531,26 @@ function formatRunPage(page: Page<WorkflowRunSnapshot>, useColor = false, debug 
   return lines.join("\n");
 }
 
+/**
+ * Summarizes the provider `cli` of each environment role: `claude` when all roles share one provider,
+ * `claude ×2, agy ×6` (first-appearance order) when mixed, and undefined when no role declares one.
+ */
+function summarizeRoleProviders(config: unknown): string | undefined {
+  if (typeof config !== "object" || config === null || !("environment" in config)) return undefined;
+  const environment = config.environment;
+  if (typeof environment !== "object" || environment === null || !("roles" in environment) || !Array.isArray(environment.roles)) {
+    return undefined;
+  }
+  const counts = new Map<string, number>();
+  for (const role of environment.roles as unknown[]) {
+    if (typeof role !== "object" || role === null || !("cli" in role) || typeof role.cli !== "string") continue;
+    counts.set(role.cli, (counts.get(role.cli) ?? 0) + 1);
+  }
+  if (counts.size === 0) return undefined;
+  if (counts.size === 1) return counts.keys().next().value;
+  return [...counts].map(([provider, count]) => `${provider} ×${count}`).join(", ");
+}
+
 function formatInitOutput(output: InitCommandOutput, useColor = false, debug = false): string {
   const lines: string[] = [];
   const projName = output.config?.projectName
@@ -609,12 +630,11 @@ function formatInitOutput(output: InitCommandOutput, useColor = false, debug = f
   lines.push(`${useColor ? green(bold(header), true) : header} ${greenTick(useColor)}`);
 
   if (output.config) {
-    const provider =
-      (output.config as any).provider ??
-      (output.config as any).environment?.roles?.[0]?.provider ??
-      "codex";
+    const providers = summarizeRoleProviders(output.config);
     lines.push(
-      `Dự án:        ${sanitizeIdentifier(output.config.projectName)} (${sanitizeIdentifier(provider)})`
+      `Dự án:        ${sanitizeIdentifier(output.config.projectName)}${
+        providers ? ` (${sanitizeIdentifier(providers)})` : ""
+      }`
     );
   }
   lines.push(`Tệp cấu hình: ${sanitizeIdentifier(output.configPath)}`);
@@ -1343,6 +1363,8 @@ export function formatCommandSuccess(
   if (isSessionManifest(data)) {
     return formatUpOutput(data, useColor, debug);
   }
+
+  if ("reportVersion" in data && data.reportVersion === 1) return formatTelemetryReport(data);
 
   if (isSnapshot(data)) {
     const runFormatted = formatWorkflowRun(data, useColor, debug);

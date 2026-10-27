@@ -1,8 +1,9 @@
+import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
@@ -10,20 +11,68 @@ import {
   type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
-import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
+import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
+import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
+import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
+import type { RegressionScope } from "./regression-changes.js";
+
+const HOST_STARTUP_TIMEOUT_MS = 120_000;
+
+export type { RegressionScope };
+export type FastPathMode = "auto" | "off";
 
 export interface AgenticHostOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
   behavioralCommands?: readonly BehavioralCommand[];
+  /** Owner mutation checks (`.bflow/verification.json`); pinned with the behavioral commands. */
+  mutationChecks?: readonly MutationCheck[];
+  /** Owner real-app checks (`appChecks` in `.bflow/verification.json`); pinned with the other verification authority. */
+  appChecks?: readonly AppCheckSuite[];
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
-    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human" };
+    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope; reviewTimeoutMs?: number };
+    fastPath?: { mode: FastPathMode };
     concurrency: { maxConcurrency: number } };
+  impactIndex?: { executable: string; home: string; storageLockPath: string };
+}
+
+export function effectiveRegressionScope(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): RegressionScope {
+  if (!policy) return "mapped_only";
+  return policy.verification.regressionScope ?? (persisted ? "mapped_only" : "affected");
+}
+
+export function effectiveFastPathMode(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): FastPathMode {
+  if (!policy) return "off";
+  return policy.fastPath?.mode ?? (persisted ? "off" : "auto");
+}
+
+function compatiblePersistedPolicy(
+  persisted: AgenticHostOptions["policy"] | undefined,
+  requested: NonNullable<AgenticHostOptions["policy"]>
+): boolean {
+  if (!persisted) return false;
+  const normalizedPersisted: NonNullable<AgenticHostOptions["policy"]> = {
+    sdd: persisted.sdd,
+    tdd: persisted.tdd,
+    verification: {
+      ...persisted.verification,
+      ...(persisted.verification.regressionScope === undefined && requested.verification.regressionScope === "affected"
+        ? { regressionScope: "affected" }
+        : {})
+    },
+    ...(persisted.fastPath !== undefined
+      ? { fastPath: persisted.fastPath }
+      : requested.fastPath?.mode === "auto"
+        ? { fastPath: { mode: "auto" } }
+        : {}),
+    concurrency: persisted.concurrency
+  };
+  return digest(normalizedPersisted) === digest(requested);
 }
 export interface RoleLaunchDescriptor { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }
 export interface AgenticHostController {
@@ -49,14 +98,41 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
   const value = record(JSON.parse(await readFile(path, "utf8")));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
-  parseBehavioralCommands(value.behavioralCommands);
+  parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
+  parseAppChecks(value.appChecks);
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
   if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
   if (value.policy !== undefined) {
     const policy = record(value.policy), sdd = record(policy.sdd), tdd = record(policy.tdd), verification = record(policy.verification), concurrency = record(policy.concurrency);
     if (!["lightweight", "full"].includes(String(sdd.minimumLevel)) || typeof sdd.approvalRequired !== "boolean" || tdd.policy !== "conditional" ||
         verification.onExhausted !== "require_human" || !Number.isInteger(verification.maxIterations) || Number(verification.maxIterations) < 1 || Number(verification.maxIterations) > 10 ||
+        (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
+        (verification.reviewTimeoutMs !== undefined && (!Number.isSafeInteger(verification.reviewTimeoutMs) || Number(verification.reviewTimeoutMs) < 60_000 || Number(verification.reviewTimeoutMs) > 3_600_000)) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
+    if (policy.fastPath !== undefined) {
+      if (policy.fastPath === null || typeof policy.fastPath !== "object" || Array.isArray(policy.fastPath)) throw new Error("Invalid persisted host policy");
+      const fastPath = policy.fastPath as Record<string, unknown>;
+      if (Object.keys(fastPath).some(key => key !== "mode") || (fastPath.mode !== "auto" && fastPath.mode !== "off")) throw new Error("Invalid persisted host policy");
+    }
+  }
+  if (value.impactIndex !== undefined) {
+    if (value.impactIndex === null || typeof value.impactIndex !== "object" || Array.isArray(value.impactIndex)) {
+      throw new Error("Invalid persisted host impactIndex");
+    }
+    const impact = value.impactIndex as Record<string, unknown>;
+    const keys = Object.keys(impact);
+    if (
+      keys.length !== 3 ||
+      !["executable", "home", "storageLockPath"].every(
+        key =>
+          typeof impact[key] === "string" &&
+          (impact[key] as string).length > 0 &&
+          isAbsolute(impact[key] as string) &&
+          !(impact[key] as string).includes("\0")
+      )
+    ) {
+      throw new Error("Invalid persisted host impactIndex");
+    }
   }
   return value as unknown as HostConfiguration;
 }
@@ -74,8 +150,11 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.manifestDirectory !== undefined ? { manifestDirectory: persisted.manifestDirectory } : {}),
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
     ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
+    ...(persisted.mutationChecks !== undefined ? { mutationChecks: persisted.mutationChecks } : {}),
+    ...(persisted.appChecks !== undefined ? { appChecks: persisted.appChecks } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
-    ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}) });
+    ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
+    ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}) });
 }
 function failure<T>(error: unknown): OperationResult<T> {
   if (String(error).includes("[bflow:native-startup-pending]")) return { ok: false, error: { code: "conflict", retryable: true,
@@ -133,12 +212,18 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   }
   let configuration = await readHostConfiguration(configPath);
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
-  if (options.policy && JSON.stringify(configuration.policy) !== JSON.stringify(options.policy)) throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (digest(parseBehavioralCommands(configuration.behavioralCommands)) !== digest(parseBehavioralCommands(options.behavioralCommands)))
     throw new Error("Persisted behavioral commands differ from owner configuration; quiesce and reconcile before changing verification authority");
-  // Platform changes are only admissible while no host process owns the endpoint.
+  if (digest(parseMutationChecks(configuration.mutationChecks, parseBehavioralCommands(configuration.behavioralCommands))) !==
+      digest(parseMutationChecks(options.mutationChecks, parseBehavioralCommands(options.behavioralCommands))))
+    throw new Error("Persisted mutation checks differ from owner configuration; quiesce and reconcile before changing verification authority");
+  if (digest(parseAppChecks(configuration.appChecks)) !== digest(parseAppChecks(options.appChecks)))
+    throw new Error("Persisted real-app checks differ from owner configuration; quiesce and reconcile before changing verification authority");
+  // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
+  const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
+  const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
   const request = (method: string, params: unknown = {}, op?: OperationOptions) => {
     const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000),
       op?.deadline === undefined ? Infinity : Math.max(1, Date.parse(op.deadline) - Date.now()));
@@ -150,6 +235,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
     alive = false;
   }
+  if (alive && options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy))
+    throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
   if (!alive) {
     try {
@@ -164,20 +251,31 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
       try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
       catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
     } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
-    if (platformChanged) {
-      await rewritePersistedPlatform(configPath, requestedPlatform);
+    if (platformChanged || policyChanged || impactIndexChanged) {
+      await rewritePersistedPlatform(configPath, requestedPlatform, {
+        ...(options.policy !== undefined ? { policy: options.policy } : {}),
+        ...(options.impactIndex !== undefined ? { impactIndex: options.impactIndex } : {})
+      });
       configuration = await readHostConfiguration(configPath);
     }
     const log = await open(join(directory, "host.log"), "a", 0o600);
+    let exited: string | undefined;
     try {
       const child = spawn(process.execPath, [fileURLToPath(new URL("./host.js", import.meta.url)), "daemon", configPath],
         { detached: true, cwd: repositoryPath, stdio: ["ignore", log.fd, log.fd], env: { ...process.env } });
+      child.once("exit", (code, signal) => { exited = signal ? `signal ${signal}` : `exit code ${code}`; });
+      child.once("error", error => { exited = String(error); });
       child.unref();
     } finally { await log.close(); }
-    const deadline = Date.now() + 10_000;
+    // Daemon boot composes platform readiness before binding the socket and can exceed
+    // a few seconds; keep waiting while the child lives and fail fast once it exits.
+    const deadline = Date.now() + HOST_STARTUP_TIMEOUT_MS;
     while (true) {
       try { await request("ping"); break; }
-      catch (startupError) { if (Date.now() >= deadline) throw new Error(`Agentic host failed to start: ${String(startupError)}; see ${join(directory, "host.log")}`); }
+      catch (startupError) {
+        if (exited !== undefined) throw new Error(`Agentic host exited during startup (${exited}): ${String(startupError)}; see ${join(directory, "host.log")}`);
+        if (Date.now() >= deadline) throw new Error(`Agentic host failed to start within ${HOST_STARTUP_TIMEOUT_MS / 1000}s: ${String(startupError)}; the daemon may still be starting, retry shortly or see ${join(directory, "host.log")}`);
+      }
       await new Promise(accept => setTimeout(accept, 50));
     }
   }
@@ -217,4 +315,26 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     }
   };
   } finally { await bootLock.close(); }
+}
+
+/** Connect-only observation. Never ensures/starts a host, changes config, or repairs sockets. */
+export async function readExistingAgenticTelemetry(options: { repositoryPath: string; sessionId: string; runId: string; asOf?: string }): Promise<WorkflowTelemetryReport> {
+  const asOf = options.asOf ?? new Date().toISOString();
+  try {
+    if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Invalid session");
+    const repositoryPath = await realpath(options.repositoryPath);
+    const stateDirectory = findPrivateRuntimeStateDirectory(repositoryPath);
+    if (!stateDirectory) throw new Error("No existing state");
+    const directory = resolve(stateDirectory, "host", options.sessionId);
+    const configuration = await readHostConfiguration(join(directory, "host.json"));
+    if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+      throw new Error("Foreign host");
+    const report = WorkflowTelemetryReportSchema.parse(await callHost(configuration.socketPath, configuration.token,
+      "telemetry_report", { runId: options.runId, asOf }, 10_000));
+    if (report.runId !== options.runId || report.source !== "agentic" || report.asOf !== asOf) throw new Error("Foreign report");
+    return report;
+  } catch {
+    return buildWorkflowTelemetry({ runId: options.runId, asOf, source: "agentic", events: [], taskIds: [],
+      complete: false, diagnostics: ["host_unavailable"] });
+  }
 }

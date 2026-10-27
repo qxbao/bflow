@@ -5,16 +5,28 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type QualityGateDefinition } from "@bflow/contracts";
+import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type JsonValue, type QualityGateDefinition } from "@bflow/contracts";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
-import { record, textField } from "./journal.js";
-import { NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
+import { json, record, textField } from "./journal.js";
+import { BehavioralIdentityMismatch, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
 import { parseVitestJson } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
 import type { AdapterRunner } from "./runner-adapter.js";
 import { parseRunnerResult } from "./runner-results.js";
 import { collectRunnerReports } from "./runner-reports.js";
 import { assertRunnerProvenance } from "./runner-provenance.js";
+import {
+  parseRegressionResult,
+  RegressionInfrastructureFailure,
+  type RegressionObservation
+} from "./regression-results.js";
+
+export {
+  parseRegressionResult,
+  RegressionInfrastructureFailure,
+  type RegressionFailure,
+  type RegressionObservation
+} from "./regression-results.js";
 
 export interface BehavioralCommand {
   id: string; command: string; executable: string; args: string[];
@@ -119,6 +131,35 @@ export function bindRunnerProfile(profile: RunnerProfile, identities: { testName
     ...(profile.prepare === undefined ? {} : { prepare: { args: strings(profile.prepare.args, "prepare argv"), timeoutMs: profile.prepare.timeoutMs } })
   };
 }
+export type RegressionCommand = Omit<BoundBehavioralCommand, "testNames"> & { testNames: []; selection: "regression" };
+export function bindRegressionProfile(profile: RunnerProfile, testPaths: string[], timeoutMs: number): RegressionCommand {
+  if (profile.source !== "detected") throw new Error("Runner profiles must be Runtime-detected");
+  if (profile.adapter !== undefined) throw new Error("Regression profile binding does not support adapter profiles");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(profile.id) || profile.command.length === 0 || profile.executable.includes("\0") || !isAbsolute(profile.executable)) throw new Error("Runner profile executable must be absolute and id must be safe");
+  if (!["unit_test", "integration_test", "e2e_test"].includes(profile.method)) throw new Error("Unsupported behavioral method");
+  const levels = strings(profile.levels, "levels") as BehavioralCommand["levels"];
+  if (levels.some(level => !permittedLevels[profile.method].includes(level))) throw new Error("Behavioral test levels do not match method");
+  if (profile.reporter !== "node_tap" && profile.reporter !== "vitest_json") throw new Error("Unsupported behavioral reporter");
+  const args = strings(profile.args, "argv", false);
+  const paths = strings(testPaths, "test paths");
+  assertTestIdentities([], paths);
+  if (paths.some(path => !testFilePattern.test(path))) throw new Error("Behavioral test paths must be committed test files");
+  const checkoutDependencyRoots = strings(profile.checkoutDependencyRoots, "checkout dependency roots", false);
+  for (const path of checkoutDependencyRoots) assertCheckoutDependencyRoot(path);
+  if (!isAbsolute(profile.dependencySource) || profile.dependencySource.includes("\0")) throw new Error("Behavioral dependency source must be an absolute repository path");
+  assertExecutionBounds(profile.timeoutMs, profile.maxOutputBytes);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 540_000) throw new Error("Invalid regression execution bounds");
+  if (profile.prepare !== undefined) assertExecutionBounds(profile.prepare.timeoutMs, undefined);
+  return {
+    id: profile.id, command: profile.command, executable: profile.executable, args: [...args, ...paths],
+    method: profile.method, levels, testNames: [], testPaths: paths, selection: "regression",
+    reporter: profile.reporter, timeoutMs,
+    ...(profile.maxOutputBytes === undefined ? {} : { maxOutputBytes: profile.maxOutputBytes }),
+    checkoutDependencyRoots, dependencySource: profile.dependencySource,
+    ...(profile.definitionBlobs ? { definitionBlobs: Object.fromEntries(Object.entries(profile.definitionBlobs).filter(([path]) => !paths.includes(path))) } : {}),
+    ...(profile.prepare === undefined ? {} : { prepare: { args: strings(profile.prepare.args, "prepare argv"), timeoutMs: profile.prepare.timeoutMs } })
+  };
+}
 export function behavioralChecks(commands: readonly BehavioralCommand[]): QualityGateDefinition[] {
   return commands.map(command => QualityGateDefinitionSchema.parse({ id: `host-behavioral-${command.id}`, name: `Independent ${command.id}`, evaluator: "host-behavioral-command", required: true,
     timeout: { executionTimeoutMs: command.timeoutMs + 60_000, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
@@ -127,7 +168,11 @@ export function behavioralChecks(commands: readonly BehavioralCommand[]): Qualit
 /** Launcher failures (bubblewrap or sandbox-exec) are infrastructure errors, never test results. */
 const SANDBOX_ERROR = /^(?:bwrap|sandbox-exec):/;
 const execute = promisify(execFile);
-export async function verificationGit(cwd: string, args: string[]): Promise<string> {
+/**
+ * `input` feeds stdin (for `hash-object --stdin`); `indexFile` points GIT_INDEX_FILE at a private scratch index so
+ * callers can build trees without touching the repository's own index. Both are applied after the sanitized env.
+ */
+export async function verificationGit(cwd: string, args: string[], extra: { readonly input?: string; readonly indexFile?: string } = {}): Promise<string> {
   // The host passes the verified session root (or the new canonical detached checkout on recursive calls).
   // Git's global/system config is deliberately omitted, so trust only this exact root for this process.
   const canonicalCwd = await realpath(cwd);
@@ -155,7 +200,14 @@ export async function verificationGit(cwd: string, args: string[]): Promise<stri
     catch (error) { await verificationGit(cwd, ["worktree", "remove", "--force", checkout]).catch(() => undefined); throw error; }
     return created.stdout;
   }
-  return (await execute("git", [...fixed, ...args], options)).stdout;
+  const runOptions = extra.indexFile === undefined ? options : { ...options, env: { ...env, GIT_INDEX_FILE: extra.indexFile } };
+  if (extra.input === undefined) return (await execute("git", [...fixed, ...args], runOptions)).stdout;
+  return new Promise<string>((resolve, reject) => {
+    const child = execFile("git", [...fixed, ...args], runOptions, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
+    // A broken pipe means git exited early; its exit status is the authoritative failure.
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(extra.input);
+  });
 }
 export async function assertPinnedRevision(cwd: string, revision: string) {
   if (!/^[a-f0-9]{40}$/.test(revision) || (await verificationGit(cwd, ["rev-parse", "HEAD"])).trim() !== revision || await verificationGit(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"])) throw new Error("Verification needs a clean worktree at the pinned revision");
@@ -277,9 +329,15 @@ function outputTail(outcome: QualityCommandOutcome): string {
   const stderr = outcome.stderr.trim().slice(-1_000), stdout = outcome.stdout.trim().slice(-1_000);
   return [stderr ? `stderr: ${stderr}` : "", stdout ? `stdout: ${stdout}` : ""].filter(Boolean).map(part => ` ${part}`).join("");
 }
-/** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
-export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string,
-  options: { readonly rtk?: RtkOutputRequest } = {}): Promise<BehavioralMeasurement> {
+export interface RegressionMeasurement {
+  sourceRevision: string; commandId: string; testBlobs: Record<string, string>;
+  observation: RegressionObservation; outcome: QualityCommandOutcome;
+}
+async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: string, revision: string,
+  options: { readonly rtk?: RtkOutputRequest } = {}): Promise<{
+  outcome: QualityCommandOutcome; testBlobs: Record<string, string>; checkout: string;
+  reports?: Awaited<ReturnType<typeof collectRunnerReports>>; rtk?: BehavioralMeasurement["rtk"];
+}> {
   await assertPinnedRevision(cwd, revision);
   await assertRunnerProvenance(command, cwd, revision);
   const testBlobs: Record<string, string> = {};
@@ -408,17 +466,8 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     const relaxed = command.prepare !== undefined || command.checkoutDependencyRoots !== undefined;
     if (!relaxed && await verificationGit(checkout, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"])) throw new Error("Behavioral execution generated files outside the committed revision");
     await assertPinnedRevision(cwd, revision);
-    let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
-    try {
-      parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames,
-        invocation?.reportPaths ? await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory) : undefined, command.adapter.failureExitCodes)
-        : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
-    } catch (error) {
-      if (error instanceof NodeTapTestCodeFailure && rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
-      throw error;
-    }
-    return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,
-      ...(rtkResult ? { rtk: rtkResult } : {}) };
+    const reports = invocation?.reportPaths ? await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory) : undefined;
+    return { outcome, testBlobs, checkout, ...(reports ? { reports } : {}), ...(rtkResult ? { rtk: rtkResult } : {}) };
   } finally {
     if (rtkIntentOpen && !rtkSettled && options.rtk?.onResult) {
       rtkSettled = true;
@@ -427,4 +476,53 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     if (added) await verificationGit(cwd, ["worktree", "remove", "--force", checkout]);
     await rm(temporary, { recursive: true, force: true });
   }
+}
+/** Parser failure that keeps the original message and carries bounded, JSON-safe runner evidence for audit and Conversation. */
+export class BehavioralMeasurementError extends Error {
+  constructor(readonly original: unknown, readonly diagnostics: JsonValue) { super(original instanceof Error ? original.message : String(original)); }
+}
+export function measurementDiagnostics(command: { readonly command: string; readonly testNames: readonly string[] }, outcome: QualityCommandOutcome, error: unknown): JsonValue {
+  const bounded = (values: readonly string[]) => values.slice(0, 100).map(value => value.slice(0, 200));
+  return json({ command: command.command, cwd: outcome.cwd, exitCode: outcome.exitCode, signal: outcome.signal, timedOut: outcome.timedOut,
+    stdoutTail: outcome.stdout.slice(-4096), stderrTail: outcome.stderr.slice(-4096), expectedNames: bounded(command.testNames),
+    ...(error instanceof BehavioralIdentityMismatch ? { observedNames: bounded(error.observedNames) } : {}) });
+}
+/** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
+export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string,
+  options: { readonly rtk?: RtkOutputRequest } = {}): Promise<BehavioralMeasurement> {
+  const { outcome, testBlobs, reports, rtk: rtkResult } = await runMeasurementCommand(command, cwd, revision, options);
+  let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
+  try {
+    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes)
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
+  } catch (error) {
+    if (error instanceof NodeTapTestCodeFailure) {
+      if (rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+      throw error;
+    }
+    throw new BehavioralMeasurementError(error, measurementDiagnostics(command, outcome, error));
+  }
+  return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,
+    ...(rtkResult ? { rtk: rtkResult } : {}) };
+}
+export async function measureRegression(command: RegressionCommand, cwd: string, revision: string): Promise<RegressionMeasurement> {
+  let run: Awaited<ReturnType<typeof runMeasurementCommand>>;
+  try {
+    run = await runMeasurementCommand(command, cwd, revision);
+  } catch (error) {
+    if (error instanceof RegressionInfrastructureFailure) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new RegressionInfrastructureFailure(
+      message.includes("deadline exceeded") ? `regression_budget_exceeded: ${message}` : message,
+      error instanceof Error ? { cause: error } : undefined
+    );
+  }
+  const observation = parseRegressionResult(run.outcome, command.reporter ?? "node_tap", run.checkout);
+  return {
+    sourceRevision: revision,
+    commandId: command.id,
+    testBlobs: run.testBlobs,
+    observation,
+    outcome: run.outcome
+  };
 }

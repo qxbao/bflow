@@ -95,6 +95,8 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly noGitnexus?: boolean | undefined;
   /** Accepts the GitNexus license and repository index without prompting. */
   readonly yes?: boolean | undefined;
+  /** Accepts the GitNexus license and repository index only; unlike yes, never implies force. */
+  readonly acceptGitnexusLicense?: boolean | undefined;
 }
 
 export interface ConfigMigrateCommandArgs extends GlobalCliFlags {
@@ -208,6 +210,7 @@ export interface RunCommandArgs extends GlobalCliFlags {
 }
 
 export interface StatusCommandArgs extends GlobalCliFlags {
+  readonly telemetry?: boolean | undefined;
   readonly command: "status";
   readonly runId?: string | undefined;
   readonly statusFilter?: readonly RunStatus[] | undefined;
@@ -451,6 +454,7 @@ export interface HighLevelFacadeServices {
 }
 
 export type CliCommandData =
+  | import("@bflow/runtime").WorkflowTelemetryReport
   | EnvironmentStatus
   | EnvironmentDoctorReport
   | SessionManifest
@@ -498,6 +502,7 @@ export interface PresentationOptions {
 }
 
 export interface CliContext {
+  readonly telemetry?: ((runId: string) => Promise<import("@bflow/runtime").WorkflowTelemetryReport>) | undefined;
   readonly environment?: EnvironmentDependencies | undefined;
   readonly cwd?: string | undefined;
   /** Test/embedded override for the bundled isolation engine location. */

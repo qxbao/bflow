@@ -2,7 +2,7 @@ import { AGY_LOGIN_REMEDIATION, probeAgyAccess } from "./agy-access.js";
 import { access, readFile } from "node:fs/promises";
 import { constants, existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
+import { diagnoseVerificationSandbox, resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
 import {
   detectPlatform,
   defaultHostEnvironment,
@@ -11,6 +11,7 @@ import {
 } from "@bflow/machine-setup";
 import {
   EnvironmentDoctorReportSchema,
+  EnvironmentDoctorCheckSchema,
   type EnvironmentDoctorCheck,
   type EnvironmentDoctorReport
 } from "@bflow/contracts";
@@ -178,6 +179,14 @@ export async function runDoctorDiagnostics(
       remediation: "Run Bflow on Linux or macOS."
     });
   }
+
+  // runtime-verification-sandbox
+  const sandbox = EnvironmentDoctorCheckSchema.parse(await diagnoseVerificationSandbox(repository.root));
+  runtimeChecks.push({
+    checkId: sandbox.checkId, group: "runtime", component: "verification-sandbox",
+    status: sandbox.status === "passed" ? "pass" : sandbox.status === "warn" ? "warning" : "fail",
+    detected_version: null, reason: sandbox.message, remediation: sandbox.remediation ?? ""
+  });
 
   // runtime-node
   const nodeVersion = process.versions.node;

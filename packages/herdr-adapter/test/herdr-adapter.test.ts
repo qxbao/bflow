@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isSafeSemver } from "../src/operation-budget.js";
 import { AgentRequestSchema, AgentExecutionHandleSchema } from "@bflow/contracts";
 import { HerdrCliTransport, createProcessRunner } from "../src/index.js";
 import type { CommandInvocation, CommandOutcome, HerdrCommandRunner } from "../src/index.js";
@@ -208,5 +209,30 @@ describe("Herdr CLI adapter", () => {
     const cancellation = { schemaVersion: 1 as const, cancellationId: "cancel-1", runId: "run-1", taskId: "task-1", executionId: "execution-1", requestedBy: "human", requestedAt: time, expectedVersion: 1, idempotencyKey: "cancel-1" };
     expect(await adapter.cancel(handle, cancellation)).toMatchObject({ ok: true, value: { status: "refused" } });
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("isSafeSemver", () => {
+  it("accepts valid semver strings", () => {
+    for (const input of [
+      "1.2.3", "v0.9.5", "1.0.0-beta.1", "1.0.0+build.5", "1.0.0-rc.1+sha.abc",
+      "0.0.0", "12.34.56", "1.0.0-0", "1.0.0-alpha-beta.0", "1.0.0+001"
+    ]) {
+      expect(isSafeSemver(input), input).toBe(true);
+    }
+  });
+
+  it("rejects malformed or unsafe strings", () => {
+    for (const input of [
+      "", "1.2", "1.2.3.4", "01.2.3", "1.02.3", "1.2.03", "v", " 1.2.3", "1.2.3 ",
+      "1.2.3\n", "1.2.3\r\n", "1.2.3\t", "1.2.3;rm -rf /", "1.2.3|cat",
+      "1.2.3&&x", "$(id)", "`id`", "1.2.3-", "1.2.3+", "1.2.3-01", "1.2.3-alpha.01",
+      "1.2.3-alpha..1", "1.2.3+build..5", "1.2.3-beta_1", "vv1.2.3"
+    ]) {
+      expect(isSafeSemver(input), input).toBe(false);
+    }
+    for (const input of [null, undefined, 123, {}, [], new String("1.2.3")]) {
+      expect(isSafeSemver(input as unknown as string)).toBe(false);
+    }
   });
 });

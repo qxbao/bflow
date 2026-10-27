@@ -6,8 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PaneBindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { HostVerification, DEFAULT_HOST_CHECKS } from "../../src/agentic/host-verification.js";
+import { HostVerification, DEFAULT_HOST_CHECKS, DEFAULT_REVIEW_TIMEOUT_MS, defaultHostChecks } from "../../src/agentic/host-verification.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
+import { validateAndStoreReworkResolution, settleReworkVerificationOutcome } from "../../src/agentic/rework-causality.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 const cleanups:(()=>Promise<unknown>)[]=[];
 afterEach(async()=>{for(const cleanup of cleanups.splice(0).reverse()) await cleanup();});
@@ -23,9 +24,10 @@ async function fixture() {
   const definition={...DEFAULT_HOST_CHECKS[0]!,configuration:{kind:"review",method:"manual_review",criterionIds:["ac-1"],testNames:["criterion"],role:"reviewer",levels:[]}};
   const context=QualityGateContextSchema.parse({runId:"run",taskId:"task",attemptId:"attempt",definition,artifacts:[],input:{sourceRevision:head,baseRevision:base,sourceWorktreePath:repository,specFingerprint:"a".repeat(64),scope:"task"}});
   const outbound:Record<string,any>[]=[{status:"accepted",message:{message_id:"request",type:"verification.requested",payload:context},handle:{target:{paneId:binding.paneId,agentId:binding.agentId,session:binding.session}}}];
-  const runtime={inspect:async()=>({outbound})} as unknown as AgenticWorkflowRuntime;
+  const state: { outbound: typeof outbound; runs: any[] } = {outbound, runs: []};
+  const runtime={inspect:async()=>state} as unknown as AgenticWorkflowRuntime;
   const restore=()=>new HostVerification(()=>runtime,()=>opened.value,new HostReceiptJournal(join(root,"receipts"),repository,"session"));
-  return {repository,head,base,git,binding,context,outbound,restore,host:restore()};
+  return {repository,head,base,git,binding,context,outbound,state,artifacts:opened.value,restore,host:restore()};
 }
 describe("trusted host observations",()=>{
   it("captures the actual pinned diff before accepting an independent verdict and rejects altered receipts",async()=>{
@@ -130,4 +132,190 @@ describe("trusted host observations",()=>{
     expect((await evaluate(f.git("rev-parse","HEAD"))).status).toBe("failed");
   });
 
+  it("includes host-regression-* checks only when scope is affected, not owner-configured, and profile has no adapter",async()=>{
+    const f=await fixture();
+    const jsProfile={
+      id:"node-tap-pnpm",
+      command:"detected:node-tap",
+      executable:process.execPath,
+      args:["--test","--test-reporter=tap"],
+      method:"unit_test" as const,
+      levels:["unit" as const,"regression" as const],
+      reporter:"node_tap" as const,
+      timeoutMs:30_000,
+      checkoutDependencyRoots:[],
+      dependencySource:f.repository,
+      source:"detected" as const
+    };
+    const adapterProfile={
+      ...jsProfile,
+      id:"pytest-adapter",
+      command:"detected:pytest",
+      adapter:{format:"node_tap" as const,projectDirectory:".",bind:()=>({args:[]})}
+    };
+    const source=new TestRunnerSource([],f.repository,async()=>({status:"detected",profiles:[jsProfile,adapterProfile],notes:[]}));
+    await source.refresh();
+    const runtime={inspect:async()=>({outbound:f.outbound})} as unknown as AgenticWorkflowRuntime;
+
+    const affectedHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
+      scope:"affected",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(affectedHost.behavioralChecks().map(c=>c.id)).toContain("host-regression-node-tap-pnpm");
+    expect(affectedHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-pytest-adapter");
+    expect(affectedHost.behavioralGates().map(g=>g.id)).toContain("host-regression-node-tap-pnpm");
+    expect(affectedHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-pytest-adapter");
+
+    const fullHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
+      scope:"full",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(fullHost.behavioralChecks().map(c=>c.id)).toContain("host-regression-node-tap-pnpm");
+    expect(fullHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-pytest-adapter");
+    expect(fullHost.behavioralGates().map(g=>g.id)).toContain("host-regression-node-tap-pnpm");
+    expect(fullHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-pytest-adapter");
+
+    const mappedOnlyHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,source,undefined,{
+      scope:"mapped_only",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(mappedOnlyHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-node-tap-pnpm");
+    expect(mappedOnlyHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-node-tap-pnpm");
+
+    const ownerSource=new TestRunnerSource([{
+      id:"owner-unit",
+      command:"owner:unit",
+      executable:process.execPath,
+      args:["--test","--test-reporter=tap"],
+      method:"unit_test",
+      levels:["unit"],
+      testNames:["test-1"],
+      testPaths:["test/unit.test.js"],
+      reporter:"node_tap",
+      timeoutMs:30_000
+    }],f.repository,async()=>({status:"detected",profiles:[jsProfile],notes:[]}));
+    const ownerHost=new HostVerification(()=>runtime,()=>{throw new Error("no artifacts");},undefined,ownerSource,undefined,{
+      scope:"affected",
+      index:{importersOf:async()=>({status:"unavailable",code:"not_configured",detail:"not configured"})}
+    });
+    expect(ownerHost.behavioralChecks().map(c=>c.id)).not.toContain("host-regression-node-tap-pnpm");
+    expect(ownerHost.behavioralGates().map(g=>g.id)).not.toContain("host-regression-node-tap-pnpm");
+  });
+
+});
+
+async function reworkFixture() {
+  const f = await fixture();
+  const reworkContext = {
+    schemaVersion: 1 as const, runId: "run", taskId: "task", attempt: 2, attemptId: "attempt",
+    reworkGeneration: 1, coreGeneration: 1, cycleId: "cycle", failedVerificationId: "failed",
+    failedCycleNumber: 1, failedRevision: f.base, remainingIterations: 2, maxIterations: 3,
+    findings: ["first", "second"].map((findingId, findingIndex) => ({findingId, findingIndex,
+      reworkGeneration: 1, verificationId: "failed", cycleNumber: 1, code: "same_code",
+      severity: "error" as const, message: `Missing invariant ${findingId}`, filePath: "guide.md"}))
+  };
+  const dossier = await validateAndStoreReworkResolution({reworkContext,
+    findingResolutionsInput: reworkContext.findings.map(item => ({findingId:item.findingId, disposition:"addressed",
+      rootCause:"The original text omitted a boundary condition", sourceLocations:["guide.md:1"],
+      repairSummary:"Added the missing boundary condition to the guide", discriminatingCheck:{kind:"manual_review",
+        target:"guide.md:1",beforeOutcome:"Boundary condition absent",afterOutcome:"Boundary condition documented"},
+      evidence:{sourceRevision:f.head,reworkGeneration:1,summary:"Exact committed guide inspected"}})),
+    worktreePath:f.repository, ownedPaths:["guide.md"], submissionStatus:"succeeded", submittedByAgentId:"developer",
+    submittedAt:new Date().toISOString(), artifactStore:f.artifacts});
+  const task = {taskId:"task",result:{attemptId:"attempt"},cycle:{cycleId:"cycle",history:[{verificationId:"failed"}]},reworkResolutions:[dossier]};
+  f.state.runs.push({runId:"run",tasks:[task]});
+  const inspected = await f.host.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string};
+  const verdicts = reworkContext.findings.map(item => ({findingId:item.findingId,verdict:"confirmed",summary:"Independently inspected exact repair"}));
+  const input = {reviewId:inspected.reviewId,messageId:"request",summary:"Independent repair review",
+    criteria:[{criterionId:"ac-1",passed:true,summary:"Accepted criterion met"}],findingVerdicts:verdicts};
+  return {...f,task,dossier,input};
+}
+describe("rework verdict admission", () => {
+  it.each(["absent","partial","unknown","duplicate","invalid"])("rejects %s verdict evidence before issuing a passed receipt", async mode => {
+    const f = await reworkFixture();
+    const values: Record<string,unknown> = {absent:undefined,partial:f.input.findingVerdicts.slice(0,1),
+      unknown:[...f.input.findingVerdicts,{findingId:"foreign",verdict:"confirmed",summary:"Unknown finding"}],
+      duplicate:[...f.input.findingVerdicts,f.input.findingVerdicts[0]],
+      invalid:[f.input.findingVerdicts[0],{...f.input.findingVerdicts[1],verdict:"addressed"}]};
+    await expect(f.host.completeReview(f.binding,{...f.input,findingVerdicts:values[mode]})).rejects.toThrow();
+    const good = await f.restore().completeReview(f.binding,f.input);
+    expect(good.result.status).toBe("passed");
+  });
+  it.each(["generation","revision","attempt","missing-dossier"])("rejects a stored observation after stale %s", async mode => {
+    const f = await reworkFixture();
+    if(mode === "generation") f.task.reworkResolutions[0] = {...f.dossier,reworkGeneration:2};
+    if(mode === "revision") f.task.reworkResolutions[0] = {...f.dossier,submittedRevision:f.base};
+    if(mode === "attempt") f.task.result.attemptId = "new-attempt";
+    if(mode === "missing-dossier") f.task.reworkResolutions = [];
+    await expect(f.restore().completeReview(f.binding,f.input)).rejects.toThrow();
+  });
+  it("rejects an unconvincing repair even when all acceptance criteria pass", async () => {
+    const f = await reworkFixture();
+    const completed = await f.host.completeReview(f.binding,{...f.input,findingVerdicts:
+      f.input.findingVerdicts.map((v,i)=>i ? {...v,verdict:"rejected"}:v)});
+    expect(completed.result.status).toBe("failed");
+    expect(completed.result.findings[0]?.details).toMatchObject({priorFindingId:"second"});
+  });
+});
+
+describe("legacy rework settlement", () => {
+  it.each(["absent","partial","duplicate","unknown","stale-revision","stale-generation","failed-missing"])("never blanket closes a passed cycle with %s evidence", async mode => {
+    const f = await reworkFixture();
+    const completed = await f.host.completeReview(f.binding,f.input);
+    const gate = structuredClone(completed.result);
+    if(mode === "absent" || mode === "failed-missing") delete gate.metadata!.findingVerdicts;
+    if(mode === "partial") gate.metadata!.findingVerdicts = f.input.findingVerdicts.slice(0,1);
+    if(mode === "duplicate") gate.metadata!.findingVerdicts = [...f.input.findingVerdicts,f.input.findingVerdicts[0]] as any;
+    if(mode === "unknown") gate.metadata!.findingVerdicts = [...f.input.findingVerdicts,{findingId:"foreign",verdict:"confirmed",summary:"Unknown finding"}];
+    if(mode === "stale-revision") (gate.metadata!.verification as any).sourceRevision = f.base;
+    if(mode === "stale-generation") (gate.metadata!.reworkVerification as any ?? (gate.metadata!.reworkVerification = {})).reworkGeneration = 2;
+    const result = {runId:"run",taskId:"task",attemptId:"attempt",verificationId:"verified",cycleNumber:2,
+      status:"passed",independentExecution:true,verifiedBy:"quality_gate",completedAt:new Date().toISOString(),
+      changeSet:{headCommitHash:f.head},qualityGateResults:[gate],findings:[]} as any;
+    const cycle = {cycleId:"cycle",runId:"run",taskId:"task",status:"passed",currentIteration:2,maxIterations:3} as any;
+    if (mode === "failed-missing") { result.status = "failed"; cycle.status = "rework_required"; }
+    const settled = settleReworkVerificationOutcome(f.dossier,result,cycle);
+    expect(settled.verificationOutcome.status).toBe("escalated_blocked");
+    expect(settled.verificationOutcome.closedFindingIds).toEqual([]);
+    expect(settled.verificationOutcome.openFindingIds).toEqual(["first","second"]);
+    expect(settled.verificationOutcome.findingOutcomes.every(item=>item.status === "unverified")).toBe(true);
+  });
+});
+
+it("retains mandatory finding evidence after a retry clears cycle history and the legacy dossier is absent", async () => {
+  const f = await reworkFixture();
+  f.task.reworkResolutions = [];
+  f.task.cycle.history = [];
+  f.state.outbound.push({attemptId:"attempt",message:{run_id:"run",type:"task.assignment",
+    payload:{task:{id:"task"},findings:[],reworkContext:f.dossier.reworkContext}}});
+  await expect(f.restore().inspectReview(f.binding,{messageId:"request"})).rejects.toThrow("Missing rework dossier");
+  await expect(f.restore().completeReview(f.binding,{...f.input,findingVerdicts:undefined})).rejects.toThrow("Missing rework dossier");
+});
+
+it("does not demand a rework dossier for a plain redispatch that only forwards prior findings", async () => {
+  const f = await reworkFixture();
+  f.task.reworkResolutions = [];
+  f.task.cycle.history = [{verificationId:"failed",status:"failed"} as any];
+  f.state.outbound.push({attemptId:"attempt",message:{run_id:"run",type:"task.assignment",
+    payload:{task:{id:"task"},findings:[{code:"prior_warning",severity:"warning",message:"Carried from the escalated cycle"}]}}});
+  const restored = f.restore();
+  const inspected = await restored.inspectReview(f.binding,{messageId:"request"}) as {reviewId:string;reworkResolution?:unknown};
+  expect(inspected.reworkResolution).toBeUndefined();
+  const completed = await restored.completeReview(f.binding,{...f.input,reviewId:inspected.reviewId,findingVerdicts:undefined});
+  expect(completed.result.status).toBe("passed");
+});
+
+it("fences a persisted rework observation after its native review is replaced", async () => {
+  const f = await reworkFixture();
+  f.outbound[0]!.reviewReplacement = {disposition:"replaced_without_verdict_claim"};
+  await expect(f.restore().completeReview(f.binding,f.input)).rejects.toThrow("Replaced workflow review");
+});
+
+it("gives independent Reviewer and QA checks the owner-configured review budget, defaulting to 900 s", () => {
+  const reviews = (checks: ReturnType<typeof defaultHostChecks>) => checks.filter(check => check.evaluator === "native-herdr-review");
+  expect(DEFAULT_REVIEW_TIMEOUT_MS).toBe(900_000);
+  expect(reviews(DEFAULT_HOST_CHECKS).map(check => check.timeout.executionTimeoutMs)).toEqual([900_000, 900_000]);
+  expect(reviews(defaultHostChecks({ verification: { reviewTimeoutMs: 1_800_000 } })).map(check => check.timeout.executionTimeoutMs)).toEqual([1_800_000, 1_800_000]);
+  expect(reviews(defaultHostChecks({ verification: {} })).map(check => check.timeout.executionTimeoutMs)).toEqual([900_000, 900_000]);
+  expect(defaultHostChecks({ verification: { reviewTimeoutMs: 120_000 } }).find(check => check.evaluator === "host-git-diff")?.timeout.executionTimeoutMs).toBe(30_000);
 });

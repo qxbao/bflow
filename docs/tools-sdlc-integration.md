@@ -63,9 +63,16 @@ Writing memory requires separate permission. The CLI default wing is the reposit
 a configured `environment.tools.mempalace.wing` must bind a reviewed alternative. An empty
 wing is not an excuse to search the whole palace or manufacture retrieval evidence.
 
-GitNexus now uses Runtime-managed Gateway resource acquire/renew/release with generation-bound
-registration, fencing and unknown/quarantine handling. Browser task actions still return
-`exclusive_resource_lease_unsupported`; the Gateway browser APIs alone do not make them usable.
+GitNexus and browser MCP (`chrome-devtools-mcp`) now use Runtime-managed Gateway resource
+acquire/renew/release with generation-bound registration, fencing and unknown/quarantine
+handling (`GitNexusResourceTransactions` and `BrowserResourceTransactions`). Each authenticated
+assignment attempt may hold at most one exclusive browser lease (max 5-minute TTL, persisted in
+`gen-N/browser-resource-transactions.json`); concurrent browser calls on the same task fail
+closed with `browser_lease_busy`, and restarted hosts preserve `quarantined`/`release_uncertain`
+entries for observation-only reconciliation without auto-replaying uncertain mutations. Evidence
+is source plus local tests; full live Chrome/provider SDLC acceptance remains open. The owner
+real-app gate (`appChecks`) runs its own sandboxed Chrome under a host-local fenced lease instead of the
+Gateway profile.
 
 GitNexus, Context7 and browser operations require their own policy requirements,
 task triggers and current readiness. A small arithmetic task does not itself

@@ -33,7 +33,7 @@ describe("config-migrate", () => {
       environment: {
         ...base.environment,
         roles: base.environment.roles.map((role, index) => index === 0 ? { ...role, model: "claude-test-model", effort: "high" as const } : role),
-        verification: { maxIterations: 7, onExhausted: "require_human" as const }
+        verification: { ...base.environment.verification, maxIterations: 7, onExhausted: "require_human" as const }
       }
     };
     const original = JSON.stringify(originalConfig, null, 2) + "\n";

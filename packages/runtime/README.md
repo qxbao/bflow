@@ -1,5 +1,41 @@
 # @bflow/runtime
 
+## Linux verification sandbox prerequisites
+
+`bflow up` requires a working Bubblewrap namespace sandbox when automated verification
+runners are configured. `bflow doctor` runs the same real execution probe and reports
+`runtime-verification-sandbox`; an installed `bwrap` binary alone does not pass it.
+The probe never installs tools, changes kernel settings or falls back to running tests
+without isolation. It distinguishes a missing executable from a launcher failure and
+includes bounded stderr diagnostics. Failed PATH entries resolving to the same binary
+are probed only once.
+
+On Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`, Bubblewrap can fail with
+`setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR: Operation not permitted`
+when its AppArmor `userns` permission is missing. First install the distribution
+`bubblewrap` package if needed. An administrator should inspect existing AppArmor profiles
+for `/usr/bin/bwrap`: repair an existing distribution profile rather than adding a duplicate.
+For a host with no such profile, review [support/bflow-bwrap.apparmor](support/bflow-bwrap.apparmor)
+and explicitly install/load it from the repository root:
+
+```sh
+apparmor_parser --skip-kernel-load --skip-cache packages/runtime/support/bflow-bwrap.apparmor
+sudo install -o root -g root -m 0644 packages/runtime/support/bflow-bwrap.apparmor /etc/apparmor.d/bflow-bwrap
+sudo apparmor_parser --replace /etc/apparmor.d/bflow-bwrap
+bflow doctor
+bflow up
+```
+
+The profile persists across reboot and grants user namespace creation to the system
+Bubblewrap binary only. Security trade-off: every local user can then create unconfined user
+namespaces through `/usr/bin/bwrap`, which partly bypasses the system-wide restriction; the
+administrator must accept that before installing it. The profile does not cover a Bubblewrap
+found elsewhere on `PATH` (for example `/usr/local/bin/bwrap`); doctor names the probed launcher. Keep the system-wide restriction enabled; do not make `bwrap`
+setuid or change provider permission modes to avoid this check. Other namespace restrictions
+(for example container policy) still need host administrator diagnosis. A failed startup
+does not prove existing roles stopped: preserve `.bflow` and reconcile with `bflow doctor`;
+use `bflow down --yes` only when intentionally stopping the current session.
+
 `RuntimeServiceImpl`, dispatcher, MVP orchestrator và workspace factory hiện có vẫn khả dụng.
 P19 bổ sung `AgenticWorkflowRuntime`, `CoordinatorTools`,
 `createAgenticConversationHost` và `openAgenticWorkspace` cho luồng SDLC v2.
@@ -12,7 +48,7 @@ launcher `bflow`. Xem [trạng thái hiện tại](../../docs/implementation-sta
 
 Đối chiếu upstream mốc `a7686be` ngày 2026-10-25: [commit audit](../../docs/main-updates-2026-10-25.md) ghi phạm vi source và bằng chứng.
 
-- [Rework causality](../../docs/rework-causality.md): assignment mang finding identity/revision/generation; submission cần `findingResolutions`, host lưu dossier và reviewer có `findingVerdicts`. Structural/provenance guards đã có, nhưng guard coverage đủ verdict trước pass còn thiếu; không coi prompt requirement là enforcement đã hoàn thiện.
+- [Rework causality](../../docs/rework-causality.md): assignment mang finding identity/revision/generation; submission cần `findingResolutions`, host lưu dossier và reviewer có `findingVerdicts`. Mọi finding trong `reworkContext.findings` của generation hiện hành cần verdict độc lập hợp lệ trước pass. Observation/receipt ghim task, attempt, generation và submitted revision; thiếu/invalid evidence không phải lỗi implementation và không tự tạo rework. Verdict `rejected` vẫn tạo finding lỗi theo bounded rework. Settlement chỉ đóng finding được xác nhận tường minh. Journal/dossier cũ vẫn đọc được, nhưng receipt cũ thiếu binding/verdict không được nâng thành bằng chứng pass; cần kiểm chứng lại qua lifecycle hiện có. Đây là enforcement source/local tests, chưa phải live provider/Herdr acceptance; shared reference document còn mô tả giới hạn cũ. Fast-path miễn manual review không miễn verdict cho rework: plan đã đóng băng thiếu kênh verdict sẽ dừng `inconclusive`, không tạo delivery approval; cần evidence/plan độc lập qua governance hiện có.
 - [Conversation cards](../../docs/guide/conversation-updates.md): thẻ tiếng Việt, mã `#n`, nhãn `Việc #k`, alias receipts qua restart, structured notice detail trong Log. Không suy display ACK thành human approval.
 - [NFR/risk-based references](../../docs/nfr-and-test-design.md): instruction được pin hỗ trợ oracle/conditions/check mapping, không tạo runner, quyền tool hoặc gate mới.
 
@@ -791,6 +827,20 @@ script, runner configuration, imported Gradle/MSBuild definitions and helper blo
 revision; selected test files freeze after independent Red. Structured leaf results,
 assertion/error discrimination and independent Quality Gates remain mandatory.
 
+`verification.reviewTimeoutMs` (optional, 60000..3600000 ms, default 900000) sets the `executionTimeoutMs` of the independent `host-reviewer`/`host-qa` native review gates through `defaultHostChecks(policy)`; `DEFAULT_HOST_CHECKS` keeps the default. Runtime's review reply wait uses that gate timeout.
+
+`verification.regressionScope` controls host regression gates (`affected` default for new configs,
+`full`, `mapped_only`; a persisted `host.json` missing `regressionScope` defaults to `mapped_only`).
+When `affected` or `full`, `HostVerification` adds one required gate `host-regression-<profile.id>` per
+detected automatic JS/TS runner (`vitest_json` or `node_tap` without a polyglot `adapter`) using a
+3-tier widening order (`graph` via GitNexus `IMPORTS` closure when the index is proven fresh at `base`
+before and after the query → `package` for non-code/non-doc files, nested `package.json`, or unavailable/stale
+index → `full` for root configs/lockfiles/workspace manifests; docs-only diffs pass with `scope: "none"`).
+Test failures at `head` are re-measured per failing file at `base` to classify `pre_existing` warnings vs
+`regression_failure` errors. Limits: regression gates apply to automatic JS/TS runners only (polyglot adapters
+are recorded as `unsupported_runner`), and the verification gate never invokes `gitnexus analyze` or refreshes
+the GitNexus index.
+
 Linux Bubblewrap is discovered on PATH and actually probed. macOS uses deny-default
 Seatbelt and probes both a system binary and the actual Node runtime. When configured
 or detected checks require verification, `prepare` refuses an unavailable sandbox before
@@ -818,6 +868,80 @@ Các kiểm tra định danh file, phạm vi session và checksum vẫn áp dụ
 Các task notice mượn lease assignment đang hoạt động và không thể reserve/release một
 Developer slot thứ hai. Đây là các đảm bảo crash process cục bộ dưới mô hình tin cậy
 Linux/filesystem đã nêu, không phải bằng chứng fault-campaign AI live hay power-loss.
+
+## Kiểm tra ứng dụng thật (`appChecks`, gate `host-app-<suiteId>`)
+
+Owner khai báo `appChecks` trong `.bflow/verification.json` (schemaVersion vẫn là 1). Mỗi suite tạo một
+gate bắt buộc `host-app-<suiteId>` (evaluator `host-app-check`, method `e2e_test`, command `app:<suiteId>`).
+Mỗi check có định danh test `app:<suiteId>:<checkId>`, và chỉ định danh này được dùng trong
+`criterionMappings` của tiêu chí `e2e_test`. Parser (`parseAppChecks`) dùng Zod strict: khóa lạ, đường dẫn
+tương đối hoặc có `..`, env bị cấm (`PATH`, `HOME`, `PORT`, `HOST`, `NODE_OPTIONS`, `LD_*`, `BFLOW_*`),
+selector không ổn định (`:nth-child`, `:nth-of-type`, `:first-child`, `:last-child`, XPath), API không có
+assertion hành vi ngoài status, và ngân sách timeout không đủ đều bị từ chối.
+
+**Chọn check.** Chỉ check được ánh xạ bởi tiêu chí chấp nhận đang hoạt động, có `verificationMethod: e2e_test`
+và mọi `testNames` là định danh app của cùng suite, mới chạy. Check cấu hình nhưng không được ánh xạ không
+chạy và không xuất hiện trong evidence. Ingress (`splitAppCriteria`) từ chối với `unsupported_verification`
+khi mapping trộn định danh app với test khác, suite/check không tồn tại hoặc tiêu chí trộn nhiều suite;
+`unknown_test_command` khi thiếu `app:<suite>` trong `targetCommands`; `unsupported_method` khi method khác
+`e2e_test`; và khi TDD ở chế độ `required` mà mọi tiêu chí tự động đều là app (đó là bằng chứng xác minh,
+không phải bằng chứng Red). Tiêu chí app không kích hoạt lỗi "No owner-configured behavioral runner" cho các
+tiêu chí khác. Trong `verificationPlan`, bộ lọc một dòng đảm bảo runner tự động không bao giờ nhận định danh app.
+
+**Thực thi.** Ứng dụng chạy từ bytes đã commit của revision (checkout tạm), không chạy từ worktree của
+developer, trong Bubblewrap (namespace trống, `--unshare-all`). Argv do owner cấu hình được chạy với
+`HOST=127.0.0.1` và `PORT`; sẵn sàng được xác định theo điều kiện (`readyPath` trả 2xx trong
+`startTimeoutMs`). UI check chạy Chrome headless qua CDP pipe trong sandbox. Một check chỉ pass khi không có
+finding: lỗi trang, `console.error`, HTTP ≥ 400 (kể cả tài nguyên phụ), request lỗi, selector phải có mặt
+**và hiển thị** (HTML tĩnh hoặc `<template>` không đủ), text phải có trong body đã render, không tràn
+ngang khi `noHorizontalOverflow`. API check so sánh status, header, JSON pointer (RFC 6901), `bodyContains`;
+nếu cấu hình `contract` OpenAPI thì route phải được khai báo. Screenshot chỉ là bằng chứng bổ sung, không
+ảnh hưởng pass/fail.
+
+**Lease trình duyệt.** Chrome là tài nguyên độc quyền host-local, lưu trong `app-checks/app-check-leases.json`
+của thư mục state host (cùng UID). Lease có fencing token tăng đơn điệu, được gia hạn định kỳ; lease bị giành
+hoặc hết hạn khi chạy khiến kết quả bị loại (`app_check_browser_lease_lost` / `app_check_browser_lease_expired`).
+Lease không phân tán, không dùng trên NFS hay nhiều host.
+
+**Evidence.** Gate lưu một artifact `test-result` JSON và ràng buộc: `candidate.sourceRevision`,
+`candidate.checkoutTree`, `app.instanceId`, `app.origin`, `app.command`, `app.envKeys` và `envDigest` (không
+bao giờ lưu giá trị env), định danh và tiêu chí được chọn, `browser.lease.fencingToken`, và `driver.sha256`
+(băm file driver). Mỗi screenshot là artifact `report` riêng, được tham chiếu bằng `screenshotArtifactId`.
+Trước khi lưu, toàn bộ nội dung tự do đi qua `sanitizeAppEvidence`: che `Bearer`/`Basic`, `token|secret|
+password|api_key=...` và `sk-...` thành `[REDACTED]`; che giá trị env đã cấu hình (từ 4 ký tự); bỏ ký tự điều
+khiển trừ tab và newline; giới hạn tail 8 KiB, message 2 KiB, body 4 KiB.
+
+**Pha Tester (P16).** Validator TDD đòi evidence phủ mọi tiêu chí bắt buộc và mọi `targetCommands`, nên
+`behavioralEvidence` cũng chạy các suite app được tiêu chí của task chọn ở mỗi pha (cùng revision, cùng đường
+đo với gate) và ghi observation `e2e_test` với command `app:<suite>`. Suite bị `blocked` làm pha đó lỗi điều kiện
+tiên quyết và không ghi evidence. Red vẫn cần một assertion failure của runner hành vi; check app fail (có thể chỉ
+vì app không khởi động) không đủ để Red hợp lệ. Assessment phải liệt kê `{method: "e2e_test", command:
+"app:<suite>"}` trong `infrastructure.commands` để `app:<suite>` có trong `targetCommands`.
+
+**Trạng thái gate.** `passed`: app sẵn sàng và mọi check được chọn không có finding. `failed`: ứng viên lỗi,
+mỗi finding trỏ tới artifact evidence (`location: app:<suite>:<check>`). `blocked`: thiếu điều kiện tiên quyết
+hoặc tài nguyên, không có kết quả nào được tạo: `app_check_platform_unsupported`, `app_check_sandbox_unavailable`,
+`app_check_app_missing`, `app_check_dependency_missing`, `app_check_browser_missing`,
+`app_check_source_not_pinned`, `app_check_driver_failed`, `app_check_browser_busy` (có thể thử lại),
+`app_check_browser_lease_lost`, `app_check_browser_lease_expired`, `app_check_timeout`. `blocked` không bao giờ
+là pass: Core chỉ coi gate bắt buộc là đạt khi trạng thái đúng là `passed` (`requiredGatesSatisfied`).
+
+**Giới hạn (phải đọc):**
+- Chỉ Linux với Bubblewrap và Chrome headless qua CDP pipe. Không có macOS, không có Seatbelt cho app check.
+- Ứng dụng được chạy theo argv Node-style do owner cấu hình; ứng dụng nhận `PORT`/`HOST`.
+- Chưa có thao tác tương tác (click, nhập liệu, điều hướng nhiều bước) trong phiên bản này.
+- `viewport.mobile: true` giả lập trình duyệt di động thật: trang thiếu `<meta name="viewport">` có layout 980px,
+  nên bị `ui_viewport_mismatch`/`ui_horizontal_overflow` ở 375px. Đây là lỗi responsive thật, không phải lỗi gate.
+- Contract chỉ hỗ trợ OpenAPI, và chỉ kiểm tra route cùng method có được khai báo.
+- Lease là host-local và cùng UID; không phải khóa phân tán.
+- `dependencyRoots` được mount chỉ đọc ở đúng đường dẫn tuyệt đối trên host; owner phải trỏ `app.env` (ví dụ
+  `NODE_PATH`) tới đó.
+- Sanitizer là lọc theo mẫu và theo giá trị đã cấu hình; không phải kiểm tra bảo mật toàn diện cho output tùy ý
+  của ứng dụng.
+- App của candidate chạy cùng sandbox và cùng UID với driver, nên code thù địch trong candidate về lý thuyết
+  có thể can thiệp driver; mô hình này chống "pass giả" do agent, không chống code độc trong sandbox. Lease không
+  bảo vệ trước tiến trình cùng UID cố ý sửa file lease.
+- Đây là bằng chứng mức source và test cục bộ. Không phải bằng chứng acceptance provider, Herdr hoặc SDLC đầy đủ.
 
 ## Role prompt và policy không hướng tới người dùng trong host mặc định
 
@@ -998,7 +1122,7 @@ by slirp; the helper must return exactly its documented readiness byte before np
 ## Workflow liveness và capability recovery
 
 Host cung cấp `repository_read` cho Coordinator và các role điều tra/verification, cùng
-`read_pinned_instructions` để đọc nội dung skill đã pin. Reader chỉ đọc file text có giới hạn,
+`read_pinned_instructions` để đọc nội dung skill đã pin. Reader chỉ đọc file text có giới hạn (một lệnh không có `skillId` trả policy và danh sách skill; mỗi trang skill theo UTF-8 byte và trả `nextOffset` khi `truncated`; Agy giữ mỗi phản hồi trong `AGY_INLINE_REPLY_BYTES`),
 listing có cursor và các thao tác Git cố định; không nhận shell hoặc argv tùy ý. Git status/diff
 fail closed khi repository cấu hình filter có thể chạy chương trình. Dispatch kiểm tra role,
 pane/native session, launch, Bflow tools/list, repository/Git và manifest trước lease/transport.
@@ -1182,3 +1306,216 @@ và revision index phù hợp, rồi đối chiếu source. Index thiếu/stale/
 Drift được báo khi context trước thay đổi; không tự sửa spec, replan, chuyển task status,
 hoặc thay approval/lease. Kiểm thử cục bộ không chứng minh live-provider acceptance hay mức
 giảm token/lỗi.
+
+## Fast-path cho thay đổi trivial (`fastPath.mode`)
+
+Khi `fastPathMode: "auto"` (truyền từ `environment.fastPath.mode` của CLI; `host.json` cũ thiếu trường này được `effectiveFastPathMode` xử lý là `"off"`), `evaluateFastPath` trong `packages/runtime/src/agentic/fast-path.ts` đánh giá thuần điều kiện fast-path tại `assess` (preview hướng dẫn cho Coordinator) và đóng băng `RunRecord.fastPath` tại `proposeWorkflow` ([ADR 0004](../../docs/adr/0004-fast-path-review-waiver.md)). Mọi cờ `fastPath` do agent gửi trong `metadata` đều bị bỏ qua. Run chỉ đạt `active` khi P15 phân loại `trivial`, không có `unresolvedQuestions`, SDD `lightweight`, đúng 1 Developer task không dependency và không `requiresApproval`, tối đa 5 đường dẫn literal trong `affectedPaths`, `tddDecision.mode !== "required"` và chưa gọi `request_specialist` (do đó `bugfix`/`feature` và TDD `required` không đủ điều kiện).
+
+Khi `run.fastPath.status === "active"`, Runtime tự duyệt thiết kế (`designNeedsHuman` bỏ qua `projectApprovalRequired` nhưng vẫn giữ `classification.humanApprovalRequired` và luôn giữ phê duyệt `delivery` của người dùng). Trong `verificationPlan`, Runtime chỉ gửi waiver `deterministic_coverage` ở mức task khi mọi tiêu chí bắt buộc đều tự động hóa (`verificationMethod !== "manual_review"`) và có `targetCommands`; thay đổi chỉ gồm tài liệu (`manual_review`) vẫn chạy Reviewer/QA ở mức task. Ở mức workflow, nếu cây Git sau tích hợp (`policies.git.treeOf`) trùng khớp với cây của task duy nhất đã `passed`, Runtime gửi waiver `identical_integrated_tree` để bỏ Reviewer/QA lặp lại trong khi vẫn chạy `host-git-integrity` và regression gate. Nếu P17 từ chối waiver hoặc tree hash không khớp (`tree_mismatch`), Runtime hạ cấp một chiều (`status: "downgraded"`) về plan đầy đủ và phát notice tiếng Việt. Lưu ý: vì bộ cổng mặc định của host bao gồm `host-test-integrity` (xem mục TI-01 ngay bên dưới) đòi hỏi Reviewer độc lập thẩm định các ứng viên làm yếu test/config, `fastPath` sẽ bị hạ cấp bảo thủ (`test_integrity_requires_independent_review`) khi cổng `host-test-integrity` có mặt; review waiver chỉ còn hiệu lực khi cấu hình host tùy chỉnh không bật cổng này. Hiện trạng bằng chứng ở mức source + local/fake-runner tests, chưa có live Herdr/provider acceptance.
+
+### Gate toàn vẹn test theo revision (TI-01)
+
+Host đăng ký `host-test-integrity` như một check bắt buộc ở cả task và workflow,
+độc lập với việc chọn behavioral/regression runner. Check dùng Git blob ở đúng
+`baseRevision` và `sourceRevision`, nhận diện rename/move và giữ multiplicity của
+các test trùng nhau; không quét từ khóa trên toàn working tree. Task rework giữ base
+ban đầu của task, workflow giữ run base, để attempt bị từ chối không biến thành
+oracle đáng tin của attempt sau. `baseRevision` trong report là base được bảo vệ này. TypeScript 5.9.3
+là parser thuộc host, không load config/plugin từ candidate. Report được ghi qua
+ArtifactStore, có rule/finding ID, vị trí và phía revision, hai SHA, before/after
+và lý do. File test dạng symlink, revision/working tree không còn khớp, parse/input
+không đo được hoặc vượt giới hạn không được coi là bằng chứng sạch.
+
+Các form JS/JSX/TS/TSX được test gồm Vitest/Jest `test`/`it`/`describe` và `expect`
+(global hoặc ESM alias), ESM Node `test`/`assert`, cùng Playwright test modifiers
+và các action trên `page`/locator dẫn xuất. So sánh tìm test bị xóa, assertion bị
+xóa/đổi oracle/nới numeric bound, skip/fixme/todo/expected-failure mới, test focus,
+parameterized inputs, discovery/script thay đổi, coverage threshold giảm và
+`force: true` mới trên browser action nhận diện được. Fixture dữ liệu nhị phân
+bị xóa không bị hiểu là test bị xóa. Truthy assertion hữu ích, guard mới, comment,
+chuỗi ký tự, test đổi tên/di chuyển và primitive equality tương đương không bị
+cấm theo từ khóa hay tổng số test.
+
+Chỉ literal tautology hẹp là `proven_violation` và tự làm gate thất bại nếu chưa
+có ngoại lệ owner hợp lệ. Các delta khác là `review_required` hoặc `coverage_gap`:
+check deterministic không tự kết luận chúng là lỗi. `inspect_review` cung cấp
+`testIntegrityObservation`; Reviewer phải trả lời **đủ và đúng từng ID** trong
+`complete_review.testIntegrityVerdicts`, gồm `verdict` (`equivalent` hoặc
+`confirmed_violation`), `reason` và `evidence: [{ revision, path, line, excerpt }]`.
+Evidence phải chỉ vào base/candidate, file Git thường có thật và đúng nguyên dòng
+đã trim; host kiểm tra trước khi lưu receipt bất biến. `equivalent` giải thích
+false positive/oracle được giữ nguyên, không miễn một vi phạm đã xác định.
+QA và Developer không thể thay Reviewer cung cấp verdict này. Phiên bản đầu
+conservatively downgrade fast-path khi gate hiện diện, kể cả candidate sạch,
+để giữ đường Reviewer độc lập.
+
+Reviewer có thể gọi `request_test_integrity_exception` với `reviewId`, `findingId`
+và `reason`; host lấy report/evidence đã lưu và Runtime chuyển yêu cầu qua
+Conversation. Reviewer kết thúc lượt khi chờ owner. Approval dùng chính authority
+người dùng đã xác thực của Runtime, phải có lý do, và được ghim vào run/task/attempt,
+base/candidate, spec fingerprint, scope, finding và report evidence. Quyết định gốc
+được lưu và xác thực lại sau restart. Comment/ticket, Developer metadata, generic
+user-decision hay chuỗi `approvedBy` không cấp ngoại lệ. Không chuyển ngoại lệ từ
+task sang workflow hoặc sang candidate/attempt khác. Chờ quyết định giữ semantics
+human-wait/timeout có sẵn: timeout không chứng minh agent đã dừng và không cấp phép
+bỏ qua approval; có thể cần đối soát/retry luồng review hiện có. Không gửi verdict
+cuối cùng trước khi có quyết định nếu đang xin ngoại lệ.
+
+Giới hạn: đây không phải chứng minh semantic equivalence tổng quát. CommonJS
+`require` aliases, custom assertions/helpers, generated tests và computed config
+chưa có phân tích đầy đủ; ngôn ngữ khác chưa có assertion parser mặc dù behavioral
+runner có hỗ trợ. Các form opaque/config hoặc ngôn ngữ test không phân tích được có coverage gap;
+không có parser đầy đủ cho mọi runner config polyglot.
+Repeated config keys ở nhiều scope có thể ghép heuristic sai; sửa thân test đã skip
+có thể báo lại skip; marker multiset không chứng minh marker giữ nguyên testcase.
+Import helper semantics và di chuyển test kèm sửa lớn cần Reviewer kiểm tra.
+Discovery thay đổi không tự chứng minh discovery bị thu hẹp. Browser syntax
+analysis không phải live browser evidence. Input host giới hạn 256 changed files,
+1 MiB/blob và 8 MiB tổng; vượt giới hạn phải chia candidate/đối soát thay vì PASS.
+Report giới hạn 2.000 findings / 2 MB, excerpt 256 ký tự và lý do 512 ký tự;
+vượt giới hạn chặn thay vì cắt mất finding rồi PASS. Source anchor chỉ tới blob đầy đủ.
+Agy nhận finding pages qua `integrityOffset`/`nextFindingOffset`, excerpt được giới
+hạn ở response; report đầy đủ giữ trong ArtifactStore.
+
+Kiểm chứng local (build trước các ca dùng `dist/`):
+
+```sh
+pnpm build
+pnpm exec vitest run packages/runtime/test/agentic/test-integrity.test.ts packages/runtime/test/agentic/host-test-integrity.test.ts packages/runtime/test/agentic/test-integrity-authority.test.ts packages/runtime/test/agentic/host-verification.test.ts
+```
+
+Các ca này dùng Git thật và filesystem ArtifactStore ở boundary host; chúng không
+chứng nhận live Herdr/provider hoặc full SDLC acceptance.
+
+Plan được lưu trước nâng cấp mà thiếu integrity check/Reviewer hoặc còn review waiver
+bị fence và cần owner đối soát; host không nâng evidence cũ thành receipt integrity.
+
+### Task handover nội bộ
+
+Developer của Core task có `read_task_handover` và `propose_task_handover`.
+`assignment_context` và `workspace_status` trả `resumeContext`: handover được host
+chọn cùng yêu cầu, specification, strategy, approval/decision, blocker và rework
+context hiện hành. Các view compact/active_only giữ phần này; compact task dossier
+cũng giữ specification và acceptance criteria khi không còn assignment đang chạy.
+Pane đã nghỉ chỉ được đọc authority của assignment của mình, không ghi handover.
+Conflict resolver và specialist ngoài Core task không dùng cơ chế này.
+
+Schema riêng của Runtime (`src/agentic/task-handover.ts`, không export qua public
+package contracts) là `{schemaVersion:1,binding,content}`:
+
+- `binding`: `runId`, `taskId`, `assignmentId`, `attempt`, `attemptId`, `generation`, `reworkGeneration`,
+  `worktreePath`, `revision` (Git HEAD), `specId`, `specVersion` (`null` nếu bản gốc
+  không khai version), `specFingerprint`, `requirementFingerprint`. Host suy ra
+  binding; proposal phải khớp chính xác binding từ lần đọc hiện tại.
+- `content`: `nextAction`, `decisions`, `disprovedHypotheses`, `untestedAngles`,
+  `references`. Mỗi chuỗi nội dung tối đa 768 ký tự; mỗi danh sách nội dung tối đa
+  8 mục; references tối đa 16 source locations hoặc evidence artifact IDs.
+  Evidence IDs chỉ là gợi ý tra cứu, không phải trusted ArtifactReference/proof.
+- Toàn bộ envelope tối đa 16 KiB UTF-8; schema strict từ chối trường lạ. Không
+  trích xuất log hoặc tự suy diễn lịch sử từ transcript.
+
+Agent đề xuất trước khi nhường lượt hoặc rút gọn context, và cập nhật sau commit.
+Host kiểm tra assignment hiện hành và gia hạn lease/fence, validate proposal, rồi
+lưu một bản mới nhất cho mỗi run/task tại
+`<journalDirectory>/task-handover/<hash(runId,taskId)>.json`, ngoài task worktree.
+Khóa journal hiện có tuần tự hóa ghi/đọc với retry; ghi file tạm độc quyền,
+fsync/rename và fsync thư mục theo nền tảng local POSIX hiện được kiểm chứng.
+Đọc giới hạn byte, không theo symlink, không đọc special file/hardlink.
+
+Sau retry/restart/context compaction, host đọc lại và kiểm tra provenance với
+assignment đã lưu. Chỉ nhận attempt hiện hành hoặc attempt trước **cùng Core
+generation và rework generation**, cùng HEAD/specification/requirement fingerprint. Worktree path của
+attempt trước phải khớp assignment cũ; host không đổi nhãn attempt nguồn. Generation
+mới, revision/specification/yêu cầu thay đổi hoặc binding không khớp sẽ bị giữ lại
+với diagnostic `handover_*`; không tự chuyển handover sang generation mới.
+Revision ở đây là HEAD, không chứng nhận nội dung chưa commit hay tình trạng source
+reference hiện tại. Mọi reference cần được kiểm tra lại trước khi dùng làm evidence.
+
+Handover luôn là JSON context chưa đáng tin kèm cảnh báo; chuỗi yêu cầu đổi policy,
+approval, specification hoặc khai thành công không có authority. Nội dung không
+được đưa vào system prompt hay acceptance proof. Trạng thái authority và các gate
+hiện có vẫn quyết định có được tiếp tục hay không.
+
+Không đổi checkpoint codec, journal version, public contract hoặc memory Gateway.
+Checkpoint và dossier rework giữ vai trò hiện có; memory có provenance vẫn đi qua
+Gateway, không được coi là nguồn handover chuẩn. State cũ không có file handover
+trả `handover_absent`; assignment cũ không có marker provenance tiếp tục recovery
+nhưng không được bịa generation để nhận proposal (`handover_unknown_assignment`).
+File hỏng/quá cỡ hoặc revision không đọc được trả diagnostic và bỏ context tùy
+chọn; không làm hỏng Core recovery. Nếu agent chưa đề xuất trước khi process chết,
+host không thể khôi phục handover chưa từng được lưu. Đây là source/local tests,
+chưa phải live-provider/Herdr/full-workflow acceptance.
+
+Kiểm chứng sau build:
+
+```sh
+pnpm build
+pnpm exec vitest run packages/runtime/test/agentic/task-handover.test.ts packages/runtime/test/agentic/task-handover-view.test.ts packages/runtime/test/agentic/rework-causality.test.ts packages/runtime/test/agentic/core-checkpoint-restore.test.ts packages/runtime/test/agentic/conversation-context-budget.test.ts packages/runtime/test/agentic/mcp-output-trim.test.ts packages/runtime/test/agentic/tool-action-policy.test.ts
+```
+
+Với Agy, context tự động trả chỉ dẫn `handover_context_deferred` tới
+`read_task_handover`. Reader tự chia reply lớn thành `handover_context_paged`
+(`page`, `cursor`, `offset`, `nextOffset`, `totalBytes`); ghép các chuỗi page rồi
+parse JSON đầy đủ trước khi tiếp việc. Có thể yêu cầu `{view:"page"}` trên provider
+khác. Trang tiếp dùng cùng `cursor` và `offset:nextOffset`; thay đổi requirement,
+approval, revision hoặc nội dung sẽ làm cursor cũ bị từ chối với
+`handover_cursor_stale`, phải đọc lại từ offset 0. Mỗi trang giữ UTF-8 nguyên vẹn
+và nằm dưới ngân sách reply Agy 8.500 byte, không cắt âm thầm authority hoặc nội
+dung đã lưu. Proposal acknowledgement không echo lại toàn bộ context. Đây là
+phân trang presentation riêng, không thay đổi schema hay lifecycle checkpoint.
+
+
+## Telemetry hiệu quả workflow
+
+`bflow status <run-id> --telemetry [--json]` đọc report qua host agentic **đang tồn tại**.
+Không khởi động host, chạy scheduler, phục hồi Core hay tạo receipt để đo. Projection
+không tham gia acceptance/task success. Lỗi nguồn trả coverage không đầy đủ cùng mã lý do;
+không ghi exception/prompt/command/output vào report.
+
+Định nghĩa, mẫu số và Conditional TDD nằm trong [Specification](TELEMETRY-SPEC.md).
+Các số đo Core gồm khoảng thời gian trạng thái task, rework theo generation, retry riêng,
+first-pass trong nhóm task Core `succeeded` có lịch sử đầy đủ, approval wait và gate
+turnaround (proxy timestamp event, không phải gate execution/persistence latency). Report luôn kèm cohort
+failed/cancelled/incomplete; first-pass không phải tỷ lệ thành công toàn workflow.
+
+Core ghi gate event bằng `evaluatedAt`; một số evaluator lấy mốc này trước khi chạy
+xong. Vì vậy gate turnaround luôn `partial`, không chứng minh thời gian chạy lệnh thuần
+hay latency ghi receipt.
+
+Với run agentic, mỗi native Reviewer/QA gate được host đo start/end: từ lúc enqueue
+verification request đến lúc settle (verdict, validation rejection, timeout hoặc abort), lưu
+trong journal `reviewTimings` (tối đa 200 entry/run). `gateExecution` chỉ tính interval đã
+đóng (`host_review_gate_timings`, `partial`); wait còn mở được đếm trong `open`. Khi wait đã
+dùng 80% `executionTimeoutMs`, Conversation nhận đúng một progress note. Đây là wall time gồm
+delivery Herdr và reply ingest, không phải thời gian thuần của Reviewer. Legacy report giữ
+`unavailable`.
+
+Host receipts bổ sung thời gian operation verification theo phase/role và regression
+widening theo evaluation ID. Chúng mang nhãn `partial`: inventory receipt không có mốc
+publication bất biến, không chứng minh toàn bộ operation lỗi/gián đoạn đều được ghi.
+Tổng thời gian các operation có thể chồng nhau. Chỉ nhận timestamp phase do host measurement
+path sinh cùng binding role, không dùng timestamp agent tự khai. Reason widening được
+chuẩn hóa thành mã; không xuất file path. Artifact delivery ACK không chứng minh evidence
+reuse. Thiếu proof reuse, cặp clarification, per-gate start/end hoặc provider usage thì
+metric tương ứng là `null/unavailable`. Chưa ước tính chi phí hay có bảng giá.
+
+Projection loại duplicate theo run/eventId và run/sequence, dùng validator batch hiện có,
+chặn xung đột identity và báo coverage khi mất event/time. RunStore reader chốt high-water
+mark rồi đọc tối đa 200 trang × 500 events. Nó không bám đuôi run đang tiếp tục ghi.
+Superseded approval thiếu timestamp không được đóng duration; pending approval có deadline
+đã qua được đếm riêng (không coi là quyết định human); cancellation/terminal không sinh
+approval duration giả. Run chỉ có journal vẫn giữ business outcome cùng provenance.
+
+Legacy standalone trả `legacy_readonly_source_unavailable`: factory Persistence hiện tại
+không có read-only open, còn Runtime composition có thể seed registry. Không mở composition
+đó chỉ để xem telemetry, không đọc SQLite bằng SQL riêng. Hỗ trợ legacy cần owner Persistence
+cung cấp đường mở chỉ đọc; không có migration/public event mới trong thay đổi này.
+
+Kiểm tra tập trung sau build:
+
+```bash
+pnpm build
+pnpm exec vitest run packages/runtime/test/telemetry apps/cli/test/telemetry.test.ts
+```
+
+Đây là bằng chứng source/local fixtures, không phải live Herdr/provider hay full SDLC acceptance.

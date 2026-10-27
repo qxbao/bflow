@@ -150,6 +150,7 @@ if (process.argv[2] === 'analyze') {
   const path = require('node:path');
   fs.mkdirSync(path.join(process.cwd(), '.gitnexus'), { recursive: true });
   fs.writeFileSync(path.join(process.cwd(), '.gitnexus', 'meta.json'), JSON.stringify({ repository: process.cwd() }));
+  fs.rmSync(path.join(process.cwd(), 'stale-index'), { force: true });
   console.log(JSON.stringify({ status: 'up-to-date', repository: process.cwd() }));
   process.exit(0);
 }
@@ -457,7 +458,7 @@ it("asks before the first GitNexus index, skips unapproved indexing and does not
   expect(declined.exitCode).toBe(0);
   const declinedData = JSON.parse(declined.stdout).data;
   expect(declinedData.gitnexus.status).toBe("skipped");
-  expect(declinedData.diagnostics.join(" ")).toContain("--yes");
+  expect(declinedData.diagnostics.join(" ")).toContain("--accept-gitnexus-license");
   expect(await readdir(root)).not.toContain(".gitnexus");
   expect(await readFile(join(root, ".bflow", "config.yml"), "utf8")).toContain("schemaVersion");
 
@@ -470,6 +471,24 @@ it("asks before the first GitNexus index, skips unapproved indexing and does not
   const repeated = await runCli(["init", "--json"], { cwd: root, setup: { platform, confirm: async prompt => { prompts.push(prompt); return false; } } });
   expect(JSON.parse(repeated.stdout).data.gitnexus.status).toBe("ready");
   expect(prompts).toHaveLength(1);
+});
+
+it("accepts the GitNexus license with --accept-gitnexus-license without overwriting customized configuration", async () => {
+  const { components, ctx, platform } = fixture();
+  await installFixtureTools(["mempalace_status", "mempalace_search"]);
+  await installFixtureTools(["query", "context", "impact"], { initialize: false, executableName: "gitnexus" });
+  for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
+
+  const created = await runCli(["init", "--no-gitnexus", "--provider", "claude", "--json"], { cwd: root, setup: { platform } });
+  expect(created.exitCode).toBe(0);
+  const configPath = join(root, ".bflow", "config.yml");
+  const customized = `${await readFile(configPath, "utf8")}# customized by operator\n`;
+  await writeFile(configPath, customized, "utf8");
+
+  const accepted = await runCli(["init", "--accept-gitnexus-license", "--json"], { cwd: root, setup: { platform } });
+  expect(accepted.exitCode).toBe(0);
+  expect(JSON.parse(accepted.stdout).data.gitnexus.status).toBe("ready");
+  expect(await readFile(configPath, "utf8")).toBe(customized);
 });
 
 it("keeps the written repository configuration and reports GitNexus as blocked when registration fails", async () => {
@@ -504,6 +523,10 @@ it("observes stale repository indexes in bflow init --check without rerunning an
   // Machine setup check remains valid even when a repository index is stale
   expect((await components[0]!.observe({ ...ctx, mode: "check" })).valid).toBe(true);
   expect(await readFile(reposFile, "utf8")).toBe(before);
+
+  const refreshRes = await runCli(["init", "--yes", "--json"], { cwd: root, setup: { platform } });
+  expect(refreshRes.exitCode).toBe(0);
+  expect(JSON.parse(refreshRes.stdout).data.gitnexus.status).toBe("ready");
 });
 
 it("uses canonical repository identity for symlinked init paths", async () => {

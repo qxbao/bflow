@@ -160,8 +160,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     };
   }
 
-  protected getProviderExecutionEnvironment(): Readonly<Record<string, string>> {
-    return this.getProviderCommandEnvironment();
+  protected getProviderExecutionEnvironment(environment?: AgentEnvironment): Readonly<Record<string, string>> {
+    return this.getProviderCommandEnvironment(environment);
   }
 
   protected commandEnvironmentOptions(): { readonly inheritEnvironment?: false } {
@@ -626,7 +626,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
           args: [...inherited.argv, ...probeArgs],
           cwd: environment.cwd,
           env: {
-            ...this.getProviderExecutionEnvironment(),
+            ...this.getProviderExecutionEnvironment(environment),
             ...(agyProbeHome ? { HOME: agyProbeHome } : {})
           },
           ...this.commandEnvironmentOptions(),
@@ -1776,6 +1776,19 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
       configFiles.push({ path: agySessionHookPath, digest: await computeFileSha256(agySessionHookPath) });
     }
     if (agyWrapperPath) configFiles.push({ path: agyWrapperPath, digest: await computeFileSha256(agyWrapperPath) });
+    if (this.descriptor.provider === "codex") {
+      for (const fileName of ["config.toml", "auth.json"]) {
+        const candidatePath = join(environment.stateDirectory, "codex-home", fileName);
+        try {
+          const info = await lstat(candidatePath);
+          if (info.isFile()) {
+            configFiles.push({ path: candidatePath, digest: await computeFileSha256(candidatePath) });
+          }
+        } catch {
+          // Private codex-home is absent when native_auth_compatible or isolator is used
+        }
+      }
+    }
 
     // Compile provider argv
     const compiled = await this.compileArgv(

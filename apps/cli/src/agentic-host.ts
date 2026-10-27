@@ -1,11 +1,13 @@
 import type { AgentRole, OperationOptions, OperationResult, SessionManifest } from "@bflow/contracts";
+import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile } from "@bflow/machine-setup";
 import { resolvePrivateRuntimeStateDirectory, type HostPrepareResponse, type HostRoleLaunch } from "@bflow/runtime";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 import { buildHostPlatformOptions, loadHostPlatformContext } from "./platform-options.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
+import { resolveApprovedGitNexusBinary } from "./gateway-repositories.js";
 
 export type { HostPrepareResponse, HostRoleLaunch };
 
@@ -30,6 +32,28 @@ export interface LifecycleHost {
 }
 export type LifecycleHostFactory = (input: EnvironmentCompositionInput) => Promise<LifecycleHost>;
 
+/**
+ * `.bflow/verification.json` is an optional owner override. When absent, no owner commands are returned and Runtime detects
+ * the repository's test runner itself (see docs/verification-runners.md); no user configuration is required.
+ */
+export async function readOwnerVerification(repositoryRoot: string, runtime: Pick<typeof import("@bflow/runtime"), "parseBehavioralCommands" | "parseMutationChecks" | "parseAppChecks">) {
+  const verificationPath = resolve(repositoryRoot, ".bflow/verification.json");
+  try {
+    if (!(await lstat(verificationPath)).isFile() || await realpath(verificationPath) !== verificationPath)
+      throw new Error("Owner verification configuration must be a regular file inside this repository");
+    const value: unknown = JSON.parse(await readFile(verificationPath, "utf8"));
+    if (value === null || typeof value !== "object" || Array.isArray(value) || !("schemaVersion" in value) || value.schemaVersion !== 1 ||
+        !("behavioralCommands" in value) || Object.keys(value).some(key => !["schemaVersion", "behavioralCommands", "mutationChecks", "appChecks"].includes(key)))
+      throw new Error("Invalid owner verification configuration (expected schemaVersion:1, behavioralCommands and optional mutationChecks and appChecks)");
+    const behavioralCommands = runtime.parseBehavioralCommands(value.behavioralCommands);
+    return { behavioralCommands, mutationChecks: runtime.parseMutationChecks("mutationChecks" in value ? value.mutationChecks : undefined, behavioralCommands),
+      appChecks: runtime.parseAppChecks("appChecks" in value ? value.appChecks : undefined) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return { behavioralCommands: [], mutationChecks: [], appChecks: [] };
+  }
+}
+
 export const openLifecycleHost: LifecycleHostFactory = async input => {
   let activeHost: Promise<LifecycleHost> | undefined;
 
@@ -43,33 +67,47 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     return runtime;
   };
 
-  // `.bflow/verification.json` is an optional owner override. When absent, [] is returned and Runtime detects the
-  // repository's test runner itself (see docs/verification-runners.md); no user configuration is required.
-  const readOwnerBehavioralCommands = async (runtime: Awaited<ReturnType<typeof loadRuntime>>) => {
-    const verificationPath = resolve(input.repository.root, ".bflow/verification.json");
+  const resolveImpactIndex = async (): Promise<{ executable: string; home: string; storageLockPath: string } | undefined> => {
+    const host = defaultHostEnvironment();
+    const mergedHost = { ...host, env: { ...host.env, ...input.env } };
+    let setupPlatform = detectPlatform(mergedHost);
+    if (mergedHost.env.BFLOW_HOME) {
+      setupPlatform = isolatedPlatformProfile(setupPlatform, resolve(mergedHost.env.BFLOW_HOME));
+    }
+    const binary = await resolveApprovedGitNexusBinary(setupPlatform);
+    if (!binary) return undefined;
+    const gitnexusState = join(setupPlatform.paths.state, "gitnexus");
+    const homeCandidate = join(gitnexusState, "gitnexus-home");
     try {
-      if (!(await lstat(verificationPath)).isFile() || await realpath(verificationPath) !== verificationPath)
-        throw new Error("Owner verification configuration must be a regular file inside this repository");
-      const value: unknown = JSON.parse(await readFile(verificationPath, "utf8"));
-      if (value === null || typeof value !== "object" || Array.isArray(value) || !("schemaVersion" in value) || value.schemaVersion !== 1 ||
-          !("behavioralCommands" in value) || Object.keys(value).some(key => key !== "schemaVersion" && key !== "behavioralCommands"))
-        throw new Error("Invalid owner verification configuration (expected schemaVersion:1 and behavioralCommands)");
-      return runtime.parseBehavioralCommands(value.behavioralCommands);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      return [];
+      const [homeStat, home, canonicalRoot] = await Promise.all([
+        lstat(homeCandidate),
+        realpath(homeCandidate),
+        realpath(input.repository.root)
+      ]);
+      if (!homeStat.isDirectory()) return undefined;
+      const { gitNexusStorageLockPath } = await import(
+        new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href
+      );
+      return {
+        executable: binary.executable,
+        home,
+        storageLockPath: gitNexusStorageLockPath(gitnexusState, canonicalRoot)
+      };
+    } catch {
+      return undefined;
     }
   };
 
   const openForStartup = (): Promise<LifecycleHost> => {
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
-      const behavioralCommands = await readOwnerBehavioralCommands(runtime);
+      const { behavioralCommands, mutationChecks, appChecks } = await readOwnerVerification(input.repository.root, runtime);
       const context = await loadHostPlatformContext(input);
       const context7Ready = input.config.environment.context7?.enabled !== false
         ? (await readGatewayReadiness(context.stateDirectory, "context7")).status === "ready" : undefined;
       const platform = await buildHostPlatformOptions(input, { context, context7Ready,
         warn: message => process.stderr.write(`Warning: ${message}\n`) });
+      const impactIndex = await resolveImpactIndex();
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -77,11 +115,15 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         manifestDirectory: resolve(input.repository.root, ".bflow/state/panes"),
         maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
         behavioralCommands,
+        mutationChecks,
+        appChecks,
         platform,
+        ...(impactIndex ? { impactIndex } : {}),
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,
           verification: input.config.environment.verification,
+          fastPath: input.config.environment.fastPath,
           concurrency: input.config.environment.concurrency
         }
       });
@@ -102,7 +144,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
       if (hasHostConfig) {
         return runtime.openPersistedAgenticHost({ repositoryPath: input.repository.root, sessionId: input.repository.sessionName });
       }
-      const behavioralCommands = await readOwnerBehavioralCommands(runtime);
+      const { behavioralCommands, mutationChecks, appChecks } = await readOwnerVerification(input.repository.root, runtime);
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -110,10 +152,13 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         manifestDirectory: resolve(input.repository.root, ".bflow/state/panes"),
         maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
         behavioralCommands,
+        mutationChecks,
+        appChecks,
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,
           verification: input.config.environment.verification,
+          fastPath: input.config.environment.fastPath,
           concurrency: input.config.environment.concurrency
         }
       });
