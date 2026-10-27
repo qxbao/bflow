@@ -6,7 +6,7 @@ import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, GitChangeSetSchema, RoleMessageSchema,
   VerificationResultSchema, type ArtifactReference, type ArtifactStore, type GitChangeSet, type RoleMessage
 } from "@bflow/contracts";
-import { assertClean, changedFiles, git, inspectRepository, patch, resolveCommit, succeeds } from "./git.js";
+import { assertClean, assertInspectedClean, changedFiles, git, inspectRepository, patch, repositoryPaths, resolveCommit, succeeds, type RepositoryInspection } from "./git.js";
 import { readState, withRepositoryLock, writeState } from "./journal.js";
 import {
   CommitHashSchema, GitOrchestrationError, IntegrationRequestSchema, TaskRequestSchema, requireCondition,
@@ -67,7 +67,7 @@ export class GitIntegrationEngine {
   static async open(options: { repositoryPath: string; artifactStore: ArtifactStore; provider?: GitProvider; worktreeRoot?: string }): Promise<GitIntegrationEngine> {
     z.string().min(1).parse(options.repositoryPath);
     if (options.worktreeRoot !== undefined) requireCondition(isAbsolute(options.worktreeRoot), "invalid_input", "worktreeRoot must be an absolute path");
-    const repository = await inspectRepository(options.repositoryPath);
+    const repository = await repositoryPaths(options.repositoryPath);
     const stateDirectory = join(repository.commonDir, "bflow-git");
     const engine = new GitIntegrationEngine(repository.root, stateDirectory, options.artifactStore, options.provider,
       options.worktreeRoot ?? join(stateDirectory, "trees"));
@@ -84,7 +84,7 @@ export class GitIntegrationEngine {
   private async transaction<T>(action: (state: State) => Promise<T>): Promise<T> {
     return withRepositoryLock(this.stateDirectory, async () => {
       // Common Git dir, rather than the caller's linked worktree, is the repository identity.
-      const common = (await inspectRepository(this.repositoryPath)).commonDir;
+      const common = (await repositoryPaths(this.repositoryPath)).commonDir;
       const state = await readState(this.stateDirectory, common);
       for (const [key, task] of Object.entries(state.tasks)) {
         requireCondition(key === identity(task.request.runId, task.request.taskId, task.request.attemptId) && key === task.key && this.managedPath(task.worktreePath, `task-${key}`) && task.branchName === taskBranchName(task.request), "invalid_journal", "Task binding does not match journal identity");
@@ -137,9 +137,9 @@ export class GitIntegrationEngine {
     const existing = bindings.find(binding => binding.path === record.worktreePath);
     if (existing) {
       requireCondition(existing.branch === record.branchName, "worktree_mismatch", "Managed worktree points to another branch");
-      await this.assertBinding(record);
-      requireCondition(await resolveCommit(record.worktreePath, "HEAD") === record.baseCommitHash, "creation_changed", "Worktree changed before creation was acknowledged");
-      await assertClean(record.worktreePath);
+      const bound = await this.assertBinding(record);
+      requireCondition(bound.head === record.baseCommitHash, "creation_changed", "Worktree changed before creation was acknowledged");
+      await assertInspectedClean(bound);
       if (!existing.locked) await git(this.repositoryPath, ["worktree", "lock", "--reason", "Bflow managed worktree", record.worktreePath]);
       return;
     }
@@ -154,11 +154,18 @@ export class GitIntegrationEngine {
     // Protect an in-use worktree from automatic Git pruning. Unlock only during explicit safe cleanup.
     await git(this.repositoryPath, ["worktree", "lock", "--reason", "Bflow managed worktree", record.worktreePath]);
   }
-  private async assertBinding(record: TaskRecord | IntegrationRecord): Promise<void> {
+  private async assertBinding(record: TaskRecord | IntegrationRecord): Promise<RepositoryInspection> {
     const info = await inspectRepository(record.worktreePath);
-    const common = (await inspectRepository(this.repositoryPath)).commonDir;
+    const common = (await repositoryPaths(this.repositoryPath)).commonDir;
     requireCondition(info.commonDir === common && info.root === record.worktreePath && info.branch === record.branchName &&
       await realpath(record.worktreePath) === record.worktreePath, "worktree_mismatch", "Task worktree/branch/repository binding changed");
+    return info;
+  }
+  /** Binding and clean-state checks from one inspection; returns the HEAD that inspection observed. */
+  private async assertBoundClean(record: TaskRecord | IntegrationRecord): Promise<string> {
+    const info = await this.assertBinding(record);
+    await assertInspectedClean(info);
+    return info.head;
   }
 
   async prepareTask(input: TaskRequest): Promise<TaskRecord> {
@@ -224,8 +231,7 @@ export class GitIntegrationEngine {
 
   private async validateTaskHead(task: TaskRecord, expected?: string): Promise<{ head: string; files: GitChangeSet["filesChanged"]; patch: string; commits: string[] }> {
     requireCondition(task.status === "active", "inactive_task", "Only active tasks may submit changes");
-    await this.assertBinding(task); await assertClean(task.worktreePath);
-    const head = await resolveCommit(task.worktreePath, "HEAD");
+    const head = await this.assertBoundClean(task);
     requireCondition(!expected || head === expected, "stale_commit", "Task HEAD changed after submission");
     requireCondition(head !== task.baseCommitHash, "missing_commit", "Task has no implementation commit");
     requireCondition(await succeeds(task.worktreePath, ["merge-base", "--is-ancestor", task.baseCommitHash, head]), "unrelated_history", "Task history no longer descends from its recorded base");
@@ -389,11 +395,11 @@ export class GitIntegrationEngine {
   private async resume(state: State, record: IntegrationRecord): Promise<IntegrationRecord> {
     requireCondition(record.status !== "cancelled" && record.status !== "cleaned", "inactive_integration", "Integration is cancelled or cleaned");
     if (record.status === "creating") { await this.provision(record); record.status = "ready"; await this.save(state); }
-    await this.assertBinding(record);
+    const bound = await this.assertBinding(record);
     if (record.status === "conflict") return record; // Explicit human/agent resolution acknowledgement required.
     if (record.status === "awaiting_verification" || record.status === "verified") {
-      await assertClean(record.worktreePath);
-      requireCondition(await resolveCommit(record.worktreePath, "HEAD") === record.expectedHead, "integration_drift", "Integration changed after verification request");
+      await assertInspectedClean(bound);
+      requireCondition(bound.head === record.expectedHead, "integration_drift", "Integration changed after verification request");
       return record;
     }
     for (const taskKey of record.order) {
@@ -447,8 +453,7 @@ export class GitIntegrationEngine {
     return this.transaction(async state => {
       const record = this.integration(state, key);
       requireCondition(record.status === "conflict" && record.currentTask === resolution.taskKey, "no_conflict", "No matching conflict awaiting resolution");
-      await this.assertBinding(record); await assertClean(record.worktreePath);
-      requireCondition(await resolveCommit(record.worktreePath, "HEAD") === resolution.resolutionCommitHash, "stale_commit", "Resolution commit must match integration HEAD");
+      requireCondition(await this.assertBoundClean(record) === resolution.resolutionCommitHash, "stale_commit", "Resolution commit must match integration HEAD");
       const task = this.task(state, resolution.taskKey);
       requireCondition(record.beforeMerge, "invalid_journal", "Missing pre-merge tip");
       scopeCheck(task, (await changedFiles(record.worktreePath, record.beforeMerge, resolution.resolutionCommitHash)).map(file => file.path));
@@ -462,8 +467,7 @@ export class GitIntegrationEngine {
     return this.transaction(async state => {
       const record = this.integration(state, key);
       requireCondition(record.status === "awaiting_verification", "verification_not_pending", "Integration is not awaiting workflow verification");
-      await this.assertBinding(record); await assertClean(record.worktreePath);
-      requireCondition(await resolveCommit(record.worktreePath, "HEAD") === record.expectedHead && result.verificationScope === "workflow" &&
+      requireCondition(await this.assertBoundClean(record) === record.expectedHead && result.verificationScope === "workflow" &&
         result.runId === record.request.runId && result.metadata?.integrationCommitHash === record.expectedHead,
       "stale_verification", "Verification must identify this run, workflow scope and exact integrationCommitHash");
       requireCondition(result.evidenceArtifacts.length > 0, "missing_artifact", "Verification evidence is required");
@@ -501,7 +505,7 @@ export class GitIntegrationEngine {
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
       throw new GitOrchestrationError("unregistered_worktree", "Unregistered directory exists; refusing removal");
     }
-    await this.assertBinding(record); await assertClean(record.worktreePath);
+    await this.assertBoundClean(record);
     requireCondition((await git(record.worktreePath, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"])).length === 0,
       "ignored_files", "Cleanup would delete ignored files; preserve or remove them explicitly first");
     if (registered.locked) await git(this.repositoryPath, ["worktree", "unlock", record.worktreePath]);
@@ -533,8 +537,7 @@ export class GitIntegrationEngine {
       const record = this.integration(state, key);
       requireCondition(this.provider, "provider_unavailable", "Configure a Git provider before requesting a pull request");
       requireCondition(record.status === "verified", "verification_required", "Workflow verification must pass before PR publication");
-      await this.assertBinding(record); await assertClean(record.worktreePath);
-      requireCondition(await resolveCommit(record.worktreePath, "HEAD") === record.expectedHead, "integration_drift", "Verified integration HEAD changed");
+      requireCondition(await this.assertBoundClean(record) === record.expectedHead, "integration_drift", "Verified integration HEAD changed");
       requireCondition(record.verification?.status === "passed", "verification_required", "A passed workflow verification receipt is required");
       for (const reference of [...record.verification.evidenceArtifacts, ...Object.values(record.snapshots).map(snapshot => snapshot.patchArtifact)]) {
         await this.checkStoredArtifact(reference);
