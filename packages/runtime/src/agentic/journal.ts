@@ -6,13 +6,13 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
-  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
+  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema, PaneBindingSchema,
   DelegationRequestSchema, GitChangeSetSchema, IsoDateTimeSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
   SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AcquireAgentLeaseRequest, type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
   type AgentRole, type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue, type ArtifactReference,
-  type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy,
+  type RoleMessage, type SdlcWorkStatus, type Specification, type TestStrategy, type PaneBinding,
   type VerificationCycle, type WorkflowDefinition, type RenewAgentLeaseRequest, type ReleaseAgentLeaseRequest
 } from "@bflow/contracts";
 import type { TaskWorktree, VerificationPlan } from "./ports.js";
@@ -20,6 +20,7 @@ import { isUserDecisionRequest, validateUserDecisionAnswer, type UserDecisionAns
 import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
 import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./native-diagnostic-fence.js";
 import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
+import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAllocation, type CancellationStopProof, type NamespaceExitProof } from "./cancellation-stop.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -94,6 +95,7 @@ export interface RunRecord {
   invalidMessages?: { key: string; count: number; messageIds: string[] }[];
   /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
   cancelReconciled?: boolean;
+  cancelledAllocations?: { binding: PaneBinding; proof: NamespaceExitProof; released?: boolean | undefined }[];
   /** Set when a human `changes_requested` continued this run as a follow-up run; the parent is terminal and never resumed. */
   supersededBy?: string;
   /** Bounded automatic Developer resolver episode for the current P18 merge conflict; absent in journals written before it. */
@@ -228,6 +230,9 @@ export interface Outbound {
   stopObservedAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
+  /** Private v6 write-ahead proof; never inferred from legacy cancellation flags. */
+  cancellationStopProof?: CancellationStopProof;
+  cancellationLeaseDisposition?: "released" | "expired";
   phaseRetirement?: { operationId: string; sessionId: string; userMessageId: string; userId: string;
     blockedReplyId: string; decidedAt: string; resumeAuthorizedBy?: string | undefined; disposition: "retired_without_measurement_claim" };
   /** Physical permission to cease waiting on one workflow review. The original request/outcome stays intact. */
@@ -248,7 +253,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -262,7 +267,7 @@ export function isConversationDelivery(out: Outbound): boolean {
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 function parseState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if ((root.version !== 1 && root.version !== 2 && root.version !== 3 && root.version !== 4 && root.version !== 5) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
@@ -310,6 +315,12 @@ function parseState(input: unknown, repository: string): JournalState {
     }
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
     if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
+    if (run.cancelledAllocations !== undefined) {
+      const records = z.array(z.object({ binding: PaneBindingSchema, proof: NamespaceExitProofSchema, released: z.boolean().optional() }).strict()).parse(run.cancelledAllocations);
+      if (state.version < 6 || !run.cancelled || records.some(item => !ownsCancelledAllocation(run.runId, item.binding)))
+        throw new Error("Invalid cancelled allocation proof");
+      run.cancelledAllocations = records;
+    }
     if (run.supersededBy !== undefined && (textField(run.supersededBy) === run.runId || run.status !== "escalated" || run.pendingAction))
       throw new Error("Invalid follow-up supersession");
     if (run.pendingAction !== undefined) {
@@ -393,6 +404,14 @@ function parseState(input: unknown, repository: string): JournalState {
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (out.cancellationStopProof !== undefined) {
+      out.cancellationStopProof = CancellationStopProofSchema.parse(out.cancellationStopProof);
+      if (state.version < 6 || !out.cancelRequested || !out.handle || digest(out.cancellationStopProof.handle) !== digest(out.handle) ||
+          Date.parse(out.cancellationStopProof.observedAt) < Date.parse(out.handle.acceptedAt) ||
+          !state.runs.some(run => run.runId === out.handle!.runId && run.cancelled)) throw new Error("Invalid cancellation stop proof");
+    }
+    if (out.cancellationLeaseDisposition !== undefined && (state.version < 6 || !out.cancellationStopProof ||
+        !["released", "expired"].includes(out.cancellationLeaseDisposition))) throw new Error("Invalid cancellation lease disposition");
     if (out.stopObservedAt !== undefined) {
       IsoDateTimeSchema.parse(out.stopObservedAt);
       if (!out.handle || out.message.type !== "delegation.request" || Date.parse(out.stopObservedAt) < Date.parse(out.handle.acceptedAt))

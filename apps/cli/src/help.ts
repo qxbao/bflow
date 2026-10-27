@@ -229,6 +229,8 @@ Tham số (Arguments):
   <run-id>              Định danh lượt chạy quy trình cần hủy (bắt buộc)
 
 Tùy chọn (Options):
+  --reconcile          Đối soát lại run agentic đã hủy; không gửi thêm interrupt hay tiếp tục công việc.
+                        Thiếu bằng chứng dừng được hỗ trợ thì giữ blocker, quyền ghi và worktree.
   --reason <text>       Lý do hủy (mặc định: "Cancelled by operator via CLI")
   --by, --requested-by <actor>
                         Danh tính người yêu cầu hủy (mặc định: "human_operator")

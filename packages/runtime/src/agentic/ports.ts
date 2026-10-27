@@ -1,5 +1,5 @@
 import type {
-  AgentExecutionHandle, AgentResult, AgentTransport, ApprovalDecision, ApprovalRequest, ArtifactStore,
+  AgentExecutionHandle, AgentRequest, AgentResult, AgentTransport, ApprovalDecision, ApprovalRequest, ArtifactStore,
   GitChangeSet, JsonValue, OperationOptions, OperationResult, PaneBinding, QualityGate,
   QualityGateDefinition, QualityGateResult, RoleMessage, RunStore, SessionManifest, Specification, TestStrategy,
   VerificationCycle, VerificationResult, WorkflowDefinition, WorkflowEngine
@@ -70,6 +70,8 @@ export interface PanePolicy {
     taskId: string; runId: string; worktreePath: string; branchName: string; agentName: string;
   }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
   releaseDeveloper(request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions): Promise<OperationResult<unknown>>;
+  /** Cancelled, proven-stopped allocation: retain the pane/worktree for idempotent manifest cleanup. */
+  releaseCancelledDeveloper?: (request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
 }
 export interface AgenticPolicies {
   specification: SpecificationPolicy;
@@ -94,6 +96,10 @@ export interface AgenticRuntimePorts {
   engine: WorkflowEngine; runStore: RunStore; artifactStore: ArtifactStore;
   registry: import("@bflow/contracts").AgentRegistry; transport: AgentTransport;
   panes: PanePolicy; policies: AgenticPolicies;
+  pinDeveloperDispatch?: (request: AgentRequest, binding: PaneBinding) => Promise<void>;
+  bindDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<void>;
+  stopDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<import("./cancellation-stop.js").CancellationStopProof | undefined>;
+  stopUnboundDeveloperScope?: (binding: PaneBinding) => Promise<import("./cancellation-stop.js").NamespaceExitProof | undefined>;
   /** Trusted host authentication of a Herdr-originated envelope, never an agent-supplied flag. */
   authenticateMessage(message: RoleMessage): Promise<boolean>;
   /**

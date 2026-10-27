@@ -610,6 +610,22 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect((await journalEntries(host.journal)).map(entry => entry.kind)).toEqual(["intent", "released"]);
   });
 
+  it("retains the proven-stopped cancellation pane and retries launch revocation without losing its manifest binding", async () => {
+    const host = await buildHost({ mcpServiceIds: ["svc-search"] });
+    const allocated = await host.panes.allocateDeveloper(allocation("run-1-t1"));
+    expect(allocated.ok).toBe(true); if (!allocated.ok) return;
+    const release = vi.spyOn(host.service, "releaseLaunch").mockRejectedValueOnce(new Error("temporary revocation failure"));
+    const request = { taskId: "run-1-t1", closePane: false, removeWorktree: false };
+    expect((await host.panes.releaseCancelledDeveloper!(request)).ok).toBe(false);
+    const manifest = await host.rolePanes.getManifest();
+    expect(manifest.ok && manifest.value?.panes.find(pane => pane.paneId === allocated.value.paneId)?.metadata?.allocationStatus).toBe("released");
+    expect(host.herdr.panes.has(allocated.value.paneId)).toBe(true);
+    expect((await host.panes.releaseCancelledDeveloper!(request)).ok).toBe(true);
+    expect(gatewayControl.registrations.size).toBe(0);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(host.herdr.calls.some(call => call.args[0] === "pane" && call.args[1] === "close" && call.args[2] === allocated.value.paneId)).toBe(false);
+  });
+
   it("releases a cancelled Developer by closing its pane and revoking its launch", async () => {
     const host = await buildHost({ mcpServiceIds: ["svc-search"] });
     const allocated = await host.panes.allocateDeveloper(allocation("run-1-t2"));

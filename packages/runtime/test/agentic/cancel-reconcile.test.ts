@@ -1,7 +1,10 @@
-import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { once } from "node:events";
+import { createHash } from "node:crypto";
+import { DeveloperProcessScopes } from "../../src/agentic/developer-process-scope.js";
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentRequestSchema, RoleMessageSchema, type PaneBinding, type QualityGate, type Specification } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
@@ -22,6 +25,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "core
 /** Developer panes are allocated on demand; `busy` only controls the Developer pane's readiness for prompt. */
 class Panes implements PanePolicy {
   busy = new Set<string>();
+  releases: { taskId: string; closePane: boolean; removeWorktree: boolean }[] = [];
   bindings: PaneBinding[] = ["conversation", "coordinator", "specifier", "architect", "planner", "reviewer", "qa", "tester"].map(role => ({
     schemaVersion: 2, bindingId: `binding-${role}`, sessionId: "session-1", role: role as PaneBinding["role"],
     paneGroup: "coordination", agentId: role, workspaceId: "workspace-1", tabId: "tab-1", paneId: `pane-${role}`,
@@ -33,13 +37,21 @@ class Panes implements PanePolicy {
     conversationSessionId: "session-1", activeRunIds: [], panes: this.bindings, attachTarget: { role: "conversation" as const, paneId: "pane-conversation" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } }; }
   async getRoleBinding(selector: string) { return { ok: true as const, value: this.bindings.find(p => [p.role, p.bindingId, p.paneId, p.agentId].includes(selector)) ?? null }; }
   async inspectRoleHealth(selector: string) { const p = unwrap(await this.getRoleBinding(selector)); if (!p) throw new Error("No pane"); return { ok: true as const, value: { readyForPrompt: !this.busy.has(p.role), occupantMatches: true, paneId: p.paneId, agentId: p.agentId } }; }
-  async allocateDeveloper(request: { taskId: string; worktreePath: string; agentName: string }) {
+  async allocateDeveloper(request: { taskId: string; worktreePath: string; agentName: string; runId?: string }) {
     const old = this.bindings.find(p => p.agentId === request.agentName); if (old) return { ok: true as const, value: old };
     const p = { ...this.bindings[0]!, bindingId: request.agentName, role: "developer" as const, agentId: request.agentName,
-      paneId: `pane-${request.agentName}`, cwd: request.worktreePath, worktreePath: request.worktreePath, readOnlyWorkspace: false };
+      paneId: `pane-${request.agentName}`, cwd: request.worktreePath, worktreePath: request.worktreePath, readOnlyWorkspace: false,
+      metadata: { taskId: request.taskId, ...(request.runId ? { runId: request.runId } : {}) } };
     this.bindings.push(p); return { ok: true as const, value: p };
   }
-  async releaseDeveloper() { return { ok: true as const, value: undefined }; }
+  async releaseDeveloper(request: { taskId: string; closePane: boolean; removeWorktree: boolean }) {
+    const binding = this.bindings.find(p => p.metadata?.taskId === request.taskId);
+    if (binding && git(binding.cwd, "status", "--porcelain")) return { ok: false as const,
+      error: { code: "conflict" as const, retryable: false, message: "Worktree contains uncommitted changes" } };
+    this.releases.push(request);
+    if (binding) binding.metadata = { ...binding.metadata, allocationStatus: "released" };
+    return { ok: true as const, value: undefined };
+  }
 }
 
 /**
@@ -57,11 +69,13 @@ async function fixture() {
   cleanups.push(async () => { store.close(); artifacts.close(); await rm(root, { recursive: true, force: true }); });
   const transport = new FakeAgentTransport(); const panes = new Panes();
   const engine = new DeterministicWorkflowEngine({ bindingReceiptKeys: {} });
-  const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
+  let timeOffset = 0;
+  const clock = () => new Date(Date.now() + timeOffset);
+  const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json"), clock });
   const checks = ["review", "regression"].map(id => ({ id, name: id, evaluator: id, required: true, timeout: { executionTimeoutMs: 3000, onTimeout: "block" }, configuration: {} })) as any;
   const gates: QualityGate[] = checks.map((check: { id: string }) => ({ id: check.id, evaluate: async () => { throw new Error("Quality gates are not evaluated by cancellation scenarios"); } }));
   const conversationInbox: unknown[] = [];
-  const ports = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, policies: undefined as unknown as Awaited<ReturnType<typeof loadAgenticPolicies>>,
+  const ports = { engine, runStore: store, artifactStore: artifacts, registry, transport, panes, clock, policies: undefined as unknown as Awaited<ReturnType<typeof loadAgenticPolicies>>,
     deliverToConversation: async (message: unknown) => { conversationInbox.push(message); },
     roleCapabilities: { developer: ["implementation"], coordinator: ["coordination", "repository.read"], conversation: ["conversation"], specifier: ["specification", "repository.read"], architect: ["architecture", "repository.read"], planner: ["planning", "repository.read"], reviewer: ["review", "repository.read"], qa: ["verification", "repository.read"], tester: ["testing", "repository.read"] },
     taskChecks: checks, workflowChecks: checks,
@@ -99,7 +113,7 @@ async function fixture() {
     expect(developer.status).toBe("accepted");
     return developer;
   }
-  return { root, repository, runtime, ports, transport, panes, dispatch,
+  return { root, repository, runtime, ports, transport, panes, dispatch, spec, definition: def, advance: (ms: number) => { timeOffset += ms; },
     state: async () => await runtime.inspect() as any,
     /** Conversation notices of the run that carry the cancellation headline, interim or final. */
     cancelHeadlines: async () => ((await runtime.inspect() as any).outbound as any[])
@@ -491,4 +505,334 @@ describe("trusted cancellation control bypasses work dispatch waits", () => {
     expect(f.transport.cancelledHandles).toHaveLength(1);
   });
 
+});
+
+// An explicit operator observation must recover historical cancelReconciled=true reports without re-dispatching work.
+describe("explicit cancellation recovery", () => {
+  async function exhausted() {
+    const f = await fixture(); const developer = await f.dispatch();
+    await f.runtime.cancel("run-1", "User cancelled");
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "done", observedAt: new Date().toISOString(), correlationVerified: false } });
+    for (let n = 0; n < CANCEL_STOP_OBSERVATION_LIMIT; n++) await f.runtime.tick();
+    expect((await f.state()).runs[0].cancelReconciled).toBe(true);
+    return { ...f, developer };
+  }
+  it("reobserves an exhausted cancellation, releases its writer, and preserves the worktree without sending or interrupting again", async () => {
+    const f = await exhausted(); const sent = f.transport.sentRequests.length;
+    f.transport.customWaitHandler = (handle, options) => {
+      expect(options?.until).not.toContain("cancelled");
+      return { ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } };
+    };
+    const report = await (f.runtime as any).reconcileCancellation("run-1");
+    expect(report).toMatchObject({ runId: "run-1", fullyStopped: true, blockers: [] });
+    expect(f.panes.releases).toEqual([{ taskId: "run-1-implement", closePane: false, removeWorktree: false }]);
+    expect(git(f.repository, "worktree", "list", "--porcelain")).toContain(f.developer.handle.target.worktreePath);
+    expect((await f.ports.engine.getSnapshot("run-1") as any).value.status).toBe("cancelled");
+    expect(f.transport.sentRequests).toHaveLength(sent);
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+    const after = (await f.state()).outbound.find((o: any) => o.message.message_id === f.developer.message.message_id);
+    expect(after.cancellationStopProof).toBeDefined();
+    expect(after.status).toBe("released");
+    const restarted = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    expect(await (restarted as any).reconcileCancellation("run-1")).toMatchObject({ fullyStopped: true });
+    expect(f.panes.releases).toHaveLength(1);
+  });
+  it("does not release on uncorrelated idle or on a different execution and does not reset the automatic observation budget", async () => {
+    const f = await exhausted();
+    for (const foreign of [false, true]) {
+      f.transport.customWaitHandler = handle => ({ ok: true, value: { handle: foreign ? { ...handle, executionId: "foreign-execution" } : handle,
+        state: "idle", observedAt: new Date().toISOString(), correlationVerified: foreign } });
+      expect(await (f.runtime as any).reconcileCancellation("run-1")).toMatchObject({ fullyStopped: false });
+    }
+    expect(f.panes.releases).toHaveLength(0);
+    const after = (await f.state()).outbound.find((o: any) => o.message.message_id === f.developer.message.message_id);
+    expect(after).toMatchObject({ status: "accepted", cancelObservations: CANCEL_STOP_OBSERVATION_LIMIT });
+    expect(after.cancellationStopProof).toBeUndefined();
+  });
+  it("retains dirty work and reports writer cleanup as blocked even after a proven stop", async () => {
+    const f = await exhausted();
+    await writeFile(join(f.developer.handle.target.worktreePath, "guide.md"), "unhanded documentation\n");
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    const report = await (f.runtime as any).reconcileCancellation("run-1");
+    expect(report.fullyStopped).toBe(false);
+    expect(report.blockers.join(" ")).toContain("uncommitted");
+    expect(f.panes.releases).toHaveLength(0);
+    expect(git(f.developer.handle.target.worktreePath, "diff")).toContain("unhanded documentation");
+    expect((await f.ports.engine.getSnapshot("run-1") as any).value.status).toBe("cancelling");
+  });
+  it("settles an expired grant without claiming a Registry release receipt", async () => {
+    const f = await exhausted(); f.advance(360_000);
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    expect(await f.runtime.reconcileCancellation("run-1")).toMatchObject({ fullyStopped: true });
+    const after = (await f.state()).outbound.find((o: any) => o.message.message_id === f.developer.message.message_id);
+    expect(after).toMatchObject({ status: "released", cancellationLeaseDisposition: "expired" });
+    const registry = JSON.parse(await readFile(join(f.root, "registry.json"), "utf8"));
+    expect(registry.receipts[`release:${after.lease.leaseId}:${after.lease.version}`]).toBeUndefined();
+    const reports = (await f.state()).outbound.filter((o: any) => String(o.message.payload.headline).includes("fully stopped"));
+    expect(reports.at(-1).message.payload.headline).toContain("0 lease(s) released, 1 lease(s) expired without a release receipt");
+  });
+  it("does not reinterpret stale Registry state as an expired or released grant", async () => {
+    const f = await exhausted(); f.advance(360_000);
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    f.ports.registry.releaseLease = async () => ({ ok: false, error: { code: "conflict", retryable: false, message: "Stale fencing token or lease version" } });
+    const report = await f.runtime.reconcileCancellation("run-1");
+    expect(report.fullyStopped).toBe(false);
+    expect(report.blockers.join(" ")).toContain("Stale fencing token");
+    const out = (await f.state()).outbound.find((o: any) => o.message.message_id === f.developer.message.message_id);
+    expect(out.status).toBe("accepted"); expect(out.cancellationLeaseDisposition).toBeUndefined();
+  });
+  it("persists stop proof before failed writer cleanup and retries after restart without a second interrupt", async () => {
+    const f = await exhausted(); const release = f.panes.releaseDeveloper.bind(f.panes);
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    f.panes.releaseDeveloper = async () => ({ ok: false, error: { code: "conflict", retryable: false, message: "temporary cleanup failure" } });
+    expect(await f.runtime.reconcileCancellation("run-1")).toMatchObject({ fullyStopped: false });
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async state => {
+      expect(state.version).toBe(6);
+      const pending = state.outbound.find(o => o.message.message_id === f.developer.message.message_id)!;
+      expect(pending.cancellationStopProof?.handle).toEqual(pending.handle);
+    });
+    f.panes.releaseDeveloper = release;
+    const restarted = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    expect(await restarted.reconcileCancellation("run-1")).toMatchObject({ fullyStopped: true });
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+  });
+  it("refuses malformed stop observations and a replacement Developer binding", async () => {
+    const f = await exhausted();
+    for (const change of [{ correlationVerified: "yes" }, { observedAt: "2000-01-01T00:00:00Z" }]) {
+      f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true, ...change } } as any);
+      expect(await f.runtime.reconcileCancellation("run-1")).toMatchObject({ fullyStopped: false });
+      const out = (await f.state()).outbound.find((o: any) => o.message.message_id === f.developer.message.message_id);
+      expect(out.cancellationStopProof).toBeUndefined();
+    }
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    f.panes.bindings.find(p => p.role === "developer")!.session = { source: "test", kind: "id", value: "replacement" };
+    expect((await f.runtime.reconcileCancellation("run-1")).blockers.join(" ")).toContain("binding was replaced");
+    expect(f.panes.releases).toHaveLength(0);
+  });
+  it("rejects a v6 stop receipt in a downgraded journal and refuses a receipt for another handle", async () => {
+    const f = await exhausted();
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    await f.runtime.reconcileCancellation("run-1");
+    const path = join(f.root, "journal/state.json"), raw = JSON.parse(await readFile(path, "utf8"));
+    raw.version = 5; await writeFile(path, JSON.stringify(raw));
+    await expect(new AgenticJournal(join(f.root, "journal"), f.repository).exclusive(async () => {})).rejects.toThrow("Invalid cancellation stop proof");
+    raw.version = 6;
+    raw.outbound.find((out: any) => out.message.message_id === f.developer.message.message_id).cancellationStopProof.handle.executionId = "foreign";
+    await writeFile(path, JSON.stringify(raw));
+    await expect(new AgenticJournal(join(f.root, "journal"), f.repository).exclusive(async () => {})).rejects.toThrow("Invalid cancellation stop proof");
+  });
+  it("retains the Developer allocation while a native mutation still has unknown delivery", async () => {
+    const f = await exhausted();
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.runs[0]!.nativeDeliveries = [{ operationId: "pending-native-wake", message: RoleMessageSchema.parse({ schema_version: 2,
+        message_id: "pending-wake", correlation_id: "correlation-1", run_id: "run-1", sender: { role: "coordinator" },
+        recipient: { role: "developer", pane_id: f.developer.handle.target.paneId }, type: "task.status", payload: { action: "pending" },
+        artifact_references: [], idempotency_key: "pending-wake" }) }]; await save();
+    });
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    expect(await f.runtime.reconcileCancellation("run-1")).toMatchObject({ fullyStopped: false });
+    expect(f.panes.releases).toHaveLength(0);
+    expect((await f.state()).outbound.find((o: any) => o.message.message_id === f.developer.message.message_id).status).toBe("accepted");
+  });
+  it("does not alter another escalated run or its exhausted resume budget", async () => {
+    const f = await exhausted();
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.runs.push({ runId: "run-2", delegation: { ...state.runs[0]!.delegation, runId: "run-2" }, status: "escalated", tasks: [],
+        coreCreated: false, cancelled: false, maxIterations: 3, error: "predecessor writer still active",
+        pendingAction: { actionId: `next-${digest(["run-2", "old-blocker"])}`, kind: "resume_coordinator", owner: "coordinator",
+          reason: "predecessor writer still active", sourceMessageId: "old-blocker", createdAt: f.ports.clock().toISOString(),
+          state: "pending", previousStatus: "intake", resumeAttempts: 3, manualResumeAttempts: 0, recovery: "manual" } }); await save();
+    });
+    const before = (await f.state()).runs[1];
+    await f.runtime.reconcileCancellation("run-1");
+    expect((await f.state()).runs[1]).toEqual(before);
+  });
+  it("recovers a crash after saving cancellation intent but before requesting Core cancellation", async () => {
+    const f = await fixture(); await f.dispatch();
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.runs[0]!.cancelled = true; state.runs[0]!.status = "cancelled"; state.runs[0]!.cancelReconciled = true; await save();
+    });
+    expect((await f.ports.engine.getSnapshot("run-1") as any).value.status).toBe("running");
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    const restarted = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    expect(await restarted.reconcileCancellation("run-1")).toMatchObject({ fullyStopped: true });
+    expect((await f.ports.engine.getSnapshot("run-1") as any).value.status).toBe("cancelled");
+    expect(f.transport.cancelledHandles).toHaveLength(0);
+  });
+  it("rejects reconciliation of a live run", async () => {
+    const f = await fixture(); await f.dispatch();
+    await expect((f.runtime as any).reconcileCancellation("run-1")).rejects.toThrow(/cancelled/i);
+    expect(f.transport.cancelledHandles).toHaveLength(0); expect(f.panes.releases).toHaveLength(0);
+  });
+});
+
+
+/** Real process scopes + the existing real Engine/Registry/stores; only the Herdr transport/pane UI remain fake. */
+async function futureScopeFixture() {
+  const f = await fixture(), bin = join(f.root, "provider-bin"); await mkdir(bin);
+  const code = `#!${process.execPath}\nconsole.log('scoped-provider-ready');setInterval(()=>{},1000);\n`;
+  const provider = join(bin, "codex"); await writeFile(provider, code, { mode: 0o700 });
+  const manager = new DeveloperProcessScopes({ directory: join(f.root, "process-scopes") });
+  const allocate = f.panes.allocateDeveloper.bind(f.panes);
+  f.panes.allocateDeveloper = async request => {
+    const material = await manager.prepare({ runId: request.runId!, taskId: request.taskId, executable: provider,
+      executableDigest: createHash("sha256").update(code).digest("hex"), configFiles: [],
+      material: { provider: "codex", argv: [], env: { PATH: bin + ":" + process.env.PATH }, launchId: "future-launch", launchFingerprint: "a".repeat(64) } });
+    const allocated = await allocate(request);
+    allocated.value.metadata = { ...allocated.value.metadata, launchId: material.launchId, launchFingerprint: material.launchFingerprint, processScopeId: material.env.BFLOW_PROCESS_SCOPE_ID };
+    const child = spawn(join(material.env.PATH!.split(":")[0]!, "codex"), [], { cwd: request.worktreePath,
+      env: { ...process.env, ...material.env }, stdio: ["ignore", "pipe", "pipe"] });
+    cleanups.push(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+    await Promise.race([once(child.stdout, "data"), once(child, "exit").then(() => { throw new Error("Scoped provider exited during fixture startup"); })]);
+    return allocated;
+  };
+  const extra: Partial<import("../../src/agentic/ports.js").AgenticRuntimePorts> = {
+    pinDeveloperDispatch: (request, binding) => manager.pinDispatch(request, binding),
+    bindDeveloperExecutionScope: (handle, binding) => manager.bindExecution(handle, binding),
+    stopDeveloperExecutionScope: (handle, binding) => manager.stop(handle, binding),
+    stopUnboundDeveloperScope: binding => manager.stopUnbound(binding)
+  };
+  Object.assign(f.ports, extra);
+  f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: false } });
+  return { ...f, manager };
+}
+
+describe.skipIf(process.platform !== "linux")("future cancellations use namespace proof instead of Herdr lifecycle hints", () => {
+  it.each([false, true])("automatically stops and releases its writer even when its lease expired=%s", async expired => {
+    const f = await futureScopeFixture(); const developer = await f.dispatch();
+    if (expired) f.advance(360_000);
+    await f.runtime.cancel("run-1", "Cancel future scoped run"); await f.runtime.tick();
+    const after = (await f.state()).outbound.find((out: any) => out.message.message_id === developer.message.message_id);
+    expect(after).toMatchObject({ status: "released", cancellationStopProof: { source: "linux_pid_namespace" },
+      cancellationLeaseDisposition: expired ? "expired" : "released" });
+    expect(f.panes.releases).toEqual([{ taskId: "run-1-implement", closePane: false, removeWorktree: false }]);
+    expect((await f.ports.engine.getSnapshot("run-1") as any).value.status).toBe("cancelled");
+    expect(f.transport.cancelledHandles).toHaveLength(0);
+  });
+  it("stops the namespace while retaining allocation and lease for an uncertain native wake", async () => {
+    const f = await futureScopeFixture(); const developer = await f.dispatch();
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.runs[0]!.nativeDeliveries = [{ operationId: "uncertain-wake", message: RoleMessageSchema.parse({ schema_version: 2,
+        message_id: "uncertain-wake", correlation_id: "correlation-1", run_id: "run-1", sender: { role: "coordinator" },
+        recipient: { role: "developer", pane_id: developer.handle.target.paneId }, type: "task.status", payload: { status: "working" },
+        artifact_references: [], idempotency_key: "uncertain-wake" }) }]; await save();
+    });
+    await f.runtime.cancel("run-1", "Cancel despite lost ACK"); await f.runtime.tick();
+    const out = (await f.state()).outbound.find((item: any) => item.message.message_id === developer.message.message_id);
+    expect(out.cancellationStopProof.source).toBe("linux_pid_namespace");
+    expect(out.status).toBe("accepted"); expect(f.panes.releases).toHaveLength(0);
+    expect((await f.ports.engine.getSnapshot("run-1") as any).value.status).toBe("cancelling");
+  });
+  it("cleans up an allocated Developer that never acquired an execution handle", async () => {
+    const f = await futureScopeFixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.definition);
+    await f.panes.allocateDeveloper({ runId: "run-1", taskId: "run-1-implement", worktreePath: f.repository, agentName: "unbound-dev" });
+    await f.runtime.cancel("run-1", "Cancel before task dispatch"); await f.runtime.tick();
+    const run = (await f.state()).runs[0];
+    expect(run.cancelledAllocations).toEqual([expect.objectContaining({ released: true, proof: expect.objectContaining({ source: "linux_pid_namespace" }) })]);
+    expect(f.panes.releases).toEqual([{ taskId: "run-1-implement", closePane: false, removeWorktree: false }]);
+    expect((await f.state()).outbound.some((out: any) => out.message.type === "task.assignment" && out.handle)).toBe(false);
+  });
+});
+
+describe("cancellation allocation ownership", () => {
+  it("does not select another run by a shared run-id prefix", async () => {
+    const f = await fixture(); await f.dispatch();
+    const foreign = await f.panes.allocateDeveloper({ runId: "run-1-next", taskId: "run-1-next-implement", worktreePath: f.repository, agentName: "foreign-dev" });
+    let stoppedForeign = false;
+    Object.assign(f.ports, { stopUnboundDeveloperScope: async () => { stoppedForeign = true; return undefined; } });
+    await f.runtime.cancel("run-1", "Only cancel the selected run");
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    await f.runtime.tick();
+    expect(stoppedForeign).toBe(false);
+    expect(foreign.value.metadata?.allocationStatus).not.toBe("released");
+    expect(f.panes.releases.map(request => request.taskId)).toEqual(["run-1-implement"]);
+  });
+});
+
+describe("cancellation without a supervised process scope", () => {
+  it("does not block Core cancellation on an undispatched legacy Developer allocation", async () => {
+    const f = await fixture(); await f.runtime.proposeWorkflow("run-1", f.spec, f.definition);
+    await f.panes.allocateDeveloper({ runId: "run-1", taskId: "run-1-implement", worktreePath: f.repository, agentName: "legacy-dev" });
+    let probed = 0;
+    Object.assign(f.ports, { stopUnboundDeveloperScope: async () => { probed++; return undefined; } });
+    await f.runtime.cancel("run-1", "Cancel before task dispatch"); await f.runtime.tick();
+    expect(probed).toBeGreaterThan(0);
+    const report = await f.runtime.reconcileCancellation("run-1");
+    expect(report).toMatchObject({ fullyStopped: true, blockers: [] });
+    expect(report.retainedWorktrees).toContain(f.repository);
+    expect((await f.state()).runs[0].cancelledAllocations).toBeUndefined();
+    expect(f.panes.releases).toHaveLength(0);
+  });
+  it("still sends the transport interrupt when the scoped stop fails", async () => {
+    const f = await fixture(); const developer = await f.dispatch();
+    Object.assign(f.ports, { stopDeveloperExecutionScope: async () => { throw new Error("scope record mode 0644"); } });
+    await f.runtime.cancel("run-1", "Cancel with a broken scope"); await f.runtime.tick();
+    expect(f.transport.cancelledHandles).toHaveLength(1);
+    const out = (await f.state()).outbound.find((item: any) => item.message.message_id === developer.message.message_id);
+    expect(out.cancelRequested).toBe(true);
+    expect(out.error).toContain("scope record mode 0644");
+  });
+  it("releases a proven-stopped Developer although another role's delivery is still uncertain", async () => {
+    const f = await fixture(); const developer = await f.dispatch();
+    await f.runtime.cancel("run-1", "Cancel with a lost Coordinator ACK");
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.outbound.push({ message: RoleMessageSchema.parse({ schema_version: 2, message_id: "lost-coordinator-ack", correlation_id: "correlation-1",
+        run_id: "run-1", sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "task.status", payload: { status: "working" },
+        artifact_references: [], idempotency_key: "lost-coordinator-ack" }), status: "unknown_delivery", selector: "coordinator",
+        taskId: "coordination", attemptId: "lost-coordinator-ack", capabilities: [],
+        request: { ...developer.request, requestId: "lost-coordinator-ack", role: "coordinator", target: { ...developer.request.target, paneId: "coordinator-pane" } } });
+      await save();
+    });
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    const report = await f.runtime.reconcileCancellation("run-1");
+    expect(f.panes.releases).toEqual([{ taskId: "run-1-implement", closePane: false, removeWorktree: false }]);
+    expect((await f.state()).outbound.find((item: any) => item.message.message_id === developer.message.message_id).status).toBe("released");
+    // The Coordinator delivery itself remains an honest blocker.
+    expect(report.fullyStopped).toBe(false);
+    expect(report.blockers.join(" ")).toContain("coordinator delivery is uncertain");
+  });
+});
+
+describe("cancelled resolver cleanup", () => {
+  it("settles the resolver's allocation even though it is not a normal Core task", async () => {
+    const f = await fixture(); await f.dispatch();
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", observedAt: new Date().toISOString(), correlationVerified: true } });
+    await f.runtime.cancel("run-1", "Cancel run"); await f.runtime.tick();
+    const binding = unwrap(await f.panes.allocateDeveloper({ runId: "run-1", taskId: "run-1-conflict-task", worktreePath: f.repository, agentName: "resolver" }));
+    const handle = { executionId: "resolver-execution", requestId: "resolver-request", attemptId: "resolver-attempt", runId: "run-1", taskId: "conflict-task",
+      idempotencyKey: "resolver-message", acceptedAt: new Date().toISOString(), correlation: { token: "resolver-request", provenance: "transport" as const, verified: true },
+      target: { transport: "herdr", agentId: binding.agentId, workspaceId: binding.workspaceId, tabId: binding.tabId, paneId: binding.paneId,
+        worktreePath: binding.worktreePath!, session: binding.session! } };
+    unwrap(await f.ports.registry.upsert({ agentId: binding.agentId, role: "developer", transport: "herdr", enabled: true,
+      priority: 0, maxConcurrentTasks: 1, capabilities: ["implementation"], settings: {} }));
+    const lease = unwrap(await f.ports.registry.acquireLease({ leaseId: "resolver-lease", agentId: binding.agentId, runId: "run-1", taskId: "conflict-task",
+      attemptId: "resolver-attempt", ttlMs: 300000, requestedAt: new Date().toISOString(), idempotencyKey: "resolver-acquire" }));
+    const resolverMessage = RoleMessageSchema.parse({ schema_version: 2, message_id: "resolver-message", correlation_id: "correlation-1", run_id: "run-1",
+      sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: binding.agentId, pane_id: binding.paneId }, type: "task.assignment",
+      payload: { kind: "git_conflict_resolution" }, artifact_references: [], idempotency_key: "resolver-message" });
+    const request = AgentRequestSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId: handle.runId, taskId: handle.taskId,
+      role: "developer", target: handle.target, instruction: JSON.stringify(resolverMessage), context: resolverMessage, workingDirectory: f.repository,
+      inputs: [], attempt: 1, retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+      timeout: { executionTimeoutMs: 300000, onTimeout: "block" }, idempotency: { key: handle.idempotencyKey, scope: "agent-request", fingerprint: digest(resolverMessage) },
+      createdAt: handle.acceptedAt, metadata: { leaseId: lease.leaseId, fencingToken: lease.fencingToken } });
+    const journal = new AgenticJournal(join(f.root, "journal"), f.repository);
+    await journal.exclusive(async (state, save) => {
+      state.runs[0]!.conflictResolution = { conflictId: "conflict-1", integrationKey: "integration-1", taskKey: "tree-1", conflictPaths: ["guide.md"],
+        worktreePath: f.repository, branchName: "main", attempts: [{ taskId: "conflict-task", attemptId: "resolver-attempt", agentName: "resolver",
+          messageId: "resolver-message", status: "assigned" }] };
+      state.outbound.push({ message: resolverMessage, status: "accepted", selector: binding.agentId, taskId: "conflict-task",
+        attemptId: "resolver-attempt", capabilities: ["implementation"], request, lease, handle, cancelRequested: true });
+      await save();
+    });
+    expect(await f.runtime.reconcileCancellation("run-1")).toMatchObject({ fullyStopped: true });
+    const run = (await f.state()).runs[0];
+    expect(run.conflictResolution.attempts[0]).toMatchObject({ status: "failed", settled: true });
+    expect(f.panes.releases.at(-1)).toEqual({ taskId: "run-1-conflict-task", closePane: false, removeWorktree: false });
+  });
 });

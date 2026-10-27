@@ -188,10 +188,11 @@ export class HerdrOutbox {
     if (Date.parse(acquired.expiresAt) <= Date.parse(this.now())) throw new Error("Recovered task lease continuation expired; reconcile before use");
     await this.renew(owner);
   }
-  async release(out: Outbound): Promise<void> {
+  async release(out: Outbound): Promise<"released" | "expired" | undefined> {
     if (out.phaseRetirement || out.reviewReplacement) return; // Historical expired grant, never claim a Registry release or remote stop.
     if (out.status === "released") return;
     if (out.leaseReacquisition) await this.reconcileLeaseAcquisition(out);
+    let disposition: "released" | "expired" | undefined;
     if (out.lease && !out.parentAssignmentId) {
       // A conflict on an already expired lease means this execution no longer holds it; any other failure stays visible.
       const expired = Date.parse(out.lease.expiresAt) <= Date.parse(this.now());
@@ -211,12 +212,21 @@ export class HerdrOutbox {
       });
       await this.save();
       const released = await this.ports.registry.releaseLease(out.leaseRelease);
-      if (!released.ok && !(released.error.code === "conflict" && Date.parse(out.lease.expiresAt) <= Date.parse(this.now()))) unwrap(released);
+      // A retried write-ahead release replays its idempotency receipt (ok). For a proven-stopped execution only the Registry's
+      // own inactive-lease conflict is settled; a fence/version mismatch means another holder and stays visible regardless of TTL.
+      const ttlExpired = Date.parse(out.lease.expiresAt) <= Date.parse(this.now());
+      const inactive = !released.ok && released.error.code === "conflict" && (out.cancellationStopProof
+        ? released.error.message === "Lease expired or already released" : ttlExpired);
+      if (!released.ok && !inactive) unwrap(released);
+      // Inactive before its TTL means the grant was already released, not expired.
+      disposition = released.ok || !ttlExpired ? "released" : "expired";
+      if (out.cancellationStopProof) out.cancellationLeaseDisposition = disposition;
       delete out.leaseRelease;
     }
     if (!out.phaseFailure && !out.error?.startsWith("policy_phase_failed:")) delete out.error;
     out.status = "released";
     await this.save();
+    return disposition;
   }
   /**
    * One bounded pass over the outbox. Each outbound is isolated: a failure is recorded on that message (error, attempt
@@ -426,6 +436,7 @@ export class HerdrOutbox {
       createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
     if (wire.type === "delegation.request" && wire.recipient.role === "coordinator")
       out.coordinatorResponseBaseline ??= this.state.outbound.length;
+    if (pane.role === "developer" && !out.parentAssignmentId) await this.ports.pinDeveloperDispatch?.(out.request, pane);
     out.status = "sending";
     await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
     if (out.parentAssignmentId) {
@@ -437,6 +448,11 @@ export class HerdrOutbox {
           throw new Error("Task notice recipient is no longer ready");
         await this.validateNotice(out, currentPane); await this.renew(out);
       } catch (error) { out.status = "queued"; out.error = String(error); await this.save(); return; }
+    }
+    if (pane.role === "developer" && !out.parentAssignmentId && this.ports.pinDeveloperDispatch) {
+      // Scope bootstrap verification can await the OS. Revalidate the current lease/fence after it and the durable dispatch intent.
+      try { await this.renew(out); }
+      catch (error) { out.status = "queued"; out.error = `Developer dispatch lease is no longer current: ${String(error)}`; await this.save(); return; }
     }
     try {
       const value = unwrap(await this.ports.transport.send(out.request));

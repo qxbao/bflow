@@ -338,3 +338,22 @@ export async function readExistingAgenticTelemetry(options: { repositoryPath: st
       complete: false, diagnostics: ["host_unavailable"] });
   }
 }
+
+const RECONCILE_CANCELLATION_TIMEOUT_MS = 600_000;
+/** Explicit operator mutation, connect-only. Never bootstraps a daemon, changes platform configuration or resumes work. */
+export async function reconcileExistingAgenticCancellation(options: { repositoryPath: string; sessionId: string; runId: string }): Promise<import("./cancellation-stop.js").CancellationReconciliationReport> {
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Invalid host session ID");
+  const repositoryPath = await realpath(options.repositoryPath);
+  const stateDirectory = findPrivateRuntimeStateDirectory(repositoryPath);
+  if (!stateDirectory) throw new Error("No existing Bflow host; preserve state and reconcile the session before retrying");
+  const directory = resolve(stateDirectory, "host", options.sessionId);
+  const configuration = await readHostConfiguration(join(directory, "host.json"));
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+    throw new Error("Foreign host configuration");
+  const { CancellationReconciliationReportSchema } = await import("./cancellation-stop.js");
+  const report = CancellationReconciliationReportSchema.parse(await callHost(configuration.socketPath, configuration.token,
+    // Bounded per-execution stops run under the journal lock; a client timeout does not mean the host stopped applying them.
+    "reconcile_cancellation", { runId: textField(options.runId) }, RECONCILE_CANCELLATION_TIMEOUT_MS));
+  if (report.runId !== options.runId) throw new Error("Foreign cancellation report");
+  return report;
+}

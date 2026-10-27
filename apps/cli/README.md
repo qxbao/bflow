@@ -647,3 +647,20 @@ Lỗi telemetry được thể hiện trong coverage/diagnostics cố định; k
 hay exit behavior của status thông thường. Chi tiết định nghĩa và giới hạn độ chính xác:
 [telemetry Specification](../../packages/runtime/TELEMETRY-SPEC.md) và
 [Runtime telemetry](../../packages/runtime/README.md#telemetry-hiệu-quả-workflow).
+
+### Reconcile an existing agentic cancellation
+
+Use `bflow cancel <run-id> --reconcile --json` for a run that is already cancelled
+and whose bounded automatic stop observation has ended. This operator command
+connects only to the existing agentic host; it does not use the legacy cancel
+store, start/restart a host, resend an interrupt, resume another run, or approve
+anything. Do not combine `--reconcile` with task, reason, actor, version, or
+idempotency-key options. `fullyStopped: false` reports blockers and returns a
+nonzero exit code; retained worktrees are named in both text and JSON output.
+
+The current Herdr adapter has no correlated process-stop proof, so idle/done,
+lease expiry, a closed CLI, or a cancellation notice is insufficient to release
+its writer. Unsupported/missing evidence stays blocked; see the Runtime
+[reconciliation limitations](../../packages/runtime/README.md#explicit-cancellation-reconciliation).
+An old running daemon must support the new operation before it can use this
+path; the CLI does not silently restart it or fall back to a different store.
