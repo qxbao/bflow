@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type QualityGateDefinition } from "@bflow/contracts";
+import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type JsonValue, type QualityGateDefinition } from "@bflow/contracts";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
-import { record, textField } from "./journal.js";
-import { NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
+import { json, record, textField } from "./journal.js";
+import { BehavioralIdentityMismatch, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
 import { parseVitestJson } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
 import type { AdapterRunner } from "./runner-adapter.js";
@@ -466,6 +466,16 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     await rm(temporary, { recursive: true, force: true });
   }
 }
+/** Parser failure that keeps the original message and carries bounded, JSON-safe runner evidence for audit and Conversation. */
+export class BehavioralMeasurementError extends Error {
+  constructor(readonly original: unknown, readonly diagnostics: JsonValue) { super(original instanceof Error ? original.message : String(original)); }
+}
+export function measurementDiagnostics(command: { readonly command: string; readonly testNames: readonly string[] }, outcome: QualityCommandOutcome, error: unknown): JsonValue {
+  const bounded = (values: readonly string[]) => values.slice(0, 100).map(value => value.slice(0, 200));
+  return json({ command: command.command, cwd: outcome.cwd, exitCode: outcome.exitCode, signal: outcome.signal, timedOut: outcome.timedOut,
+    stdoutTail: outcome.stdout.slice(-4096), stderrTail: outcome.stderr.slice(-4096), expectedNames: bounded(command.testNames),
+    ...(error instanceof BehavioralIdentityMismatch ? { observedNames: bounded(error.observedNames) } : {}) });
+}
 /** Runs only committed bytes in a new detached worktree; it has no host credentials or inherited Node/Git overrides. */
 export async function measureBehavior(command: BoundBehavioralCommand, cwd: string, revision: string,
   options: { readonly rtk?: RtkOutputRequest } = {}): Promise<BehavioralMeasurement> {
@@ -475,8 +485,11 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
     parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes)
       : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
   } catch (error) {
-    if (error instanceof NodeTapTestCodeFailure && rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
-    throw error;
+    if (error instanceof NodeTapTestCodeFailure) {
+      if (rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+      throw error;
+    }
+    throw new BehavioralMeasurementError(error, measurementDiagnostics(command, outcome, error));
   }
   return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,
     ...(rtkResult ? { rtk: rtkResult } : {}) };

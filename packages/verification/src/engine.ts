@@ -4,7 +4,7 @@ import {
   ArtifactProposalSchema, ArtifactReferenceSchema, ArtifactWriteOptionsSchema, GitChangeSetSchema,
   OperationResultSchema, QualityGateContextSchema, QualityGateResultSchema,
   RoleMessageSchema, SpecificationSchema, VerificationCycleSchema, VerificationResultSchema,
-  type ArtifactProposal, type ArtifactReference, type ArtifactStore, type GitChangeSet, type QualityFinding,
+  type ArtifactProposal, type ArtifactReference, type ArtifactStore, type GitChangeSet, type JsonValue, type QualityFinding,
   type QualityGate, type QualityGateResult, type RoleMessage, type Specification,
   type VerificationCycle, type VerificationResult
 } from "@bflow/contracts";
@@ -39,7 +39,22 @@ const ReceiptSchema = z.object({
   evidence: ArtifactReferenceSchema, outputArtifacts: z.array(ArtifactReferenceSchema).default([]), reused: z.boolean(), reason: z.string()
 }).strict();
 type CheckReceipt = z.infer<typeof ReceiptSchema>;
-class VerificationUnavailable extends Error {}
+/** Gate error with the runner's optional, already-bounded diagnostics preserved for audit. */
+class GateFailure extends Error {
+  constructor(message: string, readonly details?: JsonValue) { super(message); }
+}
+class VerificationUnavailable extends GateFailure {}
+class GateRejection extends GateFailure {}
+/** Bounded one-line summary of error findings, so escalations name the failing check instead of a fixed category. */
+function findingSummary(findings: readonly QualityFinding[]): string {
+  const errors = findings.filter(finding => finding.severity === "error");
+  if (!errors.length) return "";
+  const parts = errors.slice(0, 3).map(finding => {
+    const message = finding.message.replace(/\s+/g, " ");
+    return `${finding.code}: ${message.length > 240 ? `${message.slice(0, 237)}...` : message}`;
+  });
+  return `: ${parts.join("; ")}${errors.length > 3 ? ` (+${errors.length - 3} more)` : ""}`;
+}
 
 /** Stateless between submissions: Runtime persists the returned contract cycle.
  * Every call performs at most one verification iteration; never dispatches repairs. */
@@ -133,8 +148,8 @@ export class VerificationEngine {
     }
     return artifacts;
   }
-  private finding(plan: VerificationPlan, code: string, message: string, role = "developer"): QualityFinding {
-    return { code, severity: "error", message, details: { taskId: plan.taskId, responsibleRole: role, requiresNewTaskIfOutsideScope: true } };
+  private finding(plan: VerificationPlan, code: string, message: string, role = "developer", extra: Record<string, JsonValue> = {}): QualityFinding {
+    return { code, severity: "error", message, details: { taskId: plan.taskId, responsibleRole: role, requiresNewTaskIfOutsideScope: true, ...extra } };
   }
   private async current(plan: VerificationPlan): Promise<boolean> {
     const spec = SpecificationSchema.parse(await this.ports.loadSpecification(plan.specification.specId));
@@ -195,8 +210,8 @@ export class VerificationEngine {
       });
       const response = OperationResultSchema(QualityGateResultSchema).parse(await Promise.race([operation, timeout]));
       if (!response.ok) {
-        if (response.error.code === "validation") throw new Error(response.error.message);
-        throw new VerificationUnavailable(response.error.message);
+        if (response.error.code === "validation") throw new GateRejection(response.error.message, response.error.details);
+        throw new VerificationUnavailable(response.error.message, response.error.details);
       }
       const result = response.value;
       if (Date.parse(result.evaluatedAt) < Date.parse(dispatchedAt) || Date.parse(result.evaluatedAt) > Date.parse(this.now()))
@@ -248,6 +263,7 @@ export class VerificationEngine {
     const intent = await this.store(plan, `${key}:intent`, { plan, cycleId: cycle.cycleId, iteration, change, options, startedAt }, "log");
     const findings: QualityFinding[] = [];
     const receipts: CheckReceipt[] = [];
+    const failedChecks: { checkId: string; code: string; message: string; diagnostics?: JsonValue }[] = [];
     const gateResults: QualityGateResult[] = [];
     let conflict = false, blocked = false, inconclusive = false, failed = false;
     try {
@@ -344,7 +360,11 @@ export class VerificationEngine {
           }
         } catch (error) {
           if (error instanceof VerificationUnavailable) blocked = true; else inconclusive = true;
-          findings.push(this.finding(plan, error instanceof VerificationUnavailable ? "runner_unavailable" : "invalid_or_missing_evidence", `${definition.id}: ${String(error)}`, config.kind === "review" ? config.role : "qa"));
+          const code = error instanceof VerificationUnavailable ? "runner_unavailable" : "invalid_or_missing_evidence";
+          const diagnostics = error instanceof GateFailure ? error.details : undefined;
+          findings.push(this.finding(plan, code, `${definition.id}: ${String(error)}`, config.kind === "review" ? config.role : "qa",
+            diagnostics === undefined ? {} : { runnerDiagnostics: diagnostics }));
+          failedChecks.push({ checkId: definition.id, code, message: String(error), ...(diagnostics === undefined ? {} : { diagnostics }) });
         }
       }
       try {
@@ -355,7 +375,7 @@ export class VerificationEngine {
     const status: VerificationResult["status"] = conflict ? "escalated" : blocked ? "blocked" : inconclusive ? "inconclusive" : failed ? "failed" : "passed";
     const completedAt = this.now();
     const audit = await this.store(plan, `${key}:audit`, {
-      intent, changeSet: change, iteration, status, findings, checks: receipts, options,
+      intent, changeSet: change, iteration, status, findings, checks: receipts, failedChecks, options,
       ...(options.integration ? {
         integrationCommitHash: options.integration.headCommitHash,
         integratedTaskIds: options.integration.integratedTaskIds
@@ -419,9 +439,9 @@ export class VerificationEngine {
     const next = VerificationCycleSchema.parse({ ...cycle, currentIteration: iteration, updatedAt: completedAt,
       status: status === "passed" ? "passed" : escalate ? "escalated" : "rework_required",
       history: [...cycle.history, result],
-      ...(escalate ? { escalation: { escalatedAt: completedAt, reason: conflict ? "Specification/scope conflict" :
+      ...(escalate ? { escalation: { escalatedAt: completedAt, reason: (conflict ? "Specification/scope conflict" :
         status === "inconclusive" ? "Missing or invalid objective evidence" : status === "blocked" ? "Verification environment blocked; reconcile before retry" :
-        "Verification iteration limit exhausted", target: "human_operator", evidenceArtifacts } } : {}),
+        "Verification iteration limit exhausted") + (status === "blocked" || status === "inconclusive" ? findingSummary(findings) : ""), target: "human_operator", evidenceArtifacts } } : {}),
       metadata: { ...cleanMetadata, planId: plan.planId }
     });
     const persisted = await this.store(plan, `${key}:result`, { result, cycle: next });

@@ -1,6 +1,7 @@
 import { isAbsolute, relative } from "node:path";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { digest, record, textField } from "./journal.js";
+import { BehavioralIdentityMismatch } from "./node-tap.js";
 
 /** Private codec for the actual Vitest 2.1 JSON reporter, with the trusted runtime companion.
  * Suite totals count files plus describe suites; reconstruct ancestors instead of equating suites with files.
@@ -50,7 +51,7 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
     if (file.status !== (fileFailed ? "failed" : "passed")) throw new Error("Vitest suite infrastructure failure contradicts leaf results");
   }
   const names = results.map(result => result.name), failedSuites = [...suites.values()].filter(Boolean).length;
-  if (new Set(names).size !== names.length || digest([...names].sort()) !== digest([...expectedNames].sort())) throw new Error("Observed test names differ from owner-configured identities");
+  if (new Set(names).size !== names.length || digest([...names].sort()) !== digest([...expectedNames].sort())) throw new BehavioralIdentityMismatch(expectedNames, names);
   if (tests !== results.length + filtered || filtered !== counter("numPendingTests") || passed !== observedPassed || failed !== observedFailed || counter("numTotalTestSuites") !== suites.size ||
       counter("numFailedTestSuites") !== failedSuites || counter("numPassedTestSuites") !== suites.size - failedSuites ||
       report.success !== (failed === 0) || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("Vitest counters, leaf results or process exit code contradict one another");

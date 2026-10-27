@@ -12,7 +12,7 @@ import {
 import { digest, json, record, strings, textField } from "./journal.js";
 import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
-import { behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
+import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
   type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
@@ -777,7 +777,10 @@ export class HostVerification {
             summary: `${measured.passed}/${measured.tests} observed tests passed at ${measured.sourceRevision}` }, hostExecution: json(measured) } });
         await this.trustGate(result);
         return { ok: true, value: result };
-      } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+      } catch (error) {
+        const details = error instanceof BehavioralMeasurementError ? { diagnostics: error.diagnostics } : undefined;
+        return { ok: false, error: { code: "validation", retryable: false, message: String(error), ...(details ? { details } : {}) } };
+      }
     } };
   }
   /** Execute an independent phase; no test command, revision or verdict is accepted from the agent. */
