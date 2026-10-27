@@ -101,7 +101,8 @@ export async function main(
       const environmentStatus = parseRes.ok && parseRes.value.command === "status" &&
         parseRes.value.runId === undefined && parseRes.value.statusFilter === undefined && parseRes.value.workflowId === undefined &&
         parseRes.value.limit === undefined && parseRes.value.cursor === undefined;
-      if (parseRes.ok && BUSINESS_COMMANDS.has(parseRes.value.command) && !environmentStatus && !(parseRes.value.command === "status" && parseRes.value.telemetry)) {
+      if (parseRes.ok && BUSINESS_COMMANDS.has(parseRes.value.command) && !environmentStatus && !(parseRes.value.command === "status" && parseRes.value.telemetry) &&
+          !(parseRes.value.command === "cancel" && parseRes.value.reconcile)) {
         const configPath =
           parseRes.value.command === "run" ? parseRes.value.configPath : undefined;
 

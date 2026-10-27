@@ -1,4 +1,5 @@
 import { formatTelemetryReport } from "./telemetry.js";
+import { CancellationReconciliationReportSchema } from "@bflow/runtime";
 import type {
   ContractError,
   EnvironmentDoctorReport,
@@ -1365,6 +1366,11 @@ export function formatCommandSuccess(
   }
 
   if ("reportVersion" in data && data.reportVersion === 1) return formatTelemetryReport(data);
+  if (command === "cancel" && "fullyStopped" in data && typeof data.fullyStopped === "boolean") {
+    const report = CancellationReconciliationReportSchema.parse(data);
+    return [report.fullyStopped ? "Đã xác nhận dừng và hoàn tất đối soát hủy." : "Chưa hoàn tất đối soát hủy; chưa xác nhận an toàn để tiếp tục công việc mới.",
+      ...report.blockers, ...report.retainedWorktrees.map(path => `Giữ bản làm việc: ${path}`)].join("\n");
+  }
 
   if (isSnapshot(data)) {
     const runFormatted = formatWorkflowRun(data, useColor, debug);

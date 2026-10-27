@@ -2348,8 +2348,9 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
     }
 
     case "cancel": {
-      const booleanFlags = new Set(["--json", "-j", "--help", "-h"]);
+      const booleanFlags = new Set(["--reconcile", "--json", "-j", "--help", "-h"]);
       const allowedFlags = new Set([
+        "--reconcile",
         "--reason",
         "--by",
         "--requested-by",
@@ -2437,6 +2438,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
 
       const value: CancelCommandArgs = {
         command: "cancel",
+        ...(optRes.value.flags.has("--reconcile") ? { reconcile: true } : {}),
         runId,
         reason,
         requestedBy,
@@ -2446,6 +2448,8 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         json,
         help: false
       };
+      if (value.reconcile && ["--reason", "--by", "--requested-by", "--task", "--task-id", "--expected-version", "--idempotency-key"].some(flag => optRes.value.flags.has(flag)))
+        return makeValidationError("--reconcile observes an already cancelled agentic run; cancellation/task options cannot be combined with it.", json, "cancel");
       return { ok: true, value };
     }
   }

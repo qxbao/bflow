@@ -558,6 +558,16 @@ async function executeCommandWithProgress(
     const report = await executeTelemetryStatus(parsed.runId, context);
     return makeResult(CLI_EXIT_CODES.SUCCESS, true, "status", report, undefined, isJson, io, presentation);
   }
+  if (parsed.command === "cancel" && parsed.reconcile) {
+    try {
+      const { executeCancellationReconciliation } = await import("./cancel-reconciliation.js");
+      const report = await executeCancellationReconciliation(parsed.runId, context);
+      return makeResult(report.fullyStopped ? CLI_EXIT_CODES.SUCCESS : CLI_EXIT_CODES.RUNTIME_ERROR,
+        true, "cancel", report, undefined, isJson, io, presentation);
+    } catch (error) {
+      return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, toContractError(error), isJson, io, presentation);
+    }
+  }
   if (context?.runtime === undefined) {
     const error: ContractError = {
       code: "transport_unavailable",

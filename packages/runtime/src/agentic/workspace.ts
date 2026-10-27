@@ -2,7 +2,7 @@ import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage
+  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
@@ -14,6 +14,11 @@ import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
+  pinDeveloperDispatch?: AgenticRuntimePorts["pinDeveloperDispatch"];
+  bindDeveloperExecutionScope?: AgenticRuntimePorts["bindDeveloperExecutionScope"];
+  stopDeveloperExecutionScope?: AgenticRuntimePorts["stopDeveloperExecutionScope"];
+  stopUnboundDeveloperScope?: AgenticRuntimePorts["stopUnboundDeveloperScope"];
+  authorizeStoppedRetainedRelease?: (binding: PaneBinding) => Promise<boolean>;
   authorizeNativeDiagnosticFence?: AgenticRuntimePorts["authorizeNativeDiagnosticFence"];
   authorizePolicyPhaseRetirement?: AgenticRuntimePorts["authorizePolicyPhaseRetirement"];
   authorizeReviewReplacement?: AgenticRuntimePorts["authorizeReviewReplacement"];
@@ -63,8 +68,9 @@ export async function routeNativeConversationMessage(runtime: Pick<AgenticWorkfl
 }
 /** Launch material for one Developer task. `env` may carry bearer tokens: it is passed to Herdr only, never persisted. */
 export interface DeveloperLaunchPort {
-  allocate(request: { taskId: string; worktreePath: string }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
+  allocate(request: { runId: string; taskId: string; worktreePath: string }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
   release(taskId: string): Promise<void>;
+  assertProcessScope?(binding: PaneBinding): Promise<void>;
   /**
    * Reachability verdict of one launch's in-process Gateway probes, for the pane allocated to it. Throws for a launch
    * that is not active. Pane Manager stays unaware of Gateway: the verdict is computed by the host session.
@@ -129,7 +135,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       let entry = pending.get(request.taskId);
       if (entry === undefined) {
         let launch;
-        try { launch = await launches.allocate({ taskId: request.taskId, worktreePath: request.worktreePath }); }
+        try { launch = await launches.allocate({ runId: request.runId, taskId: request.taskId, worktreePath: request.worktreePath }); }
         catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
         // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
         const allocation = { ...request, agentKind: launch.provider, launch };
@@ -157,6 +163,8 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
           (binding?.agentKind === "agy" ? "herdr:antigravity_cli" : `herdr:${binding?.agentKind}`);
         if (binding?.session && nativeSourceMatches && health?.ok && health.value.readyForPrompt && health.value.occupantMatches &&
             health.value.paneId === binding.paneId && health.value.agentId === binding.agentId) {
+          try { await launches.assertProcessScope?.(binding); }
+          catch (error) { return failClosed(entry, `has no verified process supervision: ${String(error)}`, callOptions); }
           pending.delete(entry.taskId);
           ready.set(entry.taskId, { paneId: binding.paneId, launchId: entry.launchId });
           return { ok: true, value: binding };
@@ -173,6 +181,15 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       }
       return failClosed(entry, `cannot reach Gateway registration ${verdict.registrationId} from its provider process ` +
         `(${verdict.envName}: ${verdict.code}; ${verdict.reason})`, callOptions);
+    },
+    async releaseCancelledDeveloper(request, callOptions) {
+      const released = await base.releaseDeveloper({ ...request, closePane: false, removeWorktree: false }, callOptions);
+      if (!released.ok) return released;
+      // Retain the pane and exact binding; retry after a crash observes the same released allocation, not a missing shell.
+      try { await launches.release(request.taskId); }
+      catch (error) { return { ok: false, error: { code: "conflict", retryable: true, message: String(error) } }; }
+      pending.delete(request.taskId); ready.delete(request.taskId);
+      return released;
     },
     async releaseDeveloper(request, callOptions) {
       pending.delete(request.taskId); ready.delete(request.taskId);
@@ -223,6 +240,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     maxDeveloperCapacity: options.maxDeveloperCapacity ?? 2,
     defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
     roleConfigs }, runner, store: manifestStore,
+    ...(options.authorizeStoppedRetainedRelease ? { authorizeStoppedRetainedRelease: options.authorizeStoppedRetainedRelease } : {}),
     // Dynamic Developer launches carry Gateway env, which Herdr accepts only at pane creation over its socket.
     socket: paneModule.createHerdrSocketPort({ runner, sessionId: options.sessionId }) });
   const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches, {
@@ -262,6 +280,10 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       } });
     runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
+      ...(options.pinDeveloperDispatch ? { pinDeveloperDispatch: options.pinDeveloperDispatch } : {}),
+      ...(options.bindDeveloperExecutionScope ? { bindDeveloperExecutionScope: options.bindDeveloperExecutionScope } : {}),
+      ...(options.stopDeveloperExecutionScope ? { stopDeveloperExecutionScope: options.stopDeveloperExecutionScope } : {}),
+      ...(options.stopUnboundDeveloperScope ? { stopUnboundDeveloperScope: options.stopUnboundDeveloperScope } : {}),
       automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities,
       ...(options.preflightRoleCapabilities ? { preflightRoleCapabilities: options.preflightRoleCapabilities } : {}),
       maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,

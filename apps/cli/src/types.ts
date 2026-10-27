@@ -241,6 +241,7 @@ export interface ResumeCommandArgs extends GlobalCliFlags {
 export interface CancelCommandArgs extends GlobalCliFlags {
   readonly command: "cancel";
   readonly runId: string;
+  readonly reconcile?: boolean | undefined;
   readonly reason?: string | undefined;
   readonly requestedBy?: string | undefined;
   readonly taskId?: string | undefined;
@@ -454,6 +455,7 @@ export interface HighLevelFacadeServices {
 }
 
 export type CliCommandData =
+  | import("@bflow/runtime").CancellationReconciliationReport
   | import("@bflow/runtime").WorkflowTelemetryReport
   | EnvironmentStatus
   | EnvironmentDoctorReport
@@ -502,6 +504,7 @@ export interface PresentationOptions {
 }
 
 export interface CliContext {
+  readonly reconcileCancellation?: ((runId: string) => Promise<import("@bflow/runtime").CancellationReconciliationReport>) | undefined;
   readonly telemetry?: ((runId: string) => Promise<import("@bflow/runtime").WorkflowTelemetryReport>) | undefined;
   readonly environment?: EnvironmentDependencies | undefined;
   readonly cwd?: string | undefined;

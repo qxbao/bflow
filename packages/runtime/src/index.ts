@@ -153,3 +153,6 @@ export { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory }
 export { buildWorkflowTelemetry, readWorkflowTelemetry, WorkflowTelemetryReportSchema } from "./telemetry/report.js";
 export type { WorkflowTelemetryReport } from "./telemetry/report.js";
 export { readExistingAgenticTelemetry } from "./agentic/host-controller.js";
+export { reconcileExistingAgenticCancellation } from "./agentic/host-controller.js";
+export { CancellationReconciliationReportSchema } from "./agentic/cancellation-stop.js";
+export type { CancellationReconciliationReport } from "./agentic/cancellation-stop.js";

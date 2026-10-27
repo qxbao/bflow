@@ -1,4 +1,6 @@
 import type { GatewayToolOperationOptions } from "../platform/browser-resource-transactions.js";
+import { DeveloperProcessScopes } from "./developer-process-scope.js";
+import type { AgentExecutionHandle, AgentRequest, PaneBinding } from "@bflow/contracts";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { chmod, copyFile, mkdir, open, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
@@ -221,6 +223,7 @@ const LaunchesFileSchema = z.record(z.object({
 }).strict());
 
 export interface HostPlatformSessionOptions {
+  readonly processScopes?: DeveloperProcessScopes;
   readonly service: PlatformReadinessService;
   readonly platform: AgenticHostPlatformOptions;
   readonly repositoryPath: string;
@@ -464,8 +467,10 @@ export class HostPlatformSession {
    * Dynamic Developer launch for one task worktree. Blocked launches throw; no pane is created on failure.
    * Publishes the launch's own probe plan (keyed by launch id, so concurrent Developers never share a file).
    */
-  async allocateDeveloper(taskId: string, worktreePath: string): Promise<DeveloperLaunchMaterial> {
+  async allocateDeveloper(taskId: string, worktreePath: string, runId?: string): Promise<DeveloperLaunchMaterial> {
     if (this.identity === undefined) throw new Error("Platform has no prepared generation; run bflow up again");
+    await this.options.processScopes?.assertReady();
+    if (this.options.processScopes && !runId) throw new Error("A supervised Developer launch requires its exact run identity");
     const template = this.options.platform.roles.find(option => option.role === "developer");
     if (template === undefined) throw new Error("Platform configuration has no developer template for dynamic Developer launches");
     // Re-allocation for the same task (e.g. after restart) must not orphan the previous launch and its Gateway registration.
@@ -482,14 +487,30 @@ export class HostPlatformSession {
       await this.options.service.releaseLaunch(launchId).catch(() => undefined);
       throw error;
     }
+    let material = launchMaterial(result.value);
+    if (this.options.processScopes) {
+      try { material = await this.options.processScopes.prepare({ runId: runId!, taskId, material, executable: result.value.profile.executable,
+        executableDigest: result.value.profile.executableDigest, configFiles: result.value.profile.configFiles }); }
+      catch (error) {
+        await this.options.service.releaseLaunch(launchId);
+        await removeLaunchProbe(this.options.probeDirectory, launchId);
+        throw error;
+      }
+    }
     this.developerLaunches.set(taskId, launchId);
     this.developerGates.set(launchId, expectation ?? null);
     if (result.value.skills?.manifest && result.value.skills?.rendered) this.developerInstructions.set(launchId, {
       launchId, manifest: result.value.skills.manifest, instructionText: result.value.skills.rendered.instructionText,
       references: result.value.skills.rendered.references.map(reference => ({ ...reference })) });
     this.rememberNativeAgyHome(result.value);
-    return launchMaterial(result.value);
+    return material;
   }
+  async assertDeveloperProcessReady(binding: PaneBinding): Promise<void> { await this.options.processScopes?.assertBindingReady(binding); }
+  async pinDeveloperDispatch(request: AgentRequest, binding: PaneBinding): Promise<void> { await this.options.processScopes?.pinDispatch(request, binding); }
+  async bindDeveloperExecution(handle: AgentExecutionHandle, binding: PaneBinding): Promise<void> { await this.options.processScopes?.bindExecution(handle, binding); }
+  async stopDeveloperExecution(handle: AgentExecutionHandle, binding: PaneBinding) { return this.options.processScopes?.stop(handle, binding); }
+  async stopUnboundDeveloper(binding: PaneBinding) { return this.options.processScopes?.stopUnbound(binding); }
+  async authorizeStoppedRetainedRelease(binding: PaneBinding): Promise<boolean> { return await this.options.processScopes?.hasStoppedProof(binding) ?? false; }
 
   /**
    * Reachability verdict for one active Developer launch, bound to the pane allocated for it. Pane Manager never sees
@@ -520,6 +541,7 @@ export class HostPlatformSession {
   async releaseDeveloper(taskId: string): Promise<void> {
     const launchId = this.developerLaunches.get(taskId);
     if (launchId === undefined) return;
+    await this.options.processScopes?.sealLaunch(taskId, launchId);
     const released = await this.options.service.releaseLaunch(launchId);
     if (!released.ok) throw new Error(`Developer ${taskId} launch release failed: ${describeFailure(released.error)}`);
     await this.removeLaunchArtifacts(launchId);
@@ -899,6 +921,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     hostLaunch: role => options.hostLaunch(role)
   });
   const session = new HostPlatformSession({
+    ...(process.platform === "linux" ? { processScopes: new DeveloperProcessScopes({ directory: join(options.directory, "developer-process-scopes") }) } : {}),
     service,
     platform,
     repositoryPath: options.repositoryPath,

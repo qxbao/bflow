@@ -1445,3 +1445,38 @@ pnpm exec vitest run packages/runtime/test/telemetry apps/cli/test/telemetry.tes
 ```
 
 Đây là bằng chứng source/local fixtures, không phải live Herdr/provider hay full SDLC acceptance.
+
+### Explicit cancellation reconciliation
+
+`bflow cancel <run-id> --reconcile --json` connects to the already-running agentic
+host as an operator. It observes an already-cancelled run once even after the five
+automatic observations have been exhausted. It does not reset that budget, send
+another interrupt/assignment, approve work, resume a run, or start a host. The
+report contains `fullyStopped`, outstanding `blockers`, and `retainedWorktrees`;
+an unresolved report has a nonzero CLI exit status. An older daemon that lacks
+the operation fails explicitly; there is no legacy-runtime fallback.
+
+A correlated observation must parse as `AgentTransportObservation`, match the
+entire original handle, and have an observation timestamp between acceptance
+and the current host time. Stop evidence is persisted before allocation/lease
+cleanup. Cancelled allocations use P13's retained-pane/worktree release, with
+idempotent launch revocation; dirty worktrees or a replaced binding stay blocked.
+An expired Registry grant is reported separately from a successful release
+receipt. Core cancellation is confirmed only after the remaining blockers clear.
+
+**Current live limitation:** the Herdr adapter returns `correlationVerified:false`
+for lifecycle observations. Idle/done, an interrupt acknowledgement, lease expiry,
+a diagnostic note, or a cancellation-time `/proc`/shell snapshot cannot be
+promoted to authenticated process-exit evidence. This command therefore cannot
+clear a legacy Herdr writer solely because an operator has exited its CLI. It
+retains the blocker until a supported stop-evidence source exists. Tests of the
+positive recovery path use correlated fake-transport evidence, not live Herdr
+process-containment acceptance. A launch-bound process-supervision/stop-proof
+integration requires a separate architecture/contract decision; this change does
+not introduce one or claim the current live session is recovered.
+
+Private journal compatibility: v1–v5 are still read without manufacturing stop
+proofs. The first real correlated cancellation proof writes **v6**. V6 pins each
+proof to its exact cancelled execution and records lease disposition. Older
+binaries reject v6; do not downgrade an affected session. No public contract,
+Core event/checkpoint schema, or legacy run-store migration is changed.

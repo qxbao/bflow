@@ -755,11 +755,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     workspace = await openAgenticWorkspace({ storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
       ...(platformSession ? { developerLaunches: {
-        allocate: async request => { await assertWorkspaceFileCapability(); return platformSession.allocateDeveloper(request.taskId, request.worktreePath); },
+        allocate: async request => { await assertWorkspaceFileCapability(); return platformSession.allocateDeveloper(request.taskId, request.worktreePath, request.runId); },
         release: taskId => platformSession.releaseDeveloper(taskId),
+        assertProcessScope: binding => platformSession.assertDeveloperProcessReady(binding),
         reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId),
         degradation: () => platformSession.degradation()
-      } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
+      },
+        pinDeveloperDispatch: (request, binding) => platformSession.pinDeveloperDispatch(request, binding),
+        bindDeveloperExecutionScope: (handle, binding) => platformSession.bindDeveloperExecution(handle, binding),
+        stopDeveloperExecutionScope: (handle, binding) => platformSession.stopDeveloperExecution(handle, binding),
+        stopUnboundDeveloperScope: binding => platformSession.stopUnboundDeveloper(binding),
+        authorizeStoppedRetainedRelease: binding => platformSession.authorizeStoppedRetainedRelease(binding)
+      } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
       roleCapabilities: capabilities, preflightRoleCapabilities, taskChecks: hostChecks, workflowChecks: hostChecks, deterministicGates: [verification.deterministicGate(), verification.testIntegrityGate()],
       fastPathMode: effectiveFastPathMode(configuration.policy, true),
@@ -853,6 +860,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (binding.role === "developer") {
       try { await assertWorkspaceFileCapability(); }
       catch (error) { throw new RoleCapabilityPreflightError(`developer workspace file preflight failed: ${redactString(String(error))}`); }
+      try { await platformSession?.assertDeveloperProcessReady(binding); }
+      catch (error) { throw new RoleCapabilityPreflightError(`developer process supervision preflight failed: ${redactString(String(error))}`); }
     }
     if (!required.includes("repository.read")) return;
     const role = binding.role;
@@ -1892,6 +1901,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         finally { activation = undefined; }
       }
       case "get_run": { const stored = unwrap(await (await getQueryStore()).get(textField(record(params).runId))); return stored?.snapshot ?? null; }
+      case "reconcile_cancellation": {
+        const request = z.object({ runId: z.string().min(1).max(200) }).strict().parse(params);
+        // The root control token is required; role tokens cannot reach this lifecycle switch.
+        // Do not activate/recover/tick the workspace here: no other run may advance as a side effect.
+        return requireWorkspace().runtime.reconcileCancellation(request.runId);
+      }
       case "find_runs": { const page = unwrap(await (await getQueryStore()).find(RunQuerySchema.parse(params))); return { ...page, items: page.items.map(item => item.snapshot) }; }
       case "quiesce": {
         quiesced = true;
