@@ -22,7 +22,8 @@ import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
  * on the same committed revision, and the real P16 validator (recordEvidence / assertEvidenceComplete) accepts the record.
  * Needs only the Bubblewrap sandbox (no browser): the app check is an API check.
  */
-const sandboxReady = (await probeBehavioralSandbox()).status === "ready";
+// Mirrors the real-app runner preflight: real-app checks run only on Linux with a ready behavioral sandbox (app-check-runner.ts).
+const sandboxReady = process.platform === "linux" && (await probeBehavioralSandbox()).status === "ready";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
