@@ -34,7 +34,8 @@ export async function createAgenticConversationHost(options: {
   const conversation = manifest.panes.find(pane => pane.role === "conversation");
   const coordinator = manifest.panes.find(pane => pane.role === "coordinator");
   if (!conversation || !coordinator) throw new Error("Conversation and Coordinator panes are required");
-  const module = await import(new URL("../../../conversation/dist/index.js", import.meta.url).href);
+  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+  const module: any = await import("@bflow/conversation");
   const runtime = options.runtime;
   const enqueue = async (message: RoleMessage): Promise<OperationResult<void>> => {
     try { await runtime.queueHerdr(message); return { ok: true, value: undefined }; }

@@ -195,6 +195,7 @@ All cross-role communication across Herdr transport must use the standardized `R
 - `core` must never import `herdr-adapter` or refer to Herdr wire details.
 - Leaf implementation packages depend on `contracts`, not on each other.
 - `runtime` composes implementations through contract interfaces. It must not expose concrete adapters to the CLI.
+- Load another workspace package only by its package specifier: `import ... from "@bflow/<pkg>"` or, for lazy composition, `await import("@bflow/<pkg>")` (or an exported subpath such as `@bflow/runtime/platform/isolator-profile`). Declare it in the consumer's `package.json` `dependencies` and add the tsconfig `references` entry. Never load sibling code by path, such as `import(new URL("../../../<pkg>/dist/index.js", import.meta.url))`, a relative `../<pkg>/src` import or a computed specifier. GitNexus cannot see those edges, so affected-test selection silently misses their tests. A file path into another package's `dist/` is allowed only as data (a spawned `dist/bin.js`, a launcher path), never as a module load.
 - Herdr commands, Socket events, authentication, reconnect behavior, and capability negotiation must be verified against an available Herdr version before implementation.
 - Herdr compatibility is determined by the actual protocol/schema and required operation behavior, never an exact CLI release allowlist. Keep the release label as diagnostics only. Test the installed binary in an isolated named session; an untested version is not evidence of incompatibility and is not, by itself, a reason to stop testing or demand an upgrade. Compatibility tests must accept older/newer release labels with the same supported wire contract and reject actual incompatible/malformed responses. Distinguish transport compatibility from authenticated task-result evidence.
 - Do not add no-op, in-memory, or always-success implementations merely to satisfy tests.
@@ -220,6 +221,28 @@ The module implementations already provide event/checkpoint persistence, compati
 - Do not equate fake-runner tests with live Herdr verification or advertise unsupported E2E/application commands. Do not upgrade power-loss, network-filesystem, multi-host or hostile same-user safety from NOT VERIFIED without evidence.
 - P02-RA01 (large runner timeout overflow) and P03-RA01 (late final `get()` chunk after deadline/abort) remain open non-blocking P2 follow-ups. Their owners remain Herdr Adapter and ArtifactStore respectively; do not mark them fixed from documentation or transfer them to Runtime. See [known limitations](docs/known-limitations-v3.md) for details.
 
+## Affected-test selection with GitNexus
+
+While implementing or completing a feature or fix, prefer running only the tests the change affects instead of the full suite:
+
+```bash
+pnpm test:affected --base main          # print the selection: scope, index state, widening, test files
+pnpm test:affected --base main --run    # build, then run the selected unit and E2E files
+```
+
+`scripts/affected-tests.mjs` applies Runtime's own `verification.regressionScope: affected` policy ([verification runners](docs/verification-runners.md#regression-scope-verificationregressionscope); it imports `classifyChanges` and the GitNexus impact index from `packages/runtime/dist`) to the branch diff plus uncommitted and untracked files:
+
+- **Scope lattice `none` → `graph` → `package` → `full`**:
+  - Docs only: no tests.
+  - Code files: the GitNexus reverse-import closure.
+  - A package's manifest, runner/build config or other non-code file: that package's tests.
+  - Root manifests, the lockfile, root `tsconfig*`/`*.config.*` or more than 50 changed code files: the full suite.
+- **Bflow's isolated index, only when fresh**: it uses `<bflow state>/gitnexus/gitnexus-home` (`GITNEXUS_HOME` overrides it; with `BFLOW_HOME`, `$BFLOW_HOME/state/...`) and Bflow's managed `gitnexus` (`BFLOW_GITNEXUS` overrides it). An index built by a different GitNexus executable reports `stale`. The index must be at `HEAD`. Content drift is accepted only when every drifted file is one of the changes being selected for. Otherwise, or when a file is missing from the index, the file widens to its package (`full` at the repository root) and the reason is printed. Tests are never skipped because the index is unavailable; refresh it with `bflow init` or `gitnexus analyze --index-only`.
+- **Query form**: the query starts with the unrestricted `IMPORTS*1..10` closure and retries with `ALL SHORTEST` on `Buffer manager exception`, which this repository's index raises for wide closures.
+- **Edges the graph cannot see**: runtime composition loads sibling packages with literal package specifiers (`await import("@bflow/git-orchestrator")`), which GitNexus resolves to `packages/*/src`. Keep new cross-package loads in that form, declared in the consumer's `package.json`, and never use `import(new URL("../../../<pkg>/dist/..."))`. The remaining string paths into another package's `dist/` (spawned `dist/bin.js`, launcher paths) are found by the script. A source file holding one is added to the query seeds; a test file holding one is selected directly.
+
+The full suite still applies: run `pnpm test` (and `pnpm test:e2e`) when the selection reaches `full`, before an integration merge or release, or when the owner asks for it. CI always runs the full suite. A selection is not evidence for tests it did not run. In the handoff, report the printed selection with the counts of the tests that ran.
+
 ## Required validation before handoff
 
 From the repository root run:
@@ -227,7 +250,7 @@ From the repository root run:
 ```bash
 pnpm check:deps
 pnpm typecheck
-pnpm test
+pnpm test:affected --base <baseline> --run   # GitNexus selection above; runs the full suites when it widens to full
 git diff --check
 git status --short
 ```

@@ -8,7 +8,7 @@ import {
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
   WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
-  type ArtifactReference, type CancellationRequest, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
+  type ArtifactReference, type CancellationRequest, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
 import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
@@ -193,6 +193,23 @@ export class AdmissionRejectedError extends Error {
   readonly retryable = false;
   constructor(message: string) { super(message); this.name = "AdmissionRejectedError"; }
 }
+/**
+ * The specification input reviewed for one DAG task: its own criteria, traceability and conditional TDD assessment. A
+ * submitted test strategy is narrowed to the same criteria; its other mappings belong to sibling tasks and would make
+ * the task specification map criteria it does not contain.
+ */
+export function projectTaskSpecificationInput(draft: Specification, taskId: string, criteria: readonly AcceptanceCriterion[],
+  specIdSuffix: string, conditionalTdd: unknown = draft.metadata?.conditionalTdd): Specification {
+  const ids = new Set(criteria.map(criterion => criterion.id));
+  const sdd = record(draft.metadata?.sdd);
+  return { ...draft, specId: `${draft.specId}-${specIdSuffix}`, acceptanceCriteria: [...criteria], traceabilityTaskIds: [taskId],
+    ...(draft.testStrategy ? { testStrategy: { ...draft.testStrategy,
+      criterionMappings: draft.testStrategy.criterionMappings.filter(mapping => ids.has(mapping.criterionId)) } } : {}),
+    metadata: { ...draft.metadata,
+      sdd: { ...sdd, traceability: criteria.map(c => ({ criterionId: c.id, taskIds: [taskId] })) },
+      conditionalTdd: { ...record(conditionalTdd), taskId } } } as Specification;
+}
+
 export function isNonRetryableDeliveryError(error: unknown): boolean { return error instanceof AdmissionRejectedError; }
 /** Kinds of delivery problem. One user-facing notice per (message, class); retries and reconciliation reuse it. */
 type FailureClass = "transport_uncertain" | "undeliverable" | "inbound_failed";
@@ -1680,7 +1697,8 @@ export class AgenticWorkflowRuntime {
               }
             }
           }
-          const blockage = message.sender.role !== "coordinator" ? specialistBlockage(message.payload) : undefined;
+          const blockage = message.sender.role !== "coordinator" && !this.echoesMeasuredPhaseFailure(state, run, message)
+            ? specialistBlockage(message.payload) : undefined;
           if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
           if (message.recipient.role === "coordinator") this.wakeCoordinator(state, outbox, run, message);
         }
@@ -1688,6 +1706,17 @@ export class AgenticWorkflowRuntime {
       inbox.status = "applied"; await save();
       return json({ accepted: true });
     });
+  }
+
+  /**
+   * The verifier's status reply to a phase request whose failure Runtime itself measured and already applied (repair notice or
+   * escalation). Runtime owns that outcome; the echo is not a new blocker and must not leave a stale error/next action behind.
+   */
+  private echoesMeasuredPhaseFailure(state: JournalState, run: RunRecord, message: RoleMessage): boolean {
+    return message.causation_id !== undefined && state.outbound.some(out => out.message.message_id === message.causation_id &&
+      out.message.run_id === run.runId && out.message.type === "verification.requested" && out.phaseFailure?.applied === true &&
+      out.message.recipient.role === message.sender.role && out.handle?.target.agentId === message.sender.agent_id &&
+      out.handle?.target.paneId === message.sender.pane_id);
   }
 
   /** A specialist blocker is visible to the user, not only to the Coordinator. Idempotent per message. */
@@ -2451,11 +2480,8 @@ export class AgenticWorkflowRuntime {
           throw new Error("Task ownership must be within approved literal affectedPaths");
         const criteria = draft.acceptanceCriteria.filter(c => task.acceptanceCriteria.includes(c.id));
         if (!criteria.length) throw new Error("Every task must have mapped acceptance criteria");
-        const sdd = record(draft.metadata?.sdd);
-        const taskSpec = await this.reviewSpec({ ...draft, specId: `${draft.specId}-${digest(task.id).slice(0, 12)}`,
-          acceptanceCriteria: criteria, traceabilityTaskIds: [task.id], metadata: { ...draft.metadata,
-            sdd: { ...sdd, traceability: criteria.map(c => ({ criterionId: c.id, taskIds: [task.id] })) },
-            conditionalTdd: { ...record(task.metadata?.conditionalTdd ?? draft.metadata?.conditionalTdd), taskId: task.id } } });
+        const taskSpec = await this.reviewSpec(projectTaskSpecificationInput(draft, task.id, criteria, digest(task.id).slice(0, 12),
+          task.metadata?.conditionalTdd ?? draft.metadata?.conditionalTdd));
         if (this.ports.validateTaskCommands) {
           try { this.ports.validateTaskCommands(taskSpec.specification, taskSpec.strategy, ownedPaths); }
           catch (error) {

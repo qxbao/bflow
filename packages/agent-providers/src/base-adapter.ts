@@ -214,6 +214,17 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
     }
   }
 
+  /**
+   * The catalog ids when the native authentication output is a model catalog that omits the configured model.
+   * Agy starts its default model for an unknown --model id instead of failing, so its catalog is checked here.
+   */
+  protected nativeCatalogRejectsModel(stdout: string): readonly string[] | undefined {
+    if (this.descriptor.provider !== "agy" || this.options.model === undefined) return undefined;
+    const ids = stdout.split(/\r?\n/).map(line => /^([A-Za-z0-9][A-Za-z0-9._:/-]*)\t+\S/.exec(line)?.[1])
+      .filter((id): id is string => id !== undefined);
+    return ids.length > 0 && !ids.includes(this.options.model) ? ids : undefined;
+  }
+
   protected nativeAuthenticationConfirmed(stdout: string, stderr: string): boolean {
     if (/\b(?:unauthori[sz]ed|unauthenticated|not logged in|auth(?:entication)? required)\b/i.test(stdout + "\n" + stderr)) return false;
     if (this.descriptor.provider === "claude") {
@@ -610,6 +621,11 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
             timedOut ? "Verify provider connectivity and retry the native authentication check." : `Authenticate '${this.descriptor.executableName}' using your provider login or credentials.`
           )
         );
+      } else if (this.nativeCatalogRejectsModel(authOutcome.stdout) !== undefined) {
+        hasFailed = true;
+        checks.push(createHealthCheck("authentication", "failed", "incompatible_model",
+          `Model '${this.options.model}' is not in the native ${this.descriptor.executableName} model catalog (${this.nativeCatalogRejectsModel(authOutcome.stdout)!.join(", ")})`,
+          `Configure a model id listed by '${this.descriptor.executableName} ${this.getAuthCommand().join(" ")}' for this account.`));
       } else if (nativeOnly) {
         authPassed = true;
         checks.push(createHealthCheck("authentication", "passed", "auth_native_ok",

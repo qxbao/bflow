@@ -13,7 +13,8 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 async function hostFixture(includeDeveloper = false, conversationProvider: "claude" | "codex" = "claude") {
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-chat-rpc-")));
-  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  // A host write that finishes during teardown can refill a directory mid-removal (ENOTEMPTY); Node retries those.
+  cleanups.push(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "pipe" });
   execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "fixture baseline"], { cwd: root, stdio: "pipe" });
   const sessionId = "chat-rpc", binary = join(root, "herdr-fixture.mjs");

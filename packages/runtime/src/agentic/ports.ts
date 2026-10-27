@@ -134,10 +134,11 @@ export interface AgenticCompositionOptions {
 }
 /** Loads the actual reviewed P15–P18 packages; no alternate policy implementations. */
 export async function loadAgenticPolicies(options: AgenticCompositionOptions): Promise<AgenticPolicies> {
-  const spec = await import(new URL("../../../specification/dist/index.js", import.meta.url).href);
-  const tdd = await import(new URL("../../../test-strategy/dist/index.js", import.meta.url).href);
-  const verification = await import(new URL("../../../verification/dist/index.js", import.meta.url).href);
-  const git = await import(new URL("../../../git-orchestrator/dist/index.js", import.meta.url).href);
+  const spec = await import("@bflow/specification");
+  const tdd = await import("@bflow/test-strategy");
+  const verification = await import("@bflow/verification");
+  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+  const git: any = await import("@bflow/git-orchestrator");
   const engines = new Map<string, VerificationPolicy>();
   const activePlans = new Set<string>();
   const engineFor = (plan: VerificationPlan): VerificationPolicy => {

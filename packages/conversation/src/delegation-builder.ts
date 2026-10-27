@@ -42,16 +42,22 @@ function inferVerificationMethod(description: string, kind: ExtractedRequirement
   return "unit_test";
 }
 
-/** Infers the criterion category from its wording; functional is the default. */
-function inferCriterionCategory(description: string): "functional" | "security" | "performance" | "regression" | "edge_case" {
-  if (
-    /(?<!\p{L})(?:bảo mật|security|xác thực|auth|jwt|(?<!(?:fencing|design|lexer|parser|cancel|cancellation)\s*[- ]\s*)token(?!\s*[- ]\s*bucket\b)|quyền)(?!\p{L})/iu.test(
-      description
-    )
-  ) {
-    return "security";
-  }
-  if (/(?<!\p{L})(?:hiệu năng|performance|latency|tốc độ|throughput)(?!\p{L})/iu.test(description)) return "performance";
+/** A request about a token bucket or rate limiter, where "token" names a capacity unit rather than a credential. */
+const TOKEN_BUCKET_CONTEXT = /token\s*[- ]?\s*bucket|rate\s*[- ]?\s*limit|giới hạn (?:tần suất|lưu lượng)/iu;
+
+/**
+ * Infers the criterion category from its wording; functional is the default. `context` is the request title and
+ * objective: inside a token-bucket request a bare "token" or "tốc độ nạp" (refill rate) is functional, while explicit
+ * security wording and credential tokens still classify as security.
+ */
+function inferCriterionCategory(description: string, context = ""): "functional" | "security" | "performance" | "regression" | "edge_case" {
+  const bucketTokens = TOKEN_BUCKET_CONTEXT.test(`${context}\n${description}`);
+  const security = bucketTokens
+    ? /(?<!\p{L})(?:bảo mật|security|xác thực|auth|jwt|quyền|(?:bearer|access|refresh|api|session|csrf)\s*[- ]?\s*token|token\s+(?:xác thực|truy cập|đăng nhập))(?!\p{L})/iu
+    : /(?<!\p{L})(?:bảo mật|security|xác thực|auth|jwt|(?<!(?:fencing|design|lexer|parser|cancel|cancellation)\s*[- ]\s*)token(?!\s*[- ]\s*bucket\b)|quyền)(?!\p{L})/iu;
+  if (security.test(description)) return "security";
+  if (/(?<!\p{L})(?:hiệu năng|performance|latency|throughput)(?!\p{L})/iu.test(description) ||
+    (/(?<!\p{L})tốc độ(?!\p{L})/iu.test(description) && !(bucketTokens && /tốc độ\s+nạp/iu.test(description)))) return "performance";
   if (/(?<!\p{L})(?:hồi quy|regression|giữ nguyên)(?!\p{L})/iu.test(description)) return "regression";
   if (/(?<!\p{L})(?:biên|edge|null|rỗng)(?!\p{L})/iu.test(description)) return "edge_case";
   return "functional";
@@ -137,7 +143,7 @@ export function buildDelegationRequest(params: {
     const criterionRaw = {
       id: `ac-${idx + 1}`,
       description,
-      category: inferCriterionCategory(description),
+      category: inferCriterionCategory(description, `${params.draft.title}\n${params.draft.objective}`),
       verificationMethod: rawCriteria[idx]?.verificationMethod ?? inferVerificationMethod(description, params.draft.kind),
       required: true,
       status: "pending" as const,

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -169,9 +170,12 @@ describe("detectTestRunners", () => {
     expect(parseTscBuildArgs("tsc -p tsconfig.json --noEmit")).toBeUndefined();
   });
 
-  it("detects the real repository runner", async () => {
+  it("detects the real repository runner", async context => {
     const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../");
     const result = await detectTestRunners(repositoryRoot);
+    // Detection pins runner definitions to HEAD, so a checkout with uncommitted tracked edits cannot pass; a clean checkout (CI) still asserts.
+    const uncommitted = spawnSync("git", ["diff", "--quiet", "HEAD", "--"], { cwd: repositoryRoot }).status === 1;
+    if (uncommitted && result.status === "unsupported" && result.reason === "Runner definitions must match the committed original revision") context.skip();
     if (result.status !== "detected") throw new Error(JSON.stringify(result));
     const [unit] = result.profiles;
     expect(unit!.args[0]).toBe("node_modules/vitest/vitest.mjs");

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { RoleMessageSchema, type RoleMessage } from "@bflow/contracts";
 import { RoleCapabilityPreflightError } from "../../src/agentic/ports.js";
-import { evaluateWatchdog } from "../../src/agentic/run-watchdog.js";
 import { routeNativeConversationMessage } from "../../src/agentic/workspace.js";
-import { lifecycleFixture, type LifecycleFixture } from "../helpers/lifecycle-fixture.js";
+import { lifecycleFixture } from "../helpers/lifecycle-fixture.js";
+import { cleanups, architectRequest, through, drive, kinds, watchdogPass } from "../helpers/lifecycle-fault-matrix-stages.js";
 
 /**
  * Whole-run liveness matrix: drive one run from intake to completed through the real Runtime/Core/Git/storage boundaries and inject a
@@ -11,79 +11,9 @@ import { lifecycleFixture, type LifecycleFixture } from "../helpers/lifecycle-fi
  * or in an explicit resumable blocker, and that the run then completes with a bounded number of explicit resumes and no lost result.
  * Local fake transport only: this is not live Herdr or provider evidence.
  */
-const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
 
-interface Stage { name: string; run(f: LifecycleFixture): Promise<void> }
-const architectRequest = async (f: LifecycleFixture, objective = "Analyze impact") => {
-  const request = RoleMessageSchema.parse(await f.runtime.requestSpecialist("run-1", "architect", objective, ["architecture"]));
-  await f.runtime.flushOutbound(); return request;
-};
-const stages: Stage[] = [
-  { name: "intake", run: async f => { await f.runtime.queueHerdr(f.intakeMessage); await f.runtime.flushOutbound(); await f.runtime.receiveHerdr(f.intakeMessage); } },
-  { name: "specifying", run: async f => {
-    const request = await architectRequest(f);
-    await f.runtime.receiveHerdr(f.reply("architect", request, "spec.draft", { status: "completed", summary: "Impact analysis" }));
-    await f.runtime.flushOutbound();
-  } },
-  { name: "planned", run: async f => { await f.runtime.proposeWorkflow("run-1", f.spec, f.def); } },
-  { name: "implemented", run: async f => { await f.runtime.tick(); await f.evidence(); await f.submit(); } },
-  { name: "task verified", run: async f => { await f.runtime.tick(); } },
-  { name: "workflow verified", run: async f => { await f.runtime.tick(); } },
-  { name: "completed", run: async f => { await f.approve(); } }
-];
-const index = (name: string) => stages.findIndex(stage => stage.name === name);
-
-async function through(f: LifecycleFixture, last: string) { for (const stage of stages.slice(0, index(last) + 1)) await stage.run(f); }
-/** Continues as the Coordinator would after a fault: an escalated run is resumed through its recorded action, never by guessing. */
-async function drive(f: LifecycleFixture, after: string, maxResumes: number): Promise<number> {
-  let resumes = 0;
-  for (const stage of stages.slice(index(after) + 1)) {
-    const current = await f.run();
-    if (current.status === "escalated") {
-      expect(current.pendingAction, `before ${stage.name}: escalated without a resumable action (${current.error})`).toBeDefined();
-      expect(++resumes, `before ${stage.name}: more explicit resumes than allowed (${current.error})`).toBeLessThanOrEqual(maxResumes);
-      await f.runtime.resumeBlockedRun("run-1", current.pendingAction!.actionId);
-      await f.runtime.flushOutbound();
-    }
-    await stage.run(f);
-  }
-  const final = await f.run();
-  expect(final.status, `final error: ${final.error}`).toBe("completed");
-  return resumes;
-}
-const kinds = async (f: LifecycleFixture, kind: string) => (await f.state()).outbound.filter(out => (out.message.payload as { kind?: string }).kind === kind);
-async function watchdogPass(f: LifecycleFixture, idleMs = 10 * 60_000) {
-  const runs = await f.runtime.watchdogSnapshot("session-1");
-  const panes = f.panes.bindings.filter(pane => pane.role !== "conversation").map(pane => ({ role: pane.role, paneId: pane.paneId, status: "idle" }));
-  for (const action of evaluateWatchdog({ now: Date.now() + idleMs, runs, notices: [], panes }))
-    if (action.kind === "stalled") await f.runtime.reportRunStalled(action.runId, action.episodeKey);
-}
-
 describe.skipIf(process.platform === "win32")("whole-run lifecycle fault matrix", () => {
-  it("completes a clean run from intake through specialist, implementation, verification and approval", async () => {
-    const f = await lifecycleFixture(cleanups);
-    await through(f, "specifying"); expect((await f.run()).status).toBe("specifying");
-    await stages[index("planned")]!.run(f); expect((await f.run()).status).toBe("implementing");
-    await drive(f, "planned", 0);
-    expect(f.sentTo("architect")).toHaveLength(1);
-    expect(f.sentTo("developer")).toHaveLength(1);
-  });
-
-  // F3: once Core exists, Runtime owns dispatch, verification and integration. A Coordinator Stop there (including a replay of an
-  // old handled Stop after restart) must never turn Runtime-owned progress into an escalation.
-  it.each(["intake", "specifying", "planned", "implemented", "task verified", "workflow verified"])(
-    "a Coordinator Stop after %s never strands the run", async last => {
-      const f = await lifecycleFixture(cleanups);
-      await through(f, last);
-      await f.coordinatorStop();
-      await f.coordinatorStop(f.intakeMessage);
-      const current = await f.run();
-      if (index(last) >= index("planned")) expect(current.status, `${last}: ${current.error}`).not.toBe("escalated");
-      await drive(f, last, 1);
-    });
-
-  // F6: a verification job running longer than the stall threshold is Runtime-owned work, not a dead run.
   it.each(["task", "workflow"] as const)("watchdog does not escalate a run while %s verification is still running", async scope => {
     const f = await lifecycleFixture(cleanups);
     await through(f, scope === "task" ? "implemented" : "task verified");

@@ -88,6 +88,32 @@ describe("B1: acceptance criteria infer verification method and category", () =>
   });
 });
 
+describe("token-bucket rate limiter criteria", () => {
+  // Live run bf-b5679f4f2e725cadfef1 (Việc #1): bucket tokens are capacity units, yet bare "token" made three functional
+  // criteria security, which demanded static analysis and a manual security review the request never asked for.
+  const objective = "Bổ sung một utility module quản lý rate-limit dựa trên token-bucket với bộ nhớ tạm (in-memory) có thread-safe/async lock.";
+  const draft = (descriptions: readonly string[]) => draftWith(descriptions, { title: "Module rate-limit token-bucket", objective });
+
+  it("keeps bucket tokens, refill rate and concurrent acquisition functional", () => {
+    expect(criteriaOf(draft([
+      "Module rate-limit token-bucket in-memory được thêm vào, cho phép cấu hình dung lượng bucket và tốc độ nạp token, có cơ chế khóa thread-safe/async lock bảo vệ trạng thái.",
+      "Có test cho burst traffic: cho phép tối đa đúng dung lượng bucket trong một đợt, từ chối yêu cầu vượt quá, và cho phép lại sau khi token được nạp theo thời gian.",
+      "Có test race condition: nhiều luồng/tác vụ đồng thời gọi lấy token, tổng số yêu cầu được chấp nhận không vượt quá số token khả dụng."
+    ])).map(c => c.category)).toEqual(["functional", "functional", "functional"]);
+  });
+
+  it("still classifies explicit security wording in a rate-limit request", () => {
+    expect(criteriaOf(draft([
+      "Giới hạn số lần xác thực thất bại theo từng tài khoản",
+      "Từ chối truy cập khi bearer token không hợp lệ"
+    ])).map(c => c.category)).toEqual(["security", "security"]);
+  });
+
+  it("keeps bare token security outside a token-bucket request", () => {
+    expect(criteriaOf(draftWith(["Làm mới token trước khi hết hạn"])).map(c => c.category)).toEqual(["security"]);
+  });
+});
+
 describe("per-criterion verification methods", () => {
   const descriptions = ["Parser trả về lỗi khi chuỗi rỗng", "Báo cáo review mã nguồn", "Giữ nguyên hành vi cũ và typecheck vượt qua"];
 

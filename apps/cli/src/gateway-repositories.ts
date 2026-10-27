@@ -32,7 +32,6 @@ export const GITNEXUS_POLYFORM_NOTICE =
 
 const GITNEXUS_OPERATIONS = ["query", "context", "impact"] as const;
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-const leaf = (name: string) => import(new URL(`../../../packages/${name}/dist/index.js`, import.meta.url).href);
 
 export const RegisteredRepositoryServiceSchema = z.object({
   schemaVersion: PlatformSchemaVersionSchema,
@@ -317,7 +316,7 @@ export async function validateRepositoryServiceLaunch(
     throw new Error(`Managed GitNexus service ${definition.serviceId} connection changed since registration`);
   }
   const [launcher, specPath, specDigest, launcherDigest] = definition.connection.argv;
-  const tools = await leaf("tool-installer");
+  const tools = await import("@bflow/tool-installer");
   const spec = tools.ToolLaunchSpecSchema.parse(await readRegularJson(specPath!));
   const expectedLauncher = fileURLToPath(new URL("../../../packages/tool-installer/dist/service-launcher.js", import.meta.url));
   const launchesDir = await realpath(join(paths.config, "tool-launches"));
@@ -455,7 +454,7 @@ export async function checkRepositoryGitNexus(input: {
   let indexed = false;
   let indexStale = false;
   try {
-    const tools = await leaf("tool-installer");
+    const tools = await import("@bflow/tool-installer");
     const homeDir = join(platform.paths.state, "gitnexus", "gitnexus-home");
     if (existsSync(homeDir)) {
       const result = await tools.systemToolHost.run(binary.executable, ["status", "--json"], {
@@ -615,7 +614,7 @@ async function indexAndRegisterRepository(input: {
 
   const locatorPath = join(platform.paths.state, GATEWAY_CONTROL_LOCATOR_FILE);
   const gitnexusStateRoot = join(platform.paths.state, "gitnexus");
-  const tools = await leaf("tool-installer");
+  const tools = await import("@bflow/tool-installer");
   let indexed = await tools.ensureGitNexusIndex({
     repositoryRoot: canonicalRoot,
     stateRoot: gitnexusStateRoot,

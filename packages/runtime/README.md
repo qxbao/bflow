@@ -729,7 +729,8 @@ Build trước các test có mục tiêu, vì chúng ghép các implementation `
 
 ```sh
 pnpm build
-TMPDIR=/tmp pnpm exec vitest run packages/runtime/test/agentic/integration.test.ts
+# Integration được tách thành nhiều file (dùng chung test/helpers/agentic-integration-fixture.ts) để Vitest chạy song song.
+TMPDIR=/tmp pnpm exec vitest run packages/runtime/test/agentic/integration-
 TMPDIR=/tmp pnpm exec vitest run packages/runtime/test packages/core/test
 pnpm check:deps
 pnpm typecheck

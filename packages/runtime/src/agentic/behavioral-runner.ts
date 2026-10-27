@@ -387,7 +387,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     const invocation = command.adapter?.bind({ testNames: command.testNames, testPaths: command.testPaths }, reportDirectory);
     if (invocation?.reportPaths?.length && (await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory)).length) throw new Error("Behavioral report must not exist before execution");
     const projectCwd = command.adapter && command.adapter.projectDirectory !== "." ? join(checkout, command.adapter.projectDirectory) : checkout;
-    const module = await import(new URL("../../../quality-gates/dist/index.js", import.meta.url).href);
+    const module = await import("@bflow/quality-gates");
     const runner = module.createQualityCommandRunner();
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: "/tmp/bflow-home", TMPDIR: "/tmp", ...(command.adapter?.environment ?? {}) };
     // Seatbelt cannot mount a tmpfs, so the sandboxed process writes only to a dedicated scratch sibling of the checkout.
@@ -493,8 +493,8 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
   const { outcome, testBlobs, reports, rtk: rtkResult } = await runMeasurementCommand(command, cwd, revision, options);
   let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
   try {
-    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes)
-      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined);
+    parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes, command.testPaths)
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined, command.testPaths);
   } catch (error) {
     if (error instanceof NodeTapTestCodeFailure) {
       if (rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);

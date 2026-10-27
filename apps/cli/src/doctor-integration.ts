@@ -67,7 +67,7 @@ export interface DoctorDiagnosticsOptions {
 /** Dynamic package loaders avoiding direct dependencies in apps/cli/package.json */
 export async function loadToolInstallerModule(): Promise<any> {
   try {
-    return await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
+    return await import("@bflow/tool-installer");
   } catch {
     return null;
   }
@@ -75,7 +75,7 @@ export async function loadToolInstallerModule(): Promise<any> {
 
 export async function loadSkillsModule(): Promise<any> {
   try {
-    return await import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href);
+    return await import("@bflow/skills");
   } catch {
     return null;
   }
@@ -83,7 +83,7 @@ export async function loadSkillsModule(): Promise<any> {
 
 export async function loadMcpGatewayModule(): Promise<any> {
   try {
-    return await import(new URL("../../../packages/mcp-gateway/dist/index.js", import.meta.url).href);
+    return await import("@bflow/mcp-gateway");
   } catch {
     return null;
   }
@@ -94,13 +94,13 @@ export async function loadMcpGatewayModule(): Promise<any> {
  * Return only status evidence: native auth output can contain account information. */
 async function probeSelectedCodexProfile(profileName: string, environment: NodeJS.ProcessEnv,
   cwd: string, runner: EnvironmentProcessRunner): Promise<{ authenticated: boolean; modelCatalogVerified: boolean }> {
-  const runtimeProfiles = await import(new URL("../../../packages/runtime/dist/platform/isolator-profile.js", import.meta.url).href);
+  const runtimeProfiles = await import("@bflow/runtime/platform/isolator-profile");
   const stateRoot = resolveIsolatorStateRoot(environment, environment.HOME ?? homedir());
   const result = await new runtimeProfiles.IsolatorProfileResolver({ stateRoot, environment }).resolve("codex", profileName, { timeoutMs: 8000 });
   if (!result.ok) return { authenticated: false, modelCatalogVerified: false };
   const profile = result.value;
   if (profile.identity.codexBackendMode === "linked" && profile.backendUrl) {
-    const backendAuth = await import(new URL("../../../packages/agent-providers/dist/backend-authentication.js", import.meta.url).href);
+    const backendAuth = await import("@bflow/agent-providers/backend-authentication");
     const checked = await backendAuth.checkCodexBackendAuthentication(profile.backendUrl, profile.environment.CODEX_LB_API_KEY,
       { timeoutMs: 8000 });
     return { authenticated: checked.exitCode === 0, modelCatalogVerified: checked.exitCode === 0 };

@@ -47,11 +47,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-dist
+          # dist/.tsbuildinfo is a hidden file; without it every job rebuilds from scratch.
+          include-hidden-files: true
           path: |
             packages/*/dist
             apps/*/dist
-            packages/*/*.tsbuildinfo
-            apps/*/*.tsbuildinfo
           retention-days: 1
 
   test-unit:
@@ -79,7 +79,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends bubblewrap apparmor-profiles
+          # needrestart would otherwise try to restart unrelated runner services (php-fpm)
+          # after the install and block until their systemd timeout; list only.
+          sudo env NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l apt-get install --yes --no-install-recommends bubblewrap apparmor-profiles
 
           # Ubuntu's opt-in bwrap profile permits user namespaces while restricting
           # capabilities in its children; keep the system-wide restriction enabled.

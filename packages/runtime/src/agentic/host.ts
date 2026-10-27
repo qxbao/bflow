@@ -261,7 +261,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await privateFile(publicPath, pair.publicKey.export({ type: "spki", format: "pem" }).toString());
   }
   const publicKey = await readFile(publicPath, "utf8");
-  const promptAssets = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
+  const promptAssets = await import("@bflow/pane-manager");
   const platformRoles = configuration.platform?.roles ?? [];
   const providerForRole = (role: AgentRole): AgentProviderId => platformRoles.find(option => option.role === role)?.provider ?? "claude";
   const hookRunners = new Map<string, string>();
@@ -553,7 +553,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const getQueryStore = async () => {
     if (workspace) return workspace.runtime.ports.runStore;
     if (!queryStore) {
-      const module = await import(new URL("../../../persistence/dist/index.js", import.meta.url).href);
+      const module = await import("@bflow/persistence");
       const storage = resolve(configuration.directory, "../../agentic"); await mkdir(storage, {recursive:true, mode:0o700});
       queryStore = unwrap(module.openSqliteRunStore({ filename: join(storage, "runs.db") })) as RunStore & {close():void};
     }

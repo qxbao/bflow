@@ -93,8 +93,7 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
   })();
   const cliRequirements = effectivePolicy?.requirements.filter(requirement => requirement.kind === "cli_only") ?? [];
   if (cliRequirements.length && machineConfig.status === "valid") {
-    const { defaultToolCatalog, ManagedToolInstaller } = await import(
-      new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
+    const { defaultToolCatalog, ManagedToolInstaller } = await import("@bflow/tool-installer");
     const catalog = defaultToolCatalog(platform.os, platform.arch);
     const VerifiedExecutableInspectionSchema = OperationResultSchema(VerifiedToolExecutableIdentitySchema);
     const requested = new Set(cliRequirements.map(requirement => skills.canonicalToolId(requirement.toolId)));
@@ -123,7 +122,7 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
       requirement.operations.every(operation => parsed.data.tool.operations.includes(operation)));
   }).map(raw => (raw as { serviceId: string }).serviceId));
   if (input && input.config.environment.context7?.enabled !== false) requestedServices.add(CONTEXT7_SERVICE_ID);
-  const toolInstaller = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
+  const toolInstaller = await import("@bflow/tool-installer");
   const serviceReadiness = new Map<string, { status: "ready" | "blocked" | "missing" | "unknown"; discoveredTools: readonly string[]; reason?: string }>();
   for (const serviceId of requestedServices) {
     const observed = await readGatewayReadiness(platform.paths.state, serviceId);

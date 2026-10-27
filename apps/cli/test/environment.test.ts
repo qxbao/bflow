@@ -349,6 +349,33 @@ describe("P12 repository environment lifecycle", () => {
     expect(requests.filter(request => request.args.join(" ") === "models")).toHaveLength(2);
     expect(requests.some(request => request.args[0] === "auth" || request.args[0] === "status")).toBe(false);
   });
+  it("stops an idle host whose provider preflight was rejected so a corrected configuration can start", async () => {
+    // The host pins the rejected platform; leaving it alive makes the next up fail with "Persisted host platform differs".
+    const order: string[] = [];
+    const prepareRoles = vi.fn(async () => { order.push("prepare"); throw new Error("Model 'x' is not in the native agy model catalog"); });
+    const quiesce = vi.fn(async () => { order.push("quiesce"); return { ok: true as const, value: undefined }; });
+    const shutdownHost = vi.fn(async () => { order.push("shutdown"); });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles,
+      runtime: mockRuntime(), quiesce, shutdownHost } });
+
+    await expect(composed.up()).rejects.toThrow("not in the native agy model catalog");
+
+    expect(order).toEqual(["prepare", "quiesce", "shutdown"]);
+    expect(fixture.manager.up).not.toHaveBeenCalled();
+    expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
+  });
+  it("keeps a host that still owns active workflows when provider preflight is rejected", async () => {
+    const prepareRoles = vi.fn(async () => { throw new Error("Agy native capability unavailable"); });
+    const quiesce = vi.fn(async () => ({ ok: true as const, value: undefined }));
+    const shutdownHost = vi.fn(async () => {});
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, prepareRoles,
+      runtime: mockRuntime([activeRun]), quiesce, shutdownHost } });
+
+    await expect(composed.up()).rejects.toThrow("Agy native capability unavailable");
+
+    expect(quiesce).not.toHaveBeenCalled();
+    expect(shutdownHost).not.toHaveBeenCalled();
+  });
   linuxIt("preserves a saved manifest and active run when offline provider preparation fails", async () => {
     const saved = fixture.create(); saved.activeRunIds = [activeRun.runId];
     await mkdir(join(dir, ".bflow/state"), { recursive: true, mode: 0o700 });
@@ -453,7 +480,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(json.error.message).toBe(failure.message);
     expect(original.message).toBe(message);
   });
-  linuxIt("preserves the composed host without creating Herdr when readiness preflight blocks startup", async () => {
+  linuxIt("stops the idle composed host without creating Herdr when readiness preflight blocks startup", async () => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     const input = { repository, config, env: process.env };
@@ -471,8 +498,10 @@ describe("P12 repository environment lifecycle", () => {
       openPaneManagerEnvironment(input, runner, async () => host) });
     await expect(composed.up()).rejects.toThrow(/Provider readiness is not satisfied.*missing provider authentication/s);
     expect(host.prepare).toHaveBeenCalledOnce();
-    expect(host.shutdown).not.toHaveBeenCalled();
-    expect(host.quiesce).not.toHaveBeenCalled();
+    // The host owns no workflow, so it is quiesced and stopped instead of keeping the rejected platform pinned.
+    expect(host.quiesce).toHaveBeenCalledOnce();
+    expect(host.shutdown).toHaveBeenCalledOnce();
+    expect(vi.mocked(host.quiesce).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(host.shutdown).mock.invocationCallOrder[0]!);
     expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
     expect(fixture.manager.up).not.toHaveBeenCalled();
     expect(runner.running.has(repository.sessionName)).toBe(false);

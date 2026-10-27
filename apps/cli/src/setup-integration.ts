@@ -72,7 +72,7 @@ const probeNativeProviderLogin: ProviderLoginProbe = async observation => {
 };
 
 async function loadSkillsModule(): Promise<any> {
-  return import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href);
+  return import("@bflow/skills");
 }
 
 /** Issues a formal v3 setup approval receipt */

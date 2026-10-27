@@ -107,9 +107,8 @@ function withDefaultSkillsPort(services: HighLevelServices): HighLevelServices {
               const storeRoot = join(ctx.platform.paths.data, "skills-store");
               await mkdir(storeRoot, { recursive: true, mode: 0o700 });
               await chmod(storeRoot, 0o700);
-              const skillsMod: any = await import(
-                new URL("../../../../packages/skills/dist/index.js", import.meta.url).href
-              );
+              // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+              const skillsMod: any = await import("@bflow/skills");
               const catalog = await loadMachineSkillCatalog();
               const store = new skillsMod.SkillFileStore(storeRoot);
               const manager = new skillsMod.SkillManager({
