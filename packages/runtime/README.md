@@ -1,5 +1,38 @@
 # @bflow/runtime
 
+## Linux verification sandbox prerequisites
+
+`bflow up` requires a working Bubblewrap namespace sandbox when automated verification
+runners are configured. `bflow doctor` runs the same real execution probe and reports
+`runtime-verification-sandbox`; an installed `bwrap` binary alone does not pass it.
+The probe never installs tools, changes kernel settings or falls back to running tests
+without isolation. It distinguishes a missing executable from a launcher failure and
+includes bounded stderr diagnostics. Failed PATH entries resolving to the same binary
+are probed only once.
+
+On Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`, Bubblewrap can fail with
+`setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR: Operation not permitted`
+when its AppArmor `userns` permission is missing. First install the distribution
+`bubblewrap` package if needed. An administrator should inspect existing AppArmor profiles
+for `/usr/bin/bwrap`: repair an existing distribution profile rather than adding a duplicate.
+For a host with no such profile, review [support/bflow-bwrap.apparmor](support/bflow-bwrap.apparmor)
+and explicitly install/load it from the repository root:
+
+```sh
+apparmor_parser --skip-kernel-load --skip-cache packages/runtime/support/bflow-bwrap.apparmor
+sudo install -o root -g root -m 0644 packages/runtime/support/bflow-bwrap.apparmor /etc/apparmor.d/bflow-bwrap
+sudo apparmor_parser --replace /etc/apparmor.d/bflow-bwrap
+bflow doctor
+bflow up
+```
+
+The profile persists across reboot and grants user namespace creation to the system
+Bubblewrap binary only. Keep the system-wide restriction enabled; do not make `bwrap`
+setuid or change provider permission modes to avoid this check. Other namespace restrictions
+(for example container policy) still need host administrator diagnosis. A failed startup
+does not prove existing roles stopped: preserve `.bflow` and reconcile with `bflow doctor`;
+use `bflow down --yes` only when intentionally stopping the current session.
+
 `RuntimeServiceImpl`, dispatcher, MVP orchestrator và workspace factory hiện có vẫn khả dụng.
 P19 bổ sung `AgenticWorkflowRuntime`, `CoordinatorTools`,
 `createAgenticConversationHost` và `openAgenticWorkspace` cho luồng SDLC v2.

@@ -317,6 +317,10 @@ export function resolveActionableRemediation(
     return "Giữ nguyên thư mục .bflow và chạy 'bflow doctor' để chẩn đoán tính toàn vẹn trạng thái.";
   }
 
+  if (msg.includes("verification_sandbox_unavailable") || msg.includes("Runtime independent verification capability unavailable")) {
+    return "Chạy 'bflow doctor' để kiểm tra sandbox xác minh; xem cách cài Bubblewrap/cấp quyền userns AppArmor tại packages/runtime/README.md, rồi chạy lại 'bflow up'.";
+  }
+
   // 3. Check for specific authored instructions already embedded in the message
   if (msg.startsWith("Provider readiness is not satisfied;") && msg.includes("codex_global_hooks_")) {
     return "Chạy 'bflow setup --codex-hooks --plan' để kiểm tra nguồn hook và nguyên nhân bị chặn.";

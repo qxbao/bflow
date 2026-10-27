@@ -1,0 +1,8 @@
+# Grant user namespace creation to the distribution Bubblewrap binary only.
+# Keep kernel.apparmor_restrict_unprivileged_userns enabled system-wide.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bflow-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

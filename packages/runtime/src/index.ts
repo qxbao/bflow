@@ -5,6 +5,7 @@
  */
 
 // Service and Factory
+export { diagnoseVerificationSandbox } from "./agentic/sandbox-readiness.js";
 export { createRuntimeService, RuntimeServiceImpl } from "./service.js";
 export type {
   RuntimePorts,

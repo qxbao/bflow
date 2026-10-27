@@ -49,6 +49,14 @@ import {
 import type { CliContext, CliIo, InitCommandOutput } from "../src/types.js";
 
 describe("Presentation & Formatting Engine", () => {
+  it("directs sandbox startup failures to namespace repair even when the error is truncated", () => {
+    const out = formatCommandError({ code: "validation", retryable: false,
+      message: "verification_sandbox_unavailable: AppArmor user namespace restriction is enabled; " + "x".repeat(1000) }, "up", false);
+    expect(out).toContain("AppArmor");
+    expect(out).toContain("bflow doctor");
+    expect(out).toContain("packages/runtime/README.md");
+    expect(out).not.toContain("bflow up --help");
+  });
   describe("1. Stream Color Resolution Matrix", () => {
     it("respects explicit overrides", () => {
       expect(resolveStreamColor({ explicit: true, env: { NO_COLOR: "1" } })).toBe(true);

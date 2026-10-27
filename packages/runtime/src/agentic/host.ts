@@ -1811,7 +1811,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (signal.aborted) throw signal.reason;
           verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
           if (verificationSandbox.status !== "ready" && (testRunners.profiles.length || behavioralCommands.length))
-            throw new Error(`Runtime independent verification capability unavailable: ${verificationSandbox.reason}`);
+            throw new Error(`${verificationSandbox.code}: ${verificationSandbox.reason}`);
           await drainRoleStartup(true);
           roleStartupFailures.clear();
           // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.
