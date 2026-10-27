@@ -24,7 +24,7 @@ Sau [bootstrap một lần](../../docs/guide/installation.md) bằng `node apps/
 | `bflow attach` | TTY trực tiếp vào Conversation pane |
 | `bflow status` | Environment/host status; truyền `<run-id>` không kèm `--telemetry` hoặc dùng filters chuyển sang legacy Runtime query |
 | `bflow status <run-id> --telemetry [--json]` | Báo cáo metric chỉ đọc cho `<run-id>` qua agentic host đang chạy ([TELEMETRY-SPEC.md](../../packages/runtime/TELEMETRY-SPEC.md)) |
-| `bflow doctor [--deep]` | Diagnostic report; mặc định không model ping, deep có thể tiêu hao usage |
+| `bflow doctor [--deep]` | Diagnostic report; mặc định không model ping, deep có thể tiêu hao usage. Check `runtime-verification-sandbox` chạy probe Bubblewrap/Seatbelt thật (chỉ đọc, không cài đặt); `bflow up` chỉ bị chặn bởi lỗi này khi repo có runner được phát hiện hoặc cấu hình |
 | `bflow down [--yes] [--force] [--timeout <ms>]` | Quiesce/checkpoint/revoke, rồi dừng owned panes/server; confirmation/force không bỏ Runtime barrier |
 | `bflow recover --yes` | Recover empty legacy directory lifecycle lock sau khi owner process đã chết; không reconstruct workflow |
 

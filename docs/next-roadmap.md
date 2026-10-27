@@ -1,6 +1,6 @@
 # Công việc tiếp theo
 
-Roadmap theo [source hiện tại](implementation-status.md), cập nhật 2026-10-27 (`c1caccb`). P25–P30, D-TOOLS-01, runner detection, regression scope, fast-path, `host-test-integrity`, repository survey, rework-causality dossiers (kèm per-finding verdict enforcement), browser MCP resource transactions (`BrowserResourceTransactions`), task handovers, read-only workflow telemetry, Conversation cards/aliases và NFR/risk references đã có source và local tests; không giao lại chúng như bootstrap mới. Thứ tự dưới đây ưu tiên khoảng trống bằng chứng live và đường tích hợp còn thiếu.
+Roadmap theo [source hiện tại](implementation-status.md), cập nhật 2026-10-27 (`main` tại `901caa6`, cùng PR #53). P25–P30, D-TOOLS-01, runner detection, regression scope, fast-path, `host-test-integrity`, repository survey, rework-causality dossiers (kèm per-finding verdict enforcement), browser MCP resource transactions (`BrowserResourceTransactions`), task handovers, read-only workflow telemetry, Conversation cards/aliases và NFR/risk references đã có source và local tests; không giao lại chúng như bootstrap mới. Thứ tự dưới đây ưu tiên khoảng trống bằng chứng live và đường tích hợp còn thiếu.
 
 | Ưu tiên | Công việc | Owner / điều kiện nghiệm thu |
 | --- | --- | --- |

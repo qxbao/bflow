@@ -1,6 +1,6 @@
 # Trạng thái triển khai hiện tại
 
-Đối chiếu bổ sung ngày **2026-10-27** tại `HEAD` **`c1caccb41167e37c59128919292b08a63ce17377`** (tiếp nối đợt đối chiếu ngày 2026-10-25 tại `a7686be` / `2357669` và `5dfceac`). [Bảng commit mới](main-updates-2026-10-25.md) ghi chi tiết các thay đổi từ `355a998` đến `c1caccb`. Đây là bản đồ source và bằng chứng đã lưu, không phải nghiệm thu provider mới. Khi source thay đổi, kiểm tra lại các liên kết triển khai trước khi nâng mức hỗ trợ.
+Đối chiếu bổ sung ngày **2026-10-27** tại `main` **`901caa6`** cùng thay đổi sandbox của PR #53 (tiếp nối đợt đối chiếu ngày 2026-10-25 tại `a7686be` / `2357669` và `5dfceac`). [Bảng commit mới](main-updates-2026-10-25.md) ghi chi tiết các thay đổi từ `355a998` đến `901caa6` và PR #53. Đây là bản đồ source và bằng chứng đã lưu, không phải nghiệm thu provider mới. Khi source thay đổi, kiểm tra lại các liên kết triển khai trước khi nâng mức hỗ trợ.
 
 ## Cách đọc bằng chứng
 

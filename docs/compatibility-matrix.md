@@ -1,6 +1,6 @@
 # Ma trận tương thích hiện tại
 
-Đối chiếu source và các hồ sơ trong repo ngày 2026-10-27 (`c1caccb`). **Source/local test, probe binary thật và full SDLC acceptance là các mức khác nhau**; xem [implementation status](implementation-status.md). Các phiên bản binary trong [provider report](provider-compatibility.md) và [E2E report](e2e-report.md) là quan sát lịch sử, không phải release allowlist hoặc kết quả thử lại ở HEAD.
+Đối chiếu source và các hồ sơ trong repo ngày 2026-10-27 (`main` tại `901caa6`, cùng PR #53). **Source/local test, probe binary thật và full SDLC acceptance là các mức khác nhau**; xem [implementation status](implementation-status.md). Các phiên bản binary trong [provider report](provider-compatibility.md) và [E2E report](e2e-report.md) là quan sát lịch sử, không phải release allowlist hoặc kết quả thử lại ở HEAD.
 
 ## Hệ điều hành và filesystem
 

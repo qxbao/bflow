@@ -1,8 +1,8 @@
 # Bổ sung tài liệu từ các commit mới trên main
 
-Đợt đối chiếu ban đầu lấy mốc soạn docs **`355a998c97aa301c39f7f5f08791a0bf2f3e3a7a`**, xét các commit trên upstream tại **`a7686be06e68458aa9cc93381584752ea68e250c`** và **`2357669`** ngày 2026-10-25 (`5dfceac`), sau đó được cập nhật tiếp tới **`c1caccb41167e37c59128919292b08a63ce17377`** ngày 2026-10-27. Đây là các mốc cố định của đợt audit; không là cam kết rằng nhánh `main` sẽ luôn trỏ tới commit đó.
+Đợt đối chiếu ban đầu lấy mốc soạn docs **`355a998c97aa301c39f7f5f08791a0bf2f3e3a7a`**, xét các commit trên upstream tại **`a7686be06e68458aa9cc93381584752ea68e250c`** và **`2357669`** ngày 2026-10-25 (`5dfceac`), sau đó được cập nhật tiếp tới commit `main` **`901caa6`** ngày 2026-10-27, cộng thay đổi sandbox của PR #53. Đây là các mốc cố định của đợt audit; không là cam kết rằng nhánh `main` sẽ luôn trỏ tới commit đó.
 
-Source ban đầu được đọc tại `duc` baseline `eaa9c2a5802d4312f3b835c36da2257cfa026aaf`, sau đó đồng bộ qua `cc61ab39582b9edbdd3394f2c6b6f37a8d84eee4` (`5dfceac`) và tiếp tục tích hợp các thay đổi đến `c1caccb`.
+Source ban đầu được đọc tại merge `eaa9c2a5802d4312f3b835c36da2257cfa026aaf`, sau đó đồng bộ qua `cc61ab39582b9edbdd3394f2c6b6f37a8d84eee4` (`5dfceac`) và tiếp tục đến `901caa6`. Các commit `main` sau `901caa6` (ví dụ mutation checks và host-measured review gate timings) chưa được đối chiếu trong đợt này.
 
 ## Phạm vi thay đổi đã đối chiếu (355a998..5dfceac)
 
@@ -20,7 +20,7 @@ Source ban đầu được đọc tại `duc` baseline `eaa9c2a5802d4312f3b835c3
 | [b76adcb](https://github.com/qxbao/bflow/commit/b76adcbd348016c930f2ec9a36853241026fea2e) | Alias whole-token, không đoán mã legacy, serialize append; expiry theo thời điểm render, Stop mang card plaintext, detail không bị lặp trong reply | [Approval](guide/security-approval.md), [recovery](guide/session-recovery.md), [Runtime reference](../packages/runtime/README.md) |
 | [2357669](https://github.com/qxbao/bflow/commit/235766979a002a2b0e6b16457f528e1506a9e566) | Machine setup doctor dùng native login status trong môi trường tài khoản thông thường, tránh Agy first-run chưa onboarding; check dùng diagnostic của exact-pin destination và apply giải quyết stale native intent khi đủ bằng chứng | [Setup native checks](setup-guide.md#kiểm-tra-native-login-và-intent-superpowers), [installer recovery](../packages/tool-installer/README.md) |
 
-## Phạm vi thay đổi bổ sung sau 5dfceac (5dfceac..c1caccb)
+## Phạm vi thay đổi bổ sung sau 5dfceac (5dfceac..901caa6, cùng PR #53)
 
 | Commit | Hành vi/source đã thêm | Tài liệu bổ sung |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ Source ban đầu được đọc tại `duc` baseline `eaa9c2a5802d4312f3b835c3
 | `91f1ee2` · `682cbcd` · `62b4e6c` | Bắt buộc verdict độc lập phủ đủ mọi rework finding của generation hiện hành; thêm cổng bắt buộc `host-test-integrity` (AST JS/TS + Reviewer adjudication + owner exception) và hạ cấp fast-path dưới bộ cổng mặc định | [Rework causality](rework-causality.md), [Test integrity](../packages/runtime/TEST-INTEGRITY-VALIDATION.md), [Known limitations](known-limitations-v3.md) |
 | `9140695` · `901caa6` | Bàn giao tác vụ có xác thực (`propose_task_handover` / `read_task_handover`, `resumeContext`) ghim theo generation, `HEAD` và SHA-256 của file | [Runtime README](../packages/runtime/README.md), [Contracts](contracts.md) |
 | `482975c` | Báo cáo telemetry chỉ đọc cho lượt chạy qua host đang hoạt động (`bflow status <run-id> --telemetry [--json]`) | [Telemetry spec](../packages/runtime/TELEMETRY-SPEC.md), [CLI reference](../apps/cli/COMMAND_REFERENCE.md) |
-| `c1caccb` | Phát hiện hạn chế AppArmor user namespace đối với Bubblewrap trên Ubuntu/Debian (lỗi `verification_sandbox_unavailable` kèm lý do AppArmor; doctor check `runtime-verification-sandbox`) và cung cấp profile `packages/runtime/support/bflow-bwrap.apparmor` | [Runtime README](../packages/runtime/README.md), [Troubleshooting](guide/troubleshooting.md) |
+| PR #53 | Phát hiện hạn chế AppArmor user namespace đối với Bubblewrap trên Ubuntu/Debian (lỗi `verification_sandbox_unavailable` kèm lý do AppArmor; doctor check `runtime-verification-sandbox`) và cung cấp profile `packages/runtime/support/bflow-bwrap.apparmor` | [Runtime README](../packages/runtime/README.md), [Troubleshooting](guide/troubleshooting.md) |
 
 Merge commits chỉ hợp nhất các thay đổi trên, không được tính thành tính năng mới hoặc một mức bằng chứng riêng. Các liên kết source trong từng guide là căn cứ cho hành vi, không chỉ dựa vào commit message.
 

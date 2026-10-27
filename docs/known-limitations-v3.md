@@ -1,6 +1,6 @@
 # Giới hạn hiện tại và điều kiện đóng
 
-Đối chiếu source ngày 2026-10-27 (`c1caccb`); [implementation status](implementation-status.md) ghi baseline và đường triển khai. Các báo cáo [release v3](release-readiness-v3.md), [provider](provider-compatibility.md) và [E2E](e2e-report.md) là bằng chứng lịch sử có phạm vi riêng, không phải chứng nhận mới cho HEAD.
+Đối chiếu source ngày 2026-10-27 (`main` tại `901caa6`, cùng PR #53); [implementation status](implementation-status.md) ghi baseline và đường triển khai. Các báo cáo [release v3](release-readiness-v3.md), [provider](provider-compatibility.md) và [E2E](e2e-report.md) là bằng chứng lịch sử có phạm vi riêng, không phải chứng nhận mới cho HEAD.
 
 ## Nghiệm thu hệ thống
 
