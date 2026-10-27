@@ -4,6 +4,9 @@ import { resolve } from "node:path";
 export default defineConfig({
   resolve: {
     alias: {
+      // Subpath exports first: an object alias also matches "<key>/<subpath>" and would append it to the package index file.
+      "@bflow/runtime/platform/isolator-profile": resolve(__dirname, "../../packages/runtime/src/platform/isolator-profile.ts"),
+      "@bflow/agent-providers/backend-authentication": resolve(__dirname, "../../packages/agent-providers/src/backend-authentication.ts"),
       "@bflow/contracts": resolve(__dirname, "../../packages/contracts/src/index.ts"),
       "@bflow/core": resolve(__dirname, "../../packages/core/src/index.ts"),
       "@bflow/herdr-adapter": resolve(__dirname, "../../packages/herdr-adapter/src/index.ts"),

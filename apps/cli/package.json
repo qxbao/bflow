@@ -28,10 +28,13 @@
     "@bflow/docs-retrieval": "workspace:*",
     "@bflow/git-orchestrator": "workspace:*",
     "@bflow/machine-setup": "workspace:*",
+    "@bflow/mcp-gateway": "workspace:*",
     "@bflow/pane-manager": "workspace:*",
     "@bflow/runtime": "workspace:*",
+    "@bflow/skills": "workspace:*",
     "@bflow/specification": "workspace:*",
     "@bflow/test-strategy": "workspace:*",
+    "@bflow/tool-installer": "workspace:*",
     "@bflow/verification": "workspace:*",
     "yaml": "^2.7.0",
     "zod": "^3.24.2"

@@ -42,6 +42,15 @@
     },
     {
       "path": "../../packages/verification"
+    },
+    {
+      "path": "../../packages/mcp-gateway"
+    },
+    {
+      "path": "../../packages/skills"
+    },
+    {
+      "path": "../../packages/tool-installer"
     }
   ]
 }

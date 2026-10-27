@@ -52,34 +52,34 @@ export { SUPPORTED_CLI_COMMANDS };
 
 /** Sibling package dynamic loaders (satisfies leaf-package boundaries and check-dependency-graph) */
 async function loadSpecificationModule(): Promise<any> {
-  return import(new URL("../../../packages/specification/dist/index.js", import.meta.url).href);
+  return import("@bflow/specification");
 }
 async function loadTestStrategyModule(): Promise<any> {
-  return import(new URL("../../../packages/test-strategy/dist/index.js", import.meta.url).href);
+  return import("@bflow/test-strategy");
 }
 async function loadVerificationModule(): Promise<any> {
-  return import(new URL("../../../packages/verification/dist/index.js", import.meta.url).href);
+  return import("@bflow/verification");
 }
 async function loadGitOrchestratorModule(): Promise<any> {
-  return import(new URL("../../../packages/git-orchestrator/dist/index.js", import.meta.url).href);
+  return import("@bflow/git-orchestrator");
 }
 async function loadAgentProvidersModule(): Promise<any> {
-  return import(new URL("../../../packages/agent-providers/dist/index.js", import.meta.url).href);
+  return import("@bflow/agent-providers");
 }
 async function loadMachineSetupModule(): Promise<any> {
-  return import(new URL("../../../packages/machine-setup/dist/index.js", import.meta.url).href);
+  return import("@bflow/machine-setup");
 }
 async function loadToolInstallerModule(): Promise<any> {
-  return import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
+  return import("@bflow/tool-installer");
 }
 async function loadMcpGatewayModule(): Promise<any> {
-  return import(new URL("../../../packages/mcp-gateway/dist/index.js", import.meta.url).href);
+  return import("@bflow/mcp-gateway");
 }
 async function loadSkillsModule(): Promise<any> {
-  return import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href);
+  return import("@bflow/skills");
 }
 async function loadArtifactStoreModule(): Promise<any> {
-  return import(new URL("../../../packages/artifact-store/dist/index.js", import.meta.url).href);
+  return import("@bflow/artifact-store");
 }
 
 export interface HighLevelFacadePorts {

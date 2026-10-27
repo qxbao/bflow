@@ -28,9 +28,9 @@ export interface MachineSkillCatalog {
 
 /** Loads the repository's builtin skill catalog through the same P28 path `skills sync` uses. */
 export async function loadMachineSkillCatalog(): Promise<MachineSkillCatalog> {
-  const skills = (await import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href)) as SkillsModule;
+  const skills = (await import("@bflow/skills")) as SkillsModule;
   const catalogRoot = fileURLToPath(new URL("../../../skills", import.meta.url));
-  const toolInstaller = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
+  const toolInstaller = await import("@bflow/tool-installer");
   const items = await skills.loadSkillCatalog(catalogRoot, { source: "builtin", supportedCommands: SUPPORTED_CLI_COMMANDS });
   const definitions = items.map(item => item.definition);
   const roleBindings = skills.RoleSkillBindingsSchema.parse(JSON.parse(await readFile(fileURLToPath(new URL("../../../skills/roles/bindings.json", import.meta.url)), "utf8")));
@@ -56,7 +56,7 @@ export async function validateBundledStartupSkills(environment: EnvironmentConfi
   const catalog = await loadMachineSkillCatalog();
   let installed: SkillDefinition[] | undefined;
   if (storeRoot) {
-    const module = await import(new URL("../../../packages/skills/dist/index.js", import.meta.url).href);
+    const module = await import("@bflow/skills");
     installed = await new module.SkillManager({ store: new module.SkillFileStore(storeRoot),
       supportedCommands: SUPPORTED_CLI_COMMANDS, approvedBuiltinDigests: catalog.approvedBuiltinSkillDigests }).list();
   }

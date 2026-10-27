@@ -192,12 +192,14 @@ export interface AgenticWorkspaceHandle {
 /** Actual P12 session + P13 panes + P14 dialogue + P15–P18 policies + existing Core/SQLite/Registry/ArtifactStore. */
 export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions): Promise<AgenticWorkspaceHandle> {
   const repository = await realpath(options.repositoryPath);
-  const paneModule = await import(new URL("../../../pane-manager/dist/index.js", import.meta.url).href);
-  const herdrModule = await import(new URL("../../../herdr-adapter/dist/index.js", import.meta.url).href);
-  const coreModule = await import(new URL("../../../core/dist/index.js", import.meta.url).href);
-  const persistenceModule = await import(new URL("../../../persistence/dist/index.js", import.meta.url).href);
-  const artifactsModule = await import(new URL("../../../artifact-store/dist/index.js", import.meta.url).href);
-  const registryModule = await import(new URL("../../../agent-registry/dist/index.js", import.meta.url).href);
+  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+  const paneModule: any = await import("@bflow/pane-manager");
+  const herdrModule = await import("@bflow/herdr-adapter");
+  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+  const coreModule: any = await import("@bflow/core");
+  const persistenceModule = await import("@bflow/persistence");
+  const artifactsModule = await import("@bflow/artifact-store");
+  const registryModule = await import("@bflow/agent-registry");
   const manifestStore = new paneModule.FileSessionManifestStore(options.manifestDirectory ?? resolve(repository, ".bflow/state/panes"));
   const manifest = SessionManifestSchema.parse(unwrap(await manifestStore.load(options.sessionId)));
   if (manifest.workspaceRoot !== repository || manifest.sessionId !== options.sessionId || manifest.status !== "up")

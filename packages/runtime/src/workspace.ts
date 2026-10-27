@@ -166,12 +166,12 @@ export async function openWorkspaceRuntime(
       herdrAdapterMod,
       qualityGatesMod
     ] = await Promise.all([
-      import(new URL("../../persistence/dist/index.js", import.meta.url).href) as Promise<PersistenceModule>,
-      import(new URL("../../artifact-store/dist/index.js", import.meta.url).href) as Promise<ArtifactStoreModule>,
-      import(new URL("../../agent-registry/dist/index.js", import.meta.url).href) as Promise<AgentRegistryModule>,
-      import(new URL("../../core/dist/index.js", import.meta.url).href) as Promise<CoreModule>,
-      import(new URL("../../herdr-adapter/dist/index.js", import.meta.url).href) as Promise<HerdrAdapterModule>,
-      import(new URL("../../quality-gates/dist/index.js", import.meta.url).href) as Promise<QualityGatesModule>
+      import("@bflow/persistence") as Promise<PersistenceModule>,
+      import("@bflow/artifact-store") as Promise<ArtifactStoreModule>,
+      import("@bflow/agent-registry") as Promise<AgentRegistryModule>,
+      import("@bflow/core") as Promise<CoreModule>,
+      import("@bflow/herdr-adapter") as Promise<HerdrAdapterModule>,
+      import("@bflow/quality-gates") as Promise<QualityGatesModule>
     ]);
   } catch (err) {
     const error: ContractError = {

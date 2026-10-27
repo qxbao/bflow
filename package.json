@@ -16,6 +16,7 @@
     "lint": "pnpm run check:deps && pnpm run typecheck && pnpm exec tsc -p tests/e2e/tsconfig.json --noEmit",
     "test": "pnpm run build && vitest run",
     "test:fast": "pnpm run build && vitest run --config vitest.fast.config.ts",
+    "test:affected": "node scripts/affected-tests.mjs",
     "test:e2e": "pnpm run build && vitest run --config tests/e2e/vitest.config.ts",
     "test:watch": "vitest",
     "check:deps": "node scripts/check-dependency-graph.mjs",

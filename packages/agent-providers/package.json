@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./backend-authentication": {
+      "types": "./dist/backend-authentication.d.ts",
+      "import": "./dist/backend-authentication.js"
     }
   },
   "files": [

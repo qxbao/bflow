@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./platform/isolator-profile": {
+      "types": "./dist/platform/isolator-profile.d.ts",
+      "import": "./dist/platform/isolator-profile.js"
     }
   },
   "scripts": {
@@ -19,19 +23,23 @@
   },
   "dependencies": {
     "@bflow/agent-providers": "workspace:*",
-    "@bflow/contracts": "workspace:*",
-    "@bflow/machine-setup": "workspace:*",
-    "@bflow/mcp-gateway": "workspace:*",
-    "@bflow/skills": "workspace:*",
-    "typescript": "5.9.3",
-    "zod": "^3.24.2"
-  },
-  "devDependencies": {
     "@bflow/agent-registry": "workspace:*",
     "@bflow/artifact-store": "workspace:*",
+    "@bflow/contracts": "workspace:*",
+    "@bflow/conversation": "workspace:*",
     "@bflow/core": "workspace:*",
+    "@bflow/git-orchestrator": "workspace:*",
     "@bflow/herdr-adapter": "workspace:*",
+    "@bflow/machine-setup": "workspace:*",
+    "@bflow/mcp-gateway": "workspace:*",
+    "@bflow/pane-manager": "workspace:*",
     "@bflow/persistence": "workspace:*",
-    "@bflow/quality-gates": "workspace:*"
+    "@bflow/quality-gates": "workspace:*",
+    "@bflow/skills": "workspace:*",
+    "@bflow/specification": "workspace:*",
+    "@bflow/test-strategy": "workspace:*",
+    "@bflow/verification": "workspace:*",
+    "typescript": "5.9.3",
+    "zod": "^3.24.2"
   }
 }

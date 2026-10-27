@@ -60,7 +60,8 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   const loadRuntime = async () => {
     // Use the installed sibling package entrypoint, as the existing Runtime's
     // concrete workspace composition does. No repository module is executed.
-    const runtime = await import(new URL("../../../packages/runtime/dist/index.js", import.meta.url).href);
+    // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+    const runtime: any = await import("@bflow/runtime");
     if (typeof runtime.ensureAgenticHost !== "function") {
       throw new Error("Installed Runtime has no persistent Agentic host API; rebuild all workspace packages.");
     }
@@ -85,9 +86,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         realpath(input.repository.root)
       ]);
       if (!homeStat.isDirectory()) return undefined;
-      const { gitNexusStorageLockPath } = await import(
-        new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href
-      );
+      const { gitNexusStorageLockPath } = await import("@bflow/tool-installer");
       return {
         executable: binary.executable,
         home,
@@ -252,7 +251,8 @@ export async function terminateHostOwner(directory: string): Promise<void> {
 /** Legacy prompt-injection path for hosts that return no v3 `launch` profile. Platform-prepared roles never reach it. */
 export async function providerRoleArguments(kind: string, role: string, launch: HostRoleLaunch): Promise<readonly string[]> {
   if (kind !== "claude" && kind !== "codex") throw new Error(`Agentic provider '${kind}' is unsupported; select claude or codex.`);
-  const panes = await import(new URL("../../../packages/pane-manager/dist/index.js", import.meta.url).href);
+  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+  const panes: any = await import("@bflow/pane-manager");
   if (typeof panes.buildProviderRoleLaunchFromFiles !== "function") throw new Error("Installed Pane Manager has no trusted provider launch API; rebuild all workspace packages.");
   return panes.buildProviderRoleLaunchFromFiles({ agentKind: kind, role, systemPrompt: launch.systemPrompt,
     mcpConfigFile: launch.mcpConfigFile, hooksSettingsFile: launch.hooksSettingsFile });
