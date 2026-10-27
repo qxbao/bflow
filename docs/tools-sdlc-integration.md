@@ -70,7 +70,9 @@ assignment attempt may hold at most one exclusive browser lease (max 5-minute TT
 `gen-N/browser-resource-transactions.json`); concurrent browser calls on the same task fail
 closed with `browser_lease_busy`, and restarted hosts preserve `quarantined`/`release_uncertain`
 entries for observation-only reconciliation without auto-replaying uncertain mutations. Evidence
-is source plus local tests; full live Chrome/provider SDLC acceptance remains open.
+is source plus local tests; full live Chrome/provider SDLC acceptance remains open. The owner
+real-app gate (`appChecks`) runs its own sandboxed Chrome under a host-local fenced lease instead of the
+Gateway profile.
 
 GitNexus, Context7 and browser operations require their own policy requirements,
 task triggers and current readiness. A small arithmetic task does not itself

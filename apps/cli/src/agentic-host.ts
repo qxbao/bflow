@@ -36,20 +36,21 @@ export type LifecycleHostFactory = (input: EnvironmentCompositionInput) => Promi
  * `.bflow/verification.json` is an optional owner override. When absent, no owner commands are returned and Runtime detects
  * the repository's test runner itself (see docs/verification-runners.md); no user configuration is required.
  */
-export async function readOwnerVerification(repositoryRoot: string, runtime: Pick<typeof import("@bflow/runtime"), "parseBehavioralCommands" | "parseMutationChecks">) {
+export async function readOwnerVerification(repositoryRoot: string, runtime: Pick<typeof import("@bflow/runtime"), "parseBehavioralCommands" | "parseMutationChecks" | "parseAppChecks">) {
   const verificationPath = resolve(repositoryRoot, ".bflow/verification.json");
   try {
     if (!(await lstat(verificationPath)).isFile() || await realpath(verificationPath) !== verificationPath)
       throw new Error("Owner verification configuration must be a regular file inside this repository");
     const value: unknown = JSON.parse(await readFile(verificationPath, "utf8"));
     if (value === null || typeof value !== "object" || Array.isArray(value) || !("schemaVersion" in value) || value.schemaVersion !== 1 ||
-        !("behavioralCommands" in value) || Object.keys(value).some(key => !["schemaVersion", "behavioralCommands", "mutationChecks"].includes(key)))
-      throw new Error("Invalid owner verification configuration (expected schemaVersion:1, behavioralCommands and optional mutationChecks)");
+        !("behavioralCommands" in value) || Object.keys(value).some(key => !["schemaVersion", "behavioralCommands", "mutationChecks", "appChecks"].includes(key)))
+      throw new Error("Invalid owner verification configuration (expected schemaVersion:1, behavioralCommands and optional mutationChecks and appChecks)");
     const behavioralCommands = runtime.parseBehavioralCommands(value.behavioralCommands);
-    return { behavioralCommands, mutationChecks: runtime.parseMutationChecks("mutationChecks" in value ? value.mutationChecks : undefined, behavioralCommands) };
+    return { behavioralCommands, mutationChecks: runtime.parseMutationChecks("mutationChecks" in value ? value.mutationChecks : undefined, behavioralCommands),
+      appChecks: runtime.parseAppChecks("appChecks" in value ? value.appChecks : undefined) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return { behavioralCommands: [], mutationChecks: [] };
+    return { behavioralCommands: [], mutationChecks: [], appChecks: [] };
   }
 }
 
@@ -100,7 +101,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   const openForStartup = (): Promise<LifecycleHost> => {
     return activeHost ??= (async () => {
       const runtime = await loadRuntime();
-      const { behavioralCommands, mutationChecks } = await readOwnerVerification(input.repository.root, runtime);
+      const { behavioralCommands, mutationChecks, appChecks } = await readOwnerVerification(input.repository.root, runtime);
       const context = await loadHostPlatformContext(input);
       const context7Ready = input.config.environment.context7?.enabled !== false
         ? (await readGatewayReadiness(context.stateDirectory, "context7")).status === "ready" : undefined;
@@ -115,6 +116,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
         behavioralCommands,
         mutationChecks,
+        appChecks,
         platform,
         ...(impactIndex ? { impactIndex } : {}),
         policy: {
@@ -142,7 +144,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
       if (hasHostConfig) {
         return runtime.openPersistedAgenticHost({ repositoryPath: input.repository.root, sessionId: input.repository.sessionName });
       }
-      const { behavioralCommands, mutationChecks } = await readOwnerVerification(input.repository.root, runtime);
+      const { behavioralCommands, mutationChecks, appChecks } = await readOwnerVerification(input.repository.root, runtime);
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
         sessionId: input.repository.sessionName,
@@ -151,6 +153,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         maxDeveloperCapacity: input.config.environment.concurrency.maxConcurrency,
         behavioralCommands,
         mutationChecks,
+        appChecks,
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,

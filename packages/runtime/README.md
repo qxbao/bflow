@@ -869,6 +869,80 @@ Các task notice mượn lease assignment đang hoạt động và không thể 
 Developer slot thứ hai. Đây là các đảm bảo crash process cục bộ dưới mô hình tin cậy
 Linux/filesystem đã nêu, không phải bằng chứng fault-campaign AI live hay power-loss.
 
+## Kiểm tra ứng dụng thật (`appChecks`, gate `host-app-<suiteId>`)
+
+Owner khai báo `appChecks` trong `.bflow/verification.json` (schemaVersion vẫn là 1). Mỗi suite tạo một
+gate bắt buộc `host-app-<suiteId>` (evaluator `host-app-check`, method `e2e_test`, command `app:<suiteId>`).
+Mỗi check có định danh test `app:<suiteId>:<checkId>`, và chỉ định danh này được dùng trong
+`criterionMappings` của tiêu chí `e2e_test`. Parser (`parseAppChecks`) dùng Zod strict: khóa lạ, đường dẫn
+tương đối hoặc có `..`, env bị cấm (`PATH`, `HOME`, `PORT`, `HOST`, `NODE_OPTIONS`, `LD_*`, `BFLOW_*`),
+selector không ổn định (`:nth-child`, `:nth-of-type`, `:first-child`, `:last-child`, XPath), API không có
+assertion hành vi ngoài status, và ngân sách timeout không đủ đều bị từ chối.
+
+**Chọn check.** Chỉ check được ánh xạ bởi tiêu chí chấp nhận đang hoạt động, có `verificationMethod: e2e_test`
+và mọi `testNames` là định danh app của cùng suite, mới chạy. Check cấu hình nhưng không được ánh xạ không
+chạy và không xuất hiện trong evidence. Ingress (`splitAppCriteria`) từ chối với `unsupported_verification`
+khi mapping trộn định danh app với test khác, suite/check không tồn tại hoặc tiêu chí trộn nhiều suite;
+`unknown_test_command` khi thiếu `app:<suite>` trong `targetCommands`; `unsupported_method` khi method khác
+`e2e_test`; và khi TDD ở chế độ `required` mà mọi tiêu chí tự động đều là app (đó là bằng chứng xác minh,
+không phải bằng chứng Red). Tiêu chí app không kích hoạt lỗi "No owner-configured behavioral runner" cho các
+tiêu chí khác. Trong `verificationPlan`, bộ lọc một dòng đảm bảo runner tự động không bao giờ nhận định danh app.
+
+**Thực thi.** Ứng dụng chạy từ bytes đã commit của revision (checkout tạm), không chạy từ worktree của
+developer, trong Bubblewrap (namespace trống, `--unshare-all`). Argv do owner cấu hình được chạy với
+`HOST=127.0.0.1` và `PORT`; sẵn sàng được xác định theo điều kiện (`readyPath` trả 2xx trong
+`startTimeoutMs`). UI check chạy Chrome headless qua CDP pipe trong sandbox. Một check chỉ pass khi không có
+finding: lỗi trang, `console.error`, HTTP ≥ 400 (kể cả tài nguyên phụ), request lỗi, selector phải có mặt
+**và hiển thị** (HTML tĩnh hoặc `<template>` không đủ), text phải có trong body đã render, không tràn
+ngang khi `noHorizontalOverflow`. API check so sánh status, header, JSON pointer (RFC 6901), `bodyContains`;
+nếu cấu hình `contract` OpenAPI thì route phải được khai báo. Screenshot chỉ là bằng chứng bổ sung, không
+ảnh hưởng pass/fail.
+
+**Lease trình duyệt.** Chrome là tài nguyên độc quyền host-local, lưu trong `app-checks/app-check-leases.json`
+của thư mục state host (cùng UID). Lease có fencing token tăng đơn điệu, được gia hạn định kỳ; lease bị giành
+hoặc hết hạn khi chạy khiến kết quả bị loại (`app_check_browser_lease_lost` / `app_check_browser_lease_expired`).
+Lease không phân tán, không dùng trên NFS hay nhiều host.
+
+**Evidence.** Gate lưu một artifact `test-result` JSON và ràng buộc: `candidate.sourceRevision`,
+`candidate.checkoutTree`, `app.instanceId`, `app.origin`, `app.command`, `app.envKeys` và `envDigest` (không
+bao giờ lưu giá trị env), định danh và tiêu chí được chọn, `browser.lease.fencingToken`, và `driver.sha256`
+(băm file driver). Mỗi screenshot là artifact `report` riêng, được tham chiếu bằng `screenshotArtifactId`.
+Trước khi lưu, toàn bộ nội dung tự do đi qua `sanitizeAppEvidence`: che `Bearer`/`Basic`, `token|secret|
+password|api_key=...` và `sk-...` thành `[REDACTED]`; che giá trị env đã cấu hình (từ 4 ký tự); bỏ ký tự điều
+khiển trừ tab và newline; giới hạn tail 8 KiB, message 2 KiB, body 4 KiB.
+
+**Pha Tester (P16).** Validator TDD đòi evidence phủ mọi tiêu chí bắt buộc và mọi `targetCommands`, nên
+`behavioralEvidence` cũng chạy các suite app được tiêu chí của task chọn ở mỗi pha (cùng revision, cùng đường
+đo với gate) và ghi observation `e2e_test` với command `app:<suite>`. Suite bị `blocked` làm pha đó lỗi điều kiện
+tiên quyết và không ghi evidence. Red vẫn cần một assertion failure của runner hành vi; check app fail (có thể chỉ
+vì app không khởi động) không đủ để Red hợp lệ. Assessment phải liệt kê `{method: "e2e_test", command:
+"app:<suite>"}` trong `infrastructure.commands` để `app:<suite>` có trong `targetCommands`.
+
+**Trạng thái gate.** `passed`: app sẵn sàng và mọi check được chọn không có finding. `failed`: ứng viên lỗi,
+mỗi finding trỏ tới artifact evidence (`location: app:<suite>:<check>`). `blocked`: thiếu điều kiện tiên quyết
+hoặc tài nguyên, không có kết quả nào được tạo: `app_check_platform_unsupported`, `app_check_sandbox_unavailable`,
+`app_check_app_missing`, `app_check_dependency_missing`, `app_check_browser_missing`,
+`app_check_source_not_pinned`, `app_check_driver_failed`, `app_check_browser_busy` (có thể thử lại),
+`app_check_browser_lease_lost`, `app_check_browser_lease_expired`, `app_check_timeout`. `blocked` không bao giờ
+là pass: Core chỉ coi gate bắt buộc là đạt khi trạng thái đúng là `passed` (`requiredGatesSatisfied`).
+
+**Giới hạn (phải đọc):**
+- Chỉ Linux với Bubblewrap và Chrome headless qua CDP pipe. Không có macOS, không có Seatbelt cho app check.
+- Ứng dụng được chạy theo argv Node-style do owner cấu hình; ứng dụng nhận `PORT`/`HOST`.
+- Chưa có thao tác tương tác (click, nhập liệu, điều hướng nhiều bước) trong phiên bản này.
+- `viewport.mobile: true` giả lập trình duyệt di động thật: trang thiếu `<meta name="viewport">` có layout 980px,
+  nên bị `ui_viewport_mismatch`/`ui_horizontal_overflow` ở 375px. Đây là lỗi responsive thật, không phải lỗi gate.
+- Contract chỉ hỗ trợ OpenAPI, và chỉ kiểm tra route cùng method có được khai báo.
+- Lease là host-local và cùng UID; không phải khóa phân tán.
+- `dependencyRoots` được mount chỉ đọc ở đúng đường dẫn tuyệt đối trên host; owner phải trỏ `app.env` (ví dụ
+  `NODE_PATH`) tới đó.
+- Sanitizer là lọc theo mẫu và theo giá trị đã cấu hình; không phải kiểm tra bảo mật toàn diện cho output tùy ý
+  của ứng dụng.
+- App của candidate chạy cùng sandbox và cùng UID với driver, nên code thù địch trong candidate về lý thuyết
+  có thể can thiệp driver; mô hình này chống "pass giả" do agent, không chống code độc trong sandbox. Lease không
+  bảo vệ trước tiến trình cùng UID cố ý sửa file lease.
+- Đây là bằng chứng mức source và test cục bộ. Không phải bằng chứng acceptance provider, Herdr hoặc SDLC đầy đủ.
+
 ## Role prompt và policy không hướng tới người dùng trong host mặc định
 
 `runAgenticHost` dựng system prompt launch của mỗi role từ `agents/<role>/system-prompt.md` gốc đã cài đặt qua `readBuiltinRolePrompt` từ `@bflow/pane-manager` đã build (`packages/pane-manager/dist/index.js`, được nạp khi host khởi động, nên build pane-manager trước). Thiếu prompt Conversation hoặc Coordinator sẽ hủy việc khởi động host. Với mọi role trừ Conversation, host đảm bảo policy không hướng tới người dùng nguyên văn (`NON_USER_FACING_AUTONOMOUS_POLICY`, export từ `src/agentic/host.ts`) cộng với `NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT` (các trường `status`, `summary`, `evidence`, `artifacts`, `blockers`, `requested_action`, `next_role`, `assumptions` tùy chọn): nó được nối thêm khi prompt đã nạp thiếu nó, hoặc khi không có builtin prompt. Một chỉ dẫn kết thúc cũng cấm hỏi người dùng trong pane và yêu cầu escalate lên Coordinator qua Herdr `RoleMessage`. Coordinator không còn đọc file prompt của nó riêng nữa; loader dùng chung cung cấp nó, tiếp theo là các chỉ dẫn tích hợp host. Văn bản prompt chỉ là chỉ dẫn và không chứng minh provider tuân theo.

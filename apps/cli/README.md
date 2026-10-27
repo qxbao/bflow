@@ -389,6 +389,9 @@ cho tiêu chí `unit_test`, `integration_test` và `e2e_test`, với label và q
 trong `planning_reference`. Thiếu runner/reporter của hệ sinh thái đã nhận diện được trả
 về Coordinator để tạo setup task có review; phát hiện được làm mới khi revision thay đổi.
 Owner vẫn có thể dùng `.bflow/verification.json` làm ghi đè Node TAP/Vitest tùy chọn.
+Owner cũng có thể khai báo `appChecks` trong cùng file để chạy kiểm tra ứng dụng thật (UI/API) trong sandbox
+thành gate `host-app-<suiteId>`; xem mục "Kiểm tra ứng dụng thật" trong [README của runtime](../../packages/runtime/README.md).
+Hiện chỉ hỗ trợ Linux với Bubblewrap và Chrome; các giới hạn được liệt kê ở đó.
 Executable và argv do Runtime quyết định, kết quả từng test có cấu trúc là bắt buộc.
 Phép đo yêu cầu sandbox: Linux Bubblewrap hoặc macOS Seatbelt cho các runner JS/owner
 được hỗ trợ. Mount/cache/report của adapter native và làm ấm dependency còn giới hạn Linux.

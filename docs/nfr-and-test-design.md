@@ -48,7 +48,7 @@ Test plan cần nối rõ **criterion → rủi ro/góc nhìn → exact check/te
 
 Tên test và method phải khớp `TestStrategy.criterionMappings`/check plan hiện có. Unit test với fake không thay integration qua entrypoint, browser runtime hoặc live provider evidence khi criterion yêu cầu những mức đó. Khi browser/live proof là bắt buộc nhưng thiếu grant, origin, lease/fence hoặc runner, ghi blocked/inconclusive và escalation theo luồng hiện có.
 
-Runtime quản lý giao dịch lease trình duyệt độc quyền theo từng attempt (`BrowserResourceTransactions`), nhưng việc thêm reference browser không tự cấp quyền hay chứng nhận live Chrome/provider SDLC acceptance; khi thiếu grant, origin, lease/fence hoặc trình duyệt sẵn sàng thì công việc phải báo degraded/blocked theo đúng policy. Không tự cài load generator, scanner, browser hoặc backend chỉ vì skill gợi ý một phương pháp. Conditional TDD, independent gates, approvals và iteration bounds vẫn giữ nguyên.
+Runtime quản lý giao dịch lease trình duyệt độc quyền theo từng attempt (`BrowserResourceTransactions`), nhưng việc thêm reference browser không tự cấp quyền hay chứng nhận live Chrome/provider SDLC acceptance; khi thiếu grant, origin, lease/fence hoặc trình duyệt sẵn sàng thì công việc phải báo degraded/blocked theo đúng policy. Kiểm chứng UI/API qua app thật dùng gate owner `appChecks` ([verification runners](verification-runners.md#kiểm-tra-ứng-dụng-thật-appchecks)). Không tự cài load generator, scanner, browser hoặc backend chỉ vì skill gợi ý một phương pháp. Conditional TDD, independent gates, approvals và iteration bounds vẫn giữ nguyên.
 
 ### Race condition: test phải phân biệt được có lock hay không
 

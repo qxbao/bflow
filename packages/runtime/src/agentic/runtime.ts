@@ -44,6 +44,7 @@ import {
   type ReworkResolutionDossier
 } from "./rework-causality.js";
 import { InspectInputSchema, summarizeInspectRun, summarizeInspectState, type InspectInput } from "./mcp-output-views.js";
+import { parseAppCheckIdentity } from "./app-check-config.js";
 
 /** Existing receipt and diagnostic operations that may drain after scheduling is quiesced. */
 export const QUIESCED_RECEIPT_DRAIN_OPERATIONS: readonly string[] = Object.freeze([
@@ -3503,7 +3504,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (methodBound && !dossier.strategy.targetCommands.includes(String(config.command))) return [];
       const names = methodBound && check.metadata?.boundRunnerIdentities !== true ? dossier.strategy.criterionMappings.filter(mapping => dossier.specification.acceptanceCriteria.some(criterion =>
         criterion.id === mapping.criterionId && criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === config.method))
-        .flatMap(mapping => mapping.testNames) : config.testNames;
+        .flatMap(mapping => mapping.testNames)
+        // Real-app identities belong only to their owner gate (boundRunnerIdentities); an automatic runner never receives them.
+        .filter(name => parseAppCheckIdentity(name) === undefined) : config.testNames;
       const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
         (config.kind === "review" || criterion.verificationMethod === config.method && dossier.strategy.criterionMappings.some(mapping =>
           mapping.criterionId === criterion.id && mapping.testNames.length && mapping.testNames.every(name => Array.isArray(names) && names.includes(name)))));

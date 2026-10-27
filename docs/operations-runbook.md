@@ -69,6 +69,7 @@ Nếu startup đã có side effect rồi thất bại/Ctrl+C, CLI thử safe dow
 | `codex_global_hooks_not_isolated` | `bflow setup --codex-hooks --plan`, review rồi `--apply`; setup thường không duyệt hook |
 | `agy_onboarding_incomplete` | Kiểm tra đúng profile/HOME launch và onboarding; không copy receipt để giả readiness |
 | Browser `browser_lease_busy` / `quarantined` | Mỗi attempt chỉ giữ một lease trình duyệt độc quyền (TTL tối đa 5 phút); chờ cuộc gọi hiện tại kết thúc hoặc đối soát mục `quarantined`/`release_uncertain` trong `browser-resource-transactions.json`, không dùng profile Chrome cá nhân |
+| Gate `host-app-*` báo `blocked app_check_*` | Thiếu điều kiện tiên quyết (sandbox, app, dependency, browser), lease bận/mất/hết hạn hoặc quá hạn; không có kết quả nào được tạo. `app_check_browser_busy` thử lại sau; các mã khác cần sửa môi trường/cấu hình `appChecks` |
 | Linux Bubblewrap `verification_sandbox_unavailable` (AppArmor userns) | Trên Ubuntu/Debian bật `kernel.apparmor_restrict_unprivileged_userns=1`, cài đặt profile AppArmor `packages/runtime/support/bflow-bwrap.apparmor` cho `/usr/bin/bwrap` rồi chạy lại `bflow doctor` ([Runtime README](../packages/runtime/README.md#linux-verification-sandbox-prerequisites)) |
 | Profile Chrome bị khóa | Xác minh đúng process/profile/task và ownership; giữ quarantine/unknown, không xóa lock của process còn sống |
 | Conflict lightweight/full SDD | Trả lời revision được notice đề xuất trong Conversation; không resume lặp để bỏ project policy |
