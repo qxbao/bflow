@@ -58,7 +58,8 @@ export async function createDefaultSetupConfiguration(options: {
   const config = retiredPins.length === 0 ? loaded
     : MachineConfigSchema.parse({ ...loaded, toolPins: loaded.toolPins.filter(pin => !RETIRED_TOOL_IDS.has(pin.toolId)) });
   const registry = options.registry ?? new ToolInstallerRegistry();
-  const leaf = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
+  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+  const leaf: any = await import("@bflow/tool-installer");
   const catalog = leaf.defaultToolCatalog(platform.os, platform.arch);
   const nativeSupported = (platform.os === "linux" || platform.os === "darwin") && ["x64", "arm64"].includes(platform.arch) && config.providers.length > 0;
   const nativePins = nativeSupported ? leaf.defaultNativeToolPins() : [];

@@ -124,7 +124,6 @@ const InitializeSchema = z.object({ protocolVersion: z.string().min(1), capabili
   serverInfo: z.object({ name: z.string(), version: z.string() }).passthrough() }).passthrough();
 const ToolsSchema = z.object({ tools: z.array(z.object({ serviceId: z.string(), name: z.string() }).passthrough()) }).passthrough();
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-const leaf = (name: string) => import(new URL(`../../../packages/${name}/dist/index.js`, import.meta.url).href);
 const why = (error: unknown) => error instanceof Error ? error.message : String(error);
 const readonly = (ctx: SetupContext) => ctx.mode === "check" || ctx.mode === "dry_run";
 async function readJson(file: string): Promise<unknown> {
@@ -191,7 +190,7 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
     throw new Error("Gateway machine identity or readiness path differs from the approved boundary");
   const active = saved.approval.requirements.filter(item => item.toolId !== "gitnexus");
   if (new Set(saved.generatedIds).size !== active.length + saved.approval.remoteServices.length) throw new Error("Managed MCP service inventory does not match setup");
-  const tools = await leaf("tool-installer");
+  const tools = await import("@bflow/tool-installer");
   for (const item of active) {
     const definition = saved.services.find(candidate => saved.generatedIds.includes(candidate.serviceId) && candidate.tool.toolId === item.toolId);
     if (!definition || definition.connection.kind !== "stdio_mcp" || definition.connection.argv.length !== 4)
@@ -363,7 +362,8 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
     apply: async ctx => {
       if (readonly(ctx)) return { ownedPaths: [], diagnostics: [] };
       try {
-        const tools = await leaf("tool-installer");
+        // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+        const tools: any = await import("@bflow/tool-installer");
         let prior: z.infer<typeof GatewayConfigSchema> | undefined;
         try { prior = GatewayConfigSchema.parse(await readJson(configPath)); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -512,8 +512,9 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
   const healthOperation = ScopedOperationSchema.parse({ schemaVersion: 3, scope: { kind: "session", machineId,
     repositoryId: `setup-probe-${sha(machineId).slice(0, 24)}`, workspaceRoot: join(configured.paths.data, "gateway-probe"),
     sessionId: "setup-gateway" }, idempotencyKey: "setup-gateway" });
-  const module = await leaf("mcp-gateway");
-  const tools = await leaf("tool-installer");
+  const module = await import("@bflow/mcp-gateway");
+  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+  const tools: any = await import("@bflow/tool-installer");
   const runtimeGrants = new Map<string, readonly ResolvedToolGrant[]>();
   const gateway = new module.BflowSharedMCPGateway({
     policyOverrides: (service: MCPServiceDefinition) => tools.trustedGatewayPolicy(service),

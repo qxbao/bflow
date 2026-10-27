@@ -196,18 +196,27 @@ importers:
       '@bflow/machine-setup':
         specifier: workspace:*
         version: link:../../packages/machine-setup
+      '@bflow/mcp-gateway':
+        specifier: workspace:*
+        version: link:../../packages/mcp-gateway
       '@bflow/pane-manager':
         specifier: workspace:*
         version: link:../../packages/pane-manager
       '@bflow/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
+      '@bflow/skills':
+        specifier: workspace:*
+        version: link:../../packages/skills
       '@bflow/specification':
         specifier: workspace:*
         version: link:../../packages/specification
       '@bflow/test-strategy':
         specifier: workspace:*
         version: link:../../packages/test-strategy
+      '@bflow/tool-installer':
+        specifier: workspace:*
+        version: link:../../packages/tool-installer
       '@bflow/verification':
         specifier: workspace:*
         version: link:../../packages/verification
@@ -330,43 +339,60 @@ importers:
       '@bflow/agent-providers':
         specifier: workspace:*
         version: link:../agent-providers
-      '@bflow/contracts':
-        specifier: workspace:*
-        version: link:../contracts
-      '@bflow/machine-setup':
-        specifier: workspace:*
-        version: link:../machine-setup
-      '@bflow/mcp-gateway':
-        specifier: workspace:*
-        version: link:../mcp-gateway
-      '@bflow/skills':
-        specifier: workspace:*
-        version: link:../skills
-      typescript:
-        specifier: 5.9.3
-        version: 5.9.3
-      zod:
-        specifier: ^3.24.2
-        version: 3.25.76
-    devDependencies:
       '@bflow/agent-registry':
         specifier: workspace:*
         version: link:../agent-registry
       '@bflow/artifact-store':
         specifier: workspace:*
         version: link:../artifact-store
+      '@bflow/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@bflow/conversation':
+        specifier: workspace:*
+        version: link:../conversation
       '@bflow/core':
         specifier: workspace:*
         version: link:../core
+      '@bflow/git-orchestrator':
+        specifier: workspace:*
+        version: link:../git-orchestrator
       '@bflow/herdr-adapter':
         specifier: workspace:*
         version: link:../herdr-adapter
+      '@bflow/machine-setup':
+        specifier: workspace:*
+        version: link:../machine-setup
+      '@bflow/mcp-gateway':
+        specifier: workspace:*
+        version: link:../mcp-gateway
+      '@bflow/pane-manager':
+        specifier: workspace:*
+        version: link:../pane-manager
       '@bflow/persistence':
         specifier: workspace:*
         version: link:../persistence
       '@bflow/quality-gates':
         specifier: workspace:*
         version: link:../quality-gates
+      '@bflow/skills':
+        specifier: workspace:*
+        version: link:../skills
+      '@bflow/specification':
+        specifier: workspace:*
+        version: link:../specification
+      '@bflow/test-strategy':
+        specifier: workspace:*
+        version: link:../test-strategy
+      '@bflow/verification':
+        specifier: workspace:*
+        version: link:../verification
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
 
   packages/skills:
     dependencies:

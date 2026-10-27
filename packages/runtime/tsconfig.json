@@ -7,6 +7,18 @@
     { "path": "../agent-providers" },
     { "path": "../skills" },
     { "path": "../mcp-gateway" },
-    { "path": "../machine-setup" }
+    { "path": "../machine-setup" },
+    { "path": "../agent-registry" },
+    { "path": "../artifact-store" },
+    { "path": "../conversation" },
+    { "path": "../core" },
+    { "path": "../git-orchestrator" },
+    { "path": "../herdr-adapter" },
+    { "path": "../pane-manager" },
+    { "path": "../persistence" },
+    { "path": "../quality-gates" },
+    { "path": "../specification" },
+    { "path": "../test-strategy" },
+    { "path": "../verification" }
   ]
 }
