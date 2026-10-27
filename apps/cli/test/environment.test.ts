@@ -480,7 +480,7 @@ describe("P12 repository environment lifecycle", () => {
     expect(json.error.message).toBe(failure.message);
     expect(original.message).toBe(message);
   });
-  linuxIt("preserves the composed host without creating Herdr when readiness preflight blocks startup", async () => {
+  linuxIt("stops the idle composed host without creating Herdr when readiness preflight blocks startup", async () => {
     const path = join(dir, ".bflow/config.yml");
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     const input = { repository, config, env: process.env };
@@ -498,8 +498,10 @@ describe("P12 repository environment lifecycle", () => {
       openPaneManagerEnvironment(input, runner, async () => host) });
     await expect(composed.up()).rejects.toThrow(/Provider readiness is not satisfied.*missing provider authentication/s);
     expect(host.prepare).toHaveBeenCalledOnce();
-    expect(host.shutdown).not.toHaveBeenCalled();
-    expect(host.quiesce).not.toHaveBeenCalled();
+    // The host owns no workflow, so it is quiesced and stopped instead of keeping the rejected platform pinned.
+    expect(host.quiesce).toHaveBeenCalledOnce();
+    expect(host.shutdown).toHaveBeenCalledOnce();
+    expect(vi.mocked(host.quiesce).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(host.shutdown).mock.invocationCallOrder[0]!);
     expect(runner.requests.some(request => request.args[0] === "server")).toBe(false);
     expect(fixture.manager.up).not.toHaveBeenCalled();
     expect(runner.running.has(repository.sessionName)).toBe(false);
