@@ -1,6 +1,6 @@
 # Công việc tiếp theo
 
-Roadmap theo [source hiện tại](implementation-status.md), cập nhật 2026-10-25. P25–P30, D-TOOLS-01, runner detection, repository survey, rework-causality dossiers, Conversation cards/aliases và NFR/risk references đã có source; không giao lại chúng như bootstrap mới. Thứ tự dưới đây ưu tiên khoảng trống bằng chứng và đường tích hợp còn thiếu.
+Roadmap theo [source hiện tại](implementation-status.md), cập nhật 2026-10-27 (`main` tại `901caa6`, cùng PR #53). P25–P30, D-TOOLS-01, runner detection, regression scope, fast-path, `host-test-integrity`, repository survey, rework-causality dossiers (kèm per-finding verdict enforcement), browser MCP resource transactions (`BrowserResourceTransactions`), task handovers, read-only workflow telemetry, Conversation cards/aliases và NFR/risk references đã có source và local tests; không giao lại chúng như bootstrap mới. Thứ tự dưới đây ưu tiên khoảng trống bằng chứng live và đường tích hợp còn thiếu.
 
 | Ưu tiên | Công việc | Owner / điều kiện nghiệm thu |
 | --- | --- | --- |
@@ -8,9 +8,9 @@ Roadmap theo [source hiện tại](implementation-status.md), cập nhật 2026-
 | P1 | Platform-v3 conformance/fault campaign (P31) | QA sở hữu test mới; root CI/discovery cần integration review. Tái sử dụng e11–e16 và package tests đã có |
 | P1 | Active provider crash/restart/cancellation | Lifecycle + QA: dirty worktree, waiting approval, delivery uncertain; không double dispatch, không mất authority |
 | P1 | Tool invocation và consumption thật | Runtime/Gateway/CLI: exact grant, trigger, scope, trusted artifact; chứng minh dataflow vào output được chấp nhận; unavailable/degraded/restart cases |
-| P1 | Browser task lease integration | Runtime + MCP services: acquire/renew/release, task URL/profile scope, fencing/quarantine và live race probes; hiện browser actions còn unsupported |
+| P1 | Live browser task lease & Chrome SDLC acceptance | Runtime + MCP services: kiểm chứng live Chrome/provider với `BrowserResourceTransactions` (acquire/renew/release, URL/profile scope, fencing/quarantine và race/crash probes); source + local tests đã có |
 | P2 | macOS integration acceptance rộng hơn | Có helper/Seatbelt và phép đo thật; bổ sung full provider SDLC, platform matrix; polyglot mounts/warming cần thiết kế riêng nếu mở hỗ trợ |
-| P1 | Rework verdict-coverage hardening | Runtime owner: reject missing/partial per-finding verdicts before review pass, cover recovery/settlement; current source/prompt distinction is documented in [rework reference](rework-causality.md) |
+| P1 | Live rework verdict & test-integrity acceptance | Runtime + QA: kiểm chứng trên provider/Herdr thật cho per-finding `findingVerdicts` và `host-test-integrity` adjudication/exception; guard cấu trúc và local tests đã có ([rework reference](rework-causality.md)) |
 | P2 | Conversation/NFR live acceptance | Validate plaintext cards, exact alias decisions, detail/Log delivery and genuine NFR measurement/independent confirmation with authorized providers/tools; existing instruction/render tests do not close these |
 | P2 | Repository survey consumption | Giữ observed/inferred/unknown, source citations, bounded scope và drift; đo provider delivery/utility mà không suy approval từ source hoặc memory |
 | P2 | Provider support | Giữ Agy specialist constraints; Conversation cần trusted human-input provenance và acceptance riêng; không waive unattended isolation |

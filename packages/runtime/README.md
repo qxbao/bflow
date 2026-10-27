@@ -1,5 +1,41 @@
 # @bflow/runtime
 
+## Linux verification sandbox prerequisites
+
+`bflow up` requires a working Bubblewrap namespace sandbox when automated verification
+runners are configured. `bflow doctor` runs the same real execution probe and reports
+`runtime-verification-sandbox`; an installed `bwrap` binary alone does not pass it.
+The probe never installs tools, changes kernel settings or falls back to running tests
+without isolation. It distinguishes a missing executable from a launcher failure and
+includes bounded stderr diagnostics. Failed PATH entries resolving to the same binary
+are probed only once.
+
+On Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`, Bubblewrap can fail with
+`setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR: Operation not permitted`
+when its AppArmor `userns` permission is missing. First install the distribution
+`bubblewrap` package if needed. An administrator should inspect existing AppArmor profiles
+for `/usr/bin/bwrap`: repair an existing distribution profile rather than adding a duplicate.
+For a host with no such profile, review [support/bflow-bwrap.apparmor](support/bflow-bwrap.apparmor)
+and explicitly install/load it from the repository root:
+
+```sh
+apparmor_parser --skip-kernel-load --skip-cache packages/runtime/support/bflow-bwrap.apparmor
+sudo install -o root -g root -m 0644 packages/runtime/support/bflow-bwrap.apparmor /etc/apparmor.d/bflow-bwrap
+sudo apparmor_parser --replace /etc/apparmor.d/bflow-bwrap
+bflow doctor
+bflow up
+```
+
+The profile persists across reboot and grants user namespace creation to the system
+Bubblewrap binary only. Security trade-off: every local user can then create unconfined user
+namespaces through `/usr/bin/bwrap`, which partly bypasses the system-wide restriction; the
+administrator must accept that before installing it. The profile does not cover a Bubblewrap
+found elsewhere on `PATH` (for example `/usr/local/bin/bwrap`); doctor names the probed launcher. Keep the system-wide restriction enabled; do not make `bwrap`
+setuid or change provider permission modes to avoid this check. Other namespace restrictions
+(for example container policy) still need host administrator diagnosis. A failed startup
+does not prove existing roles stopped: preserve `.bflow` and reconcile with `bflow doctor`;
+use `bflow down --yes` only when intentionally stopping the current session.
+
 `RuntimeServiceImpl`, dispatcher, MVP orchestrator và workspace factory hiện có vẫn khả dụng.
 P19 bổ sung `AgenticWorkflowRuntime`, `CoordinatorTools`,
 `createAgenticConversationHost` và `openAgenticWorkspace` cho luồng SDLC v2.
@@ -1201,7 +1237,7 @@ giảm token/lỗi.
 
 Khi `fastPathMode: "auto"` (truyền từ `environment.fastPath.mode` của CLI; `host.json` cũ thiếu trường này được `effectiveFastPathMode` xử lý là `"off"`), `evaluateFastPath` trong `packages/runtime/src/agentic/fast-path.ts` đánh giá thuần điều kiện fast-path tại `assess` (preview hướng dẫn cho Coordinator) và đóng băng `RunRecord.fastPath` tại `proposeWorkflow` ([ADR 0004](../../docs/adr/0004-fast-path-review-waiver.md)). Mọi cờ `fastPath` do agent gửi trong `metadata` đều bị bỏ qua. Run chỉ đạt `active` khi P15 phân loại `trivial`, không có `unresolvedQuestions`, SDD `lightweight`, đúng 1 Developer task không dependency và không `requiresApproval`, tối đa 5 đường dẫn literal trong `affectedPaths`, `tddDecision.mode !== "required"` và chưa gọi `request_specialist` (do đó `bugfix`/`feature` và TDD `required` không đủ điều kiện).
 
-Khi `run.fastPath.status === "active"`, Runtime tự duyệt thiết kế (`designNeedsHuman` bỏ qua `projectApprovalRequired` nhưng vẫn giữ `classification.humanApprovalRequired` và luôn giữ phê duyệt `delivery` của người dùng). Trong `verificationPlan`, Runtime chỉ gửi waiver `deterministic_coverage` ở mức task khi mọi tiêu chí bắt buộc đều tự động hóa (`verificationMethod !== "manual_review"`) và có `targetCommands`; thay đổi chỉ gồm tài liệu (`manual_review`) vẫn chạy Reviewer/QA ở mức task. Ở mức workflow, nếu cây Git sau tích hợp (`policies.git.treeOf`) trùng khớp với cây của task duy nhất đã `passed`, Runtime gửi waiver `identical_integrated_tree` để bỏ Reviewer/QA lặp lại trong khi vẫn chạy `host-git-integrity` và regression gate. Nếu P17 từ chối waiver hoặc tree hash không khớp (`tree_mismatch`), Runtime hạ cấp một chiều (`status: "downgraded"`) về plan đầy đủ và phát notice tiếng Việt. Hiện trạng bằng chứng ở mức source + local/fake-runner tests, chưa có live Herdr/provider acceptance.
+Khi `run.fastPath.status === "active"`, Runtime tự duyệt thiết kế (`designNeedsHuman` bỏ qua `projectApprovalRequired` nhưng vẫn giữ `classification.humanApprovalRequired` và luôn giữ phê duyệt `delivery` của người dùng). Trong `verificationPlan`, Runtime chỉ gửi waiver `deterministic_coverage` ở mức task khi mọi tiêu chí bắt buộc đều tự động hóa (`verificationMethod !== "manual_review"`) và có `targetCommands`; thay đổi chỉ gồm tài liệu (`manual_review`) vẫn chạy Reviewer/QA ở mức task. Ở mức workflow, nếu cây Git sau tích hợp (`policies.git.treeOf`) trùng khớp với cây của task duy nhất đã `passed`, Runtime gửi waiver `identical_integrated_tree` để bỏ Reviewer/QA lặp lại trong khi vẫn chạy `host-git-integrity` và regression gate. Nếu P17 từ chối waiver hoặc tree hash không khớp (`tree_mismatch`), Runtime hạ cấp một chiều (`status: "downgraded"`) về plan đầy đủ và phát notice tiếng Việt. Lưu ý: vì bộ cổng mặc định của host bao gồm `host-test-integrity` (xem mục TI-01 ngay bên dưới) đòi hỏi Reviewer độc lập thẩm định các ứng viên làm yếu test/config, `fastPath` sẽ bị hạ cấp bảo thủ (`test_integrity_requires_independent_review`) khi cổng `host-test-integrity` có mặt; review waiver chỉ còn hiệu lực khi cấu hình host tùy chỉnh không bật cổng này. Hiện trạng bằng chứng ở mức source + local/fake-runner tests, chưa có live Herdr/provider acceptance.
 
 ### Gate toàn vẹn test theo revision (TI-01)
 

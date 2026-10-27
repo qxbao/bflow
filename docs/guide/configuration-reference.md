@@ -53,6 +53,8 @@ Model/effort bỏ trống dùng default provider; effort Claude: `low|medium|hig
 | `environment.tdd.policy` | `conditional` | Required/recommended/not_applicable theo spec/strategy |
 | `environment.verification.maxIterations` | `3` | Config schema nhận 1–100; **persistent host chỉ nhận 1–10**, không tự clamp |
 | `environment.verification.onExhausted` | `require_human` | Hết lượt phải escalate |
+| `environment.verification.regressionScope` | `affected` | `affected` \| `full` \| `mapped_only` (host.json cũ thiếu trường này mặc định `mapped_only`); điều khiển cổng hồi quy tự động `host-regression-<profile.id>` cho JS/TS runner |
+| `environment.fastPath.mode` | `auto` | `auto` \| `off` (host.json cũ mặc định `off`); bật fast-path cho thay đổi `trivial` đơn tác vụ ([ADR 0004](../adr/0004-fast-path-review-waiver.md)), nhưng bị hạ cấp dưới bộ cổng mặc định có `host-test-integrity` |
 | `environment.concurrency.maxConcurrency` | `2` | Config schema nhận 1–64; **host capacity/policy chỉ nhận 1–32** |
 | `environment.startupTimeoutMs` | `300000` | 1–600000 ms; `up --timeout` ghi đè toàn bộ startup budget |
 | `environment.shutdownTimeoutMs` | `30000` | 1–600000 ms; deadline shutdown riêng |
@@ -95,7 +97,7 @@ environment:
       allowAuthenticated: false
 ```
 
-RTK có `cliCommandProfiles` tùy chọn cho host-authorized runner; không nhận command string tùy ý. MemPalace chỉ search trong wing đã bind; absence dữ liệu không được giả pass. Browser actions hiện chưa có Runtime task lease và báo degraded/blocked. Context7 gửi query ra mạng, cache authenticated cần opt-in.
+RTK có `cliCommandProfiles` tùy chọn cho host-authorized runner; không nhận command string tùy ý. MemPalace chỉ search trong wing đã bind; absence dữ liệu không được giả pass. Browser actions dùng lease độc quyền theo từng attempt (`BrowserResourceTransactions`, TTL tối đa 5 phút, tối đa một lease mỗi attempt, `browser_lease_busy` khi gọi đồng thời; chưa có live Chrome SDLC acceptance). Context7 gửi query ra mạng, cache authenticated cần opt-in.
 
 `environment.toolPolicy` là advanced strict v3 policy có identity/scope/digest cùng role/operation/trigger allowlists, thay đường sinh policy từ các toggle. Không tự sửa digest. Legacy `context7.enabled: true` có mặt cùng explicit policy phải khớp exact service/operations/roles/requiredness; conflicting policy bị từ chối. Legacy `requiredTools`/`requiredMcpServices` không có đủ role/operation authority cần migrate. [D-TOOLS-01](../tools-sdlc-integration.md) · [Resolver](../../apps/cli/src/platform-options.ts).
 

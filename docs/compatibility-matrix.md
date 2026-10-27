@@ -1,12 +1,12 @@
 # Ma trận tương thích hiện tại
 
-Đối chiếu source và các hồ sơ trong repo ngày 2026-10-25. **Source/local test, probe binary thật và full SDLC acceptance là các mức khác nhau**; xem [implementation status](implementation-status.md). Các phiên bản binary trong [provider report](provider-compatibility.md) và [E2E report](e2e-report.md) là quan sát lịch sử, không phải release allowlist hoặc kết quả thử lại ở HEAD.
+Đối chiếu source và các hồ sơ trong repo ngày 2026-10-27 (`main` tại `901caa6`, cùng PR #53). **Source/local test, probe binary thật và full SDLC acceptance là các mức khác nhau**; xem [implementation status](implementation-status.md). Các phiên bản binary trong [provider report](provider-compatibility.md) và [E2E report](e2e-report.md) là quan sát lịch sử, không phải release allowlist hoặc kết quả thử lại ở HEAD.
 
 ## Hệ điều hành và filesystem
 
 | Nền tảng | Setup/service | Workspace và verification | Bằng chứng, giới hạn |
 | --- | --- | --- | --- |
-| Linux, filesystem POSIX cục bộ | `systemd --user`, managed PATH, private XDG state | Descriptor-relative workspace tools; Bubblewrap sandbox | Có source/local tests và các hồ sơ daemon/binary thật trước đây; full live SDLC/active fault campaign còn mở |
+| Linux, filesystem POSIX cục bộ | `systemd --user`, managed PATH, private XDG state | Descriptor-relative workspace tools; Bubblewrap sandbox (trên Ubuntu/Debian bật hạn chế AppArmor userns cần profile `packages/runtime/support/bflow-bwrap.apparmor`) | Có source/local tests và các hồ sơ daemon/binary thật trước đây; full live SDLC/active fault campaign còn mở |
 | macOS arm64/APFS | `launchd`, managed PATH | Apple Command Line Tools cho helper; Seatbelt `deny default` cho JS/TS/owner commands | [Portability report](acceptance/2026-10-24-macos-portability.md) có phép đo thật và [follow-up tests](acceptance/2026-10-24-macos-portability-review.md); chưa full SDLC acceptance |
 | macOS x86_64 | Cùng adapter Darwin | Source backend có sẵn | Không suy bằng chứng arm64 thành chứng nhận x86_64 |
 | Checkout không giữ được private mode | Machine state vẫn cần POSIX filesystem | Runtime có private-state fallback ngoài repo, locator pin authority | Không làm NFS/NTFS trở thành nền tảng được chứng nhận; workspace/sandbox còn điều kiện riêng |
@@ -25,7 +25,7 @@ Node.js **≥22.13**, pnpm **12.5.1**; [package.json](../package.json) pin pnpm.
 | MCP | Scoped host stdio, Gateway HTTP | Scoped host stdio, Gateway HTTP/token env var | Native config trong HOME riêng; Gateway HTTP qua stdio shim |
 | `restricted` / `workspace_auto` | Role policy, scoped MCP, host tool guard | Read-only/workspace-write sandbox, approval policy riêng | Plan/accept-edits; native file/shell bị deny, thao tác qua Bflow tools |
 | `unattended_isolated` | Chỉ khi đầy đủ provider OS sandbox/container được xác minh | Cùng yêu cầu isolation | **Unsupported** (`agy_unattended_unsupported`) |
-| Global config | Scoped launch settings/strict MCP; CLI có thể ghi per-project trust vào config người dùng khi `trustedWorkspace: true` | Global MCP bị thu hẹp; hooks cần quyết định operator riêng | HOME/XDG launch riêng; auth/onboarding phải đạt |
+| Global config | Scoped launch settings/strict MCP; CLI có thể ghi per-project trust vào config người dùng khi `trustedWorkspace: true` | Instruction home cô lập theo role (`codexHomeDirectory` / `codexProcessHomeDirectory`); global MCP bị thu hẹp; hooks cần quyết định operator riêng | HOME/XDG launch riêng; auth/onboarding phải đạt |
 | Model/effort/profile | Theo role/provider defaults và capability | Theo role/provider defaults và capability | Effort nằm trong tên model; không khai field `effort` |
 
 Không dùng global bypass cho bất kỳ permission mode nào. Sandbox của **test runner** không chứng minh isolation của **toàn bộ provider process**. Adapter permission compile không tự cung cấp deployment/container an toàn. [Provider contract](provider-contracts.md) và [permission compiler](../packages/agent-providers/src/permissions.ts) là nguồn tham chiếu.
@@ -41,10 +41,10 @@ Standalone `agent check` dùng adapter environment riêng, không đọc role/pr
 | Herdr | Protocol 22/schema 1, CLI + Unix socket, env truyền khi tạo pane | Phải kiểm tra phản hồi/hành vi thực tế; không khóa release label |
 | Shared Gateway | Loopback Streamable HTTP, stdio bridge, role/service/operation grants | Ledger/pinned schemas, structured output, unknown/quarantine; không làm kênh inter-role |
 | RTK | CLI-only, formatter `pipe` trên raw output đã capture | Command gốc chạy một lần; parser/gate dùng raw status/output. Passthrough không được gọi là token saving |
-| GitNexus | Stdio MCP, query/context/impact theo policy | Fresh repo index, workspace phù hợp, Runtime resource lease/fence theo registration; không tự rebuild trong task |
-| MemPalace | Managed Python venv, MCP search qua Gateway | Read-only wing được resolve (mặc định repo ID), provenance/trusted artifact bắt buộc; memory không thay current spec/test |
-| Context7 | Hosted MCP qua Gateway, anonymous/API key | Dùng chung giữa worktrees; optional cache, không OAuth; version/quota/network failure phải hiển thị |
-| Chrome DevTools | Dedicated profile/resource APIs ở Gateway/services | **Runtime browser task actions chưa usable**: `exclusive_resource_lease_unsupported`; không dùng profile cá nhân |
+| GitNexus | Stdio MCP, query/context/impact theo policy | `bflow init` lập chỉ mục và đăng ký `gitnexus-<repo>` vào Gateway (`--check`, `--remove`, `--no-gitnexus`); Runtime có resource lease/fence theo registration; không tự rebuild trong task |
+| MemPalace | Managed Python venv, MCP search qua Gateway | Dịch vụ cấp máy dùng chung giữa các repo/worktree nhưng phân vùng theo `wing` chỉ đọc được resolve (mặc định repo ID), provenance/trusted artifact bắt buộc; memory không thay current spec/test |
+| Context7 | Hosted MCP qua Gateway, anonymous/API key | Dùng chung giữa các repo/worktree; optional cache, không OAuth; version/quota/network failure phải hiển thị |
+| Chrome DevTools | Dedicated profile/resource APIs ở Gateway/services + `BrowserResourceTransactions` ở Runtime | Runtime quản lý lease độc quyền theo từng attempt được xác thực (`browser-resource-transactions.json`, TTL 5 phút, `browser_lease_busy` khi gọi đồng thời); không dùng profile cá nhân hay dùng chung profile Chrome của `setup`. Chưa có live Chrome SDLC acceptance |
 | Canonical skills | Exact bundle pins, role bindings, manifests, `read_pinned_instructions` | Nội dung được load không chứng minh tuân thủ; không cấp capability/tool permission |
 
 Phiên bản installer thực tế nằm trong [catalog đã review](../packages/tool-installer/README.md); đừng suy machine receipt đúng chỉ từ binary cùng tên trên PATH. [D-TOOLS-01](tools-sdlc-integration.md) quy định trigger, grant, usage và consumption.

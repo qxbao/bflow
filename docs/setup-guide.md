@@ -39,14 +39,14 @@ Installed binary vẫn là một quan sát riêng. Login chưa xác minh báo wa
 ```bash
 cd /path/to/your-project
 bflow init --provider codex
-bflow setup --dir .
+bflow init --check
 ```
 
-`init` tạo `.bflow/config.yml` và ignore file với identity riêng. Các defaults hiện tại: Codex, `workspace_auto`, `trustedWorkspace: true`, SDD lightweight có approval, Conditional TDD, verification 3 vòng, concurrency 2, startup 300.000 ms. `init --update` bổ sung default fields/comment và giữ giá trị cũ; `--force`/`--yes` thay toàn bộ config bằng defaults mới. Config `.yaml`/`.json` cũ cần `bflow config-migrate` trước.
+`init` tạo `.bflow/config.yml` và ignore file tại thư mục gốc Git chuẩn với identity riêng. Các defaults hiện tại: Codex, `workspace_auto`, `trustedWorkspace: true`, SDD lightweight có approval, Conditional TDD, verification 3 vòng, `regressionScope: affected`, `fastPath.mode: auto`, concurrency 2, startup 300.000 ms. `init --update` bổ sung default fields/comment và giữ giá trị cũ; `--force`/`--yes` thay toàn bộ config bằng defaults mới. Config `.yaml`/`.json` cũ cần `bflow config-migrate` trước.
 
-`setup --dir` chọn ngữ cảnh để chuẩn bị GitNexus index/backend của repo; installation vẫn dùng chung ở machine. **Context7 hosted được chia sẻ giữa repository/worktree** khi machine identity, canonical workspace và registration hợp lệ. **GitNexus, Chrome và backend local vẫn gắn workspace đã setup**. Khi bị lỗi workspace mismatch, chuẩn bị đúng repo bằng `bflow setup --dir <repo>`; không rebind Context7 chỉ vì đổi worktree.
+`bflow setup` có phạm vi cấp máy (chạy một lần cho môi trường tài khoản; `bflow setup --check` cho cùng kết quả từ bất kỳ thư mục nào, và `--dir` chỉ còn là cờ tương thích ngược). Việc chuẩn bị GitNexus theo từng repository được chuyển sang `bflow init`: khi chạy `bflow init`, CLI hỏi xác nhận giấy phép GitNexus PolyForm-Noncommercial lần đầu (hoặc tự động chấp nhận khi truyền `--yes`), lập chỉ mục kho mã và đăng ký dịch vụ `gitnexus-<repo>` vào Gateway đang chạy (`bflow init --check` kiểm tra chỉ đọc, `bflow init --remove` gỡ đăng ký dịch vụ kể cả khi thư mục repo đã xóa, `--no-gitnexus` bỏ qua lập chỉ mục/đăng ký). **Context7 và MemPalace** (phân vùng theo `wing` mặc định là repository ID) được chia sẻ giữa các repository/worktree qua Gateway cấp máy; **GitNexus và Chrome profile** vẫn gắn riêng theo từng repository/session (profile Chrome của `setup` không dùng chung với phiên repository).
 
-Index GitNexus fresh có thể được đọc khi setup hội tụ cấu hình. Rebuild index stale cần quyền storage độc quyền: nếu reader/writer còn giữ lock, setup báo blocked và giữ lock, không tự dừng Gateway hoặc thu hồi quyền đang dùng. Thực hiện bảo trì rồi chạy lại plan.
+Index GitNexus fresh có thể được đọc khi `init` hoặc `setup` hội tụ cấu hình. Rebuild index stale cần quyền storage độc quyền: nếu reader/writer còn giữ lock, thao tác báo blocked và giữ lock, không tự dừng Gateway hoặc thu hồi quyền đang dùng. Thực hiện bảo trì rồi chạy lại.
 
 Các tích hợp RTK/GitNexus/MemPalace/Chrome và Context7 được bật ở mức **optional** khi tạo config mới. Cấu hình không khai toggle cũng dùng optional defaults trong CLI composition. `enabled: false` tắt yêu cầu tương ứng; `required: true` chặn nếu chưa đủ inventory/grant/readiness. **Skill không cấp quyền tool.** Xem [tool policy](tools-sdlc-integration.md) và [config](guide/configuration-reference.md).
 

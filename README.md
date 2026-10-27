@@ -26,7 +26,7 @@ Bạn mô tả công việc trong một cuộc hội thoại. Bflow đưa yêu c
 | Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho Context7, GitNexus, MemPalace và browser; RTK xử lý output CLI |
 | Tiếp tục sau gián đoạn | SQLite event log, checkpoint, artifact có checksum và đối soát delivery |
 
-**Trạng thái:** đã có mã nguồn và kiểm thử tích hợp cục bộ cho Runtime/platform. Các báo cáo probe thật có phạm vi riêng; nghiệm thu đầy đủ SDLC với provider thật và chiến dịch lỗi khi đang chạy vẫn còn mở. Xem [trạng thái triển khai](docs/implementation-status.md). Agy hiện chưa dùng được cho vai trò Conversation hoặc chế độ unattended; browser task actions còn giới hạn lease ở Runtime.
+**Trạng thái:** đã có mã nguồn và kiểm thử tích hợp cục bộ cho Runtime/platform (bao gồm GitNexus và browser MCP resource transactions, regression scope, test-integrity gate, task handovers và read-only telemetry). Các báo cáo probe thật có phạm vi riêng; nghiệm thu đầy đủ SDLC với provider/Chrome thật và chiến dịch lỗi khi đang chạy vẫn còn mở. Xem [trạng thái triển khai](docs/implementation-status.md). Agy hiện chưa dùng được cho vai trò Conversation hoặc chế độ unattended.
 
 ## Bắt đầu
 
@@ -51,7 +51,7 @@ bflow --help
 bflow setup --check
 ```
 
-Từ đây dùng **`bflow …`**, không cần gõ lại `node …/bin.js`. “Alias `bflow`” ở đây là launcher do setup quản lý; bạn không cần tự thêm shell alias. Giữ source checkout tại vị trí đã setup vì launcher trỏ tới bản build đó. Setup là bước chuẩn bị ban đầu; chỉ chạy lại khi cần cập nhật, sửa môi trường hoặc chuẩn bị backend cục bộ cho repository khác.
+Từ đây dùng **`bflow …`**, không cần gõ lại `node …/bin.js`. “Alias `bflow`” ở đây là launcher do setup quản lý; bạn không cần tự thêm shell alias. Giữ source checkout tại vị trí đã setup vì launcher trỏ tới bản build đó. `bflow setup` có phạm vi cấp máy (chạy một lần cho toàn bộ môi trường máy; `bflow setup --check` cho cùng kết quả từ bất kỳ thư mục nào); việc khởi tạo và đăng ký GitNexus theo từng dự án nằm ở `bflow init`.
 
 > Setup không đăng nhập thay bạn. Hoàn tất đăng nhập CLI của provider được chọn trước `bflow up`. Dùng `bflow setup --dry-run` để xem kế hoạch, hoặc `--yes` khi đã chấp thuận plan trong môi trường không tương tác. [Chi tiết setup →](docs/setup-guide.md)
 
@@ -62,9 +62,7 @@ Chạy trong Git repository có commit đầu tiên, đã cài dependency của 
 ```bash
 cd /path/to/your-project
 bflow init --provider codex
-
-# Chuẩn bị index và các backend gắn với repository này.
-bflow setup --dir .
+bflow init --check
 bflow doctor
 
 # Xem lại cấu hình trước khi commit.
@@ -75,7 +73,7 @@ bflow up
 bflow attach
 ```
 
-`init` tạo `.bflow/config.yml` có chú thích và định danh riêng cho checkout. Bạn có thể chọn `--provider claude`, hoặc cấu hình provider/profile theo từng role. Với Agy specialist, giữ Conversation trên Claude hoặc Codex. Working tree cần sạch trước khi Runtime cấp worktree cho Developer.
+`init` tạo `.bflow/config.yml` có chú thích tại thư mục gốc Git chuẩn, lập chỉ mục GitNexus của repository (hỏi xác nhận giấy phép PolyForm-Noncommercial lần đầu, hoặc truyền `--yes`; dùng `--no-gitnexus` nếu muốn bỏ qua) và đăng ký dịch vụ `gitnexus-<repo>` trên Gateway đang chạy (`bflow init --remove` để gỡ đăng ký). Bạn có thể chọn `--provider claude`, hoặc cấu hình provider/profile theo từng role. Với Agy specialist, giữ Conversation trên Claude hoặc Codex. Working tree cần sạch trước khi Runtime cấp worktree cho Developer.
 
 Trong Conversation, bắt đầu bằng một yêu cầu có thể kiểm chứng:
 
@@ -86,11 +84,12 @@ Conversation sẽ làm rõ yêu cầu khi cần và trình các quyết định 
 ### 3. Theo dõi và kết thúc phiên
 
 ```bash
-bflow status                 # Môi trường và trạng thái host hiện tại
-bflow doctor                 # Chẩn đoán cấu hình, provider và công cụ
-bflow mcp status             # Inventory MCP; giới hạn live port được ghi bên dưới
-bflow tool status            # Công cụ đã cài
-bflow down                   # Dừng an toàn khi không còn công việc active
+bflow status                           # Môi trường và trạng thái host hiện tại
+bflow status <run-id> --telemetry      # Báo cáo metric chỉ đọc của lượt chạy qua host đang hoạt động
+bflow doctor                           # Chẩn đoán cấu hình, provider, công cụ và verification sandbox
+bflow mcp status                       # Inventory MCP; giới hạn live port được ghi bên dưới
+bflow tool status                      # Công cụ đã cài
+bflow down                             # Dừng an toàn khi không còn công việc active
 ```
 
 `mcp status` hiện đọc cấu hình nhưng chưa có kết nối kiểm tra health mặc định, nên có thể báo `configured: false` dù Gateway đang chạy. Dùng `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe Context7; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
@@ -130,9 +129,9 @@ Herdr quản lý tiến trình và các pane; Runtime quyết định điều g�
 ## Cấu hình theo cách bạn làm việc
 
 - **Provider và model:** chọn theo role trong `.bflow/config.yml`; hỗ trợ profile đã tạo qua `bflow iso`. [Vai trò](docs/guide/agent-roles.md) · [Cấu hình](docs/guide/configuration-reference.md)
-- **Kiểm thử:** Runtime phát hiện các runner được hỗ trợ; `.bflow/verification.json` là override tùy chọn của owner. Mức hỗ trợ khác nhau theo runner/OS. [Verification runners](docs/verification-runners.md)
-- **Công cụ:** các tích hợp mặc định là tùy chọn; công cụ thiếu sẽ báo degraded, công cụ bắt buộc thiếu sẽ chặn. Grant vẫn phụ thuộc inventory, scope và readiness. [Tool policy](docs/tools-sdlc-integration.md)
-- **NFR và test design:** chỉ làm rõ metric/oracle, workload và góc nhìn rủi ro liên quan; thiếu ngưỡng hay evidence vẫn chưa được pass. [Hướng dẫn](docs/nfr-and-test-design.md)
+- **Kiểm thử và tốc độ:** Runtime phát hiện các runner được hỗ trợ; `.bflow/verification.json` là override tùy chọn của owner. `environment.verification.regressionScope` (`affected` mặc định, `full`, `mapped_only`) điều khiển kiểm thử hồi quy tự động cho JS/TS; `environment.fastPath.mode` (`auto` mặc định, `off`) cấu hình fast-path cho thay đổi rủi ro thấp, nhưng bộ cổng mặc định có `host-test-integrity` sẽ hạ cấp fast-path để giữ Reviewer độc lập thẩm định các ứng viên làm yếu test/config. [Verification runners](docs/verification-runners.md) · [SDLC policies](docs/sdlc-policies.md)
+- **Công cụ:** các tích hợp mặc định là tùy chọn; công cụ thiếu sẽ báo degraded, công cụ bắt buộc thiếu sẽ chặn. Grant phụ thuộc inventory, scope, readiness và lease giao dịch (`GitNexusResourceTransactions`, `BrowserResourceTransactions`). [Tool policy](docs/tools-sdlc-integration.md)
+- **NFR, test design và bàn giao tác vụ:** chỉ làm rõ metric/oracle, workload và góc nhìn rủi ro liên quan; thiếu ngưỡng hay evidence vẫn chưa được pass. Tác vụ bị dừng giữa chừng có thể lưu và đọc lại biên bản bàn giao có giới hạn (`propose_task_handover` / `read_task_handover`). [Hướng dẫn NFR](docs/nfr-and-test-design.md) · [Runtime README](packages/runtime/README.md)
 - **Rework có dẫn chứng:** mỗi finding cần giải trình gắn với source/revision và verification độc lập; xem [cơ chế và giới hạn enforcement](docs/rework-causality.md).
 
 - **Nâng cấp cấu hình:** dùng `bflow init --update` để bổ sung defaults/comment và giữ giá trị đã có; dùng `bflow config-migrate` cho file `.yaml`/`.json` cũ. [Hướng dẫn init](docs/guide/bflow-init.md)
