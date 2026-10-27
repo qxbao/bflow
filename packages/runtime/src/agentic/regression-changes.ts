@@ -46,6 +46,7 @@ const EXACT_ROOT_CONFIGS = new Set([
 
 const DOC_PATTERN = /\.(md|txt|rst)$/i;
 const CODE_PATTERN = /\.[cm]?[jt]sx?$/;
+const NESTED_CONFIG_PATTERN = /\/(?:vitest\.(?:config|workspace)|jest\.config|[^/]+\.config)\.[cm]?[jt]s$/;
 
 function raiseTier(current: ScopeTier, next: ScopeTier): ScopeTier {
   return TIER_RANK[next] > TIER_RANK[current] ? next : current;
@@ -92,6 +93,20 @@ export function classifyChanges(
         tier = raiseTier(tier, "package");
       } else {
         widening.push({ path, tier: "full", reason: "package_manifest" });
+        tier = raiseTier(tier, "full");
+      }
+      continue;
+    }
+
+    // Runner/build configuration has no importers, but changes how every test of its package runs.
+    if (NESTED_CONFIG_PATTERN.test(path)) {
+      const pkg = packageRootOf(path);
+      if (pkg !== undefined) {
+        packageRoots.add(pkg);
+        widening.push({ path, tier: "package", reason: "package_config", packageRoot: pkg });
+        tier = raiseTier(tier, "package");
+      } else {
+        widening.push({ path, tier: "full", reason: "package_config" });
         tier = raiseTier(tier, "full");
       }
       continue;

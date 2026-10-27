@@ -166,6 +166,28 @@ describe("regression-changes", () => {
     }
   });
 
+  it("nested test-runner or build config → its package, or full outside a package", () => {
+    const result = classifyChanges(
+      [
+        { path: "packages/x/vitest.config.ts", status: "M" },
+        { path: "packages/y/test/jest.config.cjs", status: "M" },
+        { path: "tests/e2e/vitest.config.ts", status: "M" }
+      ],
+      packageRootOf
+    );
+    expect(result).toEqual({
+      tier: "full",
+      graphFiles: [],
+      packageRoots: ["packages/x", "packages/y"],
+      changedTests: [],
+      widening: [
+        { path: "packages/x/vitest.config.ts", tier: "package", reason: "package_config", packageRoot: "packages/x" },
+        { path: "packages/y/test/jest.config.cjs", tier: "package", reason: "package_config", packageRoot: "packages/y" },
+        { path: "tests/e2e/vitest.config.ts", tier: "full", reason: "package_config" }
+      ]
+    });
+  });
+
   it("non-code file without sub-package → full", () => {
     const result = classifyChanges(
       [
