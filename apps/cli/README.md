@@ -636,6 +636,10 @@ phát ước tính giá. Thiếu token/USD là `null`, không phải 0. Số 0 r
 khi nguồn đủ lịch sử; source thiếu có số quan sát dương thì ghi `partial`.
 
 CLI exit 0 nghĩa là đã xuất report, không khẳng định task thành công hoặc host sẵn sàng.
+Với run agentic, `gateExecution` là trung bình ms của các native review gate đã đóng; mỗi
+nhóm gate/role/provider có một dòng `Review gate ...` (số lượt đóng, tổng/max ms, timeout,
+near-deadline, open). JSON có `data.reviewGateDetails`.
+
 Lỗi telemetry được thể hiện trong coverage/diagnostics cố định; không đổi business state
 hay exit behavior của status thông thường. Chi tiết định nghĩa và giới hạn độ chính xác:
 [telemetry Specification](../../packages/runtime/TELEMETRY-SPEC.md) và

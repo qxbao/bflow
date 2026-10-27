@@ -1372,6 +1372,14 @@ Core ghi gate event bằng `evaluatedAt`; một số evaluator lấy mốc này 
 xong. Vì vậy gate turnaround luôn `partial`, không chứng minh thời gian chạy lệnh thuần
 hay latency ghi receipt.
 
+Với run agentic, mỗi native Reviewer/QA gate được host đo start/end: từ lúc enqueue
+verification request đến lúc settle (verdict, validation rejection, timeout hoặc abort), lưu
+trong journal `reviewTimings` (tối đa 200 entry/run). `gateExecution` chỉ tính interval đã
+đóng (`host_review_gate_timings`, `partial`); wait còn mở được đếm trong `open`. Khi wait đã
+dùng 80% `executionTimeoutMs`, Conversation nhận đúng một progress note. Đây là wall time gồm
+delivery Herdr và reply ingest, không phải thời gian thuần của Reviewer. Legacy report giữ
+`unavailable`.
+
 Host receipts bổ sung thời gian operation verification theo phase/role và regression
 widening theo evaluation ID. Chúng mang nhãn `partial`: inventory receipt không có mốc
 publication bất biến, không chứng minh toàn bộ operation lỗi/gián đoạn đều được ghi.

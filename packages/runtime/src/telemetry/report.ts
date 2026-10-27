@@ -26,20 +26,60 @@ export const WorkflowTelemetryReportSchema = z.object({
       failed: z.number().int().nonnegative(), blocked: z.number().int().nonnegative(), error: z.number().int().nonnegative() }).strict() }).strict(),
   phaseRoleIntervals: z.array(z.object({ phase: z.string(), role: z.string(), durationMs: z.number().nonnegative(), operations: z.number().int().nonnegative() }).strict()),
   regressionWideningDetails: z.array(z.object({ tier: z.string(), reason: z.string(), count: z.number().int().nonnegative() }).strict()),
+  reviewGateDetails: z.array(z.object({ gateId: z.string().min(1).max(200), role: z.string().min(1).max(200), provider: z.string().min(1).max(200).nullable(),
+    operations: z.number().int().nonnegative(), durationMs: z.number().nonnegative(), maxMs: z.number().nonnegative(),
+    timeouts: z.number().int().nonnegative(), nearDeadline: z.number().int().nonnegative(), open: z.number().int().nonnegative() }).strict()).default([]),
   firstPass: Metric, reworkCycles: Metric, retryAttempts: Metric, approvalWait: Metric, clarificationWait: Metric,
   gateTurnaround: Metric, gateExecution: Metric, phaseRoleTime: Metric, evidenceReuse: Metric,
   regressionWidening: Metric, tokens: Metric, costUsd: Metric
 }).strict();
 export type WorkflowTelemetryReport = z.infer<typeof WorkflowTelemetryReportSchema>;
 type Measurement = z.infer<typeof Metric>;
+/** Host-measured native review gate wait (see ReviewTiming in the Runtime journal); only ids, enums and timestamps. */
+export interface ReviewTimingObservation {
+  gateId: string; role: string; provider?: string | undefined; startedAt: string; completedAt?: string | undefined; timeoutMs: number;
+  outcome?: "verdict" | "rejected" | "timeout" | "aborted" | undefined; nearDeadlineAt?: string | undefined;
+}
 export interface TelemetryInput {
   runId: string; asOf: string; source: "legacy" | "agentic"; events: readonly unknown[]; complete: boolean;
   taskIds: readonly string[]; highWaterMark?: number; supersededApprovalIds?: readonly string[];
-  diagnostics?: readonly string[];
+  diagnostics?: readonly string[]; reviewTimings?: readonly ReviewTimingObservation[];
 }
+type ReviewGateDetail = WorkflowTelemetryReport["reviewGateDetails"][number];
 const unavailable = (unit: Measurement["unit"], limitation: string): Measurement => ({ value: null, quality: "unavailable", unit,
   numerator: null, denominator: 0, source: "none", limitation });
 const terminal = new Set(["succeeded", "failed", "cancelled"]);
+const REVIEW_LIMITATION = "Native review gates only; host wall time from verification request enqueue to settlement (includes Herdr delivery, reviewer work and reply ingest), not Reviewer-only execution time. Timeouts and aborts are included; open waits are excluded.";
+
+/** Closed intervals only, measured at asOf: open or future-settled waits are counted as open and never averaged. */
+function summarizeReviewTimings(timings: readonly ReviewTimingObservation[], now: number, diagnostics: Set<string>):
+  { metric: Measurement; details: ReviewGateDetail[] } {
+  const groups = new Map<string, ReviewGateDetail>();
+  let totalMs = 0, closed = 0;
+  for (const timing of timings) {
+    const started = Date.parse(timing.startedAt);
+    if (started > now) continue;
+    const completed = timing.completedAt === undefined ? undefined : Date.parse(timing.completedAt);
+    if (completed !== undefined && completed < started) { diagnostics.add("invalid_time_order"); continue; }
+    const key = JSON.stringify([timing.gateId, timing.role, timing.provider ?? null]);
+    const entry = groups.get(key) ?? { gateId: timing.gateId, role: timing.role, provider: timing.provider ?? null, operations: 0,
+      durationMs: 0, maxMs: 0, timeouts: 0, nearDeadline: 0, open: 0 };
+    if (timing.nearDeadlineAt !== undefined && Date.parse(timing.nearDeadlineAt) <= now) entry.nearDeadline++;
+    if (completed === undefined || completed > now) entry.open++;
+    else {
+      const duration = completed - started;
+      entry.operations++; entry.durationMs += duration; entry.maxMs = Math.max(entry.maxMs, duration);
+      if (timing.outcome === "timeout") entry.timeouts++;
+      totalMs += duration; closed++;
+    }
+    groups.set(key, entry);
+  }
+  const metric: Measurement = closed ? { value: totalMs / closed, numerator: totalMs, denominator: closed, quality: "partial", unit: "ms",
+    source: "host_review_gate_timings", limitation: REVIEW_LIMITATION } : unavailable("ms", "No closed native review gate wait with host start and end timestamps.");
+  const details = [...groups.values()].sort((a, b) => a.gateId.localeCompare(b.gateId) || a.role.localeCompare(b.role) ||
+    (a.provider ?? "").localeCompare(b.provider ?? ""));
+  return { metric, details };
+}
 
 /** Ephemeral read model only. No agent text, input, output, reason or finding is copied. */
 export function buildWorkflowTelemetry(input: TelemetryInput): WorkflowTelemetryReport {
@@ -156,6 +196,8 @@ export function buildWorkflowTelemetry(input: TelemetryInput): WorkflowTelemetry
   for (const id of superseded) if (!requests.has(id)) diagnostics.add("superseded_request_missing");
   if (terminal.has(outcome)) gates.interrupted = gateRequests.size - settledGates.size;
   else gates.open = gateRequests.size - settledGates.size;
+  // Agentic reports only: legacy sources carry no host review timings, so their gateExecution stays unavailable.
+  const review = input.source === "agentic" ? summarizeReviewTimings(input.reviewTimings ?? [], now, diagnostics) : undefined;
   const good = diagnostics.size === 0;
   const quality = events.length === 0 ? "unavailable" : good ? "measured" : "partial";
   const measure = (value: number | null, unit: Measurement["unit"], numerator: number | null, denominator: number,
@@ -175,7 +217,7 @@ export function buildWorkflowTelemetry(input: TelemetryInput): WorkflowTelemetry
     coverage: { quality, events: events.length, highWaterMark, invalidRecords, diagnostics: [...diagnostics].sort() }, cohort,
     taskStateTime: [...rows.values()].sort((a, b) => a.taskId.localeCompare(b.taskId) || a.state.localeCompare(b.state))
       .map(r => ({ ...r, openLowerBoundMs: good && !terminal.has(outcome) ? r.openLowerBoundMs : null, quality: good ? r.quality : "partial" })), approvals, gates,
-    phaseRoleIntervals: [], regressionWideningDetails: [],
+    phaseRoleIntervals: [], regressionWideningDetails: [], reviewGateDetails: review?.details ?? [],
     firstPass: measure(good && cohort.succeeded > 0 ? first / cohort.succeeded : null, "ratio", good ? first : null,
       good ? cohort.succeeded : 0, "Success-conditional; failed/cancelled/incomplete tasks excluded. Complete history required."),
     reworkCycles: measure(events.length && (good || reworks > 0) ? reworks : null, "count", events.length && (good || reworks > 0) ? reworks : null, tasks.size, "Distinct task generation advances; retries excluded."),
@@ -184,7 +226,7 @@ export function buildWorkflowTelemetry(input: TelemetryInput): WorkflowTelemetry
       approvals.closed, "Mean of closed event-observed waits; untimed supersessions, cancellations, elapsed expiry deadlines and open waits excluded. Expired denotes deadline elapsed, not a human decision.", approvals.open + approvals.superseded + approvals.cancelled + approvals.expired + approvals.incompleteAtTerminal + approvals.unpaired > 0),
     gateTurnaround: measure(gates.closed ? gateMs / gates.closed : null, "ms", gates.closed ? gateMs : null, gates.closed,
       "Core request/result timestamp delta only; evaluatedAt can predate execution completion. Neither execution time nor persistence latency is proven.", true),
-    gateExecution: unavailable("ms", "No per-evaluation host start/end execution pair."),
+    gateExecution: review?.metric ?? unavailable("ms", "No per-evaluation host start/end execution pair."),
     phaseRoleTime: unavailable("ms", "Core task state is not SDLC phase or authenticated role execution time."),
     clarificationWait: unavailable("ms", "No complete correlated host clarification interval source."),
     evidenceReuse: unavailable("ratio", "Delivery ACK and artifact presence do not prove independent reuse consumers."),
@@ -195,9 +237,11 @@ export function buildWorkflowTelemetry(input: TelemetryInput): WorkflowTelemetry
 
 /** Bounded snapshot prefix; never follows a growing tail or publishes raw source errors. */
 export async function readWorkflowTelemetry(store: Pick<RunStore, "get" | "readEvents">, runId: string,
-  options: { asOf?: string; source?: "legacy" | "agentic"; supersededApprovalIds?: readonly string[] } = {}): Promise<WorkflowTelemetryReport> {
+  options: { asOf?: string; source?: "legacy" | "agentic"; supersededApprovalIds?: readonly string[];
+    reviewTimings?: readonly ReviewTimingObservation[] } = {}): Promise<WorkflowTelemetryReport> {
   const base = { runId, asOf: options.asOf ?? new Date().toISOString(), source: options.source ?? "legacy",
-    supersededApprovalIds: options.supersededApprovalIds ?? [], events: [] as unknown[], taskIds: [] as string[], complete: false };
+    supersededApprovalIds: options.supersededApprovalIds ?? [], reviewTimings: options.reviewTimings ?? [],
+    events: [] as unknown[], taskIds: [] as string[], complete: false };
   try {
     const result = await store.get(runId);
     if (!result.ok) throw new Error("source_unavailable");

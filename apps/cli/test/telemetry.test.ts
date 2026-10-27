@@ -49,6 +49,20 @@ describe("status telemetry", () => {
     expect(result.stdout).toContain("source_unavailable");
     expect(result.stdout).not.toContain("SECRET-PROMPT");
   });
+  it("renders host review gate waits with provider, closed operations, near-deadline and open counts", async () => {
+    const withReviews = buildWorkflowTelemetry({ runId: "run-1", asOf: "2026-10-27T00:00:20Z", source: "agentic", taskIds: [], events: [],
+      complete: false, reviewTimings: [
+        { gateId: "review", role: "reviewer", provider: "codex", startedAt: "2026-10-27T00:00:00Z", completedAt: "2026-10-27T00:00:04Z",
+          timeoutMs: 20_000, outcome: "verdict" },
+        { gateId: "review", role: "reviewer", provider: "codex", startedAt: "2026-10-27T00:00:10Z", timeoutMs: 20_000,
+          nearDeadlineAt: "2026-10-27T00:00:19Z" }] });
+    const result = await runCli(["status", "run-1", "--telemetry"], { io, telemetry: async () => withReviews });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("gateExecution: 4000 ms [partial] numerator=4000 denominator=1");
+    expect(result.stdout).toContain("Review gate review / role reviewer / provider codex: 1 closed, 4000 ms sum, max 4000 ms, timeouts 0, near-deadline 1, open 1 [partial]");
+    const json = await runCli(["status", "run-1", "--telemetry", "--json"], { io, telemetry: async () => withReviews });
+    expect(JSON.parse(json.stdout!)).toMatchObject({ data: { reviewGateDetails: [{ gateId: "review", provider: "codex", operations: 1, open: 1 }] } });
+  });
   it("does not bootstrap legacy registry, adapters or storage to view telemetry in a configured repository", async () => {
     const root = await mkdtemp("/tmp/bflow-telemetry-cli-");
     try {
