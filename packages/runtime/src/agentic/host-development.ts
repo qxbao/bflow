@@ -286,7 +286,7 @@ export class HostDevelopment {
     const context = await this.identity(binding, input);
     if (context.resolver) return (await this.conflictResolutionContext(binding))!;
     const rawRework = record(context.message.payload).reworkContext;
-    const rawResumeContext = await this.runtime().taskHandover(binding, input);
+    const rawResumeContext = await this.runtime().taskHandover(binding, { runId: context.runId, taskId: context.taskId });
     const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
     const resumeContext = isAgy ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
     return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
@@ -308,7 +308,11 @@ export class HostDevelopment {
           };
         }) : [];
         const compact = { ...fullReply, recordedEvidence: compactEvidence };
-        if (exceedsAgyInlineReply(compact)) return json({ runId: context.runId, taskId: context.taskId, resumeContext });
+        if (exceedsAgyInlineReply(compact)) {
+          // Keep the Git identity commit_changes needs; the deferred reader carries authority and evidence.
+          const minimal = { resumeContext, runId: context.runId, taskId: context.taskId, head: fullReply.head, branch: fullReply.branch, worktreePath: fullReply.worktreePath };
+          return json(exceedsAgyInlineReply(minimal) ? { runId: context.runId, taskId: context.taskId, resumeContext } : minimal);
+        }
         return json(compact);
       }
       return json(fullReply);

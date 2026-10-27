@@ -708,7 +708,14 @@ describe("Rework root-cause explanation & independent verification through Runti
     expect(restored.authority.specification).toEqual(before.tasks[0].spec.specification);
     const boundedStatus = await f.development.status({ ...initial.developerBinding, provider: "agy", agentKind: "agy" }, { runId: "run-1", taskId: "implement" }) as any;
     expect(boundedStatus.resumeContext.code).toBe("handover_context_deferred");
+    expect(boundedStatus.head).toMatch(/^[a-f0-9]{40}$/);
     expect(Buffer.byteLength(JSON.stringify(boundedStatus))).toBeLessThanOrEqual(8500);
+    // Optional handover context never makes workspace_status stricter than its own identity check.
+    const lenientStatus = await f.development.status(initial.developerBinding, { runId: "run-1", taskId: "implement", note: "extra" }) as any;
+    expect(lenientStatus.resumeContext.handover).toMatchObject({ status: "selected" });
+    const { worktreePath: _unassigned, ...idleBinding } = initial.developerBinding;
+    expect((await f.runtime.taskHandover(idleBinding, {}) as any).handover).toMatchObject({ status: "absent", code: "handover_assignment_unavailable" });
+    await expect(f.runtime.taskHandover(idleBinding, { proposal })).rejects.toThrow(/current Developer assignment/);
 
     const statePath = join(f.root, "journal", "state.json");
     const originalState = await readFile(statePath, "utf8");

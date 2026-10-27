@@ -3044,7 +3044,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const binding = PaneBindingSchema.parse(bindingInput);
     const args = z.object({ runId: z.string().min(1).optional(), taskId: z.string().min(1).optional(), proposal: z.unknown().optional() }).strict().parse(input);
     return this.transaction(async (state, _save, core, outbox) => {
-      if (binding.role !== "developer" || !binding.worktreePath) throw new Error("A current Developer assignment is required for task handover");
+      if (binding.role !== "developer" || !binding.worktreePath) {
+        // Reads are optional context for assignment_context; a Developer pane without a worktree has no task yet.
+        if (args.proposal !== undefined || binding.role !== "developer") throw new Error("A current Developer assignment is required for task handover");
+        return json({ handover: { status: "absent", code: "handover_assignment_unavailable" } });
+      }
       const candidates = state.outbound.filter(out => (out.status === "accepted" || args.proposal === undefined && out.status === "released") && !out.parentAssignmentId && out.message.type === "task.assignment" &&
         out.handle?.target.agentId === binding.agentId && out.handle.target.paneId === binding.paneId &&
         out.handle.target.worktreePath === binding.worktreePath && digest(out.handle.target.session) === digest(binding.session) &&
