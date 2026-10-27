@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GitChangeSetSchema, RoleMessageSchema, VerificationResultSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore, type FilesystemArtifactStore } from "./test-artifact-store.js";
-import { GitIntegrationEngine, taskBranchName, type GitProvider } from "../src/index.js";
+import { GitIntegrationEngine, TaskRecordSchema, taskBranchName, type GitProvider } from "../src/index.js";
 
 const execute = promisify(execFile);
 async function git(directory: string, ...args: string[]) {
@@ -107,6 +107,62 @@ describe.skipIf(process.platform !== "linux")("GitIntegrationEngine using real i
     expect(verificationRequest).toBeDefined();
     expect((verificationRequest?.payload as Record<string, unknown>)?.integratedTaskIds).toEqual(["task-a", "task-b"]);
     for (const message of result.requests) expect(RoleMessageSchema.safeParse(message).success).toBe(true);
+  });
+
+  it("bases a dependent task on several dependency heads and integrates all of them without conflicts", async () => {
+    const a = await committed("task-a");
+    const b = await committed("task-b");
+    const aHead = a.changes.headCommitHash, bHead = b.changes.headCommitHash;
+    const c = await engine.prepareTask(request("task-c", { dependencyHeads: [aHead, bHead] }));
+    expect(c.baseCommitHash).not.toBe(base);
+    expect((await git(repository, "rev-list", "--parents", "-n", "1", c.baseCommitHash)).split(" ")).toHaveLength(3);
+    expect(await readFile(join(c.worktreePath, "src", "task-a.txt"), "utf8")).toBe("task-a\n");
+    expect(await readFile(join(c.worktreePath, "src", "task-b.txt"), "utf8")).toBe("task-b\n");
+    await writeFile(join(c.worktreePath, "src", "task-c.txt"), "task-c\n");
+    await git(c.worktreePath, "add", "-A");
+    await git(c.worktreePath, "commit", "-m", "Implement task-c");
+    const changes = await engine.collectTask(c.key);
+    expect(changes.filesChanged.map(file => file.path)).toEqual(["src/task-c.txt"]);
+    const result = await integration([
+      { taskKey: c.key, dependsOn: [a.task.key, b.task.key] }, { taskKey: a.task.key }, { taskKey: b.task.key }
+    ]);
+    expect(result.status).toBe("awaiting_verification");
+    expect(result.conflictPaths).toEqual([]);
+    expect(result.merged).toEqual([a.task.key, b.task.key, c.key]);
+    for (const file of ["task-a.txt", "task-b.txt", "task-c.txt"]) {
+      expect(await readFile(join(result.worktreePath, "src", file), "utf8")).toBe(file.replace(".txt", "\n"));
+    }
+    expect(await git(repository, "rev-parse", "main")).toBe(base);
+  });
+
+  it("uses one dependency head directly as the task base", async () => {
+    const a = await committed("task-a");
+    const aHead = a.changes.headCommitHash;
+    const b = await engine.prepareTask(request("task-b", { baseRevision: aHead, dependencyHeads: [aHead] }));
+    expect(b.baseCommitHash).toBe(aHead);
+    await expect(engine.prepareTask(request("task-c", { baseRevision: base, dependencyHeads: [aHead] }))).rejects.toMatchObject({
+      code: "dependency_base_mismatch"
+    });
+  });
+
+  it("reports conflicting dependency outputs without creating the dependent task", async () => {
+    const a = await committed("task-a", "same.txt", "from a\n");
+    const b = await committed("task-b", "same.txt", "from b\n");
+    const dependent = request("task-c", { dependencyHeads: [a.changes.headCommitHash, b.changes.headCommitHash] });
+    await expect(engine.prepareTask(dependent)).rejects.toMatchObject({ code: "dependency_base_conflict" });
+    await expect(engine.prepareTask(dependent)).rejects.toThrow(/src\/same\.txt/);
+    expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain("dependency-");
+    expect(await git(repository, "branch", "--list", "agent/*")).not.toContain("task-c");
+    // The caller can still create the dependent task from the run base, as the Runtime fallback does.
+    const fallback = await engine.prepareTask(request("task-c"));
+    expect(fallback.baseCommitHash).toBe(base);
+  });
+
+  it("parses journal task records written before dependency heads existed", async () => {
+    const { task } = await committed();
+    const legacy = structuredClone(task) as Record<string, unknown> & { request: Record<string, unknown> };
+    delete legacy.request.dependencyHeads;
+    expect(TaskRecordSchema.parse(legacy).request.dependencyHeads).toEqual([]);
   });
 
   it("collects a validated change set and persists the actual Git patch through ArtifactStore", async () => {

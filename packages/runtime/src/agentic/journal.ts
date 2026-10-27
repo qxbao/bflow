@@ -49,6 +49,8 @@ export interface TaskRecord {
   verificationPlan?: VerificationPlan; verificationPending?: boolean; writerReleased?: boolean;
   /** Validated root-cause rework dossiers submitted per rework attempt; absent in legacy journals/checkpoints. */
   reworkResolutions?: ReworkResolutionDossier[];
+  /** Attempt whose dependency-base merge conflicted; it starts from the run base so final integration resolves the overlap. */
+  dependencyBaseFallback?: string;
 }
 export interface RunRecord {
   runId: string; delegation: DelegationRequest; status: SdlcWorkStatus;

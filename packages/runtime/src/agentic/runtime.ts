@@ -29,6 +29,7 @@ import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, toolAction
 import { join } from "node:path";
 import { CONVERSATION_DELIVERY_MAX_ATTEMPTS, DISPATCH_FAILURE_NOTICE_ATTEMPTS, HerdrOutbox, NOT_READY_FAILURE_MS, unwrap } from "./outbox.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integration, type VerificationPlan } from "./ports.js";
+import { dependencyHeadsFor, prepareDependencyBaseWorktree } from "./dependency-base.js";
 import { WorkflowProposalRejected, WorkflowRejectionCodeSchema, reportsToUser, type WorkflowRejection } from "./workflow-rejection.js";
 import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
@@ -2927,10 +2928,16 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (state.outbound.some(out => out.message.idempotency_key === id)) continue;
       const agentName = `dev-${digest([run.runId, taskState.attemptId]).slice(0, 20)}`;
       const prior = task.changeSet;
-      const tree = await this.ports.policies.git.prepareTask({ runId: run.runId, taskId: task.taskId,
-        attemptId: taskState.attemptId!, baseRevision: prior?.headCommitHash ?? run.baseRevision!,
-        ownedPaths: strings(record(definition.metadata).ownedPaths),
-        forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName });
+      // A dependent task starts from its verified dependencies' heads; a fallback attempt stays on the run base once its merge conflicted.
+      const dependencyHeads = prior || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
+      const { tree, conflict } = await prepareDependencyBaseWorktree(this.ports.policies.git, { runId: run.runId, taskId: task.taskId,
+        attemptId: taskState.attemptId!, ownedPaths: strings(record(definition.metadata).ownedPaths),
+        forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName },
+      { runBaseRevision: run.baseRevision!, priorHead: prior?.headCommitHash, dependencyHeads });
+      if (conflict !== undefined) {
+        task.dependencyBaseFallback = taskState.attemptId!;
+        this.progress(state, outbox, run, `Dependency outputs of ${task.taskId} overlap; starting from the run base and leaving the overlap to final integration. ${conflict}`);
+      }
       if (!task.worktrees.some(item => item.key === tree.key)) task.worktrees.push(tree);
       await save();
       const allocation = await this.ports.panes.allocateDeveloper({

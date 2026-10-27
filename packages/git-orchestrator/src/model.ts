@@ -15,6 +15,8 @@ export const TaskRequestSchema = z.object({
   baseRevision: z.string().min(1),
   ownedPaths: z.array(PathSchema).min(1),
   forbiddenPaths: z.array(PathSchema).default([]),
+  /** Verified heads of DAG dependencies; several are merged into the task base. Absent in journals written before this field. */
+  dependencyHeads: z.array(CommitHashSchema).refine(heads => new Set(heads).size === heads.length, "Dependency heads must be unique").default([]),
   developerId: IdentifierSchema
 }).strict();
 export type TaskRequest = z.input<typeof TaskRequestSchema>;
