@@ -50,6 +50,31 @@ Tên test và method phải khớp `TestStrategy.criterionMappings`/check plan h
 
 Runtime browser task actions hiện vẫn bị giới hạn `exclusive_resource_lease_unsupported`; thêm reference browser không làm capability này usable. Không tự cài load generator, scanner, browser hoặc backend chỉ vì skill gợi ý một phương pháp. Conditional TDD, independent gates, approvals và iteration bounds vẫn giữ nguyên.
 
+### Race condition: test phải phân biệt được có lock hay không
+
+Với tiêu chí về race condition, concurrency, lock, mutual exclusion, atomicity hoặc ordering, test chỉ là bằng chứng hợp lệ khi có đồng thời hai điều kiện:
+
+1. **Điểm xen kẽ thật trong critical section:** một `await`, hook/clock/barrier được inject, deferred promise hoặc fake có thể dừng giữa bước đọc và bước ghi, để hai thao tác thực sự chồng lên nhau.
+2. **Đối chứng âm (negative control):** khi bỏ bảo vệ hoặc thay bằng pass-through (ví dụ lock → no-op), đúng test đó phải fail. Ghi kết quả mutation, hoặc lập kế hoạch mutation check với kết quả fail mong đợi.
+
+`Promise.all` trên các thao tác đồng bộ hoặc chỉ assert invariant cuối cùng không đủ. Anti-pattern: 25 lần `bucket.tryAcquire(1)` trong `Promise.all`, rồi assert 5 lần thành công. Nếu `refill()` và giảm token nằm trong `runExclusive` đồng bộ, Node đơn luồng vẫn cho kết quả đúng khi `AsyncLock` bị bỏ. Test này chỉ là *invariant coverage*, không chứng minh lock cần thiết.
+
+Ví dụ đã sửa (pseudo-code; `betweenCheckAndTake` là test seam, không phải API runtime có sẵn):
+
+```js
+// Giữ hai thao tác ở giữa bước kiểm tra token và bước giảm token.
+const gate = deferred();
+const bucket = createTokenBucket({ capacity: 5, betweenCheckAndTake: () => gate.promise });
+
+const pending = Array.from({ length: 25 }, () => bucket.tryAcquire(1));
+gate.resolve();
+const results = await Promise.all(pending);
+
+assert.equal(results.filter(Boolean).length, 5);
+```
+
+Với lock đúng, chỉ 5 lần acquire thành công. Khi thay lock bằng pass-through, cả 25 lần cùng đọc được token trước khi giảm, nên cùng test phải fail (25 thay vì 5). Nếu implementation chưa có điểm inject, tester không tự sửa runtime code; báo prerequisite gap hoặc đề xuất seam qua Runtime → Herdr → Conversation. Nếu không được phép chạy mutation trong bản sao cách ly, không chấp nhận tiêu chí là đã chứng minh race safety.
+
 ## Reference đã được phân phối
 
 | Consumer | Reference canonical |
