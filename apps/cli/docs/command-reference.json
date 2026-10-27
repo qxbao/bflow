@@ -58,6 +58,34 @@
       "flags": []
     },
     {
+      "name": "task.preview",
+      "usage": "bflow task preview",
+      "summary": "Explain the current execution plan from read-only snapshots",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "preview",
+        "not_ready",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--run",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--compare",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
       "name": "task.plan",
       "usage": "bflow task plan",
       "summary": "Create (preview/write) or check the task graph of a specification",
@@ -128,6 +156,12 @@
         }
       ],
       "flags": [
+        {
+          "name": "--expect-plan",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
         {
           "name": "--run",
           "type": "string",

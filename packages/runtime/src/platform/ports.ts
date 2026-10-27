@@ -55,6 +55,7 @@ export interface RolePlatformRequirement {
   readonly toolPolicy?: RepositoryToolPolicy;
   readonly toolIds: readonly string[];
   readonly skillSelections: readonly RoleSkillSelection[];
+  readonly dependencySkillApprovals?: readonly import("@bflow/contracts").SkillDependencyApproval[];
   readonly environmentVariables?: Readonly<Record<string, string>>;
   /** Present only with verified full-process isolation evidence; required for `unattended_isolated`. */
   readonly isolation?: { readonly kind: "os_sandbox" | "container"; readonly proofId: string };

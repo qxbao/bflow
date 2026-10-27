@@ -1,3 +1,5 @@
+import { RoleCapabilityPreflightError } from "./ports.js";
+import { readSkillApproval } from "./skill-approval.js";
 import type { GatewayToolOperationOptions } from "../platform/browser-resource-transactions.js";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
@@ -6,7 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   AgentProviderIdSchema, AgentRoleSchema,
-  type AgentProviderId, type AgentRole, type ContractError, type OperationOptions
+  type AgentProviderId, type AgentRole, type ContractError, type OperationOptions, type PaneBinding
 } from "@bflow/contracts";
 import {
   createManagedCodexHookEnvironment, createProviderProcessRunner,
@@ -166,6 +168,7 @@ export function requirementFor(
     ...(toolGrants !== undefined ? { toolGrants: roleGrants } : {}),
     ...(toolPolicy !== undefined ? { toolPolicy } : {}),
     toolIds: [...option.toolIds],
+    ...(option.dependencySkillApprovals ? { dependencySkillApprovals: [...option.dependencySkillApprovals] } : {}),
     skillSelections: option.skillSelections.map(selection => ({
       skill: selection.skill,
       required: selection.required,
@@ -243,6 +246,29 @@ interface PinnedRoleInstructions {
   manifest: SkillManifest;
   instructionText: string;
   references: readonly { name: string; description: string; entrypoint: string; digest: string }[];
+}
+
+/** Verify current pinned skill authority even for implementation-only capability requests. No readiness/model probes. */
+export async function verifyDispatchPinnedSkills(
+  session: Pick<HostPlatformSession, 'readPinnedInstructions' | 'launchIdOf'> | undefined,
+  platform: Pick<AgenticHostPlatformOptions, 'roles'> | undefined,
+  binding: PaneBinding
+): Promise<void> {
+  const selections = platform?.roles.find(option => option.role === binding.role)?.skillSelections ?? [];
+  if (!selections.length) return;
+  try {
+    if (!session) throw Error('Platform skill verifier is unavailable');
+    const metadataLaunch = binding.metadata?.launchId;
+    const launchId = binding.role === 'developer' ? metadataLaunch : session.launchIdOf(binding.role);
+    if (typeof launchId !== 'string' || !launchId || typeof metadataLaunch === 'string' && metadataLaunch !== launchId)
+      throw Error('Current skill launch identity is unavailable');
+    // This calls SkillManager.verify, including each dependency binding's current scoped receipt and expiry.
+    const pinned = await session.readPinnedInstructions(binding.role, undefined, 0, 1, launchId);
+    if (!pinned || pinned.launchId !== launchId || !pinned.manifestDigest || !pinned.instructionText.trim())
+      throw Error('Current pinned skill manifest is unavailable');
+  } catch {
+    throw new RoleCapabilityPreflightError('Current pinned skill approval or integrity is unavailable for dispatch');
+  }
 }
 
 /** One daemon's platform session: generation counter, launch ids for activation, and the Developer launch port. */
@@ -717,6 +743,7 @@ export class HostPlatformSession {
 }
 
 export interface CreateHostPlatformSessionOptions {
+  readonly beforeSideEffect?: () => Promise<void>;
   readonly platform: AgenticHostPlatformOptions;
   readonly repositoryPath: string;
   readonly sessionId: string;
@@ -862,7 +889,13 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
   const skillManager = new SkillManager({
     store: new FileSkillStore(platform.skillsStoreRoot),
     supportedCommands: skillSupportedCommands(platform),
-    approvedBuiltinDigests: [...platform.approvedBuiltinSkillDigests]
+    approvedBuiltinDigests: [...platform.approvedBuiltinSkillDigests],
+    authorize: async request => platform.skillApprovalPath !== undefined && request.scope.kind === "session" &&
+      request.scope.repositoryId === platform.repositoryId && request.scope.sessionId === options.sessionId &&
+      readSkillApproval(platform.skillApprovalPath, { approvalReceiptId: request.approvalReceiptId,
+        skillId: request.definition.skillId, version: request.definition.version, digest: request.definition.digest,
+        dependencies: request.definition.dependencies, role: request.role, provider: request.provider,
+        repositoryId: platform.repositoryId, sessionId: options.sessionId })
   });
 
   let gatewayControl: GatewayControlPort | undefined;
@@ -887,6 +920,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const service = createPlatformReadinessService({
     stateDirectory,
+    ...(options.beforeSideEffect ? { beforeSideEffect: options.beforeSideEffect } : {}),
     skillManager,
     ...(gatewayControl !== undefined ? { gatewayControl } : {}),
     ...(gatewayEndpoint !== undefined ? { gatewayEndpoint } : {}),

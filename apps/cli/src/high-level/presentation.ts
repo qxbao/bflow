@@ -83,6 +83,46 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
     }
   };
   switch (command) {
+    case "task.preview": {
+      const plan = data.plan as Record<string, unknown> | undefined;
+      if (!plan) break;
+      lines.push(`  Mode: ${text(plan.mode)}`, `  Fingerprint: ${text(plan.fingerprint)}`);
+      const pack = object(plan.pack), policy = object(plan.policy), accepted = object(plan.accepted);
+      lines.push(`  Pack: ${text(pack.id ?? pack.status)}${pack.version ? ` v${text(pack.version)}` : ""}`);
+      if (accepted.runId) {
+        lines.push(`  Specification: ${text(accepted.specificationId)} v${text(accepted.specificationVersion)}`,
+          `  Workflow: ${text(accepted.workflowId)} v${text(accepted.workflowVersion)}`);
+        for (const task of Array.isArray(accepted.tasks) ? accepted.tasks : []) {
+          const row = object(task);
+          lines.push(`  Task ${text(row.id)} (${text(row.role)}), depends on: ${text(JSON.stringify(row.dependsOn))}${row.requiresApproval === true ? "; human approval required" : ""}`);
+        }
+      } else lines.push("  Accepted specification/DAG: unresolved; analysis and clarification come first.");
+      lines.push(`  Gates: ${text(JSON.stringify(policy.gates), 2000)}`,
+        `  Conditional TDD: ${text(policy.tdd)}`,
+        `  Alternative verification: ${text(JSON.stringify(policy.alternativeVerification), 2000)}`);
+      for (const item of Array.isArray(policy.explanations) ? policy.explanations : []) {
+        const explanation = object(item), source = object(explanation.source);
+        lines.push(`  Why ${text(explanation.field)}: ${text(explanation.reasonCode)} (${text(source.kind)}: ${text(source.locator)})`);
+      }
+      for (const item of Array.isArray(plan.decisions) ? plan.decisions : []) {
+        const decision = item as Record<string, unknown>;
+        const source = decision.source as Record<string, unknown>;
+        lines.push(`  ${text(decision.field)}: ${text(JSON.stringify(decision.effective), 1000)} (${text(source?.kind)}: ${text(source?.locator)})`);
+      }
+      for (const item of Array.isArray(plan.observations) ? plan.observations : []) {
+        const observation = object(item), source = object(observation.source);
+        lines.push(`  Readiness: ${text(observation.id)}: ${text(observation.status)} / ${text(observation.outcome ?? "unknown")} (${text(source.locator)})`);
+      }
+      for (const item of Array.isArray(plan.blockers) ? plan.blockers : []) {
+        const blocker = object(item), source = object(blocker.source);
+        lines.push(`  Blocked: ${text(blocker.code)} (${text(source.kind)}: ${text(source.locator)})`);
+      }
+      if (data.diff) lines.push(`  Drift: ${text(JSON.stringify(data.diff), 4000)}`);
+      for (const item of Array.isArray(plan.unknowns) ? plan.unknowns : []) lines.push(`  Unknown: ${text(item)}`);
+      for (const item of Array.isArray(plan.approvalPoints) ? plan.approvalPoints : []) lines.push(`  Approval point: ${text(item)}`);
+      lines.push("  Preview does not establish readiness, approval, reservation or task success.");
+      break;
+    }
     case "repo.inspect": {
       const repo = object(data.repository), git = object(data.git), project = object(data.project);
       add("Root", repo.root, 1024); add("Branch", git.branch ?? (git.detached === true ? "detached HEAD" : undefined)); add("HEAD", typeof git.head === "string" ? git.head.slice(0, 12) : undefined);
@@ -235,6 +275,7 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
 function commandForRemediation(command: HighLevelCommandName): CliCommandName {
   switch (command) {
     case "repo.inspect": return "repo inspect";
+    case "task.preview": return "task preview";
     case "task.plan": return "task plan";
     case "task.implement": return "task implement";
     case "verify": return "verify";

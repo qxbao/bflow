@@ -20,6 +20,7 @@ import type { HighLevelServices } from "./high-level/services.js";
 
 export type HighLevelCommandName =
   | "repo inspect"
+  | "task preview"
   | "task plan"
   | "task implement"
   | "verify"
@@ -195,6 +196,7 @@ export interface SetupIntegrationOptions {
 export interface EnvironmentCommandArgs extends GlobalCliFlags {
   readonly command: "up" | "down" | "attach" | "doctor" | "recover";
   readonly timeoutMs?: number | undefined;
+  readonly expectPlanPath?: string | undefined;
   readonly yes: boolean;
   readonly force?: boolean | undefined;
   readonly deep?: boolean | undefined;
@@ -273,6 +275,12 @@ export interface RepoInspectCommandArgs extends HighLevelCommonFlags {
   readonly dir?: string | undefined;
   readonly includeFiles: boolean;
   readonly maxFiles?: number | undefined;
+}
+
+export interface TaskPreviewCommandArgs extends HighLevelCommonFlags {
+  readonly command: "task preview";
+  readonly runId?: string;
+  readonly comparePath?: string;
 }
 
 export interface TaskPlanCommandArgs extends HighLevelCommonFlags {
@@ -358,6 +366,7 @@ export interface AgentCheckCommandArgs extends HighLevelCommonFlags {
 
 export type HighLevelParsedCliCommand =
   | RepoInspectCommandArgs
+  | TaskPreviewCommandArgs
   | TaskPlanCommandArgs
   | TaskImplementCommandArgs
   | VerifyCommandArgs

@@ -129,7 +129,11 @@ export async function createDefaultHighLevelServices(): Promise<HighLevelService
       validateAgainstSpecification: (value, spec) => resolver.validateAgainstSpecification(value, spec)
     },
     machine: {
-      platform: () => setup.detectPlatformWithProbe(setup.defaultHostEnvironment()),
+      platform: async () => {
+        const host = setup.defaultHostEnvironment();
+        const platform = await setup.detectPlatformWithProbe(host);
+        return host.env.BFLOW_HOME ? setup.isolatedPlatformProfile(platform, resolve(host.env.BFLOW_HOME)) : platform;
+      },
       runner: () => new setup.NodeCommandRunner()
     },
     providers: registry,

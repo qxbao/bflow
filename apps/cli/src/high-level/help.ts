@@ -13,6 +13,7 @@ const HELP: Record<HighLevelCommandName, string> = {
   "repo.inspect": `Usage: bflow repo inspect [options]
 
 Inspect the Git repository, worktrees, project structure and bflow context. Read-only.`,
+  "task.preview": "Usage: bflow task preview [--run <id>] [--json] [--compare <file>]\nRead-only execution preview; does not grant readiness or approval.",
   "task.plan": `Usage: bflow task plan --spec <file> [--workflow <file> | --write [--out <file>] [--force]] [options]
 
 Create or check a specification's task graph and acceptance-criterion coverage.
@@ -106,6 +107,7 @@ export function getHighLevelHelp(command: HighLevelCommandName): string {
 
 export const HIGH_LEVEL_SUMMARY = `Agentic SDLC commands:
   repo inspect          Inspect repository, Git, structure and context
+  task preview          Read-only execution plan preview with provenance and drift
   task plan             Create or check the task graph of a specification
   task implement <id>   Prepare worktree, spec, TDD policy and assignment for a task
   verify <task-id>      Run VerificationPlan checks and return structured evidence

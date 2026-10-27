@@ -86,6 +86,8 @@ export interface AgenticPolicies {
   assertEvidenceComplete(strategy: unknown): void;
 }
 export interface AgenticRuntimePorts {
+  /** Host-owned current readonly resolution; absent is an explicit legacy host without historical drift protection. */
+  readExecutionResolution?: import("./execution-binding.js").ExecutionResolutionReader;
   /** Physical Conversation hook only; not an agent tool or an approval inferred by a model. */
   authorizeReviewReplacement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
   authorizePolicyPhaseRetirement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
@@ -111,6 +113,8 @@ export interface AgenticRuntimePorts {
   roleCapabilities: Readonly<Record<string, readonly string[]>>;
   /** Verifies requested capabilities against the current authenticated pane/session before any lease or transport side effect. */
   preflightRoleCapabilities?(binding: PaneBinding, required: readonly string[]): Promise<void>;
+  /** Readonly current skill integrity/scope/expiry check; repeated across awaited dispatch boundaries without probes. */
+  revalidateRoleSkills?(binding: PaneBinding): Promise<void>;
   maxConcurrency?: number;
   /** The concrete host can route P16 alternative-evidence requests to its measurement tools. */
   automaticAlternativeEvidence?: boolean;

@@ -1,3 +1,4 @@
+import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-binding.js";
 import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentReconciliationResultSchema,
   AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, VerificationResultSchema, WorkflowRunSnapshotSchema,
@@ -118,6 +119,7 @@ export class HerdrOutbox {
     if (request.agentId !== owner.lease.agentId || request.runId !== owner.lease.runId || request.taskId !== owner.lease.taskId ||
         request.attemptId !== owner.lease.attemptId || request.leaseId === owner.lease.leaseId)
       throw new Error("Pending task lease continuation ownership mismatch");
+    await assertRunExecutionPlan(this.state.runs.find(run => run.runId === owner.message.run_id), this.ports.readExecutionResolution);
     const acquired = AgentLeaseSchema.parse(unwrap(await this.ports.registry.acquireLease(owner.leaseReacquisition)));
     if (acquired.leaseId !== owner.leaseReacquisition.leaseId || acquired.agentId !== owner.lease.agentId ||
         acquired.runId !== owner.lease.runId || acquired.taskId !== owner.taskId || acquired.attemptId !== owner.attemptId ||
@@ -370,7 +372,16 @@ export class HerdrOutbox {
       }
     }
     // Fail closed before Registry lease acquisition, dispatch intent, or transport side effects.
+    const planRun = this.state.runs.find(run => run.runId === out.message.run_id);
+    const guardWorkDispatch = async () => {
+      if (["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type)) {
+        await assertRunExecutionPlan(planRun, this.ports.readExecutionResolution);
+        await this.ports.revalidateRoleSkills?.(pane);
+      }
+    };
+    await guardWorkDispatch();
     await this.ports.preflightRoleCapabilities?.(pane, out.capabilities);
+    await guardWorkDispatch();
     if (out.parentAssignmentId) {
       try { await this.validateNotice(out, pane); }
       catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }
@@ -384,6 +395,7 @@ export class HerdrOutbox {
         taskId: out.taskId, preferredAgentId: pane.agentId, requiredCapabilities: out.capabilities }));
       if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; return; }
       if (!out.lease) {
+        await guardWorkDispatch();
         const acquired = await this.ports.registry.acquireLease({
           leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
           taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
@@ -426,6 +438,7 @@ export class HerdrOutbox {
       createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
     if (wire.type === "delegation.request" && wire.recipient.role === "coordinator")
       out.coordinatorResponseBaseline ??= this.state.outbound.length;
+    await guardWorkDispatch();
     out.status = "sending";
     await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
     if (out.parentAssignmentId) {
@@ -438,6 +451,8 @@ export class HerdrOutbox {
         await this.validateNotice(out, currentPane); await this.renew(out);
       } catch (error) { out.status = "queued"; out.error = String(error); await this.save(); return; }
     }
+    try { await guardWorkDispatch(); }
+    catch (error) { if (error instanceof ExecutionPlanDriftError || error instanceof RoleCapabilityPreflightError) { out.status = "queued"; await this.save(); } throw error; }
     try {
       const value = unwrap(await this.ports.transport.send(out.request));
       const receipt = AgentSubmissionReceiptSchema.parse(value);

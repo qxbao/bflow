@@ -51,6 +51,9 @@ export async function executeHighLevelCommand(
   context?: CliContext
 ): Promise<HighLevelExecutionResult> {
   const workspaceRoot = context?.cwd ?? process.cwd();
+  if (parsed.command === "task preview") {
+    return { exitCode: CLI_EXIT_CODES.USAGE_ERROR, ok: false, error: { code: "validation", retryable: false, message: "Execution preview requires the read-only binary dispatcher." } };
+  }
 
   // 1. Enforce permission, role boundary, and protected branch governance
   const govResult = enforceCommandGovernance({

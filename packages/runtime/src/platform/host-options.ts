@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import {
-  AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
+  SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
   NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema,
   RepositoryToolPolicySchema, ResolvedToolGrantSchema
 } from "@bflow/contracts";
@@ -27,6 +27,7 @@ export const PlatformRoleOptionSchema = z.object({
     required: z.boolean(),
     approvalReceiptId: IdentifierSchema.optional()
   }).strict()),
+  dependencySkillApprovals: z.array(SkillDependencyApprovalSchema).optional(),
   environmentVariables: z.record(SafeArgumentSchema).optional(),
   isolation: z.object({ kind: z.enum(["os_sandbox", "container"]), proofId: IdentifierSchema }).strict().optional(),
   network: z.object({ mode: z.enum(["deny", "allowlist"]), allowedHosts: z.array(IdentifierSchema) }).strict().optional()
@@ -53,6 +54,8 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   /** Private machine-owned store recording explicit approval of exact global Codex hook snapshots. */
   codexHookApprovalPath: NonEmptyArgumentSchema.optional(),
   approvedBuiltinSkillDigests: z.array(Sha256DigestSchema),
+  /** Trusted machine-owned exact custom skill authorization store; never repository supplied. */
+  skillApprovalPath: NonEmptyArgumentSchema.refine(isAbsolute, "skillApprovalPath must be absolute").optional(),
   /**
    * Commands skills may reference, owned by the CLI command reference. Absent (older CLI) means none: skills that
    * reference a command then fail validation instead of being accepted against a guessed list.

@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   AgentRoleSchema,
   AgentProviderIdSchema,
+  SkillDependencyApprovalSchema,
   SkillDefinitionSchema,
   SkillManifestSchema,
   SkillPinSchema,
@@ -42,6 +43,7 @@ export const ResolveSkillsRequestSchema = z
     capabilityIds: z.array(z.string().min(1)),
     toolIds: z.array(z.string().min(1)),
     selections: z.array(SelectionSchema),
+    dependencyApprovals: z.array(SkillDependencyApprovalSchema).optional(),
   })
   .strict();
 export type ResolveSkillsRequest = z.infer<typeof ResolveSkillsRequestSchema>;
@@ -271,13 +273,35 @@ export class SkillManager {
   async resolve(
     input: ResolveSkillsRequest,
   ): Promise<{ manifest: SkillManifest; diagnostics: string[] }> {
+    return this.resolveAgainstCatalog(input, await this.list());
+  }
+  /** Read-only preview uses exactly the execution resolver over verified bundle snapshots. */
+  async resolveCatalog(
+    input: ResolveSkillsRequest,
+    entries: readonly { definition: SkillDefinition; files: BundleFiles }[],
+  ): Promise<{ manifest: SkillManifest; diagnostics: string[] }> {
+    const parsed = z.array(z.object({ definition: SkillDefinitionSchema, files: z.record(z.string()) }).strict()).parse(entries);
+    const catalog = parsed.map(entry => {
+      const actual = validateSkill(entry.files, { source: entry.definition.source, supportedCommands: this.supportedCommands });
+      if (canonical(actual) !== canonical(entry.definition)) throw new Error("Catalog metadata/content mismatch");
+      return actual;
+    });
+    if (new Set(catalog.map(entry => `${entry.skillId}\0${entry.version}`)).size !== catalog.length)
+      throw new Error("Duplicate catalog skill name/version");
+    return this.resolveAgainstCatalog(input, catalog);
+  }
+  private async resolveAgainstCatalog(
+    input: ResolveSkillsRequest, catalog: SkillDefinition[],
+  ): Promise<{ manifest: SkillManifest; diagnostics: string[] }> {
     const request = ResolveSkillsRequestSchema.parse(input);
     if (
       new Set(request.selections.map((s) => s.skill.skillId)).size !==
       request.selections.length
     )
       throw new Error("Duplicate skill selection");
-    const catalog = await this.list();
+    const dependencyApprovals = new Map((request.dependencyApprovals ?? []).map(binding => [binding.skill.skillId, binding]));
+    if (dependencyApprovals.size !== (request.dependencyApprovals ?? []).length)
+      throw new Error("Duplicate dependency skill authorization");
     const resolved = new Map<string, SkillDefinition>();
     const receipts = new Map<string, string | undefined>();
     const required = new Map<string, boolean>();
@@ -292,6 +316,9 @@ export class SkillManager {
       isRequired: boolean,
     ): Promise<void> => {
       const chosen = explicit.get(selected.skillId);
+      const dependencyApproval = dependencyApprovals.get(selected.skillId);
+      if (dependencyApproval && !samePin(dependencyApproval.skill, selected))
+        throw new SkillPinConflict(`Conflicting dependency authorization pin: ${selected.skillId}`);
       if (chosen && !samePin(chosen.skill, selected))
         throw new SkillPinConflict(
           `Conflicting skill pins: ${selected.skillId}`,
@@ -316,7 +343,7 @@ export class SkillManager {
       const definition = catalog.find((d) => samePin(pin(d), selected));
       if (!definition)
         throw new Error(`Missing exact skill pin: ${selected.skillId}`);
-      const approval = chosen?.approvalReceiptId ?? receipt;
+      const approval = chosen?.approvalReceiptId ?? dependencyApproval?.approvalReceiptId ?? receipt;
       await this.authorize(definition, request, approval);
       visiting.add(selected.skillId);
       for (const dependency of [...definition.dependencies].sort((a, b) =>

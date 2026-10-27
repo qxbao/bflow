@@ -58,9 +58,9 @@ describe("buildHostPlatformOptions", () => {
     expect(grants[0]).toMatchObject({ toolId: "mempalace", operations: ["mempalace_search"],
       memoryScope: { wing: "approved-wing", repositoryId: base.repository.id, access: "read_only" } });
   });
-  it("rejects configured custom skill catalog and binding paths with remediation", () => {
+  it("rejects unavailable custom skill catalogs before host options are created", async () => {
     const input = configure(environment => { environment.skills = { catalogDir: "./custom", bindingsPath: "./bindings.json" }; });
-    expect(() => resolveRepositoryToolPolicy(input, context.machineId)).toThrow(/catalogDir\/bindingsPath are not supported.*Remove these overrides/i);
+    await expect(buildHostPlatformOptions(input, { context })).rejects.toThrow();
   });
   it("derives the isolator root only from trusted machine environment", () => {
     expect(resolveIsolatorStateRoot({ AI_ISOLATOR_HOME: "/machine/isolator" }, "/home/native")).toBe("/machine/isolator");

@@ -14,6 +14,7 @@ import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
+  readExecutionResolution?: AgenticRuntimePorts["readExecutionResolution"];
   authorizeNativeDiagnosticFence?: AgenticRuntimePorts["authorizeNativeDiagnosticFence"];
   authorizePolicyPhaseRetirement?: AgenticRuntimePorts["authorizePolicyPhaseRetirement"];
   authorizeReviewReplacement?: AgenticRuntimePorts["authorizeReviewReplacement"];
@@ -25,6 +26,7 @@ export interface OpenAgenticWorkspaceOptions {
   manifestDirectory?: string; storageDirectory?: string; maxDeveloperCapacity?: number;
   roleCapabilities: AgenticRuntimePorts["roleCapabilities"];
   preflightRoleCapabilities?: AgenticRuntimePorts["preflightRoleCapabilities"];
+  revalidateRoleSkills?: AgenticRuntimePorts["revalidateRoleSkills"];
   taskChecks: AgenticRuntimePorts["taskChecks"]; workflowChecks: AgenticRuntimePorts["workflowChecks"];
   /** Deterministic host runners. Review checks are always routed through Herdr. */
   deterministicGates: readonly QualityGate[];
@@ -76,6 +78,7 @@ export interface DeveloperLaunchPort {
 /** Bound on waiting for a new Developer's provider process to prove Gateway reachability (Pane Manager's default operation timeout). */
 export const DEVELOPER_STARTUP_TIMEOUT_MS = 30_000;
 export interface DeveloperLaunchOptions {
+  readonly beforeSideEffect?: () => Promise<void>;
   readonly startupTimeoutMs?: number;
   readonly now?: () => number;
   /** Reconcile Herdr's late native-session observation before returning the persisted binding. */
@@ -133,6 +136,11 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
         catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
         // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
         const allocation = { ...request, agentKind: launch.provider, launch };
+        try { await launchOptions.beforeSideEffect?.(); }
+        catch (error) {
+          await launches.release(request.taskId).catch(() => undefined);
+          throw error;
+        }
         const allocated = await base.allocateDeveloper(allocation, callOptions);
         if (!allocated.ok) {
           try { await launches.release(request.taskId); } catch { /* the refused allocation's error is the one to report */ }
@@ -227,6 +235,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     socket: paneModule.createHerdrSocketPort({ runner, sessionId: options.sessionId }) });
   const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches, {
     startupTimeoutMs: 120_000,
+    ...(options.readExecutionResolution ? { beforeSideEffect: async () => { await options.readExecutionResolution!(); } } : {}),
     refreshBinding: async (paneId, callOptions) => {
       const observed = await rolePanes.inspectTopologyHealth(callOptions);
       if (!observed.ok) return observed;
@@ -263,7 +272,9 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
       automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities,
+      ...(options.readExecutionResolution ? { readExecutionResolution: options.readExecutionResolution } : {}),
       ...(options.preflightRoleCapabilities ? { preflightRoleCapabilities: options.preflightRoleCapabilities } : {}),
+      ...(options.revalidateRoleSkills ? { revalidateRoleSkills: options.revalidateRoleSkills } : {}),
       maxConcurrency: options.maxDeveloperCapacity ?? 2, taskChecks: options.taskChecks, workflowChecks: options.workflowChecks,
       ...(options.behavioralChecks ? { behavioralChecks: options.behavioralChecks } : {}),
       ...(options.validateTaskCommands ? { validateTaskCommands: options.validateTaskCommands } : {}),

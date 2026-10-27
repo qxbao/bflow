@@ -1,7 +1,7 @@
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SkillManager,
   SkillFileStore,
@@ -55,6 +55,26 @@ async function setup(bundles: BundleFiles[] = [files()]) {
   return { manager, store, defs, request };
 }
 describe("SkillManager exact pins and authority", () => {
+  it("resolves validated catalog snapshots through execution dependency/permission policy without opening the store", async () => {
+    const dependency = files("dependency");
+    const parent = files("parent");
+    const metadata = JSON.parse(parent["skill.json"]!);
+    metadata.dependencies = [{ skillId: "dependency", version: "1.0.0", digest: bundleDigest(dependency) }];
+    parent["skill.json"] = JSON.stringify(metadata);
+    const { manager, store, defs, request } = await setup([dependency, parent]);
+    const selected = { ...request, selections: request.selections.slice(1) };
+    const execution = await manager.resolve(selected);
+    const forbidden = ["list", "getBundle", "writeImmutableDocument", "putBundle", "withCatalogLock"] as const;
+    for (const name of forbidden) vi.spyOn(store, name).mockImplementation(() => { throw Error("Forbidden preview store access"); });
+    const snapshot = [{ definition: defs[0]!, files: dependency }, { definition: defs[1]!, files: parent }];
+    const preview = await manager.resolveCatalog(selected, snapshot);
+    expect(preview).toEqual(execution);
+    expect(preview.manifest.skills.map(skill => skill.skillId)).toEqual(["dependency", "parent"]);
+    for (const name of forbidden) expect(store[name]).not.toHaveBeenCalled();
+    await expect(manager.resolveCatalog(selected, [{ ...snapshot[0]!, files: { ...dependency, "SKILL.md": body("tampered") } }, snapshot[1]!]))
+      .rejects.toThrow();
+    await expect(manager.resolveCatalog({ ...selected, role: "conversation" }, snapshot)).rejects.toThrow();
+  });
   it("resolves, persists, restarts, and renders only selected references on all providers", async () => {
     const { manager, store, request } = await setup([files(), files("second")]);
     for (const provider of ["claude", "codex", "agy"]) {
@@ -178,4 +198,27 @@ describe("SkillManager exact pins and authority", () => {
       "parent",
     ]);
   });
+});
+
+it('resolves a custom dependency with its separately pinned receipt without selecting extra skills', async () => {
+  const dependency = files('dependency'); const parent = files('parent'); const extra = files('extra');
+  const dependencyPin = { skillId: 'dependency', version: '1.0.0', digest: bundleDigest(dependency) };
+  parent['skill.json'] = JSON.stringify({ ...JSON.parse(parent['skill.json']!), dependencies: [dependencyPin] });
+  const { store, request } = await setup([]);
+  const manager = new SkillManager({ store, supportedCommands: ['status'], authorize: async check =>
+    check.approvalReceiptId === `receipt-${check.definition.skillId}` && check.role === 'developer' &&
+    check.provider === 'claude' && check.scope.sessionId === 's' });
+  const dependencyDefinition = await manager.installBundle(dependency, { source: 'repository', expectedDigest: dependencyPin.digest });
+  const parentDefinition = await manager.installBundle(parent, { source: 'repository', expectedDigest: bundleDigest(parent) });
+  await manager.installBundle(extra, { source: 'repository', expectedDigest: bundleDigest(extra) });
+  const selected = { ...request, selections: [{ skill: { skillId: 'parent', version: '1.0.0', digest: bundleDigest(parent) }, required: true, approvalReceiptId: 'receipt-parent' }],
+    dependencyApprovals: [ { skill: dependencyPin, approvalReceiptId: 'receipt-dependency' },
+      { skill: { skillId: 'extra', version: '1.0.0', digest: bundleDigest(extra) }, approvalReceiptId: 'receipt-extra' } ] };
+  const live = await manager.resolve(selected);
+  const snapshot = await manager.resolveCatalog(selected, [{ definition: dependencyDefinition, files: dependency }, { definition: parentDefinition, files: parent }]);
+  expect(snapshot).toEqual(live); expect(live.manifest.skills.map(skill => skill.skillId)).toEqual(['dependency', 'parent']);
+  expect(live.manifest.bindings.find(binding => binding.skill.skillId === 'dependency')?.approvalReceiptId).toBe('receipt-dependency');
+  for (const invalid of [ { skill: { ...dependencyPin, digest: 'f'.repeat(64) }, approvalReceiptId: 'receipt-dependency' },
+    { skill: dependencyPin, approvalReceiptId: 'receipt-parent' } ])
+    await expect(manager.resolve({ ...selected, dependencyApprovals: [invalid] })).rejects.toThrow();
 });

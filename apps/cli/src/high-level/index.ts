@@ -1,3 +1,5 @@
+import { identifyRepository } from "../repository.js";
+import { readEnvironmentConfig } from "../environment-config.js";
 import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -32,12 +34,14 @@ import { MCP_STATUS_SPEC, mcpStatus } from "./commands/mcp-status.js";
 import { REPO_INSPECT_SPEC, repoInspect } from "./commands/repo-inspect.js";
 import { SKILLS_SYNC_SPEC, skillsSync } from "./commands/skills-sync.js";
 import { TASK_IMPLEMENT_SPEC, taskImplement } from "./commands/task-implement.js";
+import { TASK_PREVIEW_SPEC, taskPreview } from "./commands/task-preview.js";
 import { TASK_PLAN_SPEC, taskPlan } from "./commands/task-plan.js";
 import { TOOL_STATUS_SPEC, toolStatus } from "./commands/tool-status.js";
 import { VERIFY_SPEC, verify } from "./commands/verify.js";
 
 const ENTRIES: readonly { readonly spec: CommandSpec; readonly handler: HighLevelHandler }[] = [
   { spec: REPO_INSPECT_SPEC, handler: repoInspect },
+  { spec: TASK_PREVIEW_SPEC, handler: taskPreview },
   { spec: TASK_PLAN_SPEC, handler: taskPlan },
   { spec: TASK_IMPLEMENT_SPEC, handler: taskImplement },
   { spec: VERIFY_SPEC, handler: verify },
@@ -94,7 +98,7 @@ function groupHelp(group: string): string {
 }
 
 
-function withDefaultSkillsPort(services: HighLevelServices): HighLevelServices {
+function withDefaultSkillsPort(services: HighLevelServices, cwd: string): HighLevelServices {
   return {
     ...services,
     skills:
@@ -110,14 +114,18 @@ function withDefaultSkillsPort(services: HighLevelServices): HighLevelServices {
               const skillsMod: any = await import(
                 new URL("../../../../packages/skills/dist/index.js", import.meta.url).href
               );
-              const catalog = await loadMachineSkillCatalog();
+              let repository;
+              try { repository = await identifyRepository(cwd); } catch { /* Machine-only sync outside a repo retains builtin catalog. */ }
+              const input = repository && existsSync(resolveReadableConfigPath(repository.root))
+                ? { repository, config: await readEnvironmentConfig(repository), env: process.env } : undefined;
+              const catalog = await loadMachineSkillCatalog(input);
               const store = new skillsMod.SkillFileStore(storeRoot);
               const manager = new skillsMod.SkillManager({
                 store,
                 supportedCommands: SUPPORTED_CLI_COMMANDS,
                 approvedBuiltinDigests: [...catalog.approvedBuiltinSkillDigests]
               });
-              return skillsMod.createSkillsSetupSynchronizer(manager, store, [...catalog.entries]);
+              return new skillsMod.SkillsSetupSynchronizer(manager, store, [...catalog.entries]);
             })();
           }
           return cachedSynchronizer;
@@ -195,7 +203,7 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
     const parsed = parseCommandArgs(entry.spec, rest.slice(entry.spec.words.length));
     if (parsed.help) return help(getHighLevelHelp(name), entry.spec.words.join(" "));
     identity = newCommandIdentity(parsed.correlationId ?? process.env.BFLOW_CORRELATION_ID);
-    const baseServices = options.services ?? withDefaultSkillsPort(await createDefaultHighLevelServices());
+    const baseServices = options.services ?? withDefaultSkillsPort(await createDefaultHighLevelServices(), options.cwd ?? process.cwd());
     const services = withDefaultRuntime(baseServices);
     const progress = emitProgress ? (step: string) => {
       renderer.event(step);

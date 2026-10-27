@@ -11,6 +11,13 @@ export const SkillPinSchema = z.object({
 }).strict();
 export type SkillPin = z.infer<typeof SkillPinSchema>;
 
+/** Exact authorization for a dependency reached from selected skills; it never selects that skill. */
+export const SkillDependencyApprovalSchema = z.object({
+  skill: SkillPinSchema,
+  approvalReceiptId: IdentifierSchema
+}).strict();
+export type SkillDependencyApproval = z.infer<typeof SkillDependencyApprovalSchema>;
+
 export const SkillDefinitionSchema = z.object({
   schemaVersion: PlatformSchemaVersionSchema,
   skillId: IdentifierSchema,

@@ -103,6 +103,7 @@ function buildRequest(
     provider: requirement.provider,
     capabilityIds: [...requirement.capabilityIds],
     toolIds: [...requirement.toolIds],
+    ...(requirement.dependencySkillApprovals ? { dependencyApprovals: [...requirement.dependencySkillApprovals] } : {}),
     selections: requirement.skillSelections.map(selection => ({
       skill: { skillId: selection.skill.skillId, version: selection.skill.version, digest: selection.skill.digest },
       required: selection.required,

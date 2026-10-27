@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
+import { loadHostExecutionResolution } from "./execution-preview.js";
 import { buildHostPlatformOptions, loadHostPlatformContext } from "./platform-options.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
 import { resolveApprovedGitNexusBinary } from "./gateway-repositories.js";
@@ -107,6 +108,8 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         ? (await readGatewayReadiness(context.stateDirectory, "context7")).status === "ready" : undefined;
       const platform = await buildHostPlatformOptions(input, { context, context7Ready,
         warn: message => process.stderr.write(`Warning: ${message}\n`) });
+      const executionResolution = await loadHostExecutionResolution(input, platform);
+      await input.validateExecutionPlan?.(executionResolution.plan);
       const impactIndex = await resolveImpactIndex();
       return runtime.ensureAgenticHost({
         repositoryPath: input.repository.root,
@@ -118,6 +121,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         mutationChecks,
         appChecks,
         platform,
+        executionResolution,
         ...(impactIndex ? { impactIndex } : {}),
         policy: {
           sdd: input.config.environment.sdd,
@@ -154,6 +158,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
         behavioralCommands,
         mutationChecks,
         appChecks,
+        executionResolution: await loadHostExecutionResolution(input),
         policy: {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,

@@ -14,6 +14,7 @@ import {
 /** Stable command names; `bflow <words>` maps onto these identifiers. */
 export const HIGH_LEVEL_COMMANDS = [
   "repo.inspect",
+  "task.preview",
   "task.plan",
   "task.implement",
   "verify",
