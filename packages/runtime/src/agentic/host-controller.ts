@@ -27,7 +27,7 @@ export interface AgenticHostOptions {
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
-    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope };
+    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope; reviewTimeoutMs?: number };
     fastPath?: { mode: FastPathMode };
     concurrency: { maxConcurrency: number } };
   impactIndex?: { executable: string; home: string; storageLockPath: string };
@@ -98,6 +98,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
     if (!["lightweight", "full"].includes(String(sdd.minimumLevel)) || typeof sdd.approvalRequired !== "boolean" || tdd.policy !== "conditional" ||
         verification.onExhausted !== "require_human" || !Number.isInteger(verification.maxIterations) || Number(verification.maxIterations) < 1 || Number(verification.maxIterations) > 10 ||
         (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
+        (verification.reviewTimeoutMs !== undefined && (!Number.isSafeInteger(verification.reviewTimeoutMs) || Number(verification.reviewTimeoutMs) < 60_000 || Number(verification.reviewTimeoutMs) > 3_600_000)) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
     if (policy.fastPath !== undefined) {
       if (policy.fastPath === null || typeof policy.fastPath !== "object" || Array.isArray(policy.fastPath)) throw new Error("Invalid persisted host policy");

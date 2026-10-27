@@ -126,6 +126,23 @@ describe("P12 repository environment lifecycle", () => {
     await writeFile(path, renderEnvironmentConfigYaml(raw));
     await expect(readEnvironmentConfig(repository)).rejects.toThrow("Invalid SDLC policies, concurrency or timeouts");
   });
+  it("accepts reviewTimeoutMs only within 60 s to 1 h and leaves the default unset", async () => {
+    const path = join(dir, ".bflow/config.yml");
+    const raw = parseConfigYaml(await readFile(path, "utf8")) as Record<string, unknown>;
+    const env = raw["environment"] as Record<string, unknown>;
+    expect((env["verification"] as Record<string, unknown>)["reviewTimeoutMs"]).toBeUndefined();
+    expect(await readEnvironmentConfig(repository)).toMatchObject({ environment: { verification: { regressionScope: "affected" } } });
+    for (const reviewTimeoutMs of [60_000, 900_000, 3_600_000]) {
+      env["verification"] = { maxIterations: 3, onExhausted: "require_human", reviewTimeoutMs };
+      await writeFile(path, renderEnvironmentConfigYaml(raw));
+      expect((await readEnvironmentConfig(repository)).environment.verification.reviewTimeoutMs).toBe(reviewTimeoutMs);
+    }
+    for (const reviewTimeoutMs of [59_999, 3_600_001, 1.5, "900000"]) {
+      env["verification"] = { maxIterations: 3, onExhausted: "require_human", reviewTimeoutMs };
+      await writeFile(path, renderEnvironmentConfigYaml(raw));
+      await expect(readEnvironmentConfig(repository)).rejects.toThrow("Invalid SDLC policies, concurrency or timeouts");
+    }
+  });
   it("defaults fastPath.mode to auto", async () => {
     const raw = parseConfigYaml(await readFile(join(dir, ".bflow/config.yml"), "utf8")) as { environment: { fastPath?: { mode?: unknown } } };
     expect(raw.environment.fastPath?.mode).toBe("auto");

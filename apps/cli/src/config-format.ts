@@ -196,6 +196,8 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     "  #                      + `affected`    : Chạy kiểm thử liên quan đến các file thay đổi trong phạm vi task/run.",
     "  #                      + `full`        : Chạy toàn bộ bộ kiểm thử (full regression suite) của repository.",
     "  #                      + `mapped_only` : Chỉ chạy các lệnh kiểm thử được ánh xạ trực tiếp tới tiêu chí nghiệm thu.",
+    "  #   - reviewTimeoutMs : (integer ms: `60000..3600000`, mặc định: `900000`) Thời gian tối đa chờ một phiên Reviewer/QA độc lập trả kết quả.",
+    "  #                      Không ghi khóa này nếu dùng mặc định; tăng giá trị khi review trên repository lớn bị hết giờ.",
     "  verification:"
   ].join("\n");
 

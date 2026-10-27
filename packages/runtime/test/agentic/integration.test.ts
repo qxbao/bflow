@@ -1194,6 +1194,40 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
       await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
     } catch (error) { await ticking; throw error; }
   });
+  it("renews an accepted review's lease while the verifier awaits a reply longer than one lease period", async () => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit();
+    let delivered!: (request: AgentRequest) => void;
+    const delivery = new Promise<AgentRequest>(resolve => { delivered = resolve; });
+    const send = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (request, options) => {
+      const receipt = await send(request, options);
+      if (JSON.parse(request.instruction).type === "verification.requested") delivered(request);
+      return receipt;
+    });
+    const tools = new CoordinatorTools(f.runtime);
+    await tools.invoke("tick", {}, { role: "coordinator" });
+    const ticking = tools.drain(); ticking.catch(() => undefined);
+    try {
+      const request = await Promise.race([delivery, ticking.then(() => { throw new Error("Runtime tick completed before delivering the Reviewer request"); })]);
+      f.panes.busy.add("reviewer"); // the Reviewer is still working on the accepted request
+      const message = JSON.parse(request.instruction);
+      const lease = async () => ((await f.runtime.inspect()) as any).outbound.find((out: any) => out.message.message_id === message.message_id).lease;
+      await expect.poll(async () => (await lease())?.version, { timeout: 15000 }).toBeDefined();
+      const before = await lease();
+      // Simulate the lease approaching expiry mid-review; tick() is blocked on this gate, so only the wait timer can renew it.
+      await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
+        journal.outbound.find((out: any) => out.message.message_id === message.message_id).lease.expiresAt = new Date(Date.now() + 60_000).toISOString(); await save();
+      });
+      await expect.poll(async () => (await lease()).version, { timeout: 15000 }).toBeGreaterThan(before.version);
+      expect(Date.parse((await lease()).expiresAt)).toBeGreaterThan(Date.now() + 240_000);
+      f.panes.busy.delete("reviewer");
+      const result = unwrap(await f.localReview(message.payload));
+      await f.runtime.receiveHerdr(f.envelope("review.verdict", result, { sender: { role: "reviewer", agent_id: request.target.agentId, pane_id: request.target.paneId }, causation_id: message.message_id }));
+      await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
+    } catch (error) { await ticking.catch(() => undefined); throw error; }
+  }, 60000);
   it("dispatches an already queued review when readiness returns while the verifier is awaiting its reply", async () => {
     const f = await fixture({ remoteReview: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();

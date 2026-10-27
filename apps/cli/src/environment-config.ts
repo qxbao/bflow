@@ -96,7 +96,8 @@ export const EnvironmentConfigEnvironmentSchema = z
       .object({
         maxIterations: z.number().int().min(1).max(100),
         onExhausted: z.literal("require_human"),
-        regressionScope: z.enum(["affected", "full", "mapped_only"]).default("affected")
+        regressionScope: z.enum(["affected", "full", "mapped_only"]).default("affected"),
+        reviewTimeoutMs: z.number().int().min(60_000).max(3_600_000).optional()
       })
       .strict(),
     fastPath: z
@@ -361,6 +362,8 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
     if ((sdd["minimumLevel"] !== "lightweight" && sdd["minimumLevel"] !== "full") || typeof sdd["approvalRequired"] !== "boolean" || tdd["policy"] !== "conditional" ||
         !integer(verification["maxIterations"], 100) || verification["onExhausted"] !== "require_human" ||
         (verification["regressionScope"] !== undefined && !["affected", "full", "mapped_only"].includes(String(verification["regressionScope"]))) ||
+        (verification["reviewTimeoutMs"] !== undefined && (typeof verification["reviewTimeoutMs"] !== "number" || !Number.isSafeInteger(verification["reviewTimeoutMs"]) ||
+          Number(verification["reviewTimeoutMs"]) < 60_000 || Number(verification["reviewTimeoutMs"]) > 3_600_000)) ||
         (env["fastPath"] !== undefined && (typeof env["fastPath"] !== "object" || env["fastPath"] === null || Array.isArray(env["fastPath"]) ||
           ((env["fastPath"] as Record<string, unknown>)["mode"] !== undefined && !["auto", "off"].includes(String((env["fastPath"] as Record<string, unknown>)["mode"]))))) ||
         !integer(concurrency["maxConcurrency"], 64) ||

@@ -151,6 +151,7 @@ describe("configuration YAML format", () => {
     expect(rendered).toContain("enum: `provider_policy` | `os_sandbox` | `container`");
     expect(rendered).toContain("enum: `lightweight` | `full`");
     expect(rendered).toContain("regressionScope: affected | full | mapped_only");
+    expect(rendered).toContain("reviewTimeoutMs : (integer ms: `60000..3600000`, mặc định: `900000`)");
     expect(rendered).toContain("bflow init --update");
     expect(parseConfigYaml(rendered)).toEqual(config);
   });

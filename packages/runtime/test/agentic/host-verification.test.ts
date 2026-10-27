@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PaneBindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { HostVerification, DEFAULT_HOST_CHECKS } from "../../src/agentic/host-verification.js";
+import { HostVerification, DEFAULT_HOST_CHECKS, DEFAULT_REVIEW_TIMEOUT_MS, defaultHostChecks } from "../../src/agentic/host-verification.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { validateAndStoreReworkResolution, settleReworkVerificationOutcome } from "../../src/agentic/rework-causality.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
@@ -309,4 +309,13 @@ it("fences a persisted rework observation after its native review is replaced", 
   const f = await reworkFixture();
   f.outbound[0]!.reviewReplacement = {disposition:"replaced_without_verdict_claim"};
   await expect(f.restore().completeReview(f.binding,f.input)).rejects.toThrow("Replaced workflow review");
+});
+
+it("gives independent Reviewer and QA checks the owner-configured review budget, defaulting to 900 s", () => {
+  const reviews = (checks: ReturnType<typeof defaultHostChecks>) => checks.filter(check => check.evaluator === "native-herdr-review");
+  expect(DEFAULT_REVIEW_TIMEOUT_MS).toBe(900_000);
+  expect(reviews(DEFAULT_HOST_CHECKS).map(check => check.timeout.executionTimeoutMs)).toEqual([900_000, 900_000]);
+  expect(reviews(defaultHostChecks({ verification: { reviewTimeoutMs: 1_800_000 } })).map(check => check.timeout.executionTimeoutMs)).toEqual([1_800_000, 1_800_000]);
+  expect(reviews(defaultHostChecks({ verification: {} })).map(check => check.timeout.executionTimeoutMs)).toEqual([900_000, 900_000]);
+  expect(defaultHostChecks({ verification: { reviewTimeoutMs: 120_000 } }).find(check => check.evaluator === "host-git-diff")?.timeout.executionTimeoutMs).toBe(30_000);
 });

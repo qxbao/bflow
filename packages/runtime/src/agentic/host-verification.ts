@@ -64,16 +64,22 @@ export function boundQaReviewCommands(commands: readonly BoundBehavioralCommand[
   });
 }
 const whitespaceCommand = "git diff --check";
+/** Owner-configurable budget for one independent Reviewer/QA verdict; absent policy keeps the 900 s default. */
+export const DEFAULT_REVIEW_TIMEOUT_MS = 900_000;
 /** Default checks support documentation only. Behavioral checks require owner configuration. */
-export const DEFAULT_HOST_CHECKS = [
-  ...["reviewer", "qa"].map(role => QualityGateDefinitionSchema.parse({ id: `host-${role}`, name: `Independent ${role}`, evaluator: "native-herdr-review", required: true,
-    timeout: { executionTimeoutMs: 300_000, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
-    configuration: { kind: "review", method: "manual_review", criterionIds: [], testNames: [], role, levels: [] } })),
-  QualityGateDefinitionSchema.parse({ id: "host-git-integrity", name: "Integrated Git diff integrity", evaluator: "host-git-diff", required: true,
-    timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
-    configuration: { kind: "deterministic", method: "integration_test", command: whitespaceCommand, criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } }),
-  TEST_INTEGRITY_CHECK
-];
+export function defaultHostChecks(policy?: { verification: { reviewTimeoutMs?: number | undefined } }) {
+  const reviewTimeoutMs = policy?.verification.reviewTimeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS;
+  return [
+    ...["reviewer", "qa"].map(role => QualityGateDefinitionSchema.parse({ id: `host-${role}`, name: `Independent ${role}`, evaluator: "native-herdr-review", required: true,
+      timeout: { executionTimeoutMs: reviewTimeoutMs, onTimeout: "block" }, metadata: { bindAcceptedCriteria: true },
+      configuration: { kind: "review", method: "manual_review", criterionIds: [], testNames: [], role, levels: [] } })),
+    QualityGateDefinitionSchema.parse({ id: "host-git-integrity", name: "Integrated Git diff integrity", evaluator: "host-git-diff", required: true,
+      timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
+      configuration: { kind: "deterministic", method: "integration_test", command: whitespaceCommand, criterionIds: [], testNames: [], role: "quality_gate", levels: ["integration"] } }),
+    TEST_INTEGRITY_CHECK
+  ];
+}
+export const DEFAULT_HOST_CHECKS = defaultHostChecks();
 export interface HostVerificationReceipts {
   recordGate(result: QualityGateResult): Promise<unknown>;
   recordEvidence(result: VerificationResult): Promise<unknown>;

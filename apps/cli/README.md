@@ -393,6 +393,7 @@ Executable và argv do Runtime quyết định, kết quả từng test có cấ
 Phép đo yêu cầu sandbox: Linux Bubblewrap hoặc macOS Seatbelt cho các runner JS/owner
 được hỗ trợ. Mount/cache/report của adapter native và làm ấm dependency còn giới hạn Linux.
 Không có fallback chạy ngoài sandbox. Xem [ma trận và giới hạn verification](../../docs/verification-runners.md).
+`environment.verification.reviewTimeoutMs` (tùy chọn, số nguyên ms trong `60000..3600000`, mặc định `900000`) là thời gian tối đa chờ mỗi verdict Reviewer/QA độc lập; config không ghi khóa này thì giữ mặc định.
 `environment.verification.regressionScope` hỗ trợ ba giá trị: `affected` (mặc định khi `init`/đọc config thiếu trường),
 `full` (chạy toàn bộ test file runner nhận diện) và `mapped_only` (chỉ chạy test được map từ criterion;
 `host.json` cũ đã persist mà thiếu trường được giữ ở `mapped_only`). Ở chế độ `affected`, host chọn test theo
