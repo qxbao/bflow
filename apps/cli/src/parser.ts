@@ -52,6 +52,7 @@ const VALID_COMMANDS: ReadonlySet<CliCommandName> = new Set([
   "help",
   "version",
   "repo inspect",
+  "task preview",
   "task plan",
   "task implement",
   "verify",
@@ -477,6 +478,7 @@ function resolveHelpTopic(
   }
 
   if (t0 === "task") {
+    if (t1 === "preview") return { ok: true, topic: "task preview" };
     if (t1 === "plan") return { ok: true, topic: "task plan" };
     if (t1 === "implement") return { ok: true, topic: "task implement" };
     if (t1 === undefined || isFlag(t1)) return { ok: true, topic: "task plan" };
@@ -569,6 +571,17 @@ function parseRepoInspect(args: readonly string[], json: boolean): ParseCliResul
     maxFiles
   };
   return { ok: true, value };
+}
+
+function parseTaskPreview(args: readonly string[], json: boolean): ParseCliResult {
+  const result = extractHighLevelOptions(args, new Set(["--json", "-j", "--help", "-h"]), new Set(["--json", "-j", "--help", "-h", "--run", "--compare"]), "task preview", json);
+  if (!result.ok) return result.result;
+  if (result.value.positional.length) return makeValidationError("Preview accepts no positional arguments.", json, "task preview");
+  const runId = result.value.flags.get("--run");
+  if (runId !== undefined && !isValidIdentifier(runId)) return makeValidationError("Invalid run identifier.", json, "task preview");
+  const common = parseHighLevelCommonFlags(result.value, json, "task preview");
+  if (!common.ok) return common.result;
+  return { ok: true, value: { ...common.value, command: "task preview", ...(runId ? { runId } : {}), ...(result.value.flags.get("--compare") ? { comparePath: result.value.flags.get("--compare")! } : {}) } };
 }
 
 function parseTaskPlan(args: readonly string[], json: boolean): ParseCliResult {
@@ -1559,6 +1572,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
     }
     const sub = argv[1 + subIdx]!;
     const remainingArgs = [...argv.slice(1, 1 + subIdx), ...argv.slice(1 + subIdx + 1)];
+    if (sub === "preview") return parseTaskPreview(remainingArgs, json);
     if (sub === "plan") {
       return parseTaskPlan(remainingArgs, json);
     }
@@ -1665,6 +1679,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       const booleans = new Set(["--json", "-j", "--yes", "-y", "--force", "--deep"]);
       const allowed = new Set(["--json", "-j"]);
       if (command === "down" || command === "recover") { allowed.add("--yes"); allowed.add("-y"); }
+      if (command === "up") allowed.add("--expect-plan");
       if (command === "down") allowed.add("--force");
       if (command === "doctor") allowed.add("--deep");
       if (command === "up" || command === "down") allowed.add("--timeout");
@@ -1676,6 +1691,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000))
         return makeValidationError("--timeout must be an integer from 1 to 600000 milliseconds.", json, command);
       return { ok: true, value: { command, json, help: false, yes: result.value.flags.has("--yes") || result.value.flags.has("-y"), timeoutMs,
+        ...(command === "up" && result.value.flags.has("--expect-plan") ? { expectPlanPath: String(result.value.flags.get("--expect-plan")) } : {}),
         ...(command === "down" ? { force: result.value.flags.has("--force") } : {}),
         ...(command === "doctor" ? { deep: result.value.flags.has("--deep") } : {}) } };
     }

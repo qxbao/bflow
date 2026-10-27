@@ -1,3 +1,4 @@
+import { assertPrivateExecutionSources, createExecutionResolutionReader } from "./execution-binding.js";
 import { TaskHandoverReadInputSchema, taskHandoverView, taskHandoverAcknowledgement, deferredTaskHandover } from "./task-handover-view.js";
 import { enrichHostTelemetry } from "../telemetry/host-observations.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema } from "../telemetry/report.js";
@@ -72,7 +73,7 @@ import {
   planningReferenceView,
   readProjectPolicy
 } from "./mcp-output-views.js";
-import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
+import { createHostPlatformSession, verifyDispatchPinnedSkills, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
 import { FileToolUsageLedger } from "../platform/tool-usage-ledger.js";
 import { AGY_INLINE_REPLY_BYTES, exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 import {
@@ -87,6 +88,10 @@ const roles = ["conversation", "coordinator", "specifier", "architect", "planner
 const capabilities = { conversation: ["conversation"], coordinator: ["coordination", "planning", "specification", "repository.read"],
   specifier: ["specification", "repository.read"], architect: ["architecture", "repository.read"], planner: ["planning", "repository.read"], developer: ["implementation"],
   tester: ["testing", "repository.read"], reviewer: ["review", "repository.read"], qa: ["verification", "testing", "repository.read"], security: ["security", "repository.read"] };
+/** Pure access to the same mandatory capability declarations used by the host. */
+export function hostRoleCapabilities(role: AgentRole): readonly string[] {
+  return [...((capabilities as Readonly<Record<string, readonly string[]>>)[role] ?? [])];
+}
 interface RoleConfiguration { socketPath: string; token: string; role: AgentRole; provider: AgentProviderId; herdrBinary: string; sessionId: string }
 async function privateFile(path: string, content: string, mode = 0o600): Promise<void> {
   await writeFile(path, content, { mode }); await chmod(path, mode);
@@ -223,6 +228,8 @@ export async function readPinnedInstructionReply(input: { role: AgentRole; skill
 
 /** Long-lived composition owner. Startup is separate from activation to support provider MCP startup. */
 export async function runAgenticHost(configuration: HostConfiguration): Promise<void> {
+  const readExecutionResolution = configuration.executionResolution === undefined ? undefined : await createExecutionResolutionReader(configuration.executionResolution);
+  await assertPrivateExecutionSources(readExecutionResolution, configuration.executionSourceDigests);
   const binary = configuration.herdrBinary ?? "herdr";
   const environment = { ...process.env };
   for (const key of Object.keys(environment)) if (key.startsWith("HERDR_") && key !== "HERDR_CONFIG_PATH") delete environment[key];
@@ -341,6 +348,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }
   // P30 readiness is composed once per daemon. Without `platform` the legacy launch material above is served unchanged.
   const platformSession: HostPlatformSession | undefined = configuration.platform === undefined ? undefined : await createHostPlatformSession({
+    ...(readExecutionResolution ? { beforeSideEffect: async () => { await readExecutionResolution(); } } : {}),
     platform: configuration.platform, repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, directory: configuration.directory,
     issuerId, privateKeyPem: await readFile(keyPath, "utf8"), publicKeyPem: publicKey, hostCapabilities: capabilities,
     rolePrompt: role => launch[role]?.systemPrompt,
@@ -758,7 +766,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     workspace = await openAgenticWorkspace({ storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
       ...(platformSession ? { developerLaunches: {
-        allocate: async request => { await assertWorkspaceFileCapability(); return platformSession.allocateDeveloper(request.taskId, request.worktreePath, request.runId); },
+        allocate: async request => {
+          await readExecutionResolution?.();
+          await assertWorkspaceFileCapability();
+          await readExecutionResolution?.();
+          return platformSession.allocateDeveloper(request.taskId, request.worktreePath, request.runId);
+        },
         release: taskId => platformSession.releaseDeveloper(taskId),
         assertProcessScope: binding => platformSession.assertDeveloperProcessReady(binding),
         reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId),
@@ -771,6 +784,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         authorizeStoppedRetainedRelease: binding => platformSession.authorizeStoppedRetainedRelease(binding)
       } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
+      revalidateRoleSkills: binding => verifyDispatchPinnedSkills(platformSession, configuration.platform, binding),
       roleCapabilities: capabilities, preflightRoleCapabilities, taskChecks: hostChecks, workflowChecks: hostChecks, deterministicGates: [verification.deterministicGate(), verification.testIntegrityGate()],
       fastPathMode: effectiveFastPathMode(configuration.policy, true),
       behavioralChecks: (specification, strategy, originalRevision) => verification.behavioralChecks(specification, strategy, originalRevision), behavioralGates: () => verification.behavioralGates(),
@@ -782,6 +796,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       authenticateEvidence: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateEvidence(result),
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
+      ...(readExecutionResolution ? { readExecutionResolution } : {}),
       authorizeHuman: decision => receipts.authenticateHuman(decision),
       hasPolicyPhaseReceipt: async request => activePolicyMeasurements.has(request.message_id) || receipts.hasPolicyPhaseEvidence(request),
       authorizePolicyPhaseRetirement: async authority => {
@@ -860,6 +875,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let humanHookProvenance: HumanHookProvenance | undefined;
   let userQueue: Promise<unknown> = Promise.resolve();
   const preflightRoleCapabilities = async (binding: PaneBinding, required: readonly string[]): Promise<void> => {
+    await verifyDispatchPinnedSkills(platformSession, configuration.platform, binding);
     if (binding.role === "developer") {
       try { await assertWorkspaceFileCapability(); }
       catch (error) { throw new RoleCapabilityPreflightError(`developer workspace file preflight failed: ${redactString(String(error))}`); }
@@ -1850,7 +1866,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await removeLegacyRoleProbes(configuration.directory, roles);
           toolExpectations.clear();
           if (!platformSession) return { roleLaunch: launch };
+          await readExecutionResolution?.();
           const prepared = (!workspace ? await platformSession.resumePreparation(options) : undefined) ?? await platformSession.prepare(options);
+          await readExecutionResolution?.();
           for (const [role, expectation] of prepared.reachability) toolExpectations.set(role, expectation);
           const roleLaunch = Object.fromEntries(Object.entries(launch).map(([role, descriptor]) => {
             const ready = prepared.launches.get(role as AgentRole);

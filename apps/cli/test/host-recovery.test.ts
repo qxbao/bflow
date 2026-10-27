@@ -15,6 +15,7 @@ import { gitNexusStorageLockPath } from "../../../packages/tool-installer/src/in
 import { openLifecycleHost } from "../src/agentic-host.js";
 import { EnvironmentLifecycle, identifyRepository, readEnvironmentConfig, runCli } from "../src/index.js";
 import { wrapSetupComponents } from "../src/setup-gateway.js";
+import { renderEnvironmentConfigYaml } from "../src/config-format.js";
 import { HerdrProcesses } from "./fixtures/herdr-processes.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -172,6 +173,8 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     const herdrBinary = join(missingRoot, "herdr.mjs");
     await writeFile(herdrBinary, '#!/usr/bin/env node\nconsole.log(JSON.stringify({running:false}));\n', { mode: 0o700 });
     missingInput.config.environment.herdrBinary = herdrBinary;
+    // Host resolution re-reads .bflow/config.yml; persist the override instead of diverging in memory.
+    await writeFile(join(missingInput.repository.root, ".bflow/config.yml"), renderEnvironmentConfigYaml(missingInput.config));
     missingInput.env.BFLOW_HOME = bflowHome;
 
     const missingHost = await openLifecycleHost(missingInput);
@@ -236,6 +239,8 @@ describe.skipIf(process.platform === "win32")("persistent host recovery", () => 
     const readyHerdr = join(readyRoot, "herdr.mjs");
     await writeFile(readyHerdr, '#!/usr/bin/env node\nconsole.log(JSON.stringify({running:false}));\n', { mode: 0o700 });
     readyInput.config.environment.herdrBinary = readyHerdr;
+    // Host resolution re-reads .bflow/config.yml; persist the override instead of diverging in memory.
+    await writeFile(join(readyInput.repository.root, ".bflow/config.yml"), renderEnvironmentConfigYaml(readyInput.config));
     readyInput.env.BFLOW_HOME = bflowHome;
 
     const readyHost = await openLifecycleHost(readyInput);

@@ -410,3 +410,88 @@ describe("requirement change: obsolete work is withdrawn, never recalled", () =>
     expect(resumed).toMatchObject({ message: { recipient: { role: "coordinator" }, payload: { outcome: "cancelled" } } });
   });
 });
+
+describe('accepted execution resolution binding and side-effect fencing', () => {
+  async function prepared(startupRevision?: string, watchRepository = false) {
+    const f = await fixture();
+    const path = join(f.root, 'owner-profile.json');
+    await writeFile(path, JSON.stringify({ model: 'configured-model' }));
+    const { createExecutionResolutionReader, readExecutionRepositorySnapshot } = await import('../../src/agentic/execution-binding.js');
+    const { ExecutionPlanInputSchema } = await import('@bflow/contracts');
+    const repository = watchRepository ? await readExecutionRepositorySnapshot(f.repository) : { revision: startupRevision ?? git(f.repository, 'rev-parse', 'HEAD') };
+    const input = { schemaVersion: 3, resolverVersion: '1', policyVersion: '1', repository, mode: 'intake' };
+    const sources = { schemaVersion: 3, plan: input, ...(watchRepository ? { repositoryRoot: f.repository } : {}), files: [{ component: 'owner-profile', path, format: 'json' }] };
+    (f.ports as import('../../src/agentic/ports.js').AgenticRuntimePorts).readExecutionResolution = await createExecutionResolutionReader(sources);
+    await admit(f, f.handoff(f.request(1, 'Original criterion')));
+    await f.runtime.proposeWorkflow('run-1', f.spec, f.def);
+    expect((await f.run()).executionPlan).toBeDefined();
+    return { f, path, sources, ExecutionPlanInputSchema, createExecutionResolutionReader };
+  }
+  it.each(['head', 'index', 'dirty'] as const)('blocks real Git %s drift before worktree, launch or lease acquisition', async change => {
+    const { f } = await prepared(undefined, true);
+    let worktrees = 0, launches = 0, leases = 0;
+    f.ports.policies.git.prepareTask = async () => { worktrees++; throw Error('unexpected worktree'); };
+    f.ports.panes.allocateDeveloper = async () => { launches++; throw Error('unexpected launch'); };
+    f.ports.registry.acquireLease = async () => { leases++; throw Error('unexpected lease'); };
+    if (change === 'head') git(f.repository, 'commit', '--allow-empty', '-m', 'changed-base');
+    else {
+      await writeFile(join(f.repository, 'guide.md'), 'changed source\n');
+      if (change === 'index') { git(f.repository, 'add', 'guide.md'); await writeFile(join(f.repository, 'guide.md'), 'initial\n'); }
+    }
+    await f.runtime.tick();
+    expect({ worktrees, launches, leases }).toEqual({ worktrees: 0, launches: 0, leases: 0 });
+    expect((await f.run()).executionPlanDrift.changes).toContainEqual(expect.objectContaining({ field: 'inputs.repository-snapshot' }));
+  });
+  it('uses the accepted worktree base revision rather than an older host startup observation', async () => {
+    const { f } = await prepared('older-startup-revision');
+    const accepted = await f.run();
+    expect(accepted.executionPlan.snapshot.repository.revision).toBe(accepted.baseRevision);
+    expect(accepted.executionPlan.snapshot.accepted.revision).toBe(accepted.baseRevision);
+  });
+  it('binds a new accepted run without CLI expectation and blocks drift before Git worktree/registry capacity side effects', async () => {
+    const { f, path } = await prepared();
+    const original = await f.run();
+    let worktrees = 0, leases = 0;
+    f.ports.policies.git.prepareTask = async () => { worktrees++; throw Error('unexpected worktree'); };
+    f.ports.registry.acquireLease = async () => { leases++; throw Error('unexpected lease'); };
+    await writeFile(path, JSON.stringify({ model: 'new-model' }));
+    await f.runtime.tick();
+    expect(worktrees).toBe(0); expect(leases).toBe(0);
+    const blocked = await f.run();
+    expect(blocked.executionPlanDrift.changed).toBe(true);
+    expect(blocked.executionPlan.fingerprint).toBe(original.executionPlan.fingerprint);
+    expect(blocked.approval.approvalId).toBe(original.approval.approvalId);
+    expect(blocked.status).not.toBe('awaiting_approval');
+  });
+  it('persists private source baselines and refuses drift after host/source-reader restart', async () => {
+    const { f, path, sources, createExecutionResolutionReader } = await prepared();
+    const bound = JSON.parse(await readFile(join(f.root, 'journal/state.json'), 'utf8')).runs[0];
+    expect(bound.executionSourceDigests).toBeDefined();
+    expect((await f.run()).executionSourceDigests).toBeUndefined();
+    await writeFile(path, JSON.stringify({ model: 'changed-while-daemon-off' }));
+    (f.ports as import('../../src/agentic/ports.js').AgenticRuntimePorts).readExecutionResolution = await createExecutionResolutionReader(sources);
+    f.restart(); let worktrees = 0;
+    f.ports.policies.git.prepareTask = async () => { worktrees++; throw Error('unexpected worktree'); };
+    await f.runtime.tick(); expect(worktrees).toBe(0); expect((await f.run()).executionPlanDrift.changed).toBe(true);
+  });
+  it('reports drift to Conversation and permits human cancellation without another approval', async () => {
+    const { f, path } = await prepared();
+    await writeFile(path, JSON.stringify({ model: 'drifted' }));
+    await f.runtime.tick();
+    const notices = (await f.state()).outbound.filter((out: any) => out.message.recipient.role === 'conversation');
+    expect(notices.some((out: any) => JSON.stringify(out.message.payload).includes('Execution plan inputs changed'))).toBe(true);
+    expect((await f.run()).executionSourceDigests).toBeUndefined();
+    await f.runtime.cancel('run-1', 'Human cancellation');
+    await f.runtime.tick();
+    expect((await f.run()).status).toBe('cancelled');
+  });
+  it('rechecks after awaited Git preparation and prevents later pane/model launch', async () => {
+    const { f, path } = await prepared(); let prepares = 0, launches = 0;
+    f.ports.policies.git.prepareTask = async () => {
+      prepares++; await writeFile(path, JSON.stringify({ model: 'changed-during-prepare' }));
+      return { key: 'task-key', worktreePath: join(f.root, 'task-worktree'), branchName: 'task-branch', baseCommitHash: git(f.repository, 'rev-parse', 'HEAD') };
+    };
+    f.ports.panes.allocateDeveloper = async () => { launches++; throw Error('unexpected launch'); };
+    await f.runtime.tick(); expect(prepares).toBe(1); expect(launches).toBe(0); expect((await f.run()).executionPlanDrift.changed).toBe(true);
+  });
+});

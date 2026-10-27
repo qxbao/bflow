@@ -1,4 +1,5 @@
 import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReconciliationReportSchema, ownsCancellationPane, ownsCancelledAllocation, type CancellationStopProof, type CancellationReconciliationReport } from "./cancellation-stop.js";
+import { assertAcceptedWorkflowSelection, assertRunExecutionPlan, bindAcceptedExecutionPlan, ExecutionPlanDriftError, publicExecutionRun } from "./execution-binding.js";
 import { HandoverBindingSchema, TaskHandoverStore, admitHandover, selectHandover, handoverRevision, type HandoverBinding } from "./task-handover.js";
 import { readWorkflowTelemetry } from "../telemetry/report.js";
 import { z } from "zod";
@@ -891,7 +892,7 @@ export class AgenticWorkflowRuntime {
     run.delegationHistory = [...(run.delegationHistory ?? []), run.delegation];
     run.delegation = delegation;
     delete run.lastWorkflowRejection;
-    delete run.definition; delete run.workflowSpec; delete run.baseRevision; delete run.approval; delete run.approvalKind; delete run.fastPath; delete run.workflowVerificationPlan;
+    delete run.executionPlan; delete run.executionSourceDigests; delete run.executionPlanDrift; delete run.definition; delete run.workflowSpec; delete run.baseRevision; delete run.approval; delete run.approvalKind; delete run.fastPath; delete run.workflowVerificationPlan;
     run.tasks = []; run.status = "intake"; delete run.error;
   }
   /** Validate current session ownership without depending on the pane generation that originally queued the intent. */
@@ -1214,13 +1215,13 @@ export class AgenticWorkflowRuntime {
   }
   async inspect(runIdOrQuery?: string | InspectInput): Promise<JsonValue> {
     if (typeof runIdOrQuery === "string" || runIdOrQuery === undefined) {
-      return this.journal.exclusive(async state => json(runIdOrQuery ? this.run(state, runIdOrQuery) : {
-        runs: state.runs, outbound: state.outbound, inbox: state.inbox
+      return this.journal.exclusive(async state => json(runIdOrQuery ? publicExecutionRun(this.run(state, runIdOrQuery)) : {
+        runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
       }));
     }
     const query = InspectInputSchema.parse(runIdOrQuery);
-    const raw = await this.journal.exclusive(async state => json(query.runId ? this.run(state, query.runId) : {
-      runs: state.runs, outbound: state.outbound, inbox: state.inbox
+    const raw = await this.journal.exclusive(async state => json(query.runId ? publicExecutionRun(this.run(state, query.runId)) : {
+      runs: state.runs.map(publicExecutionRun), outbound: state.outbound, inbox: state.inbox
     }));
     if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
       return raw;
@@ -2443,7 +2444,7 @@ export class AgenticWorkflowRuntime {
             await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, run.definition, run.fastPath));
             await save();
           }
-          return json(run);
+          return json(publicExecutionRun(run));
         }
         throw new Error("Workflow already proposed; requirement changes need a newly approved delegation");
       }
@@ -2542,7 +2543,7 @@ export class AgenticWorkflowRuntime {
       run.approvalKind = "design"; run.status = "awaiting_approval";
       await save();
       await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, definition, run.fastPath));
-      await save(); return json(run);
+      await save(); return json(publicExecutionRun(run));
     });
   }
   private designNeedsHuman(draft: Specification, definition: WorkflowDefinition, fastPath?: FastPathRecord): boolean {
@@ -2597,6 +2598,8 @@ export class AgenticWorkflowRuntime {
       target: request.target, revision: request.revision, generation: request.generation };
   }
   private async acceptDesign(run: RunRecord, decision: ApprovalDecision): Promise<void> {
+    const input = await this.ports.readExecutionResolution?.();
+    if (input) assertAcceptedWorkflowSelection(run.definition!, input);
     const dossiers = [run.workflowSpec!, ...run.tasks.map(task => task.spec)];
     for (const dossier of dossiers) {
       const bound = ApprovalDecisionSchema.parse({ ...decision, ...this.decisionFields(dossier.request),
@@ -2611,7 +2614,9 @@ export class AgenticWorkflowRuntime {
       const projected = { ...run.definition!, tasks: run.definition!.tasks.filter(t => t.id === task.taskId), dependencies: [] };
       await this.ports.policies.specification.assertImplementationReady(task.spec.specification, task.spec.request, task.spec.decision, projected);
     }
-    run.decision = decision; run.status = "implementing";
+    run.decision = decision;
+    await bindAcceptedExecutionPlan(run, this.ports.readExecutionResolution);
+    run.status = "implementing";
   }
   /** P30 T9b: a specialist or Coordinator asks the user through Runtime -> Herdr -> Conversation; the answer resumes only the asker. */
   async requestUserDecision(bindingInput: PaneBinding, role: AgentRole, input: UserDecisionToolInput): Promise<JsonValue> {
@@ -2828,6 +2833,7 @@ export class AgenticWorkflowRuntime {
     await this.verifyReferences(request.evidence, run.runId);
     if (run.approvalKind === "design") { await this.acceptDesign(run, decision); await save(); await core.create(run); }
     else if (run.approvalKind === "task") {
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       await core.mutate(run.runId, snapshot => this.ports.engine.applyApproval({ decision, expectedVersion: snapshot.version,
         idempotencyKey: decision.idempotencyKey }));
       run.decision = decision; run.status = "implementing";
@@ -3023,6 +3029,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     await save();
   }
   private async dispatch(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox, run: RunRecord): Promise<void> {
+    await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     const before = await core.snapshot(run.runId);
     if (["succeeded", "failed", "cancelled", "cancelling"].includes(before.status)) return;
     const needsAdvance = before.status === "queued" ||
@@ -3043,7 +3050,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const prior = task.changeSet;
       // A dependent task starts from its verified dependencies' heads; a fallback attempt stays on the run base once its merge conflicted.
       const dependencyHeads = prior || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
-      const { tree, conflict } = await prepareDependencyBaseWorktree(this.ports.policies.git, { runId: run.runId, taskId: task.taskId,
+      const { tree, conflict } = await prepareDependencyBaseWorktree({ prepareTask: async request => {
+        await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+        return this.ports.policies.git.prepareTask(request);
+      } }, { runId: run.runId, taskId: task.taskId,
         attemptId: taskState.attemptId!, ownedPaths: strings(record(definition.metadata).ownedPaths),
         forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName },
       { runBaseRevision: run.baseRevision!, priorHead: prior?.headCommitHash, dependencyHeads });
@@ -3053,10 +3063,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
       if (!task.worktrees.some(item => item.key === tree.key)) task.worktrees.push(tree);
       await save();
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       const allocation = await this.ports.panes.allocateDeveloper({
         taskId: `${run.runId}-${task.taskId}`, runId: run.runId, worktreePath: tree.worktreePath,
         branchName: tree.branchName, agentName
       });
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (!allocation.ok) {
         run.error = `Developer allocation pending for ${task.taskId}: ${allocation.error.message}`;
         if (allocation.error.code !== "conflict" || !allocation.error.retryable) this.pauseDeveloperAllocation(run, task.taskId, run.error);
@@ -3906,7 +3918,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const reason = redactString(String(error));
     run.error = `${RUN_STEP_FAILURE_PREFIX} ${reason}`;
     this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, reason: run.error,
-      options: ["No action needed: Runtime retries this run on the next scheduling step", "Cancel this run"],
+      options: error instanceof ExecutionPlanDriftError
+        ? ["Run read-only task preview again, review the input diff and reconcile the accepted plan", "Cancel this run"]
+        : ["No action needed: Runtime retries this run on the next scheduling step", "Cancel this run"],
       headline: `Workflow step failed: ${reason}`, sdlcStatus: run.status }, `run-step-failed:${digest([run.runId, reason])}`, "conversation");
   }
   private parseJob(input: unknown): VerificationJob {
@@ -4050,6 +4064,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     let integration: Integration;
     if (run.integrationKey) integration = await this.ports.policies.git.getIntegration(run.integrationKey);
     else {
+      await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       integration = await this.ports.policies.git.beginIntegration({ runId: run.runId, integrationId: `integration-${digest(run.runId)}`,
         baseRevision: run.baseRevision!, tasks: run.tasks.map(task => ({ taskKey: task.worktrees.at(-1)!.key,
           dependsOn: run.definition!.dependencies.filter(dep => dep.taskId === task.taskId).map(dep => run.tasks.find(t => t.taskId === dep.dependsOnTaskId)!.worktrees.at(-1)!.key) })) });
@@ -4098,8 +4113,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const number = resolution.attempts.length + 1;
     const taskId = `conflict-${digest([run.runId, resolution.conflictId]).slice(0, 16)}`, attemptId = `${taskId}-attempt-${number}`;
     const agentName = `dev-${digest([run.runId, attemptId]).slice(0, 20)}`;
+    await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     const allocation = await this.ports.panes.allocateDeveloper({ taskId: `${run.runId}-${taskId}`, runId: run.runId,
       worktreePath: resolution.worktreePath, branchName: resolution.branchName, agentName });
+    await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     if (!allocation.ok) {
       if (allocation.error.code === "conflict" && allocation.error.retryable) { // capacity: retried on a later tick
         run.error = `Conflict resolver allocation pending: ${allocation.error.message}`;
@@ -4273,7 +4290,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   async cancel(runId: string, reason: string): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
       await this.cancelRun(state, save, core, outbox, this.run(state, runId), reason);
-      return json(this.run(state, runId));
+      return json(publicExecutionRun(this.run(state, runId)));
     });
   }
   /** Cancellation invalidates every unsent work/wake/approval; uncertain deliveries keep their reconciliation receipts. */

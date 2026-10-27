@@ -1,3 +1,4 @@
+import { prepareExecutionExpectation } from "../execution-preview.js";
 import type { JsonValue, RuntimeService, TestStrategy } from "@bflow/contracts";
 import type { TaskRecord } from "@bflow/git-orchestrator";
 import type { CommandSpec } from "../args.js";
@@ -30,6 +31,7 @@ export const TASK_IMPLEMENT_SPEC: CommandSpec = {
   words: ["task", "implement"],
   positionals: [{ name: "task-id", required: true }],
   flags: {
+    "--expect-plan": { type: "string" },
     "--run": { type: "string", required: true },
     "--spec": { type: "string", required: true },
     "--workflow": { type: "string" },
@@ -112,9 +114,17 @@ export const taskImplement: HighLevelHandler = async (args, ctx, identity) => {
   const base = args.strings.get("--base") ?? "HEAD";
   const partial = { runId, taskId };
   return guarded("task.implement", log, partial, async () => {
+    let checkExpectation = args.strings.has("--expect-plan") ? await prepareExecutionExpectation(ctx.cwd, args.strings.get("--expect-plan")!, { runId, taskId, baseRevision: base }) : undefined;
     const repository = await requireRepository(ctx.cwd);
     const { spec, digest } = await loadSpecification(ctx, log, args.strings.get("--spec")!);
     await log.check("check-approval", () => assertApproved(spec), () => ({ approvedBy: spec.approvedBy ?? null }));
+    if (args.strings.has("--expect-plan")) {
+      const path = args.strings.get("--workflow");
+      checkExpectation = await prepareExecutionExpectation(ctx.cwd, args.strings.get("--expect-plan")!, {
+        runId, taskId, baseRevision: base, specification: spec,
+        ...(path ? { workflow: await readWorkflowFile(resolveInput(ctx, path)) } : {})
+      });
+    }
     await log.check("check-run-binding", () => {
       if (spec.runId !== runId)
         throw new HighLevelError(validationError(`Specification '${spec.specId}' belongs to run '${spec.runId ?? "<none>"}', not '${runId}'`,
@@ -146,16 +156,19 @@ export const taskImplement: HighLevelHandler = async (args, ctx, identity) => {
     const request = { runId, taskId, attemptId, developerId, base, ownedPaths: [...ownedPaths], forbiddenPaths: [...forbiddenPaths], specDigest: digest };
     let resources: HighLevelResources | undefined;
     try {
+      await checkExpectation?.();
       const report = await runJournaled({
         command: "task.implement", repositoryRoot: repository.root, key, request, retrySafe: false,
         resume: args.booleans.has("--resume"), identity, clock: ctx.clock, onProgress: ctx.onProgress
       }, async (journalLog): Promise<CommandReport> => {
         journalLog.steps.unshift(...log.steps);
+        await checkExpectation?.();
         resources = await journalLog.check("open-resources", () => ctx.services.openResources(repository.root, {
           artifactRoot: args.strings.get("--artifact-root"), storeId: args.strings.get("--artifact-store-id") }));
         const specs = await bindSpecificationArtifacts(ctx.services.specification, resources.artifactStore);
         await journalLog.check("verify-specification-artifact", () => specs.verifyArtifact(spec),
           () => ({ artifactId: spec.artifactRef!.artifactId }));
+        await checkExpectation?.();
         const task: TaskRecord = await journalLog.sideEffect("prepare-worktree", () => resources!.git.prepareTask({
           runId, taskId, attemptId, developerId, baseRevision: base, ownedPaths: [...ownedPaths], forbiddenPaths: [...forbiddenPaths]
         }), value => ({ taskKey: value.key, worktreePath: value.worktreePath, branchName: value.branchName,

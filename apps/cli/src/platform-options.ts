@@ -1,3 +1,4 @@
+import { resolvePlatformConfiguration } from "./platform-resolution.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOption } from "@bflow/runtime";
@@ -6,7 +7,7 @@ import type { RepositoryToolPolicy, ResolvedToolGrant, RoleToolRequirement } fro
 import { MCPServiceDefinitionSchema, OperationResultSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema,
   VerifiedToolExecutableIdentitySchema } from "@bflow/contracts";
 import { digest as canonicalDigest } from "@bflow/machine-setup";
-import { readGatewayReadiness } from "./gateway-readiness.js";
+import { readGatewayReadiness, type ServiceReadiness } from "./gateway-readiness.js";
 import type { EnvironmentCompositionInput } from "./environment.js";
 import { EnvironmentProviderSchema, type EnvironmentProvider, type EnvironmentRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
@@ -63,6 +64,7 @@ export interface ToolPolicyResolutionStatus {
 }
 
 export async function loadHostPlatformContext(input?: EnvironmentCompositionInput): Promise<HostPlatformContext> {
+  if (input) { const resolved = await resolvePlatformConfiguration(input); if (resolved.blockers.length) throw new Error("Selected workflow pack is unavailable or invalid"); input = resolved.input; }
   const setup = await import("@bflow/machine-setup");
   const host = setup.defaultHostEnvironment();
   let platform = await setup.detectPlatformWithProbe(host);
@@ -85,7 +87,7 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
     ...machineServices,
     ...repoServices.filter(s => !seenServiceIds.has(s.serviceId))
   ];
-  const skills = await loadMachineSkillCatalog();
+  const skills = await loadMachineSkillCatalog(input);
   const toolInventory = new Map<string, { executablePath: string; version: string; digest: string }>();
   const effectivePolicy = (() => {
     if (!input) return undefined;
@@ -122,18 +124,11 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
       requirement.operations.every(operation => parsed.data.tool.operations.includes(operation)));
   }).map(raw => (raw as { serviceId: string }).serviceId));
   if (input && input.config.environment.context7?.enabled !== false) requestedServices.add(CONTEXT7_SERVICE_ID);
-  const toolInstaller = await import("@bflow/tool-installer");
   const serviceReadiness = new Map<string, { status: "ready" | "blocked" | "missing" | "unknown"; discoveredTools: readonly string[]; reason?: string }>();
   for (const serviceId of requestedServices) {
     const observed = await readGatewayReadiness(platform.paths.state, serviceId);
     const service = mcpServices.map(raw => MCPServiceDefinitionSchema.safeParse(raw)).find(parsed => parsed.success && parsed.data.serviceId === serviceId);
-    const projected = service?.success && observed.observation
-      ? toolInstaller.projectVerifiedServiceCapability({ service: service.data, observation: observed.observation })
-      : undefined;
-    serviceReadiness.set(serviceId, projected?.status === "ready"
-      ? { status: "ready", discoveredTools: projected.operations }
-      : { status: observed.status === "ready" ? "blocked" : observed.status, discoveredTools: observed.discoveredTools,
-        reason: projected && projected.status === "blocked" ? projected.diagnostic : "no fresh authenticated Gateway service observation" });
+    serviceReadiness.set(serviceId, await projectRecordedServiceReadiness(service?.success ? service.data : undefined, observed));
   }
   return {
     machineId: platform.machineId,
@@ -152,6 +147,18 @@ export function resolveIsolatorStateRoot(
   if (environment.AI_ISOLATOR_HOME) return resolve(environment.AI_ISOLATOR_HOME);
   const realHome = environment.AI_ISOLATOR_REAL_HOME || homeDirectory;
   return resolve(realHome, ".local", "share", "ai-isolator");
+}
+
+/** Same recorded-evidence policy for execution and preview; never contacts a service. */
+export async function projectRecordedServiceReadiness(rawService: unknown, observed: ServiceReadiness) {
+  const service = MCPServiceDefinitionSchema.safeParse(rawService);
+  const installer = await import("@bflow/tool-installer");
+  const projected = service.success && observed.observation && observed.gateway === "running"
+    ? installer.projectVerifiedServiceCapability({ service: service.data, observation: observed.observation }) : undefined;
+  return projected?.status === "ready"
+    ? { status: "ready" as const, discoveredTools: projected.operations as readonly string[] }
+    : { status: observed.status === "ready" ? "blocked" as const : observed.status, discoveredTools: observed.discoveredTools,
+      reason: projected?.status === "blocked" ? projected.diagnostic : "no fresh authenticated Gateway service observation" };
 }
 
 /** Resolves only trusted process/machine context; repository configuration cannot redirect approvals or Codex hooks. */
@@ -186,6 +193,9 @@ export function resolveCodexTrustPaths(input: {
  */
 export async function buildHostPlatformOptions(input: EnvironmentCompositionInput, deps: HostPlatformDeps): Promise<AgenticHostPlatformOptions> {
   const { AgenticHostPlatformOptionsSchema } = await import("@bflow/runtime");
+  const resolution = await resolvePlatformConfiguration(input);
+  if (resolution.blockers.length) throw new Error("Selected workflow pack is unavailable or invalid");
+  input = resolution.input;
   const environment = input.config.environment;
   const configured = new Map(environment.roles.map(role => [role.role, role] as const));
   const coordinator = configured.get("coordinator");
@@ -204,15 +214,11 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   const toolGrants = resolveToolGrants(toolPolicy, toolContext, input, deps.warn, deps.inventoryReason, deps.onToolStatus);
   const grantsByRole = new Map<string, ResolvedToolGrant[]>();
   for (const grant of toolGrants) grantsByRole.set(grant.role, [...(grantsByRole.get(grant.role) ?? []), grant]);
-  const roles: PlatformRoleOption[] = environment.roles.map(role => roleOption(role, input, deps.context.skills, grantsByRole.get(role.role) ?? [], deps.warn));
-  // Developers are allocated dynamically in task worktrees; without a configured Developer, the template uses the Coordinator's provider.
-  if (!configured.has("developer")) {
-    const inheritedProfileName = selectedProfileName(coordinator, environment);
-    roles.push(roleOption({ role: "developer", cli: coordinator.cli, required: false,
-      ...modelSettings(coordinator),
-      ...(inheritedProfileName !== undefined ? { "profile-name": inheritedProfileName } : {})
-    }, input, deps.context.skills, grantsByRole.get("developer") ?? [], deps.warn));
-  }
+  const requiredCapabilities = resolution.decisions.find(decision => decision.field === 'capabilities.required')?.effective;
+  const roles: PlatformRoleOption[] = configuredPlatformRoles(input).map(role => ({
+    ...resolveRolePlatformOption(role, input, deps.context.skills, grantsByRole.get(role.role) ?? [], deps.warn),
+    ...(role.role !== 'conversation' && Array.isArray(requiredCapabilities) ? { capabilityIds: requiredCapabilities.filter((item): item is string => typeof item === 'string') } : {})
+  }));
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
@@ -232,6 +238,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     codexProcessHomeDirectory: deps.context.codexProcessHomeDirectory,
     codexHookApprovalPath: deps.context.codexHookApprovalPath,
     skillsStoreRoot: join(deps.context.dataDirectory, "skills-store"),
+    skillApprovalPath: join(deps.context.stateDirectory, "skill-approvals.json"),
     approvedBuiltinSkillDigests: [...deps.context.skills.approvedBuiltinSkillDigests],
     supportedCommands: [...SUPPORTED_CLI_COMMANDS],
     ...(hasSelectedProfiles && deps.context.isolatorStateRoot
@@ -241,7 +248,19 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   });
 }
 
-function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionInput, skills: MachineSkillCatalog,
+/** Preserve governance roles while inheriting only the Developer launch template. */
+export function configuredPlatformRoles(input: EnvironmentCompositionInput): EnvironmentRoleConfig[] {
+  const roles = [...input.config.environment.roles];
+  const coordinator = roles.find(role => role.role === "coordinator");
+  if (!coordinator) throw new Error("Configuration must include a coordinator role");
+  if (!roles.some(role => role.role === "developer")) {
+    const profile = selectedProfileName(coordinator, input.config.environment);
+    roles.push({ role: "developer", cli: coordinator.cli, required: false, ...modelSettings(coordinator), ...(profile ? { "profile-name": profile } : {}) });
+  }
+  return roles;
+}
+
+export function resolveRolePlatformOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionInput, skills: MachineSkillCatalog,
   grants: readonly ResolvedToolGrant[] = [], warn?: (message: string) => void): PlatformRoleOption {
   const environment = input.config.environment;
   const provider = EnvironmentProviderSchema.safeParse(role.cli);
@@ -302,14 +321,17 @@ function roleOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionIn
     capabilityIds: [],
     mcpServiceIds: [...new Set(roleGrants.filter(grant => grant.serviceId).map(grant => grant.serviceId!))],
     toolIds: [...new Set(roleGrants.map(grant => grant.toolId))],
-    skillSelections: normalizedSelections
+    dependencySkillApprovals: environment.skills?.pins?.map(pin => ({
+      skill: { skillId: pin.skillId, version: pin.version, digest: pin.digest }, approvalReceiptId: pin.approvalReceiptId
+    })),
+    skillSelections: normalizedSelections.map(selection => {
+      const pin = environment.skills?.pins?.find(pin => pin.skillId === selection.skill.skillId && pin.digest === selection.skill.digest && pin.version === selection.skill.version);
+      return pin ? { ...selection, approvalReceiptId: pin.approvalReceiptId } : selection;
+    })
   };
 }
 
 export function resolveRepositoryToolPolicy(input: EnvironmentCompositionInput, machineId: string): RepositoryToolPolicy | undefined {
-  const skillConfig = input.config.environment.skills;
-  if (skillConfig?.catalogDir || skillConfig?.bindingsPath)
-    throw new Error("Custom environment.skills.catalogDir/bindingsPath are not supported by platform startup. Remove these overrides or use the approved bundled skills catalog and bindings.");
   const explicit = input.config.environment.toolPolicy;
   if (explicit) {
     const parsed = RepositoryToolPolicySchema.parse(explicit);
@@ -503,7 +525,7 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
   return grants;
 }
 
-function selectedProfileName(role: EnvironmentRoleConfig, environment: EnvironmentCompositionInput["config"]["environment"]): string | undefined {
+export function selectedProfileName(role: EnvironmentRoleConfig, environment: EnvironmentCompositionInput["config"]["environment"]): string | undefined {
   return role["profile-name"] ?? environment.defaults?.[role.cli as EnvironmentProvider]?.["profile-name"];
 }
 

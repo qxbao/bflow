@@ -57,6 +57,8 @@ export {
 };
 
 export interface DefaultPlatformReadinessServiceDeps {
+  /** Host-owned input revalidation before preparation mutations and provider launch material. */
+  readonly beforeSideEffect?: () => Promise<void>;
   readonly environments: RoleEnvironmentResolverPort;
   readonly skills: SkillSessionPort;
   readonly gateway?: GatewayRegistrationPort | undefined;
@@ -386,6 +388,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   }
 
   async revalidatePreparedLaunch(launchId: string, options?: OperationOptions): Promise<OperationResult<PreparedRoleLaunch>> {
+    await this.deps.beforeSideEffect?.();
     if (options?.signal?.aborted) return fail("cancelled", "Prepared launch revalidation interrupted");
     if (options?.deadline !== undefined && Date.parse(options.deadline) <= this.now().getTime())
       return failWith({ code: "timeout", retryable: true, retrySafety: "observation_only", message: "Prepared launch revalidation deadline expired" });
@@ -743,9 +746,11 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       isolatorProfile = resolvedProfile.value;
     }
 
+    await this.deps.beforeSideEffect?.();
     const skills = await this.deps.skills.resolveForRole(identity, requirement, environmentId);
     if (!skills.ok) return blocked(skills.error);
 
+    await this.deps.beforeSideEffect?.();
     let gateway: RoleGatewayAccess = NO_GATEWAY_ACCESS;
     if (requirement.mcpServiceIds.length > 0) {
       if (!this.deps.gateway) {
@@ -1000,6 +1005,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
   }
 
   private async checkPreparedRole(prepared: RoleEnvironmentReady, options?: OperationOptions): Promise<RoleAttempt> {
+    await this.deps.beforeSideEffect?.();
     const preflight = await this.deps.providers.preflight(prepared.environment, prepared.context, options);
     return preflight.ok ? { ...prepared, preflight: preflight.value,
       summary: summaryOf(prepared.requirement, "ready", [...preflight.value.checks, ...prepared.toolChecks]) } : this.blockedRole(prepared, preflight.error);
@@ -1010,6 +1016,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     const { identity, requirement } = attempt;
     const profileCheck = await this.revalidateProfile(requirement, attempt.isolatorProfile, options);
     if (!profileCheck.ok) return profileCheck;
+    await this.deps.beforeSideEffect?.();
     const profile = await this.deps.providers.prepareLaunch(attempt.environment, attempt.context, identity.generation, options);
     if (!profile.ok) return failWith(profile.error);
 

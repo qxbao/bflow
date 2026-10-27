@@ -81,6 +81,7 @@ export const EnvironmentConfigEnvironmentSchema = z
     herdrBinary: z.string().min(1),
     roles: z.array(EnvironmentRoleConfigSchema).min(1),
     defaults: EnvironmentProfileDefaultsSchema.optional(),
+    workflowPack: z.object({ path: z.string().min(1), id: z.string().min(1), version: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
     sdd: z
       .object({
         minimumLevel: z.enum(["lightweight", "full"]),
@@ -150,7 +151,8 @@ export const EnvironmentConfigEnvironmentSchema = z
         required: z.boolean().optional(),
         catalogDir: z.string().trim().min(1).optional(),
         bindingsPath: z.string().trim().min(1).optional(),
-        requiredSkills: z.array(z.string().trim().min(1)).optional()
+        requiredSkills: z.array(z.string().trim().min(1)).optional(),
+        pins: z.array(z.object({ skillId: z.string().min(1), version: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/), approvalReceiptId: z.string().min(1) }).strict()).optional()
       })
       .strict()
       .optional()

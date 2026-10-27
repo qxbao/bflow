@@ -285,6 +285,7 @@ describe("DefaultPlatformReadinessService", () => {
   }
 
   function buildService(options: {
+    beforeSideEffect?: () => Promise<void>;
     runner?: ProviderCommandRunner;
     gateway?: boolean;
     gatewayPort?: GatewayRegistrationPort;
@@ -313,6 +314,7 @@ describe("DefaultPlatformReadinessService", () => {
       ? undefined
       : new GatewayRegistrationManager({ control: gatewayControl, endpoint: ENDPOINT, now }));
     const service = new DefaultPlatformReadinessService({
+      ...(options.beforeSideEffect ? { beforeSideEffect: options.beforeSideEffect } : {}),
       environments: new RoleEnvironmentResolver(),
       skills: new SkillSessionStore({ resolver: createSkillResolver(skillManager) }),
       ...(gateway ? { gateway } : {}),
@@ -325,6 +327,17 @@ describe("DefaultPlatformReadinessService", () => {
     });
     return { service, journal };
   }
+
+  it("revalidates source inputs after skill preparation before any provider probe", async () => {
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const calls = vi.spyOn(runner, "run");
+    let checks = 0;
+    const { service } = buildService({ runner, beforeSideEffect: async () => {
+      if (++checks === 2) throw new Error("execution_plan_drift");
+    } });
+    await expect(service.prepareSession(identity, [requirement()])).rejects.toThrow("execution_plan_drift");
+    expect(calls).not.toHaveBeenCalled();
+  });
 
   async function createActualScopedGatewayFixture(mode: "valid" | "missing-input-schema" | "unavailable-actual" | "unknown", exclusive = false) {
     const serviceId = "scoped-stdio-search";

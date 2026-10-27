@@ -118,6 +118,7 @@ export function createSkillResolver(manager: SkillManager): SkillResolverPort {
 }
 
 export interface PlatformReadinessServiceOptions {
+  readonly beforeSideEffect?: () => Promise<void>;
   /** Host-owned state root; the launch journal lives directly under it. */
   readonly stateDirectory: string;
   readonly skillManager: SkillManager;
@@ -151,6 +152,7 @@ export function createPlatformReadinessService(options: PlatformReadinessService
       })
     : undefined;
   return new DefaultPlatformReadinessService({
+    ...(options.beforeSideEffect ? { beforeSideEffect: options.beforeSideEffect } : {}),
     environments: new RoleEnvironmentResolver(),
     skills: new SkillSessionStore({ resolver: createSkillResolver(options.skillManager) }),
     ...(gateway ? { gateway } : {}),

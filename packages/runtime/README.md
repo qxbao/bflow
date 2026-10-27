@@ -1569,3 +1569,47 @@ proofs. The first real correlated cancellation proof writes **v6**. V6 pins each
 proof to its exact cancelled execution and records lease disposition. Older
 binaries reject v6; do not downgrade an affected session. No public contract,
 Core event/checkpoint schema, or legacy run-store migration is changed.
+
+### Execution preview and drift boundary
+
+The additive preview contracts separate stable plan decisions from readiness observations. New
+agentic runs bind their accepted specification/DAG and current resolution when design is accepted,
+even if the caller supplied no preview expectation. Runtime revalidates before new worktree,
+capacity, provider preparation and dispatch effects, and after awaited preparation boundaries.
+A drift diagnostic includes a sourced `PlanDiff`; it creates no approval. Existing specification
+and revision approval rules remain authoritative. Cancellation, receipt draining, lease renewal
+for an already dispatched execution and Conversation reporting remain available during drift.
+
+The CLI supplies declarative input file watches. JSON watches normalize key ordering/formatting;
+other files conservatively invalidate on byte changes and require read-only re-resolution. Private
+watch digests persist across host/run restart and are excluded from public fingerprints/inspect
+output. Optional missing inputs are watched for later creation. Only bounded regular files with
+no symlinked ancestors are read. Preview does not launch, install, reserve capacity, acquire a
+lease, create an approval or invoke a model. A preview is neither readiness nor success evidence.
+
+Historical accepted runs without a resolution binding explicitly report
+`legacy_resolution_baseline_unavailable`; Runtime does not invent their historical configuration.
+Legacy host composition without input declarations retains existing prerequisite checks but cannot
+claim profile/config drift coverage. Read-only accepted-plan access reads the validated private
+journal without opening mutable RunStore/Registry/Skill stores or creating locks/directories.
+
+Repository/operator skills require machine-owned pre-approved receipts. The strict
+`SkillApprovalStoreSchema` store is private (0700 parent, 0600 file, current owner), with exact
+skill/version/digest/dependency pins, repository/session and role/provider scope; expired or
+unavailable receipts deny authorization. The machine path is composed by the trusted host rather
+than repository configuration. Preview reads these receipts and never creates them. Same-UID hostile
+mutation and full live-provider/full-SDLC acceptance are outside local test evidence.
+
+The host can declare `executionResolution.repositoryRoot` to bind read-only live Git observations.
+The shared `readExecutionRepositorySnapshot` used by CLI and Runtime includes HEAD, semantic
+index entries and bounded dirty/untracked noncredential file contents and executable modes.
+Before an effect and after restart, changed observations require re-resolution; `.bflow` managed
+metadata uses its separate explicit input watches. Legacy callers omitting `repositoryRoot` retain
+file-watch compatibility without claiming Git drift coverage. Git optional writes, fsmonitor,
+external diff and textconv are disabled; unsafe/oversized relevant files fail closed.
+
+Custom skill dependency receipts can be passed separately as `dependencySkillApprovals` in role
+platform options (`dependencyApprovals` on the SkillManager request). These exact pins and receipt
+IDs authorize only dependencies reached by the shared resolver. They never select an additional
+skill, and every reached dependency still passes the current machine approval's role/provider,
+repository/session, content/dependency pin and expiration checks.

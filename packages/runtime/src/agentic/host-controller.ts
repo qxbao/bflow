@@ -1,3 +1,4 @@
+import { createExecutionResolutionReader } from "./execution-binding.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -6,7 +7,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
+  ExecutionResolutionSourcesSchema, type ExecutionResolutionSources, AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
   type AgentRole, type CreateCheckpointCommand, type OperationOptions, type OperationResult, type RecoveryCheckpoint,
   type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
@@ -26,6 +27,7 @@ export type { RegressionScope };
 export type FastPathMode = "auto" | "off";
 
 export interface AgenticHostOptions {
+  executionResolution?: ExecutionResolutionSources;
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
   behavioralCommands?: readonly BehavioralCommand[];
   /** Owner mutation checks (`.bflow/verification.json`); pinned with the behavioral commands. */
@@ -92,7 +94,7 @@ export interface AgenticHostController {
   /** Call only after Herdr has stopped and lifecycle receipts have been saved. */
   shutdown(): Promise<void>;
 }
-export interface HostConfiguration extends AgenticHostOptions { directory: string; socketPath: string; token: string }
+export interface HostConfiguration extends AgenticHostOptions { executionSourceDigests?: Record<string, string>; directory: string; socketPath: string; token: string }
 export async function readHostConfiguration(path: string): Promise<HostConfiguration> {
   const stat = await lstat(path);
   if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
@@ -101,6 +103,11 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
   parseAppChecks(value.appChecks);
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
+  if (value.executionResolution !== undefined) value.executionResolution = ExecutionResolutionSourcesSchema.parse(value.executionResolution);
+  if (value.executionSourceDigests !== undefined) {
+    const sources = record(value.executionSourceDigests);
+    if (Object.values(sources).some(digest => typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest))) throw new Error("Invalid execution source binding");
+  }
   if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
   if (value.policy !== undefined) {
     const policy = record(value.policy), sdd = record(policy.sdd), tdd = record(policy.tdd), verification = record(policy.verification), concurrency = record(policy.concurrency);
@@ -154,7 +161,8 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.appChecks !== undefined ? { appChecks: persisted.appChecks } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
-    ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}) });
+    ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}),
+    ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) });
 }
 function failure<T>(error: unknown): OperationResult<T> {
   if (String(error).includes("[bflow:native-startup-pending]")) return { ok: false, error: { code: "conflict", retryable: true,
@@ -164,6 +172,7 @@ function failure<T>(error: unknown): OperationResult<T> {
 /** Idempotently starts a durable host before provider MCP startup. Never steals a stale socket. */
 export async function ensureAgenticHost(options: AgenticHostOptions): Promise<AgenticHostController> {
   const repositoryPath = await realpath(options.repositoryPath);
+  const startupReader = options.executionResolution === undefined ? undefined : await createExecutionResolutionReader(options.executionResolution);
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
   const identity = createHash("sha256").update(repositoryPath + "\0" + options.sessionId).digest("hex").slice(0, 24);
   const directory = resolve(resolvePrivateRuntimeStateDirectory(repositoryPath), "host", options.sessionId);
@@ -199,10 +208,12 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   try { await lstat(configPath); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") hasConfiguration = false; else throw error; }
   if (!hasConfiguration) {
+    const executionSourceDigests = await startupReader?.readPrivateSources?.();
+    await startupReader?.();
     const temporaryConfig = `${configPath}.${randomBytes(8).toString("hex")}.tmp`;
     try {
       const file = await open(temporaryConfig, "wx", 0o600);
-      try { await file.writeFile(JSON.stringify({ ...options, repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await file.sync(); }
+      try { await file.writeFile(JSON.stringify({ ...options, ...(executionSourceDigests ? { executionSourceDigests } : {}), repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await file.sync(); }
       finally { await file.close(); }
       // Location/recovery readers may inspect the config before acquiring boot.lock.
       // Publish complete bytes exclusively; retain an existing host's exact token.

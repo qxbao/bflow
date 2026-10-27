@@ -8,7 +8,7 @@ import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema, PaneBindingSchema,
   DelegationRequestSchema, GitChangeSetSchema, IsoDateTimeSchema, JsonValueSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema,
-  SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
+  ExecutionPlanExpectationSchema, PlanDiffSchema, SdlcWorkStatusSchema, SpecificationSchema, TestStrategySchema, VerificationCycleSchema,
   VerificationResultSchema, WorkflowDefinitionSchema, type AgentAssignment, type AgentExecutionHandle, type AgentLease,
   type AcquireAgentLeaseRequest, type AgentRequest, type AgentResult, type AppendEventsRequest, type ApprovalDecision,
   type AgentRole, type ApprovalRequest, type DelegationRequest, type GitChangeSet, type JsonValue, type ArtifactReference,
@@ -56,6 +56,10 @@ export interface TaskRecord {
 export interface RunRecord {
   runId: string; delegation: DelegationRequest; status: SdlcWorkStatus;
   definition?: WorkflowDefinition; workflowSpec?: SpecRecord; tasks: TaskRecord[];
+  executionPlan?: import("@bflow/contracts").ExecutionPlanExpectation;
+  executionPlanDrift?: import("@bflow/contracts").PlanDiff;
+  /** Private watch evidence retained across daemon restart; never copied into public plans. */
+  executionSourceDigests?: Record<string, string>;
   baseRevision?: string; approval?: ApprovalRequest; decision?: ApprovalDecision;
   approvalKind?: "design" | "delivery" | "action" | "task";
   integrationKey?: string; workflowCycle?: VerificationCycle; workflowChange?: GitChangeSet;
@@ -265,7 +269,7 @@ export function isConversationDelivery(out: Outbound): boolean {
   return !out.parentAssignmentId && out.message.recipient.role === "conversation";
 }
 /** Private storage codec; exported schemas validate every persisted boundary value. */
-function parseState(input: unknown, repository: string): JournalState {
+export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
   const root = record(input);
   if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
@@ -288,6 +292,9 @@ function parseState(input: unknown, repository: string): JournalState {
       throw new Error("Invalid run flags/limit");
     if (!Array.isArray(run.tasks)) throw new Error("Invalid task journal");
     if (run.definition) run.definition = WorkflowDefinitionSchema.parse(run.definition);
+    if (run.executionPlan !== undefined) run.executionPlan = ExecutionPlanExpectationSchema.parse(run.executionPlan);
+    if (run.executionSourceDigests !== undefined) run.executionSourceDigests = z.record(z.string().regex(/^[a-f0-9]{64}$/)).parse(run.executionSourceDigests);
+    if (run.executionPlanDrift !== undefined) run.executionPlanDrift = PlanDiffSchema.parse(run.executionPlanDrift);
     if (run.workflowSpec) parseSpec(run.workflowSpec);
     if (run.approval) run.approval = ApprovalRequestSchema.parse(run.approval);
     if (run.userDecisions !== undefined) parseUserDecisions(run.userDecisions, run.runId);
@@ -556,7 +563,7 @@ export class AgenticJournal {
         const bytes = await readFile(statePath);
         if (this.validatedSnapshot?.bytes.equals(bytes)) state = structuredClone(this.validatedSnapshot.value);
         else {
-          state = parseState(JSON.parse(bytes.toString("utf8")), this.repository);
+          state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository);
           this.validatedSnapshot = { bytes: Buffer.from(bytes), value: structuredClone(state) };
         }
         baseline = this.validatedSnapshot.value; durableBytes = bytes;
@@ -571,8 +578,8 @@ export class AgenticJournal {
           try { if ((await readFile(statePath)).equals(durableBytes)) return; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         }
-        parseState(state, this.repository);
-        const serialized = JSON.stringify(state), normalized = parseState(JSON.parse(serialized), this.repository);
+        parseAgenticJournalState(state, this.repository);
+        const serialized = JSON.stringify(state), normalized = parseAgenticJournalState(JSON.parse(serialized), this.repository);
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
         const file = await open(path, "wx", 0o600);
         try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }

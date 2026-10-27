@@ -39,6 +39,7 @@ Ví dụ / Examples:
   bflow setup --check
   bflow run "Add user authentication feature"
   bflow repo inspect
+  bflow task preview --json
   bflow task plan --spec ./specs/auth.json
   bflow task implement task-1 --run run-101 --spec ./specs/auth.json
   bflow verify task-1 --run run-101 --plan ./verification.json
@@ -548,6 +549,7 @@ const HELP_MAP: Record<CliCommandName, string> = {
   help: GLOBAL_HELP,
   version: GLOBAL_HELP,
   "repo inspect": REPO_INSPECT_HELP,
+  "task preview": "Usage: bflow task preview [--run <id>] [--json] [--compare <file>]\nRead-only execution preview; does not grant readiness or approval.",
   "task plan": TASK_PLAN_HELP,
   "task implement": TASK_IMPLEMENT_HELP,
   verify: VERIFY_HELP,

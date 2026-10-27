@@ -237,3 +237,7 @@ bflow git prepare run-1 --yes --json                                   # → req
 - `verify` cần independent gate runner được host inject (`HighLevelServices.gates`); thiếu runner là blocked.
 - Git/Runtime locking cần `flock` hỗ trợ inherited fd. Linux util-linux và bản macOS phù hợp được dùng; kiểm tra môi trường trước khi chạy. macOS workspace/JS verification có helper/Seatbelt riêng, không phải chứng nhận mọi polyglot adapter.
 - Xem [implementation status](../../../docs/implementation-status.md), [compatibility](../../../docs/compatibility-matrix.md) và [runner matrix](../../../docs/verification-runners.md) cho source/evidence hiện tại.
+
+### `bflow task preview [--run <id>] [--compare <file>] [--json]`
+
+Read-only execution choices, field sources, existing observations, blockers and approval points. Intake has no accepted DAG. `--run` requires authoritative approved Runtime state. Save JSON outside source paths and pass it to `bflow up --expect-plan <file>` or `bflow task implement <task-id> --run <id> --spec <file> --expect-plan <file>` to stop before effects on drift. Legacy `bflow run` rejects this flag. Preview never probes, installs, reserves or approves work.

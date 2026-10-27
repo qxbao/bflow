@@ -14,6 +14,7 @@ export const SUPPORTED_CLI_COMMANDS = [
   "resume",
   "cancel",
   "repo inspect",
+  "task preview",
   "task plan",
   "task implement",
   "verify",
@@ -256,6 +257,17 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     idempotencyAndRetry: "Read-only inspection recorded in OperationLedger. Supports --resume from prior step.",
     permissionRequirements: "Requires read access to target repository.",
     skills: ["inspect-repository", "using-bflow"]
+  },
+  {
+    command: "task preview",
+    syntax: "bflow task preview [--run <id>] [--json] [--compare <file>]",
+    purpose: "Explain desired execution choices and existing observations without starting work.",
+    reusedEngines: ["ExecutionPlanResolver"], requiredFlags: [],
+    optionalFlags: ["--run <id>", "--compare <file>", "--json", "--help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Read-only; no journal, readiness refresh, grant, lease or reservation.",
+    permissionRequirements: "Read access to repository and approved local state.",
+    skills: ["using-bflow"]
   },
   {
     command: "task plan",

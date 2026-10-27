@@ -9,10 +9,11 @@ import {
   PaneBindingSchema, WorkflowRunSnapshotSchema, RecoveryCheckpointSchema, SessionManifestSchema, WorkflowAggregateCheckpointStateSchema,
   type ContractError, type CreateCheckpointCommand, type EnvironmentDoctorReport,
   type OperationOptions, type OperationResult, type RecoveryCheckpoint, type RuntimeService,
-  type SessionLifecycleManager, type SessionManifest, type PaneBinding
+  type SessionLifecycleManager, type SessionManifest, type PaneBinding, type ExecutionPlanInput
 } from "@bflow/contracts";
 import { findExecutable } from "@bflow/machine-setup";
 import { resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
+import type { ExecutionExpectationGuard } from "./execution-expectation.js";
 import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
@@ -71,6 +72,10 @@ export interface EnvironmentCompositionInput {
   readonly repository: RepositoryIdentity;
   readonly config: EnvironmentConfig;
   readonly env: NodeJS.ProcessEnv;
+  /** Configuration as read from disk when `config` is an in-memory derivation (role fallback); never serialized. */
+  readonly sourceConfig?: EnvironmentConfig | undefined;
+  /** In-process CLI guard: confirm actual resolution before host creation, never serialized to the daemon. */
+  readonly validateExecutionPlan?: ((input: ExecutionPlanInput) => Promise<void>) | undefined;
 }
 export interface EnvironmentDependencies {
   /** Explicit opt-in model diagnostics; the default implementation uses the Runtime facade. */
@@ -240,9 +245,11 @@ export class EnvironmentLifecycle {
   private writeIntent(repository: RepositoryIdentity, phase: OperationIntent["phase"]) {
     return this.writeJson(repository, "operation.json", { repositoryId: repository.id, sessionName: repository.sessionName, phase });
   }
-  private async integration(repository: RepositoryIdentity, config: EnvironmentConfig): Promise<EnvironmentIntegration | undefined> {
+  private async integration(repository: RepositoryIdentity, config: EnvironmentConfig,
+    validateExecutionPlan?: (input: ExecutionPlanInput) => Promise<void>, sourceConfig?: EnvironmentConfig): Promise<EnvironmentIntegration | undefined> {
     if (this.dependencies.integration) return this.dependencies.integration;
-    const input = { repository, config, env: namedSessionEnvironment(repository.sessionName) };
+    const input = { repository, config, env: namedSessionEnvironment(repository.sessionName), ...(validateExecutionPlan ? { validateExecutionPlan } : {}),
+      ...(sourceConfig && sourceConfig !== config ? { sourceConfig } : {}) };
     if (this.dependencies.openIntegration) return this.dependencies.openIntegration(input);
     // Explicit operator-selected composition module; never execute a module named in repository data.
     const path = process.env["BFLOW_ENVIRONMENT_MODULE"];
@@ -311,11 +318,14 @@ export class EnvironmentLifecycle {
       if (aggregate.snapshot.runId !== runId || aggregate.snapshot.version !== checkpoint.version || aggregate.snapshot.lastEventSequence !== checkpoint.eventSequence) fail("Aggregate checkpoint identity/version mismatch");
     }
   }
-  async up(timeoutMs?: number): Promise<SessionManifest> {
+  async up(timeoutMs?: number, checkExpectation?: ExecutionExpectationGuard): Promise<SessionManifest> {
     // Step 1: load_project_config
     this.progress("Đang kiểm tra kho mã nguồn và cấu hình...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
+    await checkExpectation?.();
+    if (checkExpectation && (this.dependencies.integration || this.dependencies.openIntegration || process.env.BFLOW_ENVIRONMENT_MODULE))
+      fail("Execution expectations require the default Runtime composition; custom composition cannot confirm the shared resolver.");
     return this.locked(repository, async () => {
       const deadline = new Deadline(timeoutMs ?? config.environment.startupTimeoutMs, this.dependencies.signal);
       this.progress("Đang xác minh các phụ thuộc và xác thực provider...");
@@ -575,7 +585,8 @@ export class EnvironmentLifecycle {
       const compositionConfig = fallbackNotices.length > 0
         ? { ...config, environment: { ...config.environment, roles: rolesToRun } }
         : config;
-      const integration = await deadline.call(() => this.integration(repository, compositionConfig));
+      await checkExpectation?.();
+      const integration = await deadline.call(() => this.integration(repository, compositionConfig, checkExpectation, config));
       if (!integration) fail("P13 SessionLifecycleManager is not composed. Supply CliContext.environment.openIntegration or BFLOW_ENVIRONMENT_MODULE; no roles were started.");
 
       let cleanupEligible = false;
@@ -606,8 +617,10 @@ export class EnvironmentLifecycle {
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
           if (needsRoleStartup && integration.prepareRoles) {
             this.progress("Đang chuẩn bị môi trường provider và kiểm tra mức sẵn sàng...");
-            try { await deadline.call(opts => integration.prepareRoles!(opts)); }
-            catch (error) { await this.releaseRejectedHost(integration, deadline); throw error; }
+            try {
+              await checkExpectation?.();
+              await deadline.call(opts => integration.prepareRoles!(opts));
+            } catch (error) { await this.releaseRejectedHost(integration, deadline); throw error; }
             roleStartupPrepared = true;
           }
           cleanupEligible = true;
@@ -634,6 +647,7 @@ export class EnvironmentLifecycle {
             fail("Earlier role startup has no recoverable pane receipt; refusing duplicate agents. Run bflow down --yes to reconcile and stop the partial startup, then bflow up. Preserve .bflow.");
           if (integration.prepareRoles && !roleStartupPrepared) {
             this.progress("Đang chuẩn bị môi trường provider và kiểm tra mức sẵn sàng...");
+            await checkExpectation?.();
             await deadline.call(opts => integration.prepareRoles!(opts));
             roleStartupPrepared = true;
           }
@@ -641,6 +655,8 @@ export class EnvironmentLifecycle {
           cleanupEligible = true;
           roleDispatchAttempted = true;
           this.progress("Đang khởi chạy các vai trò agent...");
+          await checkExpectation?.();
+          checkExpectation?.assertResolved();
           manifest = this.validateManifest(unwrap(await deadline.call((opts) => integration.manager.up(repository.sessionName, opts))), repository);
         } else {
           this.progress("Đang đối soát các vai trò agent...");

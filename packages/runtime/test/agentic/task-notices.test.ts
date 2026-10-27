@@ -393,3 +393,74 @@ it("holds a queued policy continuation when a human gate or pause appears before
     expect(f.transport.sentRequests).toHaveLength(2);
   });
 });
+
+describe('execution resolution drift at the physical dispatch boundary', () => {
+  it('rechecks after capability preflight and prevents capacity acquisition/transport dispatch', async () => {
+    const f = await fixture();
+    const profile = join(f.root, 'profile.json'); await writeFile(profile, '{"model":"initial"}');
+    const { createExecutionResolutionReader } = await import('../../src/agentic/execution-binding.js');
+    f.ports.readExecutionResolution = await createExecutionResolutionReader({
+      schemaVersion: 3, plan: { schemaVersion: 3, resolverVersion: '1', policyVersion: '1', mode: 'intake', repository: { revision: 'base' } },
+      files: [{ component: 'profile', path: profile, format: 'json' }]
+    });
+    f.ports.preflightRoleCapabilities = async () => { await writeFile(profile, '{"model":"changed-during-preflight"}'); };
+    const acquire = vi.spyOn(f.registry, 'acquireLease'); const sent = f.transport.sentRequests.length;
+    await f.call(async (outbox, _state, save) => {
+      outbox.enqueue(f.message('drift-new-assignment', 'task.assignment'), 'developer', 'implement', 'next-attempt', ['implementation']);
+      await save(); await outbox.flush(f.onBound);
+    });
+    expect(acquire).not.toHaveBeenCalled(); expect(f.transport.sentRequests).toHaveLength(sent);
+    const state = await f.open().exclusive(async state => state);
+    expect(state.outbound.find(out => out.message.message_id === 'drift-new-assignment')?.error).toContain('Execution plan inputs changed');
+  });
+});
+
+it.each(['before_dispatch', 'after_registry_resolution'] as const)('denies implementation-only dispatch when an unchanged machine receipt expires: %s', async timing => {
+  const f = await fixture();
+  const { SkillManager, SkillFileStore, bundleDigest } = await import('@bflow/skills');
+  const { files } = await import('../../../skills/test/fixtures.js');
+  const { readSkillApproval } = await import('../../src/agentic/skill-approval.js');
+  const { verifyDispatchPinnedSkills } = await import('../../src/agentic/host-platform.js');
+  const bundle = files('custom'); const pin = { skillId: 'custom', version: '1.0.0', digest: bundleDigest(bundle) };
+  const receiptPath = join(f.root, 'receipt.json');
+  const receiptBytes = JSON.stringify({ schemaVersion: 3, receipts: [{ ...pin, dependencies: [], approvalReceiptId: 'custom-receipt',
+    repositoryId: 'repo', sessionId: 'session', roles: ['developer'], providers: ['claude'], approvedAt: '2026-01-01T00:00:00Z', expiresAt: '2026-10-27T10:00:00Z' }] });
+  await writeFile(receiptPath, receiptBytes, { mode: 0o600 });
+  let now = new Date('2026-10-27T09:00:00Z');
+  const manager = new SkillManager({ store: new SkillFileStore(join(f.root, 'custom-store')), supportedCommands: ['status'], authorize: check =>
+    readSkillApproval(receiptPath, { skillId: check.definition.skillId, version: check.definition.version, digest: check.definition.digest,
+      dependencies: check.definition.dependencies, approvalReceiptId: check.approvalReceiptId, role: check.role, provider: check.provider,
+      repositoryId: 'repo', sessionId: 'session' }, () => now) });
+  await manager.installBundle(bundle, { source: 'repository', expectedDigest: pin.digest });
+  const manifest = (await manager.resolve({ manifestId: 'manifest', environmentId: 'env',
+    scope: { kind: 'session', machineId: 'machine', repositoryId: 'repo', sessionId: 'session', workspaceRoot: f.root },
+    role: 'developer', provider: 'claude', capabilityIds: ['implementation'], toolIds: [],
+    selections: [{ skill: pin, required: true, approvalReceiptId: 'custom-receipt' }] })).manifest;
+  const session = { launchIdOf: () => 'launch-custom', readPinnedInstructions: async () => {
+    await manager.verify(manifest); return { launchId: 'launch-custom', manifestDigest: manifest.digest, instructionText: 'Pinned custom instructions', references: [] };
+  } };
+  const platform = { roles: [{ role: 'developer', skillSelections: [{ skill: pin, required: true }] }] };
+  f.replace({ metadata: { launchId: 'launch-custom' } });
+  f.ports.preflightRoleCapabilities = async (binding, required) => {
+    expect(required).toEqual(['implementation']);
+    await verifyDispatchPinnedSkills(session, platform as never, binding);
+  };
+  await verifyDispatchPinnedSkills(session, platform as never, unwrap(await f.ports.panes.getRoleBinding('developer'))!);
+  f.ports.revalidateRoleSkills = binding => verifyDispatchPinnedSkills(session, platform as never, binding);
+  if (timing === 'before_dispatch') now = new Date('2026-10-27T11:00:00Z');
+  else {
+    const resolve = f.registry.resolve.bind(f.registry);
+    vi.spyOn(f.registry, 'resolve').mockImplementation(async (...args) => {
+      const result = await resolve(...args); now = new Date('2026-10-27T11:00:00Z'); return result;
+    });
+  }
+  const acquire = vi.spyOn(f.registry, 'acquireLease'); const sent = f.transport.sentRequests.length;
+  await f.call(async (outbox, _state, save) => {
+    outbox.enqueue(f.message('expired-custom-work', 'task.assignment'), 'developer', 'implement', 'new-attempt', ['implementation']);
+    await save(); await outbox.flush(f.onBound);
+  });
+  expect(await readFile(receiptPath, 'utf8')).toBe(receiptBytes);
+  expect(acquire).not.toHaveBeenCalled(); expect(f.transport.sentRequests).toHaveLength(sent);
+  const state = await f.open().exclusive(async state => state);
+  expect(state.outbound.find(out => out.message.message_id === 'expired-custom-work')?.error).toContain('skill');
+});

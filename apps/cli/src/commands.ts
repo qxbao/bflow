@@ -1,3 +1,4 @@
+import { prepareExecutionExpectation } from "./execution-expectation.js";
 import { EnvironmentLifecycle } from "./environment.js";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -313,7 +314,8 @@ async function executeCommandWithProgress(
       switch (parsed.command) {
         case "up":
           if (showProgress) emitProgress("Khởi động môi trường Bflow", "Kiểm tra điều kiện cần thiết và khởi chạy các vai trò");
-          data = await lifecycle.up(parsed.timeoutMs);
+          const expectation = parsed.expectPlanPath ? await prepareExecutionExpectation(cwd, parsed.expectPlanPath) : undefined;
+          data = await lifecycle.up(parsed.timeoutMs, expectation);
           break;
         case "down":
           if (showProgress) emitProgress("Dừng môi trường Bflow", "Đóng phiên làm việc và giải phóng tài nguyên cục bộ");
