@@ -268,6 +268,8 @@ describe("Codex hook trust propagation", () => {
         modelsCalls++;
         if (invocation.env?.["HOME"]) modelHomes.push(invocation.env["HOME"]);
         await new Promise(resolve => setTimeout(resolve, 25));
+        // The native catalog must list the configured model; preflight rejects ids Agy would silently replace.
+        return { exitCode: 0, started: true, stdout: "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n", stderr: "" };
       }
       return fake.run(invocation);
     } };

@@ -8,7 +8,7 @@ import {
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
   WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
-  type ArtifactReference, type CancellationRequest, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification,
+  type ArtifactReference, type CancellationRequest, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
 import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
@@ -193,6 +193,23 @@ export class AdmissionRejectedError extends Error {
   readonly retryable = false;
   constructor(message: string) { super(message); this.name = "AdmissionRejectedError"; }
 }
+/**
+ * The specification input reviewed for one DAG task: its own criteria, traceability and conditional TDD assessment. A
+ * submitted test strategy is narrowed to the same criteria; its other mappings belong to sibling tasks and would make
+ * the task specification map criteria it does not contain.
+ */
+export function projectTaskSpecificationInput(draft: Specification, taskId: string, criteria: readonly AcceptanceCriterion[],
+  specIdSuffix: string, conditionalTdd: unknown = draft.metadata?.conditionalTdd): Specification {
+  const ids = new Set(criteria.map(criterion => criterion.id));
+  const sdd = record(draft.metadata?.sdd);
+  return { ...draft, specId: `${draft.specId}-${specIdSuffix}`, acceptanceCriteria: [...criteria], traceabilityTaskIds: [taskId],
+    ...(draft.testStrategy ? { testStrategy: { ...draft.testStrategy,
+      criterionMappings: draft.testStrategy.criterionMappings.filter(mapping => ids.has(mapping.criterionId)) } } : {}),
+    metadata: { ...draft.metadata,
+      sdd: { ...sdd, traceability: criteria.map(c => ({ criterionId: c.id, taskIds: [taskId] })) },
+      conditionalTdd: { ...record(conditionalTdd), taskId } } } as Specification;
+}
+
 export function isNonRetryableDeliveryError(error: unknown): boolean { return error instanceof AdmissionRejectedError; }
 /** Kinds of delivery problem. One user-facing notice per (message, class); retries and reconciliation reuse it. */
 type FailureClass = "transport_uncertain" | "undeliverable" | "inbound_failed";
@@ -2463,11 +2480,8 @@ export class AgenticWorkflowRuntime {
           throw new Error("Task ownership must be within approved literal affectedPaths");
         const criteria = draft.acceptanceCriteria.filter(c => task.acceptanceCriteria.includes(c.id));
         if (!criteria.length) throw new Error("Every task must have mapped acceptance criteria");
-        const sdd = record(draft.metadata?.sdd);
-        const taskSpec = await this.reviewSpec({ ...draft, specId: `${draft.specId}-${digest(task.id).slice(0, 12)}`,
-          acceptanceCriteria: criteria, traceabilityTaskIds: [task.id], metadata: { ...draft.metadata,
-            sdd: { ...sdd, traceability: criteria.map(c => ({ criterionId: c.id, taskIds: [task.id] })) },
-            conditionalTdd: { ...record(task.metadata?.conditionalTdd ?? draft.metadata?.conditionalTdd), taskId: task.id } } });
+        const taskSpec = await this.reviewSpec(projectTaskSpecificationInput(draft, task.id, criteria, digest(task.id).slice(0, 12),
+          task.metadata?.conditionalTdd ?? draft.metadata?.conditionalTdd));
         if (this.ports.validateTaskCommands) {
           try { this.ports.validateTaskCommands(taskSpec.specification, taskSpec.strategy, ownedPaths); }
           catch (error) {

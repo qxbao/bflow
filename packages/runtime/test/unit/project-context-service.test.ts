@@ -187,6 +187,21 @@ describe("ProjectContextService and Context Management", () => {
   });
 
   describe("1. Repository Structure Analysis", () => {
+    it("reads repository files when the configured root sits below a symlinked ancestor", async () => {
+      // macOS resolves /tmp and /var through /private; a lexical root under such an ancestor must not empty the survey.
+      const parent = await fs.mkdtemp(path.join(os.tmpdir(), "bflow-ctx-link-"));
+      try {
+        await fs.symlink(tmpRepoRoot, path.join(parent, "alias"));
+        await writeFile("package.json", JSON.stringify({ name: "@test/root" }));
+        await writeFile("src/index.ts", "export const value = 1;");
+        const analysis = await new ProjectContextService(path.join(parent, "alias")).analyzeRepositoryStructure();
+        expect(analysis.files.map(file => file.relativePath).sort()).toEqual(["package.json", "src/index.ts"]);
+        expect(analysis.packages).toHaveLength(1);
+      } finally {
+        await fs.rm(parent, { recursive: true, force: true });
+      }
+    });
+
     it("discovers workspace packages, entrypoints, and dependencies", async () => {
       // Root package.json
       await writeFile(

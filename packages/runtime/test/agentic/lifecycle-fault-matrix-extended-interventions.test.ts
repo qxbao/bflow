@@ -4,78 +4,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { RoleMessageSchema, type RoleMessage } from "@bflow/contracts";
 import { evaluateWatchdog } from "../../src/agentic/run-watchdog.js";
 import { lifecycleFixture, type LifecycleFixture } from "../helpers/lifecycle-fixture.js";
+import { cleanups, names, through, expectActionable } from "../helpers/lifecycle-fault-matrix-extended-stages.js";
+
 
 /**
  * Extended whole-run matrix: restarts, cancellation, rework, human changes, requirement revisions, redelivery and Conversation outages
  * at every SDLC step. Local fake transport only; not live Herdr/provider evidence.
  */
-const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
 
-interface Stage { name: string; run(f: LifecycleFixture): Promise<void> }
-const stages: Stage[] = [
-  { name: "intake", run: async f => { await f.runtime.queueHerdr(f.intakeMessage); await f.runtime.flushOutbound(); await f.runtime.receiveHerdr(f.intakeMessage); } },
-  { name: "specifying", run: async f => {
-    const request = RoleMessageSchema.parse(await f.runtime.requestSpecialist("run-1", "architect", "Analyze impact", ["architecture"]));
-    await f.runtime.flushOutbound();
-    await f.runtime.receiveHerdr(f.reply("architect", request, "spec.draft", { status: "completed", summary: "Impact analysis" }));
-    await f.runtime.flushOutbound();
-  } },
-  { name: "planned", run: async f => { await f.runtime.proposeWorkflow("run-1", f.spec, f.def); } },
-  { name: "implemented", run: async f => { await f.runtime.tick(); await f.evidence(); await f.submit(); } },
-  { name: "task verified", run: async f => { await f.runtime.tick(); } },
-  { name: "workflow verified", run: async f => { await f.runtime.tick(); } },
-  { name: "completed", run: async f => { await f.approve(); } }
-];
-const names = stages.slice(0, -1).map(stage => stage.name);
-const index = (name: string) => stages.findIndex(stage => stage.name === name);
-async function through(f: LifecycleFixture, last: string) { for (const stage of stages.slice(0, index(last) + 1)) await stage.run(f); }
-async function drive(f: LifecycleFixture, after: string, maxResumes: number): Promise<number> {
-  let resumes = 0;
-  for (const stage of stages.slice(index(after) + 1)) {
-    const current = await f.run();
-    if (current.status === "escalated") {
-      expect(current.pendingAction, `before ${stage.name}: escalated without a resumable action (${current.error})`).toBeDefined();
-      expect(++resumes, `before ${stage.name}: more explicit resumes than allowed (${current.error})`).toBeLessThanOrEqual(maxResumes);
-      await f.runtime.resumeBlockedRun("run-1", current.pendingAction!.actionId);
-      await f.runtime.flushOutbound();
-    }
-    await stage.run(f);
-  }
-  const final = await f.run();
-  expect(final.status, `final error: ${final.error}`).toBe("completed");
-  return resumes;
-}
-/** A live run must be progressing, validly waiting, or carry an explicit resumable action; never a silent terminal escalation. */
-async function expectActionable(f: LifecycleFixture, label: string) {
-  const current = await f.run();
-  if (current.status === "escalated") expect(current.pendingAction, `${label}: escalated without a resumable action (${current.error})`).toBeDefined();
-  expect(["failed"].includes(current.status) && !current.error, `${label}: failed without a reason`).toBe(false);
-}
-
 describe.skipIf(process.platform === "win32")("whole-run lifecycle fault matrix (extended)", () => {
-  it.each(names)("a Runtime restart after %s resumes the same run to completion without manual help", async last => {
-    const f = await lifecycleFixture(cleanups);
-    await through(f, last);
-    const restarted = await f.restartProcess(); await restarted.resumeRecoverableRuns();
-    expect(await drive(f, last, 0)).toBe(0);
-    expect(f.sentTo("developer").length).toBeLessThanOrEqual(1);
-  });
-
-  it("a process lost while task verification was running re-verifies after restart and completes", async () => {
-    const f = await lifecycleFixture(cleanups);
-    await through(f, "implemented");
-    const hold = f.hold("task");
-    const ticking = f.runtime.tick();
-    // The simulated dead process still has a live coroutine and gate timeout in this test process.
-    // Drain it before the fixture closes its stores/removes artifacts, including on assertion failure.
-    void ticking.catch(() => undefined); // teardown awaits and surfaces any rejection
-    cleanups.push(async () => { hold.release(); await ticking; });
-    await hold.reached;
-    await f.restartProcess();
-    expect(await drive(f, "implemented", 0)).toBe(0);
-  });
-
   it.each(names)("cancellation after %s stops the run without further dispatch or escalation", async last => {
     const f = await lifecycleFixture(cleanups);
     await through(f, last);

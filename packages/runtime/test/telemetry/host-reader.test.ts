@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, mkdir, writeFile, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -17,7 +17,8 @@ it("does not create host configuration, locks, sockets or runtime stores when th
   expect(JSON.stringify(report)).not.toContain(join(root, "host"));
 });
 it("uses only the existing authenticated report RPC and rejects a foreign report", async () => {
-  const root = await mkdtemp("/tmp/bflow-telemetry-"); roots.push(root);
+  // Host configuration always records the canonical repository path; macOS /tmp is a symlink to /private/tmp.
+  const root = await realpath(await mkdtemp("/tmp/bflow-telemetry-")); roots.push(root);
   const directory = join(root, ".bflow/state/host/session"); await mkdir(directory, { recursive: true, mode: 0o700 });
   const socketPath = join(root, "control.sock");
   await writeFile(join(directory, "host.json"), JSON.stringify({ repositoryPath: root, sessionId: "session", directory, socketPath, token: "test-token" }), { mode: 0o600 });

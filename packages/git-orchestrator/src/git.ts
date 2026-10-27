@@ -90,6 +90,28 @@ export async function resolveCommit(cwd: string, ref: string): Promise<string> {
   return commit;
 }
 
+/**
+ * Run several rev-parse queries in one Git process. Output is one line per query, so a path
+ * containing a newline cannot be split unambiguously; then query each one separately.
+ */
+async function revParseLines(cwd: string, combined: readonly string[], separate: readonly (readonly string[])[]): Promise<string[]> {
+  const lines = (await git(cwd, ["rev-parse", ...combined])).split("\n");
+  if (lines.length === separate.length + 1 && lines.pop() === "") return lines;
+  const values: string[] = [];
+  for (const args of separate) values.push((await git(cwd, ["rev-parse", ...args])).replace(/\n$/, ""));
+  return values;
+}
+
+/** Worktree root and common Git directory (the repository identity), without reading HEAD or status. */
+export async function repositoryPaths(cwd: string): Promise<{ root: string; commonDir: string }> {
+  const [topLevel, common] = await revParseLines(cwd, ["--path-format=absolute", "--show-toplevel", "--git-common-dir"],
+    [["--show-toplevel"], ["--path-format=absolute", "--git-common-dir"]]) as [string, string];
+  const root = await realpath(topLevel);
+  return { root, commonDir: await realpath(isAbsolute(common) ? common : resolve(root, common)) };
+}
+
+export type RepositoryInspection = Awaited<ReturnType<typeof inspectRepository>>;
+
 export async function inspectRepository(cwd: string): Promise<{
   root: string;
   commonDir: string;
@@ -98,9 +120,7 @@ export async function inspectRepository(cwd: string): Promise<{
   dirty: boolean;
   status: string;
 }> {
-  const root = await realpath((await git(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, ""));
-  const common = (await git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).replace(/\n$/, "");
-  const commonDir = await realpath(isAbsolute(common) ? common : resolve(root, common));
+  const { root, commonDir } = await repositoryPaths(cwd);
   let branch: string | null;
   try {
     branch = (await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"])).trim();
@@ -114,7 +134,14 @@ export async function inspectRepository(cwd: string): Promise<{
 }
 
 export async function assertClean(cwd: string): Promise<void> {
-  const repository = await inspectRepository(cwd);
+  await assertInspectedClean(await inspectRepository(cwd));
+}
+
+/**
+ * Clean-state checks for an inspection taken by the same operation, with no Git mutation since. Never pass an inspection
+ * across a mutation or a later operation: it would hide changes made in between.
+ */
+export async function assertInspectedClean(repository: RepositoryInspection): Promise<void> {
   if (repository.dirty) throw new Error("Git working tree has uncommitted changes");
   // Porcelain and Git worktree remove both trust these index flags and can silently
   // ignore modified tracked bytes. Do not clear flags or discard the hidden edits.
@@ -123,8 +150,11 @@ export async function assertClean(cwd: string): Promise<void> {
     throw new GitOrchestrationError("unsupported_index_flags",
       "Git index contains assume-unchanged or skip-worktree flags; inspect hidden changes and clear those flags explicitly before proceeding");
   }
-  for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]) {
-    const markerPath = (await git(repository.root, ["rev-parse", "--git-path", marker])).replace(/\n$/, "");
+  const markers = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"];
+  const markerPaths = await revParseLines(repository.root, markers.flatMap(marker => ["--git-path", marker]),
+    markers.map(marker => ["--git-path", marker]));
+  for (const [index, marker] of markers.entries()) {
+    const markerPath = markerPaths[index]!;
     try {
       await lstat(resolve(repository.root, markerPath));
     } catch (error) {
