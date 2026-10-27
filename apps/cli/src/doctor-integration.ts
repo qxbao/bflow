@@ -180,7 +180,7 @@ export async function runDoctorDiagnostics(
     });
   }
 
-  // runtime-node
+  // runtime-verification-sandbox
   const sandbox = EnvironmentDoctorCheckSchema.parse(await diagnoseVerificationSandbox(repository.root));
   runtimeChecks.push({
     checkId: sandbox.checkId, group: "runtime", component: "verification-sandbox",

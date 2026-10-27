@@ -318,7 +318,7 @@ export function resolveActionableRemediation(
   }
 
   if (msg.includes("verification_sandbox_unavailable") || msg.includes("Runtime independent verification capability unavailable")) {
-    return "Chạy 'bflow doctor' để kiểm tra sandbox xác minh; xem cách cài Bubblewrap/cấp quyền userns AppArmor tại packages/runtime/README.md, rồi chạy lại 'bflow up'.";
+    return "Chạy 'bflow doctor' để xem nguyên nhân và cách khắc phục sandbox xác minh (cài Bubblewrap hoặc cấp quyền userns AppArmor cho bwrap), rồi chạy lại 'bflow up'.";
   }
 
   // 3. Check for specific authored instructions already embedded in the message

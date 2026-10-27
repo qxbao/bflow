@@ -54,7 +54,6 @@ describe("Presentation & Formatting Engine", () => {
       message: "verification_sandbox_unavailable: AppArmor user namespace restriction is enabled; " + "x".repeat(1000) }, "up", false);
     expect(out).toContain("AppArmor");
     expect(out).toContain("bflow doctor");
-    expect(out).toContain("packages/runtime/README.md");
     expect(out).not.toContain("bflow up --help");
   });
   describe("1. Stream Color Resolution Matrix", () => {

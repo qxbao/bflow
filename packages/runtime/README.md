@@ -27,7 +27,10 @@ bflow up
 ```
 
 The profile persists across reboot and grants user namespace creation to the system
-Bubblewrap binary only. Keep the system-wide restriction enabled; do not make `bwrap`
+Bubblewrap binary only. Security trade-off: every local user can then create unconfined user
+namespaces through `/usr/bin/bwrap`, which partly bypasses the system-wide restriction; the
+administrator must accept that before installing it. The profile does not cover a Bubblewrap
+found elsewhere on `PATH` (for example `/usr/local/bin/bwrap`); doctor names the probed launcher. Keep the system-wide restriction enabled; do not make `bwrap`
 setuid or change provider permission modes to avoid this check. Other namespace restrictions
 (for example container policy) still need host administrator diagnosis. A failed startup
 does not prove existing roles stopped: preserve `.bflow` and reconcile with `bflow doctor`;

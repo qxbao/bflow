@@ -1,5 +1,8 @@
 # Grant user namespace creation to the distribution Bubblewrap binary only.
 # Keep kernel.apparmor_restrict_unprivileged_userns enabled system-wide.
+# Security trade-off: any local user can then create unconfined user namespaces through
+# /usr/bin/bwrap, which partly bypasses the restriction. Prefer repairing an existing
+# distribution profile; install this one only after an administrator accepts that risk.
 abi <abi/4.0>,
 include <tunables/global>
 

@@ -71,3 +71,23 @@ it("never executes a repository-controlled Bubblewrap", async () => {
   expect(await diagnoseVerificationSandbox("/repo")).toMatchObject({ status: "failed" });
   expect(mocks.exec).not.toHaveBeenCalled();
 });
+it("keeps the first launcher's diagnosis and names a launcher the bundled AppArmor profile does not cover", async () => {
+  linux();
+  vi.stubEnv("PATH", "/usr/local/bin:/usr/bin");
+  mocks.readFile.mockResolvedValue("1\n");
+  mocks.exec.mockImplementation((binary, _args, _options, callback) => callback(Object.assign(new Error("failed"),
+    { stderr: binary === "/usr/local/bin/bwrap" ? "bwrap: setting up uid map: Permission denied\n" : "bwrap: unrelated failure\n" })));
+  const result = await diagnoseVerificationSandbox();
+  expect(mocks.exec).toHaveBeenCalledTimes(2);
+  expect(result).toMatchObject({ status: "failed", message: expect.stringContaining("/usr/local/bin/bwrap") });
+  expect(result.message).not.toContain("unrelated failure");
+  expect(result.remediation).toContain("attaches to /usr/bin/bwrap only");
+});
+it("points a denied system Bubblewrap at the bundled profile by absolute path", async () => {
+  linux();
+  mocks.readFile.mockResolvedValue("1\n");
+  mocks.exec.mockImplementation((_binary, _args, _options, callback) =>
+    callback(Object.assign(new Error("failed"), { stderr: "bwrap: setting up uid map: Permission denied\n" })));
+  const result = await diagnoseVerificationSandbox();
+  expect(result.remediation).toMatch(/^Have an administrator review and install \/.*support\/bflow-bwrap\.apparmor/);
+});
