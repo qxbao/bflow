@@ -73,6 +73,17 @@ Apply a viewpoint only when its trigger condition holds for the assigned task:
 - **Input / Action / Expected observation:** Run `pnpm build` when workers/subprocesses import `dist/`, then invoke the real entrypoint (CLI command runner, composed service or served application origin) across the connected components. Observe end-to-end ingress validation, side effect and output.
 - **Evidence to collect:** `integration_test` or `e2e_test` log exercising the real entrypoint at the candidate revision.
 
+### 3.8 Concurrency, race, locking and atomicity (discriminating tests)
+
+- **When to apply:** Criteria or code involving race conditions, concurrency, locks/mutexes, mutual exclusion, atomic updates, ordering, lease/fence races or duplicate concurrent delivery. Mark `N/A` for code with no shared mutable state and no async boundary.
+- **Risk to check:** A read-check-write sequence split by an `await`, timer, I/O or event-loop turn so two operations interleave; a lock that is missing, bypassed or released early; a final-count invariant that holds even without the protection.
+- **Discriminating rule:** A race test is acceptable only when it has both:
+  1. **An interleaving point inside the critical section** (an `await`, injected clock/hook/barrier, deferred promise or controllable fake that yields between the read and the write), so two operations can actually overlap.
+  2. **A negative control:** with the protection removed or replaced by a pass-through (for example lock → no-op), the same test fails. Record the observed failure, or plan the mutation check with its expected failure.
+- **Not sufficient:** `Promise.all` over purely synchronous critical sections, asserting only the final invariant (such as "5 of 25 acquires succeed"), or a test that still passes with the lock removed. Classify these as `invariant coverage` and state that race safety is unproven.
+- **Input / Action / Expected observation:** Hold the first operation at the interleaving point, start the competing operation(s), release, then assert the invariant. Expected: the protected implementation passes; the mutated implementation fails the same named test.
+- **Evidence to collect:** Test log naming the interleaving point and the mutation result (`lock → no-op` → named test fails, nonzero exit) at the candidate revision. Run the mutation only in an isolated copy, never in the candidate worktree; if that is not permitted, report a prerequisite gap instead of accepting the criterion. Owners can enforce this negative control with an owner-configured `mutationChecks` entry in the repository's owner verification configuration (documented in the Runtime verification-runners guide).
+
 ## 4. Unit test vs integration/E2E boundaries and prerequisite gaps
 
 | Level | What it proves | What it still leaves unproven |

@@ -1194,6 +1194,100 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
       await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
     } catch (error) { await ticking; throw error; }
   });
+  it("renews an accepted review's lease while the verifier awaits a reply longer than one lease period", async () => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit();
+    let delivered!: (request: AgentRequest) => void;
+    const delivery = new Promise<AgentRequest>(resolve => { delivered = resolve; });
+    const send = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (request, options) => {
+      const receipt = await send(request, options);
+      if (JSON.parse(request.instruction).type === "verification.requested") delivered(request);
+      return receipt;
+    });
+    const tools = new CoordinatorTools(f.runtime);
+    await tools.invoke("tick", {}, { role: "coordinator" });
+    const ticking = tools.drain(); ticking.catch(() => undefined);
+    try {
+      const request = await Promise.race([delivery, ticking.then(() => { throw new Error("Runtime tick completed before delivering the Reviewer request"); })]);
+      f.panes.busy.add("reviewer"); // the Reviewer is still working on the accepted request
+      const message = JSON.parse(request.instruction);
+      const lease = async () => ((await f.runtime.inspect()) as any).outbound.find((out: any) => out.message.message_id === message.message_id).lease;
+      await expect.poll(async () => (await lease())?.version, { timeout: 15000 }).toBeDefined();
+      const before = await lease();
+      // Simulate the lease approaching expiry mid-review; tick() is blocked on this gate, so only the wait timer can renew it.
+      await (f.runtime as any).journal.exclusive(async (journal: any, save: any) => {
+        journal.outbound.find((out: any) => out.message.message_id === message.message_id).lease.expiresAt = new Date(Date.now() + 60_000).toISOString(); await save();
+      });
+      await expect.poll(async () => (await lease()).version, { timeout: 15000 }).toBeGreaterThan(before.version);
+      expect(Date.parse((await lease()).expiresAt)).toBeGreaterThan(Date.now() + 240_000);
+      f.panes.busy.delete("reviewer");
+      const result = unwrap(await f.localReview(message.payload));
+      await f.runtime.receiveHerdr(f.envelope("review.verdict", result, { sender: { role: "reviewer", agent_id: request.target.agentId, pane_id: request.target.paneId }, causation_id: message.message_id }));
+      await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
+    } catch (error) { await ticking.catch(() => undefined); throw error; }
+  }, 60000);
+  it("records one closed host review timing with the Reviewer provider after a verdict", async () => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    await f.evidence("implement"); await f.submit();
+    let delivered!: (request: AgentRequest) => void;
+    const delivery = new Promise<AgentRequest>(resolve => { delivered = resolve; });
+    const send = f.transport.send.bind(f.transport);
+    vi.spyOn(f.transport, "send").mockImplementation(async (request, options) => {
+      const receipt = await send(request, options);
+      if (JSON.parse(request.instruction).type === "verification.requested") delivered(request);
+      return receipt;
+    });
+    const tools = new CoordinatorTools(f.runtime);
+    await tools.invoke("tick", {}, { role: "coordinator" });
+    const ticking = tools.drain(); ticking.catch(() => undefined);
+    try {
+      const request = await Promise.race([delivery, ticking.then(() => {
+        throw new Error("Runtime tick completed before delivering the Reviewer request");
+      })]);
+      const message = JSON.parse(request.instruction);
+      const result = unwrap(await f.localReview(message.payload));
+      await f.runtime.receiveHerdr(f.envelope("review.verdict", result, { sender: { role: "reviewer", agent_id: request.target.agentId, pane_id: request.target.paneId }, causation_id: message.message_id }));
+      await ticking; expect((await f.inspect()).tasks[0].cycle.status).toBe("passed");
+    } catch (error) { await ticking.catch(() => undefined); throw error; }
+    const timings = ((await f.runtime.inspect("run-1")) as any).reviewTimings.filter((item: any) => item.gateId === "review");
+    expect(timings).toHaveLength(1);
+    expect(timings[0]).toMatchObject({ gateId: "review", role: "reviewer", provider: "test", outcome: "verdict", timeoutMs: 3000 });
+    expect(typeof timings[0].completedAt).toBe("string");
+    expect(Date.parse(timings[0].completedAt)).toBeGreaterThanOrEqual(Date.parse(timings[0].startedAt));
+  });
+  it("emits one near-deadline note for a review wait that has used 80% of its budget, however many timer ticks follow", async () => {
+    const f = await fixture({ remoteReview: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const definition = (f.ports as any).taskChecks.find((check: any) => check.id === "review");
+    const context = { runId: "run-1", taskId: "implement", attemptId: "near-deadline-review", artifacts: [], input: { scope: "task" },
+      definition: { ...definition, timeout: { ...definition.timeout, executionTimeoutMs: 20_000 } } };
+    const control = new AbortController(), waiting = f.runtime.herdrQualityGate("review").evaluate(context as any, { signal: control.signal });
+    waiting.catch(() => undefined);
+    const timings = async () => ((await f.runtime.inspect("run-1")) as any).reviewTimings ?? [];
+    const notes = async () => ((await f.runtime.inspect()) as any).outbound.filter((out: any) => out.message.type === "conversation.progress" &&
+      String(out.message.payload.headline).includes("80%"));
+    try {
+      await expect.poll(async () => (await timings()).length, { timeout: 10_000 }).toBe(1);
+      // Age the open wait to 85% of its 20 s budget; only the existing 1 s wait timer can notice it.
+      await (f.runtime as any).journal.exclusive(async (state: any, save: any) => {
+        state.runs.find((run: any) => run.runId === "run-1").reviewTimings[0].startedAt = new Date(Date.now() - 17_000).toISOString();
+        await save();
+      });
+      await expect.poll(async () => (await notes()).length, { timeout: 8_000 }).toBe(1);
+      await new Promise(resolve => setTimeout(resolve, 3_000));
+      expect(await notes()).toHaveLength(1);
+      expect((await notes())[0].message.payload.headline).toContain("used 80% of its 20 s budget (provider test).");
+      const [open] = await timings();
+      expect(typeof open.nearDeadlineAt).toBe("string");
+      expect(open.completedAt).toBeUndefined();
+    } finally { control.abort(); await waiting.catch(() => undefined); }
+    const [settled] = await timings();
+    expect(settled).toMatchObject({ outcome: "aborted" });
+    expect(typeof settled.completedAt).toBe("string");
+  }, 30000);
   it("dispatches an already queued review when readiness returns while the verifier is awaiting its reply", async () => {
     const f = await fixture({ remoteReview: true });
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();

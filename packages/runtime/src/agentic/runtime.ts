@@ -12,7 +12,7 @@ import {
   type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
 import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
-  type ConflictResolverAttempt, type Outbound, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
+  type ConflictResolverAttempt, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
   FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE,
@@ -29,6 +29,7 @@ import { taskLogAssignmentContextFromSnapshot, taskLogBusinessTaskId, toolAction
 import { join } from "node:path";
 import { CONVERSATION_DELIVERY_MAX_ATTEMPTS, DISPATCH_FAILURE_NOTICE_ATTEMPTS, HerdrOutbox, NOT_READY_FAILURE_MS, unwrap } from "./outbox.js";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts, type Integration, type VerificationPlan } from "./ports.js";
+import { dependencyHeadsFor, prepareDependencyBaseWorktree } from "./dependency-base.js";
 import { WorkflowProposalRejected, WorkflowRejectionCodeSchema, reportsToUser, type WorkflowRejection } from "./workflow-rejection.js";
 import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
@@ -43,6 +44,7 @@ import {
   type ReworkResolutionDossier
 } from "./rework-causality.js";
 import { InspectInputSchema, summarizeInspectRun, summarizeInspectState, type InspectInput } from "./mcp-output-views.js";
+import { parseAppCheckIdentity } from "./app-check-config.js";
 
 /** Existing receipt and diagnostic operations that may drain after scheduling is quiesced. */
 export const QUIESCED_RECEIPT_DRAIN_OPERATIONS: readonly string[] = Object.freeze([
@@ -244,6 +246,7 @@ type Admission = { kind: "new" } | { kind: "duplicate" } | { kind: "revision"; r
 const REJECTED_REVISION_OPTIONS = ["Gửi revision mới hợp lệ", "Tạo run mới", "Hủy run"];
 
 /** Durable single-writer orchestration. No LLM calls, polling artifacts, or synchronous inter-agent waits. */
+const REVIEW_TIMEOUT_MESSAGE = "Herdr verification reply timeout; delivery remains reconcilable";
 export class AgenticWorkflowRuntime {
   private readonly journal: AgenticJournal;
   private taskLogAssignmentSnapshot: Record<string, unknown>[] = [];
@@ -1013,6 +1016,8 @@ export class AgenticWorkflowRuntime {
       let timer: ReturnType<typeof setTimeout> | undefined;
       let dispatchTimer: ReturnType<typeof setInterval> | undefined;
       let dispatching = false;
+      const reviewTiming: { opened: boolean } = { opened: false };
+      const reviewer = await this.reviewerForTiming(role);
       try {
         await this.transaction(async (state, save, _core, outbox) => {
           const run = this.run(state, context.runId); this.live(run);
@@ -1042,6 +1047,10 @@ export class AgenticWorkflowRuntime {
             key = `gate-${digest([context, attempt++])}`;
           }
           this.gateWaiters.set(key, { runId: context.runId, accept: finish, reject: rejectReply });
+          reviewTiming.opened = this.openReviewTiming(run, { key, gateId: context.definition.id, role, taskId: context.taskId,
+            timeoutMs: context.definition.timeout.executionTimeoutMs, binding: reviewer,
+            startedAt: state.outbound.find(out => out.message.message_id === key)?.message.occurred_at ?? this.now() });
+          if (reviewTiming.opened) await save();
           const unanswered = state.outbound.find(out => out.message.message_id === key);
           if (unanswered) {
             // Resume a known-delivered read-only request in its SAME native session. The original request/handle and
@@ -1089,20 +1098,31 @@ export class AgenticWorkflowRuntime {
         });
         await this.flushOutbound();
         // tick() awaits this gate. Keep its existing queued request dispatchable when a delivery hold or pane readiness
-        // recovers during the wait; Outbox retains all lease/fence, uncertainty, cancellation and backoff checks.
+        // recovers during the wait, and renew an accepted review's lease before it lapses (a review may outlive one lease
+        // period); Outbox retains all lease/fence, uncertainty, cancellation and backoff checks.
         dispatchTimer = setInterval(() => {
           if (dispatching || this.quiesced || options?.signal?.aborted) return;
           dispatching = true;
           void (async () => {
-            const queued = await this.journal.exclusive(async state => state.outbound.some(out => out.message.message_id === key && out.status === "queued"));
-            if (queued && !this.quiesced && !options?.signal?.aborted) await this.flushOutbound();
+            if (reviewTiming.opened) await this.noteReviewNearDeadline(context.runId, key);
+            const due = await this.journal.exclusive(async state => state.outbound.some(out => out.message.message_id === key && (out.status === "queued" ||
+              out.status === "accepted" && out.lease !== undefined && Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)));
+            if (due && !this.quiesced && !options?.signal?.aborted) await this.flushOutbound();
           })().catch(rejectReply).finally(() => { dispatching = false; });
         }, 1_000);
         dispatchTimer.unref();
-        const outcome = await Promise.race([reply, new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("Herdr verification reply timeout; delivery remains reconcilable")), context.definition.timeout.executionTimeoutMs);
-        })]);
+        let outcome: QualityGateResult;
+        try {
+          outcome = await Promise.race([reply, new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(REVIEW_TIMEOUT_MESSAGE)), context.definition.timeout.executionTimeoutMs);
+          })]);
+        } catch (error) {
+          if (reviewTiming.opened) await this.settleReviewTiming(context.runId, key,
+            error instanceof Error && error.message === REVIEW_TIMEOUT_MESSAGE ? "timeout" : "aborted");
+          throw error;
+        }
         // Authentication proves the host origin, not complete per-finding judgment (including old receipts).
+        let rejected: Awaited<ReturnType<QualityGate["evaluate"]>> | undefined;
         try {
           await this.journal.exclusive(async state => {
           const task = this.run(state, context.runId).tasks.find(t => t.taskId === context.taskId);
@@ -1111,19 +1131,80 @@ export class AgenticWorkflowRuntime {
           else if (context.taskId && context.attemptId && hasReworkAssignment(state.outbound, context.runId, context.taskId, context.attemptId)) throw new Error("Missing rework dossier for independent finding verification");
           });
         } catch (error) {
-          return { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
+          rejected = { ok: false, error: { code: "validation", retryable: false, message: String(error) } };
         }
-        return { ok: true, value: outcome };
-      } finally { if (timer) clearTimeout(timer); if (dispatchTimer) clearInterval(dispatchTimer); options?.signal?.removeEventListener("abort", abort); this.gateWaiters.delete(key); }
+        if (reviewTiming.opened) await this.settleReviewTiming(context.runId, key, rejected ? "rejected" : "verdict");
+        return rejected ?? { ok: true, value: outcome };
+      } finally {
+        if (timer) clearTimeout(timer); if (dispatchTimer) clearInterval(dispatchTimer); options?.signal?.removeEventListener("abort", abort); this.gateWaiters.delete(key);
+        // Any other exit (for example a failed flush) must not leave an open wait; an already settled wait is untouched.
+        if (reviewTiming.opened) await this.settleReviewTiming(context.runId, key, "aborted");
+      }
     } };
+  }
+  /** Role binding provider/agent for review timing. Outside the journal lock; failures leave the timing unattributed. */
+  private async reviewerForTiming(role: string): Promise<{ agentId: string; provider: string } | undefined> {
+    try {
+      const binding = unwrap(await this.ports.panes.getRoleBinding(role));
+      return binding ? { agentId: binding.agentId, provider: binding.provider } : undefined;
+    } catch { return undefined; }
+  }
+  /** Upserts the open wait for one review request (the same key keeps its original start). Pure state update, never throws. */
+  private openReviewTiming(run: RunRecord, timing: { key: string; gateId: string; role: string; taskId?: string | undefined; timeoutMs: number;
+    startedAt: string; binding?: { agentId: string; provider: string } | undefined }): boolean {
+    try {
+      const prior = run.reviewTimings ?? [];
+      const existing = prior.find(item => item.key === timing.key);
+      const next: ReviewTiming = { key: timing.key, gateId: timing.gateId, role: timing.role, startedAt: timing.startedAt, timeoutMs: timing.timeoutMs,
+        ...(timing.taskId ? { taskId: timing.taskId } : {}),
+        ...(timing.binding ? { agentId: timing.binding.agentId, provider: timing.binding.provider } : {}),
+        ...(existing?.nearDeadlineAt ? { nearDeadlineAt: existing.nearDeadlineAt } : {}) };
+      run.reviewTimings = (existing ? prior.map(item => item === existing ? next : item) : [...prior, next]).slice(-200);
+      return true;
+    } catch { return false; }
+  }
+  /** Closes the wait once. Runs after the race, outside any other transaction; failures never change the gate outcome. */
+  private async settleReviewTiming(runId: string, key: string, outcome: NonNullable<ReviewTiming["outcome"]>): Promise<void> {
+    try {
+      await this.journal.exclusive(async (state, save) => {
+        const timing = state.runs.find(item => item.runId === runId)?.reviewTimings?.find(item => item.key === key);
+        if (!timing || timing.completedAt !== undefined) return;
+        timing.completedAt = this.now(); timing.outcome = outcome;
+        await save();
+      });
+    } catch { /* Telemetry bookkeeping is best effort. */ }
+  }
+  /** One Conversation note per review wait at 80% of its budget. Called only from the wait's 1 s timer; never throws. */
+  private async noteReviewNearDeadline(runId: string, key: string): Promise<void> {
+    try {
+      const due = await this.journal.exclusive(async state => {
+        const timing = state.runs.find(item => item.runId === runId)?.reviewTimings?.find(item => item.key === key);
+        return timing !== undefined && timing.completedAt === undefined && timing.nearDeadlineAt === undefined &&
+          Date.parse(this.now()) - Date.parse(timing.startedAt) >= 0.8 * timing.timeoutMs;
+      });
+      if (!due) return;
+      const noted = await this.transaction(async (state, save, _core, outbox) => {
+        const run = state.runs.find(item => item.runId === runId);
+        const timing = run?.reviewTimings?.find(item => item.key === key);
+        if (!run || !timing || timing.completedAt !== undefined || timing.nearDeadlineAt !== undefined) return false;
+        timing.nearDeadlineAt = this.now();
+        this.progress(state, outbox, run, `Independent ${timing.role} review of ${timing.taskId ?? "the task"} has used 80% of its ${Math.round(timing.timeoutMs / 1000)} s budget (provider ${timing.provider ?? "unknown"}).`);
+        await save();
+        return true;
+      });
+      // tick() is blocked on this wait, so the note must be delivered from here.
+      if (noted) await this.flushOutbound();
+    } catch { /* Telemetry bookkeeping is best effort. */ }
   }
   /** Read-only projection: no Core restore/flush, tick, transaction save or acceptance decision. */
   async telemetryReport(runId: string, asOf: string) {
     const context = await this.journal.exclusive(async state => {
       const run = state.runs.find(run => run.runId === runId);
-      return { status: run?.status, supersededApprovalIds: run?.supersededApprovals?.map(item => item.approvalId) ?? [] };
+      return { status: run?.status, supersededApprovalIds: run?.supersededApprovals?.map(item => item.approvalId) ?? [],
+        reviewTimings: structuredClone(run?.reviewTimings ?? []) };
     });
-    const report = await readWorkflowTelemetry(this.ports.runStore, runId, { source: "agentic", asOf, supersededApprovalIds: context.supersededApprovalIds });
+    const report = await readWorkflowTelemetry(this.ports.runStore, runId, { source: "agentic", asOf,
+      supersededApprovalIds: context.supersededApprovalIds, reviewTimings: context.reviewTimings });
     report.hostWorkStatus = context.status ?? null;
     if (report.coverage.events === 0 && context.status && ["completed", "failed", "cancelled", "escalated"].includes(context.status)) {
       report.outcome = context.status; report.outcomeSource = "host_journal";
@@ -2941,17 +3022,16 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (state.outbound.some(out => out.message.idempotency_key === id)) continue;
       const agentName = `dev-${digest([run.runId, taskState.attemptId]).slice(0, 20)}`;
       const prior = task.changeSet;
-      // A rework attempt continues its own previous head. A first attempt with exactly one dependency builds on that
-      // dependency's verified change: starting from the run base would make the Developer redo it and leave integration
-      // to merge two unrelated versions of the same files. Several dependencies still start from the run base and are
-      // combined by dependency-ordered integration.
-      const dependencies = run.definition!.dependencies.filter(dep => dep.taskId === task.taskId);
-      const dependencyHead = dependencies.length === 1
-        ? run.tasks.find(item => item.taskId === dependencies[0]!.dependsOnTaskId)?.changeSet?.headCommitHash : undefined;
-      const tree = await this.ports.policies.git.prepareTask({ runId: run.runId, taskId: task.taskId,
-        attemptId: taskState.attemptId!, baseRevision: prior?.headCommitHash ?? dependencyHead ?? run.baseRevision!,
-        ownedPaths: strings(record(definition.metadata).ownedPaths),
-        forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName });
+      // A dependent task starts from its verified dependencies' heads; a fallback attempt stays on the run base once its merge conflicted.
+      const dependencyHeads = prior || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
+      const { tree, conflict } = await prepareDependencyBaseWorktree(this.ports.policies.git, { runId: run.runId, taskId: task.taskId,
+        attemptId: taskState.attemptId!, ownedPaths: strings(record(definition.metadata).ownedPaths),
+        forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName },
+      { runBaseRevision: run.baseRevision!, priorHead: prior?.headCommitHash, dependencyHeads });
+      if (conflict !== undefined) {
+        task.dependencyBaseFallback = taskState.attemptId!;
+        this.progress(state, outbox, run, `Dependency outputs of ${task.taskId} overlap; starting from the run base and leaving the overlap to final integration. ${conflict}`);
+      }
       if (!task.worktrees.some(item => item.key === tree.key)) task.worktrees.push(tree);
       await save();
       const allocation = await this.ports.panes.allocateDeveloper({
@@ -3438,7 +3518,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (methodBound && !dossier.strategy.targetCommands.includes(String(config.command))) return [];
       const names = methodBound && check.metadata?.boundRunnerIdentities !== true ? dossier.strategy.criterionMappings.filter(mapping => dossier.specification.acceptanceCriteria.some(criterion =>
         criterion.id === mapping.criterionId && criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === config.method))
-        .flatMap(mapping => mapping.testNames) : config.testNames;
+        .flatMap(mapping => mapping.testNames)
+        // Real-app identities belong only to their owner gate (boundRunnerIdentities); an automatic runner never receives them.
+        .filter(name => parseAppCheckIdentity(name) === undefined) : config.testNames;
       const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
         (config.kind === "review" || criterion.verificationMethod === config.method && dossier.strategy.criterionMappings.some(mapping =>
           mapping.criterionId === criterion.id && mapping.testNames.length && mapping.testNames.every(name => Array.isArray(names) && names.includes(name)))));

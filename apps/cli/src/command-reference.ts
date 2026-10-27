@@ -93,9 +93,9 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     purpose: "Initialize bflow repository configuration and default workflow definition at the repository root, then index the repository with GitNexus and register its service on the machine Gateway after license approval.",
     reusedEngines: ["RepositoryConfigService", "DefaultWorkflowDefinition"],
     requiredFlags: [],
-    optionalFlags: ["--dir <path>", "--config <path>", "--name <name>", "--provider <claude|codex|agy>", "-f, --force", "-y, --yes", "-u, --update", "--check", "--remove", "--no-gitnexus", "-j, --json", "-h, --help"],
+    optionalFlags: ["--dir <path>", "--config <path>", "--name <name>", "--provider <claude|codex|agy>", "-f, --force", "-y, --yes", "--accept-gitnexus-license", "-u, --update", "--check", "--remove", "--no-gitnexus", "-j, --json", "-h, --help"],
     exitCodes: COMMON_EXIT_CODES,
-    idempotencyAndRetry: "Idempotent. Re-running without --force or --update verifies existing configuration without modifying it. The first GitNexus index asks for approval; non-interactive runs need --yes. --check is read-only; --remove also unregisters a repository deleted from disk.",
+    idempotencyAndRetry: "Idempotent. Re-running without --force or --update verifies existing configuration without modifying it. The first GitNexus index asks for approval; non-interactive runs need --yes or --accept-gitnexus-license (the latter keeps existing configuration). --check is read-only; --remove also unregisters a repository deleted from disk.",
     permissionRequirements: "Requires filesystem write access to the repository directory.",
     skills: ["using-bflow"]
   },

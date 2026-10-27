@@ -95,6 +95,8 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly noGitnexus?: boolean | undefined;
   /** Accepts the GitNexus license and repository index without prompting. */
   readonly yes?: boolean | undefined;
+  /** Accepts the GitNexus license and repository index only; unlike yes, never implies force. */
+  readonly acceptGitnexusLicense?: boolean | undefined;
 }
 
 export interface ConfigMigrateCommandArgs extends GlobalCliFlags {

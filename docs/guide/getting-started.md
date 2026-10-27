@@ -29,14 +29,14 @@ Git cần `user.name`/`user.email` để commit. `git archive` chỉ lấy nội
 Đăng nhập CLI của provider bạn chọn. Dùng `--provider claude` ở bước init nếu muốn dùng Claude; mặc định init là Codex. Với profile đã tạo qua `bflow iso`, chọn `profile-name` trong config. Không đặt toàn bộ role sang Agy vì Conversation cần trusted human-input hook mà Agy chưa cung cấp.
 
 ```bash
-bflow setup --dir .
+bflow init --check
 bflow doctor
 bflow tool status
 ```
 
 `doctor` kiểm tra role/profile/model trong config mà không model ping mặc định. Standalone `agent check` có thể tiêu hao usage và không thay kiểm tra profile của host. `mcp status` hiện chỉ có inventory mặc định; live Gateway port chưa được nối vào đường CLI đó.
 
-Setup lại ở đây chuẩn bị index và backend gắn repo; công cụ machine đã thỏa được tái sử dụng. Thiếu thành phần bắt buộc làm doctor/preflight fail. Công cụ tích hợp optional có thể degraded; xem reason và không suy installed là usable.
+`bflow init` ở bước trên đã chuẩn bị chỉ mục GitNexus và đăng ký dịch vụ `gitnexus-<repo>` của kho mã trên Gateway cấp máy (hỏi xác nhận giấy phép PolyForm-Noncommercial lần đầu, hoặc truyền `--yes`; dùng `--no-gitnexus` nếu muốn bỏ qua); công cụ cấp máy từ `bflow setup` được tái sử dụng. Thiếu thành phần bắt buộc làm doctor/preflight fail. Công cụ tích hợp optional có thể degraded; xem reason và không suy installed là usable.
 
 Xem lại `.bflow/config.yml`, rồi commit cấu hình trước khi triển khai:
 

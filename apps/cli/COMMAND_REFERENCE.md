@@ -6,24 +6,26 @@ Sau [bootstrap một lần](../../docs/guide/installation.md) bằng `node apps/
 
 | Lệnh | Hành vi / tùy chọn chính |
 | --- | --- |
-| `bflow --help`, `bflow help <command>` | Trợ giúp; `--version`/`-v` xem phiên bản |
-| `bflow setup` | Review/apply machine plan; tạo launcher/PATH, cài pins, skills và Gateway; login là thao tác riêng |
-| `bflow setup --check` | Quan sát prerequisite/drift, không ghi |
+| `bflow --help`, `bflow help <command>` | Trợ giúp; `--version`/`-v` xem phiên bản; `--debug` hiển thị chẩn đoán kỹ thuật đầy đủ |
+| `bflow setup` | Review/apply machine plan cấp máy; tạo launcher/PATH, cài pins, skills và Gateway; login là thao tác riêng |
+| `bflow setup --check` | Quan sát prerequisite/drift cấp máy (kết quả như nhau từ mọi thư mục), không ghi |
 | `bflow setup --dry-run` hoặc `--plan` | Preview plan, không áp dụng |
 | `bflow setup --apply --yes` | Chấp thuận machine plan không tương tác; không tự duyệt global hooks |
 | `bflow setup --repair --yes` | Plan/repair owned state/config theo receipt |
-| `bflow setup --dir <repo>` | Chuẩn bị workspace/backend/index; installation vẫn thuộc machine |
+| `bflow setup --dir <repo>` | Cờ tương thích ngược (`setup` áp dụng toàn máy; dùng `bflow init --dir <repo>` cho từng kho mã) |
 | `bflow setup --codex-hooks --plan` | Review hook inventory riêng, không cài tool/service |
 | `bflow setup --codex-hooks --apply` | Human snapshot approval; không tương tác cần `--yes --hook-digest <sha256>` |
 | `bflow init [--name <name>] [--provider codex\|claude\|agy] [--no-gitnexus]` | Tạo `.bflow/config.yml`, ignore file, index GitNexus và đăng ký service trên Gateway của máy; mặc định Codex, giữ config đã có |
 | `bflow init --update` | Bổ sung defaults/comment, giữ giá trị cũ; `--provider` tường minh đổi role providers |
 | `bflow init --check` hoặc `--remove` | `--check` chỉ đọc trạng thái repo/GitNexus; `--remove` gỡ đăng ký repo (kể cả repo đã xoá khỏi đĩa) |
 | `bflow init --force` hoặc `--yes` | Thay toàn bộ config bằng defaults mới; lần index GitNexus không tương tác cần `--yes`; khác nghĩa `setup --yes` |
+| `bflow init --accept-gitnexus-license` | Chỉ chấp nhận license và index GitNexus không tương tác, không ghi đè config; không kết hợp với `--no-gitnexus` hoặc `--check`/`--remove` |
 | `bflow config-migrate` | Chuyển `.yaml`/`.json` cũ sang `.yml`, giữ byte gốc trong `.bak` |
 | `bflow up [--timeout <ms>]` | Prepare persistent host/platform, preflight, launch qua Herdr, verify activated health |
 | `bflow attach` | TTY trực tiếp vào Conversation pane |
-| `bflow status` | Environment/host status; run ID hoặc filters chuyển sang legacy Runtime query |
-| `bflow doctor [--deep]` | Diagnostic report; mặc định không model ping, deep có thể tiêu hao usage |
+| `bflow status` | Environment/host status; truyền `<run-id>` không kèm `--telemetry` hoặc dùng filters chuyển sang legacy Runtime query |
+| `bflow status <run-id> --telemetry [--json]` | Báo cáo metric chỉ đọc cho `<run-id>` qua agentic host đang chạy ([TELEMETRY-SPEC.md](../../packages/runtime/TELEMETRY-SPEC.md)) |
+| `bflow doctor [--deep]` | Diagnostic report; mặc định không model ping, deep có thể tiêu hao usage. Check `runtime-verification-sandbox` chạy probe Bubblewrap/Seatbelt thật (chỉ đọc, không cài đặt); `bflow up` chỉ bị chặn bởi lỗi này khi repo có runner được phát hiện hoặc cấu hình |
 | `bflow down [--yes] [--force] [--timeout <ms>]` | Quiesce/checkpoint/revoke, rồi dừng owned panes/server; confirmation/force không bỏ Runtime barrier |
 | `bflow recover --yes` | Recover empty legacy directory lifecycle lock sau khi owner process đã chết; không reconstruct workflow |
 
@@ -74,7 +76,7 @@ bflow resume run-123 --idempotency-key resume-1
 bflow cancel run-123 --reason "Requirements changed"
 ```
 
-Chúng dùng legacy Runtime store/config, không tạo hoặc điều khiển P19 host. Với run được nhận qua Conversation, trả lời approval/revision/cancellation và operational resume trong **Conversation**; `status <run-id>` không thay host status. Không có `run --kind bugfix`. `--by` là actor label, không là auth/SSO.
+Chúng dùng legacy Runtime store/config, không tạo hoặc điều khiển P19 host. Với run được nhận qua Conversation, trả lời approval/revision/cancellation và operational resume trong **Conversation**; dùng `bflow status <run-id> --telemetry [--json]` khi cần đọc báo cáo metric từ agentic host đang chạy, còn `status <run-id>` không kèm `--telemetry` không thay host status. Không có `run --kind bugfix`. `--by` là actor label, không là auth/SSO.
 
 ## JSON, mã thoát và retry
 

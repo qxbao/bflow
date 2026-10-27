@@ -69,6 +69,7 @@ Tùy chọn (Options):
   --no-gitnexus         Bỏ qua lập chỉ mục GitNexus và đăng ký dịch vụ trên Gateway
   -f, --force           Ghi đè cấu hình hiện có bằng các giá trị mặc định mới
   -y, --yes             Tương đương --force, đồng thời chấp nhận giấy phép GitNexus PolyForm-Noncommercial không cần hỏi lại
+  --accept-gitnexus-license Chấp nhận giấy phép GitNexus PolyForm-Noncommercial và tạo chỉ mục mà không ghi đè cấu hình hiện có
   -u, --update          Tạo lại .bflow/config.yml với chú thích mới và các trường mặc định mới nhưng vẫn giữ nguyên giá trị hiện có
   -j, --json            Xuất kết quả theo định dạng phong bì JSON
       --debug           Hiển thị đầy đủ thông tin chi tiết và chẩn đoán kỹ thuật

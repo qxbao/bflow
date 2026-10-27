@@ -1711,6 +1711,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--check",
         "--remove",
         "--no-gitnexus",
+        "--accept-gitnexus-license",
         "--json",
         "-j",
         "--help",
@@ -1730,6 +1731,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--check",
         "--remove",
         "--no-gitnexus",
+        "--accept-gitnexus-license",
         "--json",
         "-j",
         "--help",
@@ -1785,13 +1787,17 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       const remove = optRes.value.flags.has("--remove");
       const noGitnexus = optRes.value.flags.has("--no-gitnexus");
       const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
+      const acceptGitnexusLicense = optRes.value.flags.has("--accept-gitnexus-license");
 
       if (check && remove) {
         return makeValidationError("Conflicting init mode flags '--check' and '--remove' cannot be combined.", json, "init");
       }
-      if ((check || remove) && (force || update || noGitnexus || projectName !== undefined || provider !== undefined)) {
+      if (acceptGitnexusLicense && noGitnexus) {
+        return makeValidationError("Option '--accept-gitnexus-license' cannot be combined with '--no-gitnexus'.", json, "init");
+      }
+      if ((check || remove) && (force || update || noGitnexus || acceptGitnexusLicense || projectName !== undefined || provider !== undefined)) {
         return makeValidationError(
-          `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--name', or '--provider'.`,
+          `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--accept-gitnexus-license', '--name', or '--provider'.`,
           json,
           "init"
         );
@@ -1809,6 +1815,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         ...(remove ? { remove: true } : {}),
         ...(noGitnexus ? { noGitnexus: true } : {}),
         ...(yes ? { yes: true } : {}),
+        ...(acceptGitnexusLicense ? { acceptGitnexusLicense: true } : {}),
         json,
         help: false
       };

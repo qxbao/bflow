@@ -19,6 +19,7 @@ import {
   createHostProviderFactoryOptions, createHostProviderAdapterFactory
 } from "../../src/agentic/host-platform.js";
 import { describeToolActions, validateMemoryActionOutput } from "../../src/agentic/tool-action-policy.js";
+import { readPinnedInstructionReply } from "../../src/agentic/host.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -822,6 +823,41 @@ describe("P30 host platform composition", () => {
     expect(await host.readPinnedInstructions("developer", undefined, 0, 8192, "launch-second")).toBeUndefined();
   });
 
+  it("pages verified SKILL.md by UTF-8 bytes without splitting characters and reassembles it exactly", async () => {
+    const skillText = `# Kỹ năng\n${"Tiếng Việt — ký tự đa byte 🚀 ".repeat(300)}`;
+    const service = fakeService({ prepareDeveloper: async (_identity, requirement) => {
+      const id = requirement.taskId!;
+      const value = prepared("developer", "codex", `launch-${id}`);
+      const manifest = { manifestId: `skills-${id}`, digest: "0".repeat(64), role: "developer", provider: "codex",
+        skills: [{ skillId: "vi-skill", version: "1.0.0", digest: "1".repeat(64) }] };
+      return { ok: true, value: { ...value, skills: { manifest, rendered: { instructionText: "Instructions", references: [] }, diagnostics: [] } } };
+    } });
+    const { options } = await session(service);
+    const host = new HostPlatformSession(options, { verify: async (manifest: unknown) => manifest } as never,
+      { getBundle: async () => ({ "SKILL.md": skillText }) } as never);
+    await host.prepare();
+    await host.allocateDeveloper("task", "/worktrees/task");
+    const read = (offset: number, limit: number) => host.readPinnedInstructions("developer", "vi-skill", offset, limit, "launch-task");
+    expect(Buffer.byteLength(skillText)).toBeGreaterThan(skillText.length);
+    // Offset 4 falls inside the three-byte character "ỹ" (bytes 3-5); the page starts at the next character boundary.
+    expect(await read(4, 97)).toMatchObject({ skill: { offset: 6, content: expect.stringMatching(/^ năng/) } });
+    // A limit smaller than one character still returns that whole character and makes progress.
+    expect(await read(3, 1)).toMatchObject({ skill: { offset: 3, bytes: 3, content: "ỹ", nextOffset: 6 } });
+    const parts: string[] = [];
+    for (let offset = 0, more = true; more; ) {
+      const skill = (await read(offset, 97))!.skill!;
+      expect(skill.bytes).toBe(Buffer.byteLength(skill.content));
+      expect(skill.offset).toBe(offset);
+      parts.push(skill.content);
+      more = skill.truncated;
+      if (more) expect(skill.nextOffset).toBe(skill.offset + skill.bytes);
+      else expect(skill.nextOffset).toBeUndefined();
+      offset = skill.nextOffset ?? offset;
+    }
+    expect(parts.join("")).toBe(skillText);
+    expect(await read(Buffer.byteLength(skillText), 8192)).toMatchObject({ skill: { bytes: 0, content: "", truncated: false } });
+  });
+
   it("carries the configured Developer model and effort through dynamic task allocation", async () => {
     const service = fakeService();
     const { options } = await session(service);
@@ -931,5 +967,39 @@ describe("P30 host platform composition", () => {
     expect(liveObservation("p1", { status: "exotic" }).transportState).toBe("unknown");
     expect(skillSupportedCommands({ ...platform, supportedCommands: ["skills sync"] })).toEqual(["skills sync"]);
     expect(skillSupportedCommands(platform)).toEqual([]);
+  });
+});
+
+describe("read_pinned_instructions reply", () => {
+  const pinned = (content: string, limit: number, offset = 0) => {
+    const bytes = Buffer.from(content, "utf8");
+    const end = Math.min(offset + limit, bytes.byteLength);
+    return { manifestDigest: "d".repeat(64), instructionText: "I".repeat(5000), references: [{ name: "ref", description: "R".repeat(300), entrypoint: "x", digest: "e".repeat(64) }],
+      skill: { skillId: "big", version: "1.0.0", digest: "f".repeat(64), offset, bytes: end - offset, content: bytes.subarray(offset, end).toString("utf8"),
+        truncated: end < bytes.byteLength, ...(end < bytes.byteLength ? { nextOffset: end } : {}) } };
+  };
+  it("omits role instructions and the reference list from skill pages", async () => {
+    const reply = await readPinnedInstructionReply({ role: "developer", skillId: "big", offset: 0, requestedLimit: 1024, isAgy: false,
+      fallbackInstructions: "fallback", hasPlatform: true, read: async limit => pinned("a".repeat(4000), limit) });
+    expect(Object.keys(reply).sort()).toEqual(["policy", "role", "skill", "skillManifestDigest", "source"]);
+    expect(reply).toMatchObject({ role: "developer", skill: { bytes: 1024, truncated: true, nextOffset: 1024 } });
+    const noSkill = await readPinnedInstructionReply({ role: "developer", offset: 0, requestedLimit: 8192, isAgy: false,
+      fallbackInstructions: "fallback", hasPlatform: true, read: async limit => pinned("a".repeat(4000), limit) });
+    expect(noSkill).toMatchObject({ instructions: "I".repeat(5000), skills: [expect.objectContaining({ name: "ref" })] });
+  });
+  it("keeps Agy skill replies inline and pages as large as the budget allows", async () => {
+    const content = "Kỹ năng — ".repeat(2000);
+    const reply = await readPinnedInstructionReply({ role: "reviewer", skillId: "big", offset: 0, requestedLimit: 16384, isAgy: true,
+      fallbackInstructions: "fallback", hasPlatform: true, read: async limit => pinned(content, limit) });
+    const size = Buffer.byteLength(JSON.stringify(reply));
+    expect(size).toBeLessThanOrEqual(8500);
+    expect(Buffer.byteLength((reply.skill as { content: string }).content)).toBeGreaterThan(4096);
+    expect(reply).toMatchObject({ skill: { truncated: true, nextOffset: (reply.skill as { bytes: number }).bytes } });
+  });
+  it("rejects skills outside the verified manifest and missing launch context", async () => {
+    await expect(readPinnedInstructionReply({ role: "developer", skillId: "foreign", offset: 0, requestedLimit: 1024, isAgy: false,
+      fallbackInstructions: "", hasPlatform: false, read: async () => undefined })).rejects.toThrow("not selected");
+    await expect(readPinnedInstructionReply({ role: "developer", offset: 0, requestedLimit: 1024, isAgy: false,
+      fallbackInstructions: "", hasPlatform: true, read: async () => undefined })).rejects.toThrow("no verified pinned instruction context");
   });
 });

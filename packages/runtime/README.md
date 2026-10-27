@@ -1,5 +1,41 @@
 # @bflow/runtime
 
+## Linux verification sandbox prerequisites
+
+`bflow up` requires a working Bubblewrap namespace sandbox when automated verification
+runners are configured. `bflow doctor` runs the same real execution probe and reports
+`runtime-verification-sandbox`; an installed `bwrap` binary alone does not pass it.
+The probe never installs tools, changes kernel settings or falls back to running tests
+without isolation. It distinguishes a missing executable from a launcher failure and
+includes bounded stderr diagnostics. Failed PATH entries resolving to the same binary
+are probed only once.
+
+On Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`, Bubblewrap can fail with
+`setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR: Operation not permitted`
+when its AppArmor `userns` permission is missing. First install the distribution
+`bubblewrap` package if needed. An administrator should inspect existing AppArmor profiles
+for `/usr/bin/bwrap`: repair an existing distribution profile rather than adding a duplicate.
+For a host with no such profile, review [support/bflow-bwrap.apparmor](support/bflow-bwrap.apparmor)
+and explicitly install/load it from the repository root:
+
+```sh
+apparmor_parser --skip-kernel-load --skip-cache packages/runtime/support/bflow-bwrap.apparmor
+sudo install -o root -g root -m 0644 packages/runtime/support/bflow-bwrap.apparmor /etc/apparmor.d/bflow-bwrap
+sudo apparmor_parser --replace /etc/apparmor.d/bflow-bwrap
+bflow doctor
+bflow up
+```
+
+The profile persists across reboot and grants user namespace creation to the system
+Bubblewrap binary only. Security trade-off: every local user can then create unconfined user
+namespaces through `/usr/bin/bwrap`, which partly bypasses the system-wide restriction; the
+administrator must accept that before installing it. The profile does not cover a Bubblewrap
+found elsewhere on `PATH` (for example `/usr/local/bin/bwrap`); doctor names the probed launcher. Keep the system-wide restriction enabled; do not make `bwrap`
+setuid or change provider permission modes to avoid this check. Other namespace restrictions
+(for example container policy) still need host administrator diagnosis. A failed startup
+does not prove existing roles stopped: preserve `.bflow` and reconcile with `bflow doctor`;
+use `bflow down --yes` only when intentionally stopping the current session.
+
 `RuntimeServiceImpl`, dispatcher, MVP orchestrator và workspace factory hiện có vẫn khả dụng.
 P19 bổ sung `AgenticWorkflowRuntime`, `CoordinatorTools`,
 `createAgenticConversationHost` và `openAgenticWorkspace` cho luồng SDLC v2.
@@ -791,6 +827,8 @@ script, runner configuration, imported Gradle/MSBuild definitions and helper blo
 revision; selected test files freeze after independent Red. Structured leaf results,
 assertion/error discrimination and independent Quality Gates remain mandatory.
 
+`verification.reviewTimeoutMs` (optional, 60000..3600000 ms, default 900000) sets the `executionTimeoutMs` of the independent `host-reviewer`/`host-qa` native review gates through `defaultHostChecks(policy)`; `DEFAULT_HOST_CHECKS` keeps the default. Runtime's review reply wait uses that gate timeout.
+
 `verification.regressionScope` controls host regression gates (`affected` default for new configs,
 `full`, `mapped_only`; a persisted `host.json` missing `regressionScope` defaults to `mapped_only`).
 When `affected` or `full`, `HostVerification` adds one required gate `host-regression-<profile.id>` per
@@ -830,6 +868,80 @@ Các kiểm tra định danh file, phạm vi session và checksum vẫn áp dụ
 Các task notice mượn lease assignment đang hoạt động và không thể reserve/release một
 Developer slot thứ hai. Đây là các đảm bảo crash process cục bộ dưới mô hình tin cậy
 Linux/filesystem đã nêu, không phải bằng chứng fault-campaign AI live hay power-loss.
+
+## Kiểm tra ứng dụng thật (`appChecks`, gate `host-app-<suiteId>`)
+
+Owner khai báo `appChecks` trong `.bflow/verification.json` (schemaVersion vẫn là 1). Mỗi suite tạo một
+gate bắt buộc `host-app-<suiteId>` (evaluator `host-app-check`, method `e2e_test`, command `app:<suiteId>`).
+Mỗi check có định danh test `app:<suiteId>:<checkId>`, và chỉ định danh này được dùng trong
+`criterionMappings` của tiêu chí `e2e_test`. Parser (`parseAppChecks`) dùng Zod strict: khóa lạ, đường dẫn
+tương đối hoặc có `..`, env bị cấm (`PATH`, `HOME`, `PORT`, `HOST`, `NODE_OPTIONS`, `LD_*`, `BFLOW_*`),
+selector không ổn định (`:nth-child`, `:nth-of-type`, `:first-child`, `:last-child`, XPath), API không có
+assertion hành vi ngoài status, và ngân sách timeout không đủ đều bị từ chối.
+
+**Chọn check.** Chỉ check được ánh xạ bởi tiêu chí chấp nhận đang hoạt động, có `verificationMethod: e2e_test`
+và mọi `testNames` là định danh app của cùng suite, mới chạy. Check cấu hình nhưng không được ánh xạ không
+chạy và không xuất hiện trong evidence. Ingress (`splitAppCriteria`) từ chối với `unsupported_verification`
+khi mapping trộn định danh app với test khác, suite/check không tồn tại hoặc tiêu chí trộn nhiều suite;
+`unknown_test_command` khi thiếu `app:<suite>` trong `targetCommands`; `unsupported_method` khi method khác
+`e2e_test`; và khi TDD ở chế độ `required` mà mọi tiêu chí tự động đều là app (đó là bằng chứng xác minh,
+không phải bằng chứng Red). Tiêu chí app không kích hoạt lỗi "No owner-configured behavioral runner" cho các
+tiêu chí khác. Trong `verificationPlan`, bộ lọc một dòng đảm bảo runner tự động không bao giờ nhận định danh app.
+
+**Thực thi.** Ứng dụng chạy từ bytes đã commit của revision (checkout tạm), không chạy từ worktree của
+developer, trong Bubblewrap (namespace trống, `--unshare-all`). Argv do owner cấu hình được chạy với
+`HOST=127.0.0.1` và `PORT`; sẵn sàng được xác định theo điều kiện (`readyPath` trả 2xx trong
+`startTimeoutMs`). UI check chạy Chrome headless qua CDP pipe trong sandbox. Một check chỉ pass khi không có
+finding: lỗi trang, `console.error`, HTTP ≥ 400 (kể cả tài nguyên phụ), request lỗi, selector phải có mặt
+**và hiển thị** (HTML tĩnh hoặc `<template>` không đủ), text phải có trong body đã render, không tràn
+ngang khi `noHorizontalOverflow`. API check so sánh status, header, JSON pointer (RFC 6901), `bodyContains`;
+nếu cấu hình `contract` OpenAPI thì route phải được khai báo. Screenshot chỉ là bằng chứng bổ sung, không
+ảnh hưởng pass/fail.
+
+**Lease trình duyệt.** Chrome là tài nguyên độc quyền host-local, lưu trong `app-checks/app-check-leases.json`
+của thư mục state host (cùng UID). Lease có fencing token tăng đơn điệu, được gia hạn định kỳ; lease bị giành
+hoặc hết hạn khi chạy khiến kết quả bị loại (`app_check_browser_lease_lost` / `app_check_browser_lease_expired`).
+Lease không phân tán, không dùng trên NFS hay nhiều host.
+
+**Evidence.** Gate lưu một artifact `test-result` JSON và ràng buộc: `candidate.sourceRevision`,
+`candidate.checkoutTree`, `app.instanceId`, `app.origin`, `app.command`, `app.envKeys` và `envDigest` (không
+bao giờ lưu giá trị env), định danh và tiêu chí được chọn, `browser.lease.fencingToken`, và `driver.sha256`
+(băm file driver). Mỗi screenshot là artifact `report` riêng, được tham chiếu bằng `screenshotArtifactId`.
+Trước khi lưu, toàn bộ nội dung tự do đi qua `sanitizeAppEvidence`: che `Bearer`/`Basic`, `token|secret|
+password|api_key=...` và `sk-...` thành `[REDACTED]`; che giá trị env đã cấu hình (từ 4 ký tự); bỏ ký tự điều
+khiển trừ tab và newline; giới hạn tail 8 KiB, message 2 KiB, body 4 KiB.
+
+**Pha Tester (P16).** Validator TDD đòi evidence phủ mọi tiêu chí bắt buộc và mọi `targetCommands`, nên
+`behavioralEvidence` cũng chạy các suite app được tiêu chí của task chọn ở mỗi pha (cùng revision, cùng đường
+đo với gate) và ghi observation `e2e_test` với command `app:<suite>`. Suite bị `blocked` làm pha đó lỗi điều kiện
+tiên quyết và không ghi evidence. Red vẫn cần một assertion failure của runner hành vi; check app fail (có thể chỉ
+vì app không khởi động) không đủ để Red hợp lệ. Assessment phải liệt kê `{method: "e2e_test", command:
+"app:<suite>"}` trong `infrastructure.commands` để `app:<suite>` có trong `targetCommands`.
+
+**Trạng thái gate.** `passed`: app sẵn sàng và mọi check được chọn không có finding. `failed`: ứng viên lỗi,
+mỗi finding trỏ tới artifact evidence (`location: app:<suite>:<check>`). `blocked`: thiếu điều kiện tiên quyết
+hoặc tài nguyên, không có kết quả nào được tạo: `app_check_platform_unsupported`, `app_check_sandbox_unavailable`,
+`app_check_app_missing`, `app_check_dependency_missing`, `app_check_browser_missing`,
+`app_check_source_not_pinned`, `app_check_driver_failed`, `app_check_browser_busy` (có thể thử lại),
+`app_check_browser_lease_lost`, `app_check_browser_lease_expired`, `app_check_timeout`. `blocked` không bao giờ
+là pass: Core chỉ coi gate bắt buộc là đạt khi trạng thái đúng là `passed` (`requiredGatesSatisfied`).
+
+**Giới hạn (phải đọc):**
+- Chỉ Linux với Bubblewrap và Chrome headless qua CDP pipe. Không có macOS, không có Seatbelt cho app check.
+- Ứng dụng được chạy theo argv Node-style do owner cấu hình; ứng dụng nhận `PORT`/`HOST`.
+- Chưa có thao tác tương tác (click, nhập liệu, điều hướng nhiều bước) trong phiên bản này.
+- `viewport.mobile: true` giả lập trình duyệt di động thật: trang thiếu `<meta name="viewport">` có layout 980px,
+  nên bị `ui_viewport_mismatch`/`ui_horizontal_overflow` ở 375px. Đây là lỗi responsive thật, không phải lỗi gate.
+- Contract chỉ hỗ trợ OpenAPI, và chỉ kiểm tra route cùng method có được khai báo.
+- Lease là host-local và cùng UID; không phải khóa phân tán.
+- `dependencyRoots` được mount chỉ đọc ở đúng đường dẫn tuyệt đối trên host; owner phải trỏ `app.env` (ví dụ
+  `NODE_PATH`) tới đó.
+- Sanitizer là lọc theo mẫu và theo giá trị đã cấu hình; không phải kiểm tra bảo mật toàn diện cho output tùy ý
+  của ứng dụng.
+- App của candidate chạy cùng sandbox và cùng UID với driver, nên code thù địch trong candidate về lý thuyết
+  có thể can thiệp driver; mô hình này chống "pass giả" do agent, không chống code độc trong sandbox. Lease không
+  bảo vệ trước tiến trình cùng UID cố ý sửa file lease.
+- Đây là bằng chứng mức source và test cục bộ. Không phải bằng chứng acceptance provider, Herdr hoặc SDLC đầy đủ.
 
 ## Role prompt và policy không hướng tới người dùng trong host mặc định
 
@@ -1010,7 +1122,7 @@ by slirp; the helper must return exactly its documented readiness byte before np
 ## Workflow liveness và capability recovery
 
 Host cung cấp `repository_read` cho Coordinator và các role điều tra/verification, cùng
-`read_pinned_instructions` để đọc nội dung skill đã pin. Reader chỉ đọc file text có giới hạn,
+`read_pinned_instructions` để đọc nội dung skill đã pin. Reader chỉ đọc file text có giới hạn (một lệnh không có `skillId` trả policy và danh sách skill; mỗi trang skill theo UTF-8 byte và trả `nextOffset` khi `truncated`; Agy giữ mỗi phản hồi trong `AGY_INLINE_REPLY_BYTES`),
 listing có cursor và các thao tác Git cố định; không nhận shell hoặc argv tùy ý. Git status/diff
 fail closed khi repository cấu hình filter có thể chạy chương trình. Dispatch kiểm tra role,
 pane/native session, launch, Bflow tools/list, repository/Git và manifest trước lease/transport.
@@ -1199,7 +1311,7 @@ giảm token/lỗi.
 
 Khi `fastPathMode: "auto"` (truyền từ `environment.fastPath.mode` của CLI; `host.json` cũ thiếu trường này được `effectiveFastPathMode` xử lý là `"off"`), `evaluateFastPath` trong `packages/runtime/src/agentic/fast-path.ts` đánh giá thuần điều kiện fast-path tại `assess` (preview hướng dẫn cho Coordinator) và đóng băng `RunRecord.fastPath` tại `proposeWorkflow` ([ADR 0004](../../docs/adr/0004-fast-path-review-waiver.md)). Mọi cờ `fastPath` do agent gửi trong `metadata` đều bị bỏ qua. Run chỉ đạt `active` khi P15 phân loại `trivial`, không có `unresolvedQuestions`, SDD `lightweight`, đúng 1 Developer task không dependency và không `requiresApproval`, tối đa 5 đường dẫn literal trong `affectedPaths`, `tddDecision.mode !== "required"` và chưa gọi `request_specialist` (do đó `bugfix`/`feature` và TDD `required` không đủ điều kiện).
 
-Khi `run.fastPath.status === "active"`, Runtime tự duyệt thiết kế (`designNeedsHuman` bỏ qua `projectApprovalRequired` nhưng vẫn giữ `classification.humanApprovalRequired` và luôn giữ phê duyệt `delivery` của người dùng). Trong `verificationPlan`, Runtime chỉ gửi waiver `deterministic_coverage` ở mức task khi mọi tiêu chí bắt buộc đều tự động hóa (`verificationMethod !== "manual_review"`) và có `targetCommands`; thay đổi chỉ gồm tài liệu (`manual_review`) vẫn chạy Reviewer/QA ở mức task. Ở mức workflow, nếu cây Git sau tích hợp (`policies.git.treeOf`) trùng khớp với cây của task duy nhất đã `passed`, Runtime gửi waiver `identical_integrated_tree` để bỏ Reviewer/QA lặp lại trong khi vẫn chạy `host-git-integrity` và regression gate. Nếu P17 từ chối waiver hoặc tree hash không khớp (`tree_mismatch`), Runtime hạ cấp một chiều (`status: "downgraded"`) về plan đầy đủ và phát notice tiếng Việt. Hiện trạng bằng chứng ở mức source + local/fake-runner tests, chưa có live Herdr/provider acceptance.
+Khi `run.fastPath.status === "active"`, Runtime tự duyệt thiết kế (`designNeedsHuman` bỏ qua `projectApprovalRequired` nhưng vẫn giữ `classification.humanApprovalRequired` và luôn giữ phê duyệt `delivery` của người dùng). Trong `verificationPlan`, Runtime chỉ gửi waiver `deterministic_coverage` ở mức task khi mọi tiêu chí bắt buộc đều tự động hóa (`verificationMethod !== "manual_review"`) và có `targetCommands`; thay đổi chỉ gồm tài liệu (`manual_review`) vẫn chạy Reviewer/QA ở mức task. Ở mức workflow, nếu cây Git sau tích hợp (`policies.git.treeOf`) trùng khớp với cây của task duy nhất đã `passed`, Runtime gửi waiver `identical_integrated_tree` để bỏ Reviewer/QA lặp lại trong khi vẫn chạy `host-git-integrity` và regression gate. Nếu P17 từ chối waiver hoặc tree hash không khớp (`tree_mismatch`), Runtime hạ cấp một chiều (`status: "downgraded"`) về plan đầy đủ và phát notice tiếng Việt. Lưu ý: vì bộ cổng mặc định của host bao gồm `host-test-integrity` (xem mục TI-01 ngay bên dưới) đòi hỏi Reviewer độc lập thẩm định các ứng viên làm yếu test/config, `fastPath` sẽ bị hạ cấp bảo thủ (`test_integrity_requires_independent_review`) khi cổng `host-test-integrity` có mặt; review waiver chỉ còn hiệu lực khi cấu hình host tùy chỉnh không bật cổng này. Hiện trạng bằng chứng ở mức source + local/fake-runner tests, chưa có live Herdr/provider acceptance.
 
 ### Gate toàn vẹn test theo revision (TI-01)
 
@@ -1369,6 +1481,14 @@ failed/cancelled/incomplete; first-pass không phải tỷ lệ thành công to�
 Core ghi gate event bằng `evaluatedAt`; một số evaluator lấy mốc này trước khi chạy
 xong. Vì vậy gate turnaround luôn `partial`, không chứng minh thời gian chạy lệnh thuần
 hay latency ghi receipt.
+
+Với run agentic, mỗi native Reviewer/QA gate được host đo start/end: từ lúc enqueue
+verification request đến lúc settle (verdict, validation rejection, timeout hoặc abort), lưu
+trong journal `reviewTimings` (tối đa 200 entry/run). `gateExecution` chỉ tính interval đã
+đóng (`host_review_gate_timings`, `partial`); wait còn mở được đếm trong `open`. Khi wait đã
+dùng 80% `executionTimeoutMs`, Conversation nhận đúng một progress note. Đây là wall time gồm
+delivery Herdr và reply ingest, không phải thời gian thuần của Reviewer. Legacy report giữ
+`unavailable`.
 
 Host receipts bổ sung thời gian operation verification theo phase/role và regression
 widening theo evaluation ID. Chúng mang nhãn `partial`: inventory receipt không có mốc

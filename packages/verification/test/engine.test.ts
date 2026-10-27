@@ -34,6 +34,40 @@ describe("VerificationEngine", () => {
     expect(outcome.cycle.status).toBe("escalated");
   });
 
+  it.each([
+    ["validation", "inconclusive", "Missing or invalid objective evidence", "invalid_or_missing_evidence"],
+    ["transport_unavailable", "blocked", "Verification environment blocked; reconcile before retry", "runner_unavailable"]
+  ] as const)("names the failed %s check and keeps runner diagnostics in the escalation, finding and audit", async (code, status, fixed, findingCode) => {
+    const f = await fixture();
+    const runner = f.runners[0]!;
+    const diagnostics = { diagnostics: { expectedNames: ["adds two"], observedNames: ["other test"], stdoutTail: "ok 1 - other test" } };
+    runner.evaluate = async () => ({ok:false,error: code === "validation"
+      ? {code,retryable:false,message:"Observed test names differ from owner-configured identities",details:diagnostics}
+      : {code,retryable:true,message:"Observed test names differ from owner-configured identities",details:diagnostics}});
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(f.plan, engine.start(f.plan, "cycle-diagnostics"), await f.change());
+    expect(outcome.result.status).toBe(status);
+    const message = `${runner.id}: Error: Observed test names differ from owner-configured identities`;
+    expect(outcome.cycle.escalation?.reason).toBe(`${fixed}: ${findingCode}: ${message}`);
+    const finding = outcome.result.findings.find(item => item.message === message)!;
+    expect(finding.details).toMatchObject({ runnerDiagnostics: diagnostics });
+    const documents = [...f.store.records.values()].flatMap(item => { try { return [JSON.parse(Buffer.from(item.bytes).toString("utf8")) as Record<string, unknown>]; } catch { return []; } });
+    const audits = documents.filter(doc => "failedChecks" in doc);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.failedChecks).toEqual([{ checkId: runner.id, code: findingCode, message: "Error: Observed test names differ from owner-configured identities", diagnostics }]);
+  });
+
+  it("bounds escalation summaries of long check messages", async () => {
+    const f = await fixture();
+    f.runners[0]!.evaluate = async () => ({ok:false,error:{code:"validation",retryable:false,message:"x".repeat(2000)}});
+    const engine = new VerificationEngine(f.ports);
+    const outcome = await engine.verify(f.plan, engine.start(f.plan, "cycle-long"), await f.change());
+    const reason = outcome.cycle.escalation?.reason ?? "";
+    expect(reason.startsWith("Missing or invalid objective evidence: invalid_or_missing_evidence: ")).toBe(true);
+    expect(reason).toMatch(/\.\.\.$/);
+    expect(reason.length).toBeLessThan(1000);
+  });
+
   it("records failed verification and a scoped developer repair before a fresh successful attempt", async () => {
     const f = await fixture();
     const runner = f.runners[0]!;

@@ -13,7 +13,7 @@ bflow attach
 
 `up` đọc identity/policy, chuẩn bị host/platform, resolve skill/tool grants, preflight provider trước pane launch, rồi đợi native binding/attestation/activated health. Không dùng Herdr `idle`/`done` để kết luận ready. Startup mặc định 300.000 ms trong config mới; `--timeout` ghi đè tổng ngân sách, kể cả prepare. `up` và doctor mặc định không chạy model ping; `doctor --deep` có thể tiêu hao usage.
 
-Herdr quản lý process/panes; persistent host giữ workflow/storage/authority; machine Gateway giữ kết nối tool. Browser runtime là capability riêng, không phải process bắt buộc cho mỗi session. Runtime browser task actions vẫn chưa có task lease usable.
+Herdr quản lý process/panes; persistent host giữ workflow/storage/authority; machine Gateway giữ kết nối tool. Browser runtime là capability riêng, không phải process bắt buộc cho mỗi session; khi được cấp quyền, Runtime quản lý lease trình duyệt độc quyền theo từng attempt (`BrowserResourceTransactions`).
 
 Conversation là đầu mối duy nhất với người dùng: nhận yêu cầu, clarification, approval, revision và cancellation. Các role khác gửi `request_user_decision` qua Runtime → Herdr → Conversation, không hỏi native trực tiếp.
 
@@ -21,17 +21,19 @@ Conversation là đầu mối duy nhất với người dùng: nhận yêu cầu
 
 ```bash
 bflow status --json
+bflow status <run-id> --telemetry --json   # Báo cáo metric chỉ đọc qua agentic host đang chạy
 bflow doctor --json
-bflow mcp status --json   # Inventory; live port mặc định còn thiếu
+bflow init --check --json                  # Kiểm tra chỉ đọc .bflow/config.yml và GitNexus của repo
+bflow mcp status --json                    # Inventory; live port mặc định còn thiếu
 bflow tool status --json
 bflow docs status
 ```
 
-`status` không tham số đọc environment/host; `status <run-id>` và filters thuộc legacy Runtime. Với P19, hỏi tiến độ/run trong Conversation và dùng host status/receipts để chẩn đoán. Delivery receipt không chứng minh model đã dùng tool, display receipt không phải approval.
+`status` không tham số đọc environment/host; `status <run-id> --telemetry` đọc metric chỉ đọc của lượt chạy từ agentic host đang chạy ([TELEMETRY-SPEC.md](../packages/runtime/TELEMETRY-SPEC.md)); `status <run-id>` không kèm `--telemetry` và các bộ lọc khác thuộc legacy Runtime. Với P19, hỏi tiến độ/run trong Conversation và dùng host status/telemetry/receipts để chẩn đoán. Delivery receipt không chứng minh model đã dùng tool, display receipt không phải approval.
 
 `mcp status` trên đường CLI hiện chưa inject live Gateway port; `configured: false` không chứng minh machine daemon chưa chạy. Dùng `doctor`, machine service status và `docs status` (chỉ Context7) để chẩn đoán; không lặp setup chỉ để làm lệnh này xanh.
 
-Tool installation, repo allowance, resolved grant, readiness, invocation và consumption là các quan sát riêng. Context7 hosted dùng chung giữa worktrees; backend local vẫn gắn workspace đã setup. GitNexus cần fresh index và lease/fence; không rebuild index dưới reader đang active. [Tool integration](tools-sdlc-integration.md).
+Tool installation, repo allowance, resolved grant, readiness, invocation và consumption là các quan sát riêng. `bflow setup` có phạm vi cấp máy; Context7 và MemPalace (phân vùng theo `wing` mặc định là repository ID) được dùng chung giữa các repository/worktree, trong khi `bflow init` lập chỉ mục GitNexus và đăng ký dịch vụ `gitnexus-<repo>` theo từng repository (`bflow init --remove` để gỡ đăng ký). GitNexus và browser đều cần lease/fence hợp lệ; không rebuild index dưới reader đang active. [Tool integration](tools-sdlc-integration.md).
 
 ## Cập nhật dễ đọc và chẩn đoán qua Log
 
@@ -63,10 +65,12 @@ Nếu startup đã có side effect rồi thất bại/Ctrl+C, CLI thử safe dow
 | Legacy directory lifecycle lock | Xác minh owner process đã chết rồi `bflow recover --yes`; lệnh này không reconstruct workflow receipt |
 | Gateway backend crash | Kiểm tra machine service và `doctor` (lệnh `mcp status` có giới hạn live port nêu trên); Runtime phát hiện registration lost/degraded, giữ outbox. Reconcile generation trước khi up lại |
 | Gateway version cũ sau build | Bảo trì/restart service do Bflow sở hữu theo setup plan; `up` không tự sửa machine config |
-| Local backend workspace mismatch | `bflow setup --dir <repo>` theo plan; không rebind Context7 chỉ vì đổi worktree |
+| GitNexus repo chưa đăng ký / stale | Chạy `bflow init --check` để kiểm tra, sau đó `bflow init` để lập chỉ mục và đăng ký `gitnexus-<repo>` vào Gateway đang chạy (`bflow init --remove` khi xóa repo); không cần chạy lại `bflow setup` cấp máy chỉ vì thêm repo mới |
 | `codex_global_hooks_not_isolated` | `bflow setup --codex-hooks --plan`, review rồi `--apply`; setup thường không duyệt hook |
 | `agy_onboarding_incomplete` | Kiểm tra đúng profile/HOME launch và onboarding; không copy receipt để giả readiness |
-| Browser `exclusive_resource_lease_unsupported` | Capability task chưa được Runtime hỗ trợ; không bỏ lease hoặc dùng profile cá nhân |
+| Browser `browser_lease_busy` / `quarantined` | Mỗi attempt chỉ giữ một lease trình duyệt độc quyền (TTL tối đa 5 phút); chờ cuộc gọi hiện tại kết thúc hoặc đối soát mục `quarantined`/`release_uncertain` trong `browser-resource-transactions.json`, không dùng profile Chrome cá nhân |
+| Gate `host-app-*` báo `blocked app_check_*` | Thiếu điều kiện tiên quyết (sandbox, app, dependency, browser), lease bận/mất/hết hạn hoặc quá hạn; không có kết quả nào được tạo. `app_check_browser_busy` thử lại sau; các mã khác cần sửa môi trường/cấu hình `appChecks` |
+| Linux Bubblewrap `verification_sandbox_unavailable` (AppArmor userns) | Trên Ubuntu/Debian bật `kernel.apparmor_restrict_unprivileged_userns=1`, cài đặt profile AppArmor `packages/runtime/support/bflow-bwrap.apparmor` cho `/usr/bin/bwrap` rồi chạy lại `bflow doctor` ([Runtime README](../packages/runtime/README.md#linux-verification-sandbox-prerequisites)) |
 | Profile Chrome bị khóa | Xác minh đúng process/profile/task và ownership; giữ quarantine/unknown, không xóa lock của process còn sống |
 | Conflict lightweight/full SDD | Trả lời revision được notice đề xuất trong Conversation; không resume lặp để bỏ project policy |
 

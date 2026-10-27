@@ -49,6 +49,13 @@ import {
 import type { CliContext, CliIo, InitCommandOutput } from "../src/types.js";
 
 describe("Presentation & Formatting Engine", () => {
+  it("directs sandbox startup failures to namespace repair even when the error is truncated", () => {
+    const out = formatCommandError({ code: "validation", retryable: false,
+      message: "verification_sandbox_unavailable: AppArmor user namespace restriction is enabled; " + "x".repeat(1000) }, "up", false);
+    expect(out).toContain("AppArmor");
+    expect(out).toContain("bflow doctor");
+    expect(out).not.toContain("bflow up --help");
+  });
   describe("1. Stream Color Resolution Matrix", () => {
     it("respects explicit overrides", () => {
       expect(resolveStreamColor({ explicit: true, env: { NO_COLOR: "1" } })).toBe(true);
@@ -376,7 +383,26 @@ describe("Presentation & Formatting Engine", () => {
       expect(out).toContain("[HOÀN TẤT] Đã khởi tạo cấu hình kho mã nguồn bflow ✓");
       expect(out).toContain("Tệp cấu hình: /workspace/.bflow/config.yml");
       expect(out).not.toContain("Đã ghi đè");
-      expect(out).toContain("Dự án:        my-project (codex)");
+      expect(out).toContain("Dự án:        my-project\n");
+      expect(out).not.toContain("(codex)");
+    });
+
+    it("summarizes the configured provider from environment roles in init output", () => {
+      const roles = (clis: string[]) => clis.map((cli, index) => ({ role: index === 0 ? "conversation" : `role-${index}`, cli, required: true }));
+      const initWith = (environment: unknown) => ({
+        configPath: "/workspace/.bflow/config.yml",
+        overwritten: false,
+        config: { projectName: "tb-bench", environment } as any
+      }) as InitCommandOutput;
+
+      const allClaude = formatCommandSuccess("init", initWith({ roles: roles(["claude", "claude", "claude"]) }), false);
+      expect(allClaude).toContain("Dự án:        tb-bench (claude)");
+      expect(allClaude).not.toContain("codex");
+
+      const mixed = formatCommandSuccess("init", initWith({
+        roles: roles(["claude", "agy", "agy", "claude", "agy", "agy", "agy", "agy"])
+      }), false);
+      expect(mixed).toContain("Dự án:        tb-bench (claude ×2, agy ×6)");
     });
 
     it("formats doctor report correctly for healthy environments with warnings", () => {

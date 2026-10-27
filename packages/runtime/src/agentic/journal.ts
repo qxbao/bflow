@@ -49,6 +49,8 @@ export interface TaskRecord {
   verificationPlan?: VerificationPlan; verificationPending?: boolean; writerReleased?: boolean;
   /** Validated root-cause rework dossiers submitted per rework attempt; absent in legacy journals/checkpoints. */
   reworkResolutions?: ReworkResolutionDossier[];
+  /** Attempt whose dependency-base merge conflicted; it starts from the run base so final integration resolves the overlap. */
+  dependencyBaseFallback?: string;
 }
 export interface RunRecord {
   runId: string; delegation: DelegationRequest; status: SdlcWorkStatus;
@@ -102,7 +104,21 @@ export interface RunRecord {
   fastPath?: FastPathRecord;
   /** Cached workflow-level verification plan for the current integration cycle. */
   workflowVerificationPlan?: VerificationPlan;
+  /** Host-measured native review gate waits, newest last (at most 200). Absent in journals written before review telemetry. */
+  reviewTimings?: ReviewTiming[];
 }
+/** Host wall time of one native review gate wait: from the verification request to its settlement. Never a Reviewer claim. */
+export interface ReviewTiming {
+  key: string; gateId: string; role: string; taskId?: string | undefined; agentId?: string | undefined; provider?: string | undefined;
+  startedAt: string; completedAt?: string | undefined; timeoutMs: number;
+  outcome?: "verdict" | "rejected" | "timeout" | "aborted" | undefined; nearDeadlineAt?: string | undefined;
+}
+const ReviewTimingSchema = z.object({
+  key: z.string().min(1), gateId: z.string().min(1), role: z.string().min(1), taskId: z.string().min(1).optional(),
+  agentId: z.string().min(1).optional(), provider: z.string().min(1).optional(), startedAt: IsoDateTimeSchema,
+  completedAt: IsoDateTimeSchema.optional(), timeoutMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  outcome: z.enum(["verdict", "rejected", "timeout", "aborted"]).optional(), nearDeadlineAt: IsoDateTimeSchema.optional()
+}).strict();
 const rejectionText = z.string().min(1).max(2000);
 const FastPathDowngradeSchema = z.object({
   reason: rejectionText,
@@ -342,6 +358,7 @@ function parseState(input: unknown, repository: string): JournalState {
     }
     if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
     if (run.fastPath !== undefined) run.fastPath = FastPathRecordSchema.parse(run.fastPath);
+    if (run.reviewTimings !== undefined) run.reviewTimings = z.array(ReviewTimingSchema).max(200).parse(run.reviewTimings);
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {

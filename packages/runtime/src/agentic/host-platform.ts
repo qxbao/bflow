@@ -346,7 +346,7 @@ export class HostPlatformSession {
   /** Exact pinned, provider-neutral skills for the current prepared launch; callers receive no storage paths or mutable bundle handles. */
   async readPinnedInstructions(role: AgentRole, skillId?: string, offset = 0, limit = 8 * 1024, expectedLaunchId?: string): Promise<{ launchId: string; manifestDigest: string; instructionText: string;
     references: readonly { name: string; description: string; entrypoint: string; digest: string }[];
-    skill?: { skillId: string; version: string; digest: string; offset: number; bytes: number; content: string; truncated: boolean } } | undefined> {
+    skill?: { skillId: string; version: string; digest: string; offset: number; bytes: number; content: string; truncated: boolean; nextOffset?: number } } | undefined> {
     const value = role === "developer"
       ? expectedLaunchId === undefined ? undefined : this.developerInstructions.get(expectedLaunchId)
       : this.roleInstructions.get(role);
@@ -364,9 +364,20 @@ export class HostPlatformSession {
     if (!definition) throw new Error("Skill is not selected by this role's verified manifest");
     const files = await this.skillStore.getBundle(definition.digest), content = files["SKILL.md"];
     if (typeof content !== "string") throw new Error(`Pinned skill ${definition.skillId} has no SKILL.md`);
-    return { ...common, skill: { skillId, version: definition.version, digest: definition.digest, offset,
-      bytes: Math.min(limit, Math.max(0, Buffer.byteLength(content) - offset)), content: content.slice(offset, offset + limit),
-      truncated: offset + limit < Buffer.byteLength(content) } };
+    // Offsets and limits are UTF-8 bytes. A page starts and ends on character boundaries, so every page is valid text and
+    // concatenating pages from nextOffset reproduces the file exactly. A start offset inside a character moves forward.
+    const bytes = Buffer.from(content, "utf8");
+    const isContinuation = (index: number) => (bytes[index]! & 0xc0) === 0x80;
+    let start = Math.min(offset, bytes.byteLength);
+    while (start < bytes.byteLength && isContinuation(start)) start++;
+    let end = Math.min(start + limit, bytes.byteLength);
+    while (end < bytes.byteLength && end > start && isContinuation(end)) end--;
+    // A limit smaller than one character still makes progress by returning that whole character.
+    if (end === start && start < bytes.byteLength) { end = start + 1; while (end < bytes.byteLength && isContinuation(end)) end++; }
+    const truncated = end < bytes.byteLength;
+    return { ...common, skill: { skillId, version: definition.version, digest: definition.digest, offset: start,
+      bytes: end - start, content: bytes.subarray(start, end).toString("utf8"), truncated,
+      ...(truncated ? { nextOffset: end } : {}) } };
   }
 
   /** Requires an activated, ready verdict for every required role before startup is accepted. */

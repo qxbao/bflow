@@ -46,6 +46,8 @@ export interface GitPolicy {
   prepareTask(request: {
     runId: string; taskId: string; attemptId: string; baseRevision: string;
     ownedPaths: string[]; forbiddenPaths: string[]; developerId: string;
+    /** Verified dependency heads; with two or more, Git merges them into the task base (baseRevision is then the run base). */
+    dependencyHeads?: string[];
   }): Promise<TaskWorktree>;
   collectTask(key: string): Promise<GitChangeSet>;
   beginIntegration(request: {

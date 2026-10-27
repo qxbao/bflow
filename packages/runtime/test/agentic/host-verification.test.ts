@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PaneBindingSchema, QualityGateContextSchema, QualityGateDefinitionSchema } from "@bflow/contracts";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { HostVerification, DEFAULT_HOST_CHECKS } from "../../src/agentic/host-verification.js";
+import { HostVerification, DEFAULT_HOST_CHECKS, DEFAULT_REVIEW_TIMEOUT_MS, defaultHostChecks } from "../../src/agentic/host-verification.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { validateAndStoreReworkResolution, settleReworkVerificationOutcome } from "../../src/agentic/rework-causality.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
@@ -310,12 +310,12 @@ it("fences a persisted rework observation after its native review is replaced", 
   f.outbound[0]!.reviewReplacement = {disposition:"replaced_without_verdict_claim"};
   await expect(f.restore().completeReview(f.binding,f.input)).rejects.toThrow("Replaced workflow review");
 });
-describe("default independent review deadlines", () => {
-  // Live run bf-b5679f4f2e725cadfef1: an Agy reviewer needed ~282s for a task review and ~420s for the workflow review,
-  // so the 300s gate blocked workflow verification although every deterministic and QA check passed.
-  it("give reviewer and QA time for a workflow-scope review and the bounded QA measurement budget", () => {
-    const reviews = DEFAULT_HOST_CHECKS.filter(check => (check.configuration as { kind?: string }).kind === "review");
-    expect(reviews.map(check => check.id)).toEqual(["host-reviewer", "host-qa"]);
-    for (const check of reviews) expect(check.timeout.executionTimeoutMs).toBeGreaterThanOrEqual(900_000);
-  });
+
+it("gives independent Reviewer and QA checks the owner-configured review budget, defaulting to 900 s", () => {
+  const reviews = (checks: ReturnType<typeof defaultHostChecks>) => checks.filter(check => check.evaluator === "native-herdr-review");
+  expect(DEFAULT_REVIEW_TIMEOUT_MS).toBe(900_000);
+  expect(reviews(DEFAULT_HOST_CHECKS).map(check => check.timeout.executionTimeoutMs)).toEqual([900_000, 900_000]);
+  expect(reviews(defaultHostChecks({ verification: { reviewTimeoutMs: 1_800_000 } })).map(check => check.timeout.executionTimeoutMs)).toEqual([1_800_000, 1_800_000]);
+  expect(reviews(defaultHostChecks({ verification: {} })).map(check => check.timeout.executionTimeoutMs)).toEqual([900_000, 900_000]);
+  expect(defaultHostChecks({ verification: { reviewTimeoutMs: 120_000 } }).find(check => check.evaluator === "host-git-diff")?.timeout.executionTimeoutMs).toBe(30_000);
 });

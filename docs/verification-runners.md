@@ -47,7 +47,8 @@ Regression runs execute whole test files without a `--test-name-pattern` / `-t` 
 When `environment.fastPath.mode` is `"auto"` (default for new/migrated repository configs; persisted `host.json` files without `fastPath` default to `"off"`) and Runtime freezes `run.fastPath.status = "active"` for a single-task `trivial` change ([ADR 0004](adr/0004-fast-path-review-waiver.md)), review waivers rely strictly on independent gates measured by the host (`bflow-host-behavioral-check` / `bflow-host-git-check`), never on agent-supplied output or flags:
 
 - **Task-level waiver (`deterministic_coverage`)**: Applied only when every active required acceptance criterion uses an automated method (`verificationMethod !== "manual_review"`), is completely mapped to host-executed `kind: "deterministic"` checks, `strategy.targetCommands.length > 0`, and `strategy.tddDecision.mode !== "required"`. Documentation-only changes (`manual_review`) have no behavioral runner and therefore keep independent Reviewer/QA checks at task scope; `bugfix`/`feature` and `tddDecision.mode === "required"` are ineligible for fast-path.
-- **Workflow-level waiver (`identical_integrated_tree`)**: Applied only when the single task's verification cycle `passed` and the host-verified Git tree of `integration.expectedHead` (`git rev-parse --verify <rev>^{tree}`) equals the task commit's tree hash. Host deterministic checks (`host-git-integrity` and configured regression gates) remain mandatory at workflow scope. If P17 rejects a waiver or the integrated tree differs (`tree_mismatch`), Runtime downgrades one-way (`status: "downgraded"`) to the full Reviewer + QA verification plan. Evidence level is source implementation plus local/fake-runner tests, not live Herdr/provider acceptance.
+- **Workflow-level waiver (`identical_integrated_tree`)**: Applied only when the single task's verification cycle `passed` and the host-verified Git tree of `integration.expectedHead` (`git rev-parse --verify <rev>^{tree}`) equals the task commit's tree hash. Host deterministic checks (`host-git-integrity` and configured regression gates) remain mandatory at workflow scope. If P17 rejects a waiver or the integrated tree differs (`tree_mismatch`), Runtime downgrades one-way (`status: "downgraded"`) to the full Reviewer + QA verification plan.
+- **Interaction with `host-test-integrity` under default host checks**: Because the default host check suite includes the mandatory `host-test-integrity` gate (`packages/runtime/src/agentic/host-verification.ts`), which requires independent Reviewer adjudication of test/config weakening candidates, `fastPath` is conservatively downgraded (`test_integrity_requires_independent_review`) when `host-test-integrity` is present. Review waivers apply only under custom host check configurations that omit `host-test-integrity`. Evidence level is source implementation plus local/fake-runner tests, not live Herdr/provider acceptance.
 
 ## Runner matrix
 
@@ -140,6 +141,87 @@ bị tắt cho host đó. Đây là thẩm quyền của operator: Coordinator c
 verdict thành công. Host đã persist pin digest của cấu hình. Thay đổi file sau khi host được
 tạo sẽ bị từ chối; hãy giữ state và reconcile/migrate host một cách tường minh. Không xóa
 journal của host để vượt qua sự không khớp cấu hình.
+
+## Mutation checks (`mutationChecks`)
+
+An owner may add `mutationChecks` to `.bflow/verification.json` to enforce the negative control of a race or lock criterion:
+the protection is replaced by a no-op in one committed file, and the named tests must **fail**. If they still pass, the test
+does not prove the protection is needed, and the gate fails with `non_discriminating_test`.
+
+```json
+{
+  "schemaVersion": 1,
+  "behavioralCommands": [
+    { "id": "unit", "command": "owner:test-unit", "executable": "/usr/bin/node", "args": ["--test", "--test-reporter=tap", "test/bucket.test.cjs"],
+      "method": "unit_test", "levels": ["unit"], "testNames": ["ac-1: concurrent takes grant one token"],
+      "testPaths": ["test/bucket.test.cjs"], "timeoutMs": 60000 }
+  ],
+  "mutationChecks": [
+    { "id": "bucket-lock", "commandId": "unit", "file": "src/bucket.ts",
+      "find": "this.lock.runExclusive(", "replace": "((fn) => fn())(",
+      "expectFailingTests": ["ac-1: concurrent takes grant one token"] }
+  ]
+}
+```
+
+- `id` is a safe identifier, unique among checks. `commandId` must reference a configured behavioral command, and every name in
+  `expectFailingTests` must be one of that command's `testNames`.
+- `file` is a repository-relative path with no `..`, leading `/`, backslash or `:`. `find` (1 to 4096 characters) must occur
+  **exactly once** in the committed file; zero occurrences make the check not applicable and more than one is a configuration error.
+  `replace` (at most 4096 characters) must differ from `find`.
+- The mutated bytes are committed as a dangling child of the candidate revision (fixed `bflow` identity, no ref, the candidate worktree,
+  its HEAD and its index are not modified). The owner command then runs on that commit in a temporary detached checkout that is removed afterwards.
+- Gate `host-mutation-<id>` is required, binds no acceptance criteria and reports `metadata.mutation` with `killed` and `mutatedRevision`.
+  The check passes only when every expected test fails. A failure that is not an assertion (`NodeTapTestCodeFailure`, infrastructure
+  error) is a gate error, not a kill. With `scope: "task"` an absent file or pattern is `passed` (not applicable); with
+  `scope: "workflow"` it fails validation so the owner updates the pattern.
+- Budget: each mutation run counts `command.timeoutMs + 90000` against the same 540 s aggregate as the behavioral commands. A configuration that exceeds it is rejected.
+- Like `behavioralCommands`, the configuration is pinned in the persisted host. Changing `mutationChecks` after the host exists is refused until the host is quiesced and reconciled.
+
+## Kiểm tra ứng dụng thật (`appChecks`)
+
+Owner có thể thêm `appChecks` vào `.bflow/verification.json` để kiểm chứng UI/API trên entrypoint thật của ứng dụng.
+Với `behavioralCommands: []`, Runtime vẫn tự phát hiện runner; `appChecks` chỉ thêm gate.
+
+```json
+{
+  "schemaVersion": 1,
+  "behavioralCommands": [],
+  "appChecks": [
+    { "id": "web",
+      "app": { "executable": "/usr/bin/node", "args": ["server.mjs"], "port": 4173, "readyPath": "/health",
+               "startTimeoutMs": 20000, "env": { "NODE_ENV": "test" }, "dependencyRoots": [] },
+      "browser": { "executable": "/opt/google/chrome/chrome", "resourceKey": "app-check-browser" },
+      "contract": { "kind": "openapi", "path": "/openapi.json" },
+      "timeoutMs": 120000,
+      "checks": [
+        { "id": "home", "kind": "ui", "path": "/", "viewport": { "width": 1280, "height": 800 },
+          "expect": { "selectors": ["[data-testid=title]"], "text": ["Welcome"] }, "timeoutMs": 15000 },
+        { "id": "items", "kind": "api", "request": { "method": "GET", "path": "/api/items" },
+          "expect": { "status": 200, "json": [{ "pointer": "/0/name", "equals": "apple" }] }, "timeoutMs": 5000 }
+      ] }
+  ]
+}
+```
+
+- **Chọn check.** Mỗi suite là gate bắt buộc `host-app-<suite>` (method `e2e_test`, command `app:<suite>`). Một check chỉ chạy
+  khi một tiêu chí `e2e_test` đang hoạt động map tới định danh `app:<suite>:<check>` và strategy có `app:<suite>` trong
+  `targetCommands` (assessment liệt kê `{ "method": "e2e_test", "command": "app:<suite>" }` trong `infrastructure.commands`).
+  Mapping trộn định danh app với test khác, check không tồn tại, hoặc TDD `required` mà mọi tiêu chí tự động đều là app bị từ chối ở ingress.
+- **Thực thi.** App chạy từ checkout của revision đã commit (không từ worktree developer) trong Bubblewrap không có mạng ngoài,
+  nhận `HOST=127.0.0.1` và `PORT`; sẵn sàng khi `readyPath` trả 2xx. UI chạy Chrome headless qua CDP pipe trong cùng sandbox,
+  chờ theo điều kiện (load, selector hiển thị, text đã render, mạng yên) và không có thao tác click. Lỗi trang, `console.error`,
+  HTTP ≥ 400, request lỗi, selector/text thiếu, sai viewport, tràn ngang (khi bật) đều fail. API cần assertion hành vi ngoài status;
+  contract OpenAPI (nếu có) phải khai báo route và method. Selector theo vị trí (`:nth-child`, XPath) bị từ chối.
+- **Bằng chứng.** HTML tĩnh, app dựng lại trong test hay screenshot tồn tại không được tính là pass. Evidence `test-result` được
+  sanitize rồi lưu qua ArtifactStore, gắn revision/tree, app instance, origin, command, tên biến env (không lưu giá trị), check và
+  tiêu chí, fencing token và hash driver. Pha Tester (P16) cũng đo các check này để evidence phủ `app:<suite>`; Red vẫn cần assertion
+  failure của runner.
+- **Prerequisite.** Thiếu sandbox, app, dependency, browser, lease bận/mất/hết hạn hoặc quá hạn trả `blocked` với mã `app_check_*`;
+  không bao giờ là pass. Chrome được tuần tự hóa bằng lease host-local có fencing token (cùng UID, không phân tán).
+- **Giới hạn.** Chỉ Linux; chưa có thao tác tương tác; contract chỉ OpenAPI; app của candidate chạy chung sandbox với driver nên mô hình
+  chống pass giả do agent chứ không chống code độc. Bằng chứng hiện tại là source + test local và chạy thử trên app fixture, không phải
+  live provider/Herdr hay full SDLC acceptance. Chi tiết trong [README runtime](../packages/runtime/README.md).
 
 ## Ví dụ Node TAP
 

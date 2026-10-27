@@ -10,6 +10,13 @@ export class NodeTapTestCodeFailure extends Error {
   }
 }
 
+/** Identity mismatch carries the owner-configured and observed names for bounded diagnostics. */
+export class BehavioralIdentityMismatch extends Error {
+  constructor(readonly expectedNames: readonly string[], readonly observedNames: readonly string[]) {
+    super("Observed test names differ from owner-configured identities");
+  }
+}
+
 /** Supported measurement protocol: complete, flat Node test-runner TAP with assertion diagnostics. */
 export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false, selectedPaths: readonly string[] = []) {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) throw new Error("Behavioral runner infrastructure failure (spawn, deadline, signal or truncated output)");
@@ -26,7 +33,7 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
   const total = count("tests"), tests = results.length, passed = count("pass") - unmatchedFiles.length, failed = count("fail");
   if (!tests || count("cancelled") || count("skipped") !== filtered.length || count("todo") || total !== allResults.length || passed + failed !== tests || !new RegExp(`^1\\.\\.${total}$`, "m").test(output) || allResults.some((result, index) => Number(result[2]) !== index + 1)) throw new Error("Zero, nested, skipped or incomplete tests cannot prove behavior");
   const names = results.map(result => result[3]!);
-  if (digest([...names].sort()) !== digest([...expectedNames].sort())) throw new Error("Observed test names differ from owner-configured identities");
+  if (digest([...names].sort()) !== digest([...expectedNames].sort())) throw new BehavioralIdentityMismatch(expectedNames, names);
   const failures = results.filter(result => result[1] === "not ok");
   if (failures.length !== failed || results.filter(result => result[1] === "ok").length !== passed || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("TAP result contradicts process exit code");
   const targetFailure = failed > 0 && failures.every(result => /^\s+failureType: 'testCodeFailure'$/m.test(result[4]!) && /^\s+code: 'ERR_ASSERTION'$/m.test(result[4]!));

@@ -14,9 +14,13 @@ import { callHost } from "./host-protocol.js";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
+import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
+import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
 import type { RegressionScope } from "./regression-changes.js";
+
+const HOST_STARTUP_TIMEOUT_MS = 120_000;
 
 export type { RegressionScope };
 export type FastPathMode = "auto" | "off";
@@ -24,10 +28,14 @@ export type FastPathMode = "auto" | "off";
 export interface AgenticHostOptions {
   repositoryPath: string; sessionId: string; herdrBinary?: string; manifestDirectory?: string; maxDeveloperCapacity?: number;
   behavioralCommands?: readonly BehavioralCommand[];
+  /** Owner mutation checks (`.bflow/verification.json`); pinned with the behavioral commands. */
+  mutationChecks?: readonly MutationCheck[];
+  /** Owner real-app checks (`appChecks` in `.bflow/verification.json`); pinned with the other verification authority. */
+  appChecks?: readonly AppCheckSuite[];
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
-    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope };
+    tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope; reviewTimeoutMs?: number };
     fastPath?: { mode: FastPathMode };
     concurrency: { maxConcurrency: number } };
   impactIndex?: { executable: string; home: string; storageLockPath: string };
@@ -90,7 +98,8 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
   const value = record(JSON.parse(await readFile(path, "utf8")));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
-  parseBehavioralCommands(value.behavioralCommands);
+  parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
+  parseAppChecks(value.appChecks);
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
   if (value.maxDeveloperCapacity !== undefined && (!Number.isInteger(value.maxDeveloperCapacity) || Number(value.maxDeveloperCapacity) < 1 || Number(value.maxDeveloperCapacity) > 32)) throw new Error("Invalid host Developer capacity");
   if (value.policy !== undefined) {
@@ -98,6 +107,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
     if (!["lightweight", "full"].includes(String(sdd.minimumLevel)) || typeof sdd.approvalRequired !== "boolean" || tdd.policy !== "conditional" ||
         verification.onExhausted !== "require_human" || !Number.isInteger(verification.maxIterations) || Number(verification.maxIterations) < 1 || Number(verification.maxIterations) > 10 ||
         (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
+        (verification.reviewTimeoutMs !== undefined && (!Number.isSafeInteger(verification.reviewTimeoutMs) || Number(verification.reviewTimeoutMs) < 60_000 || Number(verification.reviewTimeoutMs) > 3_600_000)) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
     if (policy.fastPath !== undefined) {
       if (policy.fastPath === null || typeof policy.fastPath !== "object" || Array.isArray(policy.fastPath)) throw new Error("Invalid persisted host policy");
@@ -140,6 +150,8 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.manifestDirectory !== undefined ? { manifestDirectory: persisted.manifestDirectory } : {}),
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
     ...(persisted.behavioralCommands !== undefined ? { behavioralCommands: persisted.behavioralCommands } : {}),
+    ...(persisted.mutationChecks !== undefined ? { mutationChecks: persisted.mutationChecks } : {}),
+    ...(persisted.appChecks !== undefined ? { appChecks: persisted.appChecks } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}) });
@@ -202,6 +214,11 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
   if (digest(parseBehavioralCommands(configuration.behavioralCommands)) !== digest(parseBehavioralCommands(options.behavioralCommands)))
     throw new Error("Persisted behavioral commands differ from owner configuration; quiesce and reconcile before changing verification authority");
+  if (digest(parseMutationChecks(configuration.mutationChecks, parseBehavioralCommands(configuration.behavioralCommands))) !==
+      digest(parseMutationChecks(options.mutationChecks, parseBehavioralCommands(options.behavioralCommands))))
+    throw new Error("Persisted mutation checks differ from owner configuration; quiesce and reconcile before changing verification authority");
+  if (digest(parseAppChecks(configuration.appChecks)) !== digest(parseAppChecks(options.appChecks)))
+    throw new Error("Persisted real-app checks differ from owner configuration; quiesce and reconcile before changing verification authority");
   // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
@@ -242,15 +259,23 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
       configuration = await readHostConfiguration(configPath);
     }
     const log = await open(join(directory, "host.log"), "a", 0o600);
+    let exited: string | undefined;
     try {
       const child = spawn(process.execPath, [fileURLToPath(new URL("./host.js", import.meta.url)), "daemon", configPath],
         { detached: true, cwd: repositoryPath, stdio: ["ignore", log.fd, log.fd], env: { ...process.env } });
+      child.once("exit", (code, signal) => { exited = signal ? `signal ${signal}` : `exit code ${code}`; });
+      child.once("error", error => { exited = String(error); });
       child.unref();
     } finally { await log.close(); }
-    const deadline = Date.now() + 10_000;
+    // Daemon boot composes platform readiness before binding the socket and can exceed
+    // a few seconds; keep waiting while the child lives and fail fast once it exits.
+    const deadline = Date.now() + HOST_STARTUP_TIMEOUT_MS;
     while (true) {
       try { await request("ping"); break; }
-      catch (startupError) { if (Date.now() >= deadline) throw new Error(`Agentic host failed to start: ${String(startupError)}; see ${join(directory, "host.log")}`); }
+      catch (startupError) {
+        if (exited !== undefined) throw new Error(`Agentic host exited during startup (${exited}): ${String(startupError)}; see ${join(directory, "host.log")}`);
+        if (Date.now() >= deadline) throw new Error(`Agentic host failed to start within ${HOST_STARTUP_TIMEOUT_MS / 1000}s: ${String(startupError)}; the daemon may still be starting, retry shortly or see ${join(directory, "host.log")}`);
+      }
       await new Promise(accept => setTimeout(accept, 50));
     }
   }

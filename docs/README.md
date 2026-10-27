@@ -28,7 +28,8 @@ Bắt đầu từ [README](../README.md), [cài đặt](guide/installation.md) v
 | SDD, Conditional TDD, bounded verification và approval | [SDLC policies](sdlc-policies.md) |
 | Public ports, recovery và event/checkpoint | [Contracts](contracts.md) · [ADR 0001](adr/0001-p00-contract-hardening.md) · [ADR 0002](adr/0002-p01-recovery-rework.md) |
 | Tool policy D-TOOLS-01, invocation và consumption | [Integration guide](tools-sdlc-integration.md) · [Accepted design](superpowers/specs/2026-10-24-tools-sdlc-design.md) |
-| Nguyên nhân gốc và evidence trong rework | [Rework causality](rework-causality.md) |
+| Nguyên nhân gốc, per-finding verdicts và test integrity | [Rework causality](rework-causality.md) · [Test integrity](../packages/runtime/TEST-INTEGRITY-VALIDATION.md) |
+| Telemetry chỉ đọc của workflow (`--telemetry`) | [Telemetry spec](../packages/runtime/TELEMETRY-SPEC.md) |
 | NFR và kiểm thử tương xứng rủi ro | [NFR/test design](nfr-and-test-design.md) |
 | Commit mới so với mốc docs ban đầu | [Main updates audit](main-updates-2026-10-25.md) |
 | Shared MCP và skills được pin | [Gateway architecture](shared-mcp-architecture.md) · [Skills architecture](skills-architecture.md) · [Canonical catalog](../skills/README.md) |

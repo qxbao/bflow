@@ -41,9 +41,11 @@ import { schedulerStatusReport } from "./scheduler-status.js";
 import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./conversation-context-budget.js";
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
-import { HostVerification, HostBehavioralFailure, DEFAULT_HOST_CHECKS } from "./host-verification.js";
+import { HostVerification, HostBehavioralFailure, defaultHostChecks } from "./host-verification.js";
 import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { parseMutationChecks } from "./mutation-check.js";
+import { parseAppChecks } from "./app-check-config.js";
 import { WorkflowProposalRejected, guardWorkflowProposal } from "./workflow-rejection.js";
 import { disposeDetectedDependencies } from "./runner-detection.js";
 import { TestRunnerSource, describeTestRunners } from "./task-commands.js";
@@ -72,7 +74,7 @@ import {
 } from "./mcp-output-views.js";
 import { createHostPlatformSession, launchMaterial, type HostAgentObservation, type HostPlatformSession, type StartupProof } from "./host-platform.js";
 import { FileToolUsageLedger } from "../platform/tool-usage-ledger.js";
-import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
+import { AGY_INLINE_REPLY_BYTES, exceedsAgyInlineReply } from "./agy-assignment-admission.js";
 import {
   assertRoleToolReachability, BFLOW_LAUNCH_ID_ENV, LAUNCH_REACHABILITY_DIRECTORY, launchReceiptName, probeAllGateways, ProviderBootstrapPayloadSchema,
   ProviderStartedPayloadSchema, readLaunchReachabilityFact, removeLegacyRoleProbes, reportedReachabilityOf, resolveProbePlan, selectReachabilityFact,
@@ -178,10 +180,46 @@ export const NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT =
   "Structured result requirements: Emit structured results with fields: status, summary, evidence, artifacts, blockers, requested_action, next_role (and optional assumptions). Specialist panes must never send messages to the user.";
 
 const PINNED_SKILL_POLICY = "Only skills selected by the verified current launch SkillManifest are Bflow skill prerequisites. " +
-  "Call read_pinned_instructions without a skillId to inspect your current role policy and selected skills, then select an advertised skillId for its verified content. " +
+  "Call read_pinned_instructions once without a skillId to inspect your current role policy and the selected skill list, then read an advertised skillId. " +
+  "A skill reply is one page of its verified SKILL.md; while skill.truncated is true, call again with that skill's nextOffset until truncated is false. Do not re-read pages you already have. " +
   "Provider-discovered skills or plugins outside that manifest are not Bflow prerequisites; do not read provider HOME, .codex or plugin cache paths to satisfy them. " +
   "Follow the host and accepted project policies, original role instructions and verified selected skills. An empty manifest adds no skill prerequisites. " +
   "This does not grant permissions or waive specification, TDD, verification, delivery or human approval gates.";
+/** Largest Agy skill page before the inline-reply shrink loop; ordinary roles keep the requested limit. */
+const AGY_PINNED_PAGE_LIMIT = 8192;
+export type PinnedInstructionRead = NonNullable<Awaited<ReturnType<HostPlatformSession["readPinnedInstructions"]>>>;
+/**
+ * Reply for read_pinned_instructions. A skill page omits the role instructions and the reference list (the no-skillId
+ * call already returned them). Agy pages shrink until the serialized reply fits AGY_INLINE_REPLY_BYTES.
+ */
+export async function readPinnedInstructionReply(input: { role: AgentRole; skillId?: string; offset: number; requestedLimit: number; isAgy: boolean;
+  fallbackInstructions: string; hasPlatform: boolean; read: (limit: number) => Promise<PinnedInstructionRead | undefined> }): Promise<Record<string, unknown>> {
+  const { role, skillId } = input;
+  const build = (pinned: PinnedInstructionRead | undefined): Record<string, unknown> => {
+    if (input.hasPlatform && pinned === undefined) throw new Error("Current role launch has no verified pinned instruction context");
+    if (skillId !== undefined && pinned === undefined) throw new Error("Skill is not selected by this role's verified manifest");
+    if (skillId !== undefined) return { role, policy: PINNED_SKILL_POLICY, skillManifestDigest: pinned!.manifestDigest, skill: pinned!.skill,
+      source: "verified current launch SkillManifest" };
+    return { role, instructions: pinned?.instructionText ?? input.fallbackInstructions, policy: PINNED_SKILL_POLICY,
+      ...(pinned === undefined ? {} : { skillManifestDigest: pinned.manifestDigest, skills: pinned.references }),
+      source: pinned === undefined ? "authenticated role launch policy" : "verified current launch SkillManifest" };
+  };
+  const agySkill = input.isAgy && skillId !== undefined;
+  let pageLimit = agySkill ? Math.min(input.requestedLimit, AGY_PINNED_PAGE_LIMIT) : input.requestedLimit;
+  let selected = await input.read(pageLimit);
+  let reply = build(selected);
+  // JSON escaping and the reply envelope make the size measurable only on the serialized reply; each step removes at least the overshoot.
+  while (agySkill && selected?.skill !== undefined && pageLimit > 1 && exceedsAgyInlineReply(reply)) {
+    const overshoot = Buffer.byteLength(JSON.stringify(reply), "utf8") - AGY_INLINE_REPLY_BYTES;
+    pageLimit = Math.max(1, pageLimit - Math.max(64, overshoot));
+    selected = await input.read(pageLimit);
+    reply = build(selected);
+  }
+  if (agySkill && selected?.skill !== undefined && exceedsAgyInlineReply(reply))
+    return { role, instructions: PINNED_SKILL_POLICY, policy: PINNED_SKILL_POLICY, skillManifestDigest: selected.manifestDigest,
+      skill: selected.skill, source: "verified current launch SkillManifest" };
+  return reply;
+}
 
 /** Long-lived composition owner. Startup is separate from activation to support provider MCP startup. */
 export async function runAgenticHost(configuration: HostConfiguration): Promise<void> {
@@ -423,6 +461,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
   };
   const behavioralCommands = parseBehavioralCommands(configuration.behavioralCommands);
+  const mutationChecks = parseMutationChecks(configuration.mutationChecks, behavioralCommands);
+  const appChecks = parseAppChecks(configuration.appChecks);
   // Owner commands are an optional override; without them Runtime detects the repository's test runner (no user configuration).
   const testRunners = new TestRunnerSource(behavioralCommands, configuration.repositoryPath);
   await testRunners.refresh();
@@ -492,7 +532,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   } };
   const impactIndex = configuration.impactIndex ? createGitNexusImpactIndex(configuration.impactIndex) : unconfiguredImpactIndex;
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners, rtkUsageIntegration,
-    { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex });
+    { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex }, mutationChecks,
+    { suites: appChecks, leaseDirectory: join(configuration.directory, "app-checks") });
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration);
   const activePolicyMeasurements = new Set<string>();
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation, async (turn, operationId) => {
@@ -713,6 +754,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const manifestFile = join(configuration.manifestDirectory ?? resolve(configuration.repositoryPath, ".bflow/state/panes"), configuration.sessionId + ".manifest.json");
     await privateFile(join(pluginDirectory, "hosts", configuration.sessionId + ".json"), JSON.stringify({ issuerId, privateKeyFile: keyPath, runtimeSocket: nativeSocket, manifestFile,
       herdrSocketPath: textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket) }));
+    const hostChecks = defaultHostChecks(configuration.policy);
     workspace = await openAgenticWorkspace({ storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
       ...(platformSession ? { developerLaunches: {
@@ -722,7 +764,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         degradation: () => platformSession.degradation()
       } } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
-      roleCapabilities: capabilities, preflightRoleCapabilities, taskChecks: DEFAULT_HOST_CHECKS, workflowChecks: DEFAULT_HOST_CHECKS, deterministicGates: [verification.deterministicGate(), verification.testIntegrityGate()],
+      roleCapabilities: capabilities, preflightRoleCapabilities, taskChecks: hostChecks, workflowChecks: hostChecks, deterministicGates: [verification.deterministicGate(), verification.testIntegrityGate()],
       fastPathMode: effectiveFastPathMode(configuration.policy, true),
       behavioralChecks: (specification, strategy, originalRevision) => verification.behavioralChecks(specification, strategy, originalRevision), behavioralGates: () => verification.behavioralGates(),
       validateTaskCommands: (specification, strategy, ownedPaths) => verification.assertTaskSupported(specification, strategy, ownedPaths),
@@ -1131,29 +1173,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const skillId = parameters.skillId === undefined ? undefined : textField(parameters.skillId);
       const offset = parameters.offset === undefined ? 0 : Number(parameters.offset);
       const requestedLimit = parameters.limit === undefined ? 8192 : Number(parameters.limit);
-      const isAgy = providerForRole(role) === "agy";
-      const limit = isAgy && skillId !== undefined ? Math.min(requestedLimit, 4096) : requestedLimit;
       const launchId = typeof binding.metadata?.["launchId"] === "string" ? binding.metadata["launchId"] : undefined;
-      const selected = platformSession ? await platformSession.readPinnedInstructions(role, skillId, offset, limit, launchId) : undefined;
-      const pinned = selected;
-      if (platformSession && pinned === undefined) throw new Error("Current role launch has no verified pinned instruction context");
-      if (skillId !== undefined && pinned === undefined) throw new Error("Skill is not selected by this role's verified manifest");
-      const fullReply = { role, instructions: pinned?.instructionText ?? launch[role]?.systemPrompt ?? "",
-        policy: PINNED_SKILL_POLICY,
-        ...(pinned === undefined ? {} : { skillManifestDigest: pinned.manifestDigest, skills: pinned.references }),
-        ...(selected?.skill === undefined ? {} : { skill: selected.skill }),
-        source: pinned === undefined ? "authenticated role launch policy" : "verified current launch SkillManifest" };
-      if (isAgy && skillId !== undefined && selected?.skill !== undefined && exceedsAgyInlineReply(fullReply)) {
-        return json({
-          role,
-          instructions: PINNED_SKILL_POLICY,
-          policy: PINNED_SKILL_POLICY,
-          ...(pinned === undefined ? {} : { skillManifestDigest: pinned.manifestDigest }),
-          skill: selected.skill,
-          source: "verified current launch SkillManifest"
-        });
-      }
-      return json(fullReply);
+      return json(await readPinnedInstructionReply({ role, ...(skillId === undefined ? {} : { skillId }), offset, requestedLimit,
+        isAgy: providerForRole(role) === "agy", fallbackInstructions: launch[role]?.systemPrompt ?? "", hasPlatform: platformSession !== undefined,
+        read: limit => platformSession ? platformSession.readPinnedInstructions(role, skillId, offset, limit, launchId) : Promise.resolve(undefined) }));
     }
     if (name === "resume_run") {
       const runId = textField(parameters.runId);
@@ -1811,7 +1834,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (signal.aborted) throw signal.reason;
           verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
           if (verificationSandbox.status !== "ready" && (testRunners.profiles.length || behavioralCommands.length))
-            throw new Error(`Runtime independent verification capability unavailable: ${verificationSandbox.reason}`);
+            throw new Error(`${verificationSandbox.code}: ${verificationSandbox.reason}`);
           await drainRoleStartup(true);
           roleStartupFailures.clear();
           // H1: legacy per-role plans never survive a new generation; launch-keyed plans are published by the session.
@@ -2232,7 +2255,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
   else if (["specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role)) tools.push(
     { name: "repository_read", description: "Bounded read-only repository files/listing and safe Git status/log/head/files/diff. Never executes arbitrary commands." });
   if (["coordinator", "developer", "specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role)) tools.push(
-    { name: "read_pinned_instructions", description: "Read this authenticated role's exact policy and verified pinned skill instructions for the active launch." },
+    { name: "read_pinned_instructions", description: "Read this authenticated role's policy and skill list without skillId, or one verified pinned skill page with skillId and nextOffset paging." },
     { name: "read_project_policy", description: "Read hierarchical repository policy files (AGENTS.md, CLAUDE.md, .github/copilot-instructions.md) from workspace root to filePath with full, toc, section, or digests views and knownDigests deduplication." });
   if (role === "reviewer") tools.push({ name: "request_test_integrity_exception", description: "Request an owner exception for an observed test-integrity finding through Runtime → Conversation. Requires reviewId, findingId, reason; end your turn while awaiting the authenticated owner answer. Never grants a self-waiver." });
   if (role === "developer") tools.push({ name: "authorize_implementation", description: "Verify accepted spec and Red evidence; parameters: runId, taskId" }, { name: "submit_implementation", description: "Submit committed implementation under your exact native assignment binding; parameters: runId, taskId" });
