@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { webCommandFingerprint } from "@bflow/contracts/web-host";
 import {
   AcceptanceCriterionSchema,
   AgentExecutionHandleSchema,
@@ -18,7 +19,9 @@ import {
   MetadataSchema,
   RoleMessageSchema,
   SddPolicyLevelSchema,
-  SdlcWorkStatusSchema
+  SdlcWorkStatusSchema,
+  WebCommandSchema,
+  WebOperationResultSchema
 } from "@bflow/contracts";
 import type {
   AcceptanceCriterion,
@@ -492,6 +495,27 @@ export type CancellationBatch = z.infer<typeof CancellationBatchSchema>;
 export const ConversationContextSnapshotSchema = z
   .object({
     schemaVersion: z.literal(2),
+    structuredInteractions: z.record(z.string().uuid(), z.object({
+      command: WebCommandSchema, principalId: IdentifierSchema, fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+      createdAt: IsoDateTimeSchema, state: z.enum(["intent", "applied", "failed", "unknown_delivery"]),
+      result: WebOperationResultSchema.optional(), error: ContractErrorSchema.optional(),
+      delegation: DelegationRequestSchema.optional(), decision: ApprovalDecisionSchema.optional()
+    }).strict()).superRefine((records, ctx) => {
+      for (const [id, entry] of Object.entries(records)) {
+        const parsed = WebCommandSchema.safeParse(entry.command);
+        if (!parsed.success) continue;
+        if (id !== entry.command.commandId || entry.fingerprint !== webCommandFingerprint(parsed.data) ||
+          (entry.state === "applied") !== (entry.result !== undefined) ||
+          (entry.state === "failed" && entry.error === undefined) ||
+          (entry.state === "applied" && entry.error !== undefined) ||
+          (entry.delegation && (entry.delegation.messageId !== `web-delegation-${id}` || entry.delegation.metadata?.userInteractionCommandId !== id)) ||
+          (entry.decision && (entry.command.kind !== "answer_decision" || entry.decision.approvalId !== entry.command.decisionId ||
+            entry.decision.runId !== entry.command.runId || entry.decision.decision !== entry.command.outcome ||
+            entry.decision.decidedBy !== entry.principalId || entry.decision.decidedAt !== entry.createdAt ||
+            entry.decision.idempotencyKey !== `web-decision-${id}`)))
+          ctx.addIssue({ code: "custom", path: [id], message: "Structured interaction identity/state mismatch" });
+      }
+    }).optional(),
     runtimeCancellationTargets: z.record(IdentifierSchema, RuntimeCancellationTargetSchema).optional(),
     cancellationBatches: z.record(IdentifierSchema, CancellationBatchSchema).optional(),
     session: ConversationSessionSchema,
@@ -518,6 +542,12 @@ export const ConversationContextSnapshotSchema = z
   .strict();
 
 export interface ConversationContextSnapshot {
+  readonly structuredInteractions?: Readonly<Record<string, {
+    readonly command: import("@bflow/contracts").WebCommand; readonly principalId: string; readonly fingerprint: string;
+    readonly createdAt: string; readonly state: "intent" | "applied" | "failed" | "unknown_delivery";
+    readonly result?: import("@bflow/contracts").WebOperationResult | undefined; readonly error?: ContractError | undefined;
+    readonly delegation?: DelegationRequest | undefined; readonly decision?: ApprovalDecision | undefined;
+  }>> | undefined;
   readonly runtimeCancellationTargets?: Readonly<Record<string, RuntimeCancellationTarget>> | undefined;
   readonly cancellationBatches?: Readonly<Record<string, CancellationBatch>> | undefined;
   readonly schemaVersion: 2;

@@ -3,6 +3,9 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import {
   ApprovalRequestSchema,
+  ApprovalDecisionSchema,
+  WebCommandSchema,
+  WebOperationResultSchema,
   CancellationRequestSchema,
   ContractErrorSchema,
   ConversationMessageSchema,
@@ -17,6 +20,8 @@ import {
   type OperationResult,
   type SdlcWorkStatus
 } from "@bflow/contracts";
+import type { WebCommand, WebOperationResult, ApprovalDecision } from "@bflow/contracts";
+import { WebPrincipalSchema, webCommandFingerprint, type WebPrincipal } from "@bflow/contracts/web-host";
 
 import type { ConversationContextStore } from "./context-store.js";
 import {
@@ -70,6 +75,10 @@ import {
  * Configuration options for ConversationGateway.
  */
 export interface ConversationGatewayConfig {
+  /** Owner composition verifies proof/trust/current host action before admission. Never a role tool. */
+  readonly authorizeStructuredInteraction?: (command: WebCommand, principal: WebPrincipal) => Promise<boolean>;
+  readonly onStructuredApproval?: (decision: ApprovalDecision, command: WebCommand, principal: WebPrincipal) => Promise<OperationResult<void>>;
+  readonly onStructuredResume?: (command: Extract<WebCommand, { kind: "resume" }>, principal: WebPrincipal) => Promise<OperationResult<WebOperationResult>>;
   readonly sessionId: string;
   readonly herdrSessionId: string;
   readonly conversationAgentId?: string; // default "chat"
@@ -97,6 +106,7 @@ export class ConversationGateway {
   private isProcessingTurn = false;
   private isFlushingQueue = false;
   private isDrainingSingleQueueItem = false;
+  private structuredPending: Promise<unknown> = Promise.resolve();
 
   constructor(config: ConversationGatewayConfig) {
     this.config = config;
@@ -111,6 +121,16 @@ export class ConversationGateway {
     candidate: ConversationContextSnapshot,
     removedQueueIds?: ReadonlySet<string>
   ): Promise<OperationResult<ConversationContextSnapshot>> {
+    // Structured receipts are an append-only authority ledger. A native busy-state
+    // or notice save which began earlier must not erase an accepted command/result.
+    const mergeStructured = (base: ConversationContextSnapshot["structuredInteractions"], latest: ConversationContextSnapshot["structuredInteractions"]) => {
+      const merged = { ...base };
+      for (const [id, entry] of Object.entries(latest ?? {})) {
+        const prior = merged[id];
+        if (!prior || entry.state === "applied" || (prior.state === "intent" && entry.state !== "intent")) merged[id] = entry;
+      }
+      return merged;
+    };
     // 1. Merge any items currently in this.snapshot.pendingInboundQueue that are not yet in candidate.pendingInboundQueue
     // (unless candidate explicitly removed a specific queueId in removedQueueIds during flush)
     const candidateQueueIds = new Set(candidate.pendingInboundQueue.map((item) => item.queueId));
@@ -127,6 +147,8 @@ export class ConversationGateway {
 
     let toSave: ConversationContextSnapshot = {
       ...candidate,
+      ...(candidate.structuredInteractions || this.snapshot?.structuredInteractions
+        ? { structuredInteractions: mergeStructured(candidate.structuredInteractions, this.snapshot?.structuredInteractions) } : {}),
       pendingInboundQueue: [...candidate.pendingInboundQueue, ...missingItems]
     };
 
@@ -151,9 +173,12 @@ export class ConversationGateway {
       }
     }
 
-    if (newArrivalsDuringSave.length > 0) {
+    const structuredAfterSave = mergeStructured(saveRes.value.structuredInteractions, this.snapshot?.structuredInteractions);
+    const structuredChanged = !isDeepStrictEqual(saveRes.value.structuredInteractions ?? {}, structuredAfterSave);
+    if (newArrivalsDuringSave.length > 0 || structuredChanged) {
       const doubleMerged: ConversationContextSnapshot = {
-        ...saveRes.value,
+        ...(structuredChanged ? this.snapshot! : saveRes.value),
+        ...(structuredChanged ? { structuredInteractions: structuredAfterSave } : {}),
         pendingInboundQueue: [...saveRes.value.pendingInboundQueue, ...newArrivalsDuringSave]
       };
       this.snapshot = doubleMerged;
@@ -240,6 +265,191 @@ export class ConversationGateway {
       throw new Error("ConversationGateway is not initialized. Call initializeOrRecoverSession() first.");
     }
     return this.snapshot;
+  }
+
+  /** Observe a committed structured result without replaying its side effect. */
+  async readStructuredInteraction(commandId: string): Promise<OperationResult<WebOperationResult> | undefined> {
+    const loaded = await this.config.contextStore.load(this.config.sessionId);
+    if (!loaded.ok) return loaded;
+    const entry = loaded.value?.structuredInteractions?.[commandId];
+    if (entry?.state === "applied" && entry.result) return { ok: true, value: WebOperationResultSchema.parse(entry.result) };
+    return undefined;
+  }
+
+  /** Deterministic user interaction, independent of Chat classification/model busy state.
+   * Proof registration/signature verification belongs to the trusted host callback;
+   * an arbitrary parsed WebPrincipal or authenticatedUser flag grants no authority.
+   */
+  handleStructuredInteraction(commandInput: unknown, principalInput: unknown): Promise<OperationResult<WebOperationResult>> {
+    const result = this.structuredPending.catch(() => undefined).then(() => this.structuredInteractionCore(commandInput, principalInput));
+    this.structuredPending = result;
+    return result;
+  }
+
+  private structuredHash(value: unknown): string {
+    // Match existing W01 semantic projection tokens, whose keys use localeCompare.
+    const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical)}]` : v !== null && typeof v === "object"
+      ? `{${Object.entries(v).filter(([, x]) => x !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)}}`
+      : JSON.stringify(v);
+    return createHash("sha256").update(canonical(value)).digest("hex");
+  }
+
+  private async structuredInteractionCore(commandInput: unknown, principalInput: unknown): Promise<OperationResult<WebOperationResult>> {
+    const fail = (code: "validation" | "conflict" | "not_found" | "unknown_delivery", message: string): OperationResult<WebOperationResult> =>
+      code === "conflict" ? { ok: false, error: { code, retryable: true, message } } :
+      code === "unknown_delivery" ? { ok: false, error: { code, retryable: false, message, manualInterventionRequired: true } } :
+      { ok: false, error: { code, retryable: false, message } };
+    const parsed = WebCommandSchema.safeParse(commandInput), proof = WebPrincipalSchema.safeParse(principalInput);
+    if (!parsed.success || !proof.success) return fail("validation", "Invalid structured interaction");
+    const command = parsed.data, principal = proof.data, fingerprint = webCommandFingerprint(command);
+    if (principal.hostSessionId !== this.config.herdrSessionId || principal.projectId !== command.projectId ||
+      principal.commandId !== command.commandId || principal.commandDigest !== fingerprint ||
+      !this.config.authorizeStructuredInteraction || !await this.config.authorizeStructuredInteraction(command, principal))
+      return fail("validation", "Structured interaction lacks host authority");
+    if (!this.snapshot) { const initialized = await this.initializeOrRecoverSession(); if (!initialized.ok) return initialized; }
+    const previous = this.snapshot!.structuredInteractions?.[command.commandId];
+    if (previous) {
+      if (previous.fingerprint !== fingerprint || previous.principalId !== principal.principalId) return fail("conflict", "Structured command identity conflicts");
+      if (previous.state === "applied" && previous.result) {
+        const repaired = await this.persistUpdatedSnapshot(this.snapshot!);
+        return repaired.ok ? { ok: true, value: WebOperationResultSchema.parse(previous.result) } : repaired;
+      }
+      if (previous.state === "failed" && previous.error) return { ok: false, error: previous.error };
+      return fail("unknown_delivery", "Structured interaction has an unresolved durable intent; observe before any retry");
+    }
+    // Native turn arbitration remains the existing Gateway boundary. Ordinary native
+    // arrivals queue while this deterministic admission is active; model busy alone
+    // does not block forms. An already active native mutation wins this race.
+    if (this.isProcessingTurn || this.isFlushingQueue) return fail("conflict", "Conversation admission is already processing another turn");
+    this.isProcessingTurn = true;
+    try {
+      const now = this.getNow();
+      const workflow = "runId" in command && command.runId !== undefined
+        ? Object.values(this.snapshot!.workflows).find(w => w.runId === command.runId && w.sessionId === this.config.sessionId) : undefined;
+      if ("runId" in command && command.runId !== undefined && !workflow) return fail("not_found", "Run is not in the current Conversation session");
+      if (workflow && isTerminalRunStatus(workflow.sdlcStatus)) return fail("conflict", "Terminal workflow does not accept structured mutation");
+      const id = command.commandId;
+      let delegation: import("@bflow/contracts").DelegationRequest | undefined;
+      let decision: ApprovalDecision | undefined;
+      let resultingWorkflow: WorkflowRequestContext | undefined;
+      let pendingClarifications = { ...this.snapshot!.pendingClarifications };
+      let result: WebOperationResult;
+      if (command.kind === "create_request" || command.kind === "revise_request" || command.kind === "answer_clarification") {
+        let draft: ExtractedRequirementDraft;
+        let correlationId = workflow?.correlationId ?? `web-${id}`;
+        let runId = workflow?.runId ?? `run-web-${id}`;
+        let constraints: string[] = [];
+        if (command.kind === "answer_clarification") {
+          const intakeId = command.intakeId ?? workflow!.correlationId;
+          const pending = this.snapshot!.pendingClarifications[intakeId];
+          if (!pending || command.expectedVersion.revisionToken !== this.structuredHash(pending)) return fail("conflict", "Clarification version is stale");
+          const questionIndex = pending.unresolvedQuestions.findIndex((question, index) => command.questionId === `question-${this.structuredHash([pending.correlationId, index, question])}`);
+          if (questionIndex < 0) return fail("conflict", "Clarification question is no longer pending");
+          const questions = pending.unresolvedQuestions.filter((_, index) => index !== questionIndex);
+          const criteriaQuestion = "Nêu ít nhất một tiêu chí nghiệm thu cho yêu cầu này.";
+          draft = { ...pending.draft, objective: `${pending.draft.objective}\n${command.answer}`,
+            ...(pending.unresolvedQuestions[questionIndex] === criteriaQuestion ? { acceptanceCriteria: [{ description: command.answer, verificationMethod: "manual_review" as const }] } : {}), scopeDefined: questions.length === 0 };
+          if (!questions.length && !(draft.acceptanceCriteria?.length || draft.acceptanceCriteriaDescriptions.length)) questions.push(criteriaQuestion);
+          correlationId = pending.correlationId; runId = workflow?.runId ?? `run-${correlationId}`;
+          if (questions.length) {
+            pendingClarifications[intakeId] = { ...pending, draft, accumulatedDetails: [...pending.accumulatedDetails, command.answer], unresolvedQuestions: questions, updatedAt: now };
+            result = { kind: "intake", intakeId };
+          } else {
+            delete pendingClarifications[intakeId];
+            result = { kind: "interaction", runId, currentRunId: runId };
+          }
+        } else {
+          draft = { title: command.kind === "create_request" ? command.title : workflow!.title, objective: command.objective,
+            kind: command.kind === "create_request" ? command.requestKind : workflow!.kind,
+            sddLevel: workflow?.sddLevel === "full" || (command.kind === "create_request" && command.requestKind === "feature") ||
+              /(?<!\p{L})(?:jwt|auth|security|bảo mật|kiến trúc|database|migration|toàn diện|full)(?!\p{L})/iu.test(`${command.objective}\n${command.constraints.join("\n")}`)
+              ? "full" : workflow?.sddLevel ?? "lightweight", priority: workflow?.priority ?? "normal",
+            scopeDefined: true, isLargeTask: false, affectedPaths: [], acceptanceCriteriaDescriptions: [],
+            acceptanceCriteria: command.acceptanceCriteria, isRequirementChange: command.kind === "revise_request" };
+          constraints = command.constraints;
+          result = { kind: "interaction", runId, currentRunId: runId };
+        }
+        if (result.kind === "interaction") {
+          const built = buildDelegationRequest({ sessionId: this.config.sessionId, correlationId, runId,
+            messageId: `web-delegation-${id}`, previousDelegationId: `web-del-${id}`, idempotencyKey: `web-delegation-${id}`,
+            draft, requestedAt: now, revision: workflow ? workflow.revision + 1 : 1 });
+          if (!built.ok) return built;
+          delegation = DelegationRequestSchema.parse({ ...built.value, metadata: { ...built.value.metadata, constraints,
+            userInteractionCommandId: id, userInteractionSource: "local_web" } });
+          resultingWorkflow = { correlationId, sessionId: this.config.sessionId, delegationId: delegation.delegationId,
+            specificationId: delegation.specificationId, runId, title: draft.title, objective: draft.objective, kind: draft.kind,
+            sddLevel: draft.sddLevel, priority: draft.priority, acceptanceCriteria: delegation.acceptanceCriteria,
+            sdlcStatus: "intake", revision: workflow ? workflow.revision + 1 : 1, generation: workflow?.generation ?? 0,
+            activeApprovalIds: [], progressHistory: workflow?.progressHistory ?? [], completedVerified: false,
+            createdAt: workflow?.createdAt ?? now, updatedAt: now };
+        }
+      } else if (command.kind === "answer_decision") {
+        const pending = this.snapshot!.pendingApprovals[command.decisionId], version = command.expectedVersion;
+        if (!pending || this.snapshot!.approvalDecisions[command.decisionId] || this.snapshot!.closedApprovals?.[command.decisionId] ||
+          pending.runId !== command.runId || pending.sessionId !== this.config.sessionId ||
+          version.revisionToken !== this.structuredHash(pending) || version.approvalId !== pending.approvalId ||
+          version.revision !== pending.revision || version.generation !== pending.generation ||
+          !isDeepStrictEqual(version.target, pending.target) || version.evidenceDigest !== this.structuredHash(pending.evidence))
+          return fail("conflict", "Approval version/target/evidence is stale or already settled");
+        if (pending.expiresAt && Date.parse(pending.expiresAt) <= Date.parse(now)) return fail("conflict", "Approval has expired");
+        const options = Array.isArray(pending.metadata?.options) ? pending.metadata.options.filter((value): value is string => typeof value === "string") : [];
+        if ((!isUserDecisionRequest(pending) && command.selectedOption !== undefined) ||
+          (command.selectedOption !== undefined && !options.includes(command.selectedOption)) ||
+          (isUserDecisionRequest(pending) && options.length && command.outcome === "approved" && command.selectedOption === undefined))
+          return fail("validation", "Selected option is not an offered choice");
+        if (!this.config.onStructuredApproval) return fail("validation", "Structured approval capability is unavailable");
+        decision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: command.decisionId, runId: command.runId,
+          sessionId: this.config.sessionId, target: version.target, revision: version.revision, generation: version.generation,
+          decision: command.outcome, decidedBy: principal.principalId, decidedAt: now, reason: command.reason ?? "User approved",
+          feedbackArtifacts: [], idempotencyKey: `web-decision-${id}`,
+          ...(command.selectedOption !== undefined ? { metadata: { selectedOption: command.selectedOption } } : {}) });
+        result = { kind: "interaction", runId: command.runId, currentRunId: command.runId };
+      } else if (command.kind === "cancel") {
+        const cancellation = buildCancellationRequest({ runId: command.runId, requestedBy: principal.principalId, requestedAt: now,
+          expectedVersion: workflow!.revision, cancellationId: `web-cancel-${id}`, idempotencyKey: `web-cancel-${id}`, reason: command.reason });
+        if (!cancellation.ok) return cancellation;
+        delegation = DelegationRequestSchema.parse({ schemaVersion: 2, delegationId: `web-cancel-${id}`, messageId: `web-delegation-${id}`,
+          correlationId: workflow!.correlationId, sessionId: this.config.sessionId, runId: command.runId, requestedBy: "conversation", targetRole: "coordinator",
+          title: `Hủy workflow run: ${command.runId}`, objective: command.reason, specificationId: `spec-cancel-${command.runId}`, sddLevel: "lightweight",
+          acceptanceCriteria: [{ id: "ac-cancel-1", description: command.reason, category: "functional", verificationMethod: "manual_review", required: true, status: "pending", evidenceArtifactIds: [] }],
+          inputArtifacts: [], priority: "critical", requestedAt: now, idempotencyKey: `web-cancel-${id}`,
+          metadata: { action: "cancel", targetRunId: command.runId, cancellationRequest: cancellation.value, userInteractionCommandId: id,
+            requestedScope: [command.runId], rawUserRequest: command.reason, interpretedIntent: command.reason, userMessageId: id, cancellationBatchRunIds: [command.runId] } });
+        result = { kind: "interaction", runId: command.runId, currentRunId: command.runId };
+      } else {
+        if (!this.config.onStructuredResume) return fail("validation", "Structured resume capability is unavailable");
+        result = { kind: "interaction", runId: command.runId, currentRunId: command.runId };
+      }
+      const intent = { command, principalId: principal.principalId, fingerprint, createdAt: now, state: "intent" as const,
+        ...(delegation ? { delegation } : {}), ...(decision ? { decision } : {}) };
+      const persist = async (entry: NonNullable<ConversationContextSnapshot["structuredInteractions"]>[string], updates: Partial<ConversationContextSnapshot> = {}) =>
+        this.persistUpdatedSnapshot({ ...this.snapshot!, ...updates,
+          structuredInteractions: { ...this.snapshot!.structuredInteractions, [id]: entry }, deliveryRecords: this.config.bridge.getAllDeliveryRecords() });
+      const accepted = await persist(intent);
+      if (!accepted.ok) return accepted;
+      let effect: OperationResult<void> | OperationResult<WebOperationResult> = { ok: true, value: undefined };
+      try {
+        if (delegation) effect = await this.config.bridge.handOffToCoordinator(delegation);
+        else if (decision) effect = await this.config.onStructuredApproval!(decision, command, principal);
+        else if (command.kind === "resume") effect = await this.config.onStructuredResume!(command, principal);
+      } catch { effect = { ok: false, error: { code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: "Structured admission interrupted; reconcile before retrying" } }; }
+      if (!effect.ok) {
+        const saved = await persist({ ...intent, state: effect.error.code === "unknown_delivery" ? "unknown_delivery" : "failed", error: effect.error });
+        return saved.ok ? effect : saved;
+      }
+      if (command.kind === "resume" && effect.value !== undefined) result = WebOperationResultSchema.parse(effect.value);
+      const pendingApprovals = { ...this.snapshot!.pendingApprovals }, approvalDecisions = { ...this.snapshot!.approvalDecisions };
+      let activeApprovalIds = [...this.snapshot!.session.activeApprovalIds];
+      if (decision) { delete pendingApprovals[decision.approvalId]; approvalDecisions[decision.approvalId] = decision; activeApprovalIds = activeApprovalIds.filter(id => id !== decision.approvalId); }
+      const workflows = { ...this.snapshot!.workflows };
+      if (resultingWorkflow) workflows[resultingWorkflow.correlationId] = resultingWorkflow;
+      if (decision && workflow) workflows[workflow.correlationId] = { ...workflow, activeApprovalIds: workflow.activeApprovalIds.filter(id => id !== decision!.approvalId), updatedAt: now };
+      const saved = await persist({ ...intent, state: "applied", result }, { pendingClarifications, pendingApprovals, approvalDecisions, workflows,
+        runIdToCorrelationId: { ...this.snapshot!.runIdToCorrelationId, ...(resultingWorkflow ? { [resultingWorkflow.runId]: resultingWorkflow.correlationId } : {}) },
+        session: { ...this.snapshot!.session, activeApprovalIds, ...(result.kind === "interaction" ? { activeRunId: result.currentRunId } : {}),
+          status: result.kind === "intake" ? "awaiting_user_clarification" : activeApprovalIds.length ? "awaiting_user_approval" : "delegated_to_coordinator", updatedAt: now } });
+      return saved.ok ? { ok: true, value: result } : saved;
+    } finally { this.isProcessingTurn = false; }
   }
 
   /**
@@ -1090,6 +1300,13 @@ export class ConversationGateway {
 
           if (!targetApproval) {
             return this.answerWithNotice(input, correlationId, this.unknownApprovalNotice(undefined, false));
+          }
+
+          if (Object.values(this.snapshot!.structuredInteractions ?? {}).some(entry =>
+            entry.command.kind === "answer_decision" && entry.command.decisionId === targetApproval!.approvalId &&
+            (entry.state === "intent" || entry.state === "unknown_delivery"))) {
+            return { ok: false, error: { code: "conflict", retryable: true,
+              message: "An authenticated structured decision has unresolved delivery for this exact approval; reconcile it first" } };
           }
 
           // Specialist user decisions: the selected option must be one that was offered and the
