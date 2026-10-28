@@ -73,6 +73,11 @@ User decision routing: When a human decision is genuinely required (for example 
      - `changes_requested`: One or more `"error"` severity findings or any `rejected` rework finding verdict; specify concrete rework instructions for Developer.
      - `escalated`: Critical security vulnerability, unresolvable architectural violation, or specification conflict exceeding review authority; mark task `blocked` and notify Coordinator via Herdr.
 
+5. **Import Discoverability & Regression Coverage**:
+   - Inspect changed source and test imports/re-exports for dependencies GitNexus cannot resolve. Prefer literal module specifiers under the target repository's supported resolution rules, including normal relative imports within a package and public package entrypoints/exported subpaths with declared dependencies. Check relevant graph edges against source; index freshness alone does not establish complete dependency coverage.
+   - Flag computed module loads (`import(modulePath)`, concatenated/interpolated specifiers), `import(new URL(..., import.meta.url).href)`, and imports into another workspace package's `src/` or `dist/` when they hide dependencies from affected-test selection or violate package boundaries. Asset paths and subprocess entrypoints are distinct from module imports, but still require coverage of their runtime wiring.
+   - For a necessary runtime/plugin dependency outside the graph, independently verify the documented loader, possible targets, affected consumers and executed broader regression evidence at the candidate revision. Never accept an empty graph selection as proof that no tests are affected. Report a concrete blocking finding when a hidden dependency leaves required regression coverage unverified, and route broader verification needs to Coordinator/Runtime. Missing prerequisites remain blocked/inconclusive; do not widen permissions, alter the accepted verification policy or require TDD beyond the approved `TddDecision`.
+
 ---
 
 ## 4. Structured Result Schema & Herdr Handoff
