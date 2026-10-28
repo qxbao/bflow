@@ -1,221 +1,201 @@
-# W02 Runtime foundation — incomplete, Conversation owner handoff
+# W02 — trusted structured interaction, integrated owner handoff
 
-Baseline: `607d101433d3559e6c9474e5023996babc815157`.
-Branch: `agent/runtime/w02`; worktree `.worktrees/local-web-w02`.
-Source commit: `6da552daf5a92363576eb18f0576d5d8c713cf84`.
-The subsequent handoff-only commit records measured verification below.
+This supersedes the foundation-only handoff at `9d563b9`. Conversation intake
+was W02 work, not a missing predecessor; resumed execution finishes it through
+its own owner/worktree. W02 source and local integration are implemented and
+the final affected gate is PASS. This does not close W09 live acceptance.
 
-This is **not completed W02 or M1**. Authenticated no-chat commands remain
-disabled. No new endpoint, successful production stub, native hook, legacy CLI
-mutation, public schema, root configuration or cross-owner edit was introduced.
+## Baseline, ownership and commits
 
-## Baseline and ownership
+Original approved integration baseline: `607d101433d3559e6c9474e5023996babc815157`.
+Continuation starts from foundation handoff `9d563b90f3ade8f213bc7a09edd2eb96ee109c97`.
+Runtime branch/worktree: `agent/runtime/w02`, `.worktrees/local-web-w02`.
+Conversation owner: `agent/conversation/w02`, `.worktrees/local-web-conversation-w02`.
 
-Read actual AGENTS.md, W02 plan, full spec, accepted ADR 0006 / D-WEB-01,
-W00 handoff and W01 runtime handoff. Baseline index/worktree were clean.
-Inspected HEAD, local/remote refs, worktrees, ancestry and
-`git log --left-right --cherry-pick main...origin/main` (empty). W00 branch
-`de36c73`, its freeze `2bd99d8`, W01 branch `114de68` and P24 `8dbb056`
-are ancestors. `git cherry main HEAD` was empty before implementation:
-no competing predecessor patch needed cherry-picking. Survey `7b158c4`
-was not used to reset anything. No other worktree, shared file or remote
-was modified. No fetch/push/PR/remote merge.
+Actual AGENTS.md, W02 plan/spec, accepted ADR0006 D-WEB-01 and W00/W01
+handoffs were read. HEAD/index/status/worktrees/local and remote refs,
+ancestry and patch equivalence were checked. Baseline retains W00 freeze
+`2bd99d8`, W01 `114de68` and P24 `8dbb056`. Survey `7b158c4` was not used
+to reset anything. Main started clean at the baseline and stayed untouched
+during implementation. No uncommitted work in another worktree was changed.
 
-Only owned Runtime paths are added:
+Runtime source commits:
 
-- `src/interaction/authority.ts`: in-memory owner-registered Ed25519 trust;
-  exact project/host/principal/issuer/key/capability/command/digest/time checks.
-  Strict exported WebCommand/WebPrincipal codecs at admission. New host has
-  no registered key; registration/revocation are private composition methods,
-  not an implemented IPC or role tool. Browser/model cannot register a key.
-- `src/interaction/operation-store.ts`: separate private v2 checksummed
-  immutable intent/running/uncertain/final records, host-local serialized
-  admission and nonce consumption in the same intent publication. Intent is
-  file-synced and directory-synced before acceptance. One current in-memory
-  owner can claim dispatch once. Identity is project/principal/commandId;
-  body conflict is refused and finalized receipts retain identity/nonce.
-- `test/interaction/{authority,recovery,native-compatibility}.test.ts`,
-  `web-command-fixtures.ts` and this handoff.
+- `6da552daf5a92363576eb18f0576d5d8c713cf84`: authority/store foundation.
+- `3748f2db76be0c80d9e7dd1eab4bf3388d01d076`: host/client/Conversation wiring,
+  exact action validation and the first review fixes.
+- `3aa2943cc5c0cfb99671962f84e98a20f72267e1`: observation of actual committed
+  effects across outbox/Conversation result and Runtime effect/inbox gaps.
 
-These modules are private and deliberately not re-exported as a new Runtime
-API. `UserInteractionClient.execute/readOperation` remain explicitly refused
-and W01 actions disabled. There is no authority-bearing socket route yet.
+Conversation original commits → integrated patch-equivalent commits:
 
-## Exact ownership blocker and proposed Conversation seam
+| Owner commit | Integrated commit | Change |
+| --- | --- | --- |
+| `d685a53` | `930cbca` | deterministic intake, durable private ledger, arbitration |
+| `3ecdd2b` | `b2d424a` | cancellation boundary and clarification cleanup |
+| `9e9b02b` | `34d3de9` | committed rejection observation |
+| `1b2326e` | `30b7c9b` | owner handoff |
+| `3829f96` | `6817570` | uncertain target reservation and error classification |
+| `439e38d` | `33c986b` | review-fix evidence |
 
-`packages/conversation/src/types.ts::MessageProvenanceSchema` only accepts
-`herdr_attach | cli | internal | untrusted`. `UserTurnInputSchema` requires
-text content and its existing `ConversationGateway.handleUserTurn` goes
-through native/text decision paths. No exported Conversation-owned structured
-WebCommand intake exists. `HostConversationIntake.userInput` constructs
-`herdr_attach` from a real `TrustedConversationTurn`/PaneBinding; reusing it
-for web would fabricate physical provenance. In
-`packages/runtime/src/agentic/host.ts::onHumanDecision`, the callback requires
-`humanHookProvenance`; `HostReceiptJournal.recordHuman/authenticateHuman`
-only supports native-v1. These are incompatible with pretending a browser
-proof is an authenticated native turn. No such bypass was added.
+`git cherry HEAD agent/conversation/w02` marks all six as equivalent, not
+missing. Local integration follows W02 step7. Production/test source is fixed
+at `3aa2943`; only package documentation follows. The user subsequently
+authorized main integration and remote push once verified, with affected
+tests instead of a monorepo full suite. The final execution response reports
+the verified remote head after push; local gate evidence alone is not remote closure.
 
-Conversation owner proposal (names are a proposal, not implemented APIs):
+Paths: only `packages/runtime/**` and owner-authored `packages/conversation/**`.
+Runtime adds `src/interaction/{authority,operation-store,commands}.ts`, changes
+its client/schemas/views, agentic host/controller/Conversation/runtime wiring,
+index exports, README and package-local tests/handoff. Conversation adds its
+structured Gateway entry and private optional snapshot ledger with local tests.
+No contracts, root config, lockfile, shared README/AGENTS/docs, Local Server,
+CLI or Web source change. No public schema amendment.
 
-1. Export a dedicated `handleStructuredInteraction(command, principal)` entry
-   consuming the frozen exported WebCommand/WebPrincipal schemas, invoked only
-   by host-authenticated composition. Add observation-only reconciliation for
-   the same commandId. Do not reuse model-supplied `authenticatedUser:true`
-   or accept a key bundled with a command. Coordinate exact return type using
-   existing WebOperationResult/OperationResult codecs; any new public codec
-   needs an integration decision first.
-2. Deterministically map request kind/title/objective/criteria/constraints
-   into the existing requirement policy and normal persisted delegation/outbox.
-   No classifier/model turn, invented approved Specification or Developer
-   dispatch. Keep pre-run intakeId and pending questions in Conversation
-   storage, expose exact question identity/version through the W01 view.
-3. Share the native/web pending-decision settlement and serialization boundary.
-   Recheck full approval target/revision/generation/evidenceDigest/options,
-   expiry/supersession and current pending action while holding authority.
-   Exactly one opposite decision may win. Preserve follow-up-run lineage,
-   cancel/resume guards and current native behavior.
-4. Return stable admission/result receipts keyed by commandId, including
-   failures and unknown delivery, for host observation-only reconciliation.
-   Resume/cancel must not acquire native authority from fabricated turns.
+## Integrated interfaces and admission
 
-After that owner handoff, Runtime must implement commands.ts and wire the
-existing host/intake/Runtime callbacks, dedicated owner-key registration IPC,
-authenticated mutation/read-operation ingress, v2 recovery dispatch and
-client methods. It must revalidate state under the shared native/web mutation
-boundary and retain lease/fence, independent gates, test-integrity and bounds.
-Local Server must persist its frozen owner index before forwarding and route
-old IDs to the original host session, including after down/up; never forward
-them to a replacement host. W04 owner composition registers the server key.
-No current function here establishes these missing integrations.
+Frozen `UserInteractionClient.execute/readOperation` now work with explicitly
+trusted composition. Default client remains read-only and never starts a host.
+`registerUserInteractionIssuer(options, registration)` uses existing owner-only
+private IPC to register an Ed25519 key and host-local principal; returned
+credential can only execute/read user interactions, not role or lifecycle calls.
+Factory optional `interaction: {credential, sign(command)}` supplies the signer.
+Proof includes full parsed command digest, scope, issuer/key/principal/browser
+session, nonce and <=60-second lifetime. Live scope/signature/time is checked,
+including again immediately before durable acceptance after receipt scanning.
+Host restart requires registration again; no request-supplied trust root.
 
-## Compatibility and recovery behavior actually implemented
+Conversation owner implements `handleStructuredInteraction(command, principal)`
+and observation-only `readStructuredInteraction(commandId)`. Runtime composition
+enables it through dedicated host callbacks and async-local accepted authority;
+a parsed proof or model's authenticatedUser flag alone cannot admit anything.
+Create/revise preserve explicit draft criteria/methods/constraints and use normal
+delegation/outbox/Coordinator admission. No approved Specification is invented.
+Both pre-run intakeId and existing-run questions use exact question/version
+bindings; run-scoped projection reads the authoritative Conversation context.
 
-No HostReceiptJournal-v1 byte/checksum/filename/parser changes. Compatibility
-test reads all three W00 native-v1 approval fixtures through actual journal
-`authenticateHuman`/`humanDecisions`, with byte equality afterward. This is
-fixture replay, not live physical-hook evidence or a complete replay upcaster.
+Decision validation retains exact target/revision/generation/evidence/options,
+expiry/supersession/terminal refusal and required reasons. Native and web share
+host user serialization and Gateway settlement/reservations. Unresolved intent
+reserves the same approval binding even against a NEW command ID; a new approval
+generation remains usable. Web human milestones use v2 receipts and host-issued
+identity/time, never UserPromptSubmit/PreInvocation or a fabricated PaneBinding.
 
-The v2 store checks version/kind/checksum/full fingerprint/context/filename
-identity and safe owner-only regular files; rejects symlinks and oversized
-records. Missing/foreign principal lookup cannot return another principal's
-operation. Repository/session mismatches fail closed. Historical reads use
-accepted receipts without requiring today's browser TTL. New submissions,
-including replay, still require a live registered proof. Proof/keys are never
-returned in the WebOperation DTO.
+Resume crosses Conversation's callback into existing `resumeBlockedRun` with
+`webCommand`, rechecking the version under its journal transaction. Its outbox
+uses `webCommandId`, never a made-up conversationUserMessageId. Existing lease,
+capability, approval, manual/automatic budgets and Red continuation checks remain.
+Cancel uses the existing Conversation cancellation request/Runtime controls;
+request accepted is distinct from a confirmed process stop.
 
-Current-process accepted intent can begin exactly once, with a running marker
-published before any caller could effect admission. Reopening a store after
-intent/dispatch/effect-before-ack gives reconciliation_required and cannot
-claim dispatch. A final persisted result survives response loss/restart and
-replays unchanged; same ID/different body conflicts. Explicit uncertainty is
-separate from final resolution and can later close from authoritative evidence.
-The primitive never observes/infers a workflow effect itself; its future
-trusted caller must validate that evidence before settle. There is no automatic
-retry, inferred success, cancellation-stopped claim or native/web winner claim.
+## Persistence and recovery
 
-Guarantee scope: one exclusive host owner on a local POSIX filesystem, using
-its existing host lifecycle lock. In-process callers serialize by directory;
-there is no multi-process/multi-host/network-filesystem/power-loss/hostile
-same-UID guarantee. Nonce lookup scans retained intents; no throughput claim.
+Host intent/nonce is durable before dispatch/ack; records are owner-private,
+bounded, checksummed, context/filename validated and atomically published with
+file/directory sync. Same project/principal/command ID/body replays the original
+operation. Changed body conflicts. No TTL-based pruning permits ID reuse.
+Temporary receipt cleanup on write/sync failure has a reproduced regression fix.
 
-## TDD, verification and review ledger
+The separate v2 human marker binds the exact accepted decision before its outbox
+effect. Historical authority does not depend on today's browser TTL; new submit
+still needs live proof. Native-v1 envelope, filenames, checksums and provenance
+are unchanged. All three W00 native fixtures replay through real journal APIs
+with byte equality. Additive private Conversation snapshot state retains old
+native snapshots; older strict readers reject structured ledger fields, so
+downgrade with retained web state is unsupported. No SQL/domain-event migration.
 
-Supplied accepted policy: required red-green for authority/replay/security;
-no fabricated domain TddDecision or human approval receipt.
+Recovery observes committed Conversation results, exact original Runtime outbox
+messages, applied inbox receipts or the exact Runtime-persisted decision effect.
+The latter covers follow-up commit before inbox.applied. Original outbox identity
+also survives later delegation revision and covers cancellation committed before
+Conversation's final result write. No recovery path re-admits uncertain commands.
+Unknown delivery remains in Runtime; observing local admission never claims
+remote delivery or workflow success. Definitive refusals can settle failed.
 
-- Baseline `pnpm install --frozen-lockfile` and `pnpm run build`: PASS.
-- Initial targeted authority/recovery run: RED, two suites could not load the
-  missing authority implementation. Subsequent behavioral regression tests
-  reproduced corrupt dispatch-marker settlement and uncertainty that could
-  not later resolve; both failed before their production fixes and passed
-  afterward. No tests/assertions/timeouts were weakened.
-- `TMPDIR=/tmp pnpm exec vitest run packages/runtime/test/interaction/authority.test.ts packages/runtime/test/interaction/recovery.test.ts`:
-  PASS, 24 tests / 2 files. Independent reviewer repeated 24/24 PASS.
-- `TMPDIR=/tmp pnpm exec vitest run packages/runtime/test/interaction/native-compatibility.test.ts`:
-  PASS, 1 test / 1 file, all three native fixtures.
-- Rebuilt `pnpm run build`: PASS before subprocess regression selection.
-- `pnpm check:deps`: PASS, 24 packages / 52 edges, unchanged boundaries.
-- `pnpm typecheck`: PASS, including frontend and Node resolver typechecks.
-- Affected selection: package scope, GitNexus unavailable/commit_mismatch;
-  the unavailable index widens to Runtime rather than skipping its tests.
-  206 unit input paths (including helpers), zero E2E. Actual executed inventory
-  is 188 files, not 206 test suites.
+Ruling: approval operations stay running until actual Runtime effect/lineage
+evidence, rather than predicting a child from the accepted click. Cost: callers
+must observe the same operation while normal transport proceeds.
 
-Final verification, Linux / Node v24.16.0 / pnpm 12.5.1 (Node 22 not executed):
+Ruling: foreign project/principal lookup returns no record; wrong repository or
+session in a found receipt is rejected. Cost: no foreign-record diagnostics are
+exposed by lookup. Scope remains one exclusive host/local POSIX filesystem;
+no multi-host/network-FS/power-loss/hostile same-UID guarantee is added.
 
-```sh
-TMPDIR=/tmp VITEST_MAX_THREADS=4 VITEST_MIN_THREADS=1 VITEST_MAX_FORKS=4 VITEST_MIN_FORKS=1 pnpm test:affected --base main --run
-```
+## Verification and independent review
 
-Exit 1, **NOT PASS**: 183 files passed / 2 failed / 3 skipped (188 total);
-2815 tests passed / 2 failed / 69 skipped (2886 total), 961.11 seconds.
-Tested executable/test source is exactly the source commit above, before its
-commit; subsequent edits only add this handoff. All 25 new tests pass in this
-affected run. Existing conversation-host-rpc (9), conversation-intake (28),
-host-receipts (19), cancellation-control (3), integration-recovery (17),
-integration-p19-approval-verification (23), and W01 interaction suites pass.
+Platform: Linux, Node v24.16.0, pinned pnpm 12.5.1; Node22 was not executed.
+Accepted TddDecision policy: required red-green for authority/replay/security;
+no fabricated domain TddDecision/approval receipt. Build precedes subprocess
+verification. No assertion/timeout/selection was weakened.
 
-Failures, with unchanged source/fixtures/timeouts:
+Final checks on source `3aa2943`:
 
-1. `agentic/az-acceptance.test.ts`: “stops after 3 automatic resumes of a
-   recurring no-next-action stop with one Conversation notice; an explicit
-   user resume still runs”, line 522, got `{resumed:1}` instead of `{resumed:0}`.
-2. `agentic/integration-p19-conflicts-reviews.test.ts`: “escalates the conflict
-   after two resolver attempts end without an accepted resolution”, 30-second
-   timeout (30097 ms observed).
+- `pnpm run build`: PASS.
+- `pnpm check:deps`: PASS, 24 packages / 52 edges, acyclic.
+- `pnpm typecheck`: PASS, including frontend and Node resolver.
+- `TMPDIR=/tmp VITEST_MAX_THREADS=4 VITEST_MIN_THREADS=1 pnpm exec vitest run packages/runtime/test/interaction packages/conversation/test/structured-interaction.test.ts`:
+  PASS **106/106**, 9 files. Includes actual host subprocess auth, actual local
+  Runtime+Conversation/outbox fixtures, native-first/web-first, cancel race,
+  exact stale/expired/options/reasons, run clarification and committed-effect
+  crash windows. It does not simulate a native hook in production.
+- Earlier native regression selection passed 150/150 in 13 files, before final
+  observation fixes; final affected run also selects those native suites.
+- Conversation owner's final affected package run: PASS 280/280, 11 files,
+  including 24 structured cases; see its package-local W02 handoff.
 
-Diagnostic rerun after the affected suite finished:
+Independent whole-W02 review found three Important groups, all reproduced RED
+and fixed GREEN: unresolved cross-command approval reservation plus ambiguous
+error classification; definitive decision rejection recovery; missing run-scoped
+clarification projection. The author then added true commit-before-result crash
+regressions for cancellation and follow-up decisions and a terminal/rejected
+operation observation check. No remaining review finding is waived.
 
-```sh
-TMPDIR=/tmp VITEST_MAX_THREADS=1 VITEST_MIN_THREADS=1 VITEST_MAX_FORKS=1 VITEST_MIN_FORKS=1 pnpm exec vitest run packages/runtime/test/agentic/az-acceptance.test.ts packages/runtime/test/agentic/integration-p19-conflicts-reviews.test.ts -t 'stops after 3 automatic resumes|escalates the conflict after two resolver attempts'
-```
+Historical foundation affected run had 2815 passed / 2 failed / 69 skipped;
+the unchanged automatic-resume assertion and resolver timeout both passed in
+isolated diagnostic runs. This is historical evidence, not the final gate.
+The first resumed affected run (4 workers) was stopped with exit143 after
+another required recovery window was found; it is not counted as PASS. Final
+fixed-source affected gate is recorded below. User requested affected only;
+no monorepo full suite is run for this completion.
 
-Exit 0: 2 passed / 25 name-filtered skipped, 2 files passed, 21.03 seconds.
-Both isolated successes do **not** erase the affected failures or prove their
-cause. No baseline loaded-suite reproduction is claimed; the unchanged tests
-need Runtime/integrator follow-up. No unrelated engine/timing patch, increased
-timeout, removed assertion or reduced selection was applied. The root full
-suite was not run because owned-path affected selection was sufficient scope.
-No credentials, generated dist, DB, real approvals, test logs or artifacts
-were committed. No live workflow acceptance was attempted.
+## Final affected/integration gate
 
-Ruling: execute independent Runtime authority/storage only until Conversation
-owner provides structured entry — mandated ownership plus D-WEB-01 prohibits
-emulating it with native hooks/private Runtime mutations. Cost: W02 remains
-incomplete; W07 direct-action integration cannot use this foundation alone.
+Command: `TMPDIR=/tmp VITEST_MAX_THREADS=2 VITEST_MIN_THREADS=1 VITEST_MAX_FORKS=2 VITEST_MIN_FORKS=1 pnpm test:affected --base main --run`.
+Selection: package fallback for unavailable/commit_mismatch GitNexus index,
+Runtime + Conversation, 220 unit input paths including helpers, zero E2E;
+unavailable index never skips tests. **PASS, exit0**: 198 files passed / 3 skipped
+(201 total), **3133 tests passed / 70 skipped** (3203 total), 1011.65 seconds.
+The opt-in/platform skips retain their existing scope and do not establish live
+provider or unsupported-platform acceptance. No failed case was filtered out.
+This complete final run includes the existing native Conversation/RPC,
+cancellation, approval, verification and recovery suites on fixed source.
 
-Ruling: a foreign project lookup returns no record, while a receipt found in
-the original hashed slot with wrong repository/session is rejected — matching
-project-scoped identity. Cost: callers cannot diagnose a foreign record from
-that lookup. The initial new test incorrectly expected every foreign lookup
-to throw; it was corrected to distinguish absence from corrupt context.
+No unresolved W02 blocking finding remains after review fixes and this gate.
+The earlier two loaded-suite observations were not reproduced in this final
+two-worker run; no unrelated production repair or timeout change is claimed.
+The foundation's deferred temporary-file cleanup issue is now fixed with
+sync-failure RED→GREEN coverage. P02-RA01/P03-RA01 and W09 live acceptance
+retain their separate owners/status and are not closed by W02.
 
-Independent fresh-context review: no Critical/Important defect in the isolated
-foundation. Minor deferred: `publish` closes a failed write/sync handle but
-can leave a `pending-*.tmp` before its later cleanup block; repeated disk I/O
-failures may accumulate orphans. Not an authority/replay bypass. No fault-I/O
-test or fix is claimed. Requires a later scoped cleanup fix.
+## Downstream integration notes and evidence level
 
-## Checklist disposition / evidence boundaries
+W03/W04 must keep issuer key/credential/private socket details in trusted server
+composition and bind HTTP browser sessions/CSRF before signing. Its durable owner
+index must pin original hostSessionId/principal/operation kind/fingerprint before
+forwarding; never switch an old ID to a new host after down/up. A missing host
+does not authorize re-execution. `readOperation` here is host_interaction only;
+Local Server owns lifecycle operations.
 
-- [x] Instructions/predecessors/baseline/isolation; owned paths only.
-- [x] Private proof validation and durable intent/nonce/at-most-one dispatch
-  primitives, same-key conflict/replay, conservative restart behavior.
-- [x] New authority/recovery tests and actual old-journal fixture replay.
-- [x] Build, targeted tests, independent foundation review.
-- [x] Complete affected selection executed and actual failures preserved.
-- [ ] Affected suite entirely green: two observations above remain unresolved.
-- [ ] Conversation deterministic intake, criteria mapping, clarification.
-- [ ] Native/web opposite decisions, rejected/stale/expired/superseded live
-  host validation, option validation, exact resume/cancel action semantics.
-- [ ] Owner-authenticated registration IPC, host ingress/client wiring,
-  native/web receipt authentication/recovery dispatch and downgrade guard.
-- [ ] Real effect windows at human receipt/outbox acceptance/effect commit;
-  current crash tests reopen real files around the primitive dispatch marker,
-  not an actual workflow. No model/native/Herdr effects were fabricated.
-- [ ] Full W02 acceptance and integration typecheck after Conversation handoff.
+W07 can use exact availableActions and retain the same command ID while pending
+or uncertain. Create/clarification stays in Conversation, approvals need no chat
+or model turn, and changes_requested returns the actual follow-up lineage after
+effect. Cancel applied is not stopped, HTTP202 is not workflow completion.
+W05/W08 events/artifacts/notices/chat remain separate, explicitly unsupported
+client methods until their owning tasks implement them.
 
-Evidence level: source + local cryptographic/filesystem/fixture tests only.
-No working form/button backend, browser integration, live Herdr/provider,
-physical hook, real workflow or full SDLC acceptance is claimed. Next tasks
-must keep direct actions unavailable until the unchecked W02 rows close.
+Evidence: source + local crypto/filesystem/private-socket tests and actual local
+Runtime/Conversation integration with synthetic Herdr/provider fixtures. No
+browser/HTTP workflow, live Herdr/provider, real physical hook or full SDLC
+acceptance is claimed. W09 owns live acceptance. No credentials, generated dist,
+logs, DB, test artifacts or real approvals are committed.
