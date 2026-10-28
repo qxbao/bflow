@@ -341,6 +341,7 @@ export function computeLaunchFingerprint(input: {
     environmentId: input.environment.environmentId,
     provider: input.environment.provider,
     role: input.environment.role,
+    ...(input.environment.roleProfile ? { roleProfile: input.environment.roleProfile } : {}),
     scope: input.environment.scope,
     cwd: input.environment.cwd,
     stateDirectory: input.environment.stateDirectory,

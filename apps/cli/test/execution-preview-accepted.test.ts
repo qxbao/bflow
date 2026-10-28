@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readdir, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,7 @@ const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
 it('the built binary reads a private accepted journal and fingerprints full accepted workflow content', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'preview-accepted-')); roots.push(root);
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'preview-accepted-'))); roots.push(root);
   execFileSync('git', ['init', '--quiet', root]);
   await initializeEnvironmentConfig({ cwd: root });
   const opened = await openFilesystemArtifactStore({ root: join(root, 'artifacts'), storeId: 'accepted-test' });

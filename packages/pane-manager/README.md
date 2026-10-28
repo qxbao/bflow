@@ -315,3 +315,44 @@ reports the checkout dirty; allocation and worktree removal keep the strict clea
 Tracked and ordinary untracked edits still block release. The additive optional `ignoredFiles`
 inspection detail changes no `@bflow/contracts` schema; custom inspectors without it remain strict.
 No ignored data is deleted or excluded from diagnostics. Platform token revocation remains intact.
+
+
+## Custom specialist profiles (RP-01)
+
+`DeveloperAllocationRequest.roleProfile` accepts a validated
+`ResolvedRoleProfileSnapshot`. Runtime must supply launch material with the same
+`roleProfile` pin, `features: ["custom-specialist-profiles-v1"]`, and the validated
+provider/model/permission configuration. The manager validates the contract,
+provider binding and original base-role prompt prefix before allocation effects.
+`AgentLaunchProfile.promptSource` carries a host-validated native-hook prompt path
+when the prompt file is not present in argv; the manager reads it as a bounded,
+non-symlink regular file. Specialization is appended by Runtime; this package does
+not rewrite the prompt or grant permissions.
+
+Profile bindings retain the governance role. Pane labels show the profile display
+name, base role, version and digest prefix. Session manifests retain immutable
+snapshots after allocation cleanup; changing or dropping an existing snapshot
+requires a new session generation. A profiled Developer never inherits a released
+pane's native context, including for the same pin and an empty launch environment.
+A pin or launch mismatch on an active task is a conflict.
+
+`allocateSpecialist({ role, taskId, roleProfile, launch, ... })` creates a dedicated
+non-permanent pane using the base specialist topology. It leaves the permanent
+reviewer/QA prompt and context intact. The base slot must be ready, and one active
+profile assignment occupies its capacity. Concurrent allocations on the same
+manager are serialized. Runtime must also serialize its normal specialist
+assignments against this slot; Pane Manager does not arbitrate workflow dispatch.
+Supported bases are the existing exact planner/specifier/architect/reviewer/QA
+roles. Tester-to-QA aliases and security without an exact launch topology fail
+closed. `releaseSpecialist({ taskId | agentId | paneId })` closes only the dedicated
+profile pane and retains snapshots.
+
+Profile launch intent and pin are persisted before `agent start`. Restart recovery
+accepts only the exact saved pane/name/provider-kind/native-session join. Missing,
+changed or unobserved native context blocks before recreation or relaunch and must
+be reconciled by Runtime; base configuration never substitutes for a missing
+profile launch. Runtime remains responsible for authenticated receipt validation,
+source drift, effective permissions, skills, lineage and independent verdicts.
+
+Evidence here is source implementation and fake-runner/package tests. It does not
+establish live Herdr/provider compatibility or full SDLC acceptance.

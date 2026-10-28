@@ -28,6 +28,17 @@ function validateSafeSessionId(sessionId: string): ContractError | null {
   return null;
 }
 
+/** Profile snapshots are append-only for this session, including after pane cleanup. */
+function snapshotConflict(previous: SessionManifest | null | undefined, next: SessionManifest): ContractError | null {
+  for (const snapshot of previous?.roleProfiles ?? []) {
+    const retained = next.roleProfiles?.find(item => item.pin.profileId === snapshot.pin.profileId && item.pin.version === snapshot.pin.version);
+    if (!retained || JSON.stringify(retained) !== JSON.stringify(snapshot)) {
+      return { code: "conflict", retryable: true, message: "Session role profile snapshots are immutable; create a new session generation" };
+    }
+  }
+  return null;
+}
+
 export class InMemorySessionManifestStore implements SessionManifestStore {
   readonly #records = new Map<string, SessionManifest>();
 
@@ -86,6 +97,8 @@ export class InMemorySessionManifestStore implements SessionManifestStore {
     }
 
     const validated = parsed.data;
+    const conflict = snapshotConflict(this.#records.get(validated.sessionId), validated);
+    if (conflict) return { ok: false, error: conflict };
     const cloned = structuredClone(validated);
     this.#records.set(cloned.sessionId, cloned);
     return { ok: true, value: structuredClone(cloned) };
@@ -206,6 +219,11 @@ export class FileSessionManifestStore implements SessionManifestStore {
     if (validationError !== null) {
       return { ok: false, error: validationError };
     }
+
+    const previous = await this.load(validatedManifest.sessionId, options);
+    if (!previous.ok) return previous;
+    const conflict = snapshotConflict(previous.value, validatedManifest);
+    if (conflict) return { ok: false, error: conflict };
 
     const filePath = this.resolvePath(validatedManifest.sessionId);
     const stagingPath = `${filePath}.${randomUUID()}.tmp`;

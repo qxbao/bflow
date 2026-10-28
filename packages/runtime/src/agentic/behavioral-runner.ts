@@ -230,6 +230,8 @@ export interface RtkOutputRequest {
   readonly filter: string;
   readonly required: boolean;
   readonly invocationId?: string;
+  /** Revalidate current host authority immediately before every executable probe or formatter child. */
+  readonly beforeSideEffect?: () => Promise<void>;
   readonly onIntent?: () => Promise<void>;
   readonly onUnavailable?: (reasonCode: string) => Promise<void>;
   readonly onResult?: (result: { readonly status: "completed" | "failed"; readonly reasonCode?: string }) => Promise<void>;
@@ -249,10 +251,11 @@ const RTK_FORMAT_TIMEOUT_MS = 5_000;
 const RTK_FORMAT_MAX_BYTES = 262_144;
 
 async function runSandboxedInput(sandbox: { executable: string; args: string[] }, childArgs: readonly string[], cwd: string,
-  env: Readonly<Record<string, string>>, input: string): Promise<SandboxedProcessResult> {
+  env: Readonly<Record<string, string>>, input: string, beforeSideEffect?: () => Promise<void>): Promise<SandboxedProcessResult> {
   const separator = sandbox.args.lastIndexOf("--");
   if (separator < 0 || typeof sandbox.args[separator + 1] !== "string") throw new Error("RTK sandbox command is malformed");
   const args = [...sandbox.args.slice(0, separator + 1), sandbox.args[separator + 1]!, ...childArgs];
+  await beforeSideEffect?.();
   return new Promise(resolve => {
     let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false, timedOut = false, settled = false;
     const child = spawn(sandbox.executable, args, { cwd, env: { ...env }, shell: false, detached: process.platform !== "win32",
@@ -311,15 +314,15 @@ async function prepareRtk(command: BoundBehavioralCommand, checkout: string, req
     args: [], method: command.method, levels: command.levels, testNames: command.testNames, testPaths: command.testPaths,
     timeoutMs: RTK_FORMAT_TIMEOUT_MS, checkoutDependencyRoots: [], dependencySource: cwd };
   const sandbox = await sandboxBehavior(formatter, cwd, []);
-  const version = await runSandboxedInput(sandbox, ["--version"], cwd, env, "");
+  const version = await runSandboxedInput(sandbox, ["--version"], cwd, env, "", request.beforeSideEffect);
   if (version.exitCode !== 0 || !version.stdout.includes(request.version))
     throw new RtkRequiredToolUnavailable("rtk_version_mismatch", `Pinned RTK version probe failed (exit=${String(version.exitCode)}, signal=${String(version.signal)}, timedOut=${version.timedOut})`);
-  const help = await runSandboxedInput(sandbox, ["pipe", "--help"], cwd, env, "");
+  const help = await runSandboxedInput(sandbox, ["pipe", "--help"], cwd, env, "", request.beforeSideEffect);
   if (help.exitCode !== 0 || !/stdin/i.test(help.stdout) || !help.stdout.includes("--filter"))
     throw new RtkRequiredToolUnavailable("rtk_stdin_filter_unsupported", "Pinned RTK does not expose a supported stdin filter");
   const sample = "RTK probe line\nRTK probe line\n";
   const args = request.filter === "auto" ? ["pipe"] : ["pipe", "--filter", request.filter];
-  const probe = await runSandboxedInput(sandbox, args, cwd, env, sample);
+  const probe = await runSandboxedInput(sandbox, args, cwd, env, sample, request.beforeSideEffect);
   if (probe.exitCode !== 0 || probe.timedOut || probe.truncated || !probe.stdout.trim())
     throw new RtkRequiredToolUnavailable("rtk_filter_unavailable", "Pinned RTK filter failed its bounded stdin probe");
   return { sandbox, cwd, env, args };
@@ -429,7 +432,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     if (options.rtk && rtkContext) {
       const raw = outcome.stdout + (outcome.stderr ? `\n[stderr]\n${outcome.stderr}` : "");
       try {
-        const formatted = await runSandboxedInput(rtkContext.sandbox, rtkContext.args, rtkContext.cwd, rtkContext.env, raw);
+        const formatted = await runSandboxedInput(rtkContext.sandbox, rtkContext.args, rtkContext.cwd, rtkContext.env, raw, options.rtk.beforeSideEffect);
         const compressed = formatted.exitCode === 0 && formatted.signal === null && !formatted.timedOut && !formatted.truncated && !!formatted.stdout.trim();
         const reasonCode = formatted.timedOut ? "rtk_timeout" : formatted.truncated ? "rtk_output_truncated" : "rtk_filter_failed";
         let resultRecorded = true;

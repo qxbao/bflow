@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { constants } from "node:fs";
+import { constants, openSync, closeSync, readFileSync, fstatSync } from "node:fs";
 import { chmod, lstat, mkdir, open, readlink, realpath, stat, symlink, unlink } from "node:fs/promises";
 import { join, parse, resolve, sep } from "node:path";
 import {
   type AgentEnvironment,
+  type AgentRole,
   AgentEnvironmentSchema,
   type AgentHealthCheck,
   type AgentHealthRequest,
@@ -65,6 +66,24 @@ const DEFAULT_ROLE_PROMPTS: Record<string, string> = {
   planner:
     "You are the Bflow Planner Agent. You create milestone plans and track task breakdown."
 };
+export function defaultRolePrompt(role: AgentRole): string {
+  return DEFAULT_ROLE_PROMPTS[role] ?? `You are the Bflow ${role} Agent.`;
+}
+/** Installed adapter/permission policy identity, independent of provider release labels. */
+export function providerRolePolicyDigest(): string {
+  const digest = createHash("sha256");
+  for (const name of ["base-adapter.js", "permissions.js"]) {
+    const fd = openSync(new URL(`../dist/${name}`, import.meta.url), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error("Installed provider policy is unavailable");
+      const bytes = readFileSync(fd);
+      if (bytes.length > 2 * 1024 * 1024) throw new Error("Installed provider policy exceeds limit");
+      digest.update(name).update("\0").update(bytes).update("\0");
+    } finally { closeSync(fd); }
+  }
+  return digest.digest("hex");
+}
 const AGY_SECRET_ENV_NAME_PATTERN = /(?:TOKEN|SECRET|API_KEY|PASSWORD|CREDENTIAL|PRIVATE_KEY)/i;
 const AGY_RUNTIME_ENVIRONMENT_NAMES = [
   "TERM", "COLORTERM", "NO_COLOR", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ",
@@ -1628,8 +1647,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
 
     const rolePrompt =
       this.options.rolePrompt ??
-      DEFAULT_ROLE_PROMPTS[environment.role] ??
-      `You are the Bflow ${environment.role} Agent.`;
+      defaultRolePrompt(environment.role);
 
     const fullPrompt = this.options.renderedSkillsContent
       ? `${rolePrompt}\n\n# Active Skills\n${this.options.renderedSkillsContent}`

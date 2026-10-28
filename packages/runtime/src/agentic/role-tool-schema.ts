@@ -1,4 +1,4 @@
-import { IdempotencyKeySchema, JsonValueSchema, RoleMessageSchema, SpecificationSchema, type AgentRole, type RoleMessage } from "@bflow/contracts";
+import { IdempotencyKeySchema, JsonValueSchema, RoleMessageSchema, SpecificationSchema, RoleProfilePinSchema, type AgentRole, type RoleMessage } from "@bflow/contracts";
 import { z } from "zod";
 
 /** Provider discovery only. Exported Zod contracts remain the authoritative ingress validators,
@@ -35,6 +35,7 @@ function render(schema: z.ZodTypeAny): Record<string, unknown> {
 }
 
 export const specificationToolSchema = render(SpecificationSchema);
+export const roleProfilePinToolSchema = render(RoleProfilePinSchema);
 // Discovery guidance for assess's package-local precondition. The authoritative P15
 // classifyChange validates every field at invocation; this is not a second policy validator.
 const impactFlags = ["behaviorChange", "securityImpact", "publicApiImpact", "dataSchemaImpact", "architectureImpact", "migrationRequired"];

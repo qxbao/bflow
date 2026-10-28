@@ -14,6 +14,7 @@ import { digest, json, record, strings, textField } from "./journal.js";
 import type { JsonValue, Specification, TestStrategy } from "@bflow/contracts";
 import { darwinWorkspaceFile } from "./workspace-file-darwin.js";
 import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
+import { selectRoleProfile } from "./profile-admission.js";
 
 const execute = promisify(execFile);
 /** Rules every conflict resolver receives in assignment_context and workspace_status. */
@@ -321,6 +322,9 @@ export class HostDevelopment {
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {
     const context = await this.identity(binding, input);
+    const profile = selectRoleProfile(this.runtime().ports.roleProfiles, binding.role, binding.roleProfile);
+    if (profile?.definition.restrictions.writablePaths !== undefined)
+      throw new Error("Profile-scoped Developer feedback subprocess is unsupported without whole-process write enforcement; use independent verification");
     if (context.resolver) return json({ applicable: false, independentAcceptanceEvidence: false,
       reason: "check_work does not apply to a conflict resolution: it has no task test plan. Commit the resolution with commit_changes; Runtime then runs independent workflow verification on the integrated result." });
     const rawRework = record(context.message.payload).reworkContext;

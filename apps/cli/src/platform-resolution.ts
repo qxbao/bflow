@@ -1,19 +1,24 @@
 import { resolve, relative, isAbsolute } from 'node:path';
 import { defaultHostEnvironment, detectPlatform, digest as policyDigest } from '@bflow/machine-setup';
 import { configuredPlatformRoles, resolveRepositoryToolPolicy } from './platform-options.js';
-import { RepositoryToolPolicySchema, WorkflowPackSchema, type JsonValue, type PlanDecision } from '@bflow/contracts';
+import { RepositoryToolPolicySchema, WorkflowPackSchema, sameRoleProfilePin, type JsonValue, type PlanDecision } from '@bflow/contracts';
 import { canonicalPlanDigest, resolveWorkflowPack, workflowPackDigest } from '@bflow/runtime';
 import type { EnvironmentCompositionInput } from './environment.js';
 import { EnvironmentConfigEnvironmentSchema, type EnvironmentRoleConfig, type EnvironmentProvider } from './environment-config.js';
 import { loadMachineSkillCatalog } from './skill-catalog.js';
 import { readPreviewFile } from './preview-files.js';
+import { loadSpecialistProfiles } from './specialist-profiles.js';
+import type { PlatformRoleOption } from '@bflow/runtime';
 /** The execution and preview entrypoints both use this declarative pack resolution. */
 export async function resolvePlatformConfiguration(input: EnvironmentCompositionInput) {
     const environment = input.config.environment;
+    const roleProfiles = await loadSpecialistProfiles(input);
     const project: Record<string, JsonValue> = {};
     const catalog = await loadMachineSkillCatalog(input);
     for (const role of environment.roles) {
         project[`roles.${role.role}.provider`] = role.cli;
+        if (role.specialistProfile !== undefined)
+            project[`roles.${role.role}.specialistProfile`] = role.specialistProfile;
         if (role.model !== undefined)
             project[`roles.${role.role}.model`] = role.model;
         if (role.skills !== undefined)
@@ -89,6 +94,12 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
         environment: { ...environment, roles: explicitRoles } } })
         .map(role => inheritedRoles.includes(role.role) ? materializeRole(role) : role);
     let resolved = EnvironmentConfigEnvironmentSchema.parse({ ...environment, roles });
+    for (const role of resolved.roles) {
+        if (!role.specialistProfile) continue;
+        const snapshot = roleProfiles.find(item => sameRoleProfilePin(item.pin, role.specialistProfile));
+        if (!snapshot || snapshot.definition.baseRole !== role.role)
+            throw new Error('Selected specialist profile is unavailable or incompatible with its governance role');
+    }
     const packTools = resolution.decisions.find(decision => decision.field === 'tools.required');
     if (packTools && Array.isArray(packTools.effective)) {
         const host = defaultHostEnvironment();
@@ -104,6 +115,16 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
             resolved = { ...resolved, toolPolicy: RepositoryToolPolicySchema.parse({ ...effective, digest: policyDigest(effective) }) };
         }
     }
-    return { ...resolution, inheritedRoles, input: { ...input, config: { ...input.config, environment: resolved } } };
+    return { ...resolution, roleProfiles, inheritedRoles, input: { ...input, config: { ...input.config, environment: resolved } } };
 }
 export function decisionFor(decisions: readonly PlanDecision[], field: string) { return decisions.find(item => item.field === field); }
+
+/** Preserve only real pack locks; an explicit base-role setting remains a profile default. */
+export function rolePreferenceConstraints(decisions: readonly PlanDecision[], role: EnvironmentRoleConfig): Pick<PlatformRoleOption, 'preferenceConstraints'> {
+    const locked = (key: 'model' | 'effort') => decisionFor(decisions, `roles.${role.role}.${key}`)?.rule?.kind === 'pack';
+    const constraints = {
+        ...(locked('model') && role.model !== undefined ? { model: role.model } : {}),
+        ...(locked('effort') && role.effort !== undefined ? { effort: role.effort } : {})
+    };
+    return Object.keys(constraints).length ? { preferenceConstraints: constraints } : {};
+}

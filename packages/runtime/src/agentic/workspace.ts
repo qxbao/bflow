@@ -14,6 +14,12 @@ import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
+  roleProfiles?: AgenticRuntimePorts["roleProfiles"];
+  roleProfileDefaults?: AgenticRuntimePorts["roleProfileDefaults"];
+  preflightRoleProfile?: AgenticRuntimePorts["preflightRoleProfile"];
+  attestExecutorLineage?: AgenticRuntimePorts["attestExecutorLineage"];
+  specialistLaunches?: { allocate(request: Parameters<NonNullable<PanePolicy["allocateSpecialist"]>>[0]): Promise<import("./host-platform.js").DeveloperLaunchMaterial>; release(taskId: string): Promise<void>;
+    reachability(launchId: string, paneId: string): Promise<ReachabilityVerdict> };
   pinDeveloperDispatch?: AgenticRuntimePorts["pinDeveloperDispatch"];
   bindDeveloperExecutionScope?: AgenticRuntimePorts["bindDeveloperExecutionScope"];
   stopDeveloperExecutionScope?: AgenticRuntimePorts["stopDeveloperExecutionScope"];
@@ -70,7 +76,7 @@ export async function routeNativeConversationMessage(runtime: Pick<AgenticWorkfl
 }
 /** Launch material for one Developer task. `env` may carry bearer tokens: it is passed to Herdr only, never persisted. */
 export interface DeveloperLaunchPort {
-  allocate(request: { runId: string; taskId: string; worktreePath: string }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
+  allocate(request: { runId: string; taskId: string; worktreePath: string; roleProfile?: import("@bflow/contracts").ResolvedRoleProfileSnapshot }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
   release(taskId: string): Promise<void>;
   assertProcessScope?(binding: PaneBinding): Promise<void>;
   /**
@@ -122,6 +128,8 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       message: `Developer ${entry.taskId} ${reason}; its pane and launch were released${releaseFailure === undefined ? "" : `, but the launch release failed: ${releaseFailure}`}` } };
   };
   return {
+    ...(base.allocateSpecialist ? { allocateSpecialist: base.allocateSpecialist.bind(base) } : {}),
+    ...(base.releaseSpecialist ? { releaseSpecialist: base.releaseSpecialist.bind(base) } : {}),
     getManifest: options => base.getManifest(options),
     getRoleBinding: (role, options) => base.getRoleBinding(role, options),
     // A degraded launch (Gateway registration lost) stays unready: the outbox keeps its messages queued, never drops them.
@@ -138,7 +146,8 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       let entry = pending.get(request.taskId);
       if (entry === undefined) {
         let launch;
-        try { launch = await launches.allocate({ runId: request.runId, taskId: request.taskId, worktreePath: request.worktreePath }); }
+        try { launch = await launches.allocate({ runId: request.runId, taskId: request.taskId, worktreePath: request.worktreePath,
+          ...(request.roleProfile ? { roleProfile: request.roleProfile } : {}) }); }
         catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
         // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
         const allocation = { ...request, agentKind: launch.provider, launch };
@@ -253,7 +262,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     ...(options.authorizeStoppedRetainedRelease ? { authorizeStoppedRetainedRelease: options.authorizeStoppedRetainedRelease } : {}),
     // Dynamic Developer launches carry Gateway env, which Herdr accepts only at pane creation over its socket.
     socket: paneModule.createHerdrSocketPort({ runner, sessionId: options.sessionId }) });
-  const panes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches, {
+  const basePanes: PanePolicy = options.developerLaunches ? withDeveloperLaunches(rolePanes, options.developerLaunches, {
     startupTimeoutMs: 120_000,
     ...(options.readExecutionResolution ? { beforeSideEffect: async () => { await options.readExecutionResolution!(); } } : {}),
     refreshBinding: async (paneId, callOptions) => {
@@ -262,6 +271,42 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       return rolePanes.getRoleBinding(paneId, callOptions);
     }
   }) : rolePanes;
+  const specialists = new Map<string, { role: import("@bflow/contracts").AgentRole; launch: import("./host-platform.js").DeveloperLaunchMaterial; pane?: PaneBinding }>();
+  const panes: PanePolicy = options.specialistLaunches ? {
+    ...basePanes,
+    async inspectRoleHealth(selector, operation) {
+      const health = await basePanes.inspectRoleHealth(selector, operation);
+      return health.ok && [...specialists.values()].some(value => value.role === selector)
+        ? { ok: true, value: { ...health.value, readyForPrompt: false } } : health;
+    },
+    async allocateSpecialist(request, operation) {
+      if (!rolePanes.allocateSpecialist) return { ok: false, error: { code: "validation", retryable: false, message: "Profile specialist allocation unsupported" } };
+      await options.readExecutionResolution?.();
+      let retained = specialists.get(request.taskId);
+      if (!retained) {
+        const launch = await options.specialistLaunches!.allocate(request);
+        retained = { role: request.role, launch }; specialists.set(request.taskId, retained);
+      }
+      await options.readExecutionResolution?.();
+      const allocated = await rolePanes.allocateSpecialist({ ...request, cwd: repository, agentKind: retained.launch.provider, launch: retained.launch }, operation);
+      if (!allocated.ok) return allocated;
+      retained.pane = allocated.value;
+      const topology = await rolePanes.inspectTopologyHealth(operation);
+      if (!topology.ok) return topology;
+      const observed = await rolePanes.getRoleBinding(allocated.value.bindingId, operation);
+      if (!observed.ok || !observed.value) return observed;
+      const verdict = await options.specialistLaunches!.reachability(retained.launch.launchId, observed.value.paneId);
+      if (!observed.value.session || verdict.state !== "ready") return { ok: false, error: { code: "conflict", retryable: true, message: "Profile specialist native startup/readiness is pending" } };
+      return observed;
+    },
+    async releaseSpecialist(request, operation) {
+      const retained = [...specialists.entries()].find(([key, value]) => key === request.taskId || value.pane?.agentId === request.agentId || value.pane?.paneId === request.paneId);
+      const result = await rolePanes.releaseSpecialist(request, operation);
+      if (!result.ok && result.error.code !== "not_found") return result;
+      if (retained) { await options.specialistLaunches!.release(retained[0]); specialists.delete(retained[0]); }
+      return { ok: true, value: undefined };
+    }
+  } : basePanes;
   const directory = options.storageDirectory ?? resolve(resolvePrivateRuntimeStateDirectory(repository), "agentic");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const runStore = unwrap<any>(persistenceModule.openSqliteRunStore({ filename: resolve(directory, "runs.db") }));
@@ -296,6 +341,10 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       ...(options.stopDeveloperExecutionScope ? { stopDeveloperExecutionScope: options.stopDeveloperExecutionScope } : {}),
       ...(options.stopUnboundDeveloperScope ? { stopUnboundDeveloperScope: options.stopUnboundDeveloperScope } : {}),
       automaticAlternativeEvidence: true, roleCapabilities: options.roleCapabilities,
+      ...(options.roleProfiles ? { roleProfiles: options.roleProfiles } : {}),
+      ...(options.roleProfileDefaults ? { roleProfileDefaults: options.roleProfileDefaults } : {}),
+      ...(options.preflightRoleProfile ? { preflightRoleProfile: options.preflightRoleProfile } : {}),
+      ...(options.attestExecutorLineage ? { attestExecutorLineage: options.attestExecutorLineage } : {}),
       ...(options.readExecutionResolution ? { readExecutionResolution: options.readExecutionResolution } : {}),
       ...(options.preflightRoleCapabilities ? { preflightRoleCapabilities: options.preflightRoleCapabilities } : {}),
       ...(options.revalidateRoleSkills ? { revalidateRoleSkills: options.revalidateRoleSkills } : {}),
