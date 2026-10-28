@@ -306,6 +306,12 @@ async function scanBundle(
   return { files, digest: bundleDigest(files) };
 }
 
+/** Reads one operator-selected UTF8 file with the bundle bounds; symlinks (including ancestors) are refused. */
+export async function readSourceFile(path: string): Promise<string> {
+  absolute(path);
+  return readFileBounded(path, MAX_FILE_BYTES);
+}
+
 export async function readBundle(root: string): Promise<BundleFiles> {
   return (await scanBundle(root)).files;
 }

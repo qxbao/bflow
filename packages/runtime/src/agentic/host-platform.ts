@@ -921,20 +921,29 @@ export function createHostProviderAdapterFactory(
   });
 }
 
-/** Opens the real composition: skills store, Gateway control (if located), host-held signer and provider adapters. */
-export async function createHostPlatformSession(options: CreateHostPlatformSessionOptions): Promise<HostPlatformSession> {
-  const platform = AgenticHostPlatformOptionsSchema.parse(options.platform);
-  const skillManager = new SkillManager({
+/**
+ * The host's skill authority: builtins by trusted distribution digest; operator/repository skills only with
+ * an exact machine receipt (digest, dependencies, role, provider, repository, session, expiry) re-read on use.
+ */
+export function createHostSkillManager(input: AgenticHostPlatformOptions, sessionId: string): SkillManager {
+  const platform = AgenticHostPlatformOptionsSchema.parse(input);
+  return new SkillManager({
     store: new FileSkillStore(platform.skillsStoreRoot),
     supportedCommands: skillSupportedCommands(platform),
     approvedBuiltinDigests: [...platform.approvedBuiltinSkillDigests],
     authorize: async request => platform.skillApprovalPath !== undefined && request.scope.kind === "session" &&
-      request.scope.repositoryId === platform.repositoryId && request.scope.sessionId === options.sessionId &&
+      request.scope.repositoryId === platform.repositoryId && request.scope.sessionId === sessionId &&
       readSkillApproval(platform.skillApprovalPath, { approvalReceiptId: request.approvalReceiptId,
         skillId: request.definition.skillId, version: request.definition.version, digest: request.definition.digest,
         dependencies: request.definition.dependencies, role: request.role, provider: request.provider,
-        repositoryId: platform.repositoryId, sessionId: options.sessionId })
+        repositoryId: platform.repositoryId, sessionId })
   });
+}
+
+/** Opens the real composition: skills store, Gateway control (if located), host-held signer and provider adapters. */
+export async function createHostPlatformSession(options: CreateHostPlatformSessionOptions): Promise<HostPlatformSession> {
+  const platform = AgenticHostPlatformOptionsSchema.parse(options.platform);
+  const skillManager = createHostSkillManager(platform, options.sessionId);
 
   let gatewayControl: GatewayControlPort | undefined;
   let gatewayEndpoint: string | undefined;

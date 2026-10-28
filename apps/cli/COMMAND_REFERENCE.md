@@ -46,6 +46,7 @@ Các lệnh này kết hợp engine/ports hiện có. Chúng không tự launch 
 | Inventory MCP | `bflow mcp status [--service <id>]` | Đọc config/pins; live health cần Gateway port được inject, CLI mặc định chưa nối port này |
 | Tool inventory | `bflow tool status [--tool <id>]` | Probe catalog/version/digest; `tools status` dùng parser kế thừa, ưu tiên cú pháp singular cho contract bên dưới |
 | Skill sync | `bflow skills sync [--provider <kind>] [--dry-run] [--allow-machine-scope]` | Owned machine target cần quyền tường minh; preview bằng `--dry-run`; CLI hiện chưa nhận `skills list`/`--list` |
+| Custom skills | `bflow skills scan\|import\|approve\|disable\|revoke\|status` | Scan/import chỉ đọc nguồn được chọn và stage bundle chưa duyệt; `approve --approve` ghi receipt chính xác vào machine state; revoke/status báo session cần đối soát |
 | Provider preflight | `bflow agent check <claude\|codex\|agy> [--role <role>] [--mode restricted\|workspace_auto]` | Standalone preflight; có thể chạy model probe và dùng account mặc định, không là readiness của role/profile trong config |
 
 Lệnh `repo inspect` dùng Git root của thư mục hiện tại, không có `--dir`/`--include-files`/`--max-files`; hãy `cd` vào repo trước. `agent check` không tạo Herdr pane nhưng adapter mặc định có thể chạy execution probe và tiêu hao usage; dùng `doctor`/`up` cho kiểm tra role/profile/model đã cấu hình.

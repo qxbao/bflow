@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RolePlatformRequirement } from "@bflow/contracts";
 import { SkillManager, SkillFileStore, bundleDigest, type BundleFiles } from "@bflow/skills";
-import { SkillSessionStore } from "../../src/platform/skills-session.js";
+import { SkillSessionStore, reconcileSkillSessionRecords } from "../../src/platform/skills-session.js";
 import type { PlatformSessionIdentity } from "../../src/platform/ports.js";
 
 const body = (name: string) => `---\nname: ${name}\ndescription: Inspect an assigned task before implementation.\n---\n\n${[
@@ -156,5 +156,43 @@ describe("SkillSessionStore with the real SkillManager", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("validation");
     await expect(stat(join(elsewhere, "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("reconcileSkillSessionRecords", () => {
+  it("reports persisted manifests read-only and flags ones that no longer verify or authorize", async () => {
+    const operatorFiles = bundle("operator-rules");
+    const operatorDigest = bundleDigest(operatorFiles);
+    let approved = true;
+    const authorized = new SkillManager({ store: new SkillFileStore(join(root, "store")), supportedCommands: ["status", "help", "doctor"],
+      approvedBuiltinDigests: [skillDigest], authorize: async () => approved });
+    await authorized.installBundle(operatorFiles, { source: "operator", expectedDigest: operatorDigest });
+    const store = new SkillSessionStore({ resolver: authorized });
+    const resolved = await store.resolveForRole(identity, requirement({ skillSelections: [
+      { skill: { skillId, version: skillVersion, digest: skillDigest }, required: true },
+      { skill: { skillId: "operator-rules", version: "1.0.0", digest: operatorDigest }, required: true }
+    ] }), ENV_ID);
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved.error));
+    const before = await readFile(recordFile(), "utf8");
+    const input = { stateDirectory: identity.stateDirectory, verify: (manifest: Parameters<SkillManager["verify"]>[0]) => authorized.verify(manifest),
+      authorize: async () => approved };
+    const current = await reconcileSkillSessionRecords(input);
+    expect(current).toMatchObject({ reconciliationRequired: false, diagnostics: [] });
+    expect(current.records[0]).toMatchObject({ generation: 1, role: "developer", verificationError: null, skills: [
+      expect.objectContaining({ skillId, approval: "builtin_distribution" }),
+      expect.objectContaining({ skillId: "operator-rules", approval: "authorized" })
+    ] });
+
+    approved = false;
+    const revoked = await reconcileSkillSessionRecords(input);
+    expect(revoked.reconciliationRequired).toBe(true);
+    expect(revoked.records[0]!.verificationError).toMatch(/approval unavailable/);
+    expect(revoked.records[0]!.skills.find(skill => skill.skillId === "operator-rules")?.approval).toBe("unavailable");
+    expect(await readFile(recordFile(), "utf8")).toBe(before);
+    expect((await store.load(identity, "developer", "t1")).ok).toBe(false);
+
+    await mkdir(join(root, "elsewhere"), { recursive: true });
+    await symlink(join(root, "elsewhere"), join(identity.stateDirectory, "gen-2"));
+    expect((await reconcileSkillSessionRecords(input)).diagnostics).toEqual(["gen-2: symlinked skill record directory refused"]);
   });
 });

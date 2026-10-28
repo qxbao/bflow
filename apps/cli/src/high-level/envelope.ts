@@ -22,6 +22,12 @@ export const HIGH_LEVEL_COMMANDS = [
   "mcp.status",
   "tool.status",
   "skills.sync",
+  "skills.scan",
+  "skills.import",
+  "skills.approve",
+  "skills.disable",
+  "skills.revoke",
+  "skills.status",
   "agent.check"
 ] as const;
 export type HighLevelCommandName = (typeof HIGH_LEVEL_COMMANDS)[number];

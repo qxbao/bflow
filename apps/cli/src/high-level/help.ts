@@ -90,6 +90,47 @@ Options:
   --dry-run                   Show the desired state without writing
   --allow-machine-scope       Permit machine-wide skill targets
   --resume                    Reconcile an interrupted invocation`,
+  "skills.scan": `Usage: bflow skills scan --source <path>... [--role <role>]... [--provider <id>]... [options]
+
+Read-only inventory of the exact selected sources: SKILL.md bundles (directory or SKILL.md),
+CLAUDE.md, AGENTS.md, GEMINI.md and Cursor rules (.cursorrules, *.mdc or a .cursor/rules directory).
+Reports origin, kind, content digest, resources, dependency/tool/MCP/hook references, warnings and
+duplicate groups, plus a proposed role mapping. Nothing outside the selected paths is read.
+
+Options:
+  --source <path>     Selected source (repeatable; required)
+  --role <role>       Override the proposed roles (repeatable)
+  --provider <id>     Providers to support (repeatable; default: claude, codex, agy)
+  --version <v>       Version for the proposed bundles (default: 1.0.0)
+  --name <skill-id>   Skill ID when exactly one source is selected`,
+  "skills.import": `Usage: bflow skills import --source <path>... [options]
+
+Convert selected sources into instruction-only Bflow bundles staged under
+.bflow/skills/imports/<skill>/<version>/ (bundle/, verbatim original/, report.json). Secrets,
+symlinks, traversal, oversized files and forged provenance block the import; executable hooks and
+tool/MCP references are reported, never installed or run. Staged bundles are not usable until approved.
+
+Options: the skills scan options, plus
+  --depends-on <skill-id>   Exact pin of a builtin or approved custom skill (repeatable)
+  --dry-run                 Convert and validate without writing`,
+  "skills.approve": `Usage: bflow skills approve <skill-id> --digest <sha256> [--version <v>] [--expires-in-days <n>] [--approve]
+
+Validate the exact reviewed bundle digest, its dependency pins, roles/providers and this
+repository session scope. Without --approve it only prints the grant. With --approve it writes a
+machine approval receipt (state/skill-approvals.json), promotes the bundle into the custom catalog
+and binds the exact pin in .bflow/config.yml. Then run 'bflow skills sync --allow-machine-scope'.`,
+  "skills.disable": `Usage: bflow skills disable <skill-id> [--dry-run]
+
+Unbind a custom skill from future role manifests. Pin, catalog bytes and approval stay, so running
+sessions remain recoverable. Running roles keep loaded instructions until relaunched.`,
+  "skills.revoke": `Usage: bflow skills revoke <skill-id> [--version <v>] [--dry-run]
+
+Delete this repository session's approval receipts for the skill and unbind it. Future manifests and
+Runtime recovery of manifests that contain it are refused; running roles are reported for relaunch.`,
+  "skills.status": `Usage: bflow skills status
+
+Read-only: custom catalog pins, approval validity per configured role/provider, machine install
+state, pending staged imports and persisted session manifests that need reconciliation.`,
   "agent.check": `Usage: bflow agent check <claude|codex|agy> [options]
 
 Preflight health and readiness of a provider through its adapter: binary, version,
@@ -115,4 +156,10 @@ export const HIGH_LEVEL_SUMMARY = `Agentic SDLC commands:
   mcp status            Check the MCP Gateway and backends
   tool status           Check each tool
   skills sync           Synchronize role skills for providers
+  skills scan           Inventory selected IDE skills/rules (read-only)
+  skills import         Stage converted custom skill bundles for review
+  skills approve <id>   Approve an exact custom skill digest
+  skills disable <id>   Unbind a custom skill from future manifests
+  skills revoke <id>    Delete custom skill approvals and report sessions
+  skills status         Custom skill pins, approvals and reconciliation
   agent check <prov>    Check provider health and readiness`;

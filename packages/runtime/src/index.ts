@@ -163,6 +163,7 @@ export * from './planning/index.js';
 export * from "./agentic/execution-binding.js";
 
 export * from "./agentic/skill-approval.js";
+export { createHostSkillManager, launchMaterial, requirementFor } from "./agentic/host-platform.js";
 
 export { defaultHostChecks } from "./agentic/host-verification.js";
 export { hostRoleCapabilities } from "./agentic/host.js";

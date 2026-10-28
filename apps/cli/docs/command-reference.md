@@ -208,6 +208,34 @@ Quan sát các skill đã cài, resolve trạng thái mong muốn được pin v
 lệnh fail (`reason: sync_not_converged`). Khi chưa tích hợp skill manager, lệnh fail
 với `reason: skills_synchronizer_not_configured` (exit 1).
 
+### `bflow skills scan --source <path>… [--role <role>]… [--provider <id>]… [--version <v>] [--name <id>]`
+
+Chỉ đọc đúng nguồn được chọn (thư mục skill/`SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`,
+`*.mdc`, `.cursor/rules`) và trả về inventory (origin, kind, digest, resource, tham chiếu dependency/tool/MCP/hook,
+cảnh báo, nhóm trùng lặp) cùng proposal role. Không ghi gì; exit 0 kể cả khi có nguồn bị chặn.
+
+### `bflow skills import --source <path>… [--depends-on <id>]… [--dry-run]` (cùng các option của scan)
+
+Chuyển đổi và validate bundle instruction-only, stage tại `.bflow/skills/imports/<id>/<version>/`
+(`bundle/`, `original/`, `report.json`). Nguồn bị chặn (secret, symlink, traversal, quá cỡ, provenance giả)
+→ exit 3, không ghi gì. Không cài/chạy hook hay MCP. Bundle staged chưa dùng được cho tới khi duyệt.
+
+### `bflow skills approve <skill-id> --digest <sha256> [--version <v>] [--expires-in-days <n>] [--approve]`
+
+Kiểm digest đã review, dependency pin, role/provider và scope repository/session. Thiếu `--approve` → exit 5,
+chỉ in grant. Digest khác, dependency conflict hoặc provider không hỗ trợ → exit 6. Với `--approve`: ghi receipt
+vào `state/skill-approvals.json` (0600), promote bundle vào catalog, bind pin trong `.bflow/config.yml`.
+
+### `bflow skills disable <skill-id> [--dry-run]` · `bflow skills revoke <skill-id> [--version <v>] [--dry-run]`
+
+`disable` bỏ binding cho manifest sau, giữ pin/receipt. `revoke` xoá receipt của repository session này và
+bỏ binding; manifest session đã lưu chứa skill bị báo `reconciliation_required` (exit 3) — process đang chạy
+vẫn giữ instruction đã nạp cho tới khi relaunch.
+
+### `bflow skills status`
+
+Chỉ đọc: pin, approval theo role/provider, cài đặt máy, import đang chờ duyệt và đối soát session manifest.
+
 ### `bflow agent check <claude|codex|agy> [--role <role>] [--mode restricted|workspace_auto] [--session <id>]`
 
 Dựng một `AgentEnvironment` theo phạm vi session (mặc định `restricted`, chỉ đọc, chặn network) và

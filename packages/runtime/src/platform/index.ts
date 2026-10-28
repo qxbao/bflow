@@ -50,3 +50,9 @@ export {
   PlatformPreflightReportSchema, PlatformRoleOptionSchema, RolePreflightSummarySchema,
   type AgenticHostPlatformOptions, type HostLaunchMaterial, type HostPrepareResponse, type HostRoleLaunch, type PlatformRoleOption
 } from "./host-options.js";
+export {
+  SkillSessionStore,
+  reconcileSkillSessionRecords,
+  type SkillSessionReconciliation,
+  type SkillSessionReconciliationRecord
+} from "./skills-session.js";
