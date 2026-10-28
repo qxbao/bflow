@@ -123,6 +123,18 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
       lines.push("  Preview does not establish readiness, approval, reservation or task success.");
       break;
     }
+    case "handover.inspect":
+    case "handover.export":
+    case "handover.verify": {
+      if (data.snapshotId === undefined && data.problems === undefined) break;
+      add("Run", data.runId); add("Snapshot", data.snapshotId); add("Integrated revision", data.integratedRevision ?? (command === "handover.verify" ? undefined : "none"));
+      add("Handover status", data.status); add("Package", data.outcome); add("Content digest", data.contentDigest);
+      if (command === "handover.verify") add("Intact", data.valid === true ? "yes" : "no");
+      for (const item of Array.isArray(data.reasons) ? data.reasons : []) { const reason = object(item); lines.push(`  Not eligible: ${text(reason.code)} — ${text(reason.message, 500)}`); }
+      for (const item of Array.isArray(data.problems) ? data.problems : []) lines.push(`  Problem: ${text(item, 500)}`);
+      lines.push("  A handover package is a report; it does not change run status, approvals or delivery acceptance.");
+      break;
+    }
     case "repo.inspect": {
       const repo = object(data.repository), git = object(data.git), project = object(data.project);
       add("Root", repo.root, 1024); add("Branch", git.branch ?? (git.detached === true ? "detached HEAD" : undefined)); add("HEAD", typeof git.head === "string" ? git.head.slice(0, 12) : undefined);
@@ -303,6 +315,9 @@ function commandForRemediation(command: HighLevelCommandName): CliCommandName {
   switch (command) {
     case "repo.inspect": return "repo inspect";
     case "task.preview": return "task preview";
+    case "handover.inspect": return "handover inspect";
+    case "handover.export": return "handover export";
+    case "handover.verify": return "handover verify";
     case "task.plan": return "task plan";
     case "task.implement": return "task implement";
     case "verify": return "verify";

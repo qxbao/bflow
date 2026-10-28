@@ -1764,3 +1764,28 @@ chứ không chứng minh nguồn dữ liệu: cụm chữ không có chữ số
 nhãn vẫn có thể lọt. Watchdog chưa resurface riêng approval prototype; Conversation
 lấy lại qua `reconcileApprovals`. Bằng chứng: source và test cục bộ
 (`test/agentic/prototype-review.test.ts`), chưa có live Herdr/provider acceptance.
+
+### Gói bàn giao offline (HX-01)
+
+`exportHandoverPackage`, `inspectHandoverRun`, `verifyHandoverPackage` và `openRepositoryHandoverSources`
+(`src/handover/**`) dựng gói bàn giao từ đúng một lần đọc journal của run (kiểm tra owner/mode,
+`parseAgenticJournalState`, không flock, không kết nối host) và đọc ArtifactStore có kiểm tra integrity
+(chỉ mở store đã có catalog). Snapshot identity là digest canonical của run record công khai;
+revision yêu cầu phải bằng `workflowChange.headCommitHash`. Ma trận criterion → task → integrated
+revision → check/verdict → evidence chỉ coi `passed` khi check workflow-scope gắn với integrated revision
+và evidence đã xác minh; evidence thiếu/hỏng hoặc lệch revision thành `inconclusive`. Delivery approval
+chỉ hợp lệ khi gắn với kết quả workflow verification cuối (approvalId/idempotency key/evidence).
+Hướng dẫn chạy chỉ lấy từ `targetCommands` và command đã ghi nhận; rollback chỉ từ
+`specification.rollbackPlan`, thiếu thì ghi thiếu. Journal được đọc qua descriptor mở bằng
+`O_NOFOLLOW` và owner/mode được kiểm trên chính descriptor đó; ArtifactStore mà user khác ghi được
+(root hoặc catalog group/other-writable) bị coi là `unavailable`. Manifest ghi thêm sha256 của đúng
+bytes journal đã đọc. `includeEvidence` chép evidence văn bản đã xác minh (`test-result`, `report`,
+`patch`, `document`; 1 MiB/file, 16 MiB tổng) sau redact vào `evidence/<sha256>.txt`; log và
+agent output không bao giờ được chép. Publish giữ flock trên `.<tên>.handover.lock` cạnh thư mục
+đích, dọn staging sót lại, kiểm inode thư mục sau rename và từ chối thư mục cha mà user khác ghi được
+(trừ khi có sticky bit); `replace` chỉ thay gói của cùng run. Content digest gồm exporter version.
+Schema gói (`HandoverDocumentSchema`, `HandoverManifestSchema`, version 1, exporter version 1) do
+Runtime sở hữu, chưa nằm trong `@bflow/contracts` (quyết định hoãn trong tài liệu thiết kế).
+Thiết kế và giới hạn: [handover-export-design.md](handover-export-design.md). Bằng chứng: source và
+test cục bộ (`test/handover/handover-export.test.ts`, `apps/cli/test/handover-binary.test.ts`), chưa
+có live Herdr/provider hay full SDLC acceptance.

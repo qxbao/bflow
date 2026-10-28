@@ -86,6 +86,111 @@
       ]
     },
     {
+      "name": "handover.inspect",
+      "usage": "bflow handover inspect",
+      "summary": "Show a run's snapshot identity, integrated revision and handover eligibility (read-only)",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "inspected",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--run",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "handover.export",
+      "usage": "bflow handover export",
+      "summary": "Export an offline HTML/Markdown handover package with a checksum manifest from one run snapshot",
+      "mutates": "repository",
+      "retry": "retry_safe",
+      "permissionFlags": [],
+      "outcomes": [
+        "ready",
+        "not_ready",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--run",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--revision",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--snapshot",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--out",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--format",
+          "type": "string",
+          "required": false,
+          "repeatable": true,
+          "choices": [
+            "html",
+            "md"
+          ]
+        },
+        {
+          "name": "--include-evidence",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--replace",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "handover.verify",
+      "usage": "bflow handover verify",
+      "summary": "Verify an offline handover package's manifest, hashes, links and eligibility",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "passed",
+        "not_passed",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--package",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        }
+      ]
+    },
+    {
       "name": "task.plan",
       "usage": "bflow task plan",
       "summary": "Create (preview/write) or check the task graph of a specification",
