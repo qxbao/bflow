@@ -30,3 +30,4 @@ export * from "./tool-usage.js";
 export * from './execution-plan.js';
 
 export * from "./skill-approval.js";
+export * from "./role-profile.js";

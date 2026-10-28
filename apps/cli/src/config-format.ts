@@ -64,6 +64,7 @@ export function stringifyConfigYaml(value: unknown): string {
     if (Array.isArray(env["roles"])) envOrdered["roles"] = env["roles"];
     const envOrder = [
       "defaults",
+      "specialistProfiles",
       "sdd",
       "tdd",
       "verification",

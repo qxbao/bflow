@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   SessionManifestSchema,
+  pinRoleProfile,
+  ROLE_PROFILE_FEATURE,
+  type ResolvedRoleProfileSnapshot,
   PaneBindingSchema,
   type OperationOptions,
   type OperationResult
@@ -2414,4 +2417,169 @@ describe("RolePaneManager Verification Suite", () => {
       }
     });
   });
+});
+
+
+describe("custom specialist profile native allocation", () => {
+  let runner: FakeHerdrCommandRunner;
+  let store: InMemorySessionManifestStore;
+  let inspector: FakeWorktreeInspector;
+  let manager: RolePaneManager;
+  let directory: string;
+  const config: RolePaneManagerConfig = { sessionId: "profile-session", projectName: "profile-project", workspaceRoot: "/repo",
+    permanentRoles: ["chat", "coordinator", "reviewer"], maxDeveloperCapacity: 2 };
+  const snapshot = (profileId = "backend-developer", baseRole: "developer" | "reviewer" | "tester" = "developer"): ResolvedRoleProfileSnapshot => {
+    const definition = { schemaVersion: 3 as const, profileId, version: "1.0.0", displayName: profileId, baseRole,
+      additionalInstructions: "Specialize within host policy.", skillPins: [], toolRequirements: [], restrictions: {} };
+    return { schemaVersion: 3, definition, pin: pinRoleProfile(definition), baseRolePolicyDigest: "a".repeat(64), resolutionPolicyVersion: ROLE_PROFILE_FEATURE };
+  };
+  const launchFor = async (profile: ResolvedRoleProfileSnapshot, id = profile.pin.profileId) => {
+    const { readBuiltinRolePrompt } = await import("../src/role-prompts.js");
+    const original = await readBuiltinRolePrompt(profile.definition.baseRole);
+    if (!original) throw new Error("Missing original role prompt");
+    const path = join(directory, id + ".md");
+    await writeFile(path, original.prompt + "\n\nHost policy\n" + profile.definition.additionalInstructions);
+    return { provider: "codex" as const, argv: ["-c", `model_instructions_file=${JSON.stringify(path)}`], env: {},
+      launchId: "launch-" + id, launchFingerprint: "fingerprint-" + id, roleProfile: profile.pin, features: [ROLE_PROFILE_FEATURE] };
+  };
+  beforeEach(async () => {
+    runner = new FakeHerdrCommandRunner(); store = new InMemorySessionManifestStore(); inspector = new FakeWorktreeInspector();
+    directory = await mkdtemp(join(tmpdir(), "bflow-pane-profile-"));
+    manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+    expect((await manager.initializeTopology()).ok).toBe(true);
+  });
+  afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
+
+  it("rejects missing/mixed launch profile support before Herdr allocation", async () => {
+    const profile = snapshot(); const launch = await launchFor(profile);
+    for (const request of [{}, { launch: { ...launch, features: [] } }, { launch: { ...launch, roleProfile: snapshot("other").pin } }]) {
+      const before = runner.calls.length;
+      const result = await manager.allocateDeveloper({ taskId: "task", worktreePath: "/repo/.worktrees/task", roleProfile: profile, ...request });
+      expect(result.ok).toBe(false);
+      expect(runner.calls).toHaveLength(before);
+    }
+  });
+
+  it("binds profile identity, immutable snapshot and base role to a dedicated developer", async () => {
+    const profile = snapshot(); const launch = await launchFor(profile);
+    const result = await manager.allocateDeveloper({ taskId: "task", worktreePath: "/repo/.worktrees/task", roleProfile: profile, launch });
+    expect(result.ok).toBe(true); if (!result.ok) return;
+    expect(result.value.role).toBe("developer"); expect(result.value.roleProfile).toEqual(profile.pin);
+    expect(runner.panes.get(result.value.paneId)?.label).toContain("backend-developer · developer · 1.0.0");
+    const saved = await manager.getManifest(); expect(saved.ok && saved.value?.roleProfiles).toEqual([profile]);
+    profile.definition.additionalInstructions = "changed after allocation";
+    const loaded = await manager.getManifest(); expect(loaded.ok && loaded.value?.roleProfiles?.[0]?.definition.additionalInstructions).toBe("Specialize within host policy.");
+  });
+
+  it("rejects active task pin changes instead of returning its original pane", async () => {
+    const profile = snapshot(); const launch = await launchFor(profile);
+    const first = await manager.allocateDeveloper({ taskId: "task", worktreePath: "/repo/.worktrees/task", roleProfile: profile, launch });
+    expect(first.ok).toBe(true);
+    const other = snapshot("data-engineer"); const before = runner.calls.length;
+    const second = await manager.allocateDeveloper({ taskId: "task", worktreePath: "/repo/.worktrees/task", roleProfile: other, launch: await launchFor(other) });
+    expect(second.ok).toBe(false); expect(runner.calls).toHaveLength(before);
+  });
+
+  it("never inherits released profile native context, even with identical pin and empty launch env", async () => {
+    const profile = snapshot(); const launch = await launchFor(profile);
+    const first = await manager.allocateDeveloper({ taskId: "task-1", worktreePath: "/repo/.worktrees/task", roleProfile: profile, launch });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    inspector.setCleanliness("/repo/.worktrees/task", { exists: true, isClean: true });
+    expect((await manager.releaseDeveloper({ taskId: "task-1", closePane: false })).ok).toBe(true);
+    const second = await manager.allocateDeveloper({ taskId: "task-2", worktreePath: "/repo/.worktrees/task", roleProfile: profile, launch: await launchFor(profile, "next") });
+    expect(second.ok).toBe(true); if (!second.ok) return;
+    expect(second.value.paneId).not.toBe(first.value.paneId);
+    expect(second.value.agentId).not.toBe(first.value.agentId);
+    const saved = await manager.getManifest(); expect(saved.ok && saved.value?.roleProfiles).toEqual([profile]);
+  });
+
+  it("allocates and serializes a fresh reviewer context without mutating the permanent reviewer", async () => {
+    const original = await manager.getRoleBinding("reviewer"); expect(original.ok && original.value).toBeTruthy();
+    const profile = snapshot("security-reviewer", "reviewer"); const launch = await launchFor(profile);
+    const request = { role: "reviewer" as const, taskId: "review-1", roleProfile: profile, launch };
+    const [first, second] = await Promise.all([manager.allocateSpecialist(request), manager.allocateSpecialist({ ...request, taskId: "review-2" })]);
+    expect(first.ok).toBe(true); expect(second.ok).toBe(false); if (!first.ok || !original.ok || !original.value) return;
+    expect(first.value.role).toBe("reviewer"); expect(first.value.permanent).toBe(false);
+    expect(first.value.paneId).not.toBe(original.value.paneId); expect(first.value.roleProfile).toEqual(profile.pin);
+    expect(await manager.getRoleBinding("reviewer")).toEqual(original);
+    const released = await manager.releaseSpecialist({ taskId: "review-1" }); expect(released.ok).toBe(true);
+    expect(runner.panes.has(first.value.paneId)).toBe(false); expect(runner.panes.has(original.value.paneId)).toBe(true);
+    const saved = await manager.getManifest(); expect(saved.ok && saved.value?.roleProfiles).toEqual([profile]);
+  });
+
+  it("blocks a profile when its base specialist slot is working and rejects tester-to-qa alias", async () => {
+    const reviewer = runner.agents.get("reviewer")!; runner.agents.set("reviewer", { ...reviewer, agentStatus: "working" });
+    const profile = snapshot("security-reviewer", "reviewer"); const before = runner.calls.length;
+    expect((await manager.allocateSpecialist({ role: "reviewer", taskId: "review", roleProfile: profile, launch: await launchFor(profile) })).ok).toBe(false);
+    expect(runner.calls.slice(before).some(call => call.args[0] === "pane" && call.args[1] === "split")).toBe(false);
+    const tester = snapshot("tester-profile", "tester");
+    expect((await manager.allocateSpecialist({ role: "tester", taskId: "test", roleProfile: tester, launch: await launchFor(tester) })).ok).toBe(false);
+  });
+
+  it("blocks recovery before side effects if a profiled native binding cannot be authenticated", async () => {
+    const profile = snapshot(); const first = await manager.allocateDeveloper({ taskId: "task", worktreePath: "/repo/.worktrees/task", roleProfile: profile, launch: await launchFor(profile) });
+    expect(first.ok).toBe(true); const before = runner.calls.length;
+    const recovered = await manager.recoverAfterRestart(); expect(recovered.ok).toBe(false);
+    expect(runner.calls.slice(before).some(call => ["create", "start", "split"].includes(call.args[1]!))).toBe(false);
+  });
+
+  it.each(["memory", "file"])("retains immutable profile snapshots after cleanup in %s manifest storage", async kind => {
+    const profile = snapshot();
+    const first = await manager.allocateDeveloper({ taskId: "task", worktreePath: "/repo/.worktrees/task", roleProfile: profile, launch: await launchFor(profile) });
+    expect(first.ok).toBe(true);
+    const loaded = await manager.getManifest(); if (!loaded.ok || !loaded.value) throw new Error("Missing manifest");
+    const targetStore = kind === "memory" ? new InMemorySessionManifestStore() : new FileSessionManifestStore(join(directory, "state"));
+    expect((await targetStore.save(loaded.value)).ok).toBe(true);
+    const dropped = { ...loaded.value, panes: loaded.value.panes.filter(pane => !pane.roleProfile), roleProfiles: [] };
+    expect((await targetStore.save(dropped)).ok).toBe(false);
+  });
+
+  it("accepts host-validated native hook prompt source and preserves the original prefix", async () => {
+    const profile = snapshot(); const launch = await launchFor(profile);
+    const path = JSON.parse(launch.argv[1]!.slice("model_instructions_file=".length)) as string;
+    const result = await manager.allocateDeveloper({ taskId: "hook-task", worktreePath: "/repo/.worktrees/hook", roleProfile: profile,
+      launch: { ...launch, argv: [], promptSource: path } });
+    expect(result.ok).toBe(true);
+    const original = await (await import("../src/role-prompts.js")).readBuiltinRolePrompt("developer");
+    await writeFile(path, "Override first\n" + original!.prompt);
+    const before = runner.calls.length;
+    const rejected = await manager.allocateDeveloper({ taskId: "invalid-hook", worktreePath: "/repo/.worktrees/invalid", roleProfile: profile,
+      launch: { ...launch, argv: [], promptSource: path } });
+    expect(rejected.ok).toBe(false); expect(runner.calls).toHaveLength(before);
+  });
+
+  it("preserves active profile contexts in every reconciliation manifest write", async () => {
+    const profile = snapshot("security-reviewer", "reviewer");
+    const allocated = await manager.allocateSpecialist({ role: "reviewer", taskId: "review", roleProfile: profile, launch: await launchFor(profile) });
+    expect(allocated.ok).toBe(true); if (!allocated.ok) return;
+    const writes: string[][] = [];
+    const originalSave = store.save.bind(store);
+    vi.spyOn(store, "save").mockImplementation(async (manifest, options) => {
+      writes.push(manifest.panes.map(pane => pane.paneId));
+      return originalSave(manifest, options);
+    });
+    expect((await manager.reconcileTopology()).ok).toBe(true);
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every(panes => panes.includes(allocated.value.paneId))).toBe(true);
+  });
+
+
+  it("rejects native resume flags including equals-value form", async () => {
+    const profile = snapshot(); const launch = await launchFor(profile);
+    const resumed = await manager.allocateDeveloper({ taskId: "resume-task", worktreePath: "/repo/.worktrees/resume", roleProfile: profile,
+      launch: { ...launch, argv: [...launch.argv, "--resume=old-session"] } });
+    expect(resumed.ok).toBe(false);
+  });
+
+  it("never relabels an untracked live native context as profiled", async () => {
+    const profile = snapshot(); const launch = await launchFor(profile);
+    const old = await manager.allocateDeveloper({ taskId: "old-task", worktreePath: "/repo/.worktrees/old" });
+    if (!old.ok) throw new Error(old.error.message);
+    const manifest = await manager.getManifest(); if (!manifest.ok || !manifest.value) throw new Error("missing manifest");
+    expect((await store.save({ ...manifest.value, panes: manifest.value.panes.filter(pane => pane.paneId !== old.value.paneId), roleProfiles: [profile] })).ok).toBe(true);
+    const rebound = await manager.startAgentInPane({ role: "developer", paneId: old.value.paneId, tabId: old.value.tabId,
+      workspaceId: old.value.workspaceId, cwd: old.value.cwd, agentName: old.value.agentId, roleProfile: profile, launch });
+    expect(rebound.ok).toBe(false);
+  });
+
 });

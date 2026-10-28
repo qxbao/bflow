@@ -4,7 +4,8 @@ import { ProviderFailoverPolicySchema } from "@bflow/contracts";
 import {
   SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
   NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema,
-  RepositoryToolPolicySchema, ResolvedToolGrantSchema
+  RepositoryToolPolicySchema, ResolvedToolGrantSchema, RoleProfilePinSchema, RoleProfileCatalogSchema, ROLE_PROFILE_FEATURE,
+  sameRoleProfilePin
 } from "@bflow/contracts";
 
 /**
@@ -14,12 +15,18 @@ import {
 
 export const PlatformRoleOptionSchema = z.object({
   role: AgentRoleSchema,
+  specialistProfile: RoleProfilePinSchema.optional(),
   provider: AgentProviderIdSchema,
   failover: ProviderFailoverPolicySchema.optional(),
   profileName: z.string().min(1).regex(/^[A-Za-z0-9._-]+$/).optional(),
   required: z.boolean(),
   model: z.string().trim().min(1).optional(),
   effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
+  /** Derived from actual workflow-pack locks; role model/effort alone are defaults. */
+  preferenceConstraints: z.object({
+    model: z.string().trim().min(1).optional(),
+    effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional()
+  }).strict().optional(),
   permissionMode: z.enum(["restricted", "workspace_auto", "unattended_isolated"]),
   capabilityIds: z.array(IdentifierSchema),
   mcpServiceIds: z.array(IdentifierSchema),
@@ -45,6 +52,7 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   schemaVersion: z.literal(3),
   machineId: IdentifierSchema,
   repositoryId: IdentifierSchema,
+  roleProfiles: RoleProfileCatalogSchema.optional(),
   /** Trusted machine AI-isolator state root. Never derived from repository role configuration. */
   isolatorStateRoot: z.string().min(1).refine(isAbsolute, "isolatorStateRoot must be absolute").optional(),
   /** One entry per role; a `developer` entry is the template for dynamic Developer launches. */
@@ -78,11 +86,17 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   if (new Set(roles).size !== roles.length) ctx.addIssue({ code: "custom", message: "platform roles must be unique" });
   for (const required of ["conversation", "coordinator"] as const)
     if (!roles.includes(required)) ctx.addIssue({ code: "custom", message: `platform roles must include ${required}` });
+  for (const [index, role] of options.roles.entries()) if (role.specialistProfile) {
+    const snapshot = options.roleProfiles?.find(item => sameRoleProfilePin(item.pin, role.specialistProfile));
+    if (!snapshot || snapshot.definition.baseRole !== role.role)
+      ctx.addIssue({ code: "custom", path: ["roles", index, "specialistProfile"], message: "specialist profile must match exact catalog pin and base role" });
+  }
 });
 export type AgenticHostPlatformOptions = z.infer<typeof AgenticHostPlatformOptionsSchema>;
 
 export const RolePreflightSummarySchema = z.object({
   role: AgentRoleSchema,
+  roleProfile: RoleProfilePinSchema.optional(),
   provider: AgentProviderIdSchema,
   required: z.boolean(),
   taskId: IdentifierSchema.optional(),
@@ -103,21 +117,31 @@ export const PlatformPreflightReportSchema = z.object({
 
 /** Launch material for one role. `env` may carry Gateway bearer tokens: never persist or log it. */
 export const HostLaunchMaterialSchema = z.object({
+  roleProfile: RoleProfilePinSchema.optional(),
+  features: z.array(z.string()).optional(),
+  promptSource: NonEmptyArgumentSchema.optional(),
   provider: AgentProviderIdSchema,
   argv: z.array(SafeArgumentSchema),
   env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string()),
   launchId: IdentifierSchema,
   launchFingerprint: Sha256DigestSchema
-}).strict();
+}).strict().superRefine((material, ctx) => {
+  if (material.roleProfile && !material.features?.includes(ROLE_PROFILE_FEATURE))
+    ctx.addIssue({ code: "custom", message: "profiled launch requires custom specialist profile feature support" });
+});
 export type HostLaunchMaterial = z.infer<typeof HostLaunchMaterialSchema>;
 
 export const HostRoleLaunchSchema = z.object({
+  roleProfile: RoleProfilePinSchema.optional(),
   systemPrompt: z.string(),
   mcpConfigFile: NonEmptyArgumentSchema,
   hooksSettingsFile: NonEmptyArgumentSchema,
   /** Present when the host prepared a v3 provider launch; legacy hosts omit it. */
   launch: HostLaunchMaterialSchema.optional()
-}).strict();
+}).strict().superRefine((role, ctx) => {
+  if (!sameRoleProfilePin(role.roleProfile, role.launch?.roleProfile))
+    ctx.addIssue({ code: "custom", message: "host role and launch role profile pin mismatch" });
+});
 export type HostRoleLaunch = z.infer<typeof HostRoleLaunchSchema>;
 
 /** Host `prepare` RPC result. `platform.ready === false` means: no pane side effects, fail `up` with the report. */

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   AgentEnvironmentSchema,
   canonicalReceiptJson,
@@ -9,6 +9,7 @@ import {
   type TrustScope
 } from "@bflow/contracts";
 import { fail, ok } from "./errors.js";
+import { resolveRoleProfile } from "./role-profiles.js";
 import type {
   PlatformSessionIdentity,
   RoleEnvironmentResolverPort,
@@ -49,7 +50,9 @@ export function taskIdError(taskId: string | undefined): string | undefined {
 export class RoleEnvironmentResolver implements RoleEnvironmentResolverPort {
   environmentId(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement): string {
     const task = (requirement.taskId ? `-${requirement.taskId}` : "") + (requirement.executionKey ? `-${requirement.executionKey}` : "");
-    return boundedIdentifier(`env-${identity.sessionId}-g${identity.generation}-${requirement.role}${task}`);
+    const profile = requirement.roleProfile ? `-profile-${requirement.roleProfile.pin.digest}` : "";
+    const assignment = requirement.assignmentId ? `-assignment-${sha256Hex(requirement.assignmentId)}` : "";
+    return boundedIdentifier(`env-${identity.sessionId}-g${identity.generation}-${requirement.role}${task}${profile}${assignment}`);
   }
 
   resolve(
@@ -57,6 +60,8 @@ export class RoleEnvironmentResolver implements RoleEnvironmentResolverPort {
     requirement: RolePlatformRequirement,
     resolved: { readonly skillManifestDigest: string }
   ): OperationResult<AgentEnvironment> {
+    try { if (requirement.roleProfile) requirement = resolveRoleProfile(requirement.roleProfile, requirement); }
+    catch { return fail("validation", "role profile policy is incompatible or unsupported", { status: "unsupported" }); }
     if (!Number.isInteger(identity.generation) || identity.generation < 1)
       return fail("validation", "generation must be a positive integer");
     if (!isAbsolute(requirement.cwd)) return fail("validation", "role cwd must be absolute");
@@ -101,7 +106,8 @@ export class RoleEnvironmentResolver implements RoleEnvironmentResolverPort {
       role: requirement.role,
       scope,
       cwd: requirement.cwd,
-      stateDirectory: `${identity.stateDirectory}/gen-${identity.generation}/roles/${requirement.executionKey ? boundedIdentifier(`${requirement.role}${task}`) : `${requirement.role}${task}`}`,
+      stateDirectory: `${identity.stateDirectory}/gen-${identity.generation}/roles/${requirement.executionKey ? boundedIdentifier(`${requirement.role}${task}`) : `${requirement.role}${task}`}${requirement.roleProfile ? `/profiles/${requirement.roleProfile.pin.digest}` : ""}${requirement.assignmentId ? `/assignments/${sha256Hex(requirement.assignmentId)}` : ""}`,
+      ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin } : {}),
       configFingerprint,
       permissionProfile,
       environmentVariables: { ...(requirement.environmentVariables ?? {}) },
@@ -124,17 +130,19 @@ type PermissionShape = OperationResult<{
 }>;
 
 function permissionShape(requirement: RolePlatformRequirement): PermissionShape {
+  if (requirement.writablePaths?.length === 0 && requirement.permissionMode !== "unattended_isolated")
+    return ok({ filesystem: "read_only", writableRoots: [], isolation: "provider_policy" });
   switch (requirement.permissionMode) {
     case "restricted":
       return ok({ filesystem: "read_only", writableRoots: [], isolation: "provider_policy" });
     case "workspace_auto":
-      return ok({ filesystem: "workspace_write", writableRoots: [requirement.cwd], isolation: "provider_policy" });
+      return ok({ filesystem: "workspace_write", writableRoots: requirement.writablePaths?.map(path => join(requirement.cwd, path)) ?? [requirement.cwd], isolation: "provider_policy" });
     case "unattended_isolated":
       // Never downgrade: unattended execution without verified OS/container isolation is refused.
       if (!requirement.isolation)
         return fail("validation", `unattended_isolated requires verified isolation for role ${requirement.role}`,
           { code: "unsupported_isolation" });
-      return ok({ filesystem: "workspace_write", writableRoots: [requirement.cwd], isolation: requirement.isolation.kind });
+      return ok({ filesystem: requirement.writablePaths?.length === 0 ? "read_only" : "workspace_write", writableRoots: requirement.writablePaths?.map(path => join(requirement.cwd, path)) ?? [requirement.cwd], isolation: requirement.isolation.kind });
     default:
       return fail("validation", "unknown permission mode");
   }

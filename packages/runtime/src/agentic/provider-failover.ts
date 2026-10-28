@@ -19,6 +19,9 @@ export class TaskProviderFailover {
 
   async observe(bindingInput: unknown, failureInput: unknown): Promise<TaskFailover> {
     const binding = PaneBindingSchema.parse(bindingInput), failure = ProviderFailureObservationSchema.parse(failureInput);
+    // A continuation allocates a fresh plain Developer. It cannot carry a pinned specialist profile (and a profile cannot
+    // switch provider), so a profiled execution is never failed over: that would silently drop its pin and restrictions.
+    if (binding.roleProfile) throw new Error("Provider failover is unsupported for a pinned specialist profile execution");
     const config = this.ports.providerFailover;
     if (!config || !failure.evidenceDigest || !await config.authenticate(binding, failure)) throw new Error("Unauthenticated provider failure");
     const admitted = this.state.runs.flatMap(run => run.tasks).flatMap(task => task.failovers ?? []).find(entry => entry.sourceHandle.executionId === failure.executionId);

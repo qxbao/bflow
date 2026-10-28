@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
-import { ExecutionPlanInputSchema, SkillManifestSchema, type ExecutionPlanInput, type PlanDecision, type PlanObservation,
+import { ExecutionPlanInputSchema, SkillManifestSchema, sameRoleProfilePin, type ExecutionPlanInput, type PlanDecision, type PlanObservation,
     type SkillDefinition, type TrustScope, type AgentRole, type AgentProviderId } from '@bflow/contracts';
 import { defaultHostChecks, hostRoleCapabilities, buildExecutionPlan, canonicalPlanDigest, resolvePlanField, readSkillApproval,
-    parseBehavioralCommands, parseMutationChecks, parseAppChecks, redactSecrets, isSensitiveKey, readExecutionRepositorySnapshot } from '@bflow/runtime';
+    parseBehavioralCommands, parseMutationChecks, parseAppChecks, redactSecrets, isSensitiveKey, readExecutionRepositorySnapshot, resolveRoleProfile } from '@bflow/runtime';
 import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile, MachineConfigSchema } from '@bflow/machine-setup';
 import type { EnvironmentCompositionInput } from './environment.js';
 import { identifyRepository } from './repository.js';
@@ -11,11 +11,12 @@ import { readEnvironmentConfig } from './environment-config.js';
 import { resolveIsolatorStateRoot, configuredPlatformRoles, resolveRolePlatformOption, selectedProfileName, resolveRepositoryToolPolicy, resolveToolGrants, projectRecordedServiceReadiness } from './platform-options.js';
 import { SUPPORTED_CLI_COMMANDS } from './command-reference.js';
 import type { AgenticHostPlatformOptions } from '@bflow/runtime';
-import { resolvePlatformConfiguration } from './platform-resolution.js';
+import { resolvePlatformConfiguration, rolePreferenceConstraints } from './platform-resolution.js';
 import { loadMachineSkillCatalog } from './skill-catalog.js';
 import { readPreviewFile } from './preview-files.js';
 import { readGatewayReadiness } from './gateway-readiness.js';
 import { readGatewayRepositoriesState } from './gateway-repositories.js';
+import { specialistProfilePath } from './specialist-profiles.js';
 export const EXECUTION_RESOLVER_VERSION = 'cli-platform-1';
 /** Reads desired configuration and existing observations. No readiness inspector or mutable store is opened. */
 export async function loadExecutionResolution(original: EnvironmentCompositionInput, actualPlatform?: AgenticHostPlatformOptions): Promise<ExecutionPlanInput> {
@@ -109,16 +110,63 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
                 blockers.push({ code: 'native_profile_unavailable', decisionIds: [`roles.${role.role}.profile`], source: source(`${locator}.profile-name`) });
             }
         }
+        let profilePolicyFailure = false;
         try {
-            const option = actualPlatform?.roles.find(option => option.role === role.role)
-                ?? resolveRolePlatformOption(role, input, skills, grants.filter(grant => grant.role === role.role));
+            let effectiveCapabilities = capabilities;
+            const actualOption = actualPlatform?.roles.find(option => option.role === role.role);
+            if (role.specialistProfile && actualPlatform && !actualOption) {
+                profilePolicyFailure = true;
+                throw new Error('Actual specialist role is missing from launch configuration');
+            }
+            const constraints = rolePreferenceConstraints(resolution.decisions, role);
+            let option = actualOption
+                ?? { ...resolveRolePlatformOption(role, input, skills, grants.filter(grant => grant.role === role.role)), ...constraints };
+            if (!sameRoleProfilePin(option.specialistProfile, role.specialistProfile)) {
+                profilePolicyFailure = true;
+                throw new Error('Actual specialist profile selection differs from resolved configuration');
+            }
+            if (role.specialistProfile) {
+                profilePolicyFailure = true;
+                const snapshot = resolution.roleProfiles.find(item => item.pin.digest === role.specialistProfile!.digest)!;
+                if (actualPlatform && canonicalPlanDigest(actualPlatform.roleProfiles ?? []) !== canonicalPlanDigest(resolution.roleProfiles))
+                    throw new Error('Actual specialist profile catalog differs from resolved configuration');
+                if (canonicalPlanDigest(option.preferenceConstraints ?? {}) !== canonicalPlanDigest(constraints.preferenceConstraints ?? {}))
+                    throw new Error('Actual specialist profile constraints differ from workflow pack locks');
+                const requirement = resolveRoleProfile(snapshot, { role: option.role, provider: option.provider, required: option.required,
+                    cwd: input.repository.root, capabilityIds: capabilities, permissionMode: option.permissionMode,
+                    mcpServiceIds: option.mcpServiceIds, toolIds: option.toolIds,
+                    ...(option.model !== undefined ? { model: option.model } : {}),
+                    ...(option.effort !== undefined ? { effort: option.effort } : {}),
+                    ...(option.preferenceConstraints !== undefined ? { preferenceConstraints: option.preferenceConstraints } : {}),
+                    ...(option.network !== undefined ? { network: option.network } : {}),
+                    skillSelections: option.skillSelections.map(selection => ({ skill: selection.skill, required: selection.required,
+                        ...(selection.approvalReceiptId !== undefined ? { approvalReceiptId: selection.approvalReceiptId } : {}) })),
+                    toolGrants: (actualPlatform?.toolGrants ?? grants).filter(grant => grant.role === role.role), ...(policy ? { toolPolicy: policy } : {}) });
+                effectiveCapabilities = [...requirement.capabilityIds];
+                option = { ...option, skillSelections: [...requirement.skillSelections], toolIds: [...requirement.toolIds],
+                    mcpServiceIds: [...requirement.mcpServiceIds], ...(requirement.model ? { model: requirement.model } : {}),
+                    ...(requirement.effort ? { effort: requirement.effort } : {}) };
+                for (const key of ['model', 'effort'] as const) {
+                    if (snapshot.definition.preferences?.[key] === undefined || requirement[key] === undefined) continue;
+                    const field = `roles.${role.role}.${key}`;
+                    const index = decisions.findIndex(item => item.field === field);
+                    const previous = index >= 0 ? decisions[index] : undefined;
+                    const decision = resolvePlanField({ field, candidates: [
+                        ...(previous?.candidates.map(candidate => ({ source: candidate.source, value: candidate.value })) ?? []),
+                        { source: { kind: 'policy', locator: 'environment.specialistProfiles' }, value: requirement[key]! }
+                    ], ...(previous?.rule ? { lockedBy: previous.rule } : {}) });
+                    if (index >= 0) decisions[index] = decision;
+                    else decisions.push(decision);
+                }
+                profilePolicyFailure = false;
+            }
             const selectedPins = option.skillSelections.map(item => item.skill);
             if (!skills.bundles) throw new Error('Skill snapshots unavailable');
             const resolved = await manager.resolveCatalog({
                 manifestId: `preview-${role.role}`, environmentId: `preview-${role.role}`,
                 scope: { kind: 'session', machineId: platform.machineId, repositoryId: input.repository.id,
                     workspaceRoot: input.repository.root, sessionId: input.repository.sessionName },
-                role: role.role, provider: option.provider, capabilityIds: capabilities, toolIds: option.toolIds,
+                role: role.role, provider: option.provider, capabilityIds: effectiveCapabilities, toolIds: option.toolIds,
                 selections: option.skillSelections, dependencyApprovals: option.dependencySkillApprovals
             }, skills.bundles);
             const manifest = SkillManifestSchema.parse(resolved.manifest);
@@ -159,7 +207,9 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
         catch (error) {
             const message = error instanceof Error ? error.message : '';
             const approval = message.startsWith('Skill approval unavailable') || message.startsWith('Repository skill approval');
-            blockers.push({ code: approval ? 'custom_skill_approval_unavailable'
+            if (profilePolicyFailure)
+                blockers.push({ code: 'specialist_profile_policy_unavailable', decisionIds: [`roles.${role.role}.specialistProfile`], source: source('environment.specialistProfiles') });
+            else blockers.push({ code: approval ? 'custom_skill_approval_unavailable'
                 : message.startsWith('Missing skill capability:') ? 'skill_capability_unavailable' : 'skill_pin_unavailable',
                 decisionIds: [`skills.${role.role}`], source: source(approval ? 'environment.skills.pins' : `${locator}.skills`) });
         }
@@ -212,7 +262,7 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
     if (!decisions.some(decision => decision.field === 'capabilities.required'))
         decisions.push(resolvePlanField({ field: 'capabilities.required', candidates: [{ source: { kind: 'builtin', locator: 'preflight' }, value: requiredCapabilities }] }));
     const governance = { sdd: input.config.environment.sdd, tdd: input.config.environment.tdd, verification: input.config.environment.verification, fastPath: input.config.environment.fastPath, permissions: input.config.environment.permissions ?? {} };
-    return ExecutionPlanInputSchema.parse({ schemaVersion: 3, resolverVersion: EXECUTION_RESOLVER_VERSION, policyVersion: 'bflow-host-1', repository: { revision, dirtyDigests }, components: { configuration: canonicalPlanDigest({ roles: input.config.environment.roles, skills: input.config.environment.skills ?? {}, governance }), ownerVerification: canonicalPlanDigest(ownerVerification), profiles: canonicalPlanDigest(profileProjection), skills: canonicalPlanDigest(skills.definitions.map(item => ({ skillId: item.skillId, version: item.version, digest: item.digest }))), toolPolicy: canonicalPlanDigest(requirements), workflow: canonicalPlanDigest(input.config.defaultWorkflow) }, decisions, observations, mode: 'intake', pack: resolution.pack, policy: { gates: [...defaultHostChecks({ verification: input.config.environment.verification }).map(gate => gate.id), ...appGateIds], tdd: 'unresolved', alternativeVerification: [], requiredTools, requiredCapabilities, explanations: intakePolicyExplanations(appGateIds.length > 0, input.config.environment.sdd.approvalRequired) }, blockers, unknowns: ['specification_unresolved', 'accepted_workflow_unresolved', 'task_dag_unresolved', 'provider_readiness_not_checked', 'cost_and_dynamic_allocations_unresolved'], approvalPoints: ['specification_design_approval_if_required', 'governed_scope_or_policy_change', 'git_integration_if_required'] });
+    return ExecutionPlanInputSchema.parse({ schemaVersion: 3, resolverVersion: EXECUTION_RESOLVER_VERSION, policyVersion: 'bflow-host-1', repository: { revision, dirtyDigests }, components: { configuration: canonicalPlanDigest({ roles: input.config.environment.roles, skills: input.config.environment.skills ?? {}, governance }), ownerVerification: canonicalPlanDigest(ownerVerification), profiles: canonicalPlanDigest(resolution.roleProfiles.length ? { native: profileProjection, specialists: resolution.roleProfiles } : profileProjection), skills: canonicalPlanDigest(skills.definitions.map(item => ({ skillId: item.skillId, version: item.version, digest: item.digest }))), toolPolicy: canonicalPlanDigest(requirements), workflow: canonicalPlanDigest(input.config.defaultWorkflow) }, decisions, observations, mode: 'intake', pack: resolution.pack, policy: { gates: [...defaultHostChecks({ verification: input.config.environment.verification }).map(gate => gate.id), ...appGateIds], tdd: 'unresolved', alternativeVerification: [], requiredTools, requiredCapabilities, explanations: intakePolicyExplanations(appGateIds.length > 0, input.config.environment.sdd.approvalRequired) }, blockers, unknowns: ['specification_unresolved', 'accepted_workflow_unresolved', 'task_dag_unresolved', 'provider_readiness_not_checked', 'cost_and_dynamic_allocations_unresolved'], approvalPoints: ['specification_design_approval_if_required', 'governed_scope_or_policy_change', 'git_integration_if_required'] });
 }
 /** Policy provenance for intake: values come from host policy/project config; TDD waits for an accepted specification. */
 function intakePolicyExplanations(ownerGates: boolean, approvalRequired: boolean): ExecutionPlanInput['policy']['explanations'] {
@@ -281,6 +331,8 @@ export async function loadHostExecutionResolution(input: EnvironmentCompositionI
         add('skill-bindings', resolve(input.repository.root, config.skills.bindingsPath));
     if (config.workflowPack)
         add('workflow-pack', resolve(input.repository.root, config.workflowPack.path));
+    for (const profile of config.specialistProfiles ?? [])
+        files.push({ component: 'specialist-profile', path: specialistProfilePath(input.repository.root, profile.path), format: 'bytes', optional: false });
     add('machine-tools', join(platform.paths.config, 'machine.json'), true);
     add('skill-approvals', join(platform.paths.state, 'skill-approvals.json'), true);
     for (const role of configuredPlatformRoles(resolved.input)) {

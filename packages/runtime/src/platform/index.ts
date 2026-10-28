@@ -1,4 +1,6 @@
 /** P30 platform readiness: composed launch preparation, activation and release. Concrete adapters stay internal. */
+export { resolveRoleProfile, assertRoleProfilePin, appendRoleProfileInstructions, profilePathAllowed,
+  roleProfilePolicyDigest, baseRolePolicyDigest, persistRoleProfileSnapshot, loadRoleProfileSnapshot } from "./role-profiles.js";
 export {
   DefaultPlatformReadinessService,
   preparePrivateCodexHome,

@@ -3,7 +3,7 @@ import { ProviderFailoverPolicySchema } from "@bflow/contracts";
 import { lstatSync } from "node:fs";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
-import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema } from "@bflow/contracts";
+import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema, RoleProfilePinSchema } from "@bflow/contracts";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
@@ -57,6 +57,7 @@ export const EnvironmentRoleConfigSchema = z
     role: AgentRoleSchema,
     cli: z.string().trim().min(1),
     "profile-name": EnvironmentProfileNameSchema.optional(),
+    specialistProfile: RoleProfilePinSchema.optional(),
     model: z.string().trim().min(1).optional(),
     effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
     required: z.boolean().optional(),
@@ -69,6 +70,8 @@ export const EnvironmentRoleConfigSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.specialistProfile && (value.role === "conversation" || value.role === "coordinator"))
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["specialistProfile"], message: "Only specialist governance roles may select a specialist profile." });
     if (value.failover && (value.failover.role !== value.role || !value.model || !value["profile-name"]))
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["failover"], message: "Failover requires the same governance role and explicit primary model/profile" });
     if (value.cli === "agy" && value.effort !== undefined) {
@@ -84,6 +87,9 @@ export const EnvironmentConfigEnvironmentSchema = z
     sessionName: z.string().min(1),
     herdrBinary: z.string().min(1),
     roles: z.array(EnvironmentRoleConfigSchema).min(1),
+    specialistProfiles: z.array(z.object({ path: z.string().min(1).max(1000), pin: RoleProfilePinSchema }).strict()).max(128)
+      .refine(entries => new Set(entries.map(entry => `${entry.pin.profileId}@${entry.pin.version}`)).size === entries.length,
+        "Specialist profile ID/version must be unique").optional(),
     defaults: EnvironmentProfileDefaultsSchema.optional(),
     workflowPack: z.object({ path: z.string().min(1), id: z.string().min(1), version: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
     sdd: z

@@ -3,7 +3,8 @@ import type {
   AgentEnvironment, AgentHealthCheck, AgentHealthResult, AgentLaunchAttestation, AgentLaunchProfile,
   AgentProviderAdapter, AgentProviderId, AgentRole, MCPClientRegistration, MCPServiceObservation,
   MCPToolCallResult, RepositoryToolPolicy, ResolvedToolGrant,
-  OperationOptions, OperationResult, PermissionProfile, ScopedOperation, SkillManifest, SkillPin, TrustScope
+  OperationOptions, OperationResult, PermissionProfile, ScopedOperation, SkillManifest, SkillPin, TrustScope,
+  ResolvedRoleProfileSnapshot, RoleProfilePin
 } from "@bflow/contracts";
 import type { HostHookEvent, HostMcpServer, LiveReadinessObservation } from "@bflow/agent-providers";
 import type { RenderedSkills, ResolveSkillsRequest } from "@bflow/skills";
@@ -35,11 +36,21 @@ export interface RoleSkillSelection {
 /** Owner-configured requirement for one role launch; never inferred from an agent prompt. */
 export interface RolePlatformRequirement {
   readonly role: AgentRole;
+  readonly roleProfile?: ResolvedRoleProfileSnapshot;
+  /** Assignment/attempt identity isolates native context on every fresh profiled launch. */
+  readonly assignmentId?: string;
+  readonly writablePaths?: readonly string[];
+  readonly deniedPaths?: readonly string[];
   readonly provider: AgentProviderId;
   readonly profileName?: string;
   readonly required: boolean;
   readonly model?: string;
   readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  /** Exact workflow-pack locks, distinct from the base role's model/effort defaults. */
+  readonly preferenceConstraints?: {
+    readonly model?: string | undefined;
+    readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined;
+  };
   readonly permissionMode: PermissionProfile["mode"];
   /** Workspace root for permanent roles, exact task worktree for a Developer. */
   readonly cwd: string;
@@ -87,7 +98,7 @@ export interface SkillSessionPort {
   resolveForRole(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement,
     environmentId: string): Promise<OperationResult<ResolvedRoleSkills>>;
   /** Recover a persisted manifest by exact digest; drift is `conflict`, never a silent re-resolve. */
-  load(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string, executionKey?: string): Promise<OperationResult<ResolvedRoleSkills | null>>;
+  load(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string, executionKey?: string, roleProfile?: RoleProfilePin, assignmentId?: string): Promise<OperationResult<ResolvedRoleSkills | null>>;
 }
 
 // ----------------------------------------------------------- environment (T2)
@@ -248,6 +259,7 @@ export interface ProviderReadinessPort {
 export type LaunchJournalEntry =
   | { readonly kind: "intent"; readonly launchId: string; readonly role: AgentRole; readonly provider: AgentProviderId;
       readonly taskId?: string; readonly environmentId: string; readonly configFingerprint: string;
+      readonly roleProfile?: RoleProfilePin;
       readonly launchFingerprint: string; readonly generation: number; readonly recordedAt: string }
   | { readonly kind: "attested"; readonly launchId: string; readonly paneId: string; readonly receiptId: string; readonly recordedAt: string }
   | { readonly kind: "activated"; readonly launchId: string; readonly status: AgentHealthResult["status"];
@@ -265,6 +277,7 @@ export interface LaunchJournalPort {
 
 export interface PreparedRoleLaunch {
   readonly role: AgentRole;
+  readonly roleProfile?: RoleProfilePin;
   readonly provider: AgentProviderId;
   readonly required: boolean;
   readonly taskId?: string;
@@ -279,11 +292,15 @@ export interface PreparedRoleLaunch {
     readonly env: Readonly<Record<string, string>>;
     readonly launchId: string;
     readonly launchFingerprint: string;
+    readonly roleProfile?: RoleProfilePin;
+    readonly features?: readonly string[];
+    readonly promptSource?: string;
   };
 }
 
 export interface RolePreflightSummary {
   readonly role: AgentRole;
+  readonly roleProfile?: RoleProfilePin;
   readonly provider: AgentProviderId;
   readonly required: boolean;
   readonly taskId?: string;
@@ -304,6 +321,7 @@ export interface PlatformStatusSnapshot {
   readonly generation: number | null;
   readonly launches: readonly {
     readonly launchId: string; readonly role: AgentRole; readonly provider: AgentProviderId; readonly taskId?: string;
+    readonly roleProfile?: RoleProfilePin;
     /** `degraded`: a Gateway registration this launch relies on was lost; relaunch the role. */
     readonly state: "intent" | "attested" | "activated" | "failed" | "released" | "degraded";
     readonly healthValidUntil?: string;

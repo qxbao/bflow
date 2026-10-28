@@ -1,4 +1,4 @@
-import { resolvePlatformConfiguration } from "./platform-resolution.js";
+import { resolvePlatformConfiguration, rolePreferenceConstraints } from "./platform-resolution.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOption } from "@bflow/runtime";
@@ -217,6 +217,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   const requiredCapabilities = resolution.decisions.find(decision => decision.field === 'capabilities.required')?.effective;
   const roles: PlatformRoleOption[] = configuredPlatformRoles(input).map(role => ({
     ...resolveRolePlatformOption(role, input, deps.context.skills, grantsByRole.get(role.role) ?? [], deps.warn),
+    ...rolePreferenceConstraints(resolution.decisions, role),
     ...(role.role !== 'conversation' && Array.isArray(requiredCapabilities) ? { capabilityIds: requiredCapabilities.filter((item): item is string => typeof item === 'string') } : {})
   }));
 
@@ -229,6 +230,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     machineId: deps.context.machineId,
     repositoryId: input.repository.id,
     roles,
+    ...(resolution.roleProfiles.length ? { roleProfiles: resolution.roleProfiles } : {}),
     ...(toolPolicy ? { toolPolicy } : {}),
     ...(toolGrants.length ? { toolGrants } : {}),
     exclusiveMcpResources: Object.fromEntries((deps.context.mcpServices ?? []).map(raw => MCPServiceDefinitionSchema.parse(raw))
@@ -316,6 +318,7 @@ export function resolveRolePlatformOption(role: EnvironmentRoleConfig, input: En
     provider: provider.data,
     ...(role.failover ? { failover: role.failover } : {}),
     required: role.required ?? true,
+    ...(role.specialistProfile ? { specialistProfile: role.specialistProfile } : {}),
     ...profileSettings(selectedProfileName(role, environment)),
     ...modelSettings(role),
     permissionMode: role.permissionMode ?? environment.permissions?.mode ?? "workspace_auto",

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { AGENT_ROLES, AgentRoleSchema } from './session.js';
+import { RoleProfilePinSchema } from "./role-profile.js";
 import { SkillPinSchema } from './skills.js';
 import { JsonValueSchema } from './common.js';
 import { ProviderFailoverPolicySchema } from './provider-failover.js';
@@ -13,6 +14,7 @@ export const PlanUnknownCodeSchema = z.enum([
   'legacy_resolution_baseline_unavailable'
 ]);
 export const PlanBlockerCodeSchema = z.enum([
+  'specialist_profile_policy_unavailable',
   'workflow_pack_unavailable', 'unsupported_plan_field', 'invalid_plan_value',
   'native_profile_unavailable', 'custom_skill_approval_unavailable', 'skill_pin_unavailable',
   'required_tool_pin_missing', 'required_tool_readiness_stale', 'required_tool_readiness_unavailable',
@@ -25,7 +27,7 @@ export const PlanReasonCodeSchema = z.enum([
 export const PlanLocatorSchema = z.union([
   z.enum(['builtin', 'pack', 'project', 'override', 'policy', 'runtime', 'health', 'preflight',
     'workflow-pack-allowlist', 'provider-preflight', 'accepted-workflow', 'execution-source',
-    'environment.skills.pins', 'environment.toolPolicy', 'skills/roles/bindings.json', 'skills/dependencies',
+    'environment.specialistProfiles', 'environment.skills.pins', 'environment.toolPolicy', 'skills/roles/bindings.json', 'skills/dependencies',
     'host-check-policy', 'conditional-tdd-policy', 'environment.sdd.approvalRequired', '.bflow/verification.json',
     'machine.state/skill-approvals.json', 'machine.state/setup-gateway-ready.json',
     'machine.toolPins.executable_not_inspected', 'machine.toolPins.missing']),
@@ -35,7 +37,7 @@ export const PlanLocatorSchema = z.union([
       return false;
     }
     if (parts[0] === 'environment' && parts[1] === 'roles') {
-      return AGENT_ROLES.includes(parts[2] as typeof AGENT_ROLES[number]) && parts.length === 4 && ['cli', 'model', 'effort', 'profile-name', 'skills', 'failover'].includes(parts[3]!);
+      return AGENT_ROLES.includes(parts[2] as typeof AGENT_ROLES[number]) && parts.length === 4 && ['cli', 'model', 'effort', 'profile-name', 'specialistProfile', 'skills', 'failover'].includes(parts[3]!);
     }
     if (parts[0] === 'environment' && parts[1] === 'defaults') {
       return ['claude', 'codex', 'agy', 'claude-code'].includes(parts[2]!) && parts.length === 4 && parts[3] === 'profile-name';
@@ -50,11 +52,12 @@ export const PlanSourceSchema = z.object({
   kind: z.enum(['builtin', 'pack', 'project', 'override', 'policy', 'runtime']),
   locator: PlanLocatorSchema
 }).strict();
-export const PlanFieldSchema = z.string().regex(/^(workflow\.(id|version|digest)|roles\.[a-z][a-z_-]*\.(provider|model|effort|profile|failover)|skills\.[a-z][a-z_-]*|tools\.required|capabilities\.required)$/).refine(field => !field.startsWith('roles.') && !field.startsWith('skills.') || AGENT_ROLES.includes(field.split('.')[1] as typeof AGENT_ROLES[number]), 'Unknown governance role');
+export const PlanFieldSchema = z.string().regex(/^(workflow\.(id|version|digest)|roles\.[a-z][a-z_-]*\.(provider|model|effort|profile|specialistProfile|failover)|skills\.[a-z][a-z_-]*|tools\.required|capabilities\.required)$/).refine(field => !field.startsWith('roles.') && !field.startsWith('skills.') || AGENT_ROLES.includes(field.split('.')[1] as typeof AGENT_ROLES[number]), 'Unknown governance role');
 export function isPlanFieldValue(field: string, value: unknown): boolean {
   if (value === null) {
     return true;
   }
+  if (field.endsWith('.specialistProfile')) return !['conversation', 'coordinator'].includes(field.split('.')[1]!) && RoleProfilePinSchema.safeParse(value).success;
   if (field.startsWith('skills.')) {
     return z.array(SkillPinSchema).safeParse(value).success && (value as {
       skillId: string;

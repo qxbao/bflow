@@ -1,4 +1,4 @@
-import { AgentRoleProfileSchema, JsonValueSchema, type AgentRole, type JsonValue } from "@bflow/contracts";
+import { AgentRoleProfileSchema, JsonValueSchema, RoleProfilePinSchema, type AgentRole, type JsonValue } from "@bflow/contracts";
 import { z } from "zod";
 import { record, strings, textField } from "./journal.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
@@ -17,6 +17,7 @@ export const COORDINATOR_ROLE_PROFILE = AgentRoleProfileSchema.parse({
   requiresDedicatedPane: true, requiresIndependentVerification: true
 });
 export const COORDINATOR_TOOLS = [
+  { name: "read_role_profiles", description: "Read available exact specialist profile pins, base governance role and restrictions. Select roleProfile in task definitions or request_specialist; profile identity grants no authority." },
   { name: "inspect", description: "Read durable SDLC state, inbox, assignments, evidence and uncertain handoffs." },
   { name: "report_progress", description: "Send progress or clarification questions to Conversation through Herdr." },
   { name: "assess", description: "Evaluate the actual P15 complexity policy and fastPath preview. Requires Specification v2 with explicit metadata.sdd.assessment; read planning_reference(section=specification) for the P15 fields before calling. Never infer missing impact flags. availableRoles lists only specialist roles with a pane bound in this session, with their capabilities. This read-only assessment does not approve a specification or propose/dispatch a workflow." },
@@ -57,6 +58,7 @@ export class CoordinatorTools {
     if (principal.role !== "coordinator" && !(principal.role === "developer" && name === "authorize_implementation"))
       throw new Error("Only Coordinator may invoke orchestration tools");
     switch (name) {
+      case "read_role_profiles": return this.runtime.readRoleProfiles();
       case "inspect": {
         const query = InspectInputSchema.parse(args);
         const raw = await this.runtime.inspect(query.runId);
@@ -71,7 +73,8 @@ export class CoordinatorTools {
         try { return await this.runtime.assess(specification); }
         catch (error) { return assessmentErrorAt(error, ["specification"]); }
       }
-      case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId), textField(args.role), textField(args.objective), strings(args.requiredCapabilities));
+      case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId), textField(args.role), textField(args.objective), strings(args.requiredCapabilities),
+        args.roleProfile === undefined ? undefined : RoleProfilePinSchema.parse(args.roleProfile));
       case "propose_prototype": return this.runtime.proposePrototype(textField(args.runId), args.scope);
       case "submit_prototype": return this.runtime.submitPrototype(textField(args.runId), args.submission);
       case "propose_workflow": return this.runtime.proposeWorkflow(textField(args.runId), args.specification, args.definition,
