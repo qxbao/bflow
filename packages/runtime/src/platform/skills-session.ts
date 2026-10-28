@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join, parse, sep } from "node:path";
 import {
   AgentProviderIdSchema,
@@ -12,7 +12,7 @@ import {
   type SkillManifest,
   type RoleProfilePin
 } from "@bflow/contracts";
-import type { RenderedSkills, ResolveSkillsRequest } from "@bflow/skills";
+import type { ApprovalCheck, RenderedSkills, ResolveSkillsRequest } from "@bflow/skills";
 import { fail, ok } from "./errors.js";
 import { boundedIdentifier, sessionTrustScope, sha256Hex, taskIdError } from "./environment.js";
 import { assertRoleProfilePin, resolveRoleProfile } from "./role-profiles.js";
@@ -102,6 +102,87 @@ export class SkillSessionStore implements SkillSessionPort {
       return fail("validation", errorMessage(error));
     }
   }
+}
+
+export interface SkillSessionReconciliationRecord {
+  readonly generation: number;
+  readonly file: string;
+  readonly role: AgentRole;
+  readonly manifestDigest: string;
+  /** null when the stored manifest still verifies (bytes, provenance and current approval). */
+  readonly verificationError: string | null;
+  readonly skills: readonly {
+    readonly skillId: string;
+    readonly version: string;
+    readonly digest: string;
+    readonly source: SkillManifest["skills"][number]["source"];
+    readonly approval: "builtin_distribution" | "authorized" | "unavailable";
+  }[];
+}
+export interface SkillSessionReconciliation {
+  readonly records: readonly SkillSessionReconciliationRecord[];
+  readonly reconciliationRequired: boolean;
+  readonly diagnostics: readonly string[];
+}
+
+/**
+ * Read-only reconciliation of persisted session skill records against current authority. It never edits
+ * a record or a running process: a provider keeps instructions it already loaded, so a revoked/disabled
+ * skill requires a role relaunch; Runtime recovery of the old manifest is refused once it no longer verifies.
+ */
+export async function reconcileSkillSessionRecords(input: {
+  readonly stateDirectory: string;
+  readonly verify: (manifest: SkillManifest) => Promise<unknown>;
+  readonly authorize: (check: ApprovalCheck) => Promise<boolean>;
+}): Promise<SkillSessionReconciliation> {
+  const records: SkillSessionReconciliationRecord[] = [];
+  const diagnostics: string[] = [];
+  const root = await lstatOrNull(input.stateDirectory);
+  if (root === null) return { records, reconciliationRequired: false, diagnostics };
+  if (root.isSymbolicLink() || !root.isDirectory())
+    return { records, reconciliationRequired: true, diagnostics: ["platform state directory is not a regular directory"] };
+  for (const generationName of (await readdir(input.stateDirectory)).filter(name => /^gen-[0-9]+$/.test(name)).sort()) {
+    const skillsDirectory = join(input.stateDirectory, generationName, "skills");
+    const generationStats = await lstatOrNull(join(input.stateDirectory, generationName));
+    const stats = await lstatOrNull(skillsDirectory);
+    if (generationStats?.isSymbolicLink() || stats?.isSymbolicLink()) {
+      diagnostics.push(`${generationName}: symlinked skill record directory refused`);
+      continue;
+    }
+    if (stats === null || !stats.isDirectory()) continue;
+    for (const name of (await readdir(skillsDirectory)).filter(item => item.endsWith(".json")).sort()) {
+      const file = join(skillsDirectory, name);
+      const raw = await readRecordFile(file);
+      const parsed = raw.ok && raw.value !== null ? parseRecord(raw.value) : undefined;
+      if (!parsed?.ok) {
+        diagnostics.push(`${generationName}/skills/${name}: unreadable or corrupt skill record`);
+        continue;
+      }
+      const { manifest } = parsed.value;
+      let verificationError: string | null = null;
+      try {
+        await input.verify(manifest);
+      } catch (error) {
+        verificationError = errorMessage(error);
+      }
+      const skills: SkillSessionReconciliationRecord["skills"][number][] = [];
+      for (const definition of manifest.skills) {
+        const binding = manifest.bindings.find(item => item.skill.skillId === definition.skillId);
+        const authorized = definition.source === "builtin" ? true : await input.authorize({ definition, role: manifest.role,
+          provider: manifest.provider, scope: { ...manifest.scope }, approvalReceiptId: binding?.approvalReceiptId }).catch(() => false);
+        skills.push({ skillId: definition.skillId, version: definition.version, digest: definition.digest, source: definition.source,
+          approval: definition.source === "builtin" ? "builtin_distribution" : authorized ? "authorized" : "unavailable" });
+      }
+      records.push({ generation: Number(generationName.slice(4)), file, role: manifest.role, manifestDigest: manifest.digest,
+        verificationError, skills });
+    }
+  }
+  return {
+    records,
+    reconciliationRequired: diagnostics.length > 0 || records.some(record => record.verificationError !== null ||
+      record.skills.some(skill => skill.approval === "unavailable")),
+    diagnostics
+  };
 }
 
 function buildRequest(

@@ -1172,6 +1172,18 @@ its canonical C linker without importing host alternatives configuration. Depend
 warming avoids devpts so its network namespace stays owned by the user namespace entered
 by slirp; the helper must return exactly its documented readiness byte before npm starts.
 
+### Custom skill authority và đối soát session
+
+`createHostSkillManager(platform, sessionId)` là authority skill của host (dùng trong
+`createHostPlatformSession`): builtin theo digest phân phối tin cậy; skill operator/repository chỉ
+khi receipt máy khớp chính xác digest, version, dependency, role, provider, repository, session và
+còn hạn, đọc lại ở mỗi lần resolve/verify/recover. `reconcileSkillSessionRecords({stateDirectory,
+verify, authorize})` chỉ đọc các record `gen-*/skills/*.json`, báo manifest không còn verify hoặc skill
+mất approval (`reconciliationRequired`) và từ chối thư mục symlink; nó không sửa record hay process.
+Provider đang chạy vẫn giữ instruction đã nạp: phải relaunch role. `SkillSessionStore.load` (restart)
+gọi `recover(exactDigest)` và từ chối manifest đã bị revoke, không bao giờ lấy version mới nhất.
+Bằng chứng: test local (`test/platform/skills-session.test.ts`, `apps/cli/test/custom-skill-import.test.ts`).
+
 ## Workflow liveness và capability recovery
 
 Host cung cấp `repository_read` cho Coordinator và các role điều tra/verification, cùng

@@ -33,6 +33,10 @@ import { GIT_PREPARE_SPEC, gitPrepare } from "./commands/git-prepare.js";
 import { MCP_STATUS_SPEC, mcpStatus } from "./commands/mcp-status.js";
 import { REPO_INSPECT_SPEC, repoInspect } from "./commands/repo-inspect.js";
 import { SKILLS_SYNC_SPEC, skillsSync } from "./commands/skills-sync.js";
+import {
+  SKILLS_APPROVE_SPEC, SKILLS_DISABLE_SPEC, SKILLS_IMPORT_SPEC, SKILLS_REVOKE_SPEC, SKILLS_SCAN_SPEC, SKILLS_STATUS_SPEC,
+  skillsApprove, skillsDisable, skillsImport, skillsRevoke, skillsScan, skillsStatus
+} from "./commands/skills-custom.js";
 import { TASK_IMPLEMENT_SPEC, taskImplement } from "./commands/task-implement.js";
 import { TASK_PREVIEW_SPEC, taskPreview } from "./commands/task-preview.js";
 import { TASK_PLAN_SPEC, taskPlan } from "./commands/task-plan.js";
@@ -49,6 +53,12 @@ const ENTRIES: readonly { readonly spec: CommandSpec; readonly handler: HighLeve
   { spec: MCP_STATUS_SPEC, handler: mcpStatus },
   { spec: TOOL_STATUS_SPEC, handler: toolStatus },
   { spec: SKILLS_SYNC_SPEC, handler: skillsSync },
+  { spec: SKILLS_SCAN_SPEC, handler: skillsScan },
+  { spec: SKILLS_IMPORT_SPEC, handler: skillsImport },
+  { spec: SKILLS_APPROVE_SPEC, handler: skillsApprove },
+  { spec: SKILLS_DISABLE_SPEC, handler: skillsDisable },
+  { spec: SKILLS_REVOKE_SPEC, handler: skillsRevoke },
+  { spec: SKILLS_STATUS_SPEC, handler: skillsStatus },
   { spec: AGENT_CHECK_SPEC, handler: agentCheck }
 ];
 

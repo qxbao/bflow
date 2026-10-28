@@ -439,6 +439,11 @@ không chứng minh task/run thành công. Repo mutation receipts ở `.bflow/st
 | `bflow mcp status [--service <id>]` | Đọc MCP config/pins; live health cần `HighLevelServices.mcpGateway` được inject, binary mặc định chưa nối port này |
 | `bflow tool status [--tool <id>]` | Probe catalog tool versions/digests; không cài tool. `tools status` là alias ở parser kế thừa, nên ưu tiên cú pháp singular này |
 | `bflow skills sync [--provider <kind>] [--dry-run] [--allow-machine-scope]` | Default pinned synchronizer; CLI chưa nhận `skills list` hoặc `sync --list` |
+| `bflow skills scan --source <path>... [--role <r>]... [--provider <p>]...` | Inventory chỉ đọc đúng nguồn được chọn (SKILL.md bundle, CLAUDE.md, AGENTS.md, GEMINI.md, Cursor rules) và đề xuất role |
+| `bflow skills import --source <path>... [--depends-on <id>]... [--version <v>] [--name <id>] [--dry-run]` | Chuyển đổi thành bundle instruction-only, stage tại `.bflow/skills/imports/<id>/<v>/` cùng bản gốc và report; chưa dùng được khi chưa duyệt |
+| `bflow skills approve <id> --digest <sha256> [--version <v>] [--expires-in-days <n>] [--approve]` | Kiểm digest/dependency/role/provider/scope; không có `--approve` thì chỉ in grant (exit 5) |
+| `bflow skills disable <id> [--dry-run]` / `bflow skills revoke <id> [--version <v>] [--dry-run]` | Bỏ binding cho manifest sau; revoke xoá receipt của repository session này và báo session cần đối soát |
+| `bflow skills status` | Chỉ đọc: pin, approval theo role/provider, cài đặt máy, import đang chờ và session manifest cần đối soát |
 | `bflow agent check <claude|codex|agy> [--role <role>] [--mode restricted|workspace_auto]` | Standalone preflight; có thể chạy model probe/tiêu hao usage; không chọn role/profile/model từ repo config |
 
 `mcp status` có thể báo `configured: false`/`not_ready` dù machine Gateway đã được setup:
@@ -686,3 +691,24 @@ Workflow packs may set or lock `roles.<role>.specialistProfile` using an exact c
 Profile files also participate in private EP-01 source watches. Changing bytes, removing a source or changing the accepted pin blocks subsequent execution even when an immutable snapshot still exists; formatting-only profile changes conservatively require renewed resolution. Running contexts do not hot-reload catalog instructions. These checks are source and local-test evidence, not live provider or full workflow acceptance.
 
 Local custom skills use `environment.skills.catalogDir`, optional `bindingsPath`, and `pins:[{skillId,version,digest,approvalReceiptId}]`. Catalog and bindings stay inside the repository; custom bundles cannot replace builtins. Explicit `bflow skills sync --allow-machine-scope` installs exact pinned bundles through existing validation. Execution and preview require a private machine-owned `state/skill-approvals.json` receipt binding exact version/digest/dependencies, role/provider and repository/session identity. Repository configuration supplies a receipt ID, never approval authority. Preview only reads these receipts and never installs bundles or creates approval records. Evidence is source and local tests, not live provider/Herdr acceptance.
+
+### Importing IDE skills and rules (custom skills)
+
+Flow: `skills scan` → `skills import` → review → `skills approve --approve` → `skills sync --allow-machine-scope` → `up`.
+
+```sh
+bflow skills scan --source ~/.claude/skills/review-checklist --source ./CLAUDE.md --json
+bflow skills import --source ~/.claude/skills/review-checklist --role reviewer
+# review .bflow/skills/imports/review-checklist/1.0.0/{bundle,original,report.json}
+bflow skills approve review-checklist --digest <bundle sha256>            # prints the exact grant, exit 5
+bflow skills approve review-checklist --digest <bundle sha256> --approve  # receipt + catalog + pin
+bflow skills sync --allow-machine-scope
+bflow skills status
+```
+
+- Only the selected paths are read (a selected bundle or `.cursor/rules` directory with the normal bundle bounds). Imports (`@path`) are reported, never followed. Secrets, symlinks (including ancestors), traversal, oversized/binary files and frontmatter/`skill.json` provenance claims block a source; a blocked selection writes nothing.
+- Roles and providers are fixed in the bundle's `skill.json` at import and covered by its digest. Tool/MCP references (`allowed-tools`, `mcp__*`, `.mcp.json`) become tool-policy proposals and executable content (scripts, `hooks`, `` !`cmd` ``) becomes hook proposals; neither is installed, registered or run, and the bundle has no `requiredToolIds`. Originals are copied verbatim without execute bits; `report.json` lists every transformation and every unconverted item.
+- Approval re-reads the staged bytes and refuses a different digest, a dependency that is not the exact builtin/approved pin or does not support the same roles/providers, a configured role provider the skill does not support, a builtin name, and expiry outside 1–365 days (default 90). The receipt binds digest, version, dependencies, roles, providers, repository and session and expiry; a receipt ID string in config grants nothing. Only an approved bundle is promoted into the catalog (`.bflow/skills/catalog` by default) and bound through `environment.skills.requiredSkills`, which keeps the default role skills.
+- Update: import with a new `--version`, approve and sync. Running sessions keep and recover their exact old manifest (its receipt stays valid until expiry); recovery never selects the latest version. A catalog bundle edited after approval no longer matches its pin, so startup and sync refuse it.
+- `disable` unbinds for future manifests only. `revoke` deletes this session's receipts; persisted manifests containing the skill then fail verification on recovery and `revoke`/`status` report them as `reconciliation_required`. A running provider keeps instructions it already loaded until the role is relaunched.
+- Approval writes are a CLI human action (`--approve`) to machine state outside role write roots; this is not protection against a hostile same-UID process. Evidence: source plus local tests (`apps/cli/test/custom-skill-import.test.ts`), not live provider/Herdr acceptance.

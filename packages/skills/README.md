@@ -199,3 +199,50 @@ mới theo approval hiện có, không ghi đè generation đang chạy.
 Các bundle `test-planning`, `review-code`, `security-review`, `browser-inspection` có entrypoint gọn và references theo nhu cầu cho check design/review. Chọn viewpoint theo criterion và changed surface, dùng N/A có lý do khi không liên quan; giữ chuỗi criterion → risk → exact check identity → observation → evidence. Cùng catalog hiện hành kết hợp NFR guidance; không lấy một digest của nhánh/phiên bản kết hợp cũ làm approval cho byte hiện tại.
 
 Viewpoints bổ sung boundary/state/decision/concurrency/fault/compatibility/wiring và UI/security cases khi phù hợp, không bắt mọi task chạy browser/live tooling. Nếu criterion thật yêu cầu browser/live proof, thiếu grant/lease/origin/environment phải là prerequisite gap, không đổi nhãn unit/static test thành E2E. [Guide tổng hợp](../../docs/nfr-and-test-design.md) liên kết các tài nguyên canonical và giới hạn Runtime.
+
+## Nhập skill/rule từ IDE (custom skill)
+
+`importer.ts` dùng lại `readBundle`, `bundleDigest`, `validateSkill` và các giới hạn bundle; không có
+skill engine mới. Ba hàm thuần (không ghi trạng thái, không cài, không chạy gì):
+
+| Bước | API | Kết quả |
+| --- | --- | --- |
+| Scan | `scanSkillSources([{path, kind?}])` | `inventory` (origin, `kind`, `contentDigest`, file role, resources, tham chiếu dependency/tool/MCP/hook/import/remote, cảnh báo, `duplicateGroups`) và bytes gốc trong `files` (không serialize) |
+| Proposal | `proposeSkillImport(inventory, {roles?, providers?, version?, skillIds?, reservedSkillIds?})` | Mapping vào role chuẩn (heuristic hoặc operator), tách instruction / `toolProposals` / `executableHooks`, chặn trùng tên builtin |
+| Convert | `convertSkillImport(scanned, proposal, itemId, {supportedCommands, source?, dependencies?})` | Bundle instruction-only đã qua `validateSkill`, `definition`, `originals` nguyên văn và `report` |
+
+Nguồn hỗ trợ: thư mục skill (hoặc `SKILL.md`), `CLAUDE.md`/`CLAUDE.local.md`, `AGENTS.md`,
+`GEMINI.md`, `.cursorrules`, `*.mdc` hoặc thư mục `.cursor/rules`. Chỉ đường dẫn được chọn được đọc.
+Một nguồn bị `blocked` (không ném lỗi, các nguồn khác vẫn được báo) khi: nghi có secret (giá trị
+không bao giờ xuất hiện trong inventory, kể cả description/frontmatter), frontmatter hoặc
+`skill.json` tự khai provenance/trust (`source`, `trusted`, `approved`, `digest`, …), symlink (kể cả
+thư mục cha), đường dẫn không chuẩn hoá/traversal, file quá cỡ/nhị phân/đặc biệt, loại nguồn không
+hỗ trợ hoặc không có instruction. Provenance chỉ do importer khẳng định (`source: repository|operator`).
+
+Converter giữ mọi mất mát trong `report.unconverted` (mã, file, dòng, đoạn gốc, lý do) và mọi biến
+đổi trong `report.transformations`: link/URL từ xa và autolink bị gỡ (giữ chữ), đường dẫn ngoài
+bundle thành chữ thường, thẻ HTML resource bị gỡ, lệnh Bflow không có trong inventory bị thay,
+`@import` không được theo, `` !`cmd` `` bị gỡ, frontmatter `allowed-tools`/`hooks`/`model`… không có
+tương đương. Script/hook/`.mcp.json`/file không hỗ trợ không vào bundle. Nội dung không có đủ 11
+section được đặt dưới `## Procedure` (heading hạ cấp); bundle Bflow sẵn có giữ nguyên section.
+`skill.json` sinh từ proposal với `requiredToolIds: []` và chỉ `dependencies` là pin chính xác do
+caller cung cấp. Proposal/inventory có digest; sửa proposal hoặc bytes sau scan bị từ chối.
+
+```ts
+import { BASELINE_COMMANDS, scanSkillSources, proposeSkillImport, convertSkillImport } from '@bflow/skills';
+
+const scanned = await scanSkillSources([{ path: '/home/me/.claude/skills/review-checklist' }, { path: '/work/app/CLAUDE.md' }]);
+const proposal = proposeSkillImport(scanned.inventory, { reservedSkillIds: builtinIds });
+for (const item of proposal.items.filter(item => item.status === 'proposed')) {
+  const { bundle, definition, originals, report } = convertSkillImport(scanned, proposal, item.itemId,
+    { supportedCommands: BASELINE_COMMANDS });
+  // Caller stores bundle + originals + report for human review; approval/pins/install stay with
+  // the host (CLI `skills approve`, machine receipt, `SkillManager.install`, Runtime manifest).
+}
+```
+
+Luồng CLI đầy đủ (stage → approve exact digest → promote/pin → `skills sync` → Runtime manifest)
+và giới hạn revoke/đối soát được mô tả trong [CLI README](../../apps/cli/README.md#importing-ide-skills-and-rules-custom-skills).
+Test: `packages/skills/test/importer.test.ts` (scanner/converter) và
+`apps/cli/test/custom-skill-import.test.ts` (CLI → resolver → Runtime). Heuristic role mapping chỉ là
+đề xuất; con người duyệt digest đã chứa role/provider. Đây là bằng chứng local, không phải live provider.

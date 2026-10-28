@@ -144,17 +144,35 @@ function resources(text: string, from: string, files: BundleFiles): void {
   ))
     reference(match[1]!, from, files);
 }
-function commands(text: string, supported: readonly string[]): void {
+export interface BflowCommandIssue {
+  /** Exact matched text, starting at `bflow`. */
+  match: string;
+  index: number;
+  reason: "syntax" | "unsupported";
+  command?: string;
+}
+/** Literal Bflow invocations that the validator rejects, in text order. */
+export function bflowCommandIssues(
+  text: string,
+  supported: readonly string[],
+): BflowCommandIssue[] {
   // Only documented literal invocations are allowed. Dynamic/option-first commands
   // need an explicit host command adapter, not a guessed shell parser in skill content.
+  const issues: BflowCommandIssue[] = [];
   for (const match of text.matchAll(/(?<![\w-])bflow[ \t]+([^`\n;|&]+)/g)) {
     const invocation = match[1]!.trim();
-    if (invocation.startsWith("-") || !/^[a-z]/.test(invocation))
-      throw new Error("Unsupported Bflow command syntax");
+    const base = { match: match[0], index: match.index };
+    if (invocation.startsWith("-") || !/^[a-z]/.test(invocation)) {
+      issues.push({ ...base, reason: "syntax" });
+      continue;
+    }
     const words = /^([a-z][a-z0-9-]*(?:[ \t]+[a-z][a-z0-9-]*)*)/.exec(
       invocation,
     )?.[1];
-    if (!words) throw new Error("Unsupported Bflow command syntax");
+    if (!words) {
+      issues.push({ ...base, reason: "syntax" });
+      continue;
+    }
     const command = words.replace(/[ \t]+/g, " ");
     const family = command.split(" ")[0]!;
     const nested = supported.filter((id) => id.startsWith(family + " "));
@@ -162,8 +180,15 @@ function commands(text: string, supported: readonly string[]): void {
     if (
       !candidates.some((id) => command === id || command.startsWith(id + " "))
     )
-      throw new Error(`Unsupported Bflow command: ${command}`);
+      issues.push({ ...base, reason: "unsupported", command });
   }
+  return issues;
+}
+function commands(text: string, supported: readonly string[]): void {
+  const issue = bflowCommandIssues(text, supported)[0];
+  if (issue?.reason === "syntax")
+    throw new Error("Unsupported Bflow command syntax");
+  if (issue) throw new Error(`Unsupported Bflow command: ${issue.command}`);
 }
 export function validateSkill(
   files: BundleFiles,

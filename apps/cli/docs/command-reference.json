@@ -464,6 +464,267 @@
       ]
     },
     {
+      "name": "skills.scan",
+      "usage": "bflow skills scan",
+      "summary": "Inventory selected IDE skills/rules and propose a role mapping (read-only)",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "inspected",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--source",
+          "type": "string",
+          "required": true,
+          "repeatable": true
+        },
+        {
+          "name": "--role",
+          "type": "string",
+          "required": false,
+          "repeatable": true,
+          "choices": [
+            "conversation",
+            "coordinator",
+            "planner",
+            "architect",
+            "specifier",
+            "developer",
+            "tester",
+            "reviewer",
+            "qa",
+            "security"
+          ]
+        },
+        {
+          "name": "--provider",
+          "type": "string",
+          "required": false,
+          "repeatable": true,
+          "choices": [
+            "claude",
+            "codex",
+            "agy"
+          ]
+        },
+        {
+          "name": "--version",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--name",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "skills.import",
+      "usage": "bflow skills import",
+      "summary": "Convert selected sources into reviewed, unapproved Bflow skill bundles",
+      "mutates": "repository",
+      "retry": "retry_safe",
+      "permissionFlags": [],
+      "outcomes": [
+        "prepared",
+        "preview",
+        "not_ready",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": [
+        {
+          "name": "--source",
+          "type": "string",
+          "required": true,
+          "repeatable": true
+        },
+        {
+          "name": "--role",
+          "type": "string",
+          "required": false,
+          "repeatable": true,
+          "choices": [
+            "conversation",
+            "coordinator",
+            "planner",
+            "architect",
+            "specifier",
+            "developer",
+            "tester",
+            "reviewer",
+            "qa",
+            "security"
+          ]
+        },
+        {
+          "name": "--provider",
+          "type": "string",
+          "required": false,
+          "repeatable": true,
+          "choices": [
+            "claude",
+            "codex",
+            "agy"
+          ]
+        },
+        {
+          "name": "--version",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--name",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--depends-on",
+          "type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "--dry-run",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "skills.approve",
+      "usage": "bflow skills approve <skill-id>",
+      "summary": "Approve an exact custom skill digest for its roles/providers in this repository session",
+      "mutates": "machine",
+      "retry": "retry_safe",
+      "permissionFlags": [
+        "--approve"
+      ],
+      "outcomes": [
+        "approval_required",
+        "prepared",
+        "failed"
+      ],
+      "positionals": [
+        {
+          "name": "skill-id",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--version",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--digest",
+          "type": "string",
+          "required": true,
+          "repeatable": false
+        },
+        {
+          "name": "--expires-in-days",
+          "type": "integer",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--approve",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "skills.disable",
+      "usage": "bflow skills disable <skill-id>",
+      "summary": "Unbind a custom skill from future role manifests (approval kept)",
+      "mutates": "repository",
+      "retry": "retry_safe",
+      "permissionFlags": [],
+      "outcomes": [
+        "prepared",
+        "preview",
+        "failed"
+      ],
+      "positionals": [
+        {
+          "name": "skill-id",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--dry-run",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "skills.revoke",
+      "usage": "bflow skills revoke <skill-id>",
+      "summary": "Delete this repository session's approval receipts for a custom skill and unbind it",
+      "mutates": "machine",
+      "retry": "retry_safe",
+      "permissionFlags": [],
+      "outcomes": [
+        "prepared",
+        "preview",
+        "reconciliation_required",
+        "failed"
+      ],
+      "positionals": [
+        {
+          "name": "skill-id",
+          "required": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "--version",
+          "type": "string",
+          "required": false,
+          "repeatable": false
+        },
+        {
+          "name": "--dry-run",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false
+        }
+      ]
+    },
+    {
+      "name": "skills.status",
+      "usage": "bflow skills status",
+      "summary": "Report custom skill pins, approvals, installs and running-session reconciliation (read-only)",
+      "mutates": "none",
+      "retry": "read_only",
+      "permissionFlags": [],
+      "outcomes": [
+        "checked",
+        "reconciliation_required",
+        "failed"
+      ],
+      "positionals": [],
+      "flags": []
+    },
+    {
       "name": "agent.check",
       "usage": "bflow agent check <provider>",
       "summary": "Preflight provider health and readiness without launching it",

@@ -268,6 +268,33 @@ function summaryLines(command: HighLevelCommandName, value: unknown, useColor: b
       list("Diagnostics", data.diagnostics, x => text(x, 350), Infinity);
       break;
     }
+    case "skills.scan":
+    case "skills.import":
+    case "skills.approve":
+    case "skills.disable":
+    case "skills.revoke":
+    case "skills.status": {
+      const inventory = data.inventory !== null && typeof data.inventory === "object" ? data.inventory as Record<string, unknown> : undefined;
+      if (inventory && Array.isArray(inventory.items))
+        records("Sources", inventory.items, item => item.itemId, item => ({ Kind: (item.origin as Record<string, unknown> | undefined)?.kind,
+          Status: item.status, Path: (item.origin as Record<string, unknown> | undefined)?.path,
+          Warnings: Array.isArray(item.warnings) ? item.warnings.map(w => `${(w as Record<string, unknown>).code}`).join(", ") : undefined }));
+      if (Array.isArray(data.skills))
+        records("Skills", data.skills, item => item.skillId, item => ({ Version: item.version, Digest: item.digest, Pin: item.pin,
+          Installed: item.installed, Bound: item.bound, Staged: item.stagedPath,
+          Approvals: Array.isArray(item.approvals) ? item.approvals.map(a => { const v = a as Record<string, unknown>; return `${v.role}/${v.provider}: ${v.approval}`; }) : undefined }));
+      add("Skill", data.skillId);
+      add("Version", data.version);
+      add("Digest", data.digest);
+      add("Approval receipt", data.approvalReceiptId);
+      add("Expires", data.expiresAt);
+      list("Roles", data.roles, x => text(x, 100));
+      list("Providers", data.providers, x => text(x, 100));
+      list("Blocked sources", data.blocked, x => text(JSON.stringify(x), 350), Infinity);
+      list("Pending imports", data.pendingImports, x => text(JSON.stringify(x), 350), Infinity);
+      add("Next", data.next);
+      break;
+    }
   }
   return lines;
 }
@@ -282,7 +309,13 @@ function commandForRemediation(command: HighLevelCommandName): CliCommandName {
     case "git.prepare": return "git prepare";
     case "mcp.status": return "mcp status";
     case "tool.status": return "tool status";
-    case "skills.sync": return "skills sync";
+    case "skills.sync":
+    case "skills.scan":
+    case "skills.import":
+    case "skills.approve":
+    case "skills.disable":
+    case "skills.revoke":
+    case "skills.status": return "skills sync";
     case "agent.check": return "agent check";
   }
 }
