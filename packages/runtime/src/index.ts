@@ -147,6 +147,7 @@ export { regressionChecks } from "./agentic/task-commands.js";
 
 // P30: platform readiness composition (no concrete provider adapter classes are exported).
 export * from "./platform/index.js";
+export * from "./analysis/index.js";
 
 // Private state placement for the host and CLI recovery composition.
 export { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "./private-state.js";

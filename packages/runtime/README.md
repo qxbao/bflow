@@ -112,6 +112,21 @@ Hook không nhúng raw notice list vào context thường lệ. Lượt người
 
 Chỉ callback `conversation_notices_surfaced` có thể thiếu native-session argument trong đường ACK sau reply; current authenticated pane vẫn phải có binding/session. Các endpoint khác giữ kiểm tra native session, và ACK này không thể nộp human decision. Prompt tiếng Việt và local hook tests không chứng nhận provider thật đã tuân thủ hoặc toàn bộ live workflow đã pass.
 
+## Workflow chỉ phân tích nghiệp vụ (BA-only, extension)
+
+`AnalysisWorkflowRuntime` (`src/analysis/**`) chạy một DAG gồm khảo sát được phép, elicitation, specification,
+review độc lập và publication. Nó tái dùng Core engine, RunStore, ArtifactStore, pack `WorkflowPack` được pin và
+quyết định Conditional TDD `not_applicable` kèm alternative verification. Workflow này không tạo task
+implementation, deploy, install hay Git integration. Role không có quyền ghi hay chạy lệnh. Chỉ Runtime ghi hai file
+bàn giao Markdown sau khi người duyệt đúng digest tài liệu; phê duyệt đó không phải nghiệm thu sản phẩm.
+
+`AgenticWorkflowRuntime.proposeWorkflow` bắt buộc DAG chỉ gồm Developer task và kết thúc bằng workflow verification
+trên change đã tích hợp Git. Vì vậy BA-only được tách thành luồng tương thích riêng, không giả lập implementation.
+
+Chi tiết về pack, provenance, các kiểm tra, recovery, revision, phần tích hợp host/CLI còn lại và giới hạn: xem
+[ANALYSIS-ONLY-WORKFLOW.md](ANALYSIS-ONLY-WORKFLOW.md). Pack mẫu: [support/analysis-only-pack.json](support/analysis-only-pack.json).
+Mức bằng chứng: source cộng test local với role giả lập; chưa nối host/Herdr/Conversation/CLI.
+
 ## Composition và thực thi
 
 Coordinator và Developer cùng các specialist đọc policy và skill đã pin qua
