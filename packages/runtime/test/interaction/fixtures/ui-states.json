@@ -1,0 +1,1061 @@
+{
+  "runs": {
+    "intake": {
+      "apiVersion": 1,
+      "runId": "run-intake",
+      "sessionId": "conversation-1",
+      "revisionToken": "62e7d0f1d3f4936008249641c8bca22477e2b9f3f689ce831a8545624e2117b7",
+      "title": "Test request",
+      "originRunId": "run-intake",
+      "currentRunId": "run-intake",
+      "sdlcStatus": "intake",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-intake",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "9c966959795d1c88a9635b9b13e99787ca62a82db051216cdbb05bfba216dc6c"
+          }
+        },
+        {
+          "actionId": "revise_request-run-intake",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "2962351def570ad4324787a15a01029710740797df31f2a980adc3969e9f3301"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "clarifying": {
+      "apiVersion": 1,
+      "runId": "run-clarifying",
+      "sessionId": "conversation-1",
+      "revisionToken": "7121f7729f506d6c7f31816dd3dd1924af5a724092644b7188b7ee1defcd8b76",
+      "title": "Test request",
+      "originRunId": "run-clarifying",
+      "currentRunId": "run-clarifying",
+      "sdlcStatus": "clarifying",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-clarifying",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "a0673ac7ea9417a15d0d4dc1db0a9e408aeb80f254c983d64f32f5eb5911a69c"
+          }
+        },
+        {
+          "actionId": "revise_request-run-clarifying",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "78675714a6d8f8b5ef84b599856f20f49c0e8cbaeb2e6d06ca5a44789aa2a5fd"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "specifying": {
+      "apiVersion": 1,
+      "runId": "run-specifying",
+      "sessionId": "conversation-1",
+      "revisionToken": "661e8993a3aa0748839cd778930982585fb696490320ea0593a02be668a299c5",
+      "title": "Test request",
+      "originRunId": "run-specifying",
+      "currentRunId": "run-specifying",
+      "sdlcStatus": "specifying",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-specifying",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "f29b14e43a33f996f5360f825d5f77fa8f6b4d808b09ec73fb5dc1cd74fdb4ca"
+          }
+        },
+        {
+          "actionId": "revise_request-run-specifying",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "eba4658332173377441b3a19393a9cad5a9061f14a87864fcbf050a9fa72ef83"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "planning": {
+      "apiVersion": 1,
+      "runId": "run-planning",
+      "sessionId": "conversation-1",
+      "revisionToken": "d7c504d4ee0ce7a78c44b849adff7109dbcf779f7b5388e26cf30e408914057e",
+      "title": "Test request",
+      "originRunId": "run-planning",
+      "currentRunId": "run-planning",
+      "sdlcStatus": "planning",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-planning",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "40e6a3f1050d4b49e7247e00882eaa67d650fb775f51810c8fdba21b19908c79"
+          }
+        },
+        {
+          "actionId": "revise_request-run-planning",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "a1766f28ff2dd42bd002d15108dd7f4e60b9733c29ab1819e12c01dd0c5d6868"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "tdd_deciding": {
+      "apiVersion": 1,
+      "runId": "run-tdd_deciding",
+      "sessionId": "conversation-1",
+      "revisionToken": "6d056c1f30422fe0808f51ed8e41ccfe83d76575000258b5e92fe4826c8aafe2",
+      "title": "Test request",
+      "originRunId": "run-tdd_deciding",
+      "currentRunId": "run-tdd_deciding",
+      "sdlcStatus": "tdd_deciding",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-tdd_deciding",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "36fc011e82ea1bbf73d05a5e7bac47a7d81f1ce3107b17232feb091bac15d892"
+          }
+        },
+        {
+          "actionId": "revise_request-run-tdd_deciding",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "27f24f2d89685eef46f0d8b4127e3dafe9dc264c81ceceff6fa17dbdcc95955b"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "implementing": {
+      "apiVersion": 1,
+      "runId": "run-implementing",
+      "sessionId": "conversation-1",
+      "revisionToken": "f028f137699e16c771dac0aac1307fa28f6f79aaff0b77c9386e51ea4a88ce42",
+      "title": "Test request",
+      "originRunId": "run-implementing",
+      "currentRunId": "run-implementing",
+      "sdlcStatus": "implementing",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-implementing",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "c2c035b8b513f11589568943f5fe2dc1e69f15d7841d855a2a82a4b921cde553"
+          }
+        },
+        {
+          "actionId": "revise_request-run-implementing",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "a0d77b371446033a7743f406b7ffaf56b21c604e4516b4d1f307ee148fff1f18"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "verifying": {
+      "apiVersion": 1,
+      "runId": "run-verifying",
+      "sessionId": "conversation-1",
+      "revisionToken": "edc499c4a0eda10ac033034f93767fe845f1fb7546d5452f2899ce0bb6231bd7",
+      "title": "Test request",
+      "originRunId": "run-verifying",
+      "currentRunId": "run-verifying",
+      "sdlcStatus": "verifying",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-verifying",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "b76f66dd333a2533455074c8f6f1cea08feefcb371c6c1f3968a52bdebfc3fdb"
+          }
+        },
+        {
+          "actionId": "revise_request-run-verifying",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "ce20171a4e60dbad678341032e5f51335deb3ae7c092b29bb337b411cb6e481b"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "reviewing": {
+      "apiVersion": 1,
+      "runId": "run-reviewing",
+      "sessionId": "conversation-1",
+      "revisionToken": "66463a9aaf98c82056403e54e73621ea4d7f381b04fcc27777ca8196ebc4aad6",
+      "title": "Test request",
+      "originRunId": "run-reviewing",
+      "currentRunId": "run-reviewing",
+      "sdlcStatus": "reviewing",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-reviewing",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "a44aa28245d1549a92559b5174d605f0a74e3d8640c728ae3d08e6d79bcf30e3"
+          }
+        },
+        {
+          "actionId": "revise_request-run-reviewing",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "9e97c60db19e531071555e68d69e00632d7e2ac11c84acab1175b2ba19bad92d"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "awaiting_approval": {
+      "apiVersion": 1,
+      "runId": "run-awaiting_approval",
+      "sessionId": "conversation-1",
+      "revisionToken": "0175387b3482f5fcce8ccb94776005a69706be632294fca1dbb0af8336a46951",
+      "title": "Test request",
+      "originRunId": "run-awaiting_approval",
+      "currentRunId": "run-awaiting_approval",
+      "sdlcStatus": "awaiting_approval",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-awaiting_approval",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "c601ef88c4cf5af5e698feea0fd8f0f03d52ca212ecd460a78e40ac571dfa8bf"
+          }
+        },
+        {
+          "actionId": "revise_request-run-awaiting_approval",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "222adeecad7f93f15b061e01cfe31228829621528fdf266bb6be6f76aee95be9"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "completed": {
+      "apiVersion": 1,
+      "runId": "run-completed",
+      "sessionId": "conversation-1",
+      "revisionToken": "49ca207b71c3f5b15122adb03665530a96db2046a44aa6aebf6689ff6a082961",
+      "title": "Test request",
+      "originRunId": "run-completed",
+      "currentRunId": "run-completed",
+      "sdlcStatus": "completed",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "escalated": {
+      "apiVersion": 1,
+      "runId": "run-escalated",
+      "sessionId": "conversation-1",
+      "revisionToken": "dba484a94c9d7db06f337eebd0c1194d276365164d7963aff630f3638283a62a",
+      "title": "Test request",
+      "originRunId": "run-escalated",
+      "currentRunId": "run-escalated",
+      "sdlcStatus": "escalated",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-escalated",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "4791263894f5311f44b8f0561ce61c65ef4fbe3a940c0322b6608bfd63eb9abf"
+          }
+        },
+        {
+          "actionId": "revise_request-run-escalated",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "bca724fccbb560ccaf896d66c20893fdb5e7c31e707e553edf8c5ed485b712c1"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "failed": {
+      "apiVersion": 1,
+      "runId": "run-failed",
+      "sessionId": "conversation-1",
+      "revisionToken": "c8ad7bbb0c41b0adc0cc7f4cbcc65195eba165b38da63f8b0b18cfbe5955ccab",
+      "title": "Test request",
+      "originRunId": "run-failed",
+      "currentRunId": "run-failed",
+      "sdlcStatus": "failed",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "cancelled": {
+      "apiVersion": 1,
+      "runId": "run-cancelled",
+      "sessionId": "conversation-1",
+      "revisionToken": "328626cc8a34ec7c20b66e154eabb74edc98844de7210ca9e8e2d15dc574ea21",
+      "title": "Test request",
+      "originRunId": "run-cancelled",
+      "currentRunId": "run-cancelled",
+      "sdlcStatus": "cancelled",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "design": {
+      "apiVersion": 1,
+      "runId": "run-design",
+      "sessionId": "conversation-1",
+      "revisionToken": "816e2c9c721e031bb54d3c07820ef81e98337c465c4cccdc89d50bc2766d324a",
+      "title": "Test request",
+      "originRunId": "run-design",
+      "currentRunId": "run-design",
+      "sdlcStatus": "awaiting_approval",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [
+        {
+          "decisionId": "apr-design",
+          "runId": "run-design",
+          "kind": "approval",
+          "status": "pending",
+          "question": "Review design",
+          "options": [],
+          "expectedVersion": {
+            "revisionToken": "e541618a01568a70563f8808f931354d4b8ff1c27c1fb2d9cccae35e8794063d",
+            "approvalId": "apr-design",
+            "target": {
+              "type": "specification",
+              "specId": "spec-1"
+            },
+            "revision": 2,
+            "generation": 1,
+            "evidenceDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "evidence": []
+        }
+      ],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-design",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "37957524e43574924df014020c7e0b61b797687d53a3b25ab827913f39973efa"
+          }
+        },
+        {
+          "actionId": "revise_request-run-design",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "acdd1cad8ed6b2f6a82ce525feb85489e0583b32522cc53d13f0200af2d2d814"
+          }
+        },
+        {
+          "actionId": "apr-design",
+          "kind": "answer_decision",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "e541618a01568a70563f8808f931354d4b8ff1c27c1fb2d9cccae35e8794063d",
+            "approvalId": "apr-design",
+            "target": {
+              "type": "specification",
+              "specId": "spec-1"
+            },
+            "revision": 2,
+            "generation": 1,
+            "evidenceDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "delivery": {
+      "apiVersion": 1,
+      "runId": "run-delivery",
+      "sessionId": "conversation-1",
+      "revisionToken": "fa7e9071f2105a88b0bae0bcf4a99bab44ac8ac24fded07a71861b6c45734b3d",
+      "title": "Test request",
+      "originRunId": "run-delivery",
+      "currentRunId": "run-delivery",
+      "sdlcStatus": "awaiting_approval",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [
+        {
+          "decisionId": "apr-delivery",
+          "runId": "run-delivery",
+          "kind": "approval",
+          "status": "pending",
+          "question": "Review delivery",
+          "options": [],
+          "expectedVersion": {
+            "revisionToken": "e1c0ae1558d449f59a4b968f32b41349d629018a063e71b38086918b5dd20fa1",
+            "approvalId": "apr-delivery",
+            "target": {
+              "type": "run"
+            },
+            "revision": 2,
+            "generation": 1,
+            "evidenceDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "evidence": []
+        }
+      ],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-delivery",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "3d9e9b8555f7a978989e06f015a70aa7c96445be5001ef6bbaa9bb6c2ded103b"
+          }
+        },
+        {
+          "actionId": "revise_request-run-delivery",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "7d4672a6c32d4a9d769b38f18c7714c328cd1f3fd952b30a0bb42c4cef608451"
+          }
+        },
+        {
+          "actionId": "apr-delivery",
+          "kind": "answer_decision",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "e1c0ae1558d449f59a4b968f32b41349d629018a063e71b38086918b5dd20fa1",
+            "approvalId": "apr-delivery",
+            "target": {
+              "type": "run"
+            },
+            "revision": 2,
+            "generation": 1,
+            "evidenceDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "user_decision": {
+      "apiVersion": 1,
+      "runId": "run-user_decision",
+      "sessionId": "conversation-1",
+      "revisionToken": "608f812fa9bd5dc9ad277d41944db6f580dfb13261d2c981159e2a811412c2ab",
+      "title": "Test request",
+      "originRunId": "run-user_decision",
+      "currentRunId": "run-user_decision",
+      "sdlcStatus": "awaiting_approval",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [
+        {
+          "decisionId": "apr-user_decision",
+          "runId": "run-user_decision",
+          "kind": "user_decision",
+          "status": "pending",
+          "question": "Review user_decision",
+          "options": [],
+          "expectedVersion": {
+            "revisionToken": "2974d5210fb3c79754b29535335b865158634073894063b68126e1026a4d03bf",
+            "approvalId": "apr-user_decision",
+            "target": {
+              "type": "specification",
+              "specId": "spec-1"
+            },
+            "revision": 2,
+            "generation": 1,
+            "evidenceDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "evidence": []
+        }
+      ],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-run-user_decision",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "e3565174ade167cb748b0195960e9701b46ea3191d8b96f15c20453dfbf865bc"
+          }
+        },
+        {
+          "actionId": "revise_request-run-user_decision",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "49ee339165a81301968ad7db27506dd45827570b6e3c7cf06cbddcaa70e8dd3f"
+          }
+        },
+        {
+          "actionId": "apr-user_decision",
+          "kind": "answer_decision",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "2974d5210fb3c79754b29535335b865158634073894063b68126e1026a4d03bf",
+            "approvalId": "apr-user_decision",
+            "target": {
+              "type": "specification",
+              "specId": "spec-1"
+            },
+            "revision": 2,
+            "generation": 1,
+            "evidenceDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "blocked_without_action": {
+      "apiVersion": 1,
+      "runId": "blocked",
+      "sessionId": "conversation-1",
+      "revisionToken": "6d65c40638283af511f7345ac3d091551d412a4a86f2216b032ab9de1b7765e7",
+      "title": "Test request",
+      "originRunId": "blocked",
+      "currentRunId": "blocked",
+      "sdlcStatus": "escalated",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-blocked",
+          "kind": "cancel",
+          "enabled": true,
+          "expectedVersion": {
+            "revisionToken": "e66fa36bb359fcfed2783f4c75bdbbc059620acdb4f16e78a947001f29387b6e"
+          }
+        },
+        {
+          "actionId": "revise_request-blocked",
+          "kind": "revise_request",
+          "enabled": true,
+          "expectedVersion": {
+            "revisionToken": "4721e6677c750cf6953fc94431599227749e67ffe102deb6f5bccec211070e0b"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "resume": {
+      "apiVersion": 1,
+      "runId": "resume",
+      "sessionId": "conversation-1",
+      "revisionToken": "f62471722c15853890469dd7fbf02965e251b1f82e8bba8c56792a89d65bf0e9",
+      "title": "Test request",
+      "originRunId": "resume",
+      "currentRunId": "resume",
+      "sdlcStatus": "escalated",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-resume",
+          "kind": "cancel",
+          "enabled": true,
+          "expectedVersion": {
+            "revisionToken": "72c367a8fdc2f4fa864c612ef5749cd7f770df357389ad270798eb74b2fd29bd"
+          }
+        },
+        {
+          "actionId": "revise_request-resume",
+          "kind": "revise_request",
+          "enabled": true,
+          "expectedVersion": {
+            "revisionToken": "578a43973f1a0d739581b6bba1569801605fcf2964c7da66140d78f22caa5eec"
+          }
+        },
+        {
+          "actionId": "resume-1",
+          "kind": "resume",
+          "enabled": true,
+          "expectedVersion": {
+            "revisionToken": "9d027f5e38a04cc1a3474081a45220ce0b5ec2c8cf23202d860dc06fb684e7d0"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "exhausted": {
+      "apiVersion": 1,
+      "runId": "exhausted",
+      "sessionId": "conversation-1",
+      "revisionToken": "41f7d266dc4e9001d64d6e8f8ed77d55cebf78d20798889c1d19ad36addcb43c",
+      "title": "Test request",
+      "originRunId": "exhausted",
+      "currentRunId": "exhausted",
+      "sdlcStatus": "escalated",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-exhausted",
+          "kind": "cancel",
+          "enabled": true,
+          "expectedVersion": {
+            "revisionToken": "b6e25f57cae97c2c518cc0e961e3fcb24c39529d4821bfa386cd9d176e16dca1"
+          }
+        },
+        {
+          "actionId": "revise_request-exhausted",
+          "kind": "revise_request",
+          "enabled": true,
+          "expectedVersion": {
+            "revisionToken": "c450a11198a93f063c8f5d553f84f9c85fdf84af741ba127a546b0f265136eb3"
+          }
+        },
+        {
+          "actionId": "resume-1",
+          "kind": "resume",
+          "enabled": false,
+          "disabledReason": "resume_budget_exhausted",
+          "expectedVersion": {
+            "revisionToken": "46e6427c439eda649c683798d1006e2f08c72e17ad12c4153350e4dc5d71144d"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "stale": {
+      "apiVersion": 1,
+      "runId": "stale",
+      "sessionId": "conversation-1",
+      "revisionToken": "64a6f88e3e4856f057a5739dc3e9214318e9dbcd5af33f515fc4607e3485f1ce",
+      "title": "Test request",
+      "originRunId": "stale",
+      "currentRunId": "stale",
+      "sdlcStatus": "planning",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [
+        {
+          "code": "core_projection_unavailable",
+          "message": "Core projection unavailable; reconcile before acting."
+        }
+      ],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-stale",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "core_projection_unavailable",
+          "expectedVersion": {
+            "revisionToken": "1402d44b6b20498b24518f2b2154d7731e5ac97ecf8db41610b4a6e95733298d"
+          }
+        },
+        {
+          "actionId": "revise_request-stale",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "core_projection_unavailable",
+          "expectedVersion": {
+            "revisionToken": "bc38f461c97d0b49594d64f7d5f3674236dcf5f4bd14cc8ba56acf83e132048a"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "historical_parent": {
+      "apiVersion": 1,
+      "runId": "parent",
+      "sessionId": "conversation-1",
+      "revisionToken": "dcdd35d3ed6aebacacaeca889dc5d221531bea470a8916dfcdf5696507cb013f",
+      "title": "Test request",
+      "originRunId": "parent",
+      "continuedAsRunId": "child",
+      "currentRunId": "child",
+      "sdlcStatus": "escalated",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "continuation": {
+      "apiVersion": 1,
+      "runId": "child",
+      "sessionId": "conversation-1",
+      "revisionToken": "6207f5910ba6c602f95c3eab314e231ab1e10f354310f957903be5bb839d4628",
+      "title": "Test request",
+      "originRunId": "parent",
+      "parentRunId": "parent",
+      "currentRunId": "child",
+      "sdlcStatus": "planning",
+      "coreStatus": null,
+      "transportSummary": {
+        "states": [],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-child",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "1dc9deb896052150bf54af8df41925303b9deefc51143b1333553de2b7dfc08a"
+          }
+        },
+        {
+          "actionId": "revise_request-child",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "b5914479ca7b9b29a985b76b648f61ae36b60753d98d05911a32b7b20e9d6bce"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    "after_core": {
+      "apiVersion": 1,
+      "runId": "after-core",
+      "sessionId": "conversation-1",
+      "revisionToken": "b77a085471e2db15e38d98b1529384aab272ba51161307d2055603704dcc4acf",
+      "title": "Test request",
+      "originRunId": "after-core",
+      "currentRunId": "after-core",
+      "sdlcStatus": "verifying",
+      "coreStatus": "running",
+      "transportSummary": {
+        "states": [
+          "done"
+        ],
+        "observedAt": "2026-10-28T00:00:00.000Z"
+      },
+      "tasks": [],
+      "blockers": [],
+      "decisions": [],
+      "clarifications": [],
+      "availableActions": [
+        {
+          "actionId": "cancel-after-core",
+          "kind": "cancel",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "6f976fbda7037e4ff7fe69d49cb491f56a4d7717455bc7a0c8ce2c0ee690b844"
+          }
+        },
+        {
+          "actionId": "revise_request-after-core",
+          "kind": "revise_request",
+          "enabled": false,
+          "disabledReason": "structured_commands_unavailable",
+          "expectedVersion": {
+            "revisionToken": "325e0d55ab879d3093c0a11c0b07aa45c423fb34680d939c4b3eff52e302ba12"
+          }
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    }
+  },
+  "pendingSession": {
+    "apiVersion": 1,
+    "projectId": "project-fixture",
+    "sessionId": "conversation-1",
+    "state": "ready",
+    "conversationStatus": "awaiting_user_clarification",
+    "pendingIntakes": [
+      {
+        "intakeId": "intake-1",
+        "sessionId": "conversation-1",
+        "correlationId": "intake-1",
+        "title": "Pending request",
+        "status": "clarifying",
+        "clarifications": [
+          {
+            "questionId": "question-1",
+            "question": "Which behavior?",
+            "options": [],
+            "expectedVersion": {
+              "revisionToken": "fixture-question-v1"
+            }
+          }
+        ],
+        "updatedAt": "2026-10-28T00:00:00.000Z"
+      }
+    ],
+    "blockers": [],
+    "updatedAt": "2026-10-28T00:00:00.000Z"
+  },
+  "sessions": [
+    {
+      "apiVersion": 1,
+      "projectId": "project-fixture",
+      "sessionId": "conversation-1",
+      "state": "stopped",
+      "pendingIntakes": [],
+      "blockers": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    {
+      "apiVersion": 1,
+      "projectId": "project-fixture",
+      "sessionId": "conversation-1",
+      "state": "starting",
+      "pendingIntakes": [],
+      "blockers": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    {
+      "apiVersion": 1,
+      "projectId": "project-fixture",
+      "sessionId": "conversation-1",
+      "state": "ready",
+      "pendingIntakes": [],
+      "blockers": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    {
+      "apiVersion": 1,
+      "projectId": "project-fixture",
+      "sessionId": "conversation-1",
+      "state": "stopping",
+      "pendingIntakes": [],
+      "blockers": [],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    },
+    {
+      "apiVersion": 1,
+      "projectId": "project-fixture",
+      "sessionId": "conversation-1",
+      "state": "unavailable",
+      "pendingIntakes": [],
+      "blockers": [
+        {
+          "code": "host_unavailable",
+          "message": "Start the session explicitly."
+        }
+      ],
+      "updatedAt": "2026-10-28T00:00:00.000Z"
+    }
+  ]
+}

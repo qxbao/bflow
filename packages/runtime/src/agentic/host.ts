@@ -1,3 +1,5 @@
+import { interactionHostReady } from "../interaction/actions.js";
+import { hostInteractionQuery } from "../interaction/views.js";
 import { assertPrivateExecutionSources, createExecutionResolutionReader } from "./execution-binding.js";
 import { TaskHandoverReadInputSchema, taskHandoverView, taskHandoverAcknowledgement, deferredTaskHandover } from "./task-handover-view.js";
 import { enrichHostTelemetry } from "../telemetry/host-observations.js";
@@ -1929,6 +1931,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error("Role cannot call host lifecycle methods");
     }
     switch (method) {
+      case "interaction_query": return hostInteractionQuery(configuration, params, { ready: interactionHostReady({ workspace: !!workspace, manifest: !!manifest, activating: !!activation, closing, quiesced }),
+        readCore: async runId => { if (!workspace) return undefined; const result = await workspace.runtime.ports.engine.getSnapshot(runId); return result.ok ? result.value ?? undefined : undefined; } });
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null, inboundError: inboundError ?? null };
       case "prepare": {
         if (quiesced || closing) throw new Error("Host is shutting down; reconcile before preparing roles");

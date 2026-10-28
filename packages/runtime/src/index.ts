@@ -169,3 +169,5 @@ export { createHostSkillManager, launchMaterial, requirementFor } from "./agenti
 
 export { defaultHostChecks } from "./agentic/host-verification.js";
 export { hostRoleCapabilities } from "./agentic/host.js";
+
+export { openUserInteractionClient, interactionProjectId } from "./interaction/client.js";
