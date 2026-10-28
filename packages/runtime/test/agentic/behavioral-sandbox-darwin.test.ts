@@ -131,6 +131,27 @@ describe.skipIf(process.platform !== "darwin")("macOS Seatbelt behavioral sandbo
     expect((await measureBehavior(command, f.cwd, revision)).failed).toBe(0);
     expect(await readFile(join(nodeModules, "dep", "index.js"), "utf8")).toBe("module.exports=7;\n");
   });
+  // Live regression (2026-10-28): Vite/Vitest spawns the native esbuild binary from node_modules to transform TypeScript.
+  // Exec was granted only to the Node executable, so collection failed with "spawn EPERM", zero tests ran and the Red
+  // phase was escalated as an unrepairable infrastructure failure.
+  it("lets tests execute native binaries of the read-only dependency tree but never files of the writable checkout", async () => {
+    const f = await fixture(), source = join(f.root, "deps"), bin = join(source, "node_modules", "@native", "bin");
+    await mkdir(bin, { recursive: true }); await copyFile("/usr/bin/true", join(bin, "tool")); await chmod(join(bin, "tool"), 0o755);
+    await writeFile(join(f.cwd, ".gitignore"), "node_modules\n");
+    await copyFile("/usr/bin/true", join(f.cwd, "local-tool")); await chmod(join(f.cwd, "local-tool"), 0o755);
+    const revision = await f.commit(`
+      const { spawnSync } = require('node:child_process');
+      const dependency = spawnSync('node_modules/@native/bin/tool');
+      assert.equal(dependency.error, undefined); assert.equal(dependency.status, 0);
+      const local = spawnSync('./local-tool');
+      assert.equal(local.error && local.error.code, 'EPERM');
+    `);
+    const pinned = await pinRunnerDefinitions(f.cwd, { status: "detected", notes: [], profiles: [{ ...f.command, reporter: "node_tap", source: "detected", dependencySource: source, checkoutDependencyRoots: ["node_modules"] }] });
+    if (pinned.status !== "detected") throw new Error("Fixture definitions not pinned");
+    const command = { ...f.command, dependencySource: source, checkoutDependencyRoots: ["node_modules"], definitionBlobs: pinned.profiles[0]!.definitionBlobs };
+    const measured = await measureBehavior(command, f.cwd, revision);
+    expect({ passed: measured.passed, failed: measured.failed }).toEqual({ passed: 1, failed: 0 });
+  });
   it("sandboxes a prepare step and the test run over one checkout without re-cloning read-only dependencies", async () => {
     const f = await fixture(), source = join(f.root, "deps"), nodeModules = join(source, "node_modules");
     await mkdir(join(nodeModules, "dep"), { recursive: true });
