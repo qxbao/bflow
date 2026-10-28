@@ -28,8 +28,8 @@ and never stops a host.
 Only the injected `LocalWorkspaceServices` and `UserInteractionClient` perform
 workspace/host operations. The package imports neither CLI nor a workflow engine;
 there is no mock fallback. W04 owns CLI lifecycle/key registration/signer wiring.
-W05 owns authenticated SSE/artifact/notices; W08 owns chat. Those future routes
-currently reject explicitly after authentication, validation and project scope.
+W05 implements authenticated SSE/artifact/notices; W08 chat routes still reject
+explicitly after authentication, validation and project scope.
 No Herdr/provider or full SDLC acceptance is claimed.
 
 Private state uses user-owned 0700 directories/0600 files and an exclusive owner
@@ -57,8 +57,33 @@ reconciliation_required and never redirects to another host. Legacy explicit
 workspace/client injection remains supported. Construction config and browser
 context use server-only contracts/web-host codecs (D-WEB-02); HTTP DTOs unchanged.
 The CLI owns lifecycle receipts and issuer/key registration; this server imports
-no CLI or provider modules. W06 UI, W05 events/artifacts and W08 chat remain their
-separate tasks. The bundled W00 page is still an asset/build skeleton.
+no CLI or provider modules. W06 UI and W08 chat remain separate tasks. The bundled
+W00 page is still an asset/build skeleton.
+
+W05 SSE accepts a query cursor or `Last-Event-ID` (both must agree). Its public
+cursor combines this server's epoch and the host projection epoch plus sequence.
+Server/host restart, unknown scope or evicted history yields `reset`; clients must
+reload authoritative views. This feed is not a durable domain-event journal.
+The host ring holds at most 1000 entries; each browser queue holds at most 100.
+Slow clients disconnect and reconnect from their last complete event; heartbeats
+are sent every 15 seconds, sessions expire without renewal, and closing a browser
+or Local Server only releases streams. Healthy streams remove cancellation
+listeners after each read. A finite custom source can lose its final queued
+events on completion; the production Runtime source is continuous.
+
+Artifact responses use trusted host metadata/stream only, with a 64 MiB/30-second
+transfer quota, 64 KiB chunks and 1 MiB preview bound. Plain text/JSON/Markdown
+previews use `text/plain`; links/images never execute or fetch. HTML/SVG and larger
+previews download as octet-stream attachments. Every response uses `nosniff`,
+`no-store` and sandbox CSP. Integrity failures abort the stream; partial bytes do
+not establish complete evidence. No browser-provided filesystem path or URI fetch.
+
+`POST /projects/:id/notices/:noticeId/displayed` requires cookie, exact Origin and
+CSRF, and acknowledges that exact notice only. GET/SSE/network delivery never
+marks it read or grants decision authority. UI must POST only after rendering its
+content; the current frozen DTO lacks general notice-content retrieval (integration
+proposal in [W05 handoff](test/W05-HANDOFF.md)). No fake physical hook or legacy
+mutation CLI is used.
 
 From repository root, build before subprocess/asset tests:
 
