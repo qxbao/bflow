@@ -126,3 +126,21 @@ it("observes a definitive rejected decision admission even without an applied Ru
   const rejected = { ok: false as const, error: { code: "validation" as const, retryable: false as const, message: "Exact review refused" } };
   expect(await observeStructuredDecision(command as never, rejected, [], async () => { throw new Error("No effect should be queried"); })).toEqual(rejected);
 });
+it("observes Runtime rejection of the exact decision instead of waiting forever", async () => {
+  const f = await setup(), command = WebCommandSchema.parse({ apiVersion: 1, projectId: "project-1", commandId: f.command.commandId,
+    kind: "answer_decision", runId: "run-1", decisionId: "approval-1", outcome: "rejected", reason: "Feedback",
+    expectedVersion: { revisionToken: "review-1", approvalId: "approval-1", target: { type: "run" }, revision: 1, generation: 0, evidenceDigest: "a".repeat(64) } });
+  const message = { schema_version: 2, message_id: "decision-message", correlation_id: "correlation-1", run_id: "run-1",
+    sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "approval.decision", artifact_references: [], idempotency_key: "decision-message",
+    payload: { schemaVersion: 2, approvalId: "approval-1", runId: "run-1", sessionId: "conversation-1", target: { type: "run" }, revision: 1, generation: 0,
+      decision: "rejected", reason: "Feedback", decidedBy: "local-user-1", decidedAt: at, feedbackArtifacts: [], idempotencyKey: `web-decision-${command.commandId}` } };
+  expect(await observeStructuredDecision(command as never, undefined, [{ status: "rejected", message }], async () => f.view))
+    .toMatchObject({ ok: false, error: { details: { reason: "stale_version" } } });
+});
+it("closes a queued decision when authoritative run cancellation prevents its effect", async () => {
+  const f = await setup(), command = WebCommandSchema.parse({ apiVersion: 1, projectId: "project-1", commandId: f.command.commandId,
+    kind: "answer_decision", runId: "run-1", decisionId: "approval-1", outcome: "approved",
+    expectedVersion: { revisionToken: "review-1", approvalId: "approval-1", target: { type: "run" }, revision: 1, generation: 0, evidenceDigest: "a".repeat(64) } });
+  expect(await observeStructuredDecision(command as never, undefined, [], async () => ({ ...f.view, sdlcStatus: "cancelled", availableActions: [] })))
+    .toMatchObject({ ok: false, error: { details: { reason: "stale_version" } } });
+});

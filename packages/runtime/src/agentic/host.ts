@@ -3,7 +3,7 @@ import { hostInteractionQuery } from "../interaction/views.js";
 import { interactionProjectId } from "../interaction/client.js";
 import { WebInteractionAuthority, OwnerKeySchema } from "../interaction/authority.js";
 import { WebOperationStore } from "../interaction/operation-store.js";
-import { HostStructuredCommands, observeStructuredDecision } from "../interaction/commands.js";
+import { HostStructuredCommands, observeStructuredDecision, observeStructuredAdmission, structuredDecisionEffects } from "../interaction/commands.js";
 import { InteractionExecuteSchema, InteractionOperationSchema } from "../interaction/schemas.js";
 import { canonicalWebJson, type WebPrincipal } from "@bflow/contracts/web-host";
 import { WebRunViewResultSchema, WebProjectSessionResultSchema, type WebCommand } from "@bflow/contracts";
@@ -371,23 +371,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (!workspace || !manifest) return undefined;
       const cached = await workspace.conversation.readStructuredInteraction(command.commandId);
       const state = record(await workspace.runtime.inspect());
-      const runs = state.runs as Record<string, unknown>[];
       if (command.kind === "answer_decision") {
-        return observeStructuredDecision(command, cached, state.inbox as unknown[], readWebRun);
+        const run = (state.runs as unknown[]).find(run => record(run).runId === command.runId);
+        return observeStructuredDecision(command, cached, state.inbox as unknown[], readWebRun, structuredDecisionEffects(run));
       }
       if (cached) return cached;
       // A lost Gateway result can be recovered from Runtime's exact original
       // admission/outbox. This branch observes; it never resends a command.
-      const admitted = runs.find(run => record(record(run.delegation).metadata).userInteractionCommandId === command.commandId);
-      const resumed = command.kind === "resume" && (state.outbound as Record<string, unknown>[]).some(item => {
-        const message = record(item.message); return message.run_id === command.runId && record(message.payload).webCommandId === command.commandId;
-      });
-      if (admitted || resumed) {
-        const view = await readWebRun(admitted ? textField(admitted.runId) : (command as Extract<WebCommand, { kind: "resume" }>).runId);
-        return { ok: true, value: { kind: "interaction", runId: view.runId, currentRunId: view.currentRunId,
-          ...(view.continuedAsRunId ? { continuedAsRunId: view.continuedAsRunId } : {}) } };
-      }
-      return undefined;
+      return observeStructuredAdmission(command, state.outbound as unknown[], readWebRun);
     } });
   const toolUsage = new FileToolUsageLedger(join(configuration.directory, "tool-usage.json"));
   await toolUsage.recoverInterrupted();

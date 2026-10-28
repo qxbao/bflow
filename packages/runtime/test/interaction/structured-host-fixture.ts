@@ -9,7 +9,7 @@ import { fixture as signerFixture, now } from "./web-command-fixtures.js";
 import { createAgenticConversationHost, type StructuredConversationCallbacks } from "../../src/agentic/conversation.js";
 import { AgenticJournal, digest } from "../../src/agentic/journal.js";
 import { projectRun } from "../../src/interaction/views.js";
-import { HostStructuredCommands } from "../../src/interaction/commands.js";
+import { HostStructuredCommands, observeStructuredAdmission, observeStructuredDecision, structuredDecisionEffects } from "../../src/interaction/commands.js";
 import { WebInteractionAuthority } from "../../src/interaction/authority.js";
 import { WebOperationStore } from "../../src/interaction/operation-store.js";
 export async function structuredHostFixture() {
@@ -49,12 +49,13 @@ export async function structuredHostFixture() {
     reconcile: async (command: WebCommand) => {
       if (command.kind === "answer_decision") {
         const snapshot = await f.runtime.inspect() as any;
-        if (!snapshot.inbox.some((entry: any) => entry.status === "applied" && entry.message.payload.idempotencyKey === `web-decision-${command.commandId}`)) return undefined;
-        const view = await runView(command.runId);
-        return { ok: true, value: { kind: "interaction", runId: command.runId, currentRunId: view.currentRunId,
-          ...(view.continuedAsRunId ? { continuedAsRunId: view.continuedAsRunId } : {}) } };
+        return observeStructuredDecision(command, await chat.readStructuredInteraction(command.commandId), snapshot.inbox, runView,
+          structuredDecisionEffects(snapshot.runs.find((run: any) => run.runId === command.runId)));
       }
-      return chat.readStructuredInteraction(command.commandId);
+      const cached = await chat.readStructuredInteraction(command.commandId);
+      if (cached) return cached;
+      const snapshot = await f.runtime.inspect() as any;
+      return observeStructuredAdmission(command, snapshot.outbound, runView);
     }
   };
   const commands = new HostStructuredCommands(port);

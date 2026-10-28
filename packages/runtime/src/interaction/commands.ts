@@ -1,32 +1,94 @@
 import { OperationResultSchema, WebCommandSchema, WebRunViewSchema, WebProjectSessionSchema, WebOperationSchema,
-  ApprovalDecisionSchema, RoleMessageSchema, WebOperationResultSchema, type WebCommand, type WebRunView, type WebOperation, type WebOperationResult,
+  ApprovalDecisionSchema, RoleMessageSchema, DelegationRequestSchema, CancellationRequestSchema, WebOperationResultSchema, type WebCommand, type WebRunView, type WebOperation, type WebOperationResult,
   type OperationResult, type ContractError } from "@bflow/contracts";
 import { canonicalWebJson, type WebPrincipal } from "@bflow/contracts/web-host";
 import { WebInteractionAuthority } from "./authority.js";
 import { WebOperationStore } from "./operation-store.js";
 import { record, digest } from "../agentic/journal.js";
+import { z } from "zod";
+import type { ApprovalDecision } from "@bflow/contracts";
 
 const AdmissionResult = OperationResultSchema(WebOperationResultSchema);
+const EffectRun = z.object({ decision: ApprovalDecisionSchema.optional(),
+  userDecisions: z.record(z.object({ decision: ApprovalDecisionSchema.optional() }).passthrough()).optional(),
+  prototype: z.object({ approvals: z.array(z.object({ decision: ApprovalDecisionSchema.optional() }).passthrough()) }).passthrough().optional(),
+}).passthrough();
+/** Private Runtime snapshot fields; each effect still uses the exported receipt schema. */
+export function structuredDecisionEffects(input: unknown): ApprovalDecision[] {
+  if (input === undefined) return [];
+  const run = EffectRun.parse(input);
+  return [run.decision, ...Object.values(run.userDecisions ?? {}).map(entry => entry.decision),
+    ...(run.prototype?.approvals ?? []).map(entry => entry.decision)].filter((entry): entry is ApprovalDecision => entry !== undefined);
+}
 /** Both successful effects and definitive rejection receipts survive response
  * loss. Queued approval admission alone does not prove its Runtime effect. */
 export async function observeStructuredDecision(command: Extract<WebCommand, { kind: "answer_decision" }>, cached: unknown | undefined,
-  inbox: readonly unknown[], readRun: (runId: string) => Promise<unknown>): Promise<OperationResult<WebOperationResult> | undefined> {
+  inbox: readonly unknown[], readRun: (runId: string) => Promise<unknown>, effectDecisions: readonly unknown[] = []): Promise<OperationResult<WebOperationResult> | undefined> {
   if (cached !== undefined) {
     const result = AdmissionResult.parse(cached);
     if (!result.ok) return result;
   }
-  const applied = inbox.some(raw => {
+  const matchesDecision = (input: unknown) => {
+    const decision = ApprovalDecisionSchema.safeParse(input);
+    return decision.success && decision.data.idempotencyKey === `web-decision-${command.commandId}` && decision.data.runId === command.runId &&
+      decision.data.approvalId === command.decisionId && decision.data.revision === command.expectedVersion.revision &&
+      decision.data.generation === command.expectedVersion.generation && digest(decision.data.target) === digest(command.expectedVersion.target) &&
+      decision.data.decision === command.outcome;
+  };
+  let rejected = false;
+  const applied = effectDecisions.some(matchesDecision) || inbox.some(raw => {
     const entry = record(raw), parsed = RoleMessageSchema.safeParse(entry.message);
-    if (entry.status !== "applied" || !parsed.success || parsed.data.type !== "approval.decision" || parsed.data.run_id !== command.runId) return false;
-    const decision = ApprovalDecisionSchema.safeParse(parsed.data.payload);
-    return decision.success && decision.data.idempotencyKey === `web-decision-${command.commandId}` && decision.data.approvalId === command.decisionId &&
-      decision.data.revision === command.expectedVersion.revision && decision.data.generation === command.expectedVersion.generation &&
-      digest(decision.data.target) === digest(command.expectedVersion.target) && decision.data.decision === command.outcome;
+    if (!parsed.success || parsed.data.type !== "approval.decision" || parsed.data.run_id !== command.runId) return false;
+    const matches = matchesDecision(parsed.data.payload);
+    if (matches && entry.status === "rejected") rejected = true;
+    return matches && entry.status === "applied";
   });
-  if (!applied) return undefined;
+  if (!applied && rejected) return failure("stale_version", command.commandId);
   const view = WebRunViewSchema.parse(await readRun(command.runId));
   if (view.runId !== command.runId) throw new Error("Decision run scope mismatch");
+  if (!applied) {
+    if (["completed", "failed", "cancelled"].includes(view.sdlcStatus) || view.continuedAsRunId)
+      return failure("stale_version", command.commandId);
+    return undefined;
+  }
   return { ok: true, value: { kind: "interaction", runId: view.runId, currentRunId: view.currentRunId,
+    ...(view.continuedAsRunId ? { continuedAsRunId: view.continuedAsRunId } : {}) } };
+}
+/** Recover an admission from its original immutable Runtime outbox identity,
+ * including after a later revision replaced the current delegation. Delivery
+ * can remain unknown: observing local admission does not resend remote work. */
+export async function observeStructuredAdmission(command: WebCommand, outbound: readonly unknown[], readRun: (runId: string) => Promise<unknown>)
+  : Promise<OperationResult<WebOperationResult> | undefined> {
+  if (command.kind === "answer_decision") return undefined;
+  let runId: string | undefined;
+  for (const raw of outbound) {
+    const parsed = RoleMessageSchema.safeParse(record(raw).message);
+    if (!parsed.success) continue;
+    const message = parsed.data;
+    if (command.kind === "resume") {
+      const payload = message.payload !== null && typeof message.payload === "object" && !Array.isArray(message.payload) ? message.payload : {};
+      if (message.sender.role === "runtime" && message.recipient.role === "coordinator" && message.type === "task.status" &&
+        message.run_id === command.runId && payload.kind === "resume_run" && payload.webCommandId === command.commandId)
+        runId = command.runId;
+    } else {
+      if (message.sender.role !== "conversation" || message.recipient.role !== "coordinator" || message.type !== "delegation.request" ||
+        message.message_id !== `web-delegation-${command.commandId}`) continue;
+      const payload = DelegationRequestSchema.safeParse(message.payload);
+      if (!payload.success || payload.data.messageId !== message.message_id || payload.data.metadata?.userInteractionCommandId !== command.commandId ||
+        payload.data.runId !== message.run_id || !message.run_id || ("runId" in command && command.runId !== undefined && command.runId !== message.run_id)) continue;
+      if (command.kind === "cancel") {
+        const cancellation = CancellationRequestSchema.safeParse(payload.data.metadata?.cancellationRequest);
+        if (payload.data.metadata?.action !== "cancel" || !cancellation.success || cancellation.data.runId !== command.runId ||
+          cancellation.data.requestedBy !== "conversation" || cancellation.data.reason !== command.reason) continue;
+      } else if (payload.data.metadata?.action === "cancel") continue;
+      runId = message.run_id;
+    }
+    if (runId) break;
+  }
+  if (!runId) return undefined;
+  const view = WebRunViewSchema.parse(await readRun(runId));
+  if (view.runId !== runId) throw new Error("Admission run scope mismatch");
+  return { ok: true, value: { kind: "interaction", runId, currentRunId: view.currentRunId,
     ...(view.continuedAsRunId ? { continuedAsRunId: view.continuedAsRunId } : {}) } };
 }
 type Reason = "forbidden" | "invalid_request" | "stale_version" | "operation_not_allowed" | "operation_conflict" | "unavailable";
