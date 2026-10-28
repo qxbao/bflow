@@ -1,3 +1,12 @@
+import { interactionHostReady } from "../interaction/actions.js";
+import { hostInteractionQuery } from "../interaction/views.js";
+import { interactionProjectId } from "../interaction/client.js";
+import { WebInteractionAuthority, OwnerKeySchema } from "../interaction/authority.js";
+import { WebOperationStore } from "../interaction/operation-store.js";
+import { HostStructuredCommands, observeStructuredDecision, observeStructuredAdmission, structuredDecisionEffects } from "../interaction/commands.js";
+import { InteractionExecuteSchema, InteractionOperationSchema } from "../interaction/schemas.js";
+import { canonicalWebJson, type WebPrincipal } from "@bflow/contracts/web-host";
+import { WebRunViewResultSchema, WebProjectSessionResultSchema, type WebCommand } from "@bflow/contracts";
 import { assertPrivateExecutionSources, createExecutionResolutionReader } from "./execution-binding.js";
 import { TaskHandoverReadInputSchema, taskHandoverView, taskHandoverAcknowledgement, deferredTaskHandover } from "./task-handover-view.js";
 import { enrichHostTelemetry } from "../telemetry/host-observations.js";
@@ -333,6 +342,44 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const assignmentSurvey = new AssignmentSurvey(configuration.repositoryPath);
   const activityLog = TaskActivityLog.open(join(configuration.directory, "../../agentic/task-activity.jsonl"));
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId, activityLog);
+  const webProjectId = interactionProjectId(configuration.repositoryPath);
+  const webAuthority = new WebInteractionAuthority(webProjectId, configuration.sessionId);
+  const webStore = new WebOperationStore({ directory: join(configuration.directory, "web-interactions"),
+    repository: configuration.repositoryPath, sessionId: configuration.sessionId, projectId: webProjectId });
+  const webCredentials = new Map<string, { principalId: string; issuerId: string; keyId: string }>();
+  const webContext = new AsyncLocalStorage<{ command: WebCommand; principal: WebPrincipal; acceptedAt: string }>();
+  const interactionReady = () => interactionHostReady({ workspace: !!workspace, manifest: !!manifest, activating: !!activation, closing, quiesced });
+  const readWebQuery = (params: unknown) => hostInteractionQuery(configuration, params, {
+    ready: interactionReady(), commandsSupported: webCredentials.size > 0,
+    readCore: async runId => { if (!workspace) return undefined; const result = await workspace.runtime.ports.engine.getSnapshot(runId); return result.ok ? result.value ?? undefined : undefined; } });
+  const readWebRun = async (runId: string) => {
+    const result = WebRunViewResultSchema.parse(await readWebQuery({ kind: "run", projectId: webProjectId, runId }));
+    if (!result.ok) throw new Error("Run projection unavailable");
+    return result.value;
+  };
+  const webCommands = new HostStructuredCommands({ authority: webAuthority, store: webStore, ready: interactionReady,
+    conversationSessionId: () => manifest?.conversationSessionId ?? "unavailable",
+    run: readWebRun,
+    session: async () => {
+      const result = WebProjectSessionResultSchema.parse(await readWebQuery({ kind: "session", projectId: webProjectId }));
+      if (!result.ok) throw new Error("Conversation projection unavailable");
+      return result.value;
+    },
+    admit: (command, principal, acceptedAt) => webContext.run({ command, principal, acceptedAt },
+      () => requireWorkspace().conversation.handleStructuredInteraction(command, principal)),
+    reconcile: async command => {
+      if (!workspace || !manifest) return undefined;
+      const cached = await workspace.conversation.readStructuredInteraction(command.commandId);
+      const state = record(await workspace.runtime.inspect());
+      if (command.kind === "answer_decision") {
+        const run = (state.runs as unknown[]).find(run => record(run).runId === command.runId);
+        return observeStructuredDecision(command, cached, state.inbox as unknown[], readWebRun, structuredDecisionEffects(run));
+      }
+      if (cached) return cached;
+      // A lost Gateway result can be recovered from Runtime's exact original
+      // admission/outbox. This branch observes; it never resends a command.
+      return observeStructuredAdmission(command, state.outbound as unknown[], readWebRun);
+    } });
   const toolUsage = new FileToolUsageLedger(join(configuration.directory, "tool-usage.json"));
   await toolUsage.recoverInterrupted();
   const taskLogPane = new TaskLogPane({ directory: configuration.directory, repositoryPath: configuration.repositoryPath,
@@ -861,7 +908,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       ...(readExecutionResolution ? { readExecutionResolution } : {}),
-      authorizeHuman: decision => receipts.authenticateHuman(decision),
+      authorizeHuman: async decision => await receipts.authenticateHuman(decision) ||
+        decision.sessionId === accepted.conversationSessionId && await webStore.authenticateHuman(decision, accepted.conversationSessionId),
       hasPolicyPhaseReceipt: async request => activePolicyMeasurements.has(request.message_id) || receipts.hasPolicyPhaseEvidence(request),
       authorizePolicyPhaseRetirement: async authority => {
         if (!humanHookProvenance || humanHookProvenance.messageId !== authority.userMessageId ||
@@ -907,6 +955,28 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         deliveredMessageIds.add(message.message_id); },
       onHumanDecision: async decision => { if (!humanHookProvenance) throw new Error("Human approval requires physical user input hook");
         await receipts.recordHuman(ApprovalDecisionSchema.parse(decision), humanHookProvenance); }
+    });
+    workspace.conversation.configureStructuredInteraction({
+      now: () => webContext.getStore()?.acceptedAt ?? new Date().toISOString(),
+      authorize: async (command, principal) => {
+        const context = webContext.getStore();
+        return context !== undefined && canonicalWebJson(context.command) === canonicalWebJson(command) &&
+          canonicalWebJson(context.principal) === canonicalWebJson(principal);
+      },
+      approval: async (decision, command, principal) => {
+        const context = webContext.getStore();
+        if (!context || canonicalWebJson(context.command) !== canonicalWebJson(command) || canonicalWebJson(context.principal) !== canonicalWebJson(principal))
+          throw new Error("Web decision lacks accepted host authority");
+        await webStore.recordHumanDecision(principal.principalId, command.commandId, decision, manifest!.conversationSessionId);
+      },
+      resume: async (command, principal) => {
+        const context = webContext.getStore();
+        if (!context || context.principal.principalId !== principal.principalId || canonicalWebJson(context.command) !== canonicalWebJson(command))
+          throw new Error("Web resume lacks accepted host authority");
+        await webCommands.validate(command);
+        await requireWorkspace().runtime.resumeBlockedRun(command.runId, command.actionId, { webCommand: command });
+        return { ok: true, value: { kind: "interaction", runId: command.runId, currentRunId: command.runId } };
+      }
     });
     // Reconcile old durable host receipts into Runtime before the watchdog starts. P19 journals from before
     // semantic next-action tracking may have an applied specialist result and acknowledged Coordinator blocker
@@ -1639,6 +1709,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const stopAttempts = new Map<string, number>();
   const dispatch = async (token: string, method: string, params: unknown, operation?: OperationOptions): Promise<unknown> => {
     if (token !== configuration.token) {
+      const web = webCredentials.get(token);
+      if (web) {
+        if (method === "interaction_operation") {
+          const input = InteractionOperationSchema.parse(params);
+          if (input.projectId !== webProjectId) throw new Error("Interaction project scope mismatch");
+          return webCommands.readOperation(web.principalId, input.operationId);
+        }
+        if (method !== "interaction_execute") throw new Error("User interaction credentials cannot call owner or role methods");
+        const input = InteractionExecuteSchema.parse(params);
+        if (input.principal.principalId !== web.principalId || input.principal.issuerId !== web.issuerId || input.principal.keyId !== web.keyId)
+          throw new Error("Interaction credential/proof scope mismatch");
+        const work = userQueue.catch(() => undefined).then(() => webCommands.execute(input.command, input.principal));
+        userQueue = work; return work;
+      }
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
       if (method === "provider_tools_list") {
           const input = z.object({ paneId: z.string().min(1), toolNames: z.array(z.string().min(1)).max(100), launchId: z.string().min(1).optional() }).strict().parse(params);
@@ -1929,6 +2013,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error("Role cannot call host lifecycle methods");
     }
     switch (method) {
+      case "interaction_register": {
+        const input = OwnerKeySchema.parse(params), principalId = `local-user-${process.getuid?.() ?? "local"}`;
+        if (input.principalId !== principalId) throw new Error("Owner registration must use host-local principal");
+        webAuthority.registerOwnerKey(input);
+        const credential = randomBytes(32).toString("hex");
+        webCredentials.set(credential, { principalId, issuerId: input.issuerId, keyId: input.keyId });
+        return { credential, principalId };
+      }
+      case "interaction_query": return readWebQuery(params);
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null, inboundError: inboundError ?? null };
       case "prepare": {
         if (quiesced || closing) throw new Error("Host is shutting down; reconcile before preparing roles");

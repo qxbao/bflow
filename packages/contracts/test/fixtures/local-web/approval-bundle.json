@@ -1,0 +1,394 @@
+[
+  {
+    "case": "design",
+    "request": {
+      "schemaVersion": 2,
+      "approvalId": "fixture-design-approval",
+      "runId": "fixture-design-run",
+      "sessionId": "fixture-conversation-session",
+      "status": "pending",
+      "target": {
+        "type": "run"
+      },
+      "revision": 2,
+      "generation": 1,
+      "requestedBy": "coordinator",
+      "requestedAt": "2026-10-28T00:00:00.000Z",
+      "reason": "Review the exact design bundle",
+      "evidence": [
+        {
+          "trust": "stored",
+          "artifactId": "design-artifact",
+          "runId": "fixture-design-run",
+          "kind": "document",
+          "uri": "artifact://fixture/design-artifact",
+          "mediaType": "text/markdown",
+          "sizeBytes": 12,
+          "checksum": {
+            "algorithm": "sha256",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "createdAt": "2026-10-28T00:00:00.000Z"
+        }
+      ],
+      "idempotencyKey": "fixture-design-approval"
+    },
+    "decision": {
+      "schemaVersion": 2,
+      "approvalId": "fixture-design-approval",
+      "runId": "fixture-design-run",
+      "sessionId": "fixture-conversation-session",
+      "target": {
+        "type": "run"
+      },
+      "revision": 2,
+      "generation": 1,
+      "decision": "approved",
+      "decidedBy": "fixture-local-principal",
+      "decidedAt": "2026-10-28T00:00:00.000Z",
+      "reason": "Approve the exact design bundle",
+      "feedbackArtifacts": [],
+      "idempotencyKey": "fixture-design-approval-answer"
+    },
+    "nativeReceipt": {
+      "version": 1,
+      "repository": "/fixtures/local-web/repository",
+      "sessionId": "fixture-herdr-session",
+      "kind": "human",
+      "id": "fixture-design-approval",
+      "payload": {
+        "decision": {
+          "schemaVersion": 2,
+          "approvalId": "fixture-design-approval",
+          "runId": "fixture-design-run",
+          "sessionId": "fixture-conversation-session",
+          "target": {
+            "type": "run"
+          },
+          "revision": 2,
+          "generation": 1,
+          "decision": "approved",
+          "decidedBy": "fixture-local-principal",
+          "decidedAt": "2026-10-28T00:00:00.000Z",
+          "reason": "Approve the exact design bundle",
+          "feedbackArtifacts": [],
+          "idempotencyKey": "fixture-design-approval-answer"
+        },
+        "provenance": {
+          "origin": "UserPromptSubmit",
+          "binding": {
+            "schemaVersion": 2,
+            "bindingId": "fixture-conversation-binding",
+            "sessionId": "fixture-herdr-session",
+            "role": "conversation",
+            "agentId": "fixture-chat",
+            "workspaceId": "fixture-workspace",
+            "tabId": "fixture-tab",
+            "paneId": "fixture-pane",
+            "session": {
+              "source": "herdr:claude",
+              "kind": "id",
+              "value": "fixture-native-session"
+            },
+            "provider": "claude",
+            "agentKind": "claude",
+            "cwd": "/fixtures/local-web/repository",
+            "isolationMode": "dedicated_pane",
+            "readOnlyWorkspace": true,
+            "transportState": "idle",
+            "boundAt": "2026-10-28T00:00:00.000Z"
+          },
+          "nativeSessionId": "fixture-native-session",
+          "conversationSessionId": "fixture-conversation-session",
+          "userId": "fixture-local-principal",
+          "messageId": "fixture-design-physical-message",
+          "promptDigest": "12c2b2a776b690ccf2346f8c38d657f8906403d228a7048701fd6f02c3906d14"
+        }
+      },
+      "checksum": "41b25ba0565a072b248e2071720cfedd641443a65ad75395e2dd6aea9f196818"
+    },
+    "proposedWebCommand": {
+      "apiVersion": 1,
+      "commandId": "00000000-0000-4000-8000-000000000001",
+      "projectId": "fixture-project",
+      "kind": "answer_decision",
+      "runId": "fixture-design-run",
+      "decisionId": "fixture-design-approval",
+      "expectedVersion": {
+        "revisionToken": "fixture-design-revision-token",
+        "approvalId": "fixture-design-approval",
+        "target": {
+          "type": "run"
+        },
+        "revision": 2,
+        "generation": 1,
+        "evidenceDigest": "0fd4d3dd54da48c3d578cab3b51f3326ee2e1b510539947809630184a271ca9e"
+      },
+      "outcome": "approved",
+      "reason": "Approve the exact design bundle"
+    }
+  },
+  {
+    "case": "delivery",
+    "request": {
+      "schemaVersion": 2,
+      "approvalId": "fixture-delivery-approval",
+      "runId": "fixture-delivery-run",
+      "sessionId": "fixture-conversation-session",
+      "status": "pending",
+      "target": {
+        "type": "run"
+      },
+      "revision": 2,
+      "generation": 1,
+      "requestedBy": "coordinator",
+      "requestedAt": "2026-10-28T00:00:00.000Z",
+      "reason": "Review the exact delivery bundle",
+      "evidence": [
+        {
+          "trust": "stored",
+          "artifactId": "delivery-artifact",
+          "runId": "fixture-delivery-run",
+          "kind": "test-result",
+          "uri": "artifact://fixture/delivery-artifact",
+          "mediaType": "text/markdown",
+          "sizeBytes": 12,
+          "checksum": {
+            "algorithm": "sha256",
+            "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "createdAt": "2026-10-28T00:00:00.000Z"
+        }
+      ],
+      "idempotencyKey": "fixture-delivery-approval"
+    },
+    "decision": {
+      "schemaVersion": 2,
+      "approvalId": "fixture-delivery-approval",
+      "runId": "fixture-delivery-run",
+      "sessionId": "fixture-conversation-session",
+      "target": {
+        "type": "run"
+      },
+      "revision": 2,
+      "generation": 1,
+      "decision": "approved",
+      "decidedBy": "fixture-local-principal",
+      "decidedAt": "2026-10-28T00:00:00.000Z",
+      "reason": "Approve the exact delivery bundle",
+      "feedbackArtifacts": [],
+      "idempotencyKey": "fixture-delivery-approval-answer"
+    },
+    "nativeReceipt": {
+      "version": 1,
+      "repository": "/fixtures/local-web/repository",
+      "sessionId": "fixture-herdr-session",
+      "kind": "human",
+      "id": "fixture-delivery-approval",
+      "payload": {
+        "decision": {
+          "schemaVersion": 2,
+          "approvalId": "fixture-delivery-approval",
+          "runId": "fixture-delivery-run",
+          "sessionId": "fixture-conversation-session",
+          "target": {
+            "type": "run"
+          },
+          "revision": 2,
+          "generation": 1,
+          "decision": "approved",
+          "decidedBy": "fixture-local-principal",
+          "decidedAt": "2026-10-28T00:00:00.000Z",
+          "reason": "Approve the exact delivery bundle",
+          "feedbackArtifacts": [],
+          "idempotencyKey": "fixture-delivery-approval-answer"
+        },
+        "provenance": {
+          "origin": "UserPromptSubmit",
+          "binding": {
+            "schemaVersion": 2,
+            "bindingId": "fixture-conversation-binding",
+            "sessionId": "fixture-herdr-session",
+            "role": "conversation",
+            "agentId": "fixture-chat",
+            "workspaceId": "fixture-workspace",
+            "tabId": "fixture-tab",
+            "paneId": "fixture-pane",
+            "session": {
+              "source": "herdr:claude",
+              "kind": "id",
+              "value": "fixture-native-session"
+            },
+            "provider": "claude",
+            "agentKind": "claude",
+            "cwd": "/fixtures/local-web/repository",
+            "isolationMode": "dedicated_pane",
+            "readOnlyWorkspace": true,
+            "transportState": "idle",
+            "boundAt": "2026-10-28T00:00:00.000Z"
+          },
+          "nativeSessionId": "fixture-native-session",
+          "conversationSessionId": "fixture-conversation-session",
+          "userId": "fixture-local-principal",
+          "messageId": "fixture-delivery-physical-message",
+          "promptDigest": "65531ab994724afdaa6f247af15c613bb7f35387ad906cc27755fc2392bf475d"
+        }
+      },
+      "checksum": "077ca3383a4effbaefeaea00f9a5ceaa62bbe882fb698637c5d28002c0714ef5"
+    },
+    "proposedWebCommand": {
+      "apiVersion": 1,
+      "commandId": "00000000-0000-4000-8000-000000000002",
+      "projectId": "fixture-project",
+      "kind": "answer_decision",
+      "runId": "fixture-delivery-run",
+      "decisionId": "fixture-delivery-approval",
+      "expectedVersion": {
+        "revisionToken": "fixture-delivery-revision-token",
+        "approvalId": "fixture-delivery-approval",
+        "target": {
+          "type": "run"
+        },
+        "revision": 2,
+        "generation": 1,
+        "evidenceDigest": "ddead142d08e8d18341fb4cab043fcdda15c9ee1de8616eea6e978205361e1f8"
+      },
+      "outcome": "approved",
+      "reason": "Approve the exact delivery bundle"
+    }
+  },
+  {
+    "case": "user_decision",
+    "request": {
+      "schemaVersion": 2,
+      "approvalId": "fixture-user_decision-approval",
+      "runId": "fixture-user_decision-run",
+      "sessionId": "fixture-conversation-session",
+      "status": "pending",
+      "target": {
+        "type": "task",
+        "taskId": "fixture-task"
+      },
+      "revision": 2,
+      "generation": 1,
+      "requestedBy": "reviewer",
+      "requestedAt": "2026-10-28T00:00:00.000Z",
+      "reason": "Choose the verification scope",
+      "evidence": [],
+      "idempotencyKey": "fixture-user_decision-approval",
+      "metadata": {
+        "kind": "user_decision",
+        "question": "Choose the verification scope",
+        "requestedByRole": "reviewer",
+        "options": [
+          "Affected tests",
+          "Full suite"
+        ]
+      }
+    },
+    "decision": {
+      "schemaVersion": 2,
+      "approvalId": "fixture-user_decision-approval",
+      "runId": "fixture-user_decision-run",
+      "sessionId": "fixture-conversation-session",
+      "target": {
+        "type": "task",
+        "taskId": "fixture-task"
+      },
+      "revision": 2,
+      "generation": 1,
+      "decision": "approved",
+      "decidedBy": "fixture-local-principal",
+      "decidedAt": "2026-10-28T00:00:00.000Z",
+      "reason": "Full suite",
+      "feedbackArtifacts": [],
+      "idempotencyKey": "fixture-user_decision-approval-answer",
+      "metadata": {
+        "selectedOption": "Full suite"
+      }
+    },
+    "nativeReceipt": {
+      "version": 1,
+      "repository": "/fixtures/local-web/repository",
+      "sessionId": "fixture-herdr-session",
+      "kind": "human",
+      "id": "fixture-user_decision-approval",
+      "payload": {
+        "decision": {
+          "schemaVersion": 2,
+          "approvalId": "fixture-user_decision-approval",
+          "runId": "fixture-user_decision-run",
+          "sessionId": "fixture-conversation-session",
+          "target": {
+            "type": "task",
+            "taskId": "fixture-task"
+          },
+          "revision": 2,
+          "generation": 1,
+          "decision": "approved",
+          "decidedBy": "fixture-local-principal",
+          "decidedAt": "2026-10-28T00:00:00.000Z",
+          "reason": "Full suite",
+          "feedbackArtifacts": [],
+          "idempotencyKey": "fixture-user_decision-approval-answer",
+          "metadata": {
+            "selectedOption": "Full suite"
+          }
+        },
+        "provenance": {
+          "origin": "UserPromptSubmit",
+          "binding": {
+            "schemaVersion": 2,
+            "bindingId": "fixture-conversation-binding",
+            "sessionId": "fixture-herdr-session",
+            "role": "conversation",
+            "agentId": "fixture-chat",
+            "workspaceId": "fixture-workspace",
+            "tabId": "fixture-tab",
+            "paneId": "fixture-pane",
+            "session": {
+              "source": "herdr:claude",
+              "kind": "id",
+              "value": "fixture-native-session"
+            },
+            "provider": "claude",
+            "agentKind": "claude",
+            "cwd": "/fixtures/local-web/repository",
+            "isolationMode": "dedicated_pane",
+            "readOnlyWorkspace": true,
+            "transportState": "idle",
+            "boundAt": "2026-10-28T00:00:00.000Z"
+          },
+          "nativeSessionId": "fixture-native-session",
+          "conversationSessionId": "fixture-conversation-session",
+          "userId": "fixture-local-principal",
+          "messageId": "fixture-user_decision-physical-message",
+          "promptDigest": "bb83be27e4deb0cfe6653902b4c1cd23238a5f76bc473fc14a099511e13352f5"
+        }
+      },
+      "checksum": "b3756a532bd930d1ab1510be1187a4469682e786cc15817418440e81bddfe06d"
+    },
+    "proposedWebCommand": {
+      "apiVersion": 1,
+      "commandId": "00000000-0000-4000-8000-000000000003",
+      "projectId": "fixture-project",
+      "kind": "answer_decision",
+      "runId": "fixture-user_decision-run",
+      "decisionId": "fixture-user_decision-approval",
+      "expectedVersion": {
+        "revisionToken": "fixture-user_decision-revision-token",
+        "approvalId": "fixture-user_decision-approval",
+        "target": {
+          "type": "task",
+          "taskId": "fixture-task"
+        },
+        "revision": 2,
+        "generation": 1,
+        "evidenceDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "outcome": "approved",
+      "reason": "Full suite",
+      "selectedOption": "Full suite"
+    }
+  }
+]

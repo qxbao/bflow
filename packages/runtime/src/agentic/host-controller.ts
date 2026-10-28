@@ -1,4 +1,6 @@
 import { createExecutionResolutionReader } from "./execution-binding.js";
+import { z } from "zod";
+import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -163,6 +165,44 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}),
     ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) });
+}
+/** Connect only to an existing endpoint. This seam cannot prepare, activate or restart a host. */
+export async function queryAgenticHostInteraction(options: { repositoryPath: string; sessionId: string }, input: unknown): Promise<unknown> {
+  const repositoryPath = await realpath(options.repositoryPath);
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
+  const root = findPrivateRuntimeStateDirectory(repositoryPath);
+  if (!root) throw new Error("Host unavailable");
+  const directory = resolve(root, "host", options.sessionId);
+  const configuration = await readHostConfiguration(join(directory, "host.json"));
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+    throw new Error("Foreign host configuration");
+  return callHost(configuration.socketPath, configuration.token, "interaction_query", input, 5000);
+}
+/** Owner-only registration. The returned credential has user-interaction scope
+ * only and stays inside trusted Local Server composition, never browser DTOs. */
+export async function registerUserInteractionIssuer(options: { repositoryPath: string; sessionId: string }, input: unknown) {
+  const registration = OwnerKeySchema.parse(input), repositoryPath = await realpath(options.repositoryPath);
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
+  const root = findPrivateRuntimeStateDirectory(repositoryPath);
+  if (!root) throw new Error("Host unavailable");
+  const directory = resolve(root, "host", options.sessionId), configuration = await readHostConfiguration(join(directory, "host.json"));
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+    throw new Error("Foreign host configuration");
+  const result = z.object({ credential: z.string().min(32), principalId: z.string().min(1) }).strict().parse(
+    await callHost(configuration.socketPath, configuration.token, "interaction_register", registration, 5000));
+  return { ...result, socketPath: configuration.socketPath };
+}
+/** Dedicated web credential can never call owner lifecycle or role methods. */
+export async function callUserInteractionHost(options: { repositoryPath: string; sessionId: string }, credential: string,
+  method: "interaction_execute" | "interaction_operation", input: unknown): Promise<unknown> {
+  const repositoryPath = await realpath(options.repositoryPath);
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
+  const root = findPrivateRuntimeStateDirectory(repositoryPath);
+  if (!root) throw new Error("Host unavailable");
+  const directory = resolve(root, "host", options.sessionId), configuration = await readHostConfiguration(join(directory, "host.json"));
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+    throw new Error("Foreign host configuration");
+  return callHost(configuration.socketPath, credential, method, input, 30000);
 }
 function failure<T>(error: unknown): OperationResult<T> {
   if (String(error).includes("[bflow:native-startup-pending]")) return { ok: false, error: { code: "conflict", retryable: true,

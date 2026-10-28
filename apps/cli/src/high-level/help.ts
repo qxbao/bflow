@@ -14,6 +14,29 @@ const HELP: Record<HighLevelCommandName, string> = {
 
 Inspect the Git repository, worktrees, project structure and bflow context. Read-only.`,
   "task.preview": "Usage: bflow task preview [--run <id>] [--json] [--compare <file>]\nRead-only execution preview; does not grant readiness or approval.",
+  "handover.inspect": "Usage: bflow handover inspect --run <id> [--json]\nRead-only: report the run's snapshot identity, integrated revision and handover eligibility. Writes nothing.",
+  "handover.export": `Usage: bflow handover export --run <id> (--revision <commit> | --snapshot <id>) --out <dir> [--format html|md]... [options]
+
+Export an offline handover package from one Runtime snapshot of a run: index.html, handover.md, machine-readable
+handover.json and manifest.json (SHA-256 per file, content digest, source references, snapshot identity, export time).
+The requested integrated revision and/or snapshot must match the run, otherwise nothing is written (exit 6).
+Files are staged and the directory is renamed onto the --out path only when complete; concurrent exports to one --out
+are serialized by a lock and staging left by a crash is removed. An identical existing package is reused; any other
+existing directory is a conflict unless --replace names a package of the same run. Evidence stays as artifact://
+references unless --include-evidence copies verified text evidence (test-result, report, patch, document; redacted,
+size-limited) into evidence/. Logs and raw agent output are never packaged.
+Exit 0 only when the package is eligible for handover; a draft or partial package is published and exits 3.
+Export never changes run status, approvals or delivery acceptance.
+
+Options:
+  --run <id>            Run identifier (required)
+  --revision <commit>   Expected integrated revision (full 40-character commit)
+  --snapshot <id>       Expected snapshot identity from 'bflow handover inspect'
+  --out <dir>           Package directory to create; its parent must exist (required)
+  --format <html|md>    Report formats (repeatable; default both)
+  --include-evidence    Package allow-listed verified text evidence, redacted, under evidence/
+  --replace             Replace an existing handover package of the same run (never another directory)`,
+  "handover.verify": "Usage: bflow handover verify --package <dir> [--json]\nOffline check of a handover package: manifest, file hashes, content digest, package-local links and status.\nExit 0 only for an intact eligible package; 3 for a draft, partial or damaged package.",
   "task.plan": `Usage: bflow task plan --spec <file> [--workflow <file> | --write [--out <file>] [--force]] [options]
 
 Create or check a specification's task graph and acceptance-criterion coverage.
@@ -149,6 +172,9 @@ export function getHighLevelHelp(command: HighLevelCommandName): string {
 export const HIGH_LEVEL_SUMMARY = `Agentic SDLC commands:
   repo inspect          Inspect repository, Git, structure and context
   task preview          Read-only execution plan preview with provenance and drift
+  handover inspect      Snapshot identity and handover eligibility of a run (read-only)
+  handover export       Export an offline HTML/Markdown handover package with manifest
+  handover verify       Verify a handover package's manifest, hashes and links
   task plan             Create or check the task graph of a specification
   task implement <id>   Prepare worktree, spec, TDD policy and assignment for a task
   verify <task-id>      Run VerificationPlan checks and return structured evidence

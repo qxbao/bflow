@@ -19,6 +19,7 @@ Tác giả skill (SkillManager / P28) nên render skill từ file JSON và liên
 | Sức khỏe tool | `bflow tool status` | Machine setup (P26) catalog/probe tool |
 | Đồng bộ skill | `bflow skills sync` | Machine setup (P26) `SkillsComponent` + skill manager port (P28) |
 | Mức sẵn sàng của provider | `bflow agent check <provider>` | Agent Provider Registry (P25) |
+| Xuất gói bàn giao offline | `bflow handover export --run <id> --revision <commit> --out <dir>` | AgenticJournal (chỉ đọc), ArtifactStore integrity reads |
 
 ## Hợp đồng gọi lệnh
 
@@ -269,3 +270,7 @@ bflow git prepare run-1 --yes --json                                   # → req
 ### `bflow task preview [--run <id>] [--compare <file>] [--json]`
 
 Read-only execution choices, field sources, existing observations, blockers and approval points. Intake has no accepted DAG. `--run` requires authoritative approved Runtime state. Save JSON outside source paths and pass it to `bflow up --expect-plan <file>` or `bflow task implement <task-id> --run <id> --spec <file> --expect-plan <file>` to stop before effects on drift. Legacy `bflow run` rejects this flag. Preview never probes, installs, reserves or approves work.
+
+### `bflow handover inspect --run <id> [--json]` · `bflow handover export --run <id> (--revision <commit> | --snapshot <id>) --out <dir> [--format html|md] [--include-evidence] [--replace] [--json]` · `bflow handover verify --package <dir> [--json]`
+
+`inspect` đọc một snapshot của Runtime journal (không lock, không kết nối host) và báo snapshot identity, integrated revision và mức đủ điều kiện bàn giao. `export` yêu cầu `--revision` và/hoặc `--snapshot` khớp đúng run; lệch thì không ghi gì (exit 6). Gói gồm `index.html`, `handover.md`, `handover.json` và `manifest.json` (SHA-256 từng file, content digest, source references, snapshot identity, `exportedAt`); được ghi vào staging rồi rename khi hoàn chỉnh; các lần export cùng `--out` được tuần tự hoá bằng flock và staging sót lại sau crash được dọn ở lần export sau. Gói `eligible` thoát 0; gói `draft`/`partial` vẫn được xuất, gắn nhãn rõ và thoát 3. Gói giống hệt đã có được tái sử dụng; thư mục khác là conflict có nêu rõ nó chứa gì (snapshot khác, run khác, exporter version khác); `--replace` chỉ thay gói bàn giao của cùng run và không có file lạ. `verify` kiểm tra offline manifest, hash, link nội bộ và trạng thái; chỉ gói nguyên vẹn và `eligible` thoát 0. Mặc định evidence chỉ là tham chiếu `artifact://`; `--include-evidence` chép evidence văn bản đã xác minh thuộc loại `test-result`, `report`, `patch`, `document` (1 MiB/file, tổng 16 MiB), đã redact, vào `evidence/<sha256>.txt`. Log và raw agent output không bao giờ được đóng gói; export không thay đổi run status, approval hay delivery acceptance. Chi tiết: [handover export design](../../../packages/runtime/handover-export-design.md).

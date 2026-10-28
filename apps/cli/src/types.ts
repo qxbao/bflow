@@ -21,6 +21,9 @@ import type { HighLevelServices } from "./high-level/services.js";
 export type HighLevelCommandName =
   | "repo inspect"
   | "task preview"
+  | "handover inspect"
+  | "handover export"
+  | "handover verify"
   | "task plan"
   | "task implement"
   | "verify"

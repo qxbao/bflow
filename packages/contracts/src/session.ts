@@ -1,3 +1,4 @@
+import { ConversationSessionStatusSchema } from "./conversation-status.js";
 import { z } from "zod";
 import { AgentSessionLocatorSchema, AgentTransportStateSchema } from "./agent.js";
 import { ArtifactReferenceSchema } from "./artifact.js";
@@ -263,18 +264,7 @@ export const AgentAssignmentSchema = z
   });
 export type AgentAssignment = z.infer<typeof AgentAssignmentSchema>;
 
-export const ConversationSessionStatusSchema = z.enum([
-  "active",
-  "awaiting_user_clarification",
-  "delegated_to_coordinator",
-  "reporting_progress",
-  "awaiting_user_approval",
-  "completed",
-  "paused",
-  "closed",
-  "archived"
-]);
-export type ConversationSessionStatus = z.infer<typeof ConversationSessionStatusSchema>;
+export { ConversationSessionStatusSchema, type ConversationSessionStatus } from "./conversation-status.js";
 
 export const ConversationSessionSchema = z
   .object({

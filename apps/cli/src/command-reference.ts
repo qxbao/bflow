@@ -15,6 +15,9 @@ export const SUPPORTED_CLI_COMMANDS = [
   "cancel",
   "repo inspect",
   "task preview",
+  "handover inspect",
+  "handover export",
+  "handover verify",
   "task plan",
   "task implement",
   "verify",
@@ -267,6 +270,39 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
     exitCodes: COMMON_EXIT_CODES,
     idempotencyAndRetry: "Read-only; no journal, readiness refresh, grant, lease or reservation.",
     permissionRequirements: "Read access to repository and approved local state.",
+    skills: ["using-bflow"]
+  },
+  {
+    command: "handover inspect",
+    syntax: "bflow handover inspect --run <id> [--json]",
+    purpose: "Report a run's snapshot identity, integrated revision and handover eligibility.",
+    reusedEngines: ["AgenticJournal (read-only)", "ArtifactStore integrity reads"], requiredFlags: ["--run <id>"],
+    optionalFlags: ["--json", "--help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Read-only; no journal lock, host connection, approval or status change.",
+    permissionRequirements: "Read access to the repository's private Runtime state.",
+    skills: ["using-bflow"]
+  },
+  {
+    command: "handover export",
+    syntax: "bflow handover export --run <id> (--revision <commit> | --snapshot <id>) --out <dir> [--format html|md]... [--include-evidence] [--replace] [--json]",
+    purpose: "Export an offline HTML/Markdown handover package with a checksum manifest from one run snapshot.",
+    reusedEngines: ["AgenticJournal (read-only)", "ArtifactStore integrity reads"], requiredFlags: ["--run <id>", "--out <dir>"],
+    optionalFlags: ["--revision <commit>", "--snapshot <id>", "--format <html|md>", "--include-evidence", "--replace", "--json", "--help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Locked, staged publication; an identical existing package is reused, another is a conflict unless --replace names a package of the same run.",
+    permissionRequirements: "Read access to private Runtime state; write access to the output parent directory.",
+    skills: ["using-bflow"]
+  },
+  {
+    command: "handover verify",
+    syntax: "bflow handover verify --package <dir> [--json]",
+    purpose: "Verify an offline handover package's manifest, hashes, links and eligibility.",
+    reusedEngines: ["HandoverManifest"], requiredFlags: ["--package <dir>"],
+    optionalFlags: ["--json", "--help"],
+    exitCodes: COMMON_EXIT_CODES,
+    idempotencyAndRetry: "Read-only.",
+    permissionRequirements: "Read access to the package directory.",
     skills: ["using-bflow"]
   },
   {

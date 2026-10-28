@@ -39,6 +39,7 @@ import {
 } from "./commands/skills-custom.js";
 import { TASK_IMPLEMENT_SPEC, taskImplement } from "./commands/task-implement.js";
 import { TASK_PREVIEW_SPEC, taskPreview } from "./commands/task-preview.js";
+import { HANDOVER_EXPORT_SPEC, HANDOVER_INSPECT_SPEC, HANDOVER_VERIFY_SPEC, handoverExport, handoverInspect, handoverVerify } from "./commands/handover.js";
 import { TASK_PLAN_SPEC, taskPlan } from "./commands/task-plan.js";
 import { TOOL_STATUS_SPEC, toolStatus } from "./commands/tool-status.js";
 import { VERIFY_SPEC, verify } from "./commands/verify.js";
@@ -46,6 +47,9 @@ import { VERIFY_SPEC, verify } from "./commands/verify.js";
 const ENTRIES: readonly { readonly spec: CommandSpec; readonly handler: HighLevelHandler }[] = [
   { spec: REPO_INSPECT_SPEC, handler: repoInspect },
   { spec: TASK_PREVIEW_SPEC, handler: taskPreview },
+  { spec: HANDOVER_INSPECT_SPEC, handler: handoverInspect },
+  { spec: HANDOVER_EXPORT_SPEC, handler: handoverExport },
+  { spec: HANDOVER_VERIFY_SPEC, handler: handoverVerify },
   { spec: TASK_PLAN_SPEC, handler: taskPlan },
   { spec: TASK_IMPLEMENT_SPEC, handler: taskImplement },
   { spec: VERIFY_SPEC, handler: verify },

@@ -1,5 +1,49 @@
 # @bflow/runtime
 
+## Local web interaction port (W01–W02)
+
+`openUserInteractionClient({repositoryPath, sessionId})` connects to an existing
+agentic host for scoped projections; it never starts or prepares one. Structured
+commands require owner-registered Local Server composition:
+
+1. Canonicalize the repository and use `interactionProjectId(canonicalPath)`.
+2. Call `registerUserInteractionIssuer({repositoryPath, sessionId}, registration)`
+   through private owner IPC. Registration binds `issuerId`, `keyId`, Ed25519
+   public PEM, project/host session and `principalId: local-user-<uid>`. Its
+   returned credential stays inside trusted server code and cannot call role
+   tools or host lifecycle methods. Re-register after host restart.
+3. Supply `interaction: {credential, sign(command)}` to the client factory.
+   The signer returns a strict `WebPrincipal` from `@bflow/contracts/web-host`,
+   signed over `canonicalWebJson` of all fields except signature. Include the
+   parsed command fingerprint, real browser session, unique nonce, and proof
+   lifetime at most 60 seconds. Keep signing material, credential and private
+   IPC details out of browser DTOs/logs/storage. HTTP session/CSRF enforcement
+   remains Local Server's boundary.
+
+`execute` admits create/revise/clarification/decision/resume/cancel through
+Conversation deterministically, without a model or fabricated native turn.
+Versions bind exact questions, approval evidence/generation and pending action.
+`readOperation` observes the original command ID after lost acknowledgements;
+never generate a replacement key to retry uncertain delivery. Same ID/different
+body conflicts. Human decisions share settlement with native input. An approval
+operation remains running until actual Runtime effect evidence establishes its
+result/lineage; cancel applied means the control request was admitted, not proof
+that every process stopped. Runtime retains independent gates, lease/fence,
+test-integrity, retry/rework bounds and uncertain transport receipts.
+
+Web receipts use a separate private version-2 store; native-v1 files/provenance
+are unchanged. Historical accepted receipts survive browser TTL, while new
+submissions require live owner-registered proof. Downgrade with retained web
+interaction state is unsupported: older strict Conversation readers cannot
+read its additive private receipt ledger. No automatic receipt pruning or
+uncertain-command resend is performed. Guarantees are host-local on Linux/local
+POSIX filesystems, not multi-host, power-loss or hostile same-UID isolation.
+
+Events/artifacts/notice acknowledgement (W05), chat (W08), HTTP/CLI/UI wiring and
+live acceptance remain separate tasks. W02 evidence is source, local
+Runtime/Conversation fixtures and authenticated host subprocess tests; see
+[the W02 handoff](test/interaction/W02-HANDOFF.md).
+
 ## Custom specialist profiles (RP-01)
 
 Standard governance roles remain unchanged. Coordinator discovers the configured catalog
@@ -1764,3 +1808,28 @@ chứ không chứng minh nguồn dữ liệu: cụm chữ không có chữ số
 nhãn vẫn có thể lọt. Watchdog chưa resurface riêng approval prototype; Conversation
 lấy lại qua `reconcileApprovals`. Bằng chứng: source và test cục bộ
 (`test/agentic/prototype-review.test.ts`), chưa có live Herdr/provider acceptance.
+
+### Gói bàn giao offline (HX-01)
+
+`exportHandoverPackage`, `inspectHandoverRun`, `verifyHandoverPackage` và `openRepositoryHandoverSources`
+(`src/handover/**`) dựng gói bàn giao từ đúng một lần đọc journal của run (kiểm tra owner/mode,
+`parseAgenticJournalState`, không flock, không kết nối host) và đọc ArtifactStore có kiểm tra integrity
+(chỉ mở store đã có catalog). Snapshot identity là digest canonical của run record công khai;
+revision yêu cầu phải bằng `workflowChange.headCommitHash`. Ma trận criterion → task → integrated
+revision → check/verdict → evidence chỉ coi `passed` khi check workflow-scope gắn với integrated revision
+và evidence đã xác minh; evidence thiếu/hỏng hoặc lệch revision thành `inconclusive`. Delivery approval
+chỉ hợp lệ khi gắn với kết quả workflow verification cuối (approvalId/idempotency key/evidence).
+Hướng dẫn chạy chỉ lấy từ `targetCommands` và command đã ghi nhận; rollback chỉ từ
+`specification.rollbackPlan`, thiếu thì ghi thiếu. Journal được đọc qua descriptor mở bằng
+`O_NOFOLLOW` và owner/mode được kiểm trên chính descriptor đó; ArtifactStore mà user khác ghi được
+(root hoặc catalog group/other-writable) bị coi là `unavailable`. Manifest ghi thêm sha256 của đúng
+bytes journal đã đọc. `includeEvidence` chép evidence văn bản đã xác minh (`test-result`, `report`,
+`patch`, `document`; 1 MiB/file, 16 MiB tổng) sau redact vào `evidence/<sha256>.txt`; log và
+agent output không bao giờ được chép. Publish giữ flock trên `.<tên>.handover.lock` cạnh thư mục
+đích, dọn staging sót lại, kiểm inode thư mục sau rename và từ chối thư mục cha mà user khác ghi được
+(trừ khi có sticky bit); `replace` chỉ thay gói của cùng run. Content digest gồm exporter version.
+Schema gói (`HandoverDocumentSchema`, `HandoverManifestSchema`, version 1, exporter version 1) do
+Runtime sở hữu, chưa nằm trong `@bflow/contracts` (quyết định hoãn trong tài liệu thiết kế).
+Thiết kế và giới hạn: [handover-export-design.md](handover-export-design.md). Bằng chứng: source và
+test cục bộ (`test/handover/handover-export.test.ts`, `apps/cli/test/handover-binary.test.ts`), chưa
+có live Herdr/provider hay full SDLC acceptance.

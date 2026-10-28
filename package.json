@@ -10,17 +10,19 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && pnpm --filter @bflow/web build",
     "clean": "tsc -b --clean",
-    "typecheck": "tsc -b --pretty false",
+    "typecheck": "tsc -b --pretty false && pnpm --filter @bflow/web typecheck",
     "lint": "pnpm run check:deps && pnpm run typecheck && pnpm exec tsc -p tests/e2e/tsconfig.json --noEmit",
-    "test": "pnpm run build && vitest run",
+    "test": "pnpm run build && vitest run && pnpm --filter @bflow/web test",
     "test:fast": "pnpm run build && vitest run --config vitest.fast.config.ts",
     "test:affected": "node scripts/affected-tests.mjs",
     "test:e2e": "pnpm run build && vitest run --config tests/e2e/vitest.config.ts",
     "test:watch": "vitest",
     "check:deps": "node scripts/check-dependency-graph.mjs",
-    "check": "pnpm run check:deps && pnpm run typecheck && pnpm run test"
+    "check": "pnpm run check:deps && pnpm run typecheck && pnpm run test",
+    "test:web": "pnpm --filter @bflow/web test",
+    "test:web:e2e": "pnpm run build && pnpm --filter @bflow/web test:e2e"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

@@ -1,7 +1,9 @@
 import {
   ApprovalDecisionSchema, ApprovalRequestSchema, ConversationMessageSchema, DelegationRequestSchema, RoleMessageSchema, SessionManifestSchema,
+  WebCommandSchema, type WebCommand, type WebOperationResult,
   type JsonValue, type OperationResult, type RoleMessage, type SessionManifest
 } from "@bflow/contracts";
+import { WebPrincipalSchema, type WebPrincipal } from "@bflow/contracts/web-host";
 import { digest, json, record, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { validateUserDecisionAnswer } from "./decision-routing.js";
@@ -9,6 +11,9 @@ import { assertPrototypeDecision, prototypeApproval, type PrototypeRecord } from
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 
 export interface AgenticConversationHost {
+  configureStructuredInteraction(callbacks: StructuredConversationCallbacks): void;
+  handleStructuredInteraction(command: unknown, principal: unknown): Promise<OperationResult<WebOperationResult>>;
+  readStructuredInteraction(commandId: string): Promise<OperationResult<WebOperationResult> | undefined>;
   handleUserTurn(input: unknown): Promise<unknown>;
   getContext(): Promise<unknown>;
   parseDecision(input: unknown): Promise<unknown>;
@@ -21,6 +26,12 @@ export interface AgenticConversationHost {
   flush(): Promise<unknown>;
   /** Registers Runtime-pending approvals Conversation missed; read-only toward Runtime, never decides anything. */
   reconcileApprovals(): Promise<unknown>;
+}
+export interface StructuredConversationCallbacks {
+  authorize(command: WebCommand, principal: WebPrincipal): Promise<boolean>;
+  now(): string;
+  approval(decision: import("@bflow/contracts").ApprovalDecision, command: WebCommand, principal: WebPrincipal): Promise<void>;
+  resume(command: Extract<WebCommand, { kind: "resume" }>, principal: WebPrincipal): Promise<OperationResult<WebOperationResult>>;
 }
 /** Compose the actual P14 Gateway with P19's durable Herdr outbox, retaining P14 dialogue/queue policies. */
 export async function createAgenticConversationHost(options: {
@@ -113,9 +124,21 @@ export async function createAgenticConversationHost(options: {
     coordinatorTarget: { transport: "herdr", agentId: coordinator.agentId, paneId: coordinator.paneId,
       workspaceId: coordinator.workspaceId, tabId: coordinator.tabId } });
   const contextStore = new module.FileConversationContextStore(options.contextDirectory);
+  let structured: StructuredConversationCallbacks | undefined;
   const gateway = new module.ConversationGateway({ sessionId: manifest.conversationSessionId, herdrSessionId: manifest.sessionId,
     conversationAgentId: conversation.agentId, paneId: conversation.paneId, bridge,
-    contextStore });
+    contextStore, now: () => structured?.now() ?? new Date().toISOString(),
+    authorizeStructuredInteraction: async (command: WebCommand, principal: WebPrincipal) => structured ? structured.authorize(command, principal) : false,
+    onStructuredApproval: async (decision: unknown, command: WebCommand, principal: WebPrincipal) => {
+      if (!structured) throw new Error("Structured web authority is not configured");
+      const parsed = ApprovalDecisionSchema.parse(decision);
+      await structured.approval(parsed, command, principal);
+      return enqueueDecision(parsed);
+    },
+    onStructuredResume: async (command: Extract<WebCommand, { kind: "resume" }>, principal: WebPrincipal) => {
+      if (!structured) throw new Error("Structured web authority is not configured");
+      return structured.resume(command, principal);
+    } });
   const initialized = await gateway.initializeOrRecoverSession();
   if (!initialized.ok) throw new Error(initialized.error.message);
   for (const decision of options.recoveredHumanDecisions ?? []) {
@@ -204,6 +227,12 @@ export async function createAgenticConversationHost(options: {
       ...(warnings.length ? { approvalWarnings: warnings } : {}) } : result;
   };
   return {
+    configureStructuredInteraction(callbacks) { structured = callbacks; },
+    async handleStructuredInteraction(command, principal) {
+      await reconcileApprovals();
+      return gateway.handleStructuredInteraction(WebCommandSchema.parse(command), WebPrincipalSchema.parse(principal));
+    },
+    readStructuredInteraction: commandId => gateway.readStructuredInteraction(commandId),
     reconcileApprovals,
     async handleUserTurn(input) {
       await reconcileApprovals().catch(() => undefined);
