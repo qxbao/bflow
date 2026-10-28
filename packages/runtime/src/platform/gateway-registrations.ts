@@ -471,10 +471,11 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
     targets: readonly LedgerEntry[], scope: TrustScope, options?: OperationOptions): Promise<LedgerEntries> {
     const now = this.now().toISOString();
     const next: Record<string, LedgerEntry> = { ...entries };
-    // An unconfirmed entry the Gateway no longer lists (e.g. after a Gateway restart) is already gone; the Gateway
-    // would refuse to revoke a registration it does not know, so it is retired locally instead.
+    // An entry the Gateway no longer lists (e.g. after a Gateway restart) is already gone and holds no authority there; the
+    // Gateway would refuse to revoke a registration it does not know, so it is retired locally instead. This includes entries
+    // still recorded "registered" when the daemon died together with the Gateway and never observed the restart.
     let listed: ReadonlySet<string> | undefined;
-    if (targets.some(entry => entry.state === "intent" || entry.state === "unknown" || entry.state === "lost")) {
+    if (targets.some(entry => entry.state !== "revoked")) {
       const result = await this.control.list(scope, options);
       if (!result.ok) throw new GatewayPortError(result.error);
       listed = new Set(result.value.map(registration => registration.registrationId));
@@ -494,7 +495,7 @@ export class GatewayRegistrationManager implements GatewayRegistrationPort {
           await this.releaseLeaseBestEffort(lease, scope, options);
         }
       }
-      if (entry.state !== "registered" && listed !== undefined && !listed.has(entry.registrationId)) {
+      if (listed !== undefined && !listed.has(entry.registrationId)) {
         next[entry.registrationId] = { ...entry, state: "revoked", updatedAt: now };
         this.tokens.delete(entry.registrationId);
         continue;
