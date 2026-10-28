@@ -853,6 +853,17 @@ describe("P12 repository environment lifecycle", () => {
     lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime } });
     await expect(lifecycle.down()).rejects.toThrow("1 active runs"); expect(fixture.manager.down).not.toHaveBeenCalled();
   });
+  linuxIt("refuses --yes while a Developer with an unverified execution would be lost; only --force stops it", async () => {
+    await lifecycle.up();
+    const writer: WorkflowRunSnapshot = { ...activeRun, tasks: [{ taskId: "task-multiply", status: "running", attempt: 1, generation: 0, attemptId: "attempt-1", version: 3,
+      agentExecution: { executionId: "exec-1", requestId: "request-1", attemptId: "attempt-1", runId: "active-run", taskId: "task-multiply", idempotencyKey: "assign-1",
+        target: { transport: "herdr", agentId: "dev-1", paneId: "w2:p2" }, correlation: { token: "request-1", provenance: "orchestrator", verified: false }, acceptedAt: now } }] } as WorkflowRunSnapshot;
+    const save = vi.fn(async (command: CreateCheckpointCommand) => ({ ok: true as const, value: checkpoint(command) }));
+    lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([writer]), quiesce: async () => ({ ok: true, value: undefined }), checkpoint: save } });
+    await expect(lifecycle.down(true)).rejects.toThrow(/dev-1 on task task-multiply.*cannot be retried/);
+    expect(fixture.manager.down).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+    expect((await lifecycle.down(false, 3000, true)).status).toBe("down");
+  });
   linuxIt("never bypasses checkpoints with --yes", async () => {
     await lifecycle.up(); lifecycle = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]) } });
     await expect(lifecycle.down(true)).rejects.toThrow("checkpoint/quiesce API"); expect(fixture.manager.down).not.toHaveBeenCalled();

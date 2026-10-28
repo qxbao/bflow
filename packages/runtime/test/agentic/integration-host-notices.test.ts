@@ -369,6 +369,23 @@ describe("current native Agy turn authority", () => {
     await expect(f.runtime.authorizeAgyProviderTurn(message, binding)).resolves.toBeUndefined();
     await expect(f.runtime.authorizeAgyProviderTurn({ ...message, correlation_id: "wrong" }, binding)).rejects.toThrow();
   });
+  // Live diagnostic gap (2026-10-28, run-663f1379): a QA ingress was dropped five times with only the generic message, so
+  // the mismatching field could not be identified from host evidence. The refusal now names it; the check is unchanged.
+  it("names the mismatching field when a provider prompt is not the exact outbox delivery", async () => {
+    const { f, binding, message } = await assigned();
+    await expect(f.runtime.validateProviderDelivery(message, binding)).resolves.toBeUndefined();
+    const refusal = async (m: typeof message, b: typeof binding) => {
+      try { await f.runtime.validateProviderDelivery(m, b); } catch (error) { return String(error); }
+      throw new Error("expected a refusal");
+    };
+    const session = await refusal(message, { ...binding, session: { ...binding.session!, value: "other-native-session" } });
+    expect(session).toContain("Inbound provider prompt is not an exact Runtime outbox delivery");
+    expect(session).toMatch(/message_id matched.*mismatch: session/);
+    expect(await refusal(message, { ...binding, tabId: "other-tab" })).toMatch(/mismatch: tabId/);
+    expect(await refusal({ ...message, payload: { ...(message.payload as object), extra: true } } as typeof message, binding)).toMatch(/mismatch: content digest/);
+    expect(await refusal({ ...message, message_id: "never-sent" }, binding)).toMatch(/no outbound with this message_id/);
+    expect(session).not.toContain("Analyze impact");
+  });
   it("refuses new Agy admission and tool authorization after its exact delivery was answered", async () => {
     const { f, binding, message, out } = await assigned();
     await f.runtime.receiveHerdr(f.envelope("spec.draft", { status: "completed", summary: "Analysis done" }, { causation_id: out.message.message_id,
