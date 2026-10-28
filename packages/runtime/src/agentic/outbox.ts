@@ -265,6 +265,12 @@ export class HerdrOutbox {
     if (out.error?.includes(" not ready since ")) delete out.error;
   }
   private async step(out: Outbound, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
+    const failoverRun = this.state.runs.find(run => run.runId === out.message.run_id);
+    const held = failoverRun?.tasks.flatMap(task => task.failovers ?? []).find(entry => !["dispatched", "cancelled"].includes(entry.phase));
+    if (held && out.message.recipient.role !== "conversation" && ["queued", "accepted"].includes(out.status) &&
+        !(held.phase === "allocated" && held.destinationMessageId === out.message.message_id)) {
+      out.error = "Provider continuation holds new work until reconciliation and binding settlement"; return;
+    }
     if (out.phaseRetirement || out.reviewReplacement) return; // Physical tombstone: neither resend, renew nor manufacture an expired-lease release.
     if (out.leaseRelease) { await this.release(out); return; }
     // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
@@ -384,6 +390,15 @@ export class HerdrOutbox {
     // Fail closed before Registry lease acquisition, dispatch intent, or transport side effects.
     const planRun = this.state.runs.find(run => run.runId === out.message.run_id);
     const guardWorkDispatch = async () => {
+      const continuation = planRun?.tasks.flatMap(task => task.failovers ?? []).find(entry => entry.destinationMessageId === out.message.message_id);
+      if (continuation) {
+        if (planRun!.cancelled || continuation.phase !== "allocated" || !continuation.stopProof || !this.ports.providerFailover ||
+            planRun!.nativeDeliveries?.length || planRun!.approval && planRun!.decision?.approvalId !== planRun!.approval.approvalId ||
+            Object.values(planRun!.userDecisions ?? {}).some(item => item.status === "pending") ||
+            this.state.outbound.some(item => item !== out && item.message.run_id === planRun!.runId && !isConversationDelivery(item) && ["sending", "unknown_delivery"].includes(item.status)))
+          throw new Error("Provider continuation dispatch is held by lifecycle or delivery state");
+        await this.ports.providerFailover.assertMutationSafe(continuation.sourceBinding, planRun!.runId, out.taskId);
+      }
       if (["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type)) {
         await assertRunExecutionPlan(planRun, this.ports.readExecutionResolution);
         await this.ports.revalidateRoleSkills?.(pane);

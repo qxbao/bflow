@@ -132,7 +132,7 @@ export interface PlatformReadinessServiceOptions {
   readonly now?: (() => Date) | undefined;
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
-  readonly hostLaunch?: ((role: AgentRole, taskId?: string) => HostLaunchExtras | undefined) | undefined;
+  readonly hostLaunch?: ((role: AgentRole, taskId?: string, provider?: AgentProviderId) => HostLaunchExtras | undefined) | undefined;
 }
 
 /** Wires the P30 readiness components together with the real implementations. */

@@ -68,6 +68,9 @@ export interface PanePolicy {
   inspectRoleHealth(role: string, options?: OperationOptions): Promise<OperationResult<{ readyForPrompt: boolean; occupantMatches: boolean; paneId: string; agentId: string }>>;
   allocateDeveloper(request: {
     taskId: string; runId: string; worktreePath: string; branchName: string; agentName: string;
+    failoverCandidate?: import("@bflow/contracts").FailoverCandidate;
+    continuationId?: string;
+    continuation?: import("@bflow/contracts").DeveloperContinuationAllocation;
   }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
   releaseDeveloper(request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions): Promise<OperationResult<unknown>>;
   /** Cancelled, proven-stopped allocation: retain the pane/worktree for idempotent manifest cleanup. */
@@ -88,6 +91,12 @@ export interface AgenticPolicies {
   assertEvidenceComplete(strategy: unknown): void;
 }
 export interface AgenticRuntimePorts {
+  providerFailover?: {
+    policyFor(binding: PaneBinding): { policy: import("@bflow/contracts").ProviderFailoverPolicy; current: import("@bflow/contracts").FailoverCandidate } | undefined;
+    authenticate(binding: PaneBinding, failure: import("@bflow/contracts").ProviderFailureObservation): Promise<boolean>;
+    assertMutationSafe(binding: PaneBinding, runId: string, taskId: string): Promise<void>;
+    preflight(candidate: import("@bflow/contracts").FailoverCandidate, binding: PaneBinding): Promise<void>;
+  };
   /** Host-owned current readonly resolution; absent is an explicit legacy host without historical drift protection. */
   readExecutionResolution?: import("./execution-binding.js").ExecutionResolutionReader;
   /** Physical Conversation hook only; not an agent tool or an approval inferred by a model. */

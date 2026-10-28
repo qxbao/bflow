@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ExecutionContinuationSchema } from "./agent.js";
 import {
   AgentExecutionHandleSchema,
   AgentReconciliationResultSchema,
@@ -79,6 +80,7 @@ export const BindAgentExecutionCommandSchema = z
     expectedVersion: z.number().int().nonnegative(),
     attempt: z.number().int().positive(),
     handle: AgentExecutionHandleSchema,
+    continuation: ExecutionContinuationSchema.optional(),
     idempotencyKey: IdempotencyKeySchema,
     occurredAt: IsoDateTimeSchema
   })

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { AGENT_ROLES, AgentRoleSchema } from './session.js';
 import { SkillPinSchema } from './skills.js';
 import { JsonValueSchema } from './common.js';
+import { ProviderFailoverPolicySchema } from './provider-failover.js';
 const CredentialPattern = /(?:^sk-|^gh[pousr]_|^github_pat_|^glpat-|^xox[baprs]-|^AKIA[A-Z0-9]{16}$|bearer\s|:\/\/[^/]*@)/i;
 const Name = z.string().min(1).max(256).refine(value => !CredentialPattern.test(value), 'Unsafe public identity');
 const PublicSelection = Name.refine(value => !/:\/\/|\s/.test(value) && !value.startsWith('/') && !CredentialPattern.test(value), 'Unsafe declarative selection');
@@ -34,7 +35,7 @@ export const PlanLocatorSchema = z.union([
       return false;
     }
     if (parts[0] === 'environment' && parts[1] === 'roles') {
-      return AGENT_ROLES.includes(parts[2] as typeof AGENT_ROLES[number]) && parts.length === 4 && ['cli', 'model', 'effort', 'profile-name', 'skills'].includes(parts[3]!);
+      return AGENT_ROLES.includes(parts[2] as typeof AGENT_ROLES[number]) && parts.length === 4 && ['cli', 'model', 'effort', 'profile-name', 'skills', 'failover'].includes(parts[3]!);
     }
     if (parts[0] === 'environment' && parts[1] === 'defaults') {
       return ['claude', 'codex', 'agy', 'claude-code'].includes(parts[2]!) && parts.length === 4 && parts[3] === 'profile-name';
@@ -49,7 +50,7 @@ export const PlanSourceSchema = z.object({
   kind: z.enum(['builtin', 'pack', 'project', 'override', 'policy', 'runtime']),
   locator: PlanLocatorSchema
 }).strict();
-export const PlanFieldSchema = z.string().regex(/^(workflow\.(id|version|digest)|roles\.[a-z][a-z_-]*\.(provider|model|effort|profile)|skills\.[a-z][a-z_-]*|tools\.required|capabilities\.required)$/).refine(field => !field.startsWith('roles.') && !field.startsWith('skills.') || AGENT_ROLES.includes(field.split('.')[1] as typeof AGENT_ROLES[number]), 'Unknown governance role');
+export const PlanFieldSchema = z.string().regex(/^(workflow\.(id|version|digest)|roles\.[a-z][a-z_-]*\.(provider|model|effort|profile|failover)|skills\.[a-z][a-z_-]*|tools\.required|capabilities\.required)$/).refine(field => !field.startsWith('roles.') && !field.startsWith('skills.') || AGENT_ROLES.includes(field.split('.')[1] as typeof AGENT_ROLES[number]), 'Unknown governance role');
 export function isPlanFieldValue(field: string, value: unknown): boolean {
   if (value === null) {
     return true;
@@ -59,6 +60,9 @@ export function isPlanFieldValue(field: string, value: unknown): boolean {
       skillId: string;
       version: string;
     }[]).every(pin => PublicSelection.safeParse(pin.skillId).success && PublicSelection.safeParse(pin.version).success);
+  }
+  if (field.endsWith('.failover')) {
+    return ProviderFailoverPolicySchema.safeParse(value).success;
   }
   if (field === 'tools.required' || field === 'capabilities.required') {
     return z.array(PublicSelection).safeParse(value).success;

@@ -14,6 +14,7 @@ import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
+  providerFailover?: AgenticRuntimePorts["providerFailover"];
   pinDeveloperDispatch?: AgenticRuntimePorts["pinDeveloperDispatch"];
   bindDeveloperExecutionScope?: AgenticRuntimePorts["bindDeveloperExecutionScope"];
   stopDeveloperExecutionScope?: AgenticRuntimePorts["stopDeveloperExecutionScope"];
@@ -70,7 +71,7 @@ export async function routeNativeConversationMessage(runtime: Pick<AgenticWorkfl
 }
 /** Launch material for one Developer task. `env` may carry bearer tokens: it is passed to Herdr only, never persisted. */
 export interface DeveloperLaunchPort {
-  allocate(request: { runId: string; taskId: string; worktreePath: string }): Promise<{ provider: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
+  allocate(request: { runId: string; taskId: string; worktreePath: string; candidate?: import("@bflow/contracts").FailoverCandidate; continuationId?: string }): Promise<{ provider: string; model?: string; argv: readonly string[]; env: Readonly<Record<string, string>>; launchId: string; launchFingerprint: string }>;
   release(taskId: string): Promise<void>;
   assertProcessScope?(binding: PaneBinding): Promise<void>;
   /**
@@ -138,10 +139,13 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       let entry = pending.get(request.taskId);
       if (entry === undefined) {
         let launch;
-        try { launch = await launches.allocate({ runId: request.runId, taskId: request.taskId, worktreePath: request.worktreePath }); }
+        try { launch = await launches.allocate({ runId: request.runId, taskId: request.taskId, worktreePath: request.worktreePath,
+          ...(request.failoverCandidate ? { candidate: request.failoverCandidate } : {}), ...(request.continuationId ? { continuationId: request.continuationId } : {}) }); }
         catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
         // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
-        const allocation = { ...request, agentKind: launch.provider, launch };
+        const { failoverCandidate: _candidate, continuationId: _continuationId, ...baseRequest } = request;
+        const { model: _model, ...material } = launch;
+        const allocation = { ...baseRequest, agentKind: launch.provider, ...(launch.model ? { model: launch.model } : {}), launch: material };
         try { await launchOptions.beforeSideEffect?.(); }
         catch (error) {
           await launches.release(request.taskId).catch(() => undefined);
@@ -290,6 +294,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
           source.decidedBy === decision.decidedBy && source.decidedAt === decision.decidedAt;
       } });
     runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
+      ...(options.providerFailover ? { providerFailover: options.providerFailover } : {}),
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
       ...(options.pinDeveloperDispatch ? { pinDeveloperDispatch: options.pinDeveloperDispatch } : {}),
       ...(options.bindDeveloperExecutionScope ? { bindDeveloperExecutionScope: options.bindDeveloperExecutionScope } : {}),

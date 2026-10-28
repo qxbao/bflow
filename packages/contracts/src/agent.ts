@@ -121,6 +121,24 @@ export const AgentOutcomeVerificationSchema = z.discriminatedUnion("status", [
     .strict()
 ]);
 
+/** Host-authorized retirement of one stopped execution, within the unchanged task attempt. */
+export const ExecutionContinuationSchema = z.object({
+  previousExecutionId: IdentifierSchema, switchId: IdentifierSchema,
+  policyDigest: z.string().regex(/^[a-f0-9]{64}$/), stoppedAt: IsoDateTimeSchema,
+  ordinal: z.number().int().min(1).max(16)
+}).strict();
+export type ExecutionContinuation = z.infer<typeof ExecutionContinuationSchema>;
+export function validateExecutionContinuation(current: { status: string; attemptId?: string | undefined; agentExecution?: AgentExecutionHandle | undefined },
+  next: AgentExecutionHandle, continuation: ExecutionContinuation, occurredAt: string): boolean {
+  const old = current.agentExecution;
+  return !!old && current.status === "running" && current.attemptId === next.attemptId && old.attemptId === next.attemptId &&
+    old.executionId === continuation.previousExecutionId && old.executionId !== next.executionId && old.requestId !== next.requestId &&
+    old.runId === next.runId && old.taskId === next.taskId && old.target.worktreePath === next.target.worktreePath &&
+    old.target.agentId !== next.target.agentId && old.target.paneId !== next.target.paneId &&
+    Date.parse(continuation.stoppedAt) >= Date.parse(old.acceptedAt) && Date.parse(continuation.stoppedAt) <= Date.parse(occurredAt) &&
+    Date.parse(next.acceptedAt) >= Date.parse(continuation.stoppedAt);
+}
+
 export const AgentResultSchema = z
   .object({
     requestId: IdentifierSchema,

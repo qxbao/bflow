@@ -22,6 +22,7 @@ import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./nativ
 import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
 import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAllocation, type CancellationStopProof, type NamespaceExitProof } from "./cancellation-stop.js";
 import { PrototypeRecordSchema, type PrototypeRecord } from "./prototype-review.js";
+import { TaskFailoverSchema, type TaskFailover } from "./provider-failover-state.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -46,6 +47,7 @@ export interface SpecRecord {
   specification: Specification; request: ApprovalRequest; decision?: ApprovalDecision; strategy: TestStrategy;
 }
 export interface TaskRecord {
+  failovers?: TaskFailover[];
   taskId: string; spec: SpecRecord; worktrees: TaskWorktree[]; outboundIds: string[];
   changeSet?: GitChangeSet; cycle?: VerificationCycle; result?: AgentResult;
   verificationPlan?: VerificationPlan; verificationPending?: boolean; writerReleased?: boolean;
@@ -387,6 +389,12 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
+      if (task.failovers !== undefined) {
+        z.array(TaskFailoverSchema).max(17).parse(task.failovers);
+        if (new Set(task.failovers.map(entry => entry.switchId)).size !== task.failovers.length || task.failovers.some(entry =>
+            entry.sourceHandle.runId !== run.runId || entry.sourceHandle.taskId !== task.taskId || entry.policyDigest !== digest(entry.policy)))
+          throw new Error("Invalid task failover ownership or policy digest");
+      }
       textField(task.taskId); parseSpec(task.spec); strings(task.outboundIds);
       if (!Array.isArray(task.worktrees)) throw new Error("Invalid worktree history");
       for (const tree of task.worktrees) { textField(tree.key); textField(tree.worktreePath); textField(tree.branchName); textField(tree.baseCommitHash); }

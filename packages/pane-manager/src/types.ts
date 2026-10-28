@@ -485,6 +485,7 @@ export interface LaunchObservation {
 }
 
 export interface DeveloperAllocationRequest {
+  readonly continuation?: import("@bflow/contracts").DeveloperContinuationAllocation;
   readonly taskId: string;
   readonly runId?: string;
   readonly worktreePath: string;

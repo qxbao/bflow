@@ -13,6 +13,31 @@ import { DeterministicWorkflowEngine } from "../src/index.js";
 const time = "2026-10-13T00:00:00.000Z";
 const later = "2026-10-13T00:01:00.000Z";
 
+it("continues an exact stopped execution with a new handle while retaining task attempt and generation", async () => {
+  const engine = new DeterministicWorkflowEngine();
+  const started = await advance(engine, await create(engine, definition(["implement"])), "start-continuation");
+  const first = handleFor(started, "implement");
+  const bound = unwrap(await engine.bindAgentExecution({ runId: "run-1", taskId: "implement", expectedVersion: started.snapshot.version,
+    attempt: 1, handle: first, occurredAt: later, idempotencyKey: "bind-old" }));
+  const next = { ...first, executionId: "next-execution", requestId: "next-request", idempotencyKey: "next-send", acceptedAt: later,
+    target: { ...first.target, agentId: "fallback-agent", paneId: "fallback-pane" } };
+  const command = { runId: "run-1", taskId: "implement", expectedVersion: bound.snapshot.version, attempt: 1, handle: next,
+    occurredAt: later, idempotencyKey: "continue-1", continuation: { previousExecutionId: first.executionId,
+      switchId: "switch-1", policyDigest: "a".repeat(64), stoppedAt: later, ordinal: 1 } };
+  const continued = unwrap(await engine.bindAgentExecution(command));
+  expect(continued.snapshot.tasks[0]).toMatchObject({ status: "running", attempt: 1, generation: 0, agentExecution: next });
+  expect(continued.emittedEvents[0]).toMatchObject({ type: "agent.execution_bound", payload: { continuation: command.continuation } });
+  expect((await engine.bindAgentExecution(command)).ok).toBe(true);
+  const checkpoint = unwrap(await engine.createCheckpoint({ runId: "run-1", expectedVersion: continued.snapshot.version,
+    checkpointId: "continued-checkpoint", createdAt: later }));
+  const restored = new DeterministicWorkflowEngine();
+  await create(restored, definition(["implement"]));
+  const recovered = unwrap(await restored.recover({ runId: "run-1", checkpoint, events: [], expectedVersion: continued.snapshot.version }));
+  expect(recovered.snapshot.tasks[0]!.agentExecution).toEqual(next);
+  expect((await restored.bindAgentExecution({ ...command, expectedVersion: recovered.snapshot.version, idempotencyKey: "foreign-continuation",
+    handle: { ...next, executionId: "third", requestId: "third" } })).ok).toBe(false);
+});
+
 function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
   return result.value;
