@@ -73,7 +73,7 @@ export interface DefaultPlatformReadinessServiceDeps {
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
   /** Trusted host MCP servers and hooks for a role launch (provider-neutral; adapters render them). */
-  readonly hostLaunch?: ((role: AgentRole, taskId?: string) => HostLaunchExtras | undefined) | undefined;
+  readonly hostLaunch?: ((role: AgentRole, taskId?: string, provider?: AgentProviderId) => HostLaunchExtras | undefined) | undefined;
   readonly now?: (() => Date) | undefined;
 }
 
@@ -417,7 +417,14 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     if (!profile.ok) return profile;
     const snapshot = await this.validateRoleProfileMaterial(material);
     if (!snapshot.ok) return snapshot;
-    const skills = await this.deps.skills.load(material.identity, material.requirement.role, material.requirement.taskId, material.requirement.roleProfile?.pin, material.requirement.assignmentId);
+    const skills = await this.deps.skills.load(
+      material.identity,
+      material.requirement.role,
+      material.requirement.taskId,
+      material.requirement.executionKey,
+      material.requirement.roleProfile?.pin,
+      material.requirement.assignmentId
+    );
     if (!skills.ok) return skills;
     if (!skills.value || canonicalReceiptJson(skills.value.manifest) !== canonicalReceiptJson(material.context.skillManifest))
       return fail("conflict", "Prepared launch pinned skills changed or are missing");
@@ -504,6 +511,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       return launched;
     }
     return ok(launched.value);
+  }
+
+  async preflightDeveloper(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement, options?: OperationOptions): Promise<OperationResult<AgentHealthResult>> {
+    if (requirement.role !== "developer") return fail("validation", "Developer preflight requires the developer role");
+    const checked = await this.preflightRole(identity, requirement, options);
+    if (checked.gatewayTouched) {
+      const revoked = await this.revokeRoleGateway(identity, requirement, options);
+      if (!revoked.ok) return failWith(revoked.error);
+    }
+    return checked.ready ? ok(checked.preflight) : failWith(checked.error);
   }
 
   async releaseLaunch(launchId: string, options?: OperationOptions): Promise<OperationResult<void>> {
@@ -952,7 +969,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       ? appendRoleProfileInstructions(originalPrompt ?? defaultRolePrompt(requirement.role), requirement.roleProfile)
       : originalPrompt;
     const hookCommand = this.deps.nativeSessionHookCommand?.(requirement.role, requirement.taskId);
-    const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId);
+    const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId, requirement.provider);
     const tokenNames = Object.fromEntries(gateway.registrations.map(registration =>
       [registration.registrationId, tokenEnvironmentName(registration.registrationId)]));
     const profileLaunchEnvironment = isolatorProfile === undefined

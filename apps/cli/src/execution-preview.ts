@@ -83,6 +83,8 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
         add(`roles.${role.role}.model`, role.model ?? 'provider-default-unknown', `${locator}.model`);
         if (role.effort !== undefined)
             add(`roles.${role.role}.effort`, role.effort, `${locator}.effort`);
+        if (role.failover !== undefined)
+            add(`roles.${role.role}.failover`, role.failover, `${locator}.failover`);
         const profile = selectedProfileName(role, input.config.environment);
         if (profile !== undefined) {
             add(`roles.${role.role}.profile`, profile, role['profile-name'] ? `${locator}.profile-name` : `environment.defaults.${role.cli}.profile-name`);

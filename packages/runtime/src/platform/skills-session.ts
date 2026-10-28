@@ -45,9 +45,11 @@ export class SkillSessionStore implements SkillSessionPort {
   ): Promise<OperationResult<ResolvedRoleSkills>> {
     const taskError = taskIdError(requirement.taskId);
     if (taskError) return fail("validation", taskError);
+    const executionError = taskIdError(requirement.executionKey);
+    if (executionError) return fail("validation", executionError);
     try {
       if (requirement.roleProfile) requirement = resolveRoleProfile(requirement.roleProfile, requirement);
-      const file = recordPath(identity, requirement.role, requirement.taskId, requirement.roleProfile?.pin, requirement.assignmentId);
+      const file = recordPath(identity, requirement.role, requirement.taskId, requirement.executionKey, requirement.roleProfile?.pin, requirement.assignmentId);
       const synced = await this.options.resolver.sync(buildRequest(identity, requirement, environmentId));
       const manifest = await this.options.resolver.verify(synced.manifest);
       if (manifest.environmentId !== environmentId || manifest.role !== requirement.role ||
@@ -69,13 +71,32 @@ export class SkillSessionStore implements SkillSessionPort {
     identity: PlatformSessionIdentity,
     role: AgentRole,
     taskId?: string,
-    roleProfile?: RoleProfilePin,
-    assignmentId?: string
+    executionKeyOrRoleProfile?: string | RoleProfilePin,
+    roleProfileOrAssignmentId?: RoleProfilePin | string,
+    assignmentIdArg?: string
   ): Promise<OperationResult<ResolvedRoleSkills | null>> {
     const taskError = taskIdError(taskId);
     if (taskError) return fail("validation", taskError);
+    let executionKey: string | undefined;
+    let roleProfile: RoleProfilePin | undefined;
+    let assignmentId: string | undefined;
+
+    if (typeof executionKeyOrRoleProfile === "string") {
+      executionKey = executionKeyOrRoleProfile;
+      if (typeof roleProfileOrAssignmentId === "object" && roleProfileOrAssignmentId !== null) {
+        roleProfile = roleProfileOrAssignmentId;
+        assignmentId = assignmentIdArg;
+      }
+    } else if (typeof executionKeyOrRoleProfile === "object" && executionKeyOrRoleProfile !== null) {
+      roleProfile = executionKeyOrRoleProfile;
+      if (typeof roleProfileOrAssignmentId === "string") {
+        assignmentId = roleProfileOrAssignmentId;
+      }
+    }
+    const executionError = taskIdError(executionKey);
+    if (executionError) return fail("validation", executionError);
     try {
-      const file = recordPath(identity, role, taskId, roleProfile, assignmentId);
+      const file = recordPath(identity, role, taskId, executionKey, roleProfile, assignmentId);
       const raw = await readRecordFile(file);
       if (!raw.ok) return raw;
       if (raw.value === null) return ok(null);
@@ -121,12 +142,20 @@ function buildRequest(
   };
 }
 
-function recordPath(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, roleProfile?: RoleProfilePin, assignmentId?: string): string {
+function recordPath(
+  identity: PlatformSessionIdentity,
+  role: AgentRole,
+  taskId: string | undefined,
+  executionKey?: string,
+  roleProfile?: RoleProfilePin,
+  assignmentId?: string
+): string {
   if (roleProfile !== undefined) RoleProfilePinSchema.parse(roleProfile);
-  const task = taskId ? `-${taskId}` : "";
+  const task = (taskId ? `-${taskId}` : "") + (executionKey ? `-${executionKey}` : "");
+  const roleTaskSegment = executionKey ? boundedIdentifier(`${role}${task}`) : `${role}${task}`;
   const profile = roleProfile ? `/profiles/${roleProfile.digest}` : "";
   const assignment = assignmentId ? `/assignments/${sha256Hex(assignmentId)}` : "";
-  return `${identity.stateDirectory}/gen-${identity.generation}/skills/${role}${task}${profile}${assignment}.json`;
+  return `${identity.stateDirectory}/gen-${identity.generation}/skills/${roleTaskSegment}${profile}${assignment}.json`;
 }
 
 /** Writes a record atomically; an existing record with a different manifest digest is never overwritten. */

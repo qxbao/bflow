@@ -2,6 +2,8 @@ import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReco
 import { assertAcceptedWorkflowSelection, assertRunExecutionPlan, bindAcceptedExecutionPlan, ExecutionPlanDriftError, publicExecutionRun } from "./execution-binding.js";
 import { HandoverBindingSchema, TaskHandoverStore, admitHandover, selectHandover, handoverRevision, type HandoverBinding } from "./task-handover.js";
 import { readWorkflowTelemetry } from "../telemetry/report.js";
+import { TaskProviderFailover } from "./provider-failover.js";
+import { failoverHoldsTask } from "./provider-failover-state.js";
 import { z } from "zod";
 import { RoleProfilePinSchema, sameRoleProfilePin, SpecialistRoleSchema, type RoleProfilePin } from "@bflow/contracts";
 import { selectRoleProfile, narrowProfileTask, assertProfileSnapshotCurrent, assertProfileBinding, assertIndependentProfileExecutor } from "./profile-admission.js";
@@ -267,6 +269,30 @@ export class AgenticWorkflowRuntime {
   }
   private readonly coreRestoreCache: CoreRestoreCache = new Map();
   private quiesced = false;
+  private providerFailovers(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox) {
+    return new TaskProviderFailover(this.ports, state, save, core, outbox, new TaskHandoverStore(join(this.journal.directory, "task-handover")),
+      () => this.now(), (run, entry, reason, blocked) => {
+        this.emit(state, outbox, run, "conversation.progress", { kind: "provider_failover", sdlcStatus: run.status,
+          headline: blocked ? "Việc đang chờ xử lý lỗi nhà cung cấp" : "Đang xử lý gián đoạn nhà cung cấp",
+          reason, blockageReason: reason, provider: entry.current.provider, failure: entry.failure.kind,
+          policyVersion: entry.policy.policyVersion, tried: run.tasks.flatMap(task => task.failovers ?? []).filter(item => item.spentAt).map(item => item.destination),
+          approvedCandidates: entry.policy.candidates, usage: "unknown",
+          options: ["Xem nguyên nhân và các nhà cung cấp đã thử trong trạng thái việc", "Đối soát delivery hoặc công cụ chưa rõ kết quả", "Hủy việc; thay đổi policy hoặc tài khoản cần quyền của chủ dự án"] },
+          `provider-failover:${entry.switchId}:${entry.phase}:${reason}`);
+      });
+  }
+  async observeProviderFailure(binding: unknown, failure: unknown): Promise<JsonValue> {
+    await this.initialize();
+    return this.transaction(async (state, save, core, outbox) => {
+      if (this.quiesced) throw new Error("Provider failure admission is quiesced");
+      return json(await this.providerFailovers(state, save, core, outbox).observe(binding, failure));
+    });
+  }
+  async continueProviderFailovers(): Promise<void> {
+    await this.initialize();
+    if (this.quiesced) return;
+    await this.transaction(async (state, save, core, outbox) => { await this.providerFailovers(state, save, core, outbox).continue(); });
+  }
   /** Stop new scheduling before lifecycle checkpointing; retain in-flight receipts and worktrees. */
   async quiesce(): Promise<void> {
     this.quiesced = true;
@@ -369,6 +395,13 @@ export class AgenticWorkflowRuntime {
             await this.activityLog.record({ kind: "error", role: "runtime", action: "run_error_recorded", runId: run.runId, outcome: "A Runtime workflow error was recorded; inspect the authorized run diagnostics." });
           for (const task of run.tasks) {
             const beforeTask = beforeRun?.tasks.find(item => item.taskId === task.taskId);
+            for (const entry of task.failovers ?? []) {
+              const prior = beforeTask?.failovers?.find(item => item.switchId === entry.switchId);
+              if (digest(prior) !== digest(entry)) await this.activityLog.record({ kind: "recovery", role: "runtime", action: "provider_failover",
+                runId: run.runId, taskId: task.taskId, attemptId: entry.sourceHandle.attemptId,
+                outcome: `${entry.failure.kind}; ${entry.phase}; policy=${entry.policy.policyVersion}; ${entry.current.provider} -> ${entry.destination?.provider ?? "pending"}; usage=unknown`,
+                ...(entry.reason ? { reason: entry.reason } : {}) });
+            }
             if (!beforeTask) await this.activityLog.record({ kind: "specification", role: "runtime", action: "task_specification_accepted",
               runId: run.runId, taskId: task.taskId, outcome: `${task.spec.specification.level}/${task.spec.strategy.tddDecision.mode}` });
             if (!beforeTask || beforeTask.result?.requestId !== task.result?.requestId || beforeTask.result?.status !== task.result?.status) {
@@ -3148,7 +3181,20 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       throw new Error("Stale task binding");
     }
     if (task.agentExecution) {
-      if (digest(task.agentExecution) !== digest(handle)) throw new Error("Conflicting execution binding");
+      if (digest(task.agentExecution) === digest(handle)) {
+        const entry = run.tasks.find(item => item.taskId === task.taskId)?.failovers?.find(item => item.destinationMessageId === out.message.message_id);
+        if (entry?.phase === "allocated") entry.phase = "dispatched";
+        return;
+      }
+      const entry = run.tasks.find(item => item.taskId === task.taskId)?.failovers?.find(item => item.destinationMessageId === out.message.message_id);
+      if (!entry || entry.phase !== "allocated" || !entry.stopProof || !entry.ordinal || run.cancelled ||
+          task.agentExecution.executionId !== entry.sourceHandle.executionId) throw new Error("Conflicting execution binding");
+      const stoppedAt = entry.stopProof.observedAt, ordinal = entry.ordinal;
+      await core.mutate(run.runId, current => this.ports.engine.bindAgentExecution({ runId: run.runId, taskId: task.taskId,
+        expectedVersion: current.version, attempt: task.attempt, handle, occurredAt: this.now(), idempotencyKey: `bind:${handle.requestId}`,
+        continuation: { previousExecutionId: entry.sourceHandle.executionId, switchId: entry.switchId, policyDigest: entry.policyDigest,
+          stoppedAt, ordinal } }));
+      entry.phase = "dispatched";
       return;
     }
     await core.mutate(run.runId, current => this.ports.engine.bindAgentExecution({
@@ -3160,6 +3206,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     run: RunRecord, message: RoleMessage): Promise<void> {
     const result = AgentResultSchema.parse(message.payload);
     const task = run.tasks.find(item => item.taskId === result.taskId);
+    if (failoverHoldsTask(task?.failovers)) throw new Error("Task submission is held during provider continuation");
     const out = state.outbound.find(item => item.message.message_id === message.causation_id);
     if (!task || !out?.handle || out.message.type !== "task.assignment" ||
         (out.status !== "accepted" && !(out.status === "released" && task.result?.attemptId === result.attemptId)) ||
@@ -3481,7 +3528,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           taskId: task.taskId, attemptId: currentBinding.attemptId, outcome: "code" in admitted ? admitted.code : "accepted" });
         return json({ binding: currentBinding, authority, handover: admitted });
       }
-      const selected = selectHandover(await store.read(run.runId, task.taskId), currentBinding, sources);
+      const continued = task.failovers?.some(entry => entry.phase === "dispatched" && entry.destinationMessageId === out.message.message_id)
+        ? task.failovers.filter(entry => entry.phase === "dispatched" && entry.sourceHandle.attemptId === currentBinding.attemptId &&
+          entry.sourceBinding.worktreePath === currentBinding.worktreePath).map(entry => entry.sourceMessageId) : [];
+      const selected = selectHandover(await store.read(run.runId, task.taskId), currentBinding, sources, continued);
       return json({ binding: currentBinding, authority, handover: selected });
     });
   }
@@ -3495,6 +3545,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const run = this.run(state, runId); this.live(run);
       assertNoPendingPaneDecision(run, binding);
       const task = run.tasks.find(item => item.taskId === taskId), definition = run.definition?.tasks.find(item => item.id === taskId);
+      if (failoverHoldsTask(task?.failovers)) throw new Error("Developer workspace is held during provider continuation");
       const current = (await core.snapshot(runId)).tasks.find(item => item.taskId === taskId);
       const out = state.outbound.find(item => item.handle?.requestId === current?.agentExecution?.requestId);
       if (!task || !definition || task.spec.specification.status !== "approved" || current?.status !== "running" ||
@@ -3549,6 +3600,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const request = out.request!, runId = handle.runId;
       const run = state.runs.find(item => item.runId === runId);
       if (!run || runId !== out.message.run_id) throw new Error("Tool action has no matching Runtime run holder");
+      if (run.tasks.some(task => failoverHoldsTask(task.failovers))) throw new Error("Tool actions are held during provider continuation");
       this.live(run);
       if (binding.roleProfile || out.roleProfile) {
         const profile = selectRoleProfile(run.roleProfiles, binding.role, out.roleProfile);
@@ -3968,6 +4020,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await this.drainCancellationControls(state, save, core, outbox);
       await this.cleanupProfileSpecialists(state, save);
     });
+    await this.continueProviderFailovers();
     await this.recoverMissingCoordinatorWakeups();
     await this.transaction(async (state, save, _core, outbox) => { if (this.expireUserDecisions(state, outbox)) await save(); });
     const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));

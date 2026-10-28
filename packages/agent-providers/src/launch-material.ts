@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path";
 import { SafeArgumentSchema } from "@bflow/contracts";
 import type { HostHookEvent, ProviderAdapterOptions } from "./types.js";
 
-export const HOST_HOOK_EVENTS: readonly HostHookEvent[] = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse", "PreInvocation"];
+export const HOST_HOOK_EVENTS: readonly HostHookEvent[] = ["SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "PreToolUse", "PreInvocation"];
 
 const HOST_SERVER_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const TOKEN_ENVIRONMENT_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;

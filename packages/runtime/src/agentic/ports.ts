@@ -69,6 +69,9 @@ export interface PanePolicy {
   allocateDeveloper(request: {
     taskId: string; runId: string; worktreePath: string; branchName: string; agentName: string;
     roleProfile?: import("@bflow/contracts").ResolvedRoleProfileSnapshot;
+    failoverCandidate?: import("@bflow/contracts").FailoverCandidate;
+    continuationId?: string;
+    continuation?: import("@bflow/contracts").DeveloperContinuationAllocation;
   }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
   allocateSpecialist?(request: { taskId: string; runId: string; role: import("@bflow/contracts").SpecialistRole;
     roleProfile: import("@bflow/contracts").ResolvedRoleProfileSnapshot; agentName?: string }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
@@ -96,6 +99,12 @@ export interface AgenticRuntimePorts {
   roleProfileDefaults?: Readonly<Partial<Record<AgentRole, import("@bflow/contracts").RoleProfilePin>>>;
   preflightRoleProfile?(snapshot: import("@bflow/contracts").ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): Promise<void>;
   attestExecutorLineage?(binding: PaneBinding, purpose: import("@bflow/contracts").ExecutorLineage["purpose"], assignmentId: string): Promise<import("@bflow/contracts").ExecutorLineage>;
+  providerFailover?: {
+    policyFor(binding: PaneBinding): { policy: import("@bflow/contracts").ProviderFailoverPolicy; current: import("@bflow/contracts").FailoverCandidate } | undefined;
+    authenticate(binding: PaneBinding, failure: import("@bflow/contracts").ProviderFailureObservation): Promise<boolean>;
+    assertMutationSafe(binding: PaneBinding, runId: string, taskId: string): Promise<void>;
+    preflight(candidate: import("@bflow/contracts").FailoverCandidate, binding: PaneBinding): Promise<void>;
+  };
   /** Host-owned current readonly resolution; absent is an explicit legacy host without historical drift protection. */
   readExecutionResolution?: import("./execution-binding.js").ExecutionResolutionReader;
   /** Physical Conversation hook only; not an agent tool or an approval inferred by a model. */

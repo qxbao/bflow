@@ -158,6 +158,7 @@ describe("provider launch profile on role start", () => {
       launchId: "launch-claude-1",
       launchFingerprint: "sha256-fingerprint-abc123"
     });
+    expect(result.value.provider).toBe("claude");
     expect(JSON.stringify(result.value)).not.toContain(ENV_VALUE);
     expect(JSON.stringify(result.value)).not.toContain("BFLOW_LAUNCH_TOKEN_REF");
   });

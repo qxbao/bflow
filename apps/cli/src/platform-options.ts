@@ -316,6 +316,7 @@ export function resolveRolePlatformOption(role: EnvironmentRoleConfig, input: En
   return {
     role: role.role,
     provider: provider.data,
+    ...(role.failover ? { failover: role.failover } : {}),
     required: role.required ?? true,
     ...(role.specialistProfile ? { specialistProfile: role.specialistProfile } : {}),
     ...profileSettings(selectedProfileName(role, environment)),

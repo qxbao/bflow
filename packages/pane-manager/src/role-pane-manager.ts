@@ -12,6 +12,7 @@ import type {
   SessionManifestStatus
 } from "@bflow/contracts";
 import {
+  DeveloperContinuationAllocationSchema,
   PaneBindingSchema,
   ResolvedRoleProfileSnapshotSchema,
   RoleProfilePinSchema,
@@ -1364,7 +1365,7 @@ export class RolePaneManager {
       return this.#buildAndValidateBinding({
         spec,
         agentInfo,
-        request: { ...request, metadata: { ...request.metadata, ...launchMetadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
+        request: { ...request, provider: launch?.provider ?? this.#config.roleConfigs?.[spec.topologyRole]?.provider ?? this.#config.defaultProvider ?? "herdr", metadata: { ...request.metadata, ...launchMetadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
           ...(!agentInfo.session ? { nativeSessionPending: true } : {}) } },
         agentName,
         agentKind
@@ -1387,6 +1388,7 @@ export class RolePaneManager {
       readonly worktreePath?: string;
       readonly model?: string;
       readonly launch?: AgentLaunchProfile;
+      readonly provider?: string;
       readonly permanent?: boolean;
       readonly metadata?: Record<string, unknown>;
     };
@@ -1396,7 +1398,7 @@ export class RolePaneManager {
     const { spec, agentInfo, request, agentName, agentKind } = args;
     const nowIso = this.#clock().toISOString();
     const roleConfig = this.#config.roleConfigs?.[spec.topologyRole];
-    const provider = request.launch?.provider ?? roleConfig?.provider ?? this.#config.defaultProvider ?? "herdr";
+    const provider = request.launch?.provider ?? request.provider ?? roleConfig?.provider ?? this.#config.defaultProvider ?? "herdr";
     const model = request.model ?? roleConfig?.model ?? this.#config.defaultModel;
 
     const rawBinding = {
@@ -2536,12 +2538,29 @@ export class RolePaneManager {
         );
       }
 
-      // Cleanliness check
+      let retainedContinuation = false;
+      if (request.continuation !== undefined) {
+        const continuation = DeveloperContinuationAllocationSchema.safeParse(request.continuation);
+        if (!continuation.success) return validationError("Invalid Developer continuation allocation");
+        const proof = continuation.data;
+        const source = manifest.panes.find(pane => pane.bindingId === proof.sourceBindingId && pane.role === "developer" &&
+          pane.metadata?.["allocationStatus"] === "released" && pane.metadata?.["taskId"] === request.taskId && pane.metadata?.["runId"] === request.runId);
+        if (!source || proof.allocationTaskId !== request.taskId || proof.runId !== request.runId || proof.worktreePath !== request.worktreePath ||
+            source.worktreePath !== request.worktreePath || !await this.#authorizeStoppedRetainedRelease?.(source))
+          return conflictError("Continuation requires the exact released, proven-stopped source binding in the same task worktree");
+        retainedContinuation = true;
+      }
+      // Cleanliness check: an exact stopped task continuation may preserve its scoped unfinished files.
       const inspected = await this.#worktreeInspector.inspect(request.worktreePath, options);
       if (!inspected.ok) {
         return inspected;
       }
-      if (inspected.value.exists && !inspected.value.isClean) {
+      const within = (path: string, prefix: string) => prefix === "." || path === prefix.replace(/\/$/, "") || path.startsWith(prefix.replace(/\/$/, "") + "/");
+      const retainedDirty = retainedContinuation && request.continuation !== undefined && inspected.value.dirtyFiles.every(path =>
+        !path.startsWith("/") && !path.includes("\\") && !path.split("/").includes("..") &&
+        !request.continuation!.forbiddenPaths.some(prefix => within(path, prefix)) &&
+        (request.continuation!.ownedPaths.some(prefix => within(path, prefix)) || inspected.value.ignoredFiles?.includes(path)));
+      if (inspected.value.exists && !inspected.value.isClean && !retainedDirty) {
         return conflictError(
           `Cannot allocate developer in working tree with uncommitted changes not belonging to task: ${inspected.value.dirtyFiles.join(", ")}`
         );
