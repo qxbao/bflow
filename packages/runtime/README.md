@@ -127,6 +127,19 @@ Chi tiết về pack, provenance, các kiểm tra, recovery, revision, phần t�
 [ANALYSIS-ONLY-WORKFLOW.md](ANALYSIS-ONLY-WORKFLOW.md). Pack mẫu: [support/analysis-only-pack.json](support/analysis-only-pack.json).
 Mức bằng chứng: source cộng test local với role giả lập; chưa nối host/Herdr/Conversation/CLI.
 
+## Workflow chỉ kiểm thử (QA-only, extension)
+
+`QaWorkflowRuntime` (`src/qa/**`) kiểm thử một hệ thống có sẵn mà không sửa nó. DAG cố định: thiết kế test → review
+độc lập (người duyệt đúng digest thiết kế) → thực thi → phân xử kết quả → báo cáo bug/evidence. Role không có quyền ghi,
+chạy lệnh hay truy cập mạng. Chỉ Runtime chạm vào target, qua tool có grant, kiểm tra readiness, giữ lease môi trường
+có fencing token suốt transaction và chỉ ghi test asset/báo cáo vào workspace được cấp. Origin, hành động, tài khoản,
+dữ liệu và cleanup đều do intake khai báo. Mutation bị timeout được đối soát bằng probe chỉ đọc, không bao giờ gửi lại.
+Kết quả được phân loại thành passed, product_failure, test_defect, environment_failure, blocked hoặc inconclusive.
+Phát hiện bug không cấp quyền sửa sản phẩm.
+
+Chi tiết và giới hạn: xem [QA-ONLY-WORKFLOW.md](QA-ONLY-WORKFLOW.md). Mức bằng chứng: source cộng test local chạy trên
+app fixture HTTP thật (process riêng) với role giả lập; browser adapter mới là port; chưa nối host/Herdr/Conversation/CLI.
+
 ## Composition và thực thi
 
 Coordinator và Developer cùng các specialist đọc policy và skill đã pin qua
