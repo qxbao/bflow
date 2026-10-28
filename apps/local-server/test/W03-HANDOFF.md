@@ -192,3 +192,61 @@ W05 implements events/artifacts/notices on the authenticated boundary; W08 adds
 verified chat. W09 owns real browser workflow/provider/Herdr/fault acceptance.
 These independent source/local checks do not certify those tasks or resolve
 P02-RA01/P03-RA01. Branch remains local for integrator review.
+
+## Main integration — owner-requested merge and push
+
+After the source handoff, the owner explicitly instructed “Merge main rồi push đi”.
+Fetched origin first: approved remote main had advanced from `c3456d8` to
+`e2f61c47c7a00bba3d574b41dfa3255d69a70eab` (PR64 CLI/Runtime fixes).
+Those changes did not overlap W03. Fast-forwarded local main to origin/main,
+then merged W03 without conflict in `6ad634084e8308a9f615d24f17d4ab3cdbb6e6a0`.
+No implementation, schema, timeout, assertion or selection changes were made.
+This evidence-only addition follows the merge. Push authorization is explicit;
+no full-suite waiver, provider readiness or live workflow acceptance is inferred.
+
+Checks on merge HEAD:
+
+- `pnpm check:deps`: exit0, 24 packages/52 internal edges.
+- `pnpm typecheck`: exit0, including frontend/resolver.
+- `TMPDIR=/tmp VITEST_MAX_THREADS=2 VITEST_MIN_THREADS=1 pnpm test:affected --base e2f61c47c7a00bba3d574b41dfa3255d69a70eab --run`:
+  exit0, build + **24 passed, zero failed/skipped, 7 files**. Package fallback
+  because GitNexus status was unavailable; 8 unit inputs, zero E2E.
+- `pnpm test`, with TMPDIR=/tmp, inherited AI_ISOLATOR selectors removed for
+  fixture isolation and max4/min1 thread/fork pools: **exit1**, 367 files passed,
+  2 failed, 7 skipped (376); **6214 tests passed, 3 failed, 81 skipped (6298)**,
+  plus one unhandled rejection. Full run took 1254.33s. The failed unit stage
+  prevented its chained frontend test, which was run separately below.
+- Same fixture environment, max2/min1 pools, `pnpm exec vitest run --config tests/e2e/vitest.config.ts`:
+  **exit1**, 16 files passed/1 failed; **84 passed, 1 failed, 7 skipped (92)**.
+- `pnpm --filter @bflow/web test`: exit0, **2/2** tests, one file.
+- `git diff --check`, working tree/index checks: clean before evidence addition.
+
+Non-green full-run findings retained, not reported as a full PASS:
+
+1. CLI `environment.test.ts`, “cancels an in-flight up and resumes the same
+   saved topology without deleting state”: 1000ms matcher deadline failed in
+   the loaded full run; a late cleanup produced an unhandled ENOENT rejection.
+   Focused case rerun passed; a subsequent **entire CLI file rerun passed
+   109/109**, zero errors, with one worker after the full run ended.
+2. Runtime `integration-p19-conflicts-reviews.test.ts`, “continues the workflow
+   after the assigned resolver commits a scoped resolution” and “escalates the
+   conflict after two resolver attempts end without an accepted resolution”:
+   30s deadlines under full-run load (first also reported cleanup ENOTEMPTY).
+   These match the W00 recorded timeout cases. After the full run ended,
+   one-worker focused rerun passed both (2 passed/12 filtered), respectively
+   18.841s and 21.762s, without changing tests/timeouts. Filtered reruns do not
+   turn the full run into a pass.
+3. E11 “resolves systemd-user unit plans”: expected running, observed stopped.
+   Reproduced the same assertion before integration on the built W03 branch
+   `a2764ef` (one failed/seven filtered); also documented in W00 baseline.
+   No MCP Services/systemd or CLI production repair is claimed.
+
+Exact fixture isolation prefix for the full and diagnostic commands:
+`env -u AI_ISOLATOR -u AI_ISOLATOR_PROFILE -u AI_ISOLATOR_REAL_HOME -u AI_ISOLATOR_TOOL -u AI_ISOLATOR_HOME TMPDIR=/tmp`.
+Pool values above use VITEST_MAX_THREADS/VITEST_MIN_THREADS and
+VITEST_MAX_FORKS/VITEST_MIN_FORKS. Diagnostic CLI and conflict commands use
+max1/min1; the complete unit/E2E selections ran before filtered diagnostics.
+All source remains the merge HEAD; only this evidence document changes after
+verification. HTTP source/local coverage is green; full-suite timing/cleanup and
+systemd observations remain separate unresolved owner findings. Original W04
+options/signer/history proposals and W05/W08 minor remain open.
