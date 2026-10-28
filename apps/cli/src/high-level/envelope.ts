@@ -15,6 +15,9 @@ import {
 export const HIGH_LEVEL_COMMANDS = [
   "repo.inspect",
   "task.preview",
+  "handover.inspect",
+  "handover.export",
+  "handover.verify",
   "task.plan",
   "task.implement",
   "verify",
