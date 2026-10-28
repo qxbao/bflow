@@ -57,6 +57,11 @@ export interface TaskRecord {
   /** Attempt whose dependency-base merge conflicted; it starts from the run base so final integration resolves the overlap. */
   dependencyBaseFallback?: string;
 }
+export interface IngressDiagnostic {
+  messageId: string; type: string; senderRole: string; recipientRole: string; reason: string; at: string;
+  /** `continued`: the accepted, leased delivery stood and the run kept going; `escalated`: the run paused; `reported`: notice only. */
+  disposition: "continued" | "escalated" | "reported";
+}
 export interface RunRecord {
   roleProfiles?: ResolvedRoleProfileSnapshot[];
   roleProfileDefaults?: Partial<Record<import("@bflow/contracts").AgentRole, RoleProfilePin>>;
@@ -103,6 +108,8 @@ export interface RunRecord {
    * envelope. Absent in older journals (no invalid messages counted).
    */
   invalidMessages?: { key: string; count: number; messageIds: string[] }[];
+  /** Refused provider ingress, newest last and bounded: identities and the redacted reason only, never the payload. */
+  ingressDiagnostics?: IngressDiagnostic[];
   /** Set once the run's single final cancellation notice is queued; absent in journals written before cancellation reconciliation. */
   cancelReconciled?: boolean;
   cancelledAllocations?: { binding: PaneBinding; proof: NamespaceExitProof; released?: boolean | undefined }[];
