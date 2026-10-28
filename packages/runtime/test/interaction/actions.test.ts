@@ -75,3 +75,22 @@ it("requires completed activation and an active manifest before reporting ready"
   ])
     expect(interactionHostReady({ ...active, ...patch })).toBe(false);
 });
+
+it("retains the existing follow-up exhaustion bound instead of offering another continuation", () => {
+  const exhausted = run("sixth-run");
+  exhausted.delegation.metadata = { followUp: 6, originRunId: "original" };
+  expect(
+    view(exhausted).availableActions.find(
+      (action) => action.kind === "revise_request",
+    ),
+  ).toMatchObject({
+    enabled: false,
+    disabledReason: "follow_up_budget_exhausted",
+  });
+  const parent = run("parent", {
+    status: "escalated",
+    supersededBy: "child",
+    pendingAction: pending,
+  });
+  expect(view(parent).availableActions).toEqual([]);
+});
