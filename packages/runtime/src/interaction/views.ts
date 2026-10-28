@@ -27,6 +27,7 @@ export interface ReadSources {
   ready: boolean;
   transport?: { states: AgentTransportState[]; observedAt: string };
   commandsSupported?: boolean;
+  pendingClarifications?: import("@bflow/conversation").ConversationContextSnapshot["pendingClarifications"] | undefined;
   redact?: (text: string) => string;
 }
 const safe = (s: ReadSources, text: string, max = 16000) =>
@@ -205,7 +206,10 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
         : []),
     ],
     decisions: decisions.slice(0, 100),
-    clarifications: [],
+    clarifications: (s.pendingClarifications?.[r.delegation.correlationId]?.unresolvedQuestions ?? []).slice(0, 100).map((question, index) => ({
+      questionId: "question-" + digest([r.delegation.correlationId, index, question]), question: safe(s, question), options: [],
+      expectedVersion: { revisionToken: digest(s.pendingClarifications![r.delegation.correlationId]) },
+    })),
     availableActions: actions.slice(0, 100),
     updatedAt,
   });
@@ -287,6 +291,7 @@ export async function hostInteractionQuery(
   input: unknown,
   options: {
     ready: boolean;
+    commandsSupported?: boolean;
     readCore?: (runId: string) => Promise<WorkflowRunSnapshot | undefined>;
   },
 ) {
@@ -389,12 +394,18 @@ export async function hostInteractionQuery(
       "[redacted]",
     );
   };
+  const rawContext = await readSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
+  const context = rawContext === undefined ? undefined : ConversationContextSnapshotSchema.parse(rawContext);
+  if (context && (context.session.sessionId !== sessionId || context.session.herdrSessionId !== configuration.sessionId))
+    throw new Error("Conversation scope mismatch");
   const source: ReadSources = {
     state,
     sessionId,
     observedAt,
     core,
     ready: options.ready,
+    commandsSupported: options.commandsSupported ?? false,
+    pendingClarifications: context?.pendingClarifications,
     redact,
     transport: {
       states: [...new Set(manifest.panes.map((p) => p.transportState))].slice(
@@ -405,20 +416,8 @@ export async function hostInteractionQuery(
     },
   };
   if (query.kind === "session") {
-    const raw = await readSnapshot(
-      join(root, "agentic/conversation", sessionId + ".context.json"),
-    );
-    const context =
-      raw === undefined
-        ? undefined
-        : ConversationContextSnapshotSchema.parse(raw);
-    if (
-      context &&
-      (context.session.sessionId !== sessionId ||
-        context.session.herdrSessionId !== configuration.sessionId)
-    )
-      throw new Error("Conversation scope mismatch");
     const pendingIntakes = Object.values(context?.pendingClarifications ?? {})
+      .filter(p => !state.runs.some(run => run.delegation.sessionId === sessionId && run.delegation.correlationId === p.correlationId))
       .slice(0, 100)
       .map((p) => ({
         intakeId: p.correlationId,

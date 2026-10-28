@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { WebCommandSchema, WebOperationSchema, IdentifierSchema, type WebOperation } from "@bflow/contracts";
+import { ApprovalDecisionSchema, WebCommandSchema, WebOperationSchema, IdentifierSchema, type ApprovalDecision, type WebOperation } from "@bflow/contracts";
 import { canonicalWebJson, WebInteractionReceiptSchema, webCommandFingerprint,
   type WebInteractionReceipt } from "@bflow/contracts/web-host";
 import type { WebInteractionAuthority } from "./authority.js";
@@ -14,7 +14,7 @@ const MAX_BYTES = 1024 * 1024;
 /** Private host storage, separate from HostReceiptJournal v1. Requires the
  * existing exclusive host owner/lock; no multi-process/multi-host guarantee.
  * No automatic pruning: finalized records retain nonce and command tombstones.
- * Not wired to mutation ingress until Conversation's structured port exists.
+ * Host mutation ingress delegates effects to Conversation's structured port.
  */
 export class WebOperationStore {
   private readonly directory: string;
@@ -84,9 +84,8 @@ export class WebOperationStore {
     const temp = join(this.directory, `pending-${randomUUID()}.tmp`);
     const file = await open(temp, "wx", 0o600);
     try {
-      await file.writeFile(canonicalWebJson(receipt)); await file.sync();
-    } finally { await file.close(); }
-    try {
+      try { await file.writeFile(canonicalWebJson(receipt)); await file.sync(); }
+      finally { await file.close(); }
       try { await link(temp, join(this.directory, name)); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -145,6 +144,9 @@ export class WebOperationStore {
         if (old.issuerId === principal.issuerId && old.keyId === principal.keyId && old.nonce === principal.nonce)
           throw new Error("Web proof nonce already consumed");
       }
+      // Scanning retained receipts can consume a proof's remaining lifetime.
+      // Check again at the exact durable-acceptance boundary.
+      authority.verify(command, principal);
       const operation = WebOperationSchema.parse({ apiVersion: 1, operationId: command.commandId, projectId: command.projectId,
         owner: "host_interaction", operationKind: command.kind, state: "accepted", updatedAt: new Date().toISOString() });
       const body = { version: 2, repository: this.options.repository, sessionId: this.options.sessionId, kind: "web-interaction",
@@ -161,6 +163,59 @@ export class WebOperationStore {
       return intent ? this.operation(id, intent) : undefined;
     });
   }
+  /** Private observation port. Stored accepted authority survives browser TTL. */
+  records(): Promise<WebInteractionReceipt[]> {
+    return this.exclusive(async () => {
+      if (!await this.prepare(false)) return [];
+      const records: WebInteractionReceipt[] = [];
+      for (const name of await readdir(this.directory)) {
+        if (!/^[a-f0-9]{64}\.intent\.json$/.test(name)) continue;
+        const receipt = await this.intent(name.slice(0, 64));
+        if (receipt) records.push(receipt);
+      }
+      return records;
+    });
+  }
+  private decision(intent: WebInteractionReceipt, sessionId: string): ApprovalDecision {
+    const command = intent.payload.command;
+    if (command.kind !== "answer_decision") throw new Error("Not a human decision intent");
+    return ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: command.decisionId, runId: command.runId, sessionId,
+      target: command.expectedVersion.target, revision: command.expectedVersion.revision, generation: command.expectedVersion.generation,
+      decision: command.outcome, decidedBy: intent.payload.principal.principalId, decidedAt: intent.payload.operation.updatedAt,
+      reason: command.reason ?? "User approved", feedbackArtifacts: [], idempotencyKey: `web-decision-${command.commandId}`,
+      ...(command.selectedOption === undefined ? {} : { metadata: { selectedOption: command.selectedOption } }) });
+  }
+  /** A distinct v2 human milestone, never a native-v1 human receipt. */
+  recordHumanDecision(principalId: string, commandId: string, input: unknown, sessionId: string): Promise<void> {
+    return this.exclusive(async () => {
+      await this.prepare(false);
+      const id = this.id(principalId, commandId), intent = await this.intent(id);
+      if (!intent || canonicalWebJson(this.decision(intent, sessionId)) !== canonicalWebJson(ApprovalDecisionSchema.parse(input)))
+        throw new Error("Human decision does not match accepted web intent");
+      const running = this.parse(await this.readJson(`${id}.running.json`));
+      if (running.payload.operation.state !== "running" || canonicalWebJson(running) !== canonicalWebJson(this.envelope(intent, running.payload.operation)))
+        throw new Error("Human decision lacks dispatch intent");
+      await this.publish(`${id}.human.json`, running);
+    });
+  }
+  async humanDecisions(sessionId: string): Promise<ApprovalDecision[]> {
+    const records = await this.records(), decisions: ApprovalDecision[] = [];
+    for (const intent of records) {
+      if (intent.payload.command.kind !== "answer_decision") continue;
+      const id = this.id(intent.payload.principal.principalId, intent.id);
+      const raw = await this.readJson(`${id}.human.json`);
+      if (raw === undefined) continue;
+      const marker = this.parse(raw);
+      if (marker.payload.operation.state !== "running" || canonicalWebJson(marker) !== canonicalWebJson(this.envelope(intent, marker.payload.operation)))
+        throw new Error("Invalid web human receipt");
+      decisions.push(this.decision(intent, sessionId));
+    }
+    return decisions;
+  }
+  async authenticateHuman(input: unknown, sessionId: string): Promise<boolean> {
+    const decision = ApprovalDecisionSchema.parse(input);
+    return (await this.humanDecisions(sessionId)).some(saved => canonicalWebJson(saved) === canonicalWebJson(decision));
+  }
   /** Claim immediately before Conversation admission. Never claim recovered work.
    * An interrupted running marker is unknown delivery, not retry permission. */
   begin(principalId: string, commandId: string): Promise<boolean> {
@@ -170,6 +225,24 @@ export class WebOperationStore {
       if (!intent || !this.active.has(id) || (await this.operation(id, intent)).state !== "accepted") return false;
       const operation = WebOperationSchema.parse({ ...intent.payload.operation, state: "running", updatedAt: new Date().toISOString() });
       return this.publish(`${id}.running.json`, this.envelope(intent, operation));
+    });
+  }
+  /** Only after the caller observes an authoritative committed effect. Unlike
+   * begin(), this grants no dispatch claim and never marks work active. */
+  reconcileDispatch(principalId: string, commandId: string): Promise<void> {
+    return this.exclusive(async () => {
+      if (!await this.prepare(false)) throw new Error("Missing web intent");
+      const id = this.id(principalId, commandId), intent = await this.intent(id);
+      if (!intent) throw new Error("Missing web intent");
+      const raw = await this.readJson(`${id}.running.json`);
+      if (raw !== undefined) {
+        const running = this.parse(raw);
+        if (running.payload.operation.state !== "running" || canonicalWebJson(running) !== canonicalWebJson(this.envelope(intent, running.payload.operation)))
+          throw new Error("Invalid web dispatch receipt");
+        return;
+      }
+      const operation = WebOperationSchema.parse({ ...intent.payload.operation, state: "running" });
+      await this.publish(`${id}.running.json`, this.envelope(intent, operation));
     });
   }
   /** Caller must supply a conclusive Conversation/Runtime receipt, or explicitly

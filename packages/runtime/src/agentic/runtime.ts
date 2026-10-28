@@ -1,4 +1,6 @@
 import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReconciliationReportSchema, ownsCancellationPane, ownsCancelledAllocation, type CancellationStopProof, type CancellationReconciliationReport } from "./cancellation-stop.js";
+import { actionVersion } from "../interaction/actions.js";
+import { WebCommandSchema, type WebCommand } from "@bflow/contracts";
 import { assertAcceptedWorkflowSelection, assertRunExecutionPlan, bindAcceptedExecutionPlan, ExecutionPlanDriftError, publicExecutionRun } from "./execution-binding.js";
 import { HandoverBindingSchema, TaskHandoverStore, admitHandover, selectHandover, handoverRevision, type HandoverBinding } from "./task-handover.js";
 import { readWorkflowTelemetry } from "../telemetry/report.js";
@@ -1928,10 +1930,16 @@ export class AgenticWorkflowRuntime {
         }
     await save();
   }
-  async resumeBlockedRun(runIdInput: string, actionIdInput: string, options: { automatic?: boolean; conversationUserMessageId?: string } = {}): Promise<JsonValue> {
+  async resumeBlockedRun(runIdInput: string, actionIdInput: string, options: { automatic?: boolean; conversationUserMessageId?: string; webCommand?: Extract<WebCommand, { kind: "resume" }> } = {}): Promise<JsonValue> {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
+      if (options.webCommand) {
+        const command = WebCommandSchema.parse(options.webCommand);
+        if (options.automatic || options.conversationUserMessageId || command.kind !== "resume" || command.runId !== runId || command.actionId !== actionId ||
+          digest(command.expectedVersion) !== digest(actionVersion(run, "resume"))) throw new Error("Stale web resume version or action");
+      }
+      const explicitId = options.conversationUserMessageId ?? options.webCommand?.commandId;
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before resume");
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
@@ -1940,10 +1948,10 @@ export class AgenticWorkflowRuntime {
       // An automatic wake is not the user's explicit operational request. Keep its immutable delivery,
       // but allow a separately identified manual continuation even while that wake is queued/accepted.
       const priorWake = priorResume && state.outbound.find(item => item.message.message_id === priorResume.messageId);
-      const retiredToResume = !options.automatic && options.conversationUserMessageId ? state.outbound.filter(item =>
+      const retiredToResume = !options.automatic && explicitId ? state.outbound.filter(item =>
         item.message.run_id === runId && item.phaseRetirement && !item.phaseRetirement.resumeAuthorizedBy) : [];
-      const physicalAfterModel = !options.automatic && options.conversationUserMessageId !== undefined && priorWake !== undefined &&
-        record(priorWake.message.payload).conversationUserMessageId === undefined;
+      const physicalAfterModel = !options.automatic && explicitId !== undefined && priorWake !== undefined &&
+        record(priorWake.message.payload).conversationUserMessageId === undefined && record(priorWake.message.payload).webCommandId === undefined;
       const explicitAfterAutomatic = !options.automatic && action?.actionId === actionId && action.kind === "resume_coordinator" &&
         (priorWake !== undefined && record(priorWake.message.payload).automatic === true || physicalAfterModel || retiredToResume.length > 0);
       const retryUnsent = action?.actionId === actionId && action.state === "pending" &&
@@ -1951,10 +1959,10 @@ export class AgenticWorkflowRuntime {
           out.message.message_id === id && out.status === "failed" && out.error?.includes(RoleCapabilityPreflightError.name)));
       // A receipt answers a repeated call for the episode it settled; the same identity pending again (a recurrence) is a new episode.
       const recurred = run.status === "escalated" && action?.actionId === actionId && action.state === "pending";
-      const repeatedPhysicalTurn = options.conversationUserMessageId !== undefined && priorWake !== undefined &&
-        record(priorWake.message.payload).conversationUserMessageId === options.conversationUserMessageId;
+      const repeatedPhysicalTurn = explicitId !== undefined && priorWake !== undefined &&
+        (options.webCommand ? record(priorWake.message.payload).webCommandId : record(priorWake.message.payload).conversationUserMessageId) === explicitId;
       if (priorResume && (repeatedPhysicalTurn || !retryUnsent && !recurred && !explicitAfterAutomatic)) {
-        if (!options.automatic && options.conversationUserMessageId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
+        if (!options.automatic && explicitId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
         return json({ queued: true, messageId: priorResume.messageId, actionId });
       }
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
@@ -2016,8 +2024,8 @@ export class AgenticWorkflowRuntime {
       }
       const baseResumeKey = retiredToResume.length
         ? [runId, action.actionId, "retired", retiredToResume.map(item => item.message.message_id)]
-        : options.conversationUserMessageId
-          ? [runId, action.actionId, "physical", options.conversationUserMessageId]
+        : explicitId
+          ? [runId, action.actionId, options.webCommand ? "web" : "physical", explicitId]
           : explicitAfterAutomatic
             ? [runId, action.actionId, "explicit"]
             : [runId, action.actionId];
@@ -2038,7 +2046,8 @@ export class AgenticWorkflowRuntime {
           sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
           payload: { kind: "resume_run", actionId: action.actionId, reason: action.reason,
             ...(options.automatic ? { automatic: true, attempt: (action.resumeAttempts ?? 0) + 1, limit: AUTO_RESUME_LIMIT } : { automatic: false,
-              ...(options.conversationUserMessageId ? { conversationUserMessageId: textField(options.conversationUserMessageId) } : {}) }),
+              ...(options.conversationUserMessageId ? { conversationUserMessageId: textField(options.conversationUserMessageId) } : {}),
+              ...(options.webCommand ? { webCommandId: options.webCommand.commandId } : {}) }),
             diagnosticFences: (run.nativeDiagnosticFences ?? []).map(item => ({ operationId: item.operationId, disposition: item.disposition, delivery: "unknown_delivery", resendAllowed: false })),
             next: options.automatic
               ? "Runtime resumed this run automatically (bounded). Inspect the durable blocker, then record the next workflow action through Runtime; if only a human can decide, use request_user_decision instead of stopping."
@@ -2065,8 +2074,8 @@ export class AgenticWorkflowRuntime {
       if (priorResume) priorResume.messageId = messageId;
       else run.resumeReceipts.push({ actionId, messageId });
       if (run.resumeReceipts.length > 50) run.resumeReceipts.shift();
-      for (const retired of retiredToResume) retired.phaseRetirement!.resumeAuthorizedBy = textField(options.conversationUserMessageId);
-      if (!options.automatic && options.conversationUserMessageId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, messageId);
+      for (const retired of retiredToResume) retired.phaseRetirement!.resumeAuthorizedBy = textField(explicitId);
+      if (!options.automatic && explicitId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, messageId);
       await this.recoverPhaseFailures(state, save, outbox);
       await save();
       return json({ queued: true, messageId, actionId: action.actionId });

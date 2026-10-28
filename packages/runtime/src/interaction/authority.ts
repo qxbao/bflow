@@ -5,7 +5,7 @@ import { canonicalWebJson, WebPrincipalSchema, webCommandFingerprint, type WebPr
 
 // Private owner-composition input. This is deliberately not a role tool, browser
 // payload, persisted trust root, or public contracts amendment.
-const OwnerKeySchema = z.object({
+export const OwnerKeySchema = z.object({
   issuerId: IdentifierSchema, keyId: IdentifierSchema, principalId: IdentifierSchema,
   projectId: IdentifierSchema, hostSessionId: IdentifierSchema, publicKey: z.string().min(1).max(16384),
 }).strict();

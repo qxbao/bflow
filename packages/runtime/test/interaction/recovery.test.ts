@@ -1,8 +1,8 @@
-import { mkdtemp, rm, readdir, readFile, writeFile, chmod, symlink } from "node:fs/promises";
+import { mkdtemp, rm, readdir, readFile, writeFile, chmod, symlink, open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { WebInteractionAuthority } from "../../src/interaction/authority.js";
 import { WebOperationStore } from "../../src/interaction/operation-store.js";
 import { fixture, now } from "./web-command-fixtures.js";
@@ -108,4 +108,21 @@ it("allows observation-proven resolution after explicitly recording uncertain de
   const recovered = new WebOperationStore(f.options);
   await recovered.settle("local-user-1", f.command.commandId, resolved);
   expect(await recovered.read("local-user-1", f.command.commandId)).toEqual(resolved);
+});
+it("does not acknowledge an intent if proof expires during storage admission", async () => {
+  const f = await setup(); let checks = 0;
+  const authority = new WebInteractionAuthority("project-1", "host-1", () => ++checks === 1 ? now : now + 60001);
+  authority.registerOwnerKey(f.registration);
+  await expect(f.store.accept(f.command, f.proof(), authority)).rejects.toThrow();
+  expect(await f.store.read("local-user-1", f.command.commandId)).toBeUndefined();
+});
+it("cleans private temporary receipt when file sync fails before publication", async () => {
+  const f = await setup(), probe = join(f.directory, "probe");
+  const handle = await open(probe, "wx", 0o600), prototype = Object.getPrototypeOf(handle);
+  await handle.close(); await rm(probe);
+  const sync = vi.spyOn(prototype, "sync").mockRejectedValueOnce(new Error("Fixture disk sync failure"));
+  try {
+    await expect(f.store.accept(f.command, f.proof(), f.authority)).rejects.toThrow(/sync/);
+    expect(await readdir(f.directory)).toEqual([]);
+  } finally { sync.mockRestore(); }
 });

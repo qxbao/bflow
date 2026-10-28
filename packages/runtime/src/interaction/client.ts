@@ -6,11 +6,13 @@ import {
   WebRunPageResultSchema,
   WebRunViewResultSchema,
   WebDecisionPageResultSchema,
+  WebCommandSchema, WebOperationResponseSchema, type WebCommand,
   type UserInteractionClient,
   type OperationResult,
 } from "@bflow/contracts";
-import { queryAgenticHostInteraction } from "../agentic/host-controller.js";
-import { InteractionQuerySchema } from "./schemas.js";
+import { queryAgenticHostInteraction, callUserInteractionHost } from "../agentic/host-controller.js";
+import { WebPrincipalSchema } from "@bflow/contracts/web-host";
+import { InteractionQuerySchema, InteractionOperationSchema } from "./schemas.js";
 /** Registry adapters must use the canonical repository path, never browser-supplied project IDs. */
 export function interactionProjectId(canonicalRepositoryPath: string): string {
   return (
@@ -37,10 +39,13 @@ const refused = <T>(): OperationResult<T> => ({
     message: "Interaction method or scope is not supported.",
   },
 });
-/** Read-only connection. It deliberately never calls ensureAgenticHost/openPersistedAgenticHost. */
+/** Existing-host connection. Mutations require a separately owner-registered
+ * user-interaction credential and signer. Never starts/prepares a host. */
 export async function openUserInteractionClient(options: {
   repositoryPath: string;
   sessionId: string;
+  /** Supplied only by owner-registered Local Server composition, never browser input. */
+  interaction?: { credential: string; sign(command: WebCommand): unknown | Promise<unknown> };
 }): Promise<UserInteractionClient> {
   const repositoryPath = await realpath(options.repositoryPath),
     sessionId = IdentifierSchema.parse(options.sessionId);
@@ -130,11 +135,28 @@ export async function openUserInteractionClient(options: {
             }
           : result;
       }),
-    async execute() {
-      return refused();
+    async execute(input) {
+      if (!options.interaction) return refused();
+      let command;
+      try { command = WebCommandSchema.parse(input); if (command.projectId !== projectId) return refused(); }
+      catch { return refused(); }
+      try {
+        const principal = WebPrincipalSchema.parse(await options.interaction.sign(command));
+        return WebOperationResponseSchema.parse(await callUserInteractionHost({ repositoryPath, sessionId },
+          options.interaction.credential, "interaction_execute", { command, principal }));
+      } catch {
+        return { ok: false, error: { code: "unknown_delivery", retryable: false, manualInterventionRequired: true,
+          message: "Interaction acknowledgement unavailable; observe the same operation before retrying.",
+          details: { operationId: command.commandId, reason: "reconciliation_required" } } };
+      }
     },
-    async readOperation() {
-      return refused();
+    async readOperation(id, operationId) {
+      if (!options.interaction || id !== projectId) return refused();
+      try {
+        const input = InteractionOperationSchema.parse({ projectId: id, operationId });
+        return WebOperationResponseSchema.parse(await callUserInteractionHost({ repositoryPath, sessionId },
+          options.interaction.credential, "interaction_operation", input));
+      } catch { return unavailable(); }
     },
     async *events() {
       throw new Error("Interaction events are not implemented (W05).");
