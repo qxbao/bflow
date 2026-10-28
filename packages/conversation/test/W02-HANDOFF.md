@@ -152,3 +152,36 @@ inbox settlement and authoritative effect reconciliation; it must run combined
 host tests, native/web opposite decisions/cancel races, fault windows and affected
 selection on the complete W02 branch. Callback true fixtures do not certify
 those integrations. Full W02 remains the parent/integrator's acceptance decision.
+
+## Independent whole-W02 review fix pass
+
+Follow-up source commit `3829f960e693255bf34bae1cea42484e4c7442b2`, based on
+Conversation handoff `1b2326e`. Two Important review findings fixed in one
+owner-scoped pass, with no Runtime/root/contracts edits:
+
+- A NEW web commandId cannot acquire the same exact approval target/run/
+  revision/generation while another structured intent or unknown-delivery
+  command reserves it. The scan happens before writing intent/calling the
+  host human-receipt callback. New generations are not indefinitely blocked
+  by old-generation records.
+- Callback/bridge `unknown_delivery`, `timeout`, `transport_unavailable`,
+  `corruption` and `cancelled` results retain unknown-delivery intent and
+  its authority reservation. They are not conclusive failed operations;
+  observation-only read returns undefined until authoritative resolution.
+  Explicit pre-effect validation refusal remains a committed failed result.
+
+Required RED: five callback variants (throw/unknown/timeout/transport/corruption)
+allowed the second callback or returned a non-conflict result. The missing
+same-resource reservation reproduced in every variant before source edits.
+GREEN regression also verifies a new generation can acquire authority.
+
+The old definitive-rejection fixture used transport_unavailable for a
+transport rejection. Under the accepted uncertainty policy that is ambiguous;
+the fixture now uses explicit validation refusal before enqueue to exercise
+the intended conclusive branch. No assertion was removed, timeout increased
+or test selection reduced.
+
+Final `TMPDIR=/tmp pnpm --filter @bflow/conversation test`: **PASS 280/280,
+11 files**, including 24 structured tests; its package script builds before
+testing. `git diff --check`: PASS. No live evidence claim. Parent owns combined
+Runtime acceptance/fault regressions and integration affected selection.
