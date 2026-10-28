@@ -64,6 +64,9 @@ No skill starts duplicate workers, mutates global provider settings or installs 
 | core | [inspect-repository](core/inspect-repository/SKILL.md) | coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
 | core | [understand-task](core/understand-task/SKILL.md) | conversation, coordinator, specifier, planner, architect |
 | core | [using-bflow](core/using-bflow/SKILL.md) | conversation, coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
+| data | [data-pipeline](data/data-pipeline/SKILL.md) | coordinator, specifier, architect, planner, developer, tester, reviewer, qa |
+| data | [data-contract](data/data-contract/SKILL.md) | coordinator, specifier, architect, planner, developer, tester, reviewer, qa |
+| data | [dbt-verification](data/dbt-verification/SKILL.md) | coordinator, developer, tester, reviewer, qa |
 | git | [integrate-changes](git/integrate-changes/SKILL.md) | coordinator |
 | git | [use-git-worktree](git/use-git-worktree/SKILL.md) | developer, coordinator, planner |
 | implementation | [fix-review-findings](implementation/fix-review-findings/SKILL.md) | developer |
@@ -95,6 +98,14 @@ No skill starts duplicate workers, mutates global provider settings or installs 
 | verification | [test-planning](verification/test-planning/SKILL.md) | tester, qa |
 
 ## Worked examples
+
+The data skills are optional task selections using exact reviewed catalog pins; they are not
+added to default role bindings and create no custom role, tool grant or warehouse authority.
+They distinguish directional structural drift from actual host-run data-quality evidence.
+The DC-01 execution scope is local dbt Core 1.10/manifest v12 and DuckDB snapshot validation;
+the Runtime library host path does not add daemon/CLI configuration wiring. Loading a skill
+or parsing dbt metadata is not an executed check, and a fixture pass is not warehouse/live
+acceptance. See each worked example for prerequisite and cleanup failure branches.
 
 Every skill has a `worked-example.md` bound into its content inventory, and verification/browser
 skills (`test-planning`, `review-code`, `security-review`, `browser-inspection` at `1.0.1`)

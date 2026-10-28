@@ -334,7 +334,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
     }
   });
 
-  it("[HARNESS / REAL CATALOG] verifies Superpowers routes, 33 catalog skills across 10 roles x 3 providers, and fail-closed missing tool enforcement", async () => {
+  it("[HARNESS / REAL CATALOG] verifies Superpowers routes, 36 catalog skills across 10 roles x 3 providers, and fail-closed missing tool enforcement", async () => {
     expect(superpowersInstallRoute("claude").command).toContain("plugin install superpowers");
     expect(superpowersInstallRoute("codex").command).toContain("codex plugin add superpowers");
     expect(superpowersInstallRoute("agy").command).toContain("agy plugin install https://github.com/obra/superpowers");
@@ -344,9 +344,10 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       source: "builtin",
       supportedCommands: SUPPORTED_CLI_COMMANDS
     });
-    expect(catalogSkills).toHaveLength(33);
+    expect(catalogSkills).toHaveLength(36);
 
     const bflowSkillIds = catalogSkills.map((s) => s.definition.skillId);
+    expect(bflowSkillIds).toEqual(expect.arrayContaining(["data-pipeline", "data-contract", "dbt-verification"]));
     const spValid = verifySuperpowersSkills(
       ["using-superpowers", "brainstorming", "test-driven-development", "systematic-debugging"],
       bflowSkillIds
@@ -372,7 +373,7 @@ describe("E15 — Group E: Tool Integrations, Role Skills & Unified Commands (Ha
       });
     }
     const installedList = await skillManager.list();
-    expect(installedList).toHaveLength(33);
+    expect(installedList).toHaveLength(36);
 
     const bindingsRaw = JSON.parse(readFileSync(join(skillsCatalogRoot, "roles/bindings.json"), "utf8")) as unknown;
     const parsedBindings = RoleSkillBindingsSchema.parse(bindingsRaw);

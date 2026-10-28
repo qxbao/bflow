@@ -1833,3 +1833,13 @@ Runtime sở hữu, chưa nằm trong `@bflow/contracts` (quyết định hoãn 
 Thiết kế và giới hạn: [handover-export-design.md](handover-export-design.md). Bằng chứng: source và
 test cục bộ (`test/handover/handover-export.test.ts`, `apps/cli/test/handover-binary.test.ts`), chưa
 có live Herdr/provider hay full SDLC acceptance.
+
+## Data contract drift and dbt snapshot checks (DC-01)
+
+The opt-in `DataVerificationHost` library entry point separates directional structural drift
+from actual dbt/DuckDB snapshot data-quality execution and ingests host-measured evidence
+through ArtifactStore. Contract/specification revision/digest and current approval are pinned;
+stale/superseded authority blocks acceptance. Linux Bubblewrap is required; missing tools and
+unsupported checks are prerequisite gaps. This does not add daemon/CLI configuration wiring,
+execute arbitrary candidate SQL or establish warehouse/live acceptance. See
+[adapter inputs, evidence, reproduction and limits](DATA-VERIFICATION.md).
