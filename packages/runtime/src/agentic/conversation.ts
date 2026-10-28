@@ -5,6 +5,7 @@ import {
 import { digest, json, record, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { validateUserDecisionAnswer } from "./decision-routing.js";
+import { assertPrototypeDecision, prototypeApproval, type PrototypeRecord } from "./prototype-review.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 
 export interface AgenticConversationHost {
@@ -65,6 +66,11 @@ export async function createAgenticConversationHost(options: {
       // A reply for an already answered/expired request is refused here, not queued for Runtime to reject later.
       if (userDecision.status !== "pending") throw new Error("User decision is no longer pending");
       validateUserDecisionAnswer(ApprovalRequestSchema.parse(userDecision.request), decision, new Date().toISOString());
+    } else if (prototypeApproval(run.prototype as PrototypeRecord | undefined, decision.approvalId)) {
+      // Prototype reviews have their own approvals; one is never matched against the design/task/delivery slot.
+      const entry = prototypeApproval(run.prototype as PrototypeRecord, decision.approvalId)!;
+      if (entry.status !== "pending") throw new Error("Prototype approval is no longer pending");
+      assertPrototypeDecision(entry, decision, new Date().toISOString());
     } else {
       const request = ApprovalRequestSchema.parse(run.approval);
       if (request.approvalId !== decision.approvalId || request.runId !== decision.runId || request.sessionId !== decision.sessionId ||

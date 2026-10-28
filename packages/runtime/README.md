@@ -1613,3 +1613,62 @@ platform options (`dependencyApprovals` on the SkillManager request). These exac
 IDs authorize only dependencies reached by the shared resolver. They never select an additional
 skill, and every reached dependency still passes the current machine approval's role/provider,
 repository/session, content/dependency pin and expiration checks.
+
+### Prototype review tùy chọn trước thiết kế chi tiết
+
+Nhánh này chỉ chạy khi Coordinator gọi `propose_prototype`; run không dùng prototype giữ nguyên
+đường `propose_workflow` → design approval → implementation → delivery. Không có workflow engine
+thứ hai: state nằm trong `RunRecord.prototype` (journal private, schema version 1 trong
+`src/agentic/prototype-review.ts`), quyết định đi qua `approval.decision` của Conversation hiện có.
+
+- **Scope nhẹ được chấp nhận**: mục đích, luồng cần chứng minh, `allowedPaths` dưới vùng logic
+  `prototype/`, artifact dự kiến, tiêu chí riêng của prototype, `disposition` (`throwaway` |
+  `evolvable`), `environment: "mock"`, `dataPolicy` (`synthetic` | `anonymized_fixture`),
+  `maxRevisions`. Schema strict: trường lạ (ví dụ deploy) bị từ chối. Tiêu chí prototype không được
+  trùng ID tiêu chí nghiệm thu của sản phẩm.
+- **Artifact**: `submit_prototype` chỉ lưu file vào ArtifactStore (`taskId: "prototype"`) kèm manifest
+  canonical; không ghi repository, không deploy. Từ chối file ngoài vùng, luồng không khai báo/không
+  được chứng minh, nội dung giống credential và URL tới host thật (chỉ cho loopback, `0.0.0.0`,
+  `.test`/`.example`/`.invalid`/`.localhost`). Định danh `xmlns` và DOCTYPE public (không có internal
+  subset) không bị coi là endpoint. Bộ quét credential riêng cho prototype (không dùng bộ che giấu log):
+  từ chối dạng secret đã biết (khóa provider, JWT, PEM, `user:pass@` trong URL) ở mọi vị trí và mọi
+  giá trị của key nhạy cảm (`password`, `token`, `api_key`, `Authorization`…, kể cả trong query của
+  thuộc tính HTML) trừ mặt nạ/ô template (`****`, `<token>`, `{{token}}`, `${token}`) hoặc chữ thường
+  không có chữ số (`Pending`, `Đang chờ`). Sau `Bearer`/`Basic` chỉ chấp nhận mặt nạ/ô template.
+  Tối đa 20 phiên bản scope và 50 phiên bản artifact.
+- **Approval riêng**: ID `prototype-…`, target `task/prototype`, `revision` = phiên bản artifact,
+  `generation` = phiên bản scope; metadata ghi digest manifest, luồng cần xem/luồng giữ duyệt cũ,
+  `approves: "prototype_only"`, `provesAcceptanceCriteria: false`. Chỉ người được `authorizeHuman`
+  duyệt; trước khi duyệt Runtime kiểm lại checksum mọi artifact. Card Conversation tách rõ
+  "đồng ý", "cần sửa <góp ý>" (`changes_requested`), "đổi yêu cầu <nội dung>" (`changes_requested`
+  kèm `metadata.feedbackKind: "specification_revision"`, chỉ khi trả lời có nêu mã approval prototype),
+  "từ chối vì <lý do>" (`rejected`) và "hủy việc".
+- **Quyết định**: `approved` ghi `acceptance` (approvalId, version, manifestDigest, scope, người duyệt,
+  thời điểm, luồng); run sang `planning`, không tạo design approval hay Core aggregate. `changes_requested`
+  ghi feedback `prototype_revision` (hoặc `specification_revision_proposal` khi decision metadata có
+  `feedbackKind: "specification_revision"`), không sửa yêu cầu đã chấp nhận. Với đề xuất sửa
+  specification, Runtime đánh thức Coordinator (`prototype_specification_revision_proposed`) và báo
+  người dùng rằng yêu cầu chưa đổi; thay đổi chỉ có hiệu lực khi Conversation gửi requirement revision
+  (supersede prototype hiện tại). Vượt `maxRevisions` thì
+  `escalated`. `rejected` kết thúc run `failed`. Hủy run đóng approval đang chờ.
+- **Approval cũ**: artifact mới supersede approval đang chờ; sau khi đã duyệt, chỉ luồng có digest
+  nội dung không đổi giữ duyệt cũ, luồng thay đổi phải duyệt lại và `acceptance` bị thu hồi. Sửa scope
+  hoặc revision yêu cầu supersede toàn bộ (revision yêu cầu đưa ID vào `supersededApprovals`).
+  Prototype bị supersede bởi revision yêu cầu không chặn và không làm đầu vào cho thiết kế của
+  revision mới; Coordinator có thể mở prototype mới cho revision đó.
+  Quyết định trễ cho approval không còn pending bị từ chối ở cả `queueHerdr` và `receiveHerdr`.
+- **Thiết kế chính thức**: `propose_workflow` bị từ chối khi prototype chưa `accepted` hoặc
+  `acceptance` không khớp artifact/scope hiện tại. Design approval là approval riêng, chỉ mang
+  `metadata.prototype` (`inputOnly: true`) và manifest làm evidence. Task có
+  `metadata.retainsPrototype: true` chỉ hợp lệ với prototype `evolvable` đã duyệt; fast-path bị tắt
+  để code giữ lại qua verification đầy đủ. Sau khi design được đề xuất, prototype đóng băng.
+- **Retry/restart**: gửi lại đúng nội dung (kể cả sau restart) không tạo version hay `approval.request`
+  mới; gửi lại nội dung đã bị yêu cầu sửa bị từ chối. Approval đang chờ được trả lại qua
+  `pendingApprovals` để Conversation reconcile.
+
+Giới hạn: prototype do Coordinator nộp trực tiếp (nội dung từ specialist hoặc tự soạn), không có
+Developer worktree riêng cho prototype; kiểm tra "dữ liệu thật" là heuristic (credential, host ngoài)
+chứ không chứng minh nguồn dữ liệu: cụm chữ không có chữ số (ví dụ passphrase) hoặc secret không gắn
+nhãn vẫn có thể lọt. Watchdog chưa resurface riêng approval prototype; Conversation
+lấy lại qua `reconcileApprovals`. Bằng chứng: source và test cục bộ
+(`test/agentic/prototype-review.test.ts`), chưa có live Herdr/provider acceptance.

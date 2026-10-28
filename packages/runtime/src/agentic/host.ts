@@ -2355,6 +2355,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     inspect:{properties:{runId:string,view:{type:"string",enum:["full","summary","status","tasks","blockers"]},taskId:string,cursor:{type:"string",minLength:1,maxLength:128}},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
     assess:{properties:{specification:assessmentSpecificationToolSchema},required:["specification"]},
     request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array},required:["runId","role","objective","requiredCapabilities"]},
+    propose_prototype:{properties:{runId:string,scope:object},required:["runId","scope"]},
+    submit_prototype:{properties:{runId:string,submission:object},required:["runId","submission"]},
     propose_workflow:{properties:{runId:string,specification:specificationToolSchema,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},
     reconcile_delivery:{properties:{messageId:string},required:["messageId"]}, authorize_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
     accept_conflict_resolution:{properties:{runId:string,taskKey:string,resolutionCommitHash:string},required:["runId","taskKey","resolutionCommitHash"]},

@@ -62,5 +62,6 @@
 | --- | --- | --- |
 | `P02-RA01` | Herdr adapter | Large runner timeout overflow; vẫn open P2, không đóng từ tài liệu |
 | `P03-RA01` | ArtifactStore | Late final `get()` chunk sau deadline/abort; vẫn open P2 |
+| Prototype review | Runtime / Conversation | Source + local tests; chưa có live provider/Herdr. Coordinator nộp mock trực tiếp, chưa có Developer worktree riêng cho prototype. Chặn dữ liệu thật là heuristic (credential, host ngoài), không chứng minh nguồn dữ liệu; cụm chữ không có chữ số hoặc secret không gắn nhãn vẫn có thể lọt. Watchdog chưa nhắc lại riêng approval prototype (Conversation lấy lại qua reconcile). Đề xuất sửa specification ("đổi yêu cầu") chỉ được nhận khi trả lời có nêu mã approval prototype; Runtime không tự tạo requirement revision |
 | `RR-16` | Runtime / observability | Helpers/logging không chứng minh quan sát toàn tuyến trong full provider workflow |
 | Third-party licenses | Setup / release owner | AGPL-3.0-only của Bflow không thay giấy phép tool/service được tích hợp; installer catalog và upstream terms vẫn áp dụng |

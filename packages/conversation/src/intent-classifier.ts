@@ -42,7 +42,7 @@ const APPROVAL_TOKEN_REGEX = /(?<![\w-])[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9_-]+/g;
  * Only a decision-shaped answer counts, so "run-123: trạng thái?" stays an ordinary question.
  */
 const LEADING_APPROVAL_ID_REGEX =
-  /^\s*([A-Za-z][A-Za-z0-9]*-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})\s*[:：]\s*(?:\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|từ chối|không duyệt|cần sửa)/iu;
+  /^\s*([A-Za-z][A-Za-z0-9]*-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})\s*[:：]\s*(?:\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|từ chối|không duyệt|cần sửa|(?:đề xuất\s+)?(?:đổi|thay đổi|sửa)\s+yêu cầu)/iu;
 
 /**
  * A leading short card alias `#1: ...` or `#2 1` addressing a numbered card.
@@ -55,6 +55,9 @@ const LEADING_SHORT_ID_REGEX =
  * prefix (`apr-…`, `design-…`, or `#n` mapped via `approvalShortIds`). An unknown `apr-…`, `#n`, or leading `<id>:`
  * is still returned, so it is refused instead of falling back to another pending approval.
  */
+/** Leading phrase of a reply that proposes changing accepted requirements rather than fixing a prototype. */
+const SPECIFICATION_REVISION_REGEX = /^(?:đề xuất\s+)?(?:đổi|thay đổi|sửa)\s+yêu cầu(?!\p{L})/iu;
+
 export function namedApprovalId(text: string, context: ConversationContextSnapshot): string | undefined {
   const shortMatch = LEADING_SHORT_ID_REGEX.exec(text)?.[1];
   if (shortMatch !== undefined) {
@@ -274,6 +277,13 @@ function detectApproval(
     decision = "approved";
   }
 
+  // On a named prototype review, a reply that starts with a requirement change proposes a specification revision instead of
+  // a prototype fix. It never edits accepted requirements; Runtime records it and asks for an explicit requirement revision.
+  const namedRequest = namedId !== undefined ? context.pendingApprovals[namedId] : undefined;
+  const specificationRevision = namedRequest?.metadata?.["kind"] === "prototype_review" &&
+    SPECIFICATION_REVISION_REGEX.test(normalizeForMatching(withoutApprovalId(rawContent, namedId)));
+  if (specificationRevision) decision = "changes_requested";
+
   if (!decision) {
     return { matched: false };
   }
@@ -291,7 +301,8 @@ function detectApproval(
   const approvalInput: ExtractedApprovalInput = {
     ...(explicitId !== undefined ? { approvalId: explicitId } : {}),
     decision,
-    ...(reason !== undefined ? { reason } : {})
+    ...(reason !== undefined ? { reason } : {}),
+    ...(specificationRevision ? { feedbackKind: "specification_revision" as const } : {})
   };
 
   const pendingReq = explicitId ? context.pendingApprovals[explicitId] : undefined;
@@ -885,6 +896,7 @@ export function classifyTrustedApprovalReply(
   const completeDecision = /^(?:(?:tôi|i)\s+)?(?:approve(?:d)?|lgtm|phê duyệt|đồng ý(?: duyệt)?|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|reject(?:ed)?|decline|từ chối|không đồng ý|không duyệt|bác bỏ|request changes|changes requested|changes_requested|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi)$/iu.test(reply);
   const targetedReason = (namesPendingRequest || endsWithPendingRequest) &&
     /^(?:(?:tôi|i)\s+)?(?:reject(?:ed)?|decline|từ chối|không đồng ý|không duyệt|bác bỏ|request changes|changes requested|changes_requested|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi)(?!\p{L})/iu.test(reply);
+  const targetedSpecificationRevision = namesPendingRequest && approval?.feedbackKind === "specification_revision";
   const targetedSpecialistAnswer = namesPendingRequest && namedRequest !== undefined && isUserDecisionRequest(namedRequest);
   const pendingDesigns = Object.values(context.pendingApprovals).filter(request => !isUserDecisionRequest(request));
   const unambiguousTarget = namedRequest !== undefined || pendingDesigns.length === 1 || Object.keys(context.pendingApprovals).length === 1;
@@ -892,7 +904,7 @@ export function classifyTrustedApprovalReply(
   const numberedChoice = approval?.approvalId !== undefined && context.pendingApprovals[approval.approvalId] !== undefined &&
     !isUserDecisionRequest(context.pendingApprovals[approval.approvalId]!) && NUMBERED_APPROVAL_CHOICE_REGEX.test(reply) &&
     !/\n/u.test(reply);
-  return (completeDecision || targetedReason || targetedSpecialistAnswer || numberedChoice) && unambiguousTarget ? classified : undefined;
+  return (completeDecision || targetedReason || targetedSpecificationRevision || targetedSpecialistAnswer || numberedChoice) && unambiguousTarget ? classified : undefined;
 }
 
 /** Pending approval ids named at the start of each line ("<id>: …"), or anywhere in a single-line reply. */
