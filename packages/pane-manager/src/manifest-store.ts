@@ -6,7 +6,8 @@ import {
   type OperationOptions,
   type OperationResult,
   type SessionManifest,
-  SessionManifestSchema
+  SessionManifestSchema,
+  canonicalReceiptJson
 } from "@bflow/contracts";
 import type { SessionManifestStore } from "./types.js";
 
@@ -32,7 +33,7 @@ function validateSafeSessionId(sessionId: string): ContractError | null {
 function snapshotConflict(previous: SessionManifest | null | undefined, next: SessionManifest): ContractError | null {
   for (const snapshot of previous?.roleProfiles ?? []) {
     const retained = next.roleProfiles?.find(item => item.pin.profileId === snapshot.pin.profileId && item.pin.version === snapshot.pin.version);
-    if (!retained || JSON.stringify(retained) !== JSON.stringify(snapshot)) {
+    if (!retained || canonicalReceiptJson(retained) !== canonicalReceiptJson(snapshot)) {
       return { code: "conflict", retryable: true, message: "Session role profile snapshots are immutable; create a new session generation" };
     }
   }

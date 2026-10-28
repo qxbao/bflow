@@ -2,7 +2,7 @@
 
 Trạng thái: **OWNER APPROVED RP-01 / Specification / TDD required / integration scope**. Owner duyệt toàn bộ trong conversation ngày 2026-10-28: “tôi duyệt hết, cứ triển khai đến khi hoàn thành tất cả đi xong báo tôi sau”. Chỉ thị không commit/push/PR giữ nguyên. Implementation và evidence được theo dõi riêng; approval không phải bằng chứng tính năng đã chạy.
 Ngày khảo sát: 2026-10-28. Baseline: `e73dca70cb91bdd53fbe1fe9dfb69ccba8b6f8ff`.
-Branch: `agent/runtime/custom-role-profiles`. Worktree: `/Users/hongducc/orca/bflow-custom-role-profiles`.
+Branch: `agent/runtime/custom-role-profiles`. Worktree: a private integration worktree.
 HEAD trùng `origin/main` và `origin/duc` trong refs hiện có; local `main` chậm hơn. Baseline chứa P24 `8dbb056`; không fetch remote trong khảo sát này.
 Giai đoạn proposal không sửa public schema/config. Owner sau đó duyệt implementation và integration; chỉ thị không commit/push/PR vẫn áp dụng.
 

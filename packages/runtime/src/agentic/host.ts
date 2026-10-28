@@ -1622,7 +1622,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           try {
             binding = await principal(role, input.paneId);
           } catch (error) {
-            if (!platformSession?.hasActiveDeveloperLaunch(input.launchId)) throw error;
+            if (!platformSession?.activeLaunchBelongsTo(input.launchId, role)) throw error;
           }
         }
         const observed = binding ? undefined : await observeAgent(input.paneId);
@@ -1633,9 +1633,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const names = availableTools(role, providerForRole(role)).map(tool => tool.name).sort();
         if (digest([...input.toolNames].sort()) !== digest(names)) throw new Error("Provider tools/list does not match the authenticated Bflow role surface");
         const expectedLaunchId = binding ? platformSession?.bindingLaunchId(binding) : platformSession?.launchIdOf(role);
-        const validLaunchId = platformSession !== undefined && platformSession.hasActiveDeveloperLaunch(input.launchId)
-          ? true
-          : expectedLaunchId === input.launchId;
+        // A dynamic launch is only valid for the governance role it was prepared for; it never satisfies another role.
+        const validLaunchId = platformSession?.activeLaunchBelongsTo(input.launchId, role) === true ||
+          (expectedLaunchId === input.launchId && !(role === "developer" && platformSession !== undefined && expectedLaunchId === undefined));
         if (!validLaunchId) throw new Error("Provider tools/list belongs to another prepared launch");
         const path = providerToolsListPath(role, input.paneId);
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });

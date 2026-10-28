@@ -1,14 +1,14 @@
 # Custom specialist profiles — implementation evidence
 
-Date: 2026-10-28. Owner approved RP-01, RP-AC01–10, required TDD and cross-owner integration in session `01a17e66-7ec3-7233-bd3e-128327206613`: “tôi duyệt hết, cứ triển khai đến khi hoàn thành tất cả đi xong báo tôi sau”. This file supersedes the earlier proposal-only handoff. No commit, push or PR is authorized or performed.
+Date: 2026-10-28. Owner approved RP-01, RP-AC01–10, required TDD and cross-owner integration (approval recorded by the project owner in the authoring session; reviewers should confirm it on the PR). This file supersedes the earlier proposal-only handoff. No commit, push or PR is authorized or performed.
 
 ## Workspace and baseline
 
-- Integration worktree: `/Users/hongducc/orca/bflow-custom-role-profiles`.
+- Integration worktree: a private integration worktree.
 - Branch: `agent/runtime/custom-role-profiles`.
 - Tested HEAD/baseline: `e73dca70cb91bdd53fbe1fe9dfb69ccba8b6f8ff`; implementation is an **uncommitted diff**, including untracked source/tests.
 - Baseline contains P24 `8dbb056`. At original inspection cached `origin/main` and `origin/duc` matched HEAD; local `main` was behind. No fetch, remote mutation or history rewrite.
-- Original checkout `/Users/hongducc/orca/bflow` preserved. Leaf patches were imported from isolated worktrees; integration fixes use separate platform/tool worktrees and delta patches.
+- Original checkout the original checkout preserved. Leaf patches were imported from isolated worktrees; integration fixes use separate platform/tool worktrees and delta patches.
 - Node v22.17.1, pnpm 12.5.1, macOS. Orca CLI was unavailable at initial creation (`Unable to determine Orca.app path from symlink: /usr/local/bin/orca`), so the existing Git-worktree fallback was retained.
 - macOS canonical temp root `/private/tmp` is required by tests that intentionally reject symlinked ancestors. `/var` is a symlink on this host. Use `TMPDIR=/private/tmp` for the final suite; do not weaken those production checks.
 
@@ -27,7 +27,7 @@ Date: 2026-10-28. Owner approved RP-01, RP-AC01–10, required TDD and cross-own
 
 Independent reviewer inspected contracts, CLI, Runtime scheduler/outbox/workspace/tool paths, platform/skills/provider wiring and Pane Manager. Five important findings were reproduced and addressed: base tool-grant leakage from specialist launches; automatic QA/default pin bypass; drift during awaits; premature specialist pane destruction on transport completion; and model/effort defaults incorrectly treated as policy locks.
 
-Root RED logs are under `/tmp/bflow-role-profiles-{red,preparation-red,recovery-red,lifecycle-red}.log`. They record base-reviewer fallback, missing private feature version, forbidden effects after preparation, removed accepted pin/lineage being accepted, and pane cleanup before a result. The awaited-skill RED run was captured in the original transcript; `/tmp/bflow-role-profiles-review-tests.log` now contains the later GREEN rerun. Workers also recorded RED→GREEN for ingress, scope, exact skill/tool grants, launch joins, preference locks and actual host tool routing. Integrated smoke after the tool/preferences deltas: 133 tests in 4 suites passed, including the real Vitest reporter/runner tests. A linked dependency layout in the tool worker caused reporter sandbox-path failures there; the same integrated suite passed with the native installed dependency layout. No reporter rule was weakened.
+Root RED logs are under local RED logs that are not part of the repository. They record base-reviewer fallback, missing private feature version, forbidden effects after preparation, removed accepted pin/lineage being accepted, and pane cleanup before a result. The awaited-skill RED run was captured in the original transcript; `/tmp/bflow-role-profiles-review-tests.log` now contains the later GREEN rerun. Workers also recorded RED→GREEN for ingress, scope, exact skill/tool grants, launch joins, preference locks and actual host tool routing. Integrated smoke after the tool/preferences deltas: 133 tests in 4 suites passed, including the real Vitest reporter/runner tests. A linked dependency layout in the tool worker caused reporter sandbox-path failures there; the same integrated suite passed with the native installed dependency layout. No reporter rule was weakened.
 
 Targeted Runtime integration after the root fixes: **40 tests in 3 files passed**, including 21 RP-01 tests plus existing conflict/review/replacement compatibility. Tests use real Git worktrees, SQLite/File Registry/ArtifactStore and fake transport/provider boundaries; they do not certify live Herdr or model judgment.
 

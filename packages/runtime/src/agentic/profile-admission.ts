@@ -1,4 +1,4 @@
-import { RoleProfileCatalogSchema, RoleProfilePinSchema, ResolvedRoleProfileSnapshotSchema, sameRoleProfilePin,
+import { canonicalReceiptJson, RoleProfileCatalogSchema, RoleProfilePinSchema, ResolvedRoleProfileSnapshotSchema, sameRoleProfilePin,
   type RoleProfilePin, type ResolvedRoleProfileSnapshot, type TaskDefinition, type PaneBinding, type AgentSessionLocator, type ExecutorLineage
 } from "@bflow/contracts";
 
@@ -31,7 +31,7 @@ export function narrowProfileTask(task: TaskDefinition, snapshot: ResolvedRolePr
 export function assertProfileSnapshotCurrent(snapshot: ResolvedRoleProfileSnapshot, catalog: readonly ResolvedRoleProfileSnapshot[] | undefined): void {
   const parsed = ResolvedRoleProfileSnapshotSchema.parse(snapshot);
   const current = selectRoleProfile(catalog, parsed.definition.baseRole, parsed.pin);
-  if (JSON.stringify(current) !== JSON.stringify(parsed)) throw new Error("Pinned role profile snapshot drift; replan or restore the accepted profile");
+  if (current === undefined || canonicalReceiptJson(current) !== canonicalReceiptJson(parsed)) throw new Error("Pinned role profile snapshot drift; replan or restore the accepted profile");
 }
 export function assertProfileBinding(snapshot: ResolvedRoleProfileSnapshot | undefined, pane: PaneBinding): void {
   if (!sameRoleProfilePin(snapshot?.pin, pane.roleProfile) || snapshot && snapshot.definition.baseRole !== pane.role)

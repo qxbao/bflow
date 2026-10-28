@@ -27,7 +27,17 @@ function policyBytes(path: URL): string {
 }
 /** Bind actual installed policy bytes. Source tests must build first, as required by repository policy.
  * Compiled files are read as data only; no sibling package module is loaded by path. */
+const policyDigestCache = new Map<AgentRole, string>();
+/** Computed once per process: the digest binds the policy this process loaded, and rebuilding dist underneath a
+ * running host must not change it (a new process observes the new bytes and its snapshots are re-resolved). */
 export function baseRolePolicyDigest(role: AgentRole): string {
+  const cached = policyDigestCache.get(role);
+  if (cached !== undefined) return cached;
+  const computed = computeBaseRolePolicyDigest(role);
+  policyDigestCache.set(role, computed);
+  return computed;
+}
+function computeBaseRolePolicyDigest(role: AgentRole): string {
   const assetRole: Partial<Record<AgentRole, string>> = { conversation: "chat", coordinator: "coordinator", developer: "developer", reviewer: "reviewer",
     qa: "verifier", specifier: "analyst", architect: "architect", planner: "planner" };
   const builtinPrompt = assetRole[role] ? policyBytes(new URL(`../../../../agents/${assetRole[role]}/system-prompt.md`, import.meta.url)) : defaultRolePrompt(role);
@@ -45,7 +55,7 @@ export function assertRoleProfilePin(expected: RoleProfilePin | undefined, actua
 
 function safePath(path: string): boolean {
   return path.length > 0 && !path.startsWith("/") && !/[\\\0*?\[\]{}]/.test(path) &&
-    path.split("/").every(segment => segment.length > 0 && segment !== "." && segment !== ".." && segment !== ".git" && !segment.startsWith(".bflow"));
+    path.split("/").every(segment => segment.length > 0 && segment !== "." && segment !== ".." && segment.toLowerCase() !== ".git" && !segment.toLowerCase().startsWith(".bflow"));
 }
 const within = (path: string, root: string): boolean => path === root || path.startsWith(`${root}/`);
 
@@ -199,10 +209,12 @@ export async function persistRoleProfileSnapshot(identity: PlatformSessionIdenti
   await mkdir(directory, { recursive: true, mode: 0o700 });
   if (await realpath(directory) !== directory) throw new Error("role profile snapshot directory must not contain symlinks");
   const index = identityPath(identity, snapshot.pin);
-  const newIdentity = await publishImmutableJson(index, snapshot.pin);
+  await publishImmutableJson(index, snapshot.pin);
   try { assertRoleProfilePin(snapshot.pin, RoleProfilePinSchema.parse(await readPrivateJson(index)), "snapshot identity"); }
   catch { throw new Error("role profile snapshot ID/version conflict or corrupted identity proof"); }
-  if (newIdentity) await publishImmutableJson(file, snapshot);
+  // The snapshot file is digest-addressed and never replaced, so publishing is safe whenever the identity proof
+  // matches. This repairs an interrupted earlier call that wrote only the identity.
+  await publishImmutableJson(file, snapshot);
   const stored = await loadRoleProfileSnapshot(identity, snapshot.pin);
   if (canonicalReceiptJson(stored) !== canonicalReceiptJson(snapshot)) throw new Error("role profile snapshot conflicts with existing immutable proof");
   const parent = await open(directory, "r");

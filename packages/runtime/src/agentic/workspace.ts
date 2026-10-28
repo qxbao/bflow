@@ -283,13 +283,21 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       if (!rolePanes.allocateSpecialist) return { ok: false, error: { code: "validation", retryable: false, message: "Profile specialist allocation unsupported" } };
       await options.readExecutionResolution?.();
       let retained = specialists.get(request.taskId);
+      const fresh = !retained;
       if (!retained) {
         const launch = await options.specialistLaunches!.allocate(request);
         retained = { role: request.role, launch }; specialists.set(request.taskId, retained);
       }
-      await options.readExecutionResolution?.();
+      // A launch prepared in this call owns Gateway registrations. If no pane can be bound to it, revoke it now:
+      // authority is only narrowed, and a later retry prepares a new launch that Pane Manager reconciles by launch id.
+      const abandon = async (): Promise<void> => {
+        if (!fresh) return;
+        specialists.delete(request.taskId);
+        await options.specialistLaunches!.release(request.taskId);
+      };
+      try { await options.readExecutionResolution?.(); } catch (error) { await abandon(); throw error; }
       const allocated = await rolePanes.allocateSpecialist({ ...request, cwd: repository, agentKind: retained.launch.provider, launch: retained.launch }, operation);
-      if (!allocated.ok) return allocated;
+      if (!allocated.ok) { await abandon(); return allocated; }
       retained.pane = allocated.value;
       const topology = await rolePanes.inspectTopologyHealth(operation);
       if (!topology.ok) return topology;

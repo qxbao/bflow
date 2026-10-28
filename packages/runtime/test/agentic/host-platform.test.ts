@@ -83,6 +83,15 @@ async function profiledToolSession(restrictions: NonNullable<Parameters<typeof r
 }
 
 describe("profiled tool launch authority", () => {
+  it("binds an active dynamic launch to the single governance role it was prepared for", async () => {
+    const f = await profiledToolSession();
+    const launchId = f.host.bindingLaunchId(f.binding)!;
+    expect(f.host.activeLaunchBelongsTo(launchId, "reviewer")).toBe(true);
+    for (const role of ["developer", "qa", "coordinator", "conversation"] as const)
+      expect(f.host.activeLaunchBelongsTo(launchId, role)).toBe(false);
+    expect(f.host.activeLaunchBelongsTo(undefined, "reviewer")).toBe(false);
+    expect(f.host.activeLaunchBelongsTo("unknown-launch", "reviewer")).toBe(false);
+  });
   it.each([false, true])("routes specialist tools to the dedicated allocation and freshness check (reconcile=%s)", async reconcile => {
     const f = await profiledToolSession();
     const result = await f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", reconcile,

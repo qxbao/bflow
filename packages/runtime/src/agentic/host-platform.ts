@@ -545,6 +545,12 @@ export class HostPlatformSession {
     return typeof launchId === "string" && ([...this.developerLaunches.values()].includes(launchId) || this.profiledLaunches.has(launchId));
   }
 
+  /** An active dynamic launch (Developer or profiled specialist) belongs to exactly one governance role. */
+  activeLaunchBelongsTo(launchId: string | undefined, role: AgentRole): boolean {
+    if (typeof launchId !== "string" || !this.hasActiveDeveloperLaunch(launchId)) return false;
+    return (this.profiledLaunches.get(launchId)?.role ?? "developer") === role;
+  }
+
   /** Native transcript access is bound to a live Agy launch and its exact prepared config home. */
   nativeAgyLaunch(role: AgentRole, launchId: string): { home: string; launchId: string } | undefined {
     const binding = this.nativeAgyHomes.get(launchId);

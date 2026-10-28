@@ -14,7 +14,7 @@ export type RoleProfilePin = z.infer<typeof RoleProfilePinSchema>;
 
 const pathScope = z.string().min(1).max(1000).refine(value => !value.startsWith("/") && !/[\\\0*?\[\]{}]/.test(value) &&
   value.split("/").every(segment => segment.length > 0 && segment !== "." && segment !== "..") &&
-  !value.split("/").includes(".git") && !value.startsWith(".bflow"), "scope must be a safe repository-relative file/directory prefix");
+  !value.split("/").some(segment => segment.toLowerCase() === ".git") && !value.toLowerCase().startsWith(".bflow"), "scope must be a safe repository-relative file/directory prefix");
 const uniqueStrings = (schema: z.ZodType<string>) => z.array(schema).max(1000).refine(values => new Set(values).size === values.length, "duplicates are forbidden");
 const ToolRestriction = z.object({ toolId: IdentifierSchema, operations: uniqueStrings(IdentifierSchema) }).strict();
 const tools = z.array(ToolRestriction).max(1000).refine(values => new Set(values.map(v => v.toolId)).size === values.length, "tool IDs must be unique");

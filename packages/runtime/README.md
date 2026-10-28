@@ -23,6 +23,29 @@ remaining network allowlists and unmediated native write subtrees are unsupporte
 backend cannot enforce them. Developer feedback subprocesses with narrowed write scope are
 blocked; independent owner verification retains its own policy. Profiles never grant tools.
 
+Known limits and operating notes:
+
+- **Instruction trust.** A profile's `additionalInstructions` and its exact pin both live in the
+  repository. The pin detects change, not authenticity; unlike skills there is no machine-owned approval
+  receipt. Anyone who can write the repository can add instructions to any specialist, including
+  Reviewer/QA. Profiles still only narrow permissions and never replace independent gates, but treat
+  profile files like prompts and review them as code.
+- **Write scopes.** `restrictions.writablePaths` is enforceable only where the backend can mediate it:
+  `restricted` mode (read-only), an empty intersection (read-only), or Agy host-mediated writes. A
+  non-empty writable subtree on Codex/Claude in `workspace_auto` is rejected as unsupported.
+- **Policy digest.** `baseRolePolicyDigest` binds the installed prompt and compiled host/provider policy
+  bytes and is computed once per process. Rebuilding or upgrading changes it for new processes, so
+  pinned snapshots are re-resolved rather than silently accepted; rebuild between sessions, not during.
+- **Dynamic launches are process-local.** Profiled launches, tool allocations and retained specialist
+  launches live in host memory. After a daemon restart they are retired, not recreated; a retired
+  profiled pane requires fresh startup/reconciliation. A launch prepared for an allocation that cannot be
+  bound to a pane is revoked immediately.
+- **Release order.** A profiled specialist is marked released in the session manifest before its pane is
+  closed, so an interrupted release recovers as a released allocation instead of blocking recovery.
+- **Wider behavior.** Non-conversation, non-coordinator roles now receive the original built-in prompt
+  first and host instructions after it, and every Reviewer/QA/Tester dispatch checks executor
+  independence against implementation history, with or without profiles.
+
 Daemon restart keeps pinned workflow/snapshot evidence but preserves the existing retirement
 of previous live launch authority; it does not recreate tokens or prove a process stopped.
 See [the approved design](custom-role-profiles-design.md) and

@@ -115,6 +115,7 @@ describe("custom role profile policy", () => {
   });
   it("uses component boundaries and refuses traversal, absolute and metadata paths", () => {
     expect(profilePathAllowed("src/api/new.ts", ["src/api"])).toBe(true);
+    for (const path of [".Git/hooks/pre-commit", ".GIT/config", ".BFLOW/config.yml", ".Bflow/state"]) expect(profilePathAllowed(path, undefined)).toBe(false);
     for (const path of ["src/apis/file.ts", "src/api/../secret", "/src/api", "src/api//file", "src/api/.git/config", "src/api\\file"])
       expect(profilePathAllowed(path, ["src/api"])).toBe(false);
     expect(profilePathAllowed("src/api/token", ["src"], ["src/api"])).toBe(false);
@@ -158,8 +159,13 @@ describe("custom role profile policy", () => {
       await writeFile(file, JSON.stringify({ ...profile(), definition: { ...profile().definition, additionalInstructions: "tampered" } }));
       await expect(loadRoleProfileSnapshot(identity, profile().pin)).rejects.toThrow(/snapshot/i);
       await expect(persistRoleProfileSnapshot(identity, profile())).rejects.toThrow(/snapshot/i);
+      // Interrupted publish: identity proof exists but the digest-addressed snapshot is missing. Persisting repairs it
+      // from the exact pinned definition; loading alone must still refuse to resolve a new profile.
       await rm(file);
-      await expect(persistRoleProfileSnapshot(identity, profile())).rejects.toThrow(/snapshot/i);
+      await expect(loadRoleProfileSnapshot(identity, profile().pin)).rejects.toThrow(/snapshot/i);
+      await persistRoleProfileSnapshot(identity, profile());
+      expect(await loadRoleProfileSnapshot(identity, profile().pin)).toEqual(profile());
+      await expect(persistRoleProfileSnapshot(identity, profile({ additionalInstructions: "same version changed bytes" }))).rejects.toThrow(/snapshot/i);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });

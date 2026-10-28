@@ -17,7 +17,8 @@ import {
   RoleProfilePinSchema,
   sameRoleProfilePin,
   ROLE_PROFILE_FEATURE,
-  SessionManifestSchema
+  SessionManifestSchema,
+  canonicalReceiptJson
 } from "@bflow/contracts";
 
 import type {
@@ -2364,7 +2365,7 @@ export class RolePaneManager {
     const parsed = ResolvedRoleProfileSnapshotSchema.safeParse(snapshot);
     if (!parsed.success) return validationError("Invalid role profile snapshot");
     const previous = manifest.roleProfiles?.find(item => item.pin.profileId === parsed.data.pin.profileId && item.pin.version === parsed.data.pin.version);
-    if (previous) return JSON.stringify(previous) === JSON.stringify(parsed.data)
+    if (previous) return canonicalReceiptJson(previous) === canonicalReceiptJson(parsed.data)
       ? ok(manifest) : conflictError("Session role profile snapshot cannot be replaced");
     return this.#store.save({ ...manifest, roleProfiles: [...manifest.roleProfiles ?? [], parsed.data] }, options);
   }
@@ -2440,10 +2441,20 @@ export class RolePaneManager {
           (request.taskId !== undefined && pane.metadata?.["taskId"] === request.taskId ||
             request.agentId !== undefined && pane.agentId === request.agentId || request.paneId !== undefined && pane.paneId === request.paneId));
         if (!binding) return notFoundError("Profile specialist binding not found");
+        // Record the release intent before the irreversible close. If we stop in between, restart recovery sees a
+        // released allocation instead of an "active" binding whose agent no longer exists (which would block the session).
+        const releasing = await this.#store.save({ ...manifest, updatedAt: this.#clock().toISOString(),
+          panes: manifest.panes.map(pane => pane.bindingId === binding.bindingId
+            ? { ...pane, metadata: { ...pane.metadata, allocationStatus: "released" } } : pane) }, options);
+        if (!releasing.ok) return releasing;
         const closed = await this.#runHerdr(["pane", "close", binding.paneId], options);
-        if (closed.exitCode !== 0 || closed.failure) return toCommandError(closed, "Failed to close specialist pane");
-        parseOkResponse(closed);
-        const saved = await this.#store.save({ ...manifest, panes: manifest.panes.filter(pane => pane.bindingId !== binding.bindingId),
+        if (closed.exitCode !== 0 || closed.failure) {
+          // Retrying an interrupted release: the pane may already be gone. Only an observed absence completes it.
+          const alreadyReleased = binding.metadata?.["allocationStatus"] === "released";
+          const probe = alreadyReleased ? await this.#runHerdr(["pane", "get", binding.paneId], options) : undefined;
+          if (!probe || probe.exitCode === 0 && !probe.failure) return toCommandError(closed, "Failed to close specialist pane");
+        } else parseOkResponse(closed);
+        const saved = await this.#store.save({ ...releasing.value, panes: releasing.value.panes.filter(pane => pane.bindingId !== binding.bindingId),
           updatedAt: this.#clock().toISOString() }, options);
         return saved.ok ? ok({ releasedBinding: binding, paneClosed: true, worktreeRemoved: false, retainedForReuse: false, manifest: saved.value }) : saved;
       } catch (error) { return toProtocolError(error, "Failed to release profiled specialist"); }
