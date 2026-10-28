@@ -48,7 +48,7 @@ export function taskIdError(taskId: string | undefined): string | undefined {
 
 export class RoleEnvironmentResolver implements RoleEnvironmentResolverPort {
   environmentId(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement): string {
-    const task = requirement.taskId ? `-${requirement.taskId}` : "";
+    const task = (requirement.taskId ? `-${requirement.taskId}` : "") + (requirement.executionKey ? `-${requirement.executionKey}` : "");
     return boundedIdentifier(`env-${identity.sessionId}-g${identity.generation}-${requirement.role}${task}`);
   }
 
@@ -62,6 +62,8 @@ export class RoleEnvironmentResolver implements RoleEnvironmentResolverPort {
     if (!isAbsolute(requirement.cwd)) return fail("validation", "role cwd must be absolute");
     const taskError = taskIdError(requirement.taskId);
     if (taskError) return fail("validation", taskError);
+    const executionError = taskIdError(requirement.executionKey);
+    if (executionError) return fail("validation", executionError);
 
     const shape = permissionShape(requirement);
     if (!shape.ok) return shape;
@@ -91,7 +93,7 @@ export class RoleEnvironmentResolver implements RoleEnvironmentResolverPort {
       generation: identity.generation,
       permissionProfile
     }));
-    const task = requirement.taskId ? `-${requirement.taskId}` : "";
+    const task = (requirement.taskId ? `-${requirement.taskId}` : "") + (requirement.executionKey ? `-${requirement.executionKey}` : "");
     const environment: AgentEnvironment = {
       schemaVersion: 3,
       environmentId,
@@ -99,7 +101,7 @@ export class RoleEnvironmentResolver implements RoleEnvironmentResolverPort {
       role: requirement.role,
       scope,
       cwd: requirement.cwd,
-      stateDirectory: `${identity.stateDirectory}/gen-${identity.generation}/roles/${requirement.role}${task}`,
+      stateDirectory: `${identity.stateDirectory}/gen-${identity.generation}/roles/${requirement.executionKey ? boundedIdentifier(`${requirement.role}${task}`) : `${requirement.role}${task}`}`,
       configFingerprint,
       permissionProfile,
       environmentVariables: { ...(requirement.environmentVariables ?? {}) },

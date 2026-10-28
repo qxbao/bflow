@@ -41,7 +41,9 @@ export class SkillSessionStore implements SkillSessionPort {
   ): Promise<OperationResult<ResolvedRoleSkills>> {
     const taskError = taskIdError(requirement.taskId);
     if (taskError) return fail("validation", taskError);
-    const file = recordPath(identity, requirement.role, requirement.taskId);
+    const executionError = taskIdError(requirement.executionKey);
+    if (executionError) return fail("validation", executionError);
+    const file = recordPath(identity, requirement.role, requirement.taskId, requirement.executionKey);
     try {
       const synced = await this.options.resolver.sync(buildRequest(identity, requirement, environmentId));
       const manifest = await this.options.resolver.verify(synced.manifest);
@@ -62,11 +64,14 @@ export class SkillSessionStore implements SkillSessionPort {
   async load(
     identity: PlatformSessionIdentity,
     role: AgentRole,
-    taskId?: string
+    taskId?: string,
+    executionKey?: string
   ): Promise<OperationResult<ResolvedRoleSkills | null>> {
     const taskError = taskIdError(taskId);
     if (taskError) return fail("validation", taskError);
-    const file = recordPath(identity, role, taskId);
+    const executionError = taskIdError(executionKey);
+    if (executionError) return fail("validation", executionError);
+    const file = recordPath(identity, role, taskId, executionKey);
     try {
       const raw = await readRecordFile(file);
       if (!raw.ok) return raw;
@@ -112,9 +117,9 @@ function buildRequest(
   };
 }
 
-function recordPath(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined): string {
-  const task = taskId ? `-${taskId}` : "";
-  return `${identity.stateDirectory}/gen-${identity.generation}/skills/${role}${task}.json`;
+function recordPath(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, executionKey?: string): string {
+  const task = (taskId ? `-${taskId}` : "") + (executionKey ? `-${executionKey}` : "");
+  return `${identity.stateDirectory}/gen-${identity.generation}/skills/${executionKey ? boundedIdentifier(`${role}${task}`) : `${role}${task}`}.json`;
 }
 
 /** Writes a record atomically; an existing record with a different manifest digest is never overwritten. */

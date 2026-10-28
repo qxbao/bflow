@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { fixture as runtimeFixture, cleanups as runtimeCleanups } from "../helpers/agentic-integration-fixture.js";
+import { classifyProviderFailure } from "@bflow/agent-providers";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -320,7 +322,8 @@ describe("P30 dynamic Developer launches end to end", () => {
   }
 
   /** Builds the real host composition: readiness service, HostPlatformSession, RolePaneManager and the launch wrapper. */
-  async function buildHost(options: { provider?: "claude" | "agy"; runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[];
+  async function buildHost(options: { provider?: "claude" | "codex" | "agy"; runner?: ProviderCommandRunner; gateway?: boolean; maxCapacity?: number; mcpServiceIds?: string[];
+    failoverProfiles?: boolean;
     /** When true (default) the started provider reports every registration reachable, as its SessionStart hook would. */
     reportReachability?: boolean; startupTimeoutMs?: number; delayedNativeSession?: boolean } = {}) {
     // The runtime prepares the task worktree before allocating its Developer; preflight requires it to exist.
@@ -330,15 +333,27 @@ describe("P30 dynamic Developer launches end to end", () => {
     const reachabilityDirectory = join(hostDirectory, LAUNCH_REACHABILITY_DIRECTORY);
     const clock = { t: 0, now: () => clock.t };
     const journal = new FileLaunchJournal(join(stateDirectory, "launch-journal.jsonl"));
+    const isolatedRoot = join(baseDir, "isolator");
+    const codexBinary = join(baseDir, "codex");
+    if (options.failoverProfiles) {
+      await writeFile(codexBinary, "#!/bin/sh\necho fixture\n", { mode: 0o700 });
+      for (const [provider, profile] of [["codex", "primary"], ["claude", "backup"]]) {
+        const root = join(isolatedRoot, "profiles", `${provider}--${profile}`);
+        for (const name of ["home", "config", "cache", "data", "state", "tmp"]) await mkdir(join(root, name), { recursive: true, mode: 0o700 });
+        await writeFile(join(root, "profile.env"), `AI_ISOLATOR_TOOL=${provider}\nAI_ISOLATOR_PROFILE=${profile}\nAI_ISOLATOR_CREATED_AT=2026-10-20T00:00:00Z\n`, { mode: 0o600 });
+      }
+    }
     const providers = new ProviderReadiness({
       factory: createProviderAdapterFactory({
         runner: options.runner ?? createFakeProviderRunner({ scenario: "healthy" }),
-        perProvider: { [options.provider ?? "claude"]: { executablePath: binaryPath, allowTestFilesystemOwnership: true } }
+        perProvider: options.failoverProfiles ? { claude: { executablePath: binaryPath, allowTestFilesystemOwnership: true }, codex: { executablePath: codexBinary, allowTestFilesystemOwnership: true } }
+          : { [options.provider ?? "claude"]: { executablePath: binaryPath, allowTestFilesystemOwnership: true } }
       }),
       journal
     });
     const gateway = options.gateway === false ? undefined : new GatewayRegistrationManager({ control: gatewayControl, endpoint: ENDPOINT });
     const service = new DefaultPlatformReadinessService({
+      ...(options.failoverProfiles ? { isolatorStateRoot: isolatedRoot } : {}),
       environments: new RoleEnvironmentResolver(),
       skills: new SkillSessionStore({ resolver: createSkillResolver(skillManager) }),
       ...(gateway ? { gateway } : {}),
@@ -353,6 +368,9 @@ describe("P30 dynamic Developer launches end to end", () => {
       repositoryId: "repo-1",
       roles: [{
         role: "developer", provider: options.provider ?? "claude", required: true, permissionMode: "workspace_auto",
+        ...(options.failoverProfiles ? { model: "primary-model", profileName: "primary", failover: {
+          schemaVersion: 3, policyVersion: "approved-host-1", role: "developer", candidates: [{ provider: "claude", model: "backup-model", profile: "backup" }],
+          maxSwitches: 2, maxRetries: 2, cooldownMs: 0 } } : {}),
         capabilityIds: [], mcpServiceIds: options.mcpServiceIds ?? [], toolIds: ["search"],
         skillSelections: [{ skill: skillPin, required: true }]
       }],
@@ -364,7 +382,7 @@ describe("P30 dynamic Developer launches end to end", () => {
       generationFile: join(stateDirectory, "generation.json"),
       launchesFile: join(stateDirectory, "launches.json"),
       probeDirectory, reachabilityDirectory,
-      hostCapabilities: {}
+      hostCapabilities: options.failoverProfiles ? { developer: ["implementation"] } : {}
     });
     await session.prepare();
 
@@ -399,15 +417,17 @@ describe("P30 dynamic Developer launches end to end", () => {
       createdAt: "2026-10-18T00:00:00.000Z", updatedAt: "2026-10-18T00:00:00.000Z"
     });
     await store.save(manifest);
+    const stoppedBindings = new Set<string>();
     const rolePanes = new paneModule.RolePaneManager({
       config: {
         sessionId: SESSION, projectName: "bflow", workspaceRoot: workspace, conversationSessionId: "conv-1",
         maxDeveloperCapacity: options.maxCapacity ?? 2, defaultAgentKind: "claude"
       },
-      runner: herdr, store, worktreeInspector: cleanInspector, socket: herdr.socket()
+      runner: herdr, store, ...(options.failoverProfiles ? {} : { worktreeInspector: cleanInspector }), socket: herdr.socket(),
+      authorizeStoppedRetainedRelease: async binding => stoppedBindings.has(binding.bindingId)
     });
     const panes = withDeveloperLaunches(rolePanes, {
-      allocate: request => session.allocateDeveloper(request.taskId, request.worktreePath),
+      allocate: request => session.allocateDeveloper(request.taskId, request.worktreePath, request.runId, request.candidate, request.continuationId),
       release: taskId => session.releaseDeveloper(taskId),
       reachability: (launchId, paneId) => session.developerReachability(launchId, paneId)
     }, { startupTimeoutMs: options.startupTimeoutMs ?? 30_000, now: clock.now,
@@ -417,7 +437,7 @@ describe("P30 dynamic Developer launches end to end", () => {
         return rolePanes.getRoleBinding(paneId, callOptions);
       }
     });
-    return { service, session, journal, herdr, store, rolePanes, panes, clock, probeDirectory, reachabilityDirectory };
+    return { service, session, platform, journal, herdr, store, rolePanes, panes, clock, probeDirectory, reachabilityDirectory, stoppedBindings };
   }
 
   /** The pane Pane Manager started the agent in for one allocation (the `--pane` of its `agent start`). */
@@ -471,6 +491,43 @@ describe("P30 dynamic Developer launches end to end", () => {
     }
     return found;
   }
+
+  it("continues a quota-limited Core task through the real host readiness and pane composition with controlled adapters", async () => {
+    const f = await runtimeFixture();
+    workspace = f.repository;
+    try {
+      const host = await buildHost({ provider: "codex", failoverProfiles: true });
+      const allocationErrors: unknown[] = [];
+      const allocate = host.panes.allocateDeveloper.bind(host.panes);
+      host.panes.allocateDeveloper = async request => { const result = await allocate(request); if (!result.ok) allocationErrors.push(result.error); return result; };
+      f.ports.panes = host.panes;
+      f.ports.providerFailover = {
+        policyFor: () => ({ policy: host.platform.roles[0]!.failover!, current: { provider: "codex", model: "primary-model", profile: "primary" } }),
+        authenticate: async () => true, assertMutationSafe: async () => undefined,
+        preflight: (candidate, binding) => host.session.preflightFailoverCandidate(candidate, binding)
+      };
+      f.ports.stopDeveloperExecutionScope = async (handle, binding) => { host.stoppedBindings.add(binding.bindingId); return { source: "correlated_transport", handle, observedAt: new Date().toISOString() }; };
+      await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+      const initial = await f.runtime.inspect() as any;
+      const source = initial.outbound.find((out: any) => out.message.type === "task.assignment");
+      expect(source?.handle, JSON.stringify(initial)).toBeDefined();
+      const binding = await host.panes.getRoleBinding(source.selector);
+      if (!binding.ok || !binding.value) throw new Error("Missing source host binding");
+      expect(binding.value.provider).toBe("codex");
+      await writeFile(join(binding.value.worktreePath!, "guide.md"), "preserved unfinished content\n");
+      await f.runtime.observeProviderFailure(binding.value, classifyProviderFailure({ type: "event_msg", payload: { type: "error", codex_error_info: "usage_limit_exceeded" } },
+        { provider: "codex", executionId: source.handle.executionId, observedAt: new Date().toISOString() }));
+      await f.runtime.continueProviderFailovers(); await f.runtime.flushOutbound();
+      const run = await f.runtime.inspect("run-1") as any;
+      expect(run.tasks[0].failovers[0], JSON.stringify(allocationErrors)).toMatchObject({ phase: "dispatched", destination: { provider: "claude", model: "backup-model", profile: "backup" } });
+      expect(host.herdr.startCalls()).toHaveLength(2);
+      const assignments = (await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.type === "task.assignment");
+      expect(assignments[1].handle.target.worktreePath).toBe(assignments[0].handle.target.worktreePath);
+      expect(assignments[1].handle.attemptId).toBe(assignments[0].handle.attemptId);
+      expect(run.status).toBe("implementing");
+      expect(await readFile(join(binding.value.worktreePath!, "guide.md"), "utf8")).toBe("preserved unfinished content\n");
+    } finally { for (const cleanup of runtimeCleanups.splice(0).reverse()) await cleanup(); }
+  }, 60_000);
 
   it("admits an Agy Developer only after its exact native Herdr source is ready", async () => {
     const host = await buildHost({ provider: "agy", delayedNativeSession: true });

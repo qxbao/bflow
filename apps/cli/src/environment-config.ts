@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ProviderFailoverPolicySchema } from "@bflow/contracts";
 import { lstatSync } from "node:fs";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
@@ -61,12 +62,15 @@ export const EnvironmentRoleConfigSchema = z
     required: z.boolean().optional(),
     permissionMode: z.enum(["restricted", "workspace_auto", "unattended_isolated"]).optional(),
     fallbackCli: EnvironmentProviderSchema.optional(),
+    failover: ProviderFailoverPolicySchema.optional(),
     requiredEnv: z.array(z.string().trim().min(1)).optional(),
     skills: z.array(z.string().trim().min(1)).optional(),
     unsupportedFlags: z.array(z.string().trim().min(1)).optional()
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.failover && (value.failover.role !== value.role || !value.model || !value["profile-name"]))
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["failover"], message: "Failover requires the same governance role and explicit primary model/profile" });
     if (value.cli === "agy" && value.effort !== undefined) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["effort"], message: "Agy configures effort in the model name; omit the effort field." });
     }

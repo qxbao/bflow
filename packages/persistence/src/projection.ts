@@ -1,4 +1,4 @@
-import { canonicalReceiptJson, StoredRunSchema, type DomainEvent, type StoredRun, type TaskState } from "@bflow/contracts";
+import { canonicalReceiptJson, validateExecutionContinuation, StoredRunSchema, type DomainEvent, type StoredRun, type TaskState } from "@bflow/contracts";
 import { fail, parse } from "./support.js";
 
 /** A storage/index projection, not Core replay. Never derives business outcomes or invents attempt IDs. */
@@ -37,10 +37,12 @@ export function project(run: StoredRun, events: readonly DomainEvent[]): StoredR
       task.attemptId = event.payload.attemptId;
     }
     if (task !== undefined && event.type === "agent.execution_bound") {
-      if (task.attempt !== event.payload.attempt || task.agentExecution !== undefined ||
+      if (task.attempt !== event.payload.attempt || (event.payload.continuation ? snapshot.status === "cancelling" ||
+          !validateExecutionContinuation(task, event.payload.handle, event.payload.continuation, event.occurredAt) : task.agentExecution !== undefined) ||
         task.attemptId !== undefined && task.attemptId !== event.payload.handle.attemptId) fail("validation", "Execution binding mismatch");
       task.attemptId = event.payload.handle.attemptId;
       task.agentExecution = event.payload.handle;
+      delete task.bindingVerification;
       task.version++;
     }
     if (task !== undefined && event.type === "agent.binding_verified") {

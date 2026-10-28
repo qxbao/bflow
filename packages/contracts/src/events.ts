@@ -1,4 +1,5 @@
 import { AgentBindingVerificationSchema } from "./receipts.js";
+import { ExecutionContinuationSchema } from "./agent.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
@@ -161,6 +162,7 @@ export const AgentExecutionBoundEventSchema = z
     payload: z
       .object({
         handle: AgentExecutionHandleSchema,
+        continuation: ExecutionContinuationSchema.optional(),
         attempt: z.number().int().min(1)
       })
       .strict()

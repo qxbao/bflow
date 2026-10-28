@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { ProviderFailoverPolicySchema } from "@bflow/contracts";
 import {
   SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
   NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema,
@@ -14,6 +15,7 @@ import {
 export const PlatformRoleOptionSchema = z.object({
   role: AgentRoleSchema,
   provider: AgentProviderIdSchema,
+  failover: ProviderFailoverPolicySchema.optional(),
   profileName: z.string().min(1).regex(/^[A-Za-z0-9._-]+$/).optional(),
   required: z.boolean(),
   model: z.string().trim().min(1).optional(),
@@ -32,6 +34,8 @@ export const PlatformRoleOptionSchema = z.object({
   isolation: z.object({ kind: z.enum(["os_sandbox", "container"]), proofId: IdentifierSchema }).strict().optional(),
   network: z.object({ mode: z.enum(["deny", "allowlist"]), allowedHosts: z.array(IdentifierSchema) }).strict().optional()
 }).strict().superRefine((role, ctx) => {
+  if (role.failover && (role.failover.role !== role.role || !role.model || !role.profileName))
+    ctx.addIssue({ code: "custom", message: "Failover requires the same governance role and explicit primary model/profile" });
   if (role.provider === "agy" && role.effort !== undefined)
     ctx.addIssue({ code: "custom", path: ["effort"], message: "Agy effort must be encoded in the configured model name" });
 });

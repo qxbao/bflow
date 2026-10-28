@@ -3,11 +3,12 @@ import { readSkillApproval } from "./skill-approval.js";
 import type { GatewayToolOperationOptions } from "../platform/browser-resource-transactions.js";
 import { DeveloperProcessScopes } from "./developer-process-scope.js";
 import type { AgentExecutionHandle, AgentRequest } from "@bflow/contracts";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { chmod, copyFile, mkdir, open, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
+import { FailoverCandidateSchema, canonicalReceiptJson } from "@bflow/contracts";
 import {
   AgentProviderIdSchema, AgentRoleSchema,
   type AgentProviderId, type AgentRole, type ContractError, type OperationOptions, type PaneBinding
@@ -121,6 +122,7 @@ export interface HostPlatformLaunchResult {
 
 /** Structural shape of a Developer launch handed to Pane Manager (`AgentLaunchProfile`). */
 export interface DeveloperLaunchMaterial {
+  readonly model?: string;
   readonly provider: AgentProviderId;
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -287,6 +289,8 @@ export class HostPlatformSession {
   private readonly roleInstructions = new Map<AgentRole, PinnedRoleInstructions>();
   private readonly developerInstructions = new Map<string, PinnedRoleInstructions>();
   private readonly developerLaunches = new Map<string, string>();
+  private readonly nativeTranscriptRoots = new Map<string, string>();
+  nativeTranscriptRoot(launchId: string): string | undefined { return this.nativeTranscriptRoots.get(launchId); }
   /** Active Developer launches by launch id: the reachability the launch must prove, or null without Gateway registrations. */
   private readonly developerGates = new Map<string, ReachabilityExpectation | null>();
   private gatewayCheck: NonNullable<HostPlatformStatus["gateway"]> | undefined;
@@ -476,6 +480,10 @@ export class HostPlatformSession {
   launchIdOf(role: AgentRole): string | undefined {
     return this.launches.get(role)?.launchId;
   }
+  providerOfActiveLaunch(role: AgentRole, launchId: string | undefined): AgentProviderId | undefined {
+    if (!launchId || (role === "developer" ? !this.hasActiveDeveloperLaunch(launchId) : this.launchIdOf(role) !== launchId)) return;
+    return this.options.service.status().launches.find(launch => launch.launchId === launchId && launch.role === role)?.provider;
+  }
 
   hasActiveDeveloperLaunch(launchId: string | undefined): boolean {
     return typeof launchId === "string" && [...this.developerLaunches.values()].includes(launchId);
@@ -495,16 +503,18 @@ export class HostPlatformSession {
    * Dynamic Developer launch for one task worktree. Blocked launches throw; no pane is created on failure.
    * Publishes the launch's own probe plan (keyed by launch id, so concurrent Developers never share a file).
    */
-  async allocateDeveloper(taskId: string, worktreePath: string, runId?: string): Promise<DeveloperLaunchMaterial> {
+  async allocateDeveloper(taskId: string, worktreePath: string, runId?: string, candidate?: import("@bflow/contracts").FailoverCandidate, executionKey?: string): Promise<DeveloperLaunchMaterial> {
     if (this.identity === undefined) throw new Error("Platform has no prepared generation; run bflow up again");
     const processScopes = await this.availableProcessScopes();
     if (processScopes && !runId) throw new Error("A supervised Developer launch requires its exact run identity");
-    const template = this.options.platform.roles.find(option => option.role === "developer");
+    const base = this.options.platform.roles.find(option => option.role === "developer");
+    const template = candidate && base ? this.failoverTemplate(base, candidate) : base;
     if (template === undefined) throw new Error("Platform configuration has no developer template for dynamic Developer launches");
     // Re-allocation for the same task (e.g. after restart) must not orphan the previous launch and its Gateway registration.
     await this.releaseDeveloper(taskId);
     const result = await this.options.service.prepareDeveloper(this.identity,
-      requirementFor(template, this.options.hostCapabilities, worktreePath, taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy));
+      { ...requirementFor(template, this.options.hostCapabilities, worktreePath, taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy),
+        ...(executionKey ? { executionKey } : {}) });
     if (!result.ok) throw new Error(`Developer ${taskId} launch is blocked: ${describeFailure(result.error)}`);
     const launchId = result.value.launch.launchId;
     let expectation: ReachabilityExpectation | undefined;
@@ -531,7 +541,23 @@ export class HostPlatformSession {
       launchId, manifest: result.value.skills.manifest, instructionText: result.value.skills.rendered.instructionText,
       references: result.value.skills.rendered.references.map(reference => ({ ...reference })) });
     this.rememberNativeAgyHome(result.value);
-    return material;
+    return { ...material, ...(template.model ? { model: template.model } : {}) };
+  }
+  private failoverTemplate(base: import("../platform/host-options.js").PlatformRoleOption, candidate: import("@bflow/contracts").FailoverCandidate) {
+    const selected = FailoverCandidateSchema.parse(candidate);
+    const primary = { provider: base.provider, model: base.model, profile: base.profileName };
+    if (!base.failover || canonicalReceiptJson(primary) !== canonicalReceiptJson(selected) && !base.failover.candidates.some(item => canonicalReceiptJson(item) === canonicalReceiptJson(selected))) throw new Error("Unapproved failover provider/model/profile");
+    const { effort: _effort, ...template } = base;
+    return { ...template, provider: selected.provider, model: selected.model, profileName: selected.profile };
+  }
+  async preflightFailoverCandidate(candidate: import("@bflow/contracts").FailoverCandidate, binding: PaneBinding): Promise<void> {
+    const base = this.options.platform.roles.find(option => option.role === binding.role);
+    if (!this.identity || !base || binding.role !== "developer" || !this.options.service.preflightDeveloper) throw new Error("Failover preflight unavailable");
+    const template = this.failoverTemplate(base, candidate);
+    const result = await this.options.service.preflightDeveloper(this.identity,
+      { ...requirementFor(template, this.options.hostCapabilities, binding.worktreePath!, `failover-preflight-${binding.agentId}`, this.options.platform.toolGrants, this.options.platform.toolPolicy),
+        executionKey: `candidate-${createHash("sha256").update(canonicalReceiptJson(candidate)).digest("hex").slice(0, 20)}` });
+    if (!result.ok) throw new Error("Candidate does not satisfy current provider, capability, tool, skill or permission policy");
   }
   /**
    * The supervision backend when this host can run it. A host without it (no Bubblewrap user namespaces, AppArmor
@@ -750,6 +776,7 @@ export class HostPlatformSession {
   }
 
   private rememberNativeAgyHome(prepared: PreparedRoleLaunch): void {
+    if (prepared.provider === "codex" && prepared.launch.env.CODEX_HOME) this.nativeTranscriptRoots.set(prepared.launch.launchId, prepared.launch.env.CODEX_HOME);
     if (prepared.provider !== "agy") return;
     const expectedSuffix = join(".gemini", "config", "mcp_config.json");
     const matches = prepared.profile.configFiles.filter(file => file.path.endsWith(`/${expectedSuffix}`));
@@ -793,7 +820,7 @@ export interface CreateHostPlatformSessionOptions {
   readonly hostCapabilities: Readonly<Record<string, readonly string[]>>;
   readonly rolePrompt: (role: AgentRole) => string | undefined;
   /** Host-owned MCP entries and native hooks for one role (`hostLaunch` of the composition). */
-  readonly hostLaunch: (role: AgentRole) => HostLaunchExtras | undefined;
+  readonly hostLaunch: (role: AgentRole, provider?: AgentProviderId) => HostLaunchExtras | undefined;
   readonly nativeSessionHookCommand: (role: AgentRole) => string | undefined;
 }
 
@@ -968,7 +995,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     ...createHostProviderFactoryOptions(platform, process.env),
     rolePrompt: options.rolePrompt,
     nativeSessionHookCommand: role => options.nativeSessionHookCommand(role),
-    hostLaunch: role => options.hostLaunch(role)
+    hostLaunch: (role, _taskId, provider) => options.hostLaunch(role, provider)
   });
   const session = new HostPlatformSession({
     ...(process.platform === "linux" ? { processScopes: new DeveloperProcessScopes({ directory: join(options.directory, "developer-process-scopes") }) } : {}),

@@ -13,7 +13,8 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { codexStartupPrompt } from "@bflow/agent-providers";
+import { classifyProviderFailure, codexStartupPrompt } from "@bflow/agent-providers";
+import { readCodexFailure } from "./provider-failure-reader.js";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema, DelegationRequestSchema,
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, JsonValueSchema, MCPToolCallResultSchema, RepositoryToolPolicySchema,
@@ -104,7 +105,7 @@ async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
     herdrBinary: textField(raw.herdrBinary), sessionId: textField(raw.sessionId) };
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
-const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"] as const;
+const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse", "StopFailure"] as const;
 const AgyNativeToolCallSchema = z.object({ name: z.string().min(1), args: z.record(JsonValueSchema) }).strict();
 const AgyMcpOperationSchema = z.object({ nativeSessionId: z.string().min(1), anchor: AgyNativeAnchorSchema,
   nativeStepIndex: z.number().int().nonnegative(), nativeToolCall: AgyNativeToolCallSchema }).strict();
@@ -304,10 +305,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     // Same token, new provider: a platform change is only admissible while no host owns the endpoint.
     if (roleConfig.provider !== provider) { roleConfig = { ...roleConfig, provider }; await privateFile(path, JSON.stringify(roleConfig)); }
     roleTokens.set(roleConfig.token, role);
+    for (const candidateProvider of new Set(platformRoles.find(option => option.role === role)?.failover?.candidates.map(candidate => candidate.provider) ?? [])) {
+      if (candidateProvider === provider) continue;
+      const candidatePath = join(configuration.directory, `${role}.${candidateProvider}.json`);
+      await privateFile(candidatePath, JSON.stringify({ ...roleConfig, provider: candidateProvider }));
+      const runnerPath = useShortHook ? join(shortHookDir, `${role}.${candidateProvider}.sh`) : join(configuration.directory, `${role}.${candidateProvider}.hook.sh`);
+      await privateFile(runnerPath, hookRunnerScript(process.execPath, executable, candidatePath, candidateProvider), 0o700);
+      hookRunners.set(`${role}:${candidateProvider}`, runnerPath);
+    }
     const mcpConfigFile = join(configuration.directory, role + ".mcp.json");
     const hooksSettingsFile = join(configuration.directory, role + ".hooks.json");
     await privateFile(mcpConfigFile, JSON.stringify({ mcpServers: { bflow: { type: "stdio", command: process.execPath, args: [executable, "mcp", path] } } }));
-    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
+    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || provider === "claude" && platformRoles.some(option => option.role === role && option.failover)).map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     const taskLogGuidance = role === "conversation"
       ? "Use read_task_log for recent diagnostic context; do not record specialist task steps."
@@ -352,11 +361,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     platform: configuration.platform, repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, directory: configuration.directory,
     issuerId, privateKeyPem: await readFile(keyPath, "utf8"), publicKeyPem: publicKey, hostCapabilities: capabilities,
     rolePrompt: role => launch[role]?.systemPrompt,
-    hostLaunch: role => {
-      const rolePath = join(configuration.directory, role + ".json");
-      const runner = hookRunners.get(role);
-      const provider = platformRoles.find(option => option.role === role)?.provider ?? "claude";
-      const hookEvents = provider === "agy" ? [...NATIVE_HOOK_EVENTS.filter(event => event !== "UserPromptSubmit"), "PreInvocation"] : NATIVE_HOOK_EVENTS;
+    hostLaunch: (role, requestedProvider) => {
+      const primaryProvider = platformRoles.find(option => option.role === role)?.provider ?? "claude";
+      const provider = requestedProvider ?? primaryProvider;
+      const rolePath = join(configuration.directory, provider === primaryProvider ? role + ".json" : `${role}.${provider}.json`);
+      const runner = hookRunners.get(provider === primaryProvider ? role : `${role}:${provider}`);
+      const regular = NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || provider === "claude" && platformRoles.some(option => option.role === role && option.failover));
+      const hookEvents = provider === "agy" ? [...regular.filter(event => event !== "UserPromptSubmit"), "PreInvocation"] : regular;
       const hookEntries = Object.fromEntries(hookEvents.map(event => [event, hookCommandFor(rolePath, event, runner)]));
       return { mcpServers: { bflow: { command: process.execPath, args: [executable, "mcp", rolePath] } }, hooks: hookEntries };
     },
@@ -554,9 +565,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }),
   async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.replaceWorkflowReview({ operationId,
     sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }));
-  const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
+  const nativeSessions = new Map<string, {role: AgentRole; sessionId: string; transcriptPath?: string; transcriptRoot?: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
-    const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
+    const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId),
+      ...(typeof session.transcriptPath === "string" && typeof session.transcriptRoot === "string" ? { transcriptPath: session.transcriptPath, transcriptRoot: session.transcriptRoot } : {}) });
   } } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const getQueryStore = async () => {
     if (workspace) return workspace.runtime.ports.runStore;
@@ -770,13 +782,27 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await readExecutionResolution?.();
           await assertWorkspaceFileCapability();
           await readExecutionResolution?.();
-          return platformSession.allocateDeveloper(request.taskId, request.worktreePath, request.runId);
+          return platformSession.allocateDeveloper(request.taskId, request.worktreePath, request.runId, request.candidate, request.continuationId);
         },
         release: taskId => platformSession.releaseDeveloper(taskId),
         assertProcessScope: binding => platformSession.assertDeveloperProcessReady(binding),
         reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId),
         degradation: () => platformSession.degradation()
       },
+        providerFailover: {
+          policyFor: binding => {
+            const option = platformRoles.find(option => option.role === binding.role);
+            return option?.failover && option.model && option.profileName ? { policy: option.failover,
+              current: { provider: option.provider, model: option.model, profile: option.profileName } } : undefined;
+          },
+          authenticate: (binding, failure) => receipts.authenticateProviderFailure(binding, failure),
+          assertMutationSafe: async (_binding, runId, taskId) => {
+            const unresolved = (await toolUsage.list()).some(item => item.sessionId === configuration.sessionId && item.runId === runId &&
+              (item.taskId === taskId || item.taskId === undefined) && ["started", "unknown"].includes(item.status));
+            if (unresolved) throw new Error("Provider continuation retains an unreconciled tool invocation");
+          },
+          preflight: (candidate, binding) => platformSession.preflightFailoverCandidate(candidate, binding)
+        },
         pinDeveloperDispatch: (request, binding) => platformSession.pinDeveloperDispatch(request, binding),
         bindDeveloperExecutionScope: (handle, binding) => platformSession.bindDeveloperExecution(handle, binding),
         stopDeveloperExecutionScope: (handle, binding) => platformSession.stopDeveloperExecution(handle, binding),
@@ -1136,6 +1162,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
+    const providerForRole = (_role: AgentRole): AgentProviderId => AgentProviderIdSchema.parse(binding.provider);
     if (providerForRole(role) === "agy") {
       const operation = AgyMcpOperationSchema.parse(args.nativeAgyOperation);
       if (operation.nativeSessionId !== binding.session?.value || operation.nativeToolCall.name !== "call_mcp_tool" ||
@@ -1581,8 +1608,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
         const observed = binding ? undefined : await observeAgent(input.paneId);
         if (binding && (!binding.session || observed === undefined && currentManifest === undefined)) throw new Error("Provider tools/list cannot be bound to a current role session");
-        if (observed && (!observed.nativeSession || !platformRoles.some(option => option.role === role &&
-            (observed.nativeSession!.source === option.provider || observed.nativeSession!.source === (option.provider === "agy" ? "herdr:antigravity_cli" : `herdr:${option.provider}`)))))
+        const observedProvider = platformSession?.providerOfActiveLaunch(role, input.launchId) ?? providerForRole(role);
+        if (observed && (!observed.nativeSession ||
+            (observed.nativeSession.source !== observedProvider && observed.nativeSession.source !== (observedProvider === "agy" ? "herdr:antigravity_cli" : `herdr:${observedProvider}`))))
           throw new Error("Provider tools/list has no compatible observed Herdr native session");
         const names = availableTools(role, providerForRole(role)).map(tool => tool.name).sort();
         if (digest([...input.toolNames].sort()) !== digest(names)) throw new Error("Provider tools/list does not match the authenticated Bflow role surface");
@@ -1601,8 +1629,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (method === "agy_gateway_session") {
         const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), anchor: AgyNativeAnchorSchema,
           nativeStepIndex: z.number().int().nonnegative(), nativeToolCall: AgyNativeToolCallSchema }).strict().parse(params);
-        if (providerForRole(role) !== "agy") throw new Error("Agy Gateway session is unavailable for this role");
         const binding = await principal(role, input.paneId);
+        if (binding.provider !== "agy") throw new Error("Agy Gateway session is unavailable for this role");
         if (!binding.session || binding.session.value !== input.nativeSessionId)
           throw new Error("Agy Gateway native session or launch mismatch");
         await readAgyTurn(binding, input.launchId);
@@ -1612,11 +1640,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (method === "agy_native_turn") {
         const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), transcriptPath: z.string().min(1), anchor: AgyNativeAnchorSchema }).strict().parse(params);
-        if (providerForRole(role) !== "agy" || role === "conversation") throw new Error("Agy native admission requires a specialist");
+        if (role === "conversation") throw new Error("Agy native admission requires a specialist");
         // The private startup prompt establishes SessionStart before activation; no assignment is admitted here.
         if (!workspace) return { recorded: false, reason: "startup" };
         const binding = await principal(role, input.paneId);
-        if (binding.session?.value !== input.nativeSessionId) throw new Error("Agy admission native session mismatch");
+        if (binding.provider !== "agy" || binding.session?.value !== input.nativeSessionId) throw new Error("Agy admission native session mismatch");
         const current = await readAgyTurn(binding, input.launchId, input.transcriptPath);
         if (digest(input.anchor) !== digest(current.anchor)) throw new Error("Agy admission hook belongs to another transcript turn");
         const message = RoleMessageSchema.parse(JSON.parse(normalizeProviderPrompt(current.prompt.trim())));
@@ -1635,7 +1663,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const input = record(params), hook = record(input.hook), binding = await principal(role, textField(input.paneId));
         if (hook.hook_event_name !== "PreToolUse" || !binding.session || hook.session_id !== binding.session.value)
           throw new Error("Tool guard native session mismatch");
-        if (providerForRole(role) === "agy") {
+        if (binding.provider === "agy") {
           const nativeCall = AgyNativeToolCallSchema.parse(hook.native_tool_call), nativeStep = z.number().int().nonnegative().parse(hook.native_step_index);
           if (nativeCall.name !== "call_mcp_tool" || nativeCall.args.ServerName !== "bflow" ||
               hook.tool_name !== `mcp__bflow__${textField(nativeCall.args.ToolName)}` || digest(nativeCall.args.Arguments ?? {}) !== digest(hook.tool_input))
@@ -1689,9 +1717,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (method === "agy_mcp_operation") {
         const input = z.object({ paneId: z.string().min(1), launchId: z.string().min(1), name: z.string().min(1), arguments: z.record(JsonValueSchema) }).strict().parse(params);
-        if (providerForRole(role) !== "agy" || !availableTools(role, "agy").some(tool => tool.name === input.name))
-          throw new Error("No native Agy MCP operation for this role");
         const binding = await principal(role, input.paneId);
+        if (binding.provider !== "agy" || !availableTools(role, "agy").some(tool => tool.name === input.name))
+          throw new Error("No native Agy MCP operation for this role");
         const current = await readAgyTurn(binding, input.launchId, undefined, undefined, { name: input.name, arguments: input.arguments });
         if (!current.pendingTool) throw new Error("Agy MCP call has no pending native operation");
         await assertAgyTurn(binding, current.anchor, current.pendingTool, input.name);
@@ -1725,9 +1753,21 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
       }
       if (method === "native_session") {
-        const input = record(params); nativeSessions.set(textField(input.paneId), {role, sessionId:textField(input.sessionId)});
+        const input = record(params), root = typeof input.launchId === "string" ? platformSession?.nativeTranscriptRoot(input.launchId) : undefined;
+        if (root && !platformSession?.providerOfActiveLaunch(role, textField(input.launchId))) throw new Error("Foreign provider launch transcript registration");
+        nativeSessions.set(textField(input.paneId), {role, sessionId:textField(input.sessionId),
+          ...(root && typeof input.transcriptPath === "string" ? { transcriptPath: input.transcriptPath, transcriptRoot: root } : {}) });
         await persistNativeSessions();
         return {registered:true};
+      }
+      if (method === "provider_failure") {
+        if (!workspace || quiesced || !platformRoles.some(option => option.role === role && option.failover)) return { recorded: false };
+        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), event: JsonValueSchema }).strict().parse(params);
+        const binding = await principal(role, input.paneId);
+        if (binding.provider !== "claude" || binding.session?.value !== input.nativeSessionId || binding.metadata?.launchId !== input.launchId)
+          throw new Error("Provider failure belongs to a foreign native session or launch");
+        await receipts.recordProviderErrorSignal(binding, input.event, new Date().toISOString());
+        return { recorded: true };
       }
       if (method === "transport_prompt") {
         const input = record(params), message = RoleMessageSchema.parse(input.message);
@@ -1751,7 +1791,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (!workspace) return { recorded: false };
         const input = record(params), binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider Stop native session mismatch");
-        if (providerForRole(role) === "agy") {
+        if (binding.provider === "agy") {
           // Agy executionNum resets between turns. The latest transcript anchor
           // cannot prove which invocation produced a delayed/replayed Stop.
           return { recorded: false, reason: "native_stop_epoch_unproven" };
@@ -2106,9 +2146,49 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       reconciledStopGeneration = generation;
     })().catch(error => { inboundError = redactString(String(error)); process.stderr.write(`Bflow inbound: ${inboundError}\n`); }).finally(() => { pumping = false; });
   }, 100);
+  const pumpProviderFailures = async () => {
+    if (!workspace || !platformRoles.some(option => option.failover)) return;
+    const snapshot = record(await workspace.runtime.inspect());
+    const outbound = (snapshot.outbound as unknown[]).map(record);
+    const active = outbound.filter(out => out.status === "accepted" && record(out.message).type === "task.assignment" && out.handle);
+    for (const out of active) {
+      const handle = AgentExecutionHandleSchema.parse(out.handle), target = handle.target;
+      const registration = target.paneId ? nativeSessions.get(target.paneId) : undefined;
+      const bindingValue = unwrap(await workspace.runtime.ports.panes.getRoleBinding(textField(out.selector)));
+      if (!bindingValue || bindingValue.provider !== "codex" || !platformRoles.some(option => option.role === bindingValue.role && option.failover) ||
+          !registration?.transcriptRoot || !registration.transcriptPath || registration.role !== bindingValue.role || registration.sessionId !== target.session?.value) continue;
+      const observed = await readCodexFailure({ root: registration.transcriptRoot, path: registration.transcriptPath,
+        nativeSessionId: registration.sessionId, acceptedAt: handle.acceptedAt });
+      if (!observed) continue;
+      const binding = await principal(bindingValue.role, bindingValue.paneId);
+      const failure = classifyProviderFailure(observed.event, { provider: "codex", executionId: handle.executionId, observedAt: observed.observedAt });
+      await receipts.recordProviderFailure(binding, failure);
+    }
+    for (const signal of await receipts.pendingProviderErrorSignals()) {
+      const out = active.find(out => {
+        const handle = AgentExecutionHandleSchema.parse(out.handle);
+        return handle.target.agentId === signal.binding.agentId && handle.target.paneId === signal.binding.paneId &&
+          digest(handle.target.session) === digest(signal.binding.session) && Date.parse(signal.observedAt) >= Date.parse(handle.acceptedAt);
+      });
+      if (!out) continue; // An unacknowledged original dispatch must reconcile; never attach its error to another execution.
+      const handle = AgentExecutionHandleSchema.parse(out.handle);
+      await receipts.recordProviderFailure(signal.binding, classifyProviderFailure(signal.event,
+        { provider: signal.binding.provider, executionId: handle.executionId, observedAt: signal.observedAt }));
+      await receipts.completeProviderErrorSignal(signal.id);
+    }
+    for (const pending of await receipts.pendingProviderFailures()) {
+      try {
+        await workspace.runtime.observeProviderFailure(pending.binding, pending.failure);
+        await receipts.completeProviderFailure(pending.id);
+      } catch (error) {
+        // Keep unadmitted observations durable. Cancellation and stale bindings can be diagnosed without dispatching anything.
+        inboundError = redactString(String(error));
+      }
+    }
+  };
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
-    const task = workspace.runtime.tick(); scheduler = task;
+    const task = (async () => { await pumpProviderFailures(); return workspace!.runtime.tick(); })(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
   schedulerTimerAlive = true;
@@ -2734,6 +2814,13 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
   const rawInput = Buffer.concat(chunks).toString("utf8");
   const hook = configuration.provider === "agy" ? parseAgyHookJson(rawInput, event) : parseHookJson(rawInput, event);
+  if (event === "StopFailure") {
+    if (configuration.provider !== "claude" || hook.agent_id) return;
+    await callHost(configuration.socketPath, configuration.token, "provider_failure", { paneId: textField(process.env.HERDR_PANE_ID),
+      nativeSessionId: textField(hook.session_id), launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]),
+      event: { hook_event_name: "StopFailure", error: textField(hook.error) } });
+    process.stdout.write("{}\n"); return;
+  }
   if (configuration.provider === "agy" && event === "Stop" && configuration.role !== "conversation") {
     // Permit the physical turn to end without inventing Runtime settlement or
     // an unbounded continuation. Keep its admission and business work pending.
@@ -2816,7 +2903,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     const reachability = plan === undefined ? undefined : await probeAllGateways(plan, process.env, (url, init) => fetch(url, init));
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
-    if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
+    if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session,
+      ...(process.env[BFLOW_LAUNCH_ID_ENV] ? { launchId: process.env[BFLOW_LAUNCH_ID_ENV] } : {}),
+      ...(typeof hook.transcript_path === "string" ? { transcriptPath: hook.transcript_path } : {}) });
     if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
     const stopBlockDecision = configuration.provider === "agy" ? "continue" : "block";
     if (event === "Stop" && configuration.role === "conversation") {

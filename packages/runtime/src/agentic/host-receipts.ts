@@ -1,4 +1,5 @@
 import { HostTelemetryObservationsSchema, type HostTelemetryObservations } from "../telemetry/host-observations.js";
+import { ProviderNativeFailureEventSchema, ProviderFailureObservationSchema, type ProviderFailureObservation } from "@bflow/contracts";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -18,7 +19,7 @@ import { BFLOW_INBOX_NUDGE } from "./conversation-inbox.js";
 import { TaskActivityLog, type TaskActivityInput } from "./task-activity-log.js";
 import type { AgyNativeAnchor } from "./agy-native-transcript.js";
 
-type Kind = "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
+type Kind = "provider-error-signal" | "provider-error-signal-handled" | "provider-failure" | "provider-failure-handled" | "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
 export const AgyNativeAnchorSchema = z.object({ transcriptPath: z.string().min(1), device: z.string().min(1), inode: z.string().min(1),
   stepIndex: z.number().int().nonnegative(), rowDigest: z.string().regex(/^[a-f0-9]{64}$/), prefixDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 export interface HumanHookProvenance {
@@ -217,6 +218,16 @@ export class HostReceiptJournal {
   }
   private filename(kind: Kind, id: string): string { return `${kind}-${digest(textField(id))}.json`; }
   private parsePayload(kind: Kind, input: unknown): JsonValue {
+    if (kind === "provider-error-signal") return json(z.object({ binding: PaneBindingSchema, event: ProviderNativeFailureEventSchema,
+      observedAt: z.string().datetime({ offset: true }) }).strict().parse(input));
+    if (kind === "provider-error-signal-handled") return json(z.object({ id: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(input));
+    if (kind === "provider-failure") {
+      const value = z.object({ binding: PaneBindingSchema, failure: ProviderFailureObservationSchema }).strict().parse(input);
+      if (value.binding.sessionId !== this.sessionId || value.failure.provider !== value.binding.provider || !value.failure.evidenceDigest)
+        throw new Error("Foreign provider failure receipt");
+      return json(value);
+    }
+    if (kind === "provider-failure-handled") return json(z.object({ id: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(input));
     if (kind === "conversation-turn") {
       const turn = TrustedConversationTurnSchema.parse(input);
       if (turn.binding.role !== "conversation" || turn.binding.sessionId !== this.sessionId || !turn.binding.session)
@@ -374,6 +385,43 @@ export class HostReceiptJournal {
   private turnId(binding: PaneBinding, message: RoleMessage): string {
     return digest([binding.paneId, binding.session, message.message_id]);
   }
+  async recordProviderFailure(binding: PaneBinding, failure: ProviderFailureObservation): Promise<string> {
+    const id = digest([binding.bindingId, failure.executionId, failure.evidenceDigest]);
+    const previous = await this.read("provider-failure", id);
+    if (!previous) await this.write("provider-failure", id, { binding, failure });
+    return id;
+  }
+  async recordProviderErrorSignal(bindingInput: PaneBinding, eventInput: unknown, observedAt: string): Promise<string> {
+    const binding = PaneBindingSchema.parse(bindingInput), event = ProviderNativeFailureEventSchema.parse(eventInput);
+    const id = digest([binding.bindingId, event]);
+    if (!await this.read("provider-error-signal", id)) await this.write("provider-error-signal", id, { binding, event, observedAt });
+    return id;
+  }
+  async pendingProviderErrorSignals() {
+    const result = [];
+    for (const id of await this.receiptIds("provider-error-signal")) {
+      if (await this.read("provider-error-signal-handled", id)) continue;
+      const value = record(await this.read("provider-error-signal", id));
+      result.push({ id, binding: PaneBindingSchema.parse(value.binding), event: ProviderNativeFailureEventSchema.parse(value.event), observedAt: textField(value.observedAt) });
+    }
+    return result;
+  }
+  async completeProviderErrorSignal(id: string) { await this.write("provider-error-signal-handled", id, { id }); }
+  async authenticateProviderFailure(binding: PaneBinding, failure: ProviderFailureObservation): Promise<boolean> {
+    const id = digest([binding.bindingId, failure.executionId, failure.evidenceDigest]);
+    const value = await this.read("provider-failure", id);
+    return !!value && digest(record(value).binding) === digest(binding) && digest(record(value).failure) === digest(failure);
+  }
+  async pendingProviderFailures() {
+    const result: { id: string; binding: PaneBinding; failure: ProviderFailureObservation }[] = [];
+    for (const id of await this.receiptIds("provider-failure")) {
+      if (await this.read("provider-failure-handled", id)) continue;
+      const value = record(await this.read("provider-failure", id));
+      result.push({ id, binding: PaneBindingSchema.parse(value.binding), failure: ProviderFailureObservationSchema.parse(value.failure) });
+    }
+    return result;
+  }
+  async completeProviderFailure(id: string) { await this.write("provider-failure-handled", id, { id }); }
   private bindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined }); }
   private legacyBindingIdentity(binding: PaneBinding): string { return digest({ ...binding, transportState: undefined }); }
   private isExpectedAgyTurnReceiptId(binding: PaneBinding, launchId: unknown, anchor: unknown, id: string): boolean {

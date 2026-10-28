@@ -45,6 +45,8 @@ export interface RolePlatformRequirement {
   readonly cwd: string;
   /** Dynamic Developer launches are keyed by task. */
   readonly taskId?: string;
+  /** Host-only identity of a continuation launch; task/governance identity remains unchanged. */
+  readonly executionKey?: string;
   readonly capabilityIds: readonly string[];
   readonly mcpServiceIds: readonly string[];
   /** Exact MCP operation names. Kept distinct from toolIds, which are catalog inventory IDs. */
@@ -85,7 +87,7 @@ export interface SkillSessionPort {
   resolveForRole(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement,
     environmentId: string): Promise<OperationResult<ResolvedRoleSkills>>;
   /** Recover a persisted manifest by exact digest; drift is `conflict`, never a silent re-resolve. */
-  load(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string): Promise<OperationResult<ResolvedRoleSkills | null>>;
+  load(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string, executionKey?: string): Promise<OperationResult<ResolvedRoleSkills | null>>;
 }
 
 // ----------------------------------------------------------- environment (T2)
@@ -321,6 +323,8 @@ export interface PlatformReadinessService {
   assertFresh(launchId: string, now?: Date): OperationResult<AgentHealthResult>;
   prepareDeveloper(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement,
     options?: OperationOptions): Promise<OperationResult<PreparedRoleLaunch>>;
+  preflightDeveloper?(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement,
+    options?: OperationOptions): Promise<OperationResult<AgentHealthResult>>;
   releaseLaunch(launchId: string, options?: OperationOptions): Promise<OperationResult<void>>;
   /** Verifies every seen session's Gateway registrations; lost ones degrade their launches (`assertFresh` then fails). */
   /** Revoke this session's registrations and release journal intents left by a previous host daemon. */

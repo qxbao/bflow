@@ -21,6 +21,12 @@ const proposal = (change = {}) => ({ schemaVersion: 1, binding, content, ...chan
 const admitted = () => { const result = admitHandover(proposal(), binding); expect(result.status).toBe("accepted"); return result; };
 
 describe("private task handover", () => {
+  it("selects the original same-attempt handover only for a host-recorded execution continuation", () => {
+    const next = { ...binding, assignmentId: "provider-continuation" };
+    expect(selectHandover(admitted(), next, [binding, next]).status).toBe("withheld");
+    expect(selectHandover(admitted(), next, [binding, next], [binding.assignmentId])).toMatchObject({ status: "selected" });
+    expect(selectHandover(admitted(), { ...next, worktreePath: "/other" }, [binding, next], [binding.assignmentId]).status).toBe("withheld");
+  });
   it("round trips through atomic storage and a restarted store, absent stays absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "bflow-handover-")); roots.push(root);
     const store = new TaskHandoverStore(root);
