@@ -1,7 +1,10 @@
-import { createRoot } from "react-dom/client";
-import { WEB_API_VERSION } from "@bflow/contracts/web";
-
-// Build/import smoke only; W06 owns the actual application and visual design.
-const root = document.getElementById("root");
-if (!root) throw new Error("Missing application root");
-createRoot(root).render(<p data-api-version={WEB_API_VERSION}>Bflow local web — W00 build skeleton.</p>);
+import { createRoot } from 'react-dom/client';
+import { ApiClient, consumeBootstrap } from './api/client';
+import { Router } from './router';
+import './styles/fonts.css';
+import './styles/tokens.css';
+import './styles/global.css';
+const bootstrap=consumeBootstrap();
+const root=document.getElementById('root');
+if(!root)throw new Error('Missing application root');
+createRoot(root).render(<Router api={new ApiClient()} bootstrap={bootstrap}/>);
