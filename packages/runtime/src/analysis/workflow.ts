@@ -70,6 +70,8 @@ export type AnalysisRunStatus = "running" | "awaiting_business_decision" | "awai
 interface ExecutionRecord {
   executionId: string; taskId: AnalysisTaskKind; attemptId: string; attempt: number; generation: number;
   state: "bound" | "recorded"; agentId?: string; outputDigest?: string; startedAt: string;
+  /** Set with state "recorded": the processed outcome that Core must receive (re-submitted idempotently after a restart). */
+  failure?: { code: string; message: string } | null; completedAt?: string;
 }
 interface DocumentRecord { version: number; digest: string; artifact: ArtifactReference; authorAgentId: string; attemptId: string; content: AnalysisDocument }
 interface RunRecord {
@@ -221,12 +223,13 @@ export class AnalysisWorkflowRuntime {
       const active = snapshot.tasks.find(item => item.status === "running" || item.status === "waiting");
       if (active) { await this.execute(run, active); continue; }
       if (run.status !== "running") { await this.save(); return this.status(runId); }
-      if (await this.requestApprovals(run, snapshot)) return this.status(runId);
+      // A permanently failed or blocked task stops the run before any human is asked to decide for a doomed workflow.
       if (snapshot.tasks.some(item => item.status === "blocked" || item.status === "failed")) {
         if (run.status === "running") run.status = "blocked";
         await this.save();
         return this.status(runId);
       }
+      if (await this.requestApprovals(run, snapshot)) return this.status(runId);
       return this.status(runId);
     }
     throw new Error("Analysis workflow made no bounded progress");
@@ -245,6 +248,11 @@ export class AnalysisWorkflowRuntime {
     if (task.status === "waiting") {
       // Result recorded, gate evaluation interrupted: re-evaluate from journaled evidence (idempotent evaluation IDs).
       await this.evaluateGates(run, task, existing!);
+      return;
+    }
+    if (existing?.state === "recorded") {
+      // Already processed and journaled; only the Core result write was interrupted.
+      await this.recordResult(run, existing);
       return;
     }
     let outcome: { agentId: string; output: unknown } | undefined;
@@ -303,7 +311,7 @@ export class AnalysisWorkflowRuntime {
       context: { observations: run.observations, questions: run.questions,
         decisions: Object.fromEntries(Object.entries(run.decisions).map(([id, value]) => [id, { answer: value.answer }])),
         ...(latest ? { document: { version: latest.version, digest: latest.digest, content: latest.content } } : {}),
-        findings: [...(verification && verification.status !== "passed" ? verification.result.findings : []),
+        findings: [...run.intake.revisionFindings, ...(verification && verification.status !== "passed" ? verification.result.findings : []),
           ...(run.review?.verdict === "changes_requested" ? run.review.findings.map(item => ({ code: "review", ids: item.statementIds, message: item.note })) : [])]
           .map(item => ({ code: item.code, ids: [...item.ids], message: item.message })) } });
   }
@@ -334,8 +342,16 @@ export class AnalysisWorkflowRuntime {
     execution.state = "recorded";
     execution.agentId = outcome.agentId;
     execution.outputDigest = analysisDigest(outcome.output ?? null);
+    execution.failure = failure ?? null;
+    execution.completedAt = this.ports.now();
     await this.save();
-    const at = this.ports.now();
+    await this.recordResult(run, execution);
+  }
+
+  private async recordResult(run: RunRecord, execution: ExecutionRecord) {
+    const kind = execution.taskId;
+    const failure = execution.failure ?? undefined;
+    const at = execution.completedAt ?? this.ports.now();
     const result = AgentResultSchema.parse({ requestId: `request-${execution.executionId}`, attemptId: execution.attemptId, runId: run.runId,
       taskId: kind, executionId: execution.executionId, status: failure ? "failed" : "succeeded",
       verification: { status: "verified", evidence: `analysis ${kind} output ${execution.outputDigest}`, correlation: this.handle(run, execution).correlation },
@@ -349,6 +365,7 @@ export class AnalysisWorkflowRuntime {
 
   private async acceptSurvey(run: RunRecord, output: { observations: { path: string; note: string }[] }) {
     const roots = run.intake.surveyPaths.map(relativeSafe);
+    const recorded: SurveyObservation[] = [];
     for (const observation of output.observations) {
       const path = relativeSafe(observation.path);
       if (!roots.some(root => path === root || path.startsWith(`${root}/`)))
@@ -359,9 +376,11 @@ export class AnalysisWorkflowRuntime {
       if (!stats.isFile() || stats.size > 1_048_576) throw new AnalysisPermissionDenied(`Survey source is not a bounded regular file: ${path}`);
       const bytes = await readFile(absolute);
       // Runtime records what was observed; role notes never become source evidence on their own.
-      const recorded = SurveyObservationSchema.parse({ path, sha256: sha256(bytes), bytes: bytes.length, note: observation.note });
-      run.observations = [...run.observations.filter(item => item.path !== path), recorded];
+      recorded.push(SurveyObservationSchema.parse({ path, sha256: sha256(bytes), bytes: bytes.length, note: observation.note }));
     }
+    // All-or-nothing: a denied output leaves no partial observations behind.
+    const paths = new Set(recorded.map(item => item.path));
+    run.observations = [...run.observations.filter(item => !paths.has(item.path)), ...recorded];
   }
 
   private acceptElicitation(run: RunRecord, output: { questions: { id: string; question: string; blocking: boolean }[] }) {
@@ -394,10 +413,15 @@ export class AnalysisWorkflowRuntime {
     let produced: ArtifactReference[] = [];
     if (binding.gateId === ANALYSIS_GATES.verification) {
       const latest = run.documents.at(-1)!;
-      const result = this.verify(run, latest.content);
-      const artifact = await this.putJson(run, "specification", `analysis-${run.runId}-verification-v${latest.version}-${execution.attemptId}`, "report",
-        { documentDigest: latest.digest, ...result });
-      run.verifications.push({ documentDigest: latest.digest, attemptId: execution.attemptId, at, status: result.status, artifact, result });
+      let recorded = run.verifications.find(item => item.attemptId === execution.attemptId && item.documentDigest === latest.digest);
+      if (!recorded) {
+        const checked = this.verify(run, latest.content);
+        const stored = await this.putJson(run, "specification", `analysis-${run.runId}-verification-v${latest.version}-${execution.attemptId}`, "report",
+          { documentDigest: latest.digest, ...checked });
+        recorded = { documentDigest: latest.digest, attemptId: execution.attemptId, at, status: checked.status, artifact: stored, result: checked };
+        run.verifications.push(recorded);
+      }
+      const { result, artifact } = recorded;
       status = result.status; findings = [...result.findings]; produced = [artifact];
       if (result.status === "blocked") {
         run.status = "needs_revision";
@@ -573,7 +597,11 @@ export class AnalysisWorkflowRuntime {
     const intake = { ...previous.intake, revision: previous.intake.revision + 1, supersedes: runId, revisionReason: input.reason,
       answeredDecisions: answered, userStatements: [...previous.intake.userStatements, ...(input.userStatements ?? [])],
       requiredDecisions: [...previous.intake.requiredDecisions, ...previous.questions.filter(item => !previous.intake.requiredDecisions.some(other => other.id === item.id))] };
-    const result = await this.start({ runId: input.runId, intake, pack: input.pack, packPin: input.packPin,
+    const carried = [...(previous.review?.verdict === "changes_requested" ? previous.review.findings.map(item => ({ code: "review", ids: item.statementIds, message: item.note })) : []),
+      ...(previous.verifications.at(-1) && previous.verifications.at(-1)!.status !== "passed" ? previous.verifications.at(-1)!.result.findings.map(item => ({ code: item.code, ids: [...item.ids], message: item.message })) : []),
+      ...(previous.approvals.document?.decision && previous.approvals.document.decision.decision !== "approved" && previous.approvals.document.decision.reason
+        ? [{ code: "document_feedback", ids: [], message: previous.approvals.document.decision.reason }] : [])];
+    const result = await this.start({ runId: input.runId, intake: { ...intake, revisionFindings: carried }, pack: input.pack, packPin: input.packPin,
       ...(input.definition !== undefined ? { definition: input.definition } : {}) });
     previous.status = "superseded";
     previous.supersededBy = input.runId;
@@ -651,6 +679,8 @@ export class AnalysisWorkflowRuntime {
     if (!allowed.includes(path)) throw new AnalysisPermissionDenied(`Write outside the analysis handoff was denied: ${path}`);
     const absolute = resolve(this.ports.repositoryRoot, path);
     if (!within(this.ports.repositoryRoot, absolute)) throw new AnalysisPermissionDenied(`Write escapes the repository: ${path}`);
+    // Check existing ancestors before mkdir: a symlinked parent would otherwise create directories outside the repository.
+    await this.assertNoSymlink(dirname(absolute));
     await mkdir(dirname(absolute), { recursive: true });
     await this.assertNoSymlink(dirname(absolute));
     try {

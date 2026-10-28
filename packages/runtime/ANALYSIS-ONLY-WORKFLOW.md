@@ -112,9 +112,11 @@ Khi gate thất bại, Core chạy retry có giới hạn và gửi lại cho sp
 
 - Assignment luôn mang `permissions.write = "none"`, `commands = "none"`, `read = surveyPaths`.
 - Output có `writes`/`files`/`patch`/`commands`/`proposedTasks`/`install`/`deploy`, survey đọc ngoài phạm vi, hoặc
-  output từ sai role đều là **permission denial**. Denial được ghi vào journal, attempt thất bại, và retry có giới hạn.
+  output từ sai role đều là **permission denial**. Output survey được chấp nhận theo kiểu tất cả hoặc không: một path
+  bị từ chối thì không observation nào của output đó được ghi. Denial được ghi vào journal, attempt thất bại, và retry có giới hạn.
 - Chỉ Runtime ghi repository, và chỉ khi tài liệu đã được người duyệt: hai file Markdown
-  `<documentRoot>/<requestId>/r<revision>/{analysis,handoff}.md`. Thư mục cha là symlink thì bị từ chối. File đã tồn tại
+  `<documentRoot>/<requestId>/r<revision>/{analysis,handoff}.md`. Thư mục cha là symlink thì bị từ chối; việc kiểm tra
+  chạy trước khi tạo thư mục, nên không có gì được tạo ngoài repository. File đã tồn tại
   không bị ghi đè, trừ trường hợp publish lại nội dung y hệt sau restart.
 
 ## Quyết định, approval và bàn giao
@@ -138,8 +140,12 @@ Khi gate thất bại, Core chạy retry có giới hạn và gửi lại cho sp
   - Execution đã bind nhưng chưa có kết quả thì không bao giờ gửi lại mù. Runtime gọi `roles.reconcile`.
     Nếu kết quả `unknown`, run bị `blocked` với `unknown_delivery:<executionId>`.
   - Nếu journal mất bản ghi binding, Runtime nhận binding từ Core và đi tiếp bằng reconcile.
+  - Nếu kết quả đã được xử lý và ghi journal nhưng Core chưa nhận, Runtime gửi lại đúng kết quả đó (idempotent),
+    không chạy lại role hay publication.
   - Task đã hoàn tất không bị giao lại.
-- `revise` tạo một run mới, revision n+1, mang lý do và các quyết định đã trả lời. Run cũ chuyển `superseded` và giữ
+- Task fail vĩnh viễn (hết retry) hoặc bị chặn sẽ dừng run trước khi hỏi người dùng thêm quyết định.
+- `revise` tạo một run mới, revision n+1, mang lý do, các quyết định đã trả lời và `revisionFindings` (finding của
+  reviewer, của verification và lý do người duyệt yêu cầu sửa) để specifier ở revision mới thấy. Run cũ chuyển `superseded` và giữ
   nguyên lịch sử tài liệu, approval và bàn giao.
 
 ## Cách dùng

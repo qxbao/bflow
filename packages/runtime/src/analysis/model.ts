@@ -46,7 +46,9 @@ export const AnalysisIntakeSchema = z.object({
   supersedes: Id.optional(),
   /** Decisions answered on an earlier revision; they stay user-sourced. */
   answeredDecisions: z.record(Id, z.object({ answer: Text, decidedBy: Text, decidedAt: z.string().datetime({ offset: true }) }).strict()).default({}),
-  revisionReason: Text.optional()
+  revisionReason: Text.optional(),
+  /** Reviewer, verification and approval feedback carried from the superseded revision to the specifier. */
+  revisionFindings: z.array(z.object({ code: z.string().min(1).max(64), ids: z.array(z.string().max(64)), message: Text }).strict()).default([])
 }).strict().superRefine((intake, context) => {
   const issue = (message: string) => context.addIssue({ code: z.ZodIssueCode.custom, message });
   if (!intake.deliverables.some(section => section === "acceptance_criteria") || !intake.deliverables.includes("functional_requirements"))

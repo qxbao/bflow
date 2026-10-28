@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
-import type { ArtifactStore, RunStore } from "@bflow/contracts";
+import type { ArtifactStore, RunStore, WorkflowEngine } from "@bflow/contracts";
 import {
   AnalysisPackRejected, AnalysisWorkflowRejected, AnalysisWorkflowRuntime, buildAnalysisPack, planAnalysisWorkflow, resolveAnalysisPack,
   verifyAnalysisDocument, type AnalysisAssignment, type AnalysisDocument, type AnalysisIntakeInput, type AnalysisRolePort, type AnalysisReconciliation
@@ -122,9 +122,9 @@ async function stores() {
   const artifactStore = unwrap(await openFilesystemArtifactStore({ root: join(state, "artifacts"), storeId: "analysis" })) as ArtifactStore;
   return { runStore, artifactStore };
 }
-async function open(roles: AnalysisRolePort, humans = ["user:anh"]) {
+async function open(roles: AnalysisRolePort, humans = ["user:anh"], engine: WorkflowEngine = new DeterministicWorkflowEngine()) {
   const { runStore, artifactStore } = await stores();
-  return AnalysisWorkflowRuntime.open({ engine: new DeterministicWorkflowEngine(), runStore, artifactStore, roles, repositoryRoot: repo,
+  return AnalysisWorkflowRuntime.open({ engine, runStore, artifactStore, roles, repositoryRoot: repo,
     journalPath: join(state, "analysis-journal.json"), authorizeHuman: decision => humans.includes(decision.decidedBy), now });
 }
 async function tree(dir: string): Promise<Record<string, string>> {
@@ -312,6 +312,64 @@ describe("analysis-only workflow on a fixture repository", () => {
     expect(status).toMatchObject({ status: "needs_revision", blockers: ["document_changes_requested"] });
     expect((await runtime.drive("ba-cr")).handoff).toBeUndefined();
     await expect(readdir(join(repo, "docs"))).rejects.toThrow();
+    // The revision hands the human feedback to the specifier of r2.
+    const roles = new FixtureRoles();
+    const revised = await open(roles);
+    await revised.revise("ba-cr", { runId: "ba-cr2", reason: "Add the cancellation flow", pack: PACK, packPin: PIN });
+    await revised.drive("ba-cr2");
+    await revised.decideBusinessQuestions("ba-cr2", { decision: "approved", answers: {}, decidedBy: "user:anh" });
+    const spec = roles.calls.find(item => item.taskId === "specification")!;
+    expect(spec.context.findings).toContainEqual({ code: "document_feedback", ids: [], message: "Add the cancellation flow" });
+  });
+
+  it("keeps survey outputs all-or-nothing and refuses a symlinked document root", async () => {
+    const outside = join(root, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(repo, "docs"));
+    const roles = new FixtureRoles({
+      survey: () => ({ output: { observations: [{ path: "src/refunds/states.ts", note: "ok" }, { path: "package.json", note: "outside" }] } })
+    });
+    const runtime = await open(roles);
+    await runtime.start({ runId: "atomic-1", intake: intake(), pack: PACK, packPin: PIN });
+    const status = await runtime.drive("atomic-1");
+    expect(status.denials).toHaveLength(2);
+    expect(status.status).toBe("blocked");
+    expect(roles.calls.some(item => item.taskId === "specification")).toBe(false);
+    expect(status.approvals.elicitation).toBeUndefined();
+    const journal = JSON.parse(await readFile(join(state, "analysis-journal.json"), "utf8"));
+    expect(journal.runs[0].observations).toEqual([]);
+
+    const publish = await open(new FixtureRoles());
+    await publish.start({ runId: "link-1", intake: intake({ requestId: "linked" }), pack: PACK, packPin: PIN });
+    await publish.drive("link-1");
+    await publish.decideBusinessQuestions("link-1", { decision: "approved", answers: { "D-1": "5,000,000 VND", "D-2": "30 days" }, decidedBy: "user:anh" });
+    const final = await publish.decideDocument("link-1", { decision: "approved", documentDigest: docDigest(publish, "link-1"), decidedBy: "user:anh" });
+    expect(final.handoff).toBeUndefined();
+    expect(final.denials.map(item => item.reason)).toEqual([expect.stringContaining("Symlinked path refused: docs")]);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("re-records a journaled result after a crash before Core accepted it, without redoing publication", async () => {
+    const real = new DeterministicWorkflowEngine();
+    let fail = true;
+    const crashing = new Proxy(real, { get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (key === "recordAgentResult") return async (command: { taskId: string }) => {
+        if (fail && command.taskId === "publication") { fail = false; throw new Error("crash before Core result"); }
+        return value.call(target, command);
+      };
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) as WorkflowEngine;
+    const runtime = await open(new FixtureRoles(), ["user:anh"], crashing);
+    await runtime.start({ runId: "pub-1", intake: intake(), pack: PACK, packPin: PIN });
+    await runtime.drive("pub-1");
+    await runtime.decideBusinessQuestions("pub-1", { decision: "approved", answers: { "D-1": "5,000,000 VND", "D-2": "30 days" }, decidedBy: "user:anh" });
+    await expect(runtime.decideDocument("pub-1", { decision: "approved", documentDigest: docDigest(runtime, "pub-1"), decidedBy: "user:anh" }))
+      .rejects.toThrow(/crash before Core result/);
+    const restarted = await open(new FixtureRoles());
+    const status = await restarted.drive("pub-1");
+    expect(status.status).toBe("published");
+    expect(status.rejections).toEqual([]);
   });
 
   it("recovers after a restart: completed tasks are not re-dispatched and an unjournaled delivery is reconciled", async () => {
