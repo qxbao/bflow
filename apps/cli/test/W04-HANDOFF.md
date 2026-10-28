@@ -1,3 +1,7 @@
+> Historical partial handoff for c7d8148/7c19443. The project owner subsequently
+> approved bounded W04 integration on 2026-10-29. See
+> [the integration handoff](W04-INTEGRATION-HANDOFF.md) for current disposition.
+
 # W04 — CLI web command and lifecycle composition
 
 Status: **PARTIAL / BLOCKED on integration-owned seams**. The independent W04
