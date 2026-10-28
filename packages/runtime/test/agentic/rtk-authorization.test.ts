@@ -14,7 +14,10 @@ vi.mock("node:child_process", async importOriginal => {
   return { ...actual, spawn: (...args: Parameters<typeof actual.spawn>) => {
     const child = actual.spawn(...args);
     const argv = Array.isArray(args[1]) ? args[1] as readonly string[] : [];
-    const executable = argv.findIndex(arg => arg.startsWith("/") && arg.endsWith("/.bflow-rtk-scratch/rtk"));
+    const separator = argv.lastIndexOf("--");
+    const executable = separator >= 0 && argv[separator + 1]?.startsWith("/") && argv[separator + 1]?.endsWith("/.bflow-rtk-scratch/rtk")
+      ? separator + 1
+      : -1;
     if (executable >= 0) {
       observation.rtkChildren.push([...argv.slice(executable + 1)]);
       if (observation.rtkChildren.length === observation.revokeAfter) child.once("close", () => { observation.revoked = true; });
