@@ -47,6 +47,11 @@ import {
 } from "./rework-causality.js";
 import { InspectInputSchema, summarizeInspectRun, summarizeInspectState, type InspectInput } from "./mcp-output-views.js";
 import { parseAppCheckIdentity } from "./app-check-config.js";
+import {
+  PROTOTYPE_TASK, PrototypeSubmissionSchema, acceptPrototypeScope, admitPrototypeVersion, assertPrototypeDecision, closePrototype, currentScope,
+  pendingPrototypeApprovals, prototypeApproval, prototypeDecisionRefusal, prototypeDesignInput, prototypeManifest, prototypeView, settlePrototypeDecision,
+  validatePrototypeContent, type PrototypeApproval
+} from "./prototype-review.js";
 
 /** Existing receipt and diagnostic operations that may drain after scheduling is quiesced. */
 export const QUIESCED_RECEIPT_DRAIN_OPERATIONS: readonly string[] = Object.freeze([
@@ -800,7 +805,8 @@ export class AgenticWorkflowRuntime {
         const run = state.runs.find(item => item.runId === message.run_id);
         if (run && (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)))
           throw new AdmissionRejectedError(`Run is ${run.status}; approval is no longer actionable`);
-        const reason = run && supersededReason(run, ApprovalDecisionSchema.parse(message.payload).approvalId);
+        const approvalId = ApprovalDecisionSchema.parse(message.payload).approvalId;
+        const reason = run && (supersededReason(run, approvalId) ?? prototypeDecisionRefusal(run.prototype, approvalId));
         if (reason !== undefined) throw new AdmissionRejectedError(reason);
       }
       const out = outbox.enqueue(message); await save();
@@ -882,6 +888,9 @@ export class AgenticWorkflowRuntime {
       this.resumeUserDecisionAsker(state, outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "cancelled",
         reason: `Requirement revision ${revision} superseded this question` });
     }
+    // A prototype answers the previous requirement; its approvals never carry to the revised one.
+    if (run.prototype && run.prototype.status !== "superseded") for (const entry of closePrototype(run.prototype, "superseded", `Requirement revision ${revision} superseded this prototype review`))
+      superseded.push({ approvalId: entry.request.approvalId, supersededByRevision: revision });
     if (superseded.length) {
       run.supersededApprovals = [...(run.supersededApprovals ?? []), ...superseded];
       const approvalIds = superseded.map(item => item.approvalId);
@@ -1246,6 +1255,7 @@ export class AgenticWorkflowRuntime {
           pending.push({ request: ApprovalRequestSchema.parse(run.approval), correlationId: run.delegation.correlationId });
         for (const entry of Object.values(run.userDecisions ?? {}))
           if (entry.status === "pending") pending.push({ request: ApprovalRequestSchema.parse(entry.request), correlationId: run.delegation.correlationId });
+        for (const request of pendingPrototypeApprovals(run.prototype)) pending.push({ request, correlationId: run.delegation.correlationId });
       }
       return pending;
     });
@@ -1585,9 +1595,10 @@ export class AgenticWorkflowRuntime {
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
           const decision = ApprovalDecisionSchema.parse(message.payload);
-          const reason = supersededReason(run, decision.approvalId);
+          const reason = supersededReason(run, decision.approvalId) ?? prototypeDecisionRefusal(run.prototype, decision.approvalId);
           if (reason !== undefined) { inbox.status = "rejected"; inbox.reason = reason; await save(); throw new AdmissionRejectedError(reason); }
           if (run.userDecisions?.[decision.approvalId] !== undefined) await this.answerUserDecision(state, save, outbox, run, decision);
+          else if (prototypeApproval(run.prototype, decision.approvalId)) await this.applyPrototypeDecision(state, save, outbox, run, decision);
           else await this.applyDecision(state, save, core, outbox, run, decision);
         } else if (message.type === "execution.receipt") {
           const receipt = AgentBindingReceiptSchema.parse(message.payload);
@@ -2464,6 +2475,8 @@ export class AgenticWorkflowRuntime {
       if (proposed.dependencies.some(dep => dep.condition !== "succeeded")) throw new Error("Dependencies must require verified success");
       const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
       if (classification.level !== draft.level) throw new Error("SDD level conflicts with assessed policy");
+      // An accepted prototype is input to the formal design, never its approval; an open prototype review blocks the design.
+      const prototype = prototypeDesignInput(run.prototype, proposed);
       const definition = WorkflowDefinitionSchema.parse({ ...proposed,
         maxConcurrency: Math.min(proposed.maxConcurrency, this.ports.maxConcurrency ?? 2), tasks: proposed.tasks.map(task => ({ ...task,
         retry: { ...task.retry, maxAttempts: task.retry.maxAttempts + maxIterations - 1 },
@@ -2517,10 +2530,11 @@ export class AgenticWorkflowRuntime {
         specialistRequested,
         followUpOrRevision
       });
+      const retainsPrototype = (prototype?.retainedByTasks.length ?? 0) > 0;
       run.fastPath = {
-        status: fastPathDecision.eligible ? "active" : "inactive",
+        status: fastPathDecision.eligible && !retainsPrototype ? "active" : "inactive",
         decidedAt: this.now(),
-        blockers: [...fastPathDecision.blockers],
+        blockers: [...fastPathDecision.blockers, ...(retainsPrototype ? ["Retained prototype code requires full verification"] : [])],
         reasons: [...fastPathDecision.reasons],
         classificationDigest: digest(classification)
       };
@@ -2538,13 +2552,136 @@ export class AgenticWorkflowRuntime {
         reason: classification.humanApprovalRequired ? "Human design approval required before implementation" : "Specification acceptance",
         // A task spec covering exactly the workflow's criteria repeats the workflow spec, so only narrower task specs are listed.
         evidence: [workflowSpec.specification.artifactRef!, ...tasks.filter(task => digest(task.spec.specification.acceptanceCriteria.map(c => c.id)) !== workflowCriteria)
-          .map(task => task.spec.specification.artifactRef!)],
-        idempotencyKey: `design:${runId}${revisionKey}`, metadata: { bundleFingerprint: digest([definition, workflowSpec, tasks]) } });
+          .map(task => task.spec.specification.artifactRef!), ...(prototype ? [prototype.manifest] : [])],
+        idempotencyKey: `design:${runId}${revisionKey}`, metadata: { bundleFingerprint: digest([definition, workflowSpec, tasks]),
+          ...(prototype ? { prototype: json({ ...prototype, manifest: undefined }) } : {}) } });
       run.approvalKind = "design"; run.status = "awaiting_approval";
       await save();
       await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, definition, run.fastPath));
       await save(); return json(publicExecutionRun(run));
     });
+  }
+  /**
+   * Opens or revises the optional prototype branch with a lightweight accepted scope. Runtime validates the scope (mock-only,
+   * synthetic data, logical prototype/ area, prototype-only criteria); a revision supersedes every earlier prototype approval.
+   */
+  async proposePrototype(runId: string, scopeInput: unknown): Promise<JsonValue> {
+    if (this.quiesced) throw new Error("Runtime is quiesced");
+    return this.transaction(async (state, save, _core, outbox) => {
+      const run = this.run(state, runId); this.live(run);
+      if (run.nativeDeliveries?.length) throw new Error("Unknown native delivery must be reconciled before proposing a prototype");
+      if (run.definition) throw new Error("Prototype review happens before the formal design; the design is already proposed");
+      const result = acceptPrototypeScope(run.prototype, scopeInput, { now: this.now(), requirementRevision: revisionOf(run.delegation),
+        productCriterionIds: run.delegation.acceptanceCriteria.map(criterion => criterion.id) });
+      if (!result.changed) return json(prototypeView(result.record));
+      run.prototype = result.record; run.status = "specifying";
+      const scope = currentScope(result.record);
+      this.notifyPrototypeSuperseded(state, outbox, run, result.superseded, `scope-${scope.version}`);
+      this.emit(state, outbox, run, "conversation.progress", { kind: "prototype_scope_accepted", runId, sdlcStatus: run.status,
+        scopeVersion: scope.version, disposition: scope.scope.disposition, flows: scope.scope.flows.map(flow => flow.id),
+        headline: `Đã chấp nhận phạm vi prototype v${scope.version} (${scope.scope.disposition === "throwaway" ? "dùng xong bỏ" : "được phép phát triển tiếp"}): ${scope.scope.purpose}`.slice(0, 500) },
+      `prototype-scope:${result.record.requirementRevision}:${scope.digest}`, "conversation");
+      await save();
+      return json(prototypeView(result.record));
+    });
+  }
+  /**
+   * Stores a prototype artifact version in ArtifactStore (never the repository) and asks Conversation for a separate prototype
+   * approval. An identical retry, including after restart, returns the existing version without a second request.
+   */
+  async submitPrototype(runId: string, input: unknown): Promise<JsonValue> {
+    if (this.quiesced) throw new Error("Runtime is quiesced");
+    const submission = PrototypeSubmissionSchema.parse(input);
+    return this.transaction(async (state, save, _core, outbox) => {
+      const run = this.run(state, runId); this.live(run);
+      const prototype = run.prototype;
+      if (!prototype) throw new Error("No accepted prototype scope; call propose_prototype first");
+      if (run.definition) throw new Error("The formal design is already proposed; the prototype is frozen as its input");
+      if (!["awaiting_artifact", "awaiting_review", "revision_requested", "accepted"].includes(prototype.status)) throw new Error(`Prototype review is ${prototype.status}`);
+      const scope = currentScope(prototype);
+      if (submission.scopeVersion !== scope.version) throw new Error(`Submission targets prototype scope v${submission.scopeVersion}; the accepted scope is v${scope.version}`);
+      validatePrototypeContent(scope.scope, submission);
+      const { createHash } = await import("node:crypto");
+      const encoded = submission.files.map(file => {
+        const bytes = Buffer.from(file.content, "utf8");
+        return { file, bytes, sha256: createHash("sha256").update(bytes).digest("hex") };
+      });
+      const { body, manifestDigest, flowDigests } = prototypeManifest(runId, scope,
+        encoded.map(item => ({ path: item.file.path, mediaType: item.file.mediaType, flowIds: item.file.flowIds, sha256: item.sha256 })));
+      const latest = prototype.versions.at(-1);
+      if (latest?.manifestDigest === manifestDigest && latest.scopeDigest === scope.digest) {
+        // Same bytes are a retry only while that version is still under review or accepted; reviewed feedback needs a real revision.
+        if (!["awaiting_review", "accepted"].includes(prototype.status)) throw new Error(`Prototype v${latest.version} was already reviewed (${prototype.status}); submit a revised artifact`);
+        return json(prototypeView(prototype));
+      }
+      // Store everything before the journal changes: a failed write leaves only unreferenced content-addressed artifacts.
+      const put = async (bytes: Buffer, sha256: string, mediaType: string, kind: "document" | "report") => ArtifactReferenceSchema.parse(unwrap(await this.ports.artifactStore.put({
+        options: { artifactId: `prototype-${digest([runId, sha256]).slice(0, 40)}`, runId, taskId: PROTOTYPE_TASK, kind, mediaType,
+          expectedIntegrity: { checksum: { algorithm: "sha256", value: sha256 }, sizeBytes: bytes.length }, idempotencyKey: `prototype:${runId}:${sha256}` },
+        content: (async function* () { yield bytes; })() })));
+      const files = [];
+      for (const item of encoded) files.push({ path: item.file.path, mediaType: item.file.mediaType, flowIds: [...item.file.flowIds].sort(),
+        artifact: await put(item.bytes, item.sha256, item.file.mediaType, "document") });
+      const manifestBytes = Buffer.from(JSON.stringify(body));
+      const manifest = await put(manifestBytes, createHash("sha256").update(manifestBytes).digest("hex"), "application/json", "report");
+      const { approval, superseded } = admitPrototypeVersion(prototype, { runId, sessionId: run.delegation.sessionId, now: this.now(),
+        version: { manifest, manifestDigest, files, flowDigests, summary: submission.summary } });
+      run.status = "awaiting_approval";
+      this.notifyPrototypeSuperseded(state, outbox, run, superseded, `version-${approval.version}`);
+      this.emit(state, outbox, run, "approval.request", approval.request, `approval:${approval.request.approvalId}`, "conversation", approval.request.evidence);
+      await save();
+      return json(prototypeView(prototype));
+    });
+  }
+  private notifyPrototypeSuperseded(state: JournalState, outbox: HerdrOutbox, run: RunRecord, superseded: PrototypeApproval[], key: string): void {
+    if (!superseded.length) return;
+    const approvalIds = superseded.map(entry => entry.request.approvalId);
+    this.emit(state, outbox, run, "conversation.progress", { kind: "approval_superseded", runId: run.runId, approvalIds,
+      reason: superseded[0]!.closedReason, headline: `Phê duyệt prototype đang chờ không còn áp dụng (${superseded[0]!.closedReason}): ${approvalIds.join(", ")}` },
+    `prototype-superseded:${key}:${digest(approvalIds)}`, "conversation");
+  }
+  /**
+   * Prototype feedback that proposes changing accepted requirements. Runtime records it but never applies it: the change takes
+   * effect only as a requirement revision from Conversation, which supersedes this prototype through the normal revision path.
+   */
+  private proposeSpecificationRevision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: PrototypeApproval, feedback: string): void {
+    const approvalId = entry.request.approvalId, wakeId = `p19-wake-${digest([run.runId, "prototype_specification_revision", approvalId])}`;
+    if (!state.outbound.some(out => out.message.message_id === wakeId)) outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId,
+      correlation_id: run.delegation.correlationId, causation_id: approvalId, run_id: run.runId, sender: { role: "runtime" }, recipient: { role: "coordinator" },
+      type: "task.status", payload: { kind: "prototype_specification_revision_proposed", runId: run.runId, approvalId, prototypeVersion: entry.version,
+        feedback, sdlcStatus: run.status,
+        next: "The accepted requirements are unchanged. Do not edit them or widen the prototype scope to absorb this proposal. It takes effect only as a " +
+          "requirement revision sent by Conversation after the user confirms it; that revision supersedes this prototype. If the user instead keeps the " +
+          "accepted requirements, revise the prototype within its scope (submit_prototype) or ask through request_user_decision." },
+      artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
+    this.progress(state, outbox, run, `Đã ghi nhận đề xuất đổi yêu cầu từ góp ý prototype v${entry.version}; yêu cầu đã chấp nhận CHƯA bị thay đổi. ` +
+      "Để áp dụng, hãy xác nhận thay đổi yêu cầu cho công việc này (prototype hiện tại sẽ được thay thế); nếu giữ yêu cầu cũ, prototype sẽ được sửa trong phạm vi đã duyệt");
+  }
+  /** Human decision on one prototype version. It never touches the design/task/delivery approval slot. */
+  private async applyPrototypeDecision(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord, decision: ApprovalDecision): Promise<void> {
+    const prototype = run.prototype!, entry = prototypeApproval(prototype, decision.approvalId)!;
+    assertPrototypeDecision(entry, decision, this.now());
+    if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
+    // An approval binds the exact stored bytes the reviewer saw; damaged or substituted content cannot be approved.
+    if (decision.decision === "approved") await this.verifyReferences(entry.request.evidence, run.runId);
+    const outcome = settlePrototypeDecision(prototype, entry, decision);
+    if (outcome === "accepted") {
+      run.status = "planning"; delete run.error;
+      this.progress(state, outbox, run, `Prototype v${entry.version} đã được duyệt. Đây không phải duyệt thiết kế hay nghiệm thu; bước tiếp theo là specification/design chính thức`);
+    } else if (outcome === "revision_requested" && prototype.feedback.at(-1)!.kind === "specification_revision_proposal") {
+      run.status = "specifying";
+      this.proposeSpecificationRevision(state, outbox, run, entry, prototype.feedback.at(-1)!.reason);
+    } else if (outcome === "revision_requested") {
+      run.status = "specifying";
+      this.progress(state, outbox, run, `Đã ghi nhận yêu cầu sửa prototype v${entry.version} (lần ${prototype.revisionsRequested}/${currentScope(prototype).scope.maxRevisions}); yêu cầu đã chấp nhận không bị thay đổi`);
+    } else if (outcome === "escalated") {
+      run.status = "escalated"; run.error = `Prototype revision limit (${currentScope(prototype).scope.maxRevisions}) reached; human direction is required`;
+      this.progress(state, outbox, run, run.error);
+    } else {
+      run.status = "failed"; run.error = `Prototype rejected: ${redactString(decision.reason ?? "rejected").slice(0, 500)}`;
+      this.progress(state, outbox, run, run.error);
+    }
+    await save();
   }
   private designNeedsHuman(draft: Specification, definition: WorkflowDefinition, fastPath?: FastPathRecord): boolean {
     const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
@@ -4302,6 +4439,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     if (run.approval && (!run.decision || run.decision.approvalId !== run.approval.approvalId))
       run.approval = ApprovalRequestSchema.parse({ ...run.approval, status: "cancelled" });
+    if (run.prototype) closePrototype(run.prototype, "cancelled", "Run cancelled");
     let failure: unknown;
     for (const out of state.outbound.filter(item => item.message.run_id === run.runId && !item.phaseRetirement &&
         (item.status === "queued" || item.status === "cancelled" && item.lease !== undefined && !item.parentAssignmentId) &&

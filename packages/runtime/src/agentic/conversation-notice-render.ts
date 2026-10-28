@@ -373,20 +373,28 @@ function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): Rendere
 }
 
 /** Full content of a design/task/gate approval: what is approved, why, by whom, on what evidence, and the numbered choices. */
-function approvalContent(notice: NoticeLike, fields: ApprovalNotice): RenderedNotice {
+function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype = false): RenderedNotice {
   const shortId = notice.shortId ?? fields.approvalId;
   const runId = fields.runId ?? notice.runId;
   const runLabel = notice.runLabel;
   const role = formatRoleLabel(fields.requestedBy);
   const cleanReason = sanitizeCardProse(fields.reason, { approvalId: fields.approvalId, code: shortId, runId, workTag: workTagOf(notice, runId) });
-  const options = [
+  // A prototype review distinguishes a revision request from a final rejection: "2"/"từ chối" ends the prototype branch.
+  const options = prototype ? [
+    { number: 1, text: "Đồng ý (chỉ duyệt prototype)" },
+    { number: 2, text: "Từ chối hẳn prototype (ghi lý do)" }
+  ] : [
     { number: 1, text: "Đồng ý" },
     { number: 2, text: "Chưa đồng ý (ghi lý do)" }
   ];
-  const headline = `🔔 Cần bạn duyệt · ${shortId}`;
+  const headline = `🔔 Cần bạn duyệt${prototype ? " prototype" : ""} · ${shortId}`;
   const evidenceLine = fields.evidenceCount > 0 ? `Kèm ${fields.evidenceCount} tài liệu (gõ "xem chi tiết ${shortId}" để xem)` : undefined;
   const expiryText = formatFriendlyExpiry(fields.expiresAt);
-  const reply = `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") nếu cần sửa — ${expiryText}`;
+  const workCommand = notice.runLabel ? (workTagOf(notice, runId) ?? "việc").toLowerCase() : runId ?? "việc";
+  const reply = prototype
+    ? `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt prototype, "${shortId}: cần sửa <góp ý>" để yêu cầu sửa prototype, ` +
+      `"${shortId}: đổi yêu cầu <nội dung>" nếu góp ý cần đổi yêu cầu đã chấp nhận, "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn, hoặc "hủy ${workCommand}" để hủy công việc — ${expiryText}`
+    : `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") nếu cần sửa — ${expiryText}`;
   const lines = [
     headline,
     ...(runLabel ? [runLabel] : []),
@@ -409,7 +417,7 @@ function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAY
       ...(metadata.options ? { options: metadata.options } : {}), ...(payload.expiresAt ? { expiresAt: payload.expiresAt } : {}) });
   }
   const fields = approvalNoticeFields(payload);
-  return fields === undefined ? undefined : approvalContent(notice, fields);
+  return fields === undefined ? undefined : approvalContent(notice, fields, metadata?.kind === "prototype_review");
 }
 
 function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLOAD>): RenderedNotice {
