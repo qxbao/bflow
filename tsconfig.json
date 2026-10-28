@@ -20,6 +20,8 @@
     { "path": "./packages/quality-gates" },
     { "path": "./packages/runtime" },
     { "path": "./packages/tool-installer" },
-    { "path": "./apps/cli" }
+    { "path": "./apps/cli" },
+    { "path": "./apps/local-server" },
+    { "path": "./apps/web/tsconfig.node.json" }
   ]
 }

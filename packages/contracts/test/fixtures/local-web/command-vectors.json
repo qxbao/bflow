@@ -1,0 +1,87 @@
+{
+  "status": "W00 accepted schema vectors; stateful conflict/staleness checks belong to W02",
+  "validCreate": {
+    "apiVersion": 1,
+    "commandId": "00000000-0000-4000-8000-000000000004",
+    "projectId": "fixture-project",
+    "kind": "create_request",
+    "title": "Add a bounded status view",
+    "requestKind": "feature",
+    "objective": "Show the current workflow state without creating authority.",
+    "acceptanceCriteria": [
+      {
+        "description": "Read shows the authoritative run status.",
+        "verificationMethod": "integration_test"
+      }
+    ],
+    "constraints": [
+      "No mutation on read."
+    ]
+  },
+  "invalidCases": [
+    {
+      "name": "unknown HTTP version",
+      "base": "validCreate",
+      "set": {
+        "apiVersion": 2
+      },
+      "expected": "invalid_request"
+    },
+    {
+      "name": "browser claims authority",
+      "base": "validCreate",
+      "set": {
+        "authenticatedUser": true
+      },
+      "expected": "invalid_request"
+    },
+    {
+      "name": "missing revision",
+      "base": "approval-bundle.design",
+      "remove": [
+        "expectedVersion.revision"
+      ],
+      "expected": "invalid_request"
+    },
+    {
+      "name": "missing generation",
+      "base": "approval-bundle.design",
+      "remove": [
+        "expectedVersion.generation"
+      ],
+      "expected": "invalid_request"
+    },
+    {
+      "name": "dropped target",
+      "base": "approval-bundle.design",
+      "remove": [
+        "expectedVersion.target"
+      ],
+      "expected": "invalid_request"
+    },
+    {
+      "name": "dropped evidence digest",
+      "base": "approval-bundle.design",
+      "remove": [
+        "expectedVersion.evidenceDigest"
+      ],
+      "expected": "invalid_request"
+    },
+    {
+      "name": "same key different body",
+      "base": "validCreate",
+      "set": {
+        "objective": "Different objective"
+      },
+      "expected": "operation_conflict after durable acceptance"
+    },
+    {
+      "name": "stale but well-formed approval",
+      "base": "approval-bundle.design",
+      "set": {
+        "expectedVersion.generation": 0
+      },
+      "expected": "stale_version at host; schema alone cannot know staleness"
+    }
+  ]
+}

@@ -10,9 +10,19 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "import": "./dist/web.js"
+    },
+    "./web-host": {
+      "types": "./dist/web-host.d.ts",
+      "import": "./dist/web-host.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "dependencies": {
     "zod": "^3.24.2"
   }
