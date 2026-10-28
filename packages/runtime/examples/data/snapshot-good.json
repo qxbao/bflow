@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "fixture_good",
+  "declaredModelRevision": "2041d7efa860981833eb6bd58fd9023ce8a727d3",
+  "model": "orders",
+  "rows": [
+    [
+      1,
+      "new",
+      10
+    ],
+    [
+      2,
+      "paid",
+      20
+    ]
+  ],
+  "references": [
+    {
+      "model": "customers",
+      "fields": [
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "unique": true
+        }
+      ],
+      "rows": [
+        [
+          10
+        ],
+        [
+          20
+        ]
+      ]
+    }
+  ]
+}

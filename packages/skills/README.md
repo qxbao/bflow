@@ -30,6 +30,14 @@ setup request và repository desired config dùng các schema nghiêm ngặt c�
 
 Root build/lockfile, CLI setup/skills commands và Runtime P30 manifest composition đã được nối. `bflow init` lưu desired role selections trong `.bflow/config.yml`; helper `.bflow/skills.json` bên trên là API package-local, không phải file tự sinh bởi CLI hiện tại. Runtime dùng approved bundle pins và tool grants, không dùng skill như permission grant. Xem [implementation status](../../docs/implementation-status.md).
 
+Catalog data bổ sung `data-pipeline`, `data-contract` và `dbt-verification` dưới dạng lựa
+chọn theo task bằng pin chính xác; không thêm vào role bindings mặc định. Chúng dùng role
+chuẩn, phân biệt structural drift theo consumer direction với data-quality execution, và
+giữ approval/revision/digest của contract cùng quyền sở hữu fixture. Scope DC-01 là dbt
+Core 1.10/manifest v12 với DuckDB snapshot validation qua Runtime library host; không thêm
+lệnh CLI hay nối cấu hình daemon. Catalog/render tests chỉ chứng minh phân phối instruction
+và pin, không chứng minh agent tuân thủ, dữ liệu đạt hoặc warehouse/live acceptance.
+
 `roles/bindings.json` có thể thêm `conditionalBindings` mà không làm hỏng file legacy chỉ có
 `schemaVersion` và `bindings`. `resolveRoleSkillSelections` luôn kiểm tra skill pin cùng role
 trong catalog đã tải; nó chỉ thêm skill có điều kiện khi host truyền tool grant cùng `toolId`.

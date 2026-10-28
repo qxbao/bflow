@@ -116,7 +116,7 @@ describe("canonical role catalog", () => {
       source: "builtin",
       supportedCommands: BASELINE_COMMANDS,
     });
-    expect(loaded).toHaveLength(33);
+    expect(loaded).toHaveLength(36);
     expect(loaded.map((s) => s.definition.skillId)).toEqual(
       expect.arrayContaining(shared),
     );
