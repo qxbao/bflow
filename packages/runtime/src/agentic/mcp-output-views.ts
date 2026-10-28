@@ -1423,7 +1423,7 @@ export function buildRoleBriefing(role: AgentRole, provider: AgentProviderId = "
   ];
   if (role === "coordinator") {
     lines.push(
-      "Coordinator MCP tools: mcp__bflow__inspect, mcp__bflow__planning_reference, mcp__bflow__assess, mcp__bflow__request_specialist, mcp__bflow__propose_workflow, mcp__bflow__tick, mcp__bflow__tick_status, mcp__bflow__report_progress, mcp__bflow__request_user_decision, mcp__bflow__reconcile_delivery, mcp__bflow__retry_verification, mcp__bflow__accept_conflict_resolution, mcp__bflow__cancel, mcp__bflow__resume_run, mcp__bflow__assignment_context, mcp__bflow__read_task_log, mcp__bflow__log_task_step, mcp__bflow__repository_read, mcp__bflow__read_project_policy, mcp__bflow__read_pinned_instructions, mcp__bflow__read_role_pane, mcp__bflow__send_role_message.",
+      "Coordinator MCP tools: mcp__bflow__inspect, mcp__bflow__planning_reference, mcp__bflow__assess, mcp__bflow__request_specialist, mcp__bflow__propose_prototype, mcp__bflow__submit_prototype, mcp__bflow__propose_workflow, mcp__bflow__tick, mcp__bflow__tick_status, mcp__bflow__report_progress, mcp__bflow__request_user_decision, mcp__bflow__reconcile_delivery, mcp__bflow__retry_verification, mcp__bflow__accept_conflict_resolution, mcp__bflow__cancel, mcp__bflow__resume_run, mcp__bflow__assignment_context, mcp__bflow__read_task_log, mcp__bflow__log_task_step, mcp__bflow__repository_read, mcp__bflow__read_project_policy, mcp__bflow__read_pinned_instructions, mcp__bflow__read_role_pane, mcp__bflow__send_role_message.",
       "Prefer planning_reference({ section: 'all', view: 'compact' }) instead of loading full raw template/schema files, and inspect({ runId, view: 'summary', cursor }) when polling run progress."
     );
   }

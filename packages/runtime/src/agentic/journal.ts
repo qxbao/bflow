@@ -22,6 +22,7 @@ import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
 import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./native-diagnostic-fence.js";
 import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
 import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAllocation, type CancellationStopProof, type NamespaceExitProof } from "./cancellation-stop.js";
+import { PrototypeRecordSchema, type PrototypeRecord } from "./prototype-review.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -115,6 +116,8 @@ export interface RunRecord {
   workflowVerificationPlan?: VerificationPlan;
   /** Host-measured native review gate waits, newest last (at most 200). Absent in journals written before review telemetry. */
   reviewTimings?: ReviewTiming[];
+  /** Optional prototype review branch before the formal design; absent for runs that do not use a prototype. */
+  prototype?: PrototypeRecord;
 }
 /** Host wall time of one native review gate wait: from the verification request to its settlement. Never a Reviewer claim. */
 export interface ReviewTiming {
@@ -397,6 +400,10 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
     if (run.fastPath !== undefined) run.fastPath = FastPathRecordSchema.parse(run.fastPath);
     if (run.reviewTimings !== undefined) run.reviewTimings = z.array(ReviewTimingSchema).max(200).parse(run.reviewTimings);
+    if (run.prototype !== undefined) {
+      run.prototype = PrototypeRecordSchema.parse(run.prototype);
+      if (run.prototype.approvals.some(entry => entry.request.runId !== run.runId)) throw new Error("Prototype approval belongs to another run");
+    }
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {

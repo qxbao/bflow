@@ -22,6 +22,8 @@ export const COORDINATOR_TOOLS = [
   { name: "report_progress", description: "Send progress or clarification questions to Conversation through Herdr." },
   { name: "assess", description: "Evaluate the actual P15 complexity policy and fastPath preview. Requires Specification v2 with explicit metadata.sdd.assessment; read planning_reference(section=specification) for the P15 fields before calling. Never infer missing impact flags. availableRoles lists only specialist roles with a pane bound in this session, with their capabilities. This read-only assessment does not approve a specification or propose/dispatch a workflow." },
   { name: "request_specialist", description: "Queue a capability-constrained specialist delegation through Herdr. A role with no bound pane falls back security->reviewer and tester->qa when that pane has every required capability (the objective and result say so). Otherwise the call fails immediately with the roles that do have panes; nothing is dispatched and the run is unchanged, so choose another role in this turn. A bound pane missing a capability blocks the run for capability repair." },
+  { name: "propose_prototype", description: "Optional, before propose_workflow: open or revise a prototype branch with a lightweight scope (purpose, flows, allowedPaths under prototype/, artifacts, prototype-only criteria, disposition throwaway|evolvable, environment mock, dataPolicy synthetic|anonymized_fixture, maxRevisions). A revision supersedes earlier prototype approvals; it never changes accepted requirements." },
+  { name: "submit_prototype", description: "Store a prototype artifact version (files with logical prototype/ paths, mediaType, content and demonstrated flowIds) in ArtifactStore and request a separate human prototype approval through Conversation. Never writes the repository, deploys or uses real data; prototype approval is not design approval or delivery acceptance." },
   { name: "propose_workflow", description: "Submit draft Specification and implementation DAG; Runtime enforces SDD, approvals and TDD policy." },
   { name: "tick", description: "Schedule a background Runtime step and return immediately; yield the Coordinator turn so Herdr replies can arrive." },
   { name: "tick_status", description: "Read host scheduler status without waiting for another agent's turn." },
@@ -73,6 +75,8 @@ export class CoordinatorTools {
       }
       case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId), textField(args.role), textField(args.objective), strings(args.requiredCapabilities),
         args.roleProfile === undefined ? undefined : RoleProfilePinSchema.parse(args.roleProfile));
+      case "propose_prototype": return this.runtime.proposePrototype(textField(args.runId), args.scope);
+      case "submit_prototype": return this.runtime.submitPrototype(textField(args.runId), args.submission);
       case "propose_workflow": return this.runtime.proposeWorkflow(textField(args.runId), args.specification, args.definition,
         args.maxIterations === undefined ? 3 : Number(args.maxIterations));
       case "tick": return this.scheduleTick();

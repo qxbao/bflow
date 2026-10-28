@@ -1132,6 +1132,7 @@ export class ConversationGateway {
               ...(targetApproval.metadata ?? {}),
               ...(approvalInput.selectedOption !== undefined ? { selectedOption: approvalInput.selectedOption } : {}),
               ...(chosenPosition !== undefined ? { selectedOptionIndex: chosenPosition } : {}),
+              ...(approvalInput.feedbackKind !== undefined ? { feedbackKind: approvalInput.feedbackKind } : {}),
               correlationId
             }
           });

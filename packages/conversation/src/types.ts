@@ -192,6 +192,8 @@ export interface ExtractedApprovalInput {
   readonly reason?: string;
   /** Option chosen by the user for a specialist user-decision request. */
   readonly selectedOption?: string;
+  /** Set when feedback on a prototype review proposes changing accepted requirements rather than fixing the prototype. */
+  readonly feedbackKind?: "specification_revision";
 }
 
 export interface ExtractedCancellationInput {
