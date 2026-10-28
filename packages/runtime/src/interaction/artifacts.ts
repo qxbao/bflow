@@ -78,7 +78,7 @@ export async function connectArtifact(socketPath: string, token: string, params:
       metadata=result.value;if(metadata.sizeBytes>ARTIFACT_TRANSFER_BYTES)throw Error('Artifact quota');
       remainder=header.subarray(newline+1);break;
     }
-    return {ok:true,value:{metadata,chunks:(async function*(){
+    const chunks = (async function*(){
       let count=0;const hash=createHash(metadata.checksum.algorithm);
       try {
         let pending=remainder;
@@ -88,6 +88,11 @@ export async function connectArtifact(socketPath: string, token: string, params:
         }
         if(count!==metadata.sizeBytes || hash.digest('hex')!==metadata.checksum.value.toLowerCase())throw Error('Artifact incomplete');
       }finally{socket.destroy();await iterator.return?.();}
-    })()}};
+    })();
+    // Explicit close also works before the async generator's first next().
+    return {ok:true,value:{metadata,chunks:{[Symbol.asyncIterator](){return {
+      next:()=>chunks.next(),
+      async return(){socket.destroy();return chunks.return();},
+    };}}}};
   }catch{socket.destroy();return {ok:false,error:{code:'transport_unavailable',retryable:true,message:'Artifact unavailable.'}};}
 }

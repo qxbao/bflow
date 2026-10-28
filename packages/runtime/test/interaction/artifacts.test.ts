@@ -47,3 +47,9 @@ it('releases a store iterator when a disconnected reader leaves IPC backpressure
  await new Promise(r=>setTimeout(r,30));reader.destroy();
  try{await expect.poll(()=>cleaned,{timeout:1000}).toBe(true);}finally{await new Promise<void>(r=>server.close(()=>r()));await rm(directory,{recursive:true,force:true});}
 });
+it('closes IPC when a caller abandons artifact bytes before starting the returned iterator',async()=>{
+ const directory=await mkdtemp('/tmp/w05-unread-'),path=join(directory,'socket');let disconnected=false;let peer:import('node:net').Socket|undefined;
+ const server=createServer(socket=>{peer=socket;socket.on('error',()=>{});socket.once('close',()=>{disconnected=true;});socket.once('data',()=>socket.write(JSON.stringify({ok:true,value:{apiVersion:1,artifactId:'a',runId:'r',mediaType:'text/plain',checksum:{algorithm:'sha256',value:'a'.repeat(64)},sizeBytes:1,disposition:'inline',previewLimitBytes:1048576}})+'\n'));});server.listen(path);await once(server,'listening');
+ try{const value=unwrap(await connectArtifact(path,'private',{id:'p',artifactId:'a'}));await value.chunks[Symbol.asyncIterator]().return?.();await expect.poll(()=>disconnected,{timeout:500}).toBe(true);}
+ finally{peer?.destroy();await new Promise<void>(r=>server.close(()=>r()));await rm(directory,{recursive:true,force:true});}
+});
