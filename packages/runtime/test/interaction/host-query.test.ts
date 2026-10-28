@@ -51,7 +51,29 @@ import { state, run, at, clarificationContext } from "./fixtures.js";
 it("queries a real host subprocess before Core without activating it, scopes reads and redacts private values", async () => {
   const repositoryPath = await mkdtemp(join(tmpdir(), "web-query-host-"));
   const sessionId = "host-1";
-  const controller = await ensureAgenticHost({ repositoryPath, sessionId });
+  // Queries must not depend on a machine-installed Herdr. Only cleanup may observe
+  // the stopped synthetic session; any unexpected transport command fails this fixture.
+  const herdrBinary = join(repositoryPath, "herdr-fixture.mjs");
+  const callsPath = join(repositoryPath, "herdr-calls.jsonl");
+  const shutdownArgs = ["--session", sessionId, "status", "server", "--json"];
+  await writeFile(
+    herdrBinary,
+    [
+      "#!/usr/bin/env node",
+      "import { appendFileSync } from 'node:fs';",
+      "const args = process.argv.slice(2);",
+      `const expected = ${JSON.stringify(shutdownArgs)};`,
+      "if (JSON.stringify(args) !== JSON.stringify(expected)) throw new Error('Unexpected Herdr command in read-only fixture');",
+      `appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + '\\n');`,
+      "process.stdout.write(JSON.stringify({ running: false }) + '\\n');",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  const controller = await ensureAgenticHost({
+    repositoryPath,
+    sessionId,
+    herdrBinary,
+  });
   try {
     const root = findPrivateRuntimeStateDirectory(repositoryPath)!;
     const configuration = JSON.parse(
@@ -209,8 +231,18 @@ it("queries a real host subprocess before Core without activating it, scopes rea
     expect(await readdir(join(root, "host", sessionId))).not.toContain(
       "launch-index.json",
     );
+    expect(await readdir(repositoryPath)).not.toContain("herdr-calls.jsonl");
   } finally {
-    await controller.shutdown();
-    await rm(repositoryPath, { recursive: true, force: true });
+    try {
+      await controller.shutdown();
+      expect(
+        (await readFile(callsPath, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      ).toEqual([shutdownArgs]);
+    } finally {
+      await rm(repositoryPath, { recursive: true, force: true });
+    }
   }
 }, 30000);

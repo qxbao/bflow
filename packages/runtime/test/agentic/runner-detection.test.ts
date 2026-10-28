@@ -181,7 +181,12 @@ describe("detectTestRunners", () => {
     expect(unit!.args[0]).toBe("node_modules/vitest/vitest.mjs");
     expect(unit!.reporter).toBe("vitest_json");
     expect(result.notes.some(note => /^vitest 2\./.test(note))).toBe(true);
-    expect(unit!.prepare?.args).toEqual(["node_modules/typescript/bin/tsc", "-b"]);
+    // The repository build chains the frontend build after tsc. Automatic prepare must
+    // keep refusing shell scripts; the plain-tsc fixture above covers supported prepare.
+    expect(unit!.prepare).toBeUndefined();
+    expect(result.notes.some(note => note.includes("prepare skipped"))).toBe(true);
+    expect(result.notes).toContain("build step not detected; tests importing dist may fail");
+    expect(result.notes.some(note => note.startsWith("prepare:"))).toBe(false);
     expect(unit!.checkoutDependencyRoots).toEqual(expect.arrayContaining(["node_modules", "packages/runtime/node_modules"]));
   });
 });
