@@ -5,6 +5,8 @@
     "rootDir": "../..",
     "types": ["node", "vitest/globals"],
     "paths": {
+      "@bflow/contracts/web": ["../../packages/contracts/src/web.ts"],
+      "@bflow/contracts/web-host": ["../../packages/contracts/src/web-host.ts"],
       "@bflow/contracts": ["../../packages/contracts/src/index.ts"],
       "@bflow/core": ["../../packages/core/src/index.ts"],
       "@bflow/herdr-adapter": ["../../packages/herdr-adapter/src/index.ts"],
