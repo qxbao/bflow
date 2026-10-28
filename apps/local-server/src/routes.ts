@@ -5,6 +5,7 @@ import { join, extname, sep } from 'node:path';
 import { WebHttpContracts, WebHttpPathParamsSchema, WebProjectInspectionResultSchema, WebProjectPreviewResultSchema,
   WebProjectSessionResultSchema, WebRunPageResultSchema, WebRunViewResultSchema, WebDecisionPageResultSchema, WEB_LIMITS,
   type UserInteractionClient } from '@bflow/contracts/web';
+import { WebAuthenticatedContextSchema, type WebAuthenticatedContext } from '@bflow/contracts/web-host';
 import { BrowserSessions } from './session.js';
 import { ProjectRegistry } from './project-registry.js';
 import { Operations } from './lifecycle-operations.js';
@@ -29,7 +30,7 @@ export function requestPath(raw:string):{path:string;query:Record<string,string>
   const query:Record<string,string>=Object.create(null);for(const [key,value] of new URLSearchParams(search)){if(Object.hasOwn(query,key))throw new HttpError('invalid_request');query[key]=value;}
   return {path,query};
 }
-export interface RouteContext {sessions:BrowserSessions;registry:ProjectRegistry;operations:Operations;interaction:(id:string)=>Promise<UserInteractionClient>;assetsDirectory:string;serialize:<T>(fn:()=>Promise<T>)=>Promise<T>}
+export interface RouteContext {sessions:BrowserSessions;registry:ProjectRegistry;operations:Operations;interaction:(id:string,context:WebAuthenticatedContext)=>Promise<UserInteractionClient>;principalId:string;assetsDirectory:string;serialize:<T>(fn:()=>Promise<T>)=>Promise<T>}
 export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteContext):Promise<void>{
   const {path,query}=requestPath(req.url??'/');
   if(path==='/api'||path.startsWith('/api/')){
@@ -50,12 +51,13 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       const respond=(value:unknown,status=200)=>{let parsed:unknown;try{parsed=contract.response.parse(value);}catch{throw new HttpError('unavailable');}json(res,status,parsed);};
       if(name==='bootstrap'){const b=WebHttpContracts.bootstrap.body.parse(input);respond(ctx.sessions.bootstrap(b.secret,res));return;}
       if(name==='session'){respond(session);return;}
+      const authentication=WebAuthenticatedContextSchema.parse({principalId:ctx.principalId,browserSessionId:session!.sessionId,expiresAt:session!.expiresAt});
       if(name==='projects'){respond({apiVersion:1,items:await ctx.registry.list()});return;}
       if(name==='registerProject'){const b=WebHttpContracts.registerProject.body.parse(input);const result=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return ctx.registry.register(b.path);});respond(result.project,result.created?201:200);return;}
       if(!id)throw new HttpError('not_found');
       await ctx.registry.get(id);
       if(name==='unregisterProject'){await ctx.serialize(()=>{ctx.sessions.authenticate(req);return ctx.registry.unregister(id);});respond(undefined,204);return;}
-      if(name==='operation'){respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);}));return;}
+      if(name==='operation'){respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);},authentication));return;}
       await ctx.registry.require(id);
       if(name==='startSession'||name==='stopSession'){
         const b=WebHttpContracts.startSession.body.parse(name==='startSession'?input:{apiVersion:1,operationId:WebHttpContracts.stopSession.body.parse(input).operationId});
@@ -67,8 +69,8 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       if(name==='preview'){
         const value=unwrap(WebProjectPreviewResultSchema.parse(await observeWithinDeadline(()=>ctx.operations.workspace.preview(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
       }
-      if(name==='command'){const command=WebHttpContracts.command.body.parse(input);if(command.projectId!==id)throw new HttpError('forbidden');respond(await ctx.operations.command(command,()=>{ctx.sessions.authenticate(req);}),202);return;}
-      const client=await observeWithinDeadline(()=>ctx.interaction(id));
+      if(name==='command'){const command=WebHttpContracts.command.body.parse(input);if(command.projectId!==id)throw new HttpError('forbidden');respond(await ctx.operations.command(command,()=>{ctx.sessions.authenticate(req);},authentication),202);return;}
+      const client=await observeWithinDeadline(()=>ctx.interaction(id,authentication));
       if(name==='projectSession'){const value=unwrap(WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>client.readProjectSession(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;}
       if(name==='runs'){respond(unwrap(WebRunPageResultSchema.parse(await observeWithinDeadline(()=>client.listRuns(id,WebHttpContracts.runs.query.parse(query))))));return;}
       if(name==='run'){const value=unwrap(WebRunViewResultSchema.parse(await observeWithinDeadline(()=>client.readRun(id,params.runId!))));if(value.runId!==params.runId)throw new HttpError('unavailable');respond(value);return;}

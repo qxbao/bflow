@@ -46,15 +46,19 @@ resent after lost ACK. `applied` is an operation effect, not workflow success.
 This is single-process local POSIX filesystem behavior; no power-loss, multi-host
 or hostile same-UID guarantee is added.
 
-W00 has no exported schema for server construction options. The factory validates
-its options locally without changing frozen contracts; an integration-owned
-additive options schema remains proposed. W04 must also resolve registered paths
-and bind signer browserSessionId/stable principal through trusted composition;
-the frozen project-only resolver does not carry HTTP session context. Unresolved
-host receipts from a replacement session stay reconciliation_required; current
-composition cannot authenticate historical-session evidence through its DTO. Do not
-invent hooks, pass browser-supplied provenance, or bypass host verification to
-bridge that seam. See `test/W03-HANDOFF.md` for the exact integration proposals.
+W04 adds production owner composition via `createLocalWebServer({...config,
+compose: ({principalId, resolveProject}) => ({workspace, interaction,
+hostSessionId, readHistoricalOperation})})`. The resolver revalidates registered
+canonical Git roots; `interaction(projectId, context)` receives only server-issued
+principal/browserSessionId/expiry after authentication. `hostSessionId` resolves
+the physical host identity, independently of the public Conversation session ID.
+Historical reads use that original pinned host; an unavailable original stays
+reconciliation_required and never redirects to another host. Legacy explicit
+workspace/client injection remains supported. Construction config and browser
+context use server-only contracts/web-host codecs (D-WEB-02); HTTP DTOs unchanged.
+The CLI owns lifecycle receipts and issuer/key registration; this server imports
+no CLI or provider modules. W06 UI, W05 events/artifacts and W08 chat remain their
+separate tasks. The bundled W00 page is still an asset/build skeleton.
 
 From repository root, build before subprocess/asset tests:
 

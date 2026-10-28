@@ -1,5 +1,6 @@
 /** Server/host codecs only. Never import this subpath from the browser. */
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { IdentifierSchema, IsoDateTimeSchema, JsonValueSchema } from "./common.js";
 import { WebCommandSchema, WebOperationSchema, WebOperationKindSchema } from "./web.js";
@@ -69,3 +70,21 @@ export type WebOperationIndexRecord = z.infer<typeof WebOperationIndexRecordSche
 export type WebReceiptReplayView<TNative> =
   | { readonly source: "native"; readonly receiptVersion: 1; readonly payload: TNative }
   | { readonly source: "local_web"; readonly receiptVersion: 2; readonly payload: WebInteractionReceipt };
+
+// D-WEB-02: owner-side construction/provenance only; never exported by contracts/web.
+export const LocalWebServerConfigSchema = z.object({
+  host: z.literal('127.0.0.1'), port: z.number().int().min(0).max(65535),
+  stateDirectory: z.string().min(1).refine(isAbsolute, 'expected absolute state directory'),
+  assetsDirectory: z.string().min(1).refine(isAbsolute, 'expected absolute asset directory'),
+}).strict();
+export const WebAuthenticatedContextSchema = z.object({
+  principalId: id, browserSessionId: id, expiresAt: IsoDateTimeSchema,
+}).strict();
+export type WebAuthenticatedContext = z.infer<typeof WebAuthenticatedContextSchema>;
+export const WebIssuerRegistrationSchema = z.object({
+  issuerId: id, keyId: id, principalId: id, projectId: id, hostSessionId: id,
+  publicKey: z.string().min(1).max(16384),
+}).strict();
+export const WebIssuerCredentialSchema = z.object({
+  credential: z.string().min(32), principalId: id, socketPath: z.string().min(1),
+}).strict();

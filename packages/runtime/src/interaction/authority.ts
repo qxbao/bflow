@@ -1,14 +1,11 @@
 import { createPublicKey, verify, type KeyObject } from "node:crypto";
 import { z } from "zod";
 import { IdentifierSchema, WebCommandSchema } from "@bflow/contracts";
-import { canonicalWebJson, WebPrincipalSchema, webCommandFingerprint, type WebPrincipal } from "@bflow/contracts/web-host";
+import { canonicalWebJson, WebPrincipalSchema, WebIssuerRegistrationSchema, webCommandFingerprint, type WebPrincipal } from "@bflow/contracts/web-host";
 
 // Private owner-composition input. This is deliberately not a role tool, browser
 // payload, persisted trust root, or public contracts amendment.
-export const OwnerKeySchema = z.object({
-  issuerId: IdentifierSchema, keyId: IdentifierSchema, principalId: IdentifierSchema,
-  projectId: IdentifierSchema, hostSessionId: IdentifierSchema, publicKey: z.string().min(1).max(16384),
-}).strict();
+export const OwnerKeySchema = WebIssuerRegistrationSchema;
 type OwnerKey = z.infer<typeof OwnerKeySchema>;
 
 /** Registration must be invoked only by owner-authenticated host composition.

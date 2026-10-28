@@ -51,6 +51,12 @@
     },
     {
       "path": "../../packages/tool-installer"
+    },
+    {
+      "path": "../local-server"
+    },
+    {
+      "path": "../web/tsconfig.node.json"
     }
   ]
 }

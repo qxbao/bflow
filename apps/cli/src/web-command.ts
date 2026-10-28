@@ -5,12 +5,13 @@ import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { WebSessionBootstrapRequestSchema, type UserInteractionClient } from '@bflow/contracts/web';
+import { WebSessionBootstrapRequestSchema } from '@bflow/contracts/web';
 import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile } from '@bflow/machine-setup';
-import type { LocalWebServer } from '@bflow/local-server';
+import type { LocalWebServer, LocalWebServices } from '@bflow/local-server';
 import { readPreviewFile } from './preview-files.js';
 import { withLifecycleLock } from './lifecycle-lock.js';
 import { createWebWorkspaceServices, type WebWorkspaceOptions } from './web-workspace-services.js';
+import { createWebInteractionServices } from './web-interaction.js';
 import type { CliIo } from './types.js';
 
 export const WEB_HELP = 'Cách dùng: bflow web [--port N] [--no-open]\nWeb localhost (mặc định 127.0.0.1:4317). Ctrl-C chỉ đóng web; phiên dự án tiếp tục chạy. Không tự setup/init/index. Không hỗ trợ --json vì URL ghép nối chỉ dành cho terminal khởi chạy.';
@@ -32,7 +33,8 @@ export function parseWebArgs(args: readonly string[]): WebArgs {
 export interface WebCommandOptions extends Partial<WebWorkspaceOptions> {
   stateDirectory?: string;
   assetsDirectory?: string;
-  interaction?: (projectId: string) => Promise<UserInteractionClient>;
+  interaction?: LocalWebServices['interaction'];
+  readHistoricalOperation?: LocalWebServices['readHistoricalOperation'];
   io?: CliIo;
   /** Embedded terminal sink; defaults to the real stdout TTY. */
   isTerminal?: boolean;
@@ -143,17 +145,19 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
       }
     }
     catch { throw new Error('Thiếu production web assets. Chạy pnpm run build từ source checkout đã cài dependencies, rồi chạy lại bflow web.'); }
-    // W03 exposes neither a registered-project resolver nor authenticated browser context.
-    // Integration must supply these owner-side ports. Do not read its private registry format
-    // or manufacture a signer/physical hook to hide that missing seam.
-    const resolveProject = options.resolveProject ?? (async () => { throw new Error('Local Server registry resolver chưa được integration nối vào CLI.'); });
-    const workspace = createWebWorkspaceServices({ ...options, resolveProject });
-    const interaction = options.interaction ?? (async () => { throw new Error('Authenticated Local Server interaction context chưa được integration cung cấp.'); });
     let server: LocalWebServer;
     try {
       const { createLocalWebServer } = await import('@bflow/local-server');
       server = await createLocalWebServer({ host: '127.0.0.1', port: args.port,
-      stateDirectory: join(stateDirectory, 'server'), assetsDirectory, workspace, interaction }); }
+      stateDirectory: join(stateDirectory, 'server'), assetsDirectory, compose(context){
+        const resolveProject=options.resolveProject??context.resolveProject;
+        const signed=createWebInteractionServices({principalId:context.principalId,resolveProject});
+        return {workspace:createWebWorkspaceServices({...options,resolveProject,
+          receiptDirectory:options.receiptDirectory??join(stateDirectory,'lifecycle-receipts')}),
+          interaction:options.interaction??signed.interaction,
+          hostSessionId:signed.hostSessionId,
+          readHistoricalOperation:options.readHistoricalOperation??signed.readHistoricalOperation};
+      }}); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${args.port} đang bận (EADDRINUSE); dừng instance đúng chủ sở hữu hoặc chọn --port khác.`);
       throw error;
@@ -216,8 +220,6 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
     try { await (options.openBrowser ?? openWebBrowser)(pairingUrl); io.stdout(`Bflow web: ${handle.origin} — Ctrl-C chỉ đóng web.`); }
     catch { io.stderr('Không mở được trình duyệt. Mở URL ghép nối bên dưới trong 60 giây, chỉ trên máy này:'); printPairing(pairingUrl); }
   } else printPairing(pairingUrl);
-  if (!options.resolveProject || !options.interaction)
-    io.stderr('Local web còn chờ integration nối registered-project resolver và authenticated interaction context; các thao tác project tương ứng chưa khả dụng.');
   return handle;
 }
 /** Only a newly-created owner waits for signals; a reuse invocation returns immediately. */

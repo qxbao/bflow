@@ -42,3 +42,20 @@ describe('web workspace lifecycle',()=>{
   const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:vi.fn(),down:vi.fn(),doctor})});expect(await s.inspectProject(p.projectId)).toMatchObject({ok:true,value:{ready:false}});expect(doctor).toHaveBeenCalledWith(false);
  });
 });
+it('recovers correlated lifecycle results after service restart without a host or resend',async()=>{
+ const p=await project(),receiptDirectory=join(p.canonicalPath,'private web receipts');const up=vi.fn(async()=>({}));const down=vi.fn(async()=>({status:'down'}));
+ const readSession=async()=>({ok:true as const,value:{apiVersion:1 as const,projectId:p.projectId,sessionId:'session',state:'ready' as const,pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()}});
+ const options={resolveProject:async()=>p,receiptDirectory,createLifecycle:()=>({up,down,doctor:vi.fn()}),readSession};
+ const first=createWebWorkspaceServices(options),id=crypto.randomUUID();expect(await first.startSession(p.projectId,id)).toMatchObject({ok:true});
+ const restarted=createWebWorkspaceServices({...options,readSession:async()=>{throw Error('host absent');}});
+ const pending={apiVersion:1 as const,projectId:p.projectId,operationId:id,owner:'local_lifecycle' as const,operationKind:'session_start' as const,state:'reconciliation_required' as const,updatedAt:new Date().toISOString()};
+ expect(await restarted.reconcileSessionOperation(pending)).toMatchObject({ok:true,value:{state:'applied',operationId:id}});
+ expect(await restarted.startSession(p.projectId,id)).toMatchObject({ok:true});expect(up).toHaveBeenCalledOnce();
+ const stopId=crypto.randomUUID();expect(await first.stopSession(p.projectId,stopId)).toMatchObject({ok:true});
+ expect(await restarted.reconcileSessionOperation({...pending,operationId:stopId,operationKind:'session_stop'})).toMatchObject({ok:true,value:{state:'applied',result:{session:{state:'stopped'}}}});expect(down).toHaveBeenCalledOnce();
+});
+it('retains an interrupted correlated lifecycle effect as uncertain and never resends its ID',async()=>{
+ const p=await project();const up=vi.fn(async()=>{throw Error('ACK lost');});const options={resolveProject:async()=>p,receiptDirectory:join(p.canonicalPath,'receipts'),createLifecycle:()=>({up,down:vi.fn(),doctor:vi.fn()})};
+ const id=crypto.randomUUID();expect(await createWebWorkspaceServices(options).startSession(p.projectId,id)).toMatchObject({ok:false});
+ expect(await createWebWorkspaceServices(options).startSession(p.projectId,id)).toMatchObject({ok:false});expect(up).toHaveBeenCalledOnce();
+});

@@ -1,7 +1,8 @@
 import { createServer } from 'node:http';
 import { realpath } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
-import type { LocalWorkspaceServices, UserInteractionClient } from '@bflow/contracts/web';
+import { LocalWebServerConfigSchema, WebAuthenticatedContextSchema, type WebAuthenticatedContext, type WebOperationIndexRecord } from '@bflow/contracts/web-host';
+import type { OperationResult } from '@bflow/contracts';
+import type { LocalWorkspaceServices, UserInteractionClient, WebProject, WebOperation } from '@bflow/contracts/web';
 import { PrivateState, OperationIndex } from './operation-index.js';
 import { ProjectRegistry } from './project-registry.js';
 import { Operations } from './lifecycle-operations.js';
@@ -9,24 +10,51 @@ import { BrowserSessions } from './session.js';
 import { route, json } from './routes.js';
 import { secureRequest, securityHeaders } from './security.js';
 import { publicError, WebApiErrorStatus } from './errors.js';
+export interface LocalWebServices {
+  workspace: LocalWorkspaceServices;
+  interaction: (projectId: string, context: WebAuthenticatedContext) => Promise<UserInteractionClient>;
+  hostSessionId?: (projectId: string) => Promise<string>;
+  readHistoricalOperation?: (record: WebOperationIndexRecord) => Promise<OperationResult<WebOperation>>;
+}
+export interface LocalWebCompositionContext {
+  readonly principalId: string;
+  resolveProject(projectId: string): Promise<WebProject>;
+}
 export interface LocalWebServerOptions {
   host:'127.0.0.1';port:number;stateDirectory:string;assetsDirectory:string;
-  workspace:LocalWorkspaceServices;interaction:(projectId:string)=>Promise<UserInteractionClient>;
+  workspace?: LocalWorkspaceServices;
+  interaction?: LocalWebServices['interaction'];
+  readHistoricalOperation?: LocalWebServices['readHistoricalOperation'];
+  hostSessionId?: LocalWebServices['hostSessionId'];
+  compose?: (context: LocalWebCompositionContext) => LocalWebServices | Promise<LocalWebServices>;
 }
 export interface LocalWebServer {readonly origin:string;issueBootstrap():Promise<string>;close():Promise<void>}
 /** Listener creation is explicit; importing the package has no side effects. No fallback backend. */
 export async function createLocalWebServer(options:LocalWebServerOptions):Promise<LocalWebServer>{
-  // W00 did not freeze a CLI options schema. Validate locally, pending an integration-owned additive schema.
-  if(!options || Object.keys(options).some(k=>!['host','port','stateDirectory','assetsDirectory','workspace','interaction'].includes(k)) || options.host!=='127.0.0.1' || !Number.isInteger(options.port) || options.port<0 || options.port>65535 || typeof options.stateDirectory!=='string' || !isAbsolute(options.stateDirectory) || typeof options.assetsDirectory!=='string' || !isAbsolute(options.assetsDirectory) || typeof options.interaction!=='function' || !options.workspace || ['inspectProject','startSession','stopSession','reconcileSessionOperation','preview'].some(k=>typeof Reflect.get(options.workspace,k)!=='function'))throw new Error('Invalid Local Server options');
-  const assetsDirectory=await realpath(options.assetsDirectory),state=await PrivateState.open(options.stateDirectory);
+  const config = LocalWebServerConfigSchema.parse({host:options.host,port:options.port,stateDirectory:options.stateDirectory,assetsDirectory:options.assetsDirectory});
+  if (Object.keys(options).some(k=>!['host','port','stateDirectory','assetsDirectory','workspace','interaction','compose','readHistoricalOperation','hostSessionId'].includes(k)) ||
+      (options.compose && (options.workspace || options.interaction || options.readHistoricalOperation || options.hostSessionId)) ||
+      (options.compose !== undefined && typeof options.compose !== 'function')) throw new Error('Invalid Local Server options');
+  const assetsDirectory=await realpath(config.assetsDirectory),state=await PrivateState.open(config.stateDirectory);
   let queue:Promise<unknown>=Promise.resolve();
   const serialize=<T>(fn:()=>Promise<T>):Promise<T>=>{const next=queue.then(fn);queue=next.catch(()=>{});return next;};
-  const index=new OperationIndex(state),registry=new ProjectRegistry(state,index),operations=new Operations(index,options.workspace,options.interaction,serialize,id=>registry.require(id)),sessions=new BrowserSessions();
+  const index=new OperationIndex(state),registry=new ProjectRegistry(state,index),sessions=new BrowserSessions();
+  let services: LocalWebServices;
+  try {
+    services = options.compose ? await options.compose({principalId:state.principalId, resolveProject:id=>registry.require(id)}) :
+      {workspace:options.workspace!,interaction:options.interaction!,...(options.hostSessionId?{hostSessionId:options.hostSessionId}:{}),...(options.readHistoricalOperation?{readHistoricalOperation:options.readHistoricalOperation}:{})};
+    if (!services || typeof services.interaction !== 'function' || !services.workspace ||
+        ['inspectProject','startSession','stopSession','reconcileSessionOperation','preview'].some(k=>typeof Reflect.get(services.workspace,k)!=='function') ||
+        (services.hostSessionId !== undefined && typeof services.hostSessionId !== 'function') ||
+        (services.readHistoricalOperation !== undefined && typeof services.readHistoricalOperation !== 'function')) throw new Error('Invalid Local Server services');
+  } catch(error) { await state.close(); throw error; }
+  const interaction:LocalWebServices['interaction']=(id,context)=>services.interaction(id,WebAuthenticatedContextSchema.parse(context));
+  const operations=new Operations(index,services.workspace,interaction,serialize,id=>registry.require(id),services.readHistoricalOperation,services.hostSessionId);
   const pending=new Set<Promise<void>>();
   let origin='';let closed=false;
   const server=createServer({requestTimeout:15000,headersTimeout:10000,maxHeaderSize:16384},(req,res)=>{
     securityHeaders(res);
-    const active=(async()=>{try{secureRequest(req,origin);await route(req,res,{sessions,registry,operations,interaction:options.interaction,assetsDirectory,serialize});}
+    const active=(async()=>{try{secureRequest(req,origin);await route(req,res,{sessions,registry,operations,interaction,principalId:state.principalId,assetsDirectory,serialize});}
       catch(error){if(!res.headersSent){const safe=publicError(error);json(res,WebApiErrorStatus[safe.code],safe);}else res.destroy();}
     })();pending.add(active);void active.finally(()=>pending.delete(active));
   });

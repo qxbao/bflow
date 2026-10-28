@@ -193,6 +193,9 @@ importers:
       '@bflow/git-orchestrator':
         specifier: workspace:*
         version: link:../../packages/git-orchestrator
+      '@bflow/local-server':
+        specifier: workspace:*
+        version: link:../local-server
       '@bflow/machine-setup':
         specifier: workspace:*
         version: link:../../packages/machine-setup
@@ -220,6 +223,9 @@ importers:
       '@bflow/verification':
         specifier: workspace:*
         version: link:../../packages/verification
+      '@bflow/web':
+        specifier: workspace:*
+        version: link:../web
       yaml:
         specifier: ^2.7.0
         version: 2.9.1

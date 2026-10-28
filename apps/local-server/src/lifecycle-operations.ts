@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { WebOperationSchema, WebOperationResponseSchema, WebProjectSessionResultSchema,
   type WebOperation, type WebCommand, type LocalWorkspaceServices, type UserInteractionClient } from '@bflow/contracts/web';
 import { canonicalWebJson, webCommandFingerprint, WebOperationIndexRecordSchema } from '@bflow/contracts/web-host';
+import type { WebAuthenticatedContext, WebOperationIndexRecord } from '@bflow/contracts/web-host';
+import { IdentifierSchema, type OperationResult } from '@bflow/contracts';
 import { OperationIndex, type IndexedOperation } from './operation-index.js';
 import { HttpError, publicError, contractError, unwrap, observeWithinDeadline } from './errors.js';
 const now=()=>new Date().toISOString();
@@ -9,8 +11,8 @@ const final=(op:WebOperation)=>op.state==='applied'||op.state==='failed';
 export class Operations {
   private closing=false;
   private queues=new Map<string,Promise<void>>();
-  constructor(readonly index:OperationIndex,readonly workspace:LocalWorkspaceServices,readonly interaction:(projectId:string)=>Promise<UserInteractionClient>,
-    private critical:<T>(fn:()=>Promise<T>)=>Promise<T>,private registered:(id:string)=>Promise<unknown>){}
+  constructor(readonly index:OperationIndex,readonly workspace:LocalWorkspaceServices,readonly interaction:(projectId:string,context:WebAuthenticatedContext)=>Promise<UserInteractionClient>,
+    private critical:<T>(fn:()=>Promise<T>)=>Promise<T>,private registered:(id:string)=>Promise<unknown>,private historical?: (record:WebOperationIndexRecord)=>Promise<OperationResult<WebOperation>>,private resolveHostSession?:(projectId:string)=>Promise<string>){}
   shutdown():void{this.closing=true;}
   private serial<T>(projectId:string,id:string,call:()=>Promise<T>):Promise<T>{
     const key=canonicalWebJson([projectId,id]),previous=this.queues.get(key)??Promise.resolve();
@@ -19,7 +21,7 @@ export class Operations {
     void settled.then(()=>{if(this.queues.get(key)===settled)this.queues.delete(key);});return next;
   }
   lifecycle(projectId:string,id:string,kind:'session_start'|'session_stop',body:unknown,authorize:()=>void):Promise<WebOperation>{return this.serial(projectId,id,()=>{authorize();return this.deliverLifecycle(projectId,id,kind,body,authorize);});}
-  command(command:WebCommand,authorize:()=>void):Promise<WebOperation>{return this.serial(command.projectId,command.commandId,()=>{authorize();return this.deliverCommand(command,authorize);});}
+  command(command:WebCommand,authorize:()=>void,context:WebAuthenticatedContext):Promise<WebOperation>{return this.serial(command.projectId,command.commandId,()=>{authorize();return this.deliverCommand(command,authorize,context);});}
   private async reserve(projectId:string,id:string,kind:WebOperation['operationKind'],fingerprint:string,authorize:()=>void,hostSessionId?:string):Promise<IndexedOperation>{
     const index=WebOperationIndexRecordSchema.parse({schemaVersion:1,projectId,principalId:this.index.state.principalId,commandId:id,receiptId:id,
       owner:hostSessionId===undefined?'local_lifecycle':'host_interaction',operationKind:kind,fingerprint,...(hostSessionId===undefined?{}:{hostSessionId}),createdAt:now()});
@@ -45,26 +47,29 @@ export class Operations {
       return await this.update(record,{...record.operation,state:'applied',result:{kind:'lifecycle',session:result.value},updatedAt:now()});
     }catch{return this.uncertain(record);}
   }
-  private async deliverCommand(command:WebCommand,authorize:()=>void):Promise<WebOperation>{
+  private async deliverCommand(command:WebCommand,authorize:()=>void,context:WebAuthenticatedContext):Promise<WebOperation>{
     const fingerprint=webCommandFingerprint(command),old=await this.index.read(command.projectId,command.commandId);
-    if(old){if(old.index.fingerprint!==fingerprint || old.index.owner!=='host_interaction' || old.index.operationKind!==command.kind)throw new HttpError('operation_conflict');return this.observe(old);}
-    const client=await observeWithinDeadline(()=>this.interaction(command.projectId));
+    if(old){if(old.index.fingerprint!==fingerprint || old.index.owner!=='host_interaction' || old.index.operationKind!==command.kind)throw new HttpError('operation_conflict');return this.observe(old,context);}
+    const client=await observeWithinDeadline(()=>this.interaction(command.projectId,context));
     const session=unwrap(WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>client.readProjectSession(command.projectId))));
     if(session.projectId!==command.projectId || !session.sessionId || session.state!=='ready')throw new HttpError('unavailable');
-    const record=await this.reserve(command.projectId,command.commandId,command.kind,fingerprint,authorize,session.sessionId);
+    const hostSessionId=IdentifierSchema.parse(this.resolveHostSession?await observeWithinDeadline(()=>this.resolveHostSession!(command.projectId)):session.sessionId);
+    const record=await this.reserve(command.projectId,command.commandId,command.kind,fingerprint,authorize,hostSessionId);
     try{
       const result=WebOperationResponseSchema.parse(await observeWithinDeadline(()=>client.execute(command)));
       if(!result.ok){if(['validation','conflict','not_found','unsupported_version'].includes(result.error.code))return await this.update(record,{...record.operation,state:'failed',error:publicError(new HttpError(contractError(result.error).code,command.commandId)),updatedAt:now()});return await this.uncertain(record);}
       return await this.update(record,result.value);
     }catch{return this.uncertain(record);}
   }
-  private async observe(record:IndexedOperation):Promise<WebOperation>{
+  private async observe(record:IndexedOperation,context?:WebAuthenticatedContext):Promise<WebOperation>{
     if(final(record.operation))return record.operation;
     try{
       let raw:unknown;
       if(record.index.owner==='local_lifecycle')raw=await observeWithinDeadline(()=>this.workspace.reconcileSessionOperation(record.operation));
+      else if(this.historical)raw=await observeWithinDeadline(()=>this.historical!(record.index));
       else {
-        const client=await observeWithinDeadline(()=>this.interaction(record.index.projectId));
+        if(!context)throw new HttpError('unavailable');
+        const client=await observeWithinDeadline(()=>this.interaction(record.index.projectId,context));
         const session=unwrap(WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>client.readProjectSession(record.index.projectId))));
         // The frozen client cannot authenticate a historical session in its operation DTO.
         // Fail closed rather than accepting another host's plausible same-ID receipt.
@@ -77,5 +82,5 @@ export class Operations {
       return await this.update(record,result.value);
     }catch{return this.uncertain(record);}
   }
-  read(projectId:string,id:string,authorize:()=>void):Promise<WebOperation>{return this.serial(projectId,id,async()=>{authorize();const record=await this.index.read(projectId,id);if(!record)throw new HttpError('not_found');return this.observe(record);});}
+  read(projectId:string,id:string,authorize:()=>void,context:WebAuthenticatedContext):Promise<WebOperation>{return this.serial(projectId,id,async()=>{authorize();const record=await this.index.read(projectId,id);if(!record)throw new HttpError('not_found');return this.observe(record,context);});}
 }

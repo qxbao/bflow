@@ -1,0 +1,35 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { mkdtemp,mkdir,writeFile,rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { createLocalWebServer } from '../src/index.js';
+import { workspace,client } from './helpers.js';
+const roots:string[]=[],servers:{close():Promise<void>}[]=[];
+afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>s.close()));await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
+it('composes once with a revalidating registry and supplies real authenticated browser context to interaction',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'web-compose-'));roots.push(root);const assets=join(root,'assets'),repo=join(root,'registered');await mkdir(assets);execFileSync('git',['init','--quiet',repo]);await writeFile(join(assets,'index.html'),'page');
+ let context:any;const interaction=vi.fn(async()=>client);const compose=vi.fn(async(c:any)=>{context=c;return {workspace,interaction};});
+ const server=await createLocalWebServer({host:'127.0.0.1',port:0,stateDirectory:join(root,'state'),assetsDirectory:assets,compose} as any);servers.push(server);
+ expect(compose).toHaveBeenCalledOnce();
+ const request=async(path:string,method='GET',body?:unknown,headers:Record<string,string>={})=>fetch(server.origin+path,{method,headers:{Origin:server.origin,'content-type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});
+ const boot=await request('/api/v1/session/bootstrap','POST',{apiVersion:1,secret:await server.issueBootstrap()});const session=await boot.json();const headers={Cookie:boot.headers.get('set-cookie')!.split(';')[0]!,'x-bflow-csrf':session.csrfToken};
+ const registered=await request('/api/v1/projects','POST',{apiVersion:1,path:repo},headers);const project=await registered.json();
+ expect(await context.resolveProject(project.projectId)).toMatchObject({canonicalPath:repo});
+ await request(`/api/v1/projects/${project.projectId}/session`,'GET',undefined,headers);
+ expect(interaction).toHaveBeenCalledWith(project.projectId,{principalId:context.principalId,browserSessionId:session.sessionId,expiresAt:session.expiresAt});
+ expect(JSON.stringify(interaction.mock.calls)).not.toContain(session.csrfToken);
+ const before=interaction.mock.calls.length;await request(`/api/v1/projects/${project.projectId}/session`);expect(interaction.mock.calls).toHaveLength(before);
+ await rm(repo,{recursive:true});await expect(context.resolveProject(project.projectId)).rejects.toThrow();
+});
+it('pins the physical host instead of the Conversation session for uncertain command recovery',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'web-host-binding-'));roots.push(root);const assets=join(root,'assets'),repo=join(root,'repo');await mkdir(assets);await writeFile(join(assets,'index.html'),'page');execFileSync('git',['init','--quiet',repo]);
+ const readHistoricalOperation=vi.fn(async(record:any)=>({ok:true as const,value:{apiVersion:1 as const,operationId:record.commandId,projectId:record.projectId,owner:'host_interaction' as const,operationKind:record.operationKind,state:'applied' as const,result:{kind:'interaction' as const,runId:'run',currentRunId:'run'},updatedAt:new Date().toISOString()}}));
+ const server=await createLocalWebServer({host:'127.0.0.1',port:0,stateDirectory:join(root,'state'),assetsDirectory:assets,compose:()=>({workspace,hostSessionId:async()=> 'host-physical',readHistoricalOperation,interaction:async(projectId:string)=>({...client,execute:async()=>{throw Error('lost ACK');},readProjectSession:async()=>({ok:true,value:{apiVersion:1,projectId,sessionId:'conv-host-physical',state:'ready',pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()}})})})} as any);servers.push(server);
+ const send=(path:string,method:string,body:unknown,headers:Record<string,string>={})=>fetch(server.origin+path,{method,headers:{Origin:server.origin,'content-type':'application/json',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})});
+ const response=await send('/api/v1/session/bootstrap','POST',{apiVersion:1,secret:await server.issueBootstrap()});const session=await response.json();const headers={Cookie:response.headers.get('set-cookie')!.split(';')[0]!,'x-bflow-csrf':session.csrfToken};
+ const project=await (await send('/api/v1/projects','POST',{apiVersion:1,path:repo},headers)).json();const command={apiVersion:1,projectId:project.projectId,commandId:crypto.randomUUID(),kind:'cancel',runId:'run',reason:'stop',expectedVersion:{revisionToken:'v'}};
+ expect(await (await send(`/api/v1/projects/${project.projectId}/commands`,'POST',command,headers)).json()).toMatchObject({state:'reconciliation_required'});
+ expect(await (await send(`/api/v1/projects/${project.projectId}/operations/${command.commandId}`,'GET',undefined,headers)).json()).toMatchObject({state:'applied'});
+ expect(readHistoricalOperation).toHaveBeenCalledWith(expect.objectContaining({hostSessionId:'host-physical'}));
+});

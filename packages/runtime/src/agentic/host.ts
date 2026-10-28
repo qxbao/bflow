@@ -2017,6 +2017,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const input = OwnerKeySchema.parse(params), principalId = `local-user-${process.getuid?.() ?? "local"}`;
         if (input.principalId !== principalId) throw new Error("Owner registration must use host-local principal");
         webAuthority.registerOwnerKey(input);
+        for (const [credential, existing] of webCredentials) {
+          if (existing.principalId === principalId && existing.issuerId === input.issuerId && existing.keyId === input.keyId)
+            return { credential, principalId };
+        }
         const credential = randomBytes(32).toString("hex");
         webCredentials.set(credential, { principalId, issuerId: input.issuerId, keyId: input.keyId });
         return { credential, principalId };

@@ -50,6 +50,9 @@ it("registers a scoped user credential on actual owner IPC and rejects role/life
     const registered = await registerUserInteractionIssuer({ repositoryPath: directory, sessionId: "host-1" },
       { ...f.registration, projectId, principalId: `local-user-${process.getuid?.() ?? "local"}` });
     expect(registered.credential).toEqual(expect.any(String));
+    const again = await registerUserInteractionIssuer({ repositoryPath: directory, sessionId: "host-1" },
+      { ...f.registration, projectId, principalId: `local-user-${process.getuid?.() ?? "local"}` });
+    expect(again.credential).toBe(registered.credential);
     const client = await openUserInteractionClient({ repositoryPath: directory, sessionId: "host-1",
       interaction: { credential: registered.credential, sign: command => f.proof(command, { projectId, principalId: registered.principalId,
         issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString() }) } });

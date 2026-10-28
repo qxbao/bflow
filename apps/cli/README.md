@@ -1,5 +1,16 @@
 # Vòng đời môi trường của Bflow CLI (P12)
 
+`bflow web [--port N] [--no-open]` là command riêng, mặc định phục vụ UI/API
+ở `127.0.0.1:4317`, dùng machine state theo `BFLOW_HOME`. Build từ root trước;
+thiếu assets thì lệnh báo cách build, không tự cài đặt/init/index/duyệt license.
+Instance đang chạy chỉ được reuse sau khi xác minh owner; URL ghép nối chứa secret
+trong fragment và chỉ in ra terminal. Chạy lại lệnh để lấy URL mới sau 60 giây.
+Ctrl-C đóng web, không dừng host dự án. Start/stop qua API dùng EnvironmentLifecycle
+và receipt gắn operation ID; mất ACK được đối soát, không tự gọi lại effect.
+W04 cung cấp command/backend composition; trang bundle hiện vẫn là W00 skeleton,
+chưa có các màn hình W06/W07 hay SSE/artifact/chat của W05/W08. Evidence hiện tại
+là source và local tests, chưa phải nghiệm thu workflow live.
+
 Khi session đang offline, `up` chuẩn bị và kiểm tra provider trước khi tạo Herdr
 server mới. Nếu preflight từ chối, CLI giữ manifest/run cũ và trả lỗi provider;
 không gọi shutdown barrier trên công việc chưa được activate. Các trường hợp

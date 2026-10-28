@@ -1,5 +1,5 @@
+import { WebIssuerCredentialSchema } from "@bflow/contracts/web-host";
 import { createExecutionResolutionReader } from "./execution-binding.js";
-import { z } from "zod";
 import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
@@ -188,9 +188,9 @@ export async function registerUserInteractionIssuer(options: { repositoryPath: s
   const directory = resolve(root, "host", options.sessionId), configuration = await readHostConfiguration(join(directory, "host.json"));
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
     throw new Error("Foreign host configuration");
-  const result = z.object({ credential: z.string().min(32), principalId: z.string().min(1) }).strict().parse(
+  const result = WebIssuerCredentialSchema.omit({socketPath:true}).parse(
     await callHost(configuration.socketPath, configuration.token, "interaction_register", registration, 5000));
-  return { ...result, socketPath: configuration.socketPath };
+  return WebIssuerCredentialSchema.parse({ ...result, socketPath: configuration.socketPath });
 }
 /** Dedicated web credential can never call owner lifecycle or role methods. */
 export async function callUserInteractionHost(options: { repositoryPath: string; sessionId: string }, credential: string,
