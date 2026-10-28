@@ -1,3 +1,7 @@
+import { streamEvents, upstreamCursor } from './sse.js';
+import { artifactResponse } from './artifact-response.js';
+import { uniqueHeader } from './security.js';
+import { WebEventsQuerySchema, WebArtifactReadResultSchema, WebNoticeDisplayedResultSchema } from '@bflow/contracts/web';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
@@ -30,7 +34,7 @@ export function requestPath(raw:string):{path:string;query:Record<string,string>
   const query:Record<string,string>=Object.create(null);for(const [key,value] of new URLSearchParams(search)){if(Object.hasOwn(query,key))throw new HttpError('invalid_request');query[key]=value;}
   return {path,query};
 }
-export interface RouteContext {sessions:BrowserSessions;registry:ProjectRegistry;operations:Operations;interaction:(id:string,context:WebAuthenticatedContext)=>Promise<UserInteractionClient>;principalId:string;assetsDirectory:string;serialize:<T>(fn:()=>Promise<T>)=>Promise<T>}
+export interface RouteContext {eventEpoch:string;sessions:BrowserSessions;registry:ProjectRegistry;operations:Operations;interaction:(id:string,context:WebAuthenticatedContext)=>Promise<UserInteractionClient>;principalId:string;assetsDirectory:string;serialize:<T>(fn:()=>Promise<T>)=>Promise<T>}
 export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteContext):Promise<void>{
   const {path,query}=requestPath(req.url??'/');
   if(path==='/api'||path.startsWith('/api/')){
@@ -75,7 +79,21 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       if(name==='runs'){respond(unwrap(WebRunPageResultSchema.parse(await observeWithinDeadline(()=>client.listRuns(id,WebHttpContracts.runs.query.parse(query))))));return;}
       if(name==='run'){const value=unwrap(WebRunViewResultSchema.parse(await observeWithinDeadline(()=>client.readRun(id,params.runId!))));if(value.runId!==params.runId)throw new HttpError('unavailable');respond(value);return;}
       if(name==='decisions'){respond(unwrap(WebDecisionPageResultSchema.parse(await observeWithinDeadline(()=>client.listDecisions(id)))));return;}
-      // W05/W08 own SSE/artifact/notice/chat behavior. These routes still pass auth/schema/scope checks.
+      if(name==='events'){
+        const header=uniqueHeader(req,'last-event-id'),q=WebEventsQuerySchema.parse(parsedQuery);
+        if(header!==undefined && q.cursor!==undefined && header!==q.cursor)throw new HttpError('invalid_request');
+        const cursor=upstreamCursor(ctx.eventEpoch,header??q.cursor);
+        await streamEvents(req,res,client.events(id,cursor),id,ctx.eventEpoch,()=>{ctx.sessions.authenticate(req);},Date.parse(session!.expiresAt));return;
+      }
+      if(name==='artifact'){
+        const value=unwrap(WebArtifactReadResultSchema.parse(await observeWithinDeadline(()=>client.readArtifact(id,params.artifactId!))));
+        await artifactResponse(req,res,value,params.artifactId!,()=>{ctx.sessions.authenticate(req);});return;
+      }
+      if(name==='noticeDisplayed'){
+        const value=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.acknowledgeNotice(id,params.noticeId!));});
+        const displayed=unwrap(WebNoticeDisplayedResultSchema.parse(value));if(displayed.noticeId!==params.noticeId)throw new HttpError('unavailable');respond(displayed);return;
+      }
+      // W08 owns chat. These routes still pass auth/schema/scope checks.
       void parsedQuery;throw new HttpError('operation_not_allowed');
     })();return;
   }

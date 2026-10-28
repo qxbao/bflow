@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { realpath } from 'node:fs/promises';
 import { LocalWebServerConfigSchema, WebAuthenticatedContextSchema, type WebAuthenticatedContext, type WebOperationIndexRecord } from '@bflow/contracts/web-host';
@@ -50,11 +51,12 @@ export async function createLocalWebServer(options:LocalWebServerOptions):Promis
   } catch(error) { await state.close(); throw error; }
   const interaction:LocalWebServices['interaction']=(id,context)=>services.interaction(id,WebAuthenticatedContextSchema.parse(context));
   const operations=new Operations(index,services.workspace,interaction,serialize,id=>registry.require(id),services.readHistoricalOperation,services.hostSessionId);
+  const eventEpoch=randomUUID();
   const pending=new Set<Promise<void>>();
   let origin='';let closed=false;
   const server=createServer({requestTimeout:15000,headersTimeout:10000,maxHeaderSize:16384},(req,res)=>{
     securityHeaders(res);
-    const active=(async()=>{try{secureRequest(req,origin);await route(req,res,{sessions,registry,operations,interaction,principalId:state.principalId,assetsDirectory,serialize});}
+    const active=(async()=>{try{secureRequest(req,origin);await route(req,res,{eventEpoch,sessions,registry,operations,interaction,principalId:state.principalId,assetsDirectory,serialize});}
       catch(error){if(!res.headersSent){const safe=publicError(error);json(res,WebApiErrorStatus[safe.code],safe);}else res.destroy();}
     })();pending.add(active);void active.finally(()=>pending.delete(active));
   });
