@@ -190,4 +190,10 @@ describe("task provider continuation through real Runtime/Core/Git/Registry/stor
     await expect((f.runtime as any).observeProviderFailure(f.binding, f.failure)).rejects.toThrow();
     expect((await f.runtime.inspect("run-1") as any).tasks[0].failovers).toBeUndefined();
   });
+  it("never fails over a pinned specialist profile execution", async () => {
+    const f = await setup();
+    const pin = { profileId: "backend-developer", version: "1.0.0", digest: "a".repeat(64) };
+    await expect((f.runtime as any).observeProviderFailure({ ...f.binding, roleProfile: pin }, f.failure)).rejects.toThrow();
+    expect((await f.runtime.inspect("run-1") as any).tasks[0].failovers).toBeUndefined();
+  });
 });

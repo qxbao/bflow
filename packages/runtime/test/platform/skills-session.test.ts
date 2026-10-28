@@ -99,11 +99,11 @@ describe("SkillSessionStore with the real SkillManager", () => {
     const first = profile(), second = profile({ profileId: "data-engineer" });
     expect((await store.resolveForRole(identity, requirement({ roleProfile: first, assignmentId: "a1" }), "env-one")).ok).toBe(true);
     expect((await store.resolveForRole(identity, requirement({ roleProfile: second, assignmentId: "a1" }), "env-two")).ok).toBe(true);
-    const a = await store.load(identity, "developer", "t1", first.pin, "a1");
-    const b = await store.load(identity, "developer", "t1", second.pin, "a1");
+    const a = await store.load(identity, "developer", "t1", undefined, first.pin, "a1");
+    const b = await store.load(identity, "developer", "t1", undefined, second.pin, "a1");
     expect(a.ok && a.value?.manifest.environmentId).toBe("env-one");
     expect(b.ok && b.value?.manifest.environmentId).toBe("env-two");
-    const missing = await store.load(identity, "developer", "t1", first.pin, "a2");
+    const missing = await store.load(identity, "developer", "t1", undefined, first.pin, "a2");
     expect(missing.ok && missing.value).toBe(null);
   });
 

@@ -71,28 +71,12 @@ export class SkillSessionStore implements SkillSessionPort {
     identity: PlatformSessionIdentity,
     role: AgentRole,
     taskId?: string,
-    executionKeyOrRoleProfile?: string | RoleProfilePin,
-    roleProfileOrAssignmentId?: RoleProfilePin | string,
-    assignmentIdArg?: string
+    executionKey?: string,
+    roleProfile?: RoleProfilePin,
+    assignmentId?: string
   ): Promise<OperationResult<ResolvedRoleSkills | null>> {
     const taskError = taskIdError(taskId);
     if (taskError) return fail("validation", taskError);
-    let executionKey: string | undefined;
-    let roleProfile: RoleProfilePin | undefined;
-    let assignmentId: string | undefined;
-
-    if (typeof executionKeyOrRoleProfile === "string") {
-      executionKey = executionKeyOrRoleProfile;
-      if (typeof roleProfileOrAssignmentId === "object" && roleProfileOrAssignmentId !== null) {
-        roleProfile = roleProfileOrAssignmentId;
-        assignmentId = assignmentIdArg;
-      }
-    } else if (typeof executionKeyOrRoleProfile === "object" && executionKeyOrRoleProfile !== null) {
-      roleProfile = executionKeyOrRoleProfile;
-      if (typeof roleProfileOrAssignmentId === "string") {
-        assignmentId = roleProfileOrAssignmentId;
-      }
-    }
     const executionError = taskIdError(executionKey);
     if (executionError) return fail("validation", executionError);
     try {

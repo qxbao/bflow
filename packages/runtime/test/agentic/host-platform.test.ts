@@ -76,7 +76,7 @@ async function profiledToolSession(restrictions: NonNullable<Parameters<typeof r
     toolPolicy: policy, toolGrants: [grant], roleProfiles: [profile] };
   const host = new HostPlatformSession({ ...options, platform: configured });
   await host.prepare();
-  if (role === "developer") await host.allocateDeveloper("run-1-task-1", options.repositoryPath, "run-1", profile);
+  if (role === "developer") await host.allocateDeveloper("run-1-task-1", options.repositoryPath, "run-1", undefined, undefined, profile);
   else await host.allocateProfileSpecialist({ runId: "run-1", taskId: "allocation-review-1", role, roleProfile: profile });
   const binding = { role, roleProfile: profile.pin, metadata: { launchId: "launch-profile" } } as PaneBinding;
   return { host, binding, configured, options, service, calls, fresh };

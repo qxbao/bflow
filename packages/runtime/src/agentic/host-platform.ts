@@ -573,12 +573,10 @@ export class HostPlatformSession {
    * Dynamic Developer launch for one task worktree. Blocked launches throw; no pane is created on failure.
    * Publishes the launch's own probe plan (keyed by launch id, so concurrent Developers never share a file).
    */
-  async allocateDeveloper(taskId: string, worktreePath: string, runId?: string, candidateOrProfile?: import("@bflow/contracts").FailoverCandidate | ResolvedRoleProfileSnapshot, executionKey?: string, roleProfileArg?: ResolvedRoleProfileSnapshot): Promise<DeveloperLaunchMaterial> {
+  async allocateDeveloper(taskId: string, worktreePath: string, runId?: string, candidate?: import("@bflow/contracts").FailoverCandidate, executionKey?: string, roleProfile?: ResolvedRoleProfileSnapshot): Promise<DeveloperLaunchMaterial> {
     if (this.identity === undefined) throw new Error("Platform has no prepared generation; run bflow up again");
     const processScopes = await this.availableProcessScopes();
     if (processScopes && !runId) throw new Error("A supervised Developer launch requires its exact run identity");
-    const candidate = candidateOrProfile && "provider" in candidateOrProfile && "model" in candidateOrProfile ? candidateOrProfile as import("@bflow/contracts").FailoverCandidate : undefined;
-    const roleProfile = (candidateOrProfile && "profileId" in candidateOrProfile ? candidateOrProfile as ResolvedRoleProfileSnapshot : undefined) ?? roleProfileArg;
     const base = this.options.platform.roles.find(option => option.role === "developer");
     const template = candidate && base ? this.failoverTemplate(base, candidate) : base;
     if (template === undefined) throw new Error("Platform configuration has no developer template for dynamic Developer launches");

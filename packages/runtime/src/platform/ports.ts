@@ -98,7 +98,7 @@ export interface SkillSessionPort {
   resolveForRole(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement,
     environmentId: string): Promise<OperationResult<ResolvedRoleSkills>>;
   /** Recover a persisted manifest by exact digest; drift is `conflict`, never a silent re-resolve. */
-  load(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string, executionKeyOrRoleProfile?: string | RoleProfilePin, roleProfileOrAssignmentId?: RoleProfilePin | string, assignmentId?: string): Promise<OperationResult<ResolvedRoleSkills | null>>;
+  load(identity: PlatformSessionIdentity, role: AgentRole, taskId?: string, executionKey?: string, roleProfile?: RoleProfilePin, assignmentId?: string): Promise<OperationResult<ResolvedRoleSkills | null>>;
 }
 
 // ----------------------------------------------------------- environment (T2)
