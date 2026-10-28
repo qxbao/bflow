@@ -273,6 +273,7 @@ export class ConversationGateway {
     if (!loaded.ok) return loaded;
     const entry = loaded.value?.structuredInteractions?.[commandId];
     if (entry?.state === "applied" && entry.result) return { ok: true, value: WebOperationResultSchema.parse(entry.result) };
+    if (entry?.state === "failed" && entry.error) return { ok: false, error: ContractErrorSchema.parse(entry.error) };
     return undefined;
   }
 

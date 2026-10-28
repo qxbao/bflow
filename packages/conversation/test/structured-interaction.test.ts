@@ -183,3 +183,10 @@ it("closes a native clarification about an approval answered on web", async () =
   expect(gateway.getContextSnapshot().pendingClarifications).toEqual({});
   expect(gateway.getContextSnapshot().session.unresolvedQuestions).toEqual([]);
 });
+it("observes a committed definitive rejection without retrying the bridge", async () => {
+  const f = await setup(), c = command(); f.transport.nextSubmissionStatus = "rejected";
+  const result = await f.gateway.handleStructuredInteraction(c, principal(c));
+  expect(result.ok).toBe(false);
+  expect(await f.gateway.readStructuredInteraction(c.commandId)).toEqual(result);
+  expect(f.transport.sentRoleMessages).toHaveLength(1);
+});
