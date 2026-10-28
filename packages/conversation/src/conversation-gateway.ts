@@ -405,7 +405,7 @@ export class ConversationGateway {
           ...(command.selectedOption !== undefined ? { metadata: { selectedOption: command.selectedOption } } : {}) });
         result = { kind: "interaction", runId: command.runId, currentRunId: command.runId };
       } else if (command.kind === "cancel") {
-        const cancellation = buildCancellationRequest({ runId: command.runId, requestedBy: principal.principalId, requestedAt: now,
+        const cancellation = buildCancellationRequest({ runId: command.runId, requestedBy: "conversation", requestedAt: now,
           expectedVersion: workflow!.revision, cancellationId: `web-cancel-${id}`, idempotencyKey: `web-cancel-${id}`, reason: command.reason });
         if (!cancellation.ok) return cancellation;
         delegation = DelegationRequestSchema.parse({ schemaVersion: 2, delegationId: `web-cancel-${id}`, messageId: `web-delegation-${id}`,
@@ -413,7 +413,7 @@ export class ConversationGateway {
           title: `Hủy workflow run: ${command.runId}`, objective: command.reason, specificationId: `spec-cancel-${command.runId}`, sddLevel: "lightweight",
           acceptanceCriteria: [{ id: "ac-cancel-1", description: command.reason, category: "functional", verificationMethod: "manual_review", required: true, status: "pending", evidenceArtifactIds: [] }],
           inputArtifacts: [], priority: "critical", requestedAt: now, idempotencyKey: `web-cancel-${id}`,
-          metadata: { action: "cancel", targetRunId: command.runId, cancellationRequest: cancellation.value, userInteractionCommandId: id,
+          metadata: { action: "cancel", targetRunId: command.runId, cancellationRequest: cancellation.value, userInteractionCommandId: id, userInteractionPrincipalId: principal.principalId,
             requestedScope: [command.runId], rawUserRequest: command.reason, interpretedIntent: command.reason, userMessageId: id, cancellationBatchRunIds: [command.runId] } });
         result = { kind: "interaction", runId: command.runId, currentRunId: command.runId };
       } else {
@@ -444,9 +444,11 @@ export class ConversationGateway {
       const workflows = { ...this.snapshot!.workflows };
       if (resultingWorkflow) workflows[resultingWorkflow.correlationId] = resultingWorkflow;
       if (decision && workflow) workflows[workflow.correlationId] = { ...workflow, activeApprovalIds: workflow.activeApprovalIds.filter(id => id !== decision!.approvalId), updatedAt: now };
+      if (decision) pendingClarifications = { ...closeClarificationsForApproval({ ...this.snapshot!, pendingClarifications }, decision.approvalId, now).pendingClarifications };
       const saved = await persist({ ...intent, state: "applied", result }, { pendingClarifications, pendingApprovals, approvalDecisions, workflows,
         runIdToCorrelationId: { ...this.snapshot!.runIdToCorrelationId, ...(resultingWorkflow ? { [resultingWorkflow.runId]: resultingWorkflow.correlationId } : {}) },
         session: { ...this.snapshot!.session, activeApprovalIds, ...(result.kind === "interaction" ? { activeRunId: result.currentRunId } : {}),
+          unresolvedQuestions: Object.values(pendingClarifications).flatMap(clarification => clarification.unresolvedQuestions),
           status: result.kind === "intake" ? "awaiting_user_clarification" : activeApprovalIds.length ? "awaiting_user_approval" : "delegated_to_coordinator", updatedAt: now } });
       return saved.ok ? { ok: true, value: result } : saved;
     } finally { this.isProcessingTurn = false; }

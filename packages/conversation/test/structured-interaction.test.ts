@@ -127,7 +127,7 @@ it("answers pre-run clarification by exact question/version, preserving explicit
   const pending = { correlationId: "intake", originalRequestText: "Report", accumulatedDetails: [], unresolvedQuestions: ["Which format?"],
     draft: { title: "Report", objective: "Export", kind: "feature" as const, sddLevel: "lightweight" as const, priority: "normal" as const,
       scopeDefined: false, isLargeTask: false, affectedPaths: [], acceptanceCriteriaDescriptions: [], acceptanceCriteria: [{ description: "Opens", verificationMethod: "e2e_test" as const }], isRequirementChange: false }, createdAt: at, updatedAt: at };
-  await f.store.save({ ...f.gateway.getContextSnapshot(), pendingClarifications: { intake: pending } });
+  await f.store.save({ ...f.gateway.getContextSnapshot(), session: { ...f.gateway.getContextSnapshot().session, unresolvedQuestions: ["Which format?"] }, pendingClarifications: { intake: pending } });
   const restored = new ConversationGateway(f.config); await restored.initializeOrRecoverSession();
   const c = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project", kind: "answer_clarification", intakeId: "intake",
     questionId: `question-${hash(["intake", 0, "Which format?"])}`, expectedVersion: { revisionToken: hash(pending) }, answer: "PDF" });
@@ -135,13 +135,14 @@ it("answers pre-run clarification by exact question/version, preserving explicit
   expect(await restored.handleStructuredInteraction(stale, principal(stale))).toMatchObject({ ok: false });
   expect(await restored.handleStructuredInteraction(c, principal(c))).toMatchObject({ ok: true, value: { kind: "interaction", runId: "run-intake" } });
   expect(f.transport.sentRoleMessages[0]?.payload).toMatchObject({ objective: "Export\nPDF", acceptanceCriteria: [{ verificationMethod: "e2e_test" }] });
+  expect(restored.getContextSnapshot().session.unresolvedQuestions).toEqual([]);
 });
 it("keeps cancelled/resumed actions in Conversation admission without claiming process stop", async () => {
   const f = await pendingApproval();
   const cancel = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project", kind: "cancel", runId: f.request.runId,
     expectedVersion: { revisionToken: "host-validated-version" }, reason: "No longer needed" });
   expect(await f.gateway.handleStructuredInteraction(cancel, principal(cancel))).toMatchObject({ ok: true, value: { kind: "interaction" } });
-  expect(f.transport.sentRoleMessages.at(-1)?.payload).toMatchObject({ metadata: { action: "cancel", targetRunId: f.request.runId } });
+  expect(f.transport.sentRoleMessages.at(-1)?.payload).toMatchObject({ metadata: { action: "cancel", targetRunId: f.request.runId, cancellationRequest: { requestedBy: "conversation" } } });
   const resume = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project", kind: "resume", runId: f.request.runId,
     actionId: "host-action", expectedVersion: { revisionToken: "host-validated-version" } });
   expect(await f.gateway.handleStructuredInteraction(resume, principal(resume))).toMatchObject({ ok: true, value: { runId: "run" } });
@@ -170,4 +171,15 @@ it("retains structured receipts when a model busy-state save overlaps admission"
   expect(Object.values(f.gateway.getContextSnapshot().workflows)).toHaveLength(1);
   expect(await f.gateway.handleStructuredInteraction(c, principal(c))).toEqual(result);
   expect(f.transport.sentRoleMessages).toHaveLength(1);
+});
+it("closes a native clarification about an approval answered on web", async () => {
+  const f = await pendingApproval(), snapshot = f.gateway.getContextSnapshot();
+  const clarification = { correlationId: "clarify-approval", originalRequestText: "apr-approval", accumulatedDetails: [], unresolvedQuestions: ["apr-approval: approve or reject?"],
+    draft: { title: "Review", objective: "Review", kind: "feature" as const, sddLevel: "full" as const, priority: "normal" as const,
+      scopeDefined: false, isLargeTask: false, affectedPaths: [], acceptanceCriteriaDescriptions: [], isRequirementChange: false }, createdAt: at, updatedAt: at };
+  await f.store.save({ ...snapshot, pendingClarifications: { "clarify-approval": clarification }, session: { ...snapshot.session, unresolvedQuestions: clarification.unresolvedQuestions } });
+  const gateway = new ConversationGateway(f.config); await gateway.initializeOrRecoverSession();
+  expect(await gateway.handleStructuredInteraction(f.answer, principal(f.answer))).toMatchObject({ ok: true });
+  expect(gateway.getContextSnapshot().pendingClarifications).toEqual({});
+  expect(gateway.getContextSnapshot().session.unresolvedQuestions).toEqual([]);
 });
