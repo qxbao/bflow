@@ -25,6 +25,39 @@ export async function reportNativeDeliveryUncertainty(
   return acknowledged();
 }
 
+/** Time an unacknowledged native intent must stay unacknowledged before it is reported as uncertain. */
+export const NATIVE_ACK_GRACE_MS = 60_000;
+
+/** Native ACK grace; `BFLOW_NATIVE_ACK_GRACE_MS` overrides it within 5 s–10 min. */
+export function nativeAckGraceMs(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 5_000 && parsed <= 600_000 ? parsed : NATIVE_ACK_GRACE_MS;
+}
+
+/**
+ * Debounces native delivery uncertainty. The intent is written before the transport side effect and the ACK arrives a
+ * moment later, so a watchdog tick can observe an intent that is merely in flight. Only an intent observed unacknowledged
+ * continuously for the whole grace period is due for an uncertainty report. Nothing is resent either way.
+ */
+export class NativeAckGrace {
+  private readonly firstSeen = new Map<string, number>();
+  constructor(private readonly graceMs = NATIVE_ACK_GRACE_MS) {
+    if (!Number.isFinite(graceMs) || graceMs <= 0) throw new Error("Native ACK grace must be a positive number of milliseconds");
+  }
+  /** `pending` are the currently unacknowledged operation IDs; returns those whose grace has elapsed. */
+  due(pending: readonly string[], now: number): string[] {
+    const current = new Set(pending);
+    for (const operationId of this.firstSeen.keys()) if (!current.has(operationId)) this.firstSeen.delete(operationId);
+    const due: string[] = [];
+    for (const operationId of current) {
+      const first = this.firstSeen.get(operationId);
+      if (first === undefined) this.firstSeen.set(operationId, now);
+      else if (now - first >= this.graceMs) due.push(operationId);
+    }
+    return due;
+  }
+}
+
 export const NativeIssueSchema = z.object({ path: z.string(), code: z.string(), message: z.string() }).strict();
 /** Only the trusted native binding signature is replaced in flight. All other fields remain immutable. */
 export function nativeMessageFingerprint(message: RoleMessage): string {
