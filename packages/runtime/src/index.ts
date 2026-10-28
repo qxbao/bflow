@@ -153,6 +153,15 @@ export * from "./qa/index.js";
 // Private state placement for the host and CLI recovery composition.
 export { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "./private-state.js";
 
+// Offline handover packages (HX-01): read-only run snapshot, integrity-checked evidence, staged publication.
+export {
+  exportHandoverPackage, inspectHandoverRun, verifyHandoverPackage, openHandoverSources, openRepositoryHandoverSources,
+  HandoverConflictError, HandoverNotFoundError, HandoverDocumentSchema, HandoverManifestSchema, HandoverInspectionSchema,
+  HandoverExportResultSchema, HandoverVerificationSchema
+} from "./handover/index.js";
+export type {
+  HandoverDocument, HandoverManifest, HandoverInspection, HandoverExportResult, HandoverVerification, HandoverSources, HandoverExportOptions
+} from "./handover/index.js";
 // Read-only telemetry reports; independent of workflow acceptance.
 export { buildWorkflowTelemetry, readWorkflowTelemetry, WorkflowTelemetryReportSchema } from "./telemetry/report.js";
 export type { WorkflowTelemetryReport } from "./telemetry/report.js";
