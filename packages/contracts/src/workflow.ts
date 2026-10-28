@@ -12,6 +12,7 @@ import {
   TimeoutPolicySchema
 } from "./execution.js";
 import { QualityGateBindingSchema, QualityGateDefinitionSchema } from "./quality.js";
+import { RoleProfilePinSchema, SpecialistRoleSchema } from "./role-profile.js";
 
 export const TaskDefinitionSchema = z
   .object({
@@ -19,6 +20,7 @@ export const TaskDefinitionSchema = z
     title: z.string().min(1),
     description: z.string().min(1).optional(),
     role: z.string().min(1),
+    roleProfile: RoleProfilePinSchema.optional(),
     instruction: z.string().min(1),
     acceptanceCriteria: z.array(z.string().min(1)),
     input: JsonValueSchema.optional(),
@@ -29,7 +31,9 @@ export const TaskDefinitionSchema = z
     qualityGates: z.array(QualityGateBindingSchema),
     metadata: MetadataSchema.optional()
   })
-  .strict();
+  .strict().superRefine((task, ctx) => {
+    if (task.roleProfile && !SpecialistRoleSchema.safeParse(task.role).success) ctx.addIssue({ code: "custom", message: "profiled task requires a standard specialist governance role", path: ["role"] });
+  });
 
 export const TaskDependencySchema = z
   .object({

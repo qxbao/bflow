@@ -19,7 +19,11 @@ import {
   createHostProviderFactoryOptions, createHostProviderAdapterFactory
 } from "../../src/agentic/host-platform.js";
 import { describeToolActions, validateMemoryActionOutput } from "../../src/agentic/tool-action-policy.js";
-import { readPinnedInstructionReply } from "../../src/agentic/host.js";
+import { readPinnedInstructionReply, preserveBuiltinRolePrompt, createHostRtkUsageResolver } from "../../src/agentic/host.js";
+import { verifyDispatchPinnedSkills } from "../../src/agentic/host-platform.js";
+import { pinRoleProfile } from "@bflow/contracts";
+import { FileToolUsageLedger } from "../../src/platform/tool-usage-ledger.js";
+import { profile as roleProfileFixture } from "../platform/role-profile-fixture.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
@@ -36,7 +40,171 @@ const platform: AgenticHostPlatformOptions = {
   skillsStoreRoot: "/var/lib/bflow/skills-store", approvedBuiltinSkillDigests: []
 };
 
+async function profiledToolSession(restrictions: NonNullable<Parameters<typeof roleProfileFixture>[0]>["restrictions"] = {}, cli = false, role: "reviewer" | "developer" = "reviewer") {
+  const calls: { kind: string; args: unknown[] }[] = [], fresh: string[] = [];
+  const profileLaunch = (requirement: RolePlatformRequirement) => {
+    const launch = prepared(role, "codex", requirement.roleProfile ? "launch-profile" : "launch-reviewer");
+    return { ...launch, ...(requirement.taskId ? { taskId: requirement.taskId } : {}),
+      environment: { ...launch.environment, ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin } : {}) },
+      skills: { manifest: {} as never, rendered: { instructionText: "Pinned", references: [] } as never, diagnostics: [] } };
+  };
+  const service = fakeService({
+    prepareSession: async (_identity, requirements) => ({ ok: true, value: { report: { ready: true, generation: 1, roles: [], checkedAt: at },
+      launches: requirements.map(profileLaunch) } }),
+    prepareDeveloper: async (_identity, requirement) => ({ ok: true, value: profileLaunch(requirement) }),
+    status: () => ({ generation: 1, launches: ["launch-reviewer", "launch-profile"].map(launchId => ({ launchId, role,
+      provider: "codex" as const, state: "activated" as const })) }),
+    assertFresh: launchId => { fresh.push(launchId); return { ok: true, value: {} as never }; },
+    verifyGateway: async () => ({ ok: true, value: { checkedAt: at, healthy: true, lost: [], uncertain: false } }),
+    invokeTool: async (...args) => { calls.push({ kind: "invoke", args }); return { ok: true, value: { schemaVersion: 3, callId: "call-profile", status: "completed", output: {}, observedAt: at } }; },
+    reconcileToolCall: async (...args) => { calls.push({ kind: "reconcile", args }); return { ok: true, value: { schemaVersion: 3, callId: "call-profile", status: "completed", output: {}, observedAt: at } }; }
+  });
+  const { options } = await session(service);
+  const scope = { kind: "session", machineId: options.platform.machineId, repositoryId: options.platform.repositoryId,
+    workspaceRoot: options.repositoryPath, sessionId: options.sessionId };
+  const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: scope.repositoryId,
+    scope: { kind: "repository", machineId: scope.machineId, repositoryId: scope.repositoryId, workspaceRoot: scope.workspaceRoot }, digest: "b".repeat(64), requirements: [cli ? { toolId: "rtk", kind: "cli_only", operations: ["pipe"], requiredness: "optional", roles: [role], triggers: ["routine_command"] } : { toolId: "context7",
+      kind: "native_remote_mcp", serviceId: "docs", operations: ["query_docs"], requiredness: "optional", roles: [role], triggers: ["external_documentation"] }] });
+  const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-profile", policyDigest: policy.digest,
+    requiredness: "optional", role, scope,
+    ...(cli ? { toolId: "rtk", kind: "cli_only", triggers: ["routine_command"], operations: ["pipe"],
+      cliIdentity: { executablePath: "/trusted/rtk", version: "1.0.0", digest: "c".repeat(64) } } :
+      { toolId: "context7", kind: "native_remote_mcp", triggers: ["external_documentation"], serviceId: "docs", operations: ["query_docs"] }),
+    capabilityIds: ["documentation"] });
+  const profile = roleProfileFixture({ profileId: "db-reviewer", baseRole: role, restrictions });
+  const configured = { ...platform, roles: [{ ...roleOption(role, "codex"), capabilityIds: ["repository.read", "documentation"], toolIds: [cli ? "rtk" : "context7"] }],
+    toolPolicy: policy, toolGrants: [grant], roleProfiles: [profile] };
+  const host = new HostPlatformSession({ ...options, platform: configured });
+  await host.prepare();
+  if (role === "developer") await host.allocateDeveloper("run-1-task-1", options.repositoryPath, "run-1", profile);
+  else await host.allocateProfileSpecialist({ runId: "run-1", taskId: "allocation-review-1", role, roleProfile: profile });
+  const binding = { role, roleProfile: profile.pin, metadata: { launchId: "launch-profile" } } as PaneBinding;
+  return { host, binding, configured, options, service, calls, fresh };
+}
+
+describe("profiled tool launch authority", () => {
+  it.each([false, true])("routes specialist tools to the dedicated allocation and freshness check (reconcile=%s)", async reconcile => {
+    const f = await profiledToolSession();
+    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", reconcile,
+      undefined, undefined, f.binding);
+    expect(result.ok).toBe(true);
+    expect(f.fresh).toEqual(["launch-profile"]);
+    expect(f.calls).toMatchObject([{ kind: reconcile ? "reconcile" : "invoke", args: [expect.anything(), "reviewer", "allocation-review-1", "docs", "query_docs", {}, "call-profile", { timeoutMs: 5_000 }] }]);
+  });
+  it.each([{ tools: [] }, { capabilityIds: ["repository.read"] }])("denies optional tools removed by effective profile grants (%j)", async restrictions => {
+    const f = await profiledToolSession(restrictions);
+    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+      undefined, undefined, f.binding);
+    expect(result.ok).toBe(false);
+    expect(f.calls).toEqual([]);
+  });
+  it.each([{ tools: [] }, { capabilityIds: ["repository.read"] }])("suppresses the actual RTK callback when its effective grant was removed (%j)", async restrictions => {
+    const f = await profiledToolSession(restrictions, true, "developer");
+    const ledger = new FileToolUsageLedger(join(f.options.stateDirectory, "rtk-usage.json"));
+    const resolve = createHostRtkUsageResolver({ platform: f.configured, sessionId: f.options.sessionId, repositoryPath: f.options.repositoryPath },
+      ledger, () => f.host, () => f.binding);
+    const runner = await resolve({ role: f.binding.role, runId: "run-1", taskId: "task-1", attemptId: "attempt-1", commandId: "unit", revision: "revision-1" });
+    expect(runner).toBeUndefined();
+    expect(await ledger.list()).toMatchObject([{ toolId: "rtk", status: "degraded", reasonCode: "cli_grant_unavailable" }]);
+  });
+  it("preserves RTK for an allowed profiled runner and legacy unprofiled callback", async () => {
+    const f = await profiledToolSession({}, true, "developer");
+    for (const binding of [f.binding, undefined]) {
+      const ledger = new FileToolUsageLedger(join(f.options.stateDirectory, `rtk-${binding ? "profiled" : "legacy"}.json`));
+      const resolve = createHostRtkUsageResolver({ platform: f.configured, sessionId: f.options.sessionId, repositoryPath: f.options.repositoryPath },
+        ledger, () => f.host, () => binding);
+      expect(await resolve({ role: f.binding.role, runId: "run-1", taskId: "task-1", attemptId: "attempt-1", commandId: "unit", revision: "revision-1" }))
+        .toMatchObject({ executablePath: "/trusted/rtk", required: false });
+    }
+  });
+  it("rechecks profile grants after the awaited Gateway inspection", async () => {
+    const f = await profiledToolSession();
+    f.service.verifyGateway = async () => {
+      f.configured.toolGrants = [];
+      return { ok: true, value: { checkedAt: at, healthy: true, lost: [], uncertain: false } };
+    };
+    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+      undefined, undefined, f.binding);
+    expect(result.ok).toBe(false);
+    expect(f.calls).toEqual([]);
+  });
+  it.each(["source", "grant"])("revalidates execution sources and pinned grants before each RTK child (%s drift)", async drift => {
+    const f = await profiledToolSession({}, true, "developer");
+    const ledger = new FileToolUsageLedger(join(f.options.stateDirectory, `rtk-child-${drift}.json`));
+    let reads = 0;
+    const resolve = createHostRtkUsageResolver({ platform: f.configured, sessionId: f.options.sessionId, repositoryPath: f.options.repositoryPath },
+      ledger, () => f.host, () => f.binding, async () => {
+        reads++;
+        await Promise.resolve();
+        if (drift === "source") throw new Error("Execution source drift");
+        f.configured.toolGrants = [];
+      });
+    const runner = await resolve({ role: "developer", runId: "run-1", taskId: "task-1", attemptId: "attempt-1", commandId: "unit", revision: "revision-1" });
+    await expect(runner!.beforeSideEffect!()).rejects.toThrow(drift === "source" ? /Execution source drift/ : /grants changed/);
+    expect(reads).toBe(1);
+    expect(await ledger.list()).toEqual([]);
+  });
+  it("rechecks a profiled RTK grant immediately before recording its process intent", async () => {
+    const f = await profiledToolSession({}, true, "developer");
+    const ledger = new FileToolUsageLedger(join(f.options.stateDirectory, "rtk-drift.json"));
+    const resolve = createHostRtkUsageResolver({ platform: f.configured, sessionId: f.options.sessionId, repositoryPath: f.options.repositoryPath },
+      ledger, () => f.host, () => f.binding);
+    const runner = await resolve({ role: f.binding.role, runId: "run-1", taskId: "task-1", attemptId: "attempt-1", commandId: "unit", revision: "revision-1" });
+    expect(runner).toBeDefined();
+    f.configured.toolGrants = [];
+    await expect(runner!.onIntent!()).rejects.toThrow(/grants changed/);
+    expect(await ledger.list()).toEqual([]);
+  });
+  it("does not permit a released profiled allocation or a base launch with the same role", async () => {
+    const f = await profiledToolSession();
+    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+      undefined, undefined, { ...f.binding, metadata: { launchId: "launch-reviewer" } })).resolves.toMatchObject({ ok: false });
+    await f.host.releaseDeveloper("allocation-review-1");
+    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", true,
+      undefined, undefined, f.binding)).resolves.toMatchObject({ ok: false });
+    expect(f.calls).toEqual([]);
+  });
+  it("does not carry profile tool authority into a newer platform generation", async () => {
+    const f = await profiledToolSession();
+    await f.host.prepare();
+    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+      undefined, undefined, f.binding)).resolves.toMatchObject({ ok: false });
+    expect(f.calls).toEqual([]);
+  });
+  it("refuses a profiled binding with a missing allocation rather than choosing the permanent registration", async () => {
+    const f = await profiledToolSession();
+    const result = await f.host.invokeTool("reviewer", undefined, "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+      undefined, undefined, f.binding);
+    expect(result.ok).toBe(false);
+    expect(f.calls).toEqual([]);
+  });
+});
+
 describe("profile selection ingress", () => {
+  it("keeps the original specialist prompt first while retaining every trusted host instruction", () => {
+    const original = "Original builtin specialist policy\nNever waive approval.";
+    const trusted = "Trusted Runtime host scope, TDD and lease rules.";
+    const prompt = preserveBuiltinRolePrompt(original, trusted);
+    expect(prompt.startsWith(original)).toBe(true);
+    expect(prompt).toContain(trusted);
+    expect(prompt).toContain(original);
+  });
+  it("preserves typed profile identity in actual host platform status", () => {
+    const roleProfile = { profileId: "backend-developer", version: "1.0.0", digest: "b".repeat(64) };
+    expect(HostPlatformStatusSchema.safeParse({ report: null, status: { generation: 1, launches: [{ launchId: "launch-profile", role: "developer",
+      provider: "codex", state: "activated", roleProfile }] }, gatewayDiagnostic: null }).success).toBe(true);
+  });
+  it("revalidates profile-only skill authority against the dedicated specialist launch", async () => {
+    const roleProfile = pinRoleProfile({ schemaVersion: 3, profileId: "db-reviewer", version: "1.0.0", displayName: "DB Reviewer", baseRole: "reviewer",
+      additionalInstructions: "Review transactions", skillPins: [], toolRequirements: [], restrictions: {} });
+    const binding = { role: "reviewer", roleProfile, metadata: { launchId: "launch-profile" } } as never;
+    const calls: unknown[] = [];
+    const host = { launchIdOf: () => "launch-base", bindingLaunchId: () => "launch-profile", readPinnedInstructions: async (...args: unknown[]) => {
+      calls.push(args); throw new Error("profile skill receipt was revoked"); } };
+    await expect(verifyDispatchPinnedSkills(host as never, { roles: [roleOption("reviewer", "codex")] }, binding)).rejects.toThrow(/pinned skill/i);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(["reviewer", undefined, 0, 1, "launch-profile"]);
+  });
   it("accepts only exported tool policy and grant schemas on the host wire", () => {
     const scope = { kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "session-1" };
     const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: "repo-1", scope: { kind: "repository", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo" },

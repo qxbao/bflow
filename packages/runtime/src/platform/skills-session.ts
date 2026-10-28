@@ -5,14 +5,17 @@ import {
   AgentProviderIdSchema,
   canonicalReceiptJson,
   SkillManifestSchema,
+  RoleProfilePinSchema,
   Sha256DigestSchema,
   type AgentRole,
   type OperationResult,
-  type SkillManifest
+  type SkillManifest,
+  type RoleProfilePin
 } from "@bflow/contracts";
 import type { RenderedSkills, ResolveSkillsRequest } from "@bflow/skills";
 import { fail, ok } from "./errors.js";
-import { boundedIdentifier, sessionTrustScope, taskIdError } from "./environment.js";
+import { boundedIdentifier, sessionTrustScope, sha256Hex, taskIdError } from "./environment.js";
+import { assertRoleProfilePin, resolveRoleProfile } from "./role-profiles.js";
 import type {
   PlatformSessionIdentity,
   ResolvedRoleSkills,
@@ -26,6 +29,7 @@ interface PersistedRoleSkills {
   readonly manifest: SkillManifest;
   readonly rendered: RenderedSkills;
   readonly diagnostics: string[];
+  readonly roleProfile?: RoleProfilePin;
 }
 
 /** `sync` (not bare resolve) persists the `manifest-<digest>` document that `recover` reads back. */
@@ -41,8 +45,9 @@ export class SkillSessionStore implements SkillSessionPort {
   ): Promise<OperationResult<ResolvedRoleSkills>> {
     const taskError = taskIdError(requirement.taskId);
     if (taskError) return fail("validation", taskError);
-    const file = recordPath(identity, requirement.role, requirement.taskId);
     try {
+      if (requirement.roleProfile) requirement = resolveRoleProfile(requirement.roleProfile, requirement);
+      const file = recordPath(identity, requirement.role, requirement.taskId, requirement.roleProfile?.pin, requirement.assignmentId);
       const synced = await this.options.resolver.sync(buildRequest(identity, requirement, environmentId));
       const manifest = await this.options.resolver.verify(synced.manifest);
       if (manifest.environmentId !== environmentId || manifest.role !== requirement.role ||
@@ -50,7 +55,8 @@ export class SkillSessionStore implements SkillSessionPort {
         return fail("validation", "resolved skill manifest identity mismatch");
       const rendered = synced.rendered;
       const diagnostics = [...synced.diagnostics];
-      const record: PersistedRoleSkills = { schemaVersion: 3, manifest, rendered, diagnostics };
+      const record: PersistedRoleSkills = { schemaVersion: 3, manifest, rendered, diagnostics,
+        ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin } : {}) };
       const persisted = await persistRecord(file, record);
       if (!persisted.ok) return persisted;
       return ok({ manifest, rendered, diagnostics });
@@ -62,17 +68,20 @@ export class SkillSessionStore implements SkillSessionPort {
   async load(
     identity: PlatformSessionIdentity,
     role: AgentRole,
-    taskId?: string
+    taskId?: string,
+    roleProfile?: RoleProfilePin,
+    assignmentId?: string
   ): Promise<OperationResult<ResolvedRoleSkills | null>> {
     const taskError = taskIdError(taskId);
     if (taskError) return fail("validation", taskError);
-    const file = recordPath(identity, role, taskId);
     try {
+      const file = recordPath(identity, role, taskId, roleProfile, assignmentId);
       const raw = await readRecordFile(file);
       if (!raw.ok) return raw;
       if (raw.value === null) return ok(null);
       const stored = parseRecord(raw.value);
       if (!stored.ok) return stored;
+      assertRoleProfilePin(roleProfile, stored.value.roleProfile, "skill record");
       const { manifest, rendered, diagnostics } = stored.value;
       if (manifest.role !== role) return fail("corruption", "stored skill record role mismatch");
       let recovered: SkillManifest;
@@ -112,9 +121,12 @@ function buildRequest(
   };
 }
 
-function recordPath(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined): string {
+function recordPath(identity: PlatformSessionIdentity, role: AgentRole, taskId: string | undefined, roleProfile?: RoleProfilePin, assignmentId?: string): string {
+  if (roleProfile !== undefined) RoleProfilePinSchema.parse(roleProfile);
   const task = taskId ? `-${taskId}` : "";
-  return `${identity.stateDirectory}/gen-${identity.generation}/skills/${role}${task}.json`;
+  const profile = roleProfile ? `/profiles/${roleProfile.digest}` : "";
+  const assignment = assignmentId ? `/assignments/${sha256Hex(assignmentId)}` : "";
+  return `${identity.stateDirectory}/gen-${identity.generation}/skills/${role}${task}${profile}${assignment}.json`;
 }
 
 /** Writes a record atomically; an existing record with a different manifest digest is never overwritten. */
@@ -128,6 +140,7 @@ async function persistRecord(
   if (existing.value !== null) {
     const stored = parseRecord(existing.value);
     if (!stored.ok) return stored;
+    assertRoleProfilePin(record.roleProfile, stored.value.roleProfile, "skill record");
     if (stored.value.manifest.digest !== record.manifest.digest)
       return fail("conflict", "skill record exists with a different manifest digest");
     return ok(undefined);
@@ -207,9 +220,12 @@ function recordEnvelope(raw: unknown): PersistedRoleSkills | null {
   const diagnostics = raw["diagnostics"];
   if (!diagnostics.every(item => typeof item === "string")) return null;
   const manifest = SkillManifestSchema.safeParse(raw["manifest"]);
+  const roleProfile = raw["roleProfile"] === undefined ? undefined : RoleProfilePinSchema.safeParse(raw["roleProfile"]);
+  if (roleProfile !== undefined && !roleProfile.success) return null;
   const rendered = renderedSkills(raw["rendered"]);
   if (!manifest.success || !rendered || rendered.manifestDigest !== manifest.data.digest) return null;
-  return { schemaVersion: 3, manifest: manifest.data, rendered, diagnostics: diagnostics as string[] };
+  return { schemaVersion: 3, manifest: manifest.data, rendered, diagnostics: diagnostics as string[],
+    ...(roleProfile?.success ? { roleProfile: roleProfile.data } : {}) };
 }
 
 function renderedSkills(raw: unknown): RenderedSkills | null {

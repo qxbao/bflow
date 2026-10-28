@@ -1,5 +1,34 @@
 # @bflow/runtime
 
+## Custom specialist profiles (RP-01)
+
+Standard governance roles remain unchanged. Coordinator discovers the configured catalog
+with `read_role_profiles` and supplies an exact `roleProfile` pin on Developer tasks or
+`request_specialist`. Runtime validates the immutable definition, base role, capabilities,
+scope, skills and grants before allocation and dispatch. Review/QA defaults are pinned with
+the accepted workflow; conditional evidence uses dedicated profiled QA allocations too.
+Instructions append to the original role prompt. Profile labels never establish independent
+review: native executor identity and the full implementation assignment history are checked.
+
+Profiled runs use private agentic journal **v7**, rejected by older binaries. Missing pins,
+snapshots or executor proof block recovery; no legacy fallback is inferred. Existing unprofiled
+v1–v6 journals remain readable. Source/policy drift blocks the next effect, including changes
+during awaited preparation or skill checks. Transport turn completion releases a lease but
+retains specialist context until a correlated result is applied and native deliveries drain.
+
+Model/effort preferences override unlocked base defaults; exact pack locks still apply.
+Changing the configured provider through a profile is explicitly unsupported because native
+login, ingress and Gateway setup are provider-bound. Process-tree read/deny restrictions,
+remaining network allowlists and unmediated native write subtrees are unsupported where the
+backend cannot enforce them. Developer feedback subprocesses with narrowed write scope are
+blocked; independent owner verification retains its own policy. Profiles never grant tools.
+
+Daemon restart keeps pinned workflow/snapshot evidence but preserves the existing retirement
+of previous live launch authority; it does not recreate tokens or prove a process stopped.
+See [the approved design](custom-role-profiles-design.md) and
+[validation evidence](custom-role-profiles-evidence.md). Evidence is source plus local tests,
+not full live Herdr/provider or SDLC acceptance.
+
 ## Linux verification sandbox prerequisites
 
 `bflow up` requires a working Bubblewrap namespace sandbox when automated verification

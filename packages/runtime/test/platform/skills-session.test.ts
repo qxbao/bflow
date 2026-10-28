@@ -1,8 +1,9 @@
+import { profile } from "./role-profile-fixture.js";
 import { mkdtemp, readFile, realpath, rm, stat, symlink, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { RolePlatformRequirement } from "@bflow/contracts";
+import type { RolePlatformRequirement } from "../../src/platform/ports.js";
 import { SkillManager, SkillFileStore, bundleDigest, type BundleFiles } from "@bflow/skills";
 import { SkillSessionStore } from "../../src/platform/skills-session.js";
 import type { PlatformSessionIdentity } from "../../src/platform/ports.js";
@@ -91,6 +92,19 @@ describe("SkillSessionStore with the real SkillManager", () => {
     const loaded = await store.load(identity, "developer", "t1");
     if (!loaded.ok) throw new Error(JSON.stringify(loaded.error));
     expect(loaded.value).toEqual(resolved.value);
+  });
+
+  it("isolates exact skill records by profile digest and assignment identity", async () => {
+    const store = new SkillSessionStore({ resolver: manager });
+    const first = profile(), second = profile({ profileId: "data-engineer" });
+    expect((await store.resolveForRole(identity, requirement({ roleProfile: first, assignmentId: "a1" }), "env-one")).ok).toBe(true);
+    expect((await store.resolveForRole(identity, requirement({ roleProfile: second, assignmentId: "a1" }), "env-two")).ok).toBe(true);
+    const a = await store.load(identity, "developer", "t1", first.pin, "a1");
+    const b = await store.load(identity, "developer", "t1", second.pin, "a1");
+    expect(a.ok && a.value?.manifest.environmentId).toBe("env-one");
+    expect(b.ok && b.value?.manifest.environmentId).toBe("env-two");
+    const missing = await store.load(identity, "developer", "t1", first.pin, "a2");
+    expect(missing.ok && missing.value).toBe(null);
   });
 
   it("is idempotent for the same manifest digest", async () => {

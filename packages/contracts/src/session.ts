@@ -9,22 +9,10 @@ import {
   MetadataSchema
 } from "./common.js";
 import { AcceptanceCriterionSchema, SddPolicyLevelSchema, TddDecisionSchema } from "./sdlc.js";
+import { AgentRoleSchema } from "./agent-roles.js";
+export { AGENT_ROLES, AgentRoleSchema, type AgentRole } from "./agent-roles.js";
+import { RoleProfilePinSchema, RoleProfileCatalogSchema, sameRoleProfilePin } from "./role-profile.js";
 
-export const AGENT_ROLES = [
-  "conversation",
-  "coordinator",
-  "planner",
-  "architect",
-  "specifier",
-  "developer",
-  "tester",
-  "reviewer",
-  "qa",
-  "security"
-] as const;
-
-export const AgentRoleSchema = z.enum(AGENT_ROLES);
-export type AgentRole = z.infer<typeof AgentRoleSchema>;
 
 export const AgentCapabilityCategorySchema = z.enum([
   "conversation",
@@ -129,6 +117,7 @@ export const PaneBindingSchema = z
   .object({
     schemaVersion: z.literal(2),
     bindingId: IdentifierSchema,
+    roleProfile: RoleProfilePinSchema.optional(),
     sessionId: IdentifierSchema,
     role: AgentRoleSchema,
     paneGroup: PaneGroupSchema.optional(),
@@ -168,6 +157,7 @@ export const SessionManifestSchema = z
     status: SessionManifestStatusSchema,
     conversationSessionId: IdentifierSchema,
     activeRunIds: z.array(IdentifierSchema),
+    roleProfiles: RoleProfileCatalogSchema.optional(),
     panes: z.array(PaneBindingSchema).min(1),
     attachTarget: z
       .object({
@@ -183,6 +173,10 @@ export const SessionManifestSchema = z
   })
   .strict()
   .superRefine((manifest, context) => {
+    for (const [index, pane] of manifest.panes.entries()) {
+      if (pane.roleProfile && !manifest.roleProfiles?.some(snapshot => sameRoleProfilePin(snapshot.pin, pane.roleProfile) && snapshot.definition.baseRole === pane.role))
+        context.addIssue({ code: "custom", message: "pane profile requires a matching pinned manifest snapshot and governance role", path: ["panes", index, "roleProfile"] });
+    }
     const seenPaneIds = new Set<string>();
     manifest.panes.forEach((p, idx) => {
       if (seenPaneIds.has(p.paneId)) {
@@ -239,6 +233,7 @@ export const AgentAssignmentSchema = z
   .object({
     schemaVersion: z.literal(2),
     assignmentId: IdentifierSchema,
+    roleProfile: RoleProfilePinSchema.optional(),
     runId: IdentifierSchema,
     taskId: IdentifierSchema,
     delegationId: IdentifierSchema,
@@ -257,6 +252,7 @@ export const AgentAssignmentSchema = z
   })
   .strict()
   .superRefine((assignment, context) => {
+    if (assignment.roleProfile && ["conversation", "coordinator"].includes(assignment.role)) context.addIssue({ code: "custom", message: "profiles are specialist-only", path: ["roleProfile"] });
     if (assignment.role === "conversation") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -391,6 +387,7 @@ export const DelegationRequestSchema = z
     runId: IdentifierSchema.optional(),
     requestedBy: z.enum(["conversation", "coordinator"]),
     targetRole: AgentRoleSchema,
+    roleProfile: RoleProfilePinSchema.optional(),
     title: z.string().min(1),
     objective: z.string().min(1),
     specificationId: IdentifierSchema,
@@ -405,6 +402,8 @@ export const DelegationRequestSchema = z
   })
   .strict()
   .superRefine((request, context) => {
+    if (request.roleProfile && (request.requestedBy !== "coordinator" || ["conversation", "coordinator"].includes(request.targetRole)))
+      context.addIssue({ code: "custom", message: "only Coordinator may select a specialist profile", path: ["roleProfile"] });
     if (request.requestedBy === "conversation" && request.targetRole !== "coordinator") {
       context.addIssue({
         code: z.ZodIssueCode.custom,

@@ -6,7 +6,8 @@ import {
   AgentRoleSchema,
   IdentifierSchema,
   IsoDateTimeSchema,
-  Sha256DigestSchema
+  Sha256DigestSchema,
+  RoleProfilePinSchema
 } from "@bflow/contracts";
 import type { LaunchJournalEntry, LaunchJournalPort } from "./ports.js";
 
@@ -56,7 +57,7 @@ const ENTRY_SPECS: Readonly<Record<LaunchJournalEntry["kind"], EntrySpec>> = {
       generation: checkGeneration,
       recordedAt: checkTimestamp
     },
-    optional: { taskId: checkIdentifier }
+    optional: { taskId: checkIdentifier, roleProfile: value => RoleProfilePinSchema.safeParse(value).success }
   },
   attested: {
     required: {

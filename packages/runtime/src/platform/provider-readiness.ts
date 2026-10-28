@@ -164,6 +164,7 @@ export class ProviderReadiness implements ProviderReadinessPort {
         launchId: profile.launchId,
         role: environment.role,
         provider: environment.provider,
+        ...(environment.roleProfile ? { roleProfile: environment.roleProfile } : {}),
         environmentId: environment.environmentId,
         configFingerprint: environment.configFingerprint,
         launchFingerprint: profile.launchFingerprint,

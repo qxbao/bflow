@@ -1,4 +1,7 @@
 import { RoleCapabilityPreflightError } from "./ports.js";
+import { resolveRoleProfile } from "../platform/role-profiles.js";
+import { assertProfileSnapshotCurrent } from "./profile-admission.js";
+import { sameRoleProfilePin, canonicalReceiptJson, ExecutorLineageSchema, RoleProfilePinSchema, ROLE_PROFILE_FEATURE, type ResolvedRoleProfileSnapshot, type ExecutorLineage, type ResolvedToolGrant } from "@bflow/contracts";
 import { readSkillApproval } from "./skill-approval.js";
 import type { GatewayToolOperationOptions } from "../platform/browser-resource-transactions.js";
 import { DeveloperProcessScopes } from "./developer-process-scope.js";
@@ -65,6 +68,7 @@ export interface HostAgentObservation {
 }
 
 const PlatformStatusLaunchSchema = z.object({
+  roleProfile: RoleProfilePinSchema.optional(),
   launchId: z.string().min(1),
   role: AgentRoleSchema,
   provider: AgentProviderIdSchema,
@@ -121,6 +125,9 @@ export interface HostPlatformLaunchResult {
 
 /** Structural shape of a Developer launch handed to Pane Manager (`AgentLaunchProfile`). */
 export interface DeveloperLaunchMaterial {
+  readonly roleProfile?: import("@bflow/contracts").RoleProfilePin | undefined;
+  readonly features?: readonly string[] | undefined;
+  readonly promptSource?: string | undefined;
   readonly provider: AgentProviderId;
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string>>;
@@ -161,6 +168,7 @@ export function requirementFor(
     required: option.required,
     ...(option.model !== undefined ? { model: option.model } : {}),
     ...(option.effort !== undefined ? { effort: option.effort } : {}),
+    ...(option.preferenceConstraints !== undefined ? { preferenceConstraints: option.preferenceConstraints } : {}),
     permissionMode: option.permissionMode,
     cwd,
     ...(taskId !== undefined ? { taskId } : {}),
@@ -195,6 +203,8 @@ export function launchMaterial(prepared: PreparedRoleLaunch): HostLaunchMaterial
     env: { ...prepared.launch.env, [BFLOW_LAUNCH_ID_ENV]: prepared.launch.launchId, BFLOW_ENVIRONMENT_ID: prepared.environment.environmentId },
     launchId: prepared.launch.launchId,
     launchFingerprint: prepared.launch.launchFingerprint
+    , ...(prepared.environment.roleProfile ? { roleProfile: prepared.environment.roleProfile, features: [ROLE_PROFILE_FEATURE],
+      ...(prepared.launch.promptSource ? { promptSource: prepared.launch.promptSource } : {}) } : {})
   });
 }
 
@@ -255,21 +265,21 @@ interface PinnedRoleInstructions {
 
 /** Verify current pinned skill authority even for implementation-only capability requests. No readiness/model probes. */
 export async function verifyDispatchPinnedSkills(
-  session: Pick<HostPlatformSession, 'readPinnedInstructions' | 'launchIdOf'> | undefined,
+  session: (Pick<HostPlatformSession, 'readPinnedInstructions' | 'launchIdOf'> & Partial<Pick<HostPlatformSession, 'bindingLaunchId'>>) | undefined,
   platform: Pick<AgenticHostPlatformOptions, 'roles'> | undefined,
   binding: PaneBinding
 ): Promise<void> {
   const selections = platform?.roles.find(option => option.role === binding.role)?.skillSelections ?? [];
-  if (!selections.length) return;
+  if (!selections.length && !binding.roleProfile) return;
   try {
     if (!session) throw Error('Platform skill verifier is unavailable');
     const metadataLaunch = binding.metadata?.launchId;
-    const launchId = binding.role === 'developer' ? metadataLaunch : session.launchIdOf(binding.role);
+    const launchId = binding.roleProfile ? session.bindingLaunchId?.(binding) : binding.role === 'developer' ? metadataLaunch : session.launchIdOf(binding.role);
     if (typeof launchId !== 'string' || !launchId || typeof metadataLaunch === 'string' && metadataLaunch !== launchId)
       throw Error('Current skill launch identity is unavailable');
     // This calls SkillManager.verify, including each dependency binding's current scoped receipt and expiry.
     const pinned = await session.readPinnedInstructions(binding.role, undefined, 0, 1, launchId);
-    if (!pinned || pinned.launchId !== launchId || !pinned.manifestDigest || !pinned.instructionText.trim())
+    if (!pinned || pinned.launchId !== launchId || !pinned.manifestDigest || selections.length > 0 && !pinned.instructionText.trim())
       throw Error('Current pinned skill manifest is unavailable');
   } catch {
     throw new RoleCapabilityPreflightError('Current pinned skill approval or integrity is unavailable for dispatch');
@@ -278,6 +288,60 @@ export async function verifyDispatchPinnedSkills(
 
 /** One daemon's platform session: generation counter, launch ids for activation, and the Developer launch port. */
 export class HostPlatformSession {
+  private readonly profiledLaunches = new Map<string, PreparedRoleLaunch>();
+  private readonly profileToolRequirements = new Map<string, { generation: number; requirement: RolePlatformRequirement }>();
+  /** Host-mediated tools share the exact allocation and narrowed grants prepared for this native context. */
+  toolActionScope(binding: PaneBinding): { launchId: string | undefined; taskId: string | undefined; grants: readonly ResolvedToolGrant[] } {
+    const launchId = this.bindingLaunchId(binding);
+    if (!binding.roleProfile) {
+      const taskId = binding.role === "developer" ? [...this.developerLaunches].find(([, id]) => id === launchId)?.[0] : undefined;
+      return { launchId, taskId, grants: (this.options.platform.toolGrants ?? []).filter(grant => grant.role === binding.role) };
+    }
+    const allocation = launchId ? this.profileToolRequirements.get(launchId) : undefined;
+    const prepared = allocation?.requirement;
+    if (allocation?.generation !== this.identity?.generation || !prepared?.roleProfile || !prepared.taskId || this.developerLaunches.get(prepared.taskId) !== launchId)
+      throw new Error("Pinned profile tool allocation is unavailable");
+    assertProfileSnapshotCurrent(prepared.roleProfile, this.options.platform.roleProfiles);
+    const template = this.options.platform.roles.find(option => option.role === binding.role);
+    if (!template) throw new Error("Pinned profile tool template is unavailable");
+    const current = resolveRoleProfile(prepared.roleProfile, requirementFor(template, this.options.hostCapabilities, prepared.cwd,
+      prepared.taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy));
+    if (canonicalReceiptJson(current.toolGrants ?? []) !== canonicalReceiptJson(prepared.toolGrants ?? []) ||
+        current.toolPolicy?.digest !== prepared.toolPolicy?.digest)
+      throw new Error("Pinned profile tool grants changed; reconcile the launch before further tool actions");
+    return { launchId, taskId: prepared.taskId, grants: structuredClone(prepared.toolGrants ?? []) };
+  }
+  private readonly executorRoots = new Map<string, ExecutorLineage>();
+  bindingLaunchId(binding: PaneBinding): string | undefined {
+    if (!binding.roleProfile) return binding.role === "developer" ? typeof binding.metadata?.launchId === "string" ? binding.metadata.launchId : undefined : this.launchIdOf(binding.role);
+    const launchId = binding.metadata?.launchId;
+    const launch = typeof launchId === "string" ? this.profiledLaunches.get(launchId) : undefined;
+    if (!launch || launch.role !== binding.role || !sameRoleProfilePin(launch.environment.roleProfile, binding.roleProfile)) throw new Error("Pinned profile launch identity is unavailable");
+    return launchId as string;
+  }
+  preflightProfile(snapshot: ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): void {
+    assertProfileSnapshotCurrent(snapshot, this.options.platform.roleProfiles);
+    const template = this.options.platform.roles.find(option => option.role === role);
+    if (!template) throw new Error("Profile base role has no configured platform template");
+    const effective = resolveRoleProfile(snapshot, requirementFor(template, this.options.hostCapabilities, this.options.repositoryPath, undefined,
+      this.options.platform.toolGrants, this.options.platform.toolPolicy));
+    if (requiredCapabilities.some(capability => !effective.capabilityIds.includes(capability))) throw new Error("Profile capability scope cannot satisfy the assignment");
+  }
+  async attestProfileExecutor(binding: PaneBinding, purpose: ExecutorLineage["purpose"], assignmentId: string): Promise<ExecutorLineage> {
+    const launchId = this.bindingLaunchId(binding), launch = launchId ? this.profiledLaunches.get(launchId) : undefined;
+    if (!launch || !binding.session || !binding.roleProfile) throw new Error("Profile lineage requires its live host-prepared native context");
+    const health = await this.options.service.verifyActivated({ launchId: launchId!, paneId: binding.paneId, nativeSession: binding.session,
+      observation: { paneId: binding.paneId, agentName: binding.agentId, transportState: binding.transportState, interactiveReady: true, nativeSession: binding.session } });
+    if (!health.ok) throw new Error("Profile native context has no authenticated activated readiness");
+    const nativeKey = JSON.stringify(binding.session);
+    let lineage = this.executorRoots.get(nativeKey);
+    if (lineage && lineage.launchId !== launchId) throw new Error("Profile fresh launch reused a prior native executor context; reconciliation required");
+    lineage ??= ExecutorLineageSchema.parse({ schemaVersion: 3, executorId: `executor-${launchId}`, launchId, nativeSessionId: binding.session.value,
+      bindingId: binding.bindingId, freshContext: true, purpose, assignmentIds: [] });
+    lineage = ExecutorLineageSchema.parse({ ...lineage, assignmentIds: [...new Set([...lineage.assignmentIds, assignmentId])] });
+    this.executorRoots.set(nativeKey, lineage);
+    return lineage;
+  }
   private identity: PlatformSessionIdentity | undefined;
   private report: PlatformPreflightReport | undefined;
   private preparedStartup: HostPlatformLaunchResult | undefined;
@@ -378,10 +442,10 @@ export class HostPlatformSession {
   async readPinnedInstructions(role: AgentRole, skillId?: string, offset = 0, limit = 8 * 1024, expectedLaunchId?: string): Promise<{ launchId: string; manifestDigest: string; instructionText: string;
     references: readonly { name: string; description: string; entrypoint: string; digest: string }[];
     skill?: { skillId: string; version: string; digest: string; offset: number; bytes: number; content: string; truncated: boolean; nextOffset?: number } } | undefined> {
-    const value = role === "developer"
+    const value = role === "developer" || expectedLaunchId !== undefined && this.profiledLaunches.has(expectedLaunchId)
       ? expectedLaunchId === undefined ? undefined : this.developerInstructions.get(expectedLaunchId)
       : this.roleInstructions.get(role);
-    const active = role === "developer"
+    const active = role === "developer" || expectedLaunchId !== undefined && this.profiledLaunches.has(expectedLaunchId)
       ? expectedLaunchId !== undefined && [...this.developerLaunches.values()].includes(expectedLaunchId)
       : value?.launchId === this.launches.get(role)?.launchId;
     if (!value || !active || (expectedLaunchId !== undefined && value.launchId !== expectedLaunchId) || !this.skillManager || !this.skillStore) return undefined;
@@ -478,14 +542,14 @@ export class HostPlatformSession {
   }
 
   hasActiveDeveloperLaunch(launchId: string | undefined): boolean {
-    return typeof launchId === "string" && [...this.developerLaunches.values()].includes(launchId);
+    return typeof launchId === "string" && ([...this.developerLaunches.values()].includes(launchId) || this.profiledLaunches.has(launchId));
   }
 
   /** Native transcript access is bound to a live Agy launch and its exact prepared config home. */
   nativeAgyLaunch(role: AgentRole, launchId: string): { home: string; launchId: string } | undefined {
     const binding = this.nativeAgyHomes.get(launchId);
     if (!binding || binding.role !== role || binding.provider !== "agy") return undefined;
-    const active = role === "developer"
+    const active = role === "developer" || this.profiledLaunches.has(launchId)
       ? [...this.developerLaunches.values()].includes(launchId)
       : this.launches.get(role)?.launchId === launchId && this.launches.get(role)?.provider === "agy";
     return active ? { home: binding.home, launchId } : undefined;
@@ -495,7 +559,7 @@ export class HostPlatformSession {
    * Dynamic Developer launch for one task worktree. Blocked launches throw; no pane is created on failure.
    * Publishes the launch's own probe plan (keyed by launch id, so concurrent Developers never share a file).
    */
-  async allocateDeveloper(taskId: string, worktreePath: string, runId?: string): Promise<DeveloperLaunchMaterial> {
+  async allocateDeveloper(taskId: string, worktreePath: string, runId?: string, roleProfile?: ResolvedRoleProfileSnapshot): Promise<DeveloperLaunchMaterial> {
     if (this.identity === undefined) throw new Error("Platform has no prepared generation; run bflow up again");
     const processScopes = await this.availableProcessScopes();
     if (processScopes && !runId) throw new Error("A supervised Developer launch requires its exact run identity");
@@ -503,8 +567,10 @@ export class HostPlatformSession {
     if (template === undefined) throw new Error("Platform configuration has no developer template for dynamic Developer launches");
     // Re-allocation for the same task (e.g. after restart) must not orphan the previous launch and its Gateway registration.
     await this.releaseDeveloper(taskId);
-    const result = await this.options.service.prepareDeveloper(this.identity,
-      requirementFor(template, this.options.hostCapabilities, worktreePath, taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy));
+    const baseRequirement = requirementFor(template, this.options.hostCapabilities, worktreePath, taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy);
+    const requirement = roleProfile ? resolveRoleProfile(roleProfile, baseRequirement) : baseRequirement;
+    const generation = this.identity.generation;
+    const result = await this.options.service.prepareDeveloper(this.identity, requirement);
     if (!result.ok) throw new Error(`Developer ${taskId} launch is blocked: ${describeFailure(result.error)}`);
     const launchId = result.value.launch.launchId;
     let expectation: ReachabilityExpectation | undefined;
@@ -526,12 +592,38 @@ export class HostPlatformSession {
       }
     }
     this.developerLaunches.set(taskId, launchId);
+    if (roleProfile) {
+      this.profiledLaunches.set(launchId, result.value);
+      this.profileToolRequirements.set(launchId, { generation, requirement: structuredClone(requirement) });
+    }
     this.developerGates.set(launchId, expectation ?? null);
     if (result.value.skills?.manifest && result.value.skills?.rendered) this.developerInstructions.set(launchId, {
       launchId, manifest: result.value.skills.manifest, instructionText: result.value.skills.rendered.instructionText,
       references: result.value.skills.rendered.references.map(reference => ({ ...reference })) });
     this.rememberNativeAgyHome(result.value);
     return material;
+  }
+  async allocateProfileSpecialist(request: { taskId: string; runId: string; role: import("@bflow/contracts").SpecialistRole; roleProfile: ResolvedRoleProfileSnapshot }): Promise<DeveloperLaunchMaterial> {
+    if (!this.identity || request.role === "developer") throw new Error("Profiled specialist launch requires a prepared specialist generation");
+    this.preflightProfile(request.roleProfile, request.role, ["repository.read"]);
+    const template = this.options.platform.roles.find(option => option.role === request.role)!;
+    const requirement = resolveRoleProfile(request.roleProfile, requirementFor(template, this.options.hostCapabilities, this.options.repositoryPath,
+      request.taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy));
+    const generation = this.identity.generation;
+    const result = await this.options.service.prepareSession(this.identity, [requirement]);
+    if (!result.ok || !result.value.report.ready || result.value.launches.length !== 1) throw new Error("Profiled specialist launch readiness is blocked");
+    const prepared = result.value.launches[0]!;
+    try {
+      const expectation = await publishLaunchProbe(this.options.probeDirectory, prepared);
+      this.profiledLaunches.set(prepared.launch.launchId, prepared);
+      this.profileToolRequirements.set(prepared.launch.launchId, { generation, requirement: structuredClone(requirement) });
+      this.developerLaunches.set(request.taskId, prepared.launch.launchId);
+      this.developerGates.set(prepared.launch.launchId, expectation ?? null);
+      this.rememberNativeAgyHome(prepared);
+      this.developerInstructions.set(prepared.launch.launchId, { launchId: prepared.launch.launchId, manifest: prepared.skills.manifest,
+        instructionText: prepared.skills.rendered.instructionText, references: prepared.skills.rendered.references.map(reference => ({ ...reference })) });
+      return launchMaterial(prepared);
+    } catch (error) { await this.options.service.releaseLaunch(prepared.launch.launchId); throw error; }
   }
   /**
    * The supervision backend when this host can run it. A host without it (no Bubblewrap user namespaces, AppArmor
@@ -587,6 +679,8 @@ export class HostPlatformSession {
     if (!released.ok) throw new Error(`Developer ${taskId} launch release failed: ${describeFailure(released.error)}`);
     await this.removeLaunchArtifacts(launchId);
     this.developerLaunches.delete(taskId);
+    this.profiledLaunches.delete(launchId);
+    this.profileToolRequirements.delete(launchId);
     this.developerGates.delete(launchId);
     this.developerInstructions.delete(launchId);
     this.nativeAgyHomes.delete(launchId);
@@ -601,6 +695,8 @@ export class HostPlatformSession {
     for (const launchId of this.developerLaunches.values()) await this.removeLaunchArtifacts(launchId);
     this.launches.clear();
     this.developerLaunches.clear();
+    this.profiledLaunches.clear();
+    this.profileToolRequirements.clear();
     this.developerGates.clear();
     this.developerInstructions.clear();
     this.nativeAgyHomes.clear();
@@ -622,8 +718,17 @@ export class HostPlatformSession {
   }
 
   async invokeTool(role: AgentRole, taskId: string | undefined, toolId: string, serviceId: string, operation: string,
-    trigger: ToolTrigger, input: JsonValue, callId: string, reconcile = false, options?: OperationOptions, transactionId?: string): Promise<OperationResult<MCPToolCallResult>> {
-    const identity = this.identity, policy = this.options.platform.toolPolicy, grants = this.options.platform.toolGrants;
+    trigger: ToolTrigger, input: JsonValue, callId: string, reconcile = false, options?: OperationOptions, transactionId?: string, binding?: PaneBinding): Promise<OperationResult<MCPToolCallResult>> {
+    const identity = this.identity, policy = this.options.platform.toolPolicy;
+    let scope: ReturnType<HostPlatformSession["toolActionScope"]> | undefined;
+    try {
+      if (binding) {
+        if (binding.role !== role) throw new Error("Tool binding governance role mismatch");
+        scope = this.toolActionScope(binding);
+        if (scope.taskId !== taskId) throw new Error("Tool binding allocation mismatch");
+      }
+    } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+    const grants = scope?.grants ?? this.options.platform.toolGrants;
     if (!identity || !policy || !grants) return { ok: false, error: { code: "validation", retryable: false, message: "Tool actions require an active explicit repository policy and resolved grants" } };
     const requirement = policy.requirements.find(item => item.toolId === toolId && item.roles.includes(role) && item.kind !== "cli_only" &&
       (item.serviceId === undefined || item.serviceId === serviceId) && item.operations.includes(operation) && item.triggers.includes(trigger));
@@ -638,7 +743,9 @@ export class HostPlatformSession {
         grant.memoryScope?.wing !== requirement.memoryScope?.wing || grant.memoryScope?.repositoryId !== requirement.memoryScope?.repositoryId ||
         grant.memoryScope?.access !== requirement.memoryScope?.access || !grant.triggers.includes(trigger))
       return { ok: false, error: { code: "validation", retryable: false, message: "Resolved tool grant exceeds repository policy" } };
-    const launchId = role === "developer" ? this.developerLaunches.get(taskId ?? "") : this.launches.get(role)?.launchId;
+    const launchId = scope?.launchId ?? (taskId !== undefined ? this.developerLaunches.get(taskId) : this.launches.get(role)?.launchId);
+    if (!binding && launchId && this.profiledLaunches.has(launchId))
+      return { ok: false, error: { code: "validation", retryable: false, message: "Profile tool action requires its authenticated native binding" } };
     if (launchId === undefined) return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action has no active role launch" } };
     const launch = this.options.service.status().launches.find(item => item.launchId === launchId);
     if (!launch || launch.state !== "activated")
@@ -658,6 +765,13 @@ export class HostPlatformSession {
     if (!gateway.ok) return gateway;
     if (!gateway.value.healthy || gateway.value.uncertain)
       return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action Gateway registrations are lost or uncertain" } };
+    // Gateway inspection awaited external work; recheck the same pinned allocation/grants immediately before its tool side effect.
+    if (binding?.roleProfile) {
+      try {
+        const current = this.toolActionScope(binding);
+        if (current.launchId !== launchId || current.taskId !== taskId) throw new Error("Profile tool allocation changed during Gateway inspection");
+      } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+    }
     if (reconcile) return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
     return this.options.service.invokeTool(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
   }

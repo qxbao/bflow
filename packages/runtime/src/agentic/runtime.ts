@@ -3,6 +3,9 @@ import { assertAcceptedWorkflowSelection, assertRunExecutionPlan, bindAcceptedEx
 import { HandoverBindingSchema, TaskHandoverStore, admitHandover, selectHandover, handoverRevision, type HandoverBinding } from "./task-handover.js";
 import { readWorkflowTelemetry } from "../telemetry/report.js";
 import { z } from "zod";
+import { RoleProfilePinSchema, sameRoleProfilePin, SpecialistRoleSchema, type RoleProfilePin } from "@bflow/contracts";
+import { selectRoleProfile, narrowProfileTask, assertProfileSnapshotCurrent, assertProfileBinding, assertIndependentProfileExecutor } from "./profile-admission.js";
+export { assertIndependentProfileExecutor } from "./profile-admission.js";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentLeaseSchema, canonicalReceiptJson, hasAuthenticatedBindings, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, WorkflowAggregateCheckpointStateSchema,
   AgentResultSchema, AgentRoleSchema, AgentTransportObservationSchema, AgentTransportCapabilitiesSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
@@ -1065,17 +1068,18 @@ export class AgenticWorkflowRuntime {
                 !run.nativeDeliveries?.length && !state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) &&
                 (!run.approval || run.decision?.approvalId === run.approval.approvalId) &&
                 !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
-              const binding = unwrap(await this.ports.panes.getRoleBinding(role));
+              const binding = unwrap(await this.ports.panes.getRoleBinding(unanswered.selector));
               const target = unanswered.handle.target;
               if (binding && binding.session && binding.paneId === target.paneId && binding.agentId === target.agentId &&
                   binding.workspaceId === target.workspaceId && binding.tabId === target.tabId && digest(binding.session) === digest(target.session)) {
                 const noticeId = `review-resume-${digest([key, userTurn])}`;
                 if (!state.outbound.some(item => item.message.message_id === noticeId)) {
-                  outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: noticeId, correlation_id: run.delegation.correlationId,
+                  const notice = outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: noticeId, correlation_id: run.delegation.correlationId,
                     causation_id: key, run_id: run.runId, sender: { role: "runtime" }, recipient: { role, agent_id: target.agentId, pane_id: target.paneId }, type: "task.status",
                     payload: { kind: "resume_verification_request", sourceMessageId: key, conversationUserMessageId: userTurn,
                       next: `Continue your existing read-only verification request ${key}. Call inspect_review with that original messageId, then complete_review. Preserve its exact revision/specification. This diagnostic is not a new assignment, approval or success claim. Report a correlated blocked task.status if unable to continue.` },
-                    artifact_references: [], occurred_at: this.now(), idempotency_key: noticeId }), role, undefined, undefined, unanswered.capabilities);
+                    artifact_references: [], occurred_at: this.now(), idempotency_key: noticeId }), unanswered.selector, undefined, undefined, unanswered.capabilities);
+                  if (unanswered.roleProfile) notice.roleProfile = unanswered.roleProfile;
                   await save();
                 }
               }
@@ -1092,10 +1096,27 @@ export class AgenticWorkflowRuntime {
           const gateArtifacts = reworkDossier
             ? [...context.artifacts, reworkDossier.artifactRef, ...reworkDossier.findingResolutions.map(item => item.evidence.artifactRef)]
             : context.artifacts;
-          outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: key, correlation_id: run.delegation.correlationId,
+          const rolePin = this.acceptedProfileDefault(run, AgentRoleSchema.parse(role));
+          const selectedProfile = selectRoleProfile(run.roleProfiles, role, rolePin, [role === "reviewer" ? "review" : role === "tester" ? "testing" : "verification", "repository.read"]);
+          let selectedBinding = binding;
+          const allocationTaskId = `review-profile-${digest([run.runId, key])}`;
+          if (selectedProfile) {
+            if (!this.ports.panes.allocateSpecialist || !this.ports.preflightRoleProfile) throw new Error("Profiled verification allocation is unsupported");
+            assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+            await this.ports.preflightRoleProfile(selectedProfile, AgentRoleSchema.parse(role), ["repository.read", role === "reviewer" ? "review" : role === "tester" ? "testing" : "verification"]);
+            assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+            this.acceptedProfileDefault(run, AgentRoleSchema.parse(role));
+            selectedBinding = unwrap(await this.ports.panes.allocateSpecialist({ taskId: allocationTaskId, runId: run.runId,
+              role: SpecialistRoleSchema.parse(role), roleProfile: selectedProfile }));
+            if (!selectedBinding) throw new Error("Profiled verification allocation missing");
+            assertProfileBinding(selectedProfile, selectedBinding);
+            assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+          }
+          const verificationOut = outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: key, correlation_id: run.delegation.correlationId,
             run_id: run.runId, ...(recoverySource ? { causation_id: recoverySource.message.message_id } : {}), sender: { role: "coordinator" }, recipient: { role }, type: "verification.requested",
-            payload: context, artifact_references: gateArtifacts, occurred_at: this.now(), idempotency_key: key }), role,
+            payload: context, artifact_references: gateArtifacts, occurred_at: this.now(), idempotency_key: key }), selectedProfile ? selectedBinding!.bindingId : role,
             `check-${digest([context.taskId, context.definition.id, context.attemptId])}`, context.attemptId!, role === "reviewer" ? ["review"] : role === "tester" ? ["testing"] : ["verification"]);
+          if (selectedProfile) { verificationOut.roleProfile = selectedProfile.pin; verificationOut.profileAllocationTaskId = allocationTaskId; }
           await save();
         });
         await this.flushOutbound();
@@ -1441,8 +1462,11 @@ export class AgenticWorkflowRuntime {
         if (role !== "developer") return false;
         outbox.enqueueTaskNotice(RoleMessageSchema.parse({ ...base, sender: { role: "coordinator" },
           recipient: { role: "developer", agent_id: target.agentId, pane_id: target.paneId } }), holder);
-      } else outbox.enqueue(RoleMessageSchema.parse({ ...base, sender: { role: "runtime" },
-        recipient: { role, agent_id: target.agentId, ...(target.paneId ? { pane_id: target.paneId } : {}) } }), role);
+      } else {
+        const reminder = outbox.enqueue(RoleMessageSchema.parse({ ...base, sender: { role: "runtime" },
+          recipient: { role, agent_id: target.agentId, ...(target.paneId ? { pane_id: target.paneId } : {}) } }), holder.selector);
+        if (holder.roleProfile) reminder.roleProfile = holder.roleProfile;
+      }
       return true;
     } catch { return false; }
   }
@@ -2327,6 +2351,11 @@ export class AgenticWorkflowRuntime {
       artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
   }
   /** Coordinator chooses these calls adaptively. No fixed chain of Analyst -> Architect -> Planner. */
+  readRoleProfiles(): JsonValue {
+    return json((this.ports.roleProfiles ?? []).map(profile => ({ pin: profile.pin, displayName: profile.definition.displayName,
+      governanceRole: profile.definition.baseRole, skillPins: profile.definition.skillPins, toolRequirements: profile.definition.toolRequirements,
+      restrictions: profile.definition.restrictions, preferences: profile.definition.preferences ?? {} })));
+  }
   async reportProgress(runId: string, headline: string, questions: string[] = []): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
@@ -2351,14 +2380,30 @@ export class AgenticWorkflowRuntime {
     throw new SpecialistUnavailableError(`${detail}. Nothing was dispatched and the run is unchanged; choose one of the roles with a bound pane: ${
       bound.length ? bound.map(item => `${item.role} [${item.capabilities.join(", ")}]`).join("; ") : "none"}`, role, bound.map(item => item.role));
   }
-  async requestSpecialist(runId: string, requestedRole: string, objective: string, requiredCapabilities: string[]): Promise<JsonValue> {
+  async requestSpecialist(runId: string, requestedRole: string, objective: string, requiredCapabilities: string[], profileInput?: RoleProfilePin): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
       if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out)))
         throw new Error("Unknown delivery must be reconciled before requesting another specialist assignment");
       if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
+      const pin = profileInput === undefined ? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(requestedRole)] : RoleProfilePinSchema.parse(profileInput);
+      const selectedProfile = selectRoleProfile(this.ports.roleProfiles, requestedRole, pin, [...requiredCapabilities, "repository.read"]);
+      if (selectedProfile && state.outbound.some(out => out.message.recipient.role === requestedRole && ["accepted", "sending", "unknown_delivery"].includes(out.status)))
+        throw new Error("Profile base specialist capacity is occupied by an active assignment");
+      if (selectedProfile && (!this.ports.panes.allocateSpecialist || !this.ports.preflightRoleProfile)) throw new Error("Profiled specialist allocation is unsupported by this host");
+      if (selectedProfile) {
+        await this.ports.preflightRoleProfile!(selectedProfile, AgentRoleSchema.parse(requestedRole), [...requiredCapabilities, "repository.read"]);
+        assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+        run.roleProfiles ??= [];
+        if (!run.roleProfiles.some(profile => sameRoleProfilePin(profile.pin, selectedProfile.pin))) run.roleProfiles.push(selectedProfile);
+        await save();
+      }
       let role = requestedRole, fallbackFrom: string | undefined;
-      let pane = unwrap(await this.ports.panes.getRoleBinding(role));
+      const allocationTask = `specialist-${digest([runId, requestedRole, objective, requiredCapabilities, pin ?? null])}`;
+      let pane = selectedProfile ? unwrap(await this.ports.panes.allocateSpecialist!({ taskId: allocationTask, runId,
+        role: SpecialistRoleSchema.parse(requestedRole), roleProfile: selectedProfile })) : unwrap(await this.ports.panes.getRoleBinding(role));
+      if (selectedProfile && pane) assertProfileBinding(selectedProfile, pane);
+      if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
       if (!pane) {
         // A role absent from this session is a synchronous tool refusal, not a run escalation: the Coordinator re-plans in the same turn.
         const fallback = SPECIALIST_FALLBACKS[requestedRole];
@@ -2389,15 +2434,17 @@ export class AgenticWorkflowRuntime {
         await save(); return json({ blocked: true, actionId: pendingAction.actionId, reason: run.error });
       }
       // Exact dedupe within one attempt; a stopped holder that still owes the result gets a new deterministic attempt instead.
-      let key = `specialist:${role}:${digest([objective, requiredCapabilities])}`;
+      let key = `specialist:${role}:${digest([objective, requiredCapabilities, ...(pin ? [pin] : [])])}`;
       for (let prior = state.outbound.find(out => out.message.message_id === `p19-${digest([runId, key])}`);
         prior && (this.supersededAttempt(state, prior) || this.stoppedWithoutResult(state, run, prior)); prior = state.outbound.find(out => out.message.message_id === `p19-${digest([runId, key])}`))
         key = nextAttemptKey(key);
       const delegation = DelegationRequestSchema.parse({ ...run.delegation, delegationId: `delegation-${digest([runId, key])}`,
+        ...(selectedProfile ? { roleProfile: selectedProfile.pin } : {}),
         messageId: `p19-${digest([runId, key])}`, requestedBy: "coordinator", targetRole: role, objective,
         idempotencyKey: key, requestedAt: this.now(),
         ...(fallbackFrom ? { metadata: { ...run.delegation.metadata, specialistFallback: { requestedRole: fallbackFrom, actingRole: role } } } : {}) });
       const out = this.emit(state, outbox, run, "delegation.request", delegation, key, pane.role, run.delegation.inputArtifacts);
+      if (selectedProfile) { out.roleProfile = selectedProfile.pin; out.selector = pane.bindingId; out.profileAllocationTaskId = allocationTask; }
       out.capabilities = [...new Set([...strings(requiredCapabilities), "repository.read"])];
       if (!this.ports.roleCapabilities[role]?.includes("repository.read")) {
         out.status = "failed";
@@ -2432,10 +2479,26 @@ export class AgenticWorkflowRuntime {
   async proposeWorkflow(runId: string, specificationInput: unknown, definitionInput: unknown, maxIterations = 3): Promise<JsonValue> {
     if (this.quiesced) throw new Error("Runtime is quiesced");
     const draft = SpecificationSchema.parse(specificationInput);
-    const proposed = WorkflowDefinitionSchema.parse(definitionInput);
+    const originalProposal = WorkflowDefinitionSchema.parse(definitionInput);
+    const proposalProfiles = [...new Map(originalProposal.tasks.flatMap(task => {
+      const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
+      const profile = selectRoleProfile(this.ports.roleProfiles, task.role, pin,
+        task.metadata?.requiredCapabilities ? strings(task.metadata.requiredCapabilities) : ["implementation"]);
+      return profile ? [profile] : [];
+    }).map(profile => [profile.pin.digest, profile])).values()];
+    for (const profile of proposalProfiles) {
+      if (!this.ports.preflightRoleProfile) throw new Error("Profiled task preflight is unsupported by this host");
+      await this.ports.preflightRoleProfile(profile, profile.definition.baseRole, ["implementation"]);
+    }
+    const proposed = WorkflowDefinitionSchema.parse({ ...originalProposal, tasks: originalProposal.tasks.map(task => {
+      const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
+      return narrowProfileTask(task, selectRoleProfile(proposalProfiles, task.role, pin,
+        task.metadata?.requiredCapabilities ? strings(task.metadata.requiredCapabilities) : ["implementation"]));
+    }) });
     if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 10) throw new Error("Invalid verification limit");
     return this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, runId); this.live(run);
+      for (const profile of proposalProfiles) assertProfileSnapshotCurrent(profile, this.ports.roleProfiles);
       if (run.nativeDeliveries?.length) throw new Error("Unknown native delivery must be reconciled before proposing a workflow");
       if (run.definition) {
         if (digest(run.definition.metadata?.proposalFingerprint) === digest(digest([draft, proposed, maxIterations]))) {
@@ -2525,6 +2588,12 @@ export class AgenticWorkflowRuntime {
         classificationDigest: digest(classification)
       };
       run.definition = definition; run.workflowSpec = workflowSpec; run.tasks = tasks; run.maxIterations = maxIterations;
+      run.roleProfileDefaults ??= structuredClone(this.ports.roleProfileDefaults ?? {});
+      if (proposalProfiles.length) run.roleProfiles = [...new Map([...(run.roleProfiles ?? []), ...proposalProfiles].map(profile => [profile.pin.digest, profile])).values()];
+      for (const [role, pin] of Object.entries(run.roleProfileDefaults)) {
+        const profile = selectRoleProfile(this.ports.roleProfiles, role, pin);
+        if (profile && !run.roleProfiles?.some(value => sameRoleProfilePin(value.pin, profile.pin))) { run.roleProfiles ??= []; run.roleProfiles.push(profile); }
+      }
       // A follow-up run (human changes requested) starts from the parent's delivered head, preset at its creation.
       run.baseRevision ??= textField((await this.ports.policies.git.inspect()).head);
       // A requirement revision gets its own approval even when it plans the same tasks: the superseded id must never come back.
@@ -2545,6 +2614,30 @@ export class AgenticWorkflowRuntime {
       await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, definition, run.fastPath));
       await save(); return json(publicExecutionRun(run));
     });
+  }
+  private acceptedProfileDefault(run: RunRecord, role: AgentRole): RoleProfilePin | undefined {
+    const accepted = run.roleProfileDefaults?.[role];
+    if (!sameRoleProfilePin(accepted, this.ports.roleProfileDefaults?.[role]))
+      throw new Error("Profile default selection drift; restore the accepted configuration or replan");
+    return accepted;
+  }
+  /** Automatic policy measurements use the same pinned specialist allocation as review gates. */
+  private async profileEvidenceRecipient(run: RunRecord, role: "qa", key: string, requiredCapabilities: string[]): Promise<
+    { selector: string; roleProfile?: RoleProfilePin; profileAllocationTaskId?: string }> {
+    const profile = selectRoleProfile(run.roleProfiles, role, this.acceptedProfileDefault(run, role), [...requiredCapabilities, "repository.read"]);
+    if (!profile) return { selector: role };
+    if (!this.ports.panes.allocateSpecialist || !this.ports.preflightRoleProfile) throw new Error("Profiled evidence allocation is unsupported");
+    assertProfileSnapshotCurrent(profile, this.ports.roleProfiles);
+    await this.ports.preflightRoleProfile(profile, role, [...requiredCapabilities, "repository.read"]);
+    assertProfileSnapshotCurrent(profile, this.ports.roleProfiles);
+    this.acceptedProfileDefault(run, role);
+    const profileAllocationTaskId = `evidence-profile-${digest([run.runId, key])}`;
+    const pane = unwrap(await this.ports.panes.allocateSpecialist({ taskId: profileAllocationTaskId, runId: run.runId, role, roleProfile: profile }));
+    if (!pane) throw new Error("Profiled evidence allocation missing");
+    assertProfileBinding(profile, pane);
+    assertProfileSnapshotCurrent(profile, this.ports.roleProfiles);
+    this.acceptedProfileDefault(run, role);
+    return { selector: pane.bindingId, roleProfile: profile.pin, profileAllocationTaskId };
   }
   private designNeedsHuman(draft: Specification, definition: WorkflowDefinition, fastPath?: FastPathRecord): boolean {
     const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
@@ -3016,13 +3109,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); evidenceComplete = true; } catch { /* Independent evidence is still required. */ }
     if (this.ports.automaticAlternativeEvidence && result.status === "succeeded" && !evidenceComplete && task.spec.strategy.tddDecision.mode !== "required") {
       const requestId = `alternative-${result.requestId}`;
-      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: requestId,
+      const recipient = await this.profileEvidenceRecipient(run, "qa", requestId, ["testing"]);
+      const evidenceOut = outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: requestId,
         correlation_id: run.delegation.correlationId, causation_id: message.message_id, run_id: run.runId,
         sender: { role: "coordinator" }, recipient: { role: "qa" }, type: "verification.requested",
         payload: json({ kind: "conditional_evidence", runId: run.runId, taskId: task.taskId,
           instruction: "Inspect the exact committed diff with inspect_alternative_verification, evaluate the accepted criteria independently, then record_alternative_verification. Do not invent evidence.",
           specification: task.spec.specification, strategy: task.spec.strategy }), artifact_references: [],
-        occurred_at: this.now(), idempotency_key: requestId }), "qa", `evidence-${task.taskId}`, `evidence-${result.attemptId}`, ["testing"]);
+        occurred_at: this.now(), idempotency_key: requestId }), recipient.selector, `evidence-${task.taskId}`, `evidence-${result.attemptId}`, ["testing"]);
+      Object.assign(evidenceOut, recipient);
     }
     if (result.status === "blocked") { run.error = result.blockage?.message ?? "Developer is blocked"; this.progress(state, outbox, run, run.error); }
     if (["failed", "timed_out"].includes(result.status)) this.progress(state, outbox, run, result.error?.message ?? "Implementation failed");
@@ -3044,6 +3139,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     for (const taskState of snapshot.tasks.filter(task => task.status === "running" && !task.agentExecution)) {
       const task = run.tasks.find(item => item.taskId === taskState.taskId)!;
       const definition = run.definition!.tasks.find(item => item.id === task.taskId)!;
+      const selectedProfile = selectRoleProfile(run.roleProfiles, definition.role, definition.roleProfile,
+        definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : ["implementation"]);
+      if (selectedProfile) {
+        assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+        if (!this.ports.preflightRoleProfile) throw new Error("Pinned profile dispatch preflight is unsupported");
+        await this.ports.preflightRoleProfile(selectedProfile, selectedProfile.definition.baseRole, ["implementation"]);
+        assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+      }
       const id = `assignment:${run.runId}:${taskState.attemptId}`;
       if (state.outbound.some(out => out.message.idempotency_key === id)) continue;
       const agentName = `dev-${digest([run.runId, taskState.attemptId]).slice(0, 20)}`;
@@ -3052,6 +3155,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const dependencyHeads = prior || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
       const { tree, conflict } = await prepareDependencyBaseWorktree({ prepareTask: async request => {
         await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+        if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
         return this.ports.policies.git.prepareTask(request);
       } }, { runId: run.runId, taskId: task.taskId,
         attemptId: taskState.attemptId!, ownedPaths: strings(record(definition.metadata).ownedPaths),
@@ -3064,9 +3168,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (!task.worktrees.some(item => item.key === tree.key)) task.worktrees.push(tree);
       await save();
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+      if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
       const allocation = await this.ports.panes.allocateDeveloper({
         taskId: `${run.runId}-${task.taskId}`, runId: run.runId, worktreePath: tree.worktreePath,
-        branchName: tree.branchName, agentName
+        branchName: tree.branchName, agentName, ...(selectedProfile ? { roleProfile: selectedProfile } : {})
       });
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (!allocation.ok) {
@@ -3076,6 +3181,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
       if (run.error?.startsWith(`Developer allocation pending for ${task.taskId}: `)) delete run.error;
       const pane = PaneBindingSchema.parse(allocation.value);
+      assertProfileBinding(selectedProfile, pane);
+      if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
       if (pane.worktreePath !== tree.worktreePath || pane.agentId !== agentName) throw new Error("Developer allocation mismatch");
       const requiredCapabilities = definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : ["implementation"];
       const reworkContext = task.cycle?.status === "rework_required" && task.cycle.history.length > 0
@@ -3109,7 +3216,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           implementationAuthorizationRequired: task.spec.strategy.tddDecision.mode === "required",
           instruction },
         artifact_references: [task.spec.specification.artifactRef!], occurred_at: this.now(), idempotency_key: id });
-      outbox.enqueue(message, pane.bindingId, task.taskId, taskState.attemptId!, requiredCapabilities);
+      const assignmentOut = outbox.enqueue(message, pane.bindingId, task.taskId, taskState.attemptId!, requiredCapabilities);
+      if (selectedProfile) assignmentOut.roleProfile = selectedProfile.pin;
       task.outboundIds.push(messageId); delete task.result; task.writerReleased = false;
       await save();
     }
@@ -3258,6 +3366,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           task.worktrees.at(-1)?.worktreePath !== binding.worktreePath)
         throw new Error("No current Developer assignment owns this task workspace");
       await outbox.renew(out);
+      const selectedProfile = selectRoleProfile(run.roleProfiles, binding.role, definition.roleProfile);
+      assertProfileBinding(selectedProfile, binding);
+      if (selectedProfile) {
+        assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+        await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+        await this.ports.revalidateRoleSkills?.(binding);
+        await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+        assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+      }
       return use(task, definition);
     });
   }
@@ -3296,6 +3413,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const run = state.runs.find(item => item.runId === runId);
       if (!run || runId !== out.message.run_id) throw new Error("Tool action has no matching Runtime run holder");
       this.live(run);
+      if (binding.roleProfile || out.roleProfile) {
+        const profile = selectRoleProfile(run.roleProfiles, binding.role, out.roleProfile);
+        assertProfileBinding(profile, binding);
+        if (!profile) throw new Error("Profiled tool action has no durable snapshot");
+        assertProfileSnapshotCurrent(profile, this.ports.roleProfiles);
+        await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+        await this.ports.revalidateRoleSkills?.(binding);
+      }
       if (run.status === "awaiting_approval" || run.supersededBy || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
           state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status)))
         throw new Error("Tool action is blocked by approval, user decision, supersession, or unresolved delivery");
@@ -3335,6 +3460,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (out.status !== "accepted" || renewed.agentId !== binding.agentId || renewed.runId !== handle.runId ||
           renewed.taskId !== request.taskId || renewed.attemptId !== out.attemptId || renewed.fencingToken < lease.fencingToken ||
           Date.parse(renewed.expiresAt) <= Date.parse(this.now())) throw new Error("Tool action lease renewal did not preserve the active assignment");
+      if (binding.roleProfile || out.roleProfile) {
+        await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+        const profile = selectRoleProfile(run.roleProfiles, binding.role, out.roleProfile);
+        if (!profile) throw new Error("Profiled tool action has no durable snapshot");
+        assertProfileBinding(profile, binding);
+        assertProfileSnapshotCurrent(profile, this.ports.roleProfiles);
+      }
       return use({ runId, ...(taskId ? { taskId } : {}), transportTaskId: request.taskId,
         attemptId: out.attemptId, leaseId: renewed.leaseId, fencingToken: renewed.fencingToken });
     });
@@ -3383,13 +3515,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         throw new Error("This revision already failed the phase; commit a repair before requesting another measurement");
       // A resumed infrastructure failure re-measures the same revision under a new request identity.
       const id = `phase-${digest(retired.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length, "retired", retired.length] : failedHere.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length] : [runId, taskId, current.attemptId, phase, sourceRevision])}`;
-      outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
+      const recipient = await this.profileEvidenceRecipient(run, "qa", id, ["testing"]);
+      const evidenceOut = outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
         causation_id: assignment.message.message_id, run_id: runId, sender: { role: "coordinator" }, recipient: { role: "qa" },
         type: "verification.requested", artifact_references: [], occurred_at: this.now(), idempotency_key: id,
         payload: json({ kind: "conditional_evidence", phase, runId, taskId, sourceRevision, implementationAttemptId: current.attemptId,
           specification: task.spec.specification, strategy: task.spec.strategy,
           instruction: "Run record_behavioral_verification for this exact phase and revision using the owner-configured independent runner. Never supply measured output yourself." })
-      }), "qa", `phase-${taskId}-${phase}`, `phase-${current.attemptId}-${phase}`, ["testing"]);
+      }), recipient.selector, `phase-${taskId}-${phase}`, `phase-${current.attemptId}-${phase}`, ["testing"]);
+      Object.assign(evidenceOut, recipient);
       await save(); return json({ queued: true, messageId: id });
     });
   }
@@ -3668,10 +3802,35 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     return plan;
   }
   /** A bounded scheduler step; performs independent verification outside the journal lock. */
+  private async cleanupProfileSpecialists(state: JournalState, save: () => Promise<void>, runId?: string): Promise<void> {
+    if (!this.ports.panes.releaseSpecialist) return;
+    for (const out of state.outbound) {
+      if (!out.roleProfile || !out.profileAllocationTaskId || out.profileAllocationReleased || runId && out.message.run_id !== runId) continue;
+      const run = state.runs.find(item => item.runId === out.message.run_id);
+      if (!run || run.nativeDeliveries?.length) continue;
+      const safelyQueued = run.cancelled && out.status === "cancelled" && !out.handle;
+      const stopped = run.cancelled && out.status === "released" && out.cancelRequested && out.cancellationStopProof;
+      if (!safelyQueued && !stopped && !(out.status === "released" && out.handle && !this.outboundOwesResult(state, run, out))) continue;
+      if (state.outbound.some(item => item !== out && (item.selector === out.selector || out.handle && item.handle?.target.paneId === out.handle.target.paneId) &&
+        (["sending", "unknown_delivery"].includes(item.status) || this.outboundOwesResult(state, run, item)))) continue;
+      const health = await this.ports.panes.inspectRoleHealth(out.selector);
+      if (!health.ok) continue;
+      if (!health.value.occupantMatches || !safelyQueued && !health.value.readyForPrompt || out.handle &&
+          (health.value.paneId !== out.handle.target.paneId || health.value.agentId !== out.handle.target.agentId)) continue;
+      const current = unwrap(await this.ports.panes.getRoleBinding(out.selector));
+      if (!current || !sameRoleProfilePin(current.roleProfile, out.roleProfile) || out.handle && digest(current.session) !== digest(out.handle.target.session)) continue;
+      const cleanup = await this.ports.panes.releaseSpecialist({ taskId: out.profileAllocationTaskId });
+      if (!cleanup.ok && cleanup.error.code !== "not_found") unwrap(cleanup);
+      out.profileAllocationReleased = true; await save();
+    }
+  }
   async tick(): Promise<JsonValue> {
     await this.initialize();
     if (this.quiesced) return this.inspect();
-    await this.transaction(async (state, save, core, outbox) => { await this.drainCancellationControls(state, save, core, outbox); });
+    await this.transaction(async (state, save, core, outbox) => {
+      await this.drainCancellationControls(state, save, core, outbox);
+      await this.cleanupProfileSpecialists(state, save);
+    });
     await this.recoverMissingCoordinatorWakeups();
     await this.transaction(async (state, save, _core, outbox) => { if (this.expireUserDecisions(state, outbox)) await save(); });
     const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));
@@ -3963,6 +4122,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         return observation !== null && typeof observation === "object" && !Array.isArray(observation) &&
           typeof observation.executorId === "string" && implementerIds.has(observation.executorId);
       })) throw new Error("Verification evidence executor is a workflow implementer");
+      const historicalImplementers = state.outbound.filter(out => out.message.run_id === run.runId && out.message.type === "task.assignment" && out.handle)
+        .map(out => ({ ...out.handle!.target, executorLineage: out.executorLineage }));
+      for (const gate of result.qualityGateResults) {
+        const observation = gate.metadata?.verification;
+        if (!observation || typeof observation !== "object" || Array.isArray(observation) || typeof observation.executorId !== "string") continue;
+        const verifier = state.outbound.find(out => out.message.run_id === run.runId && out.handle?.target.agentId === observation.executorId &&
+          ["reviewer", "qa", "tester"].includes(out.message.recipient.role));
+        if (verifier?.handle) assertIndependentProfileExecutor({ ...verifier.handle.target, executorLineage: verifier.executorLineage }, historicalImplementers);
+      }
       const existingPending = state.pendingVerifications.find(item => record(record(item.outcome).result).verificationId === pendingId);
       if (!existingPending) { state.pendingVerifications.push({ job: json(job), outcome: json(outcome) }); await save(); }
       // Other parallel checks may finish while a human is deciding this task.
@@ -4113,9 +4281,29 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const number = resolution.attempts.length + 1;
     const taskId = `conflict-${digest([run.runId, resolution.conflictId]).slice(0, 16)}`, attemptId = `${taskId}-attempt-${number}`;
     const agentName = `dev-${digest([run.runId, attemptId]).slice(0, 20)}`;
+    // A resolver is another implementation executor. Preserve every participating profile restriction;
+    // incompatible specialized contexts require replanning rather than a broader default worker.
+    const participatingPins = [...new Map((run.definition?.tasks ?? []).filter(task =>
+      resolution.conflictPaths.some(path => strings(task.metadata?.ownedPaths ?? []).some(prefix => path === prefix || path.startsWith(`${prefix}/`))))
+      .flatMap(task => task.roleProfile ? [task.roleProfile] : []).map(pin => [pin.digest, pin])).values()];
+    if (participatingPins.length > 1) { this.escalateConflict(state, outbox, run, "conflicting task profiles require an explicitly approved compatible resolver profile"); await save(); return; }
+    const resolverPin = resolution.roleProfile ?? participatingPins[0];
+    const selectedProfile = selectRoleProfile(run.roleProfiles, "developer", resolverPin, ["implementation"]);
+    if (selectedProfile) {
+      const scope = selectedProfile.definition.restrictions.writablePaths;
+      if (scope !== undefined && resolution.conflictPaths.some(path => !scope.some(prefix => path === prefix || path.startsWith(`${prefix}/`)))) {
+        this.escalateConflict(state, outbox, run, "conflict paths exceed the pinned profile scope; replan is required"); await save(); return;
+      }
+      assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+      if (!this.ports.preflightRoleProfile) throw new Error("Pinned resolver profile preflight is unsupported");
+      await this.ports.preflightRoleProfile(selectedProfile, "developer", ["implementation"]);
+      assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
+      resolution.roleProfile = selectedProfile.pin; await save();
+    }
     await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
+    if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
     const allocation = await this.ports.panes.allocateDeveloper({ taskId: `${run.runId}-${taskId}`, runId: run.runId,
-      worktreePath: resolution.worktreePath, branchName: resolution.branchName, agentName });
+      worktreePath: resolution.worktreePath, branchName: resolution.branchName, agentName, ...(selectedProfile ? { roleProfile: selectedProfile } : {}) });
     await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     if (!allocation.ok) {
       if (allocation.error.code === "conflict" && allocation.error.retryable) { // capacity: retried on a later tick
@@ -4125,10 +4313,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       this.escalateConflict(state, outbox, run, `resolver allocation failed: ${allocation.error.message}`); await save(); return;
     }
     const pane = PaneBindingSchema.parse(allocation.value);
+    assertProfileBinding(selectedProfile, pane);
     if (pane.worktreePath !== resolution.worktreePath || pane.agentId !== agentName) throw new Error("Conflict resolver allocation mismatch");
     const paths = resolution.conflictPaths.join(", ") || "(see git status)";
     const messageId = `conflict-resolver-${digest([run.runId, resolution.conflictId, number])}`;
-    outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
+    const resolverOut = outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId, correlation_id: run.delegation.correlationId,
       causation_id: request.message_id, run_id: run.runId, sender: { role: "coordinator" },
       recipient: { role: "developer", agent_id: pane.agentId, pane_id: pane.paneId }, type: "task.assignment",
       payload: json({ kind: CONFLICT_RESOLUTION_KIND, runId: run.runId, taskId, attempt: number, maxAttempts: CONFLICT_RESOLVER_ATTEMPTS,
@@ -4141,6 +4330,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           "to conclude the merge. Runtime submits that commit to P18 accept_conflict_resolution and runs workflow verification. Never discard a side " +
           "wholesale or reset the merge. If you cannot resolve it, send task.status with status \"failed\" and the reason." }),
       artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), pane.bindingId, taskId, attemptId, ["implementation"]);
+    if (selectedProfile) resolverOut.roleProfile = selectedProfile.pin;
     resolution.attempts.push({ messageId, taskId, attemptId, agentName, status: "assigned" });
     run.status = "implementing";
     run.error = `Resolving Git integration conflict in ${paths}: Developer resolver attempt ${number}/${CONFLICT_RESOLVER_ATTEMPTS} assigned; worktree preserved`;
@@ -4514,10 +4704,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       let waiting = false;
       for (const out of executions.filter(item => item.handle && (item.status === "accepted" ||
           item.status === "released" && item.cancelRequested && item.message.recipient.role === "developer" &&
-          !this.writerSettled(run, item)))) {
+          !this.writerSettled(run, item) || item.status === "released" && item.roleProfile && item.profileAllocationTaskId && !item.profileAllocationReleased))) {
         const attempts = out.cancelObservations ?? 0;
         try {
-          if (!out.cancelRequested && !explicitRunId) await this.requestStop(state, core, outbox, save, run, out, run.error ?? "Run cancelled");
+          if (out.status === "released" && out.roleProfile && out.profileAllocationTaskId) {
+            if (await this.releaseCancelledExecution(state, save, outbox, run, out)) continue;
+          } else if (!out.cancelRequested && !explicitRunId) await this.requestStop(state, core, outbox, save, run, out, run.error ?? "Run cancelled");
           else if ((explicitRunId || attempts < CANCEL_STOP_OBSERVATION_LIMIT) &&
               await this.releaseCancelledExecution(state, save, outbox, run, out)) continue;
           // Interrupts and lease renewals count as attempts too, so a pane that never accepts a stop still reaches the bound.
@@ -4547,6 +4739,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   /** Final, idempotent report for one cancelled run. Core and worktree cleanup happen only when no execution remains unconfirmed. */
   private async finishCancellation(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, executions: Outbound[], explicit = false, allocationBlockers: string[] = []): Promise<CancellationReconciliationReport> {
+    await this.cleanupProfileSpecialists(state, save, run.runId);
     const unresolved: string[] = [...allocationBlockers, ...(run.nativeDeliveries ?? []).map(item => `Native delivery ${item.operationId} is uncertain (${item.message.message_id}); no mutation was resent`)];
     for (const retired of state.outbound.filter(item => item.message.run_id === run.runId && item.phaseRetirement))
       unresolved.push(`Retired verifier phase ${retired.message.message_id}: measurement/remote outcome remains unclaimed; late results are fenced`);
@@ -4571,6 +4764,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     for (const out of executions.filter(item => item.status === "released" && item.cancelRequested && item.message.recipient.role === "developer"))
       if (!this.writerSettled(run, out)) unresolved.push(`Developer writer allocation for ${out.taskId} is not released`);
+    for (const out of state.outbound.filter(item => item.message.run_id === run.runId && item.roleProfile && item.profileAllocationTaskId && !item.profileAllocationReleased))
+      unresolved.push(`Profile specialist allocation ${out.profileAllocationTaskId} is retained pending delivery/stop/resource reconciliation`);
     const released = executions.filter(out => out.cancelRequested && out.status === "released" && out.lease && out.cancellationLeaseDisposition === "released").length;
     const expired = executions.filter(out => out.cancellationLeaseDisposition === "expired").length;
     if (run.coreCreated && unresolved.length === 0) {

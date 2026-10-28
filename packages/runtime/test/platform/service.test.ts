@@ -1,3 +1,4 @@
+import { profile as specialistProfile } from "./role-profile-fixture.js";
 import { testPython } from "../../../../tests/helpers/python-runtime.js";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -327,6 +328,35 @@ describe("DefaultPlatformReadinessService", () => {
     });
     return { service, journal };
   }
+
+  it("pins profile instructions, environment, launch intent and status without replacing builtin policy", async () => {
+    const { service, journal } = buildService();
+    const snapshot = specialistProfile();
+    const prepared = await service.prepareDeveloper(identity, requirement({ roleProfile: snapshot }));
+    if (!prepared.ok) throw new Error(JSON.stringify(prepared.error));
+    expect(prepared.value.environment.roleProfile).toEqual(snapshot.pin);
+    expect(prepared.value.launch.roleProfile).toEqual(snapshot.pin);
+    expect(prepared.value.launch.features).toContain("custom-specialist-profiles-v1");
+    const configs = await Promise.all(prepared.value.profile.configFiles.map(file => readFile(file.path, "utf8")));
+    expect(configs.some(text => text.includes("Role prompt for developer.") && text.includes(snapshot.definition.additionalInstructions))).toBe(true);
+    expect((await journal.entries()).find(entry => entry.kind === "intent")).toMatchObject({ roleProfile: snapshot.pin });
+    expect(service.status().launches[0]).toMatchObject({ roleProfile: snapshot.pin });
+    const snapshotFile = join(identity.stateDirectory, `gen-${identity.generation}`, "role-profiles", `${snapshot.pin.digest}.json`);
+    await rm(snapshotFile);
+    const activated = await service.verifyActivated({ launchId: prepared.value.launch.launchId, paneId: PANE_ID, nativeSession: NATIVE_SESSION, observation: LIVE_READY });
+    expect(activated.ok).toBe(false);
+  });
+
+  it("rejects unsupported profile reads before skill, Gateway or provider side effects", async () => {
+    const runner = createFakeProviderRunner({ scenario: "healthy" });
+    const calls = vi.spyOn(runner, "run");
+    const { service, journal } = buildService({ runner });
+    const prepared = await service.prepareDeveloper(identity, requirement({ roleProfile: specialistProfile({ restrictions: { readablePaths: ["src"] } }) }));
+    expect(prepared.ok).toBe(false);
+    expect(calls).not.toHaveBeenCalled();
+    expect(gatewayControl.registerCalls).toBe(0);
+    expect(await journal.entries()).toEqual([]);
+  });
 
   it("revalidates source inputs after skill preparation before any provider probe", async () => {
     const runner = createFakeProviderRunner({ scenario: "healthy" });

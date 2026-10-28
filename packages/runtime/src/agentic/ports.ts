@@ -1,6 +1,6 @@
 import type {
   AgentExecutionHandle, AgentRequest, AgentResult, AgentTransport, ApprovalDecision, ApprovalRequest, ArtifactStore,
-  GitChangeSet, JsonValue, OperationOptions, OperationResult, PaneBinding, QualityGate,
+  AgentRole, GitChangeSet, JsonValue, OperationOptions, OperationResult, PaneBinding, QualityGate,
   QualityGateDefinition, QualityGateResult, RoleMessage, RunStore, SessionManifest, Specification, TestStrategy,
   VerificationCycle, VerificationResult, WorkflowDefinition, WorkflowEngine
 } from "@bflow/contracts";
@@ -68,7 +68,11 @@ export interface PanePolicy {
   inspectRoleHealth(role: string, options?: OperationOptions): Promise<OperationResult<{ readyForPrompt: boolean; occupantMatches: boolean; paneId: string; agentId: string }>>;
   allocateDeveloper(request: {
     taskId: string; runId: string; worktreePath: string; branchName: string; agentName: string;
+    roleProfile?: import("@bflow/contracts").ResolvedRoleProfileSnapshot;
   }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
+  allocateSpecialist?(request: { taskId: string; runId: string; role: import("@bflow/contracts").SpecialistRole;
+    roleProfile: import("@bflow/contracts").ResolvedRoleProfileSnapshot; agentName?: string }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
+  releaseSpecialist?(request: { taskId?: string; agentId?: string; paneId?: string }, options?: OperationOptions): Promise<OperationResult<unknown>>;
   releaseDeveloper(request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions): Promise<OperationResult<unknown>>;
   /** Cancelled, proven-stopped allocation: retain the pane/worktree for idempotent manifest cleanup. */
   releaseCancelledDeveloper?: (request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
@@ -88,6 +92,10 @@ export interface AgenticPolicies {
   assertEvidenceComplete(strategy: unknown): void;
 }
 export interface AgenticRuntimePorts {
+  roleProfiles?: readonly import("@bflow/contracts").ResolvedRoleProfileSnapshot[];
+  roleProfileDefaults?: Readonly<Partial<Record<AgentRole, import("@bflow/contracts").RoleProfilePin>>>;
+  preflightRoleProfile?(snapshot: import("@bflow/contracts").ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): Promise<void>;
+  attestExecutorLineage?(binding: PaneBinding, purpose: import("@bflow/contracts").ExecutorLineage["purpose"], assignmentId: string): Promise<import("@bflow/contracts").ExecutorLineage>;
   /** Host-owned current readonly resolution; absent is an explicit legacy host without historical drift protection. */
   readExecutionResolution?: import("./execution-binding.js").ExecutionResolutionReader;
   /** Physical Conversation hook only; not an agent tool or an approval inferred by a model. */
