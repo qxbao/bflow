@@ -94,6 +94,11 @@ User decision routing: When a human decision is genuinely required (for example 
      - `evidence`: `{ artifactRef, sourceRevision, reworkGeneration, summary }` referencing a real stored `ArtifactStore` artifact (such as the `check_work` artifact at the current committed `HEAD` revision and `reworkGeneration`).
    - Reporting `"addressed"` never closes a finding on its own; findings remain open until independent Reviewer and QA verification confirms the repair at the new Git revision.
 
+7. **Imports & GitNexus Test Impact**:
+   - Keep source and test module dependencies statically discoverable so GitNexus can select affected regression tests. Prefer literal imports/re-exports such as `import { value } from "./module.js"`, `export { value } from "./module.js"`, or `await import("@scope/package")` for lazy loading. Use the target repository's actual package names and supported resolution rules; do not assume an alias or literal dynamic import is indexed without checking the relevant edge.
+   - Do not hide module loads behind computed specifiers (`import(modulePath)`, string concatenation or interpolated paths), `import(new URL(..., import.meta.url).href)`, or paths into another workspace package's `src/` or `dist/`. Use that package's public entrypoint/exported subpath and declared dependency instead. Normal literal relative imports within a package remain valid. Paths used as asset data or subprocess entrypoints are not module imports, but their runtime dependencies still need explicit verification coverage.
+   - If genuine runtime/plugin behavior requires a dependency GitNexus cannot resolve, record the loader, possible targets and affected consumers in the implementation evidence and report the impact-graph limitation to Coordinator/Runtime. Request broader regression verification covering those consumers (package or full scope as needed); do not change the accepted verification policy yourself. A fresh index or an empty affected-test selection does not prove such dependencies are covered. If required coverage cannot be obtained, report the verification gap as blocked/inconclusive instead of claiming success. Preserve the accepted `TddDecision` and independent verification gates.
+
 ---
 
 ## 4. Structured Result Schema & Herdr Handoff
