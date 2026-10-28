@@ -1,4 +1,5 @@
 export * from "./types.js";
+export * from "./failure-classification.js";
 export * from "./diagnostics.js";
 export * from "./runner.js";
 export * from "./attestation.js";

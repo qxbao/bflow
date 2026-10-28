@@ -1,5 +1,8 @@
 import type {
   AgentRole,
+  RoleProfilePin,
+  ResolvedRoleProfileSnapshot,
+  SpecialistRole,
   AgentSessionLocator,
   AgentTransportState,
   OperationOptions,
@@ -215,6 +218,11 @@ export interface AgentLaunchProfile {
   readonly env: Readonly<Record<string, string>>;
   readonly launchId: string;
   readonly launchFingerprint: string;
+  /** Runtime-validated profile binding and negotiated component support. */
+  readonly roleProfile?: RoleProfilePin | undefined;
+  readonly features?: readonly string[] | undefined;
+  /** Host-validated native hook prompt file, when not represented in argv. */
+  readonly promptSource?: string | undefined;
   readonly provider: AgentLaunchProvider;
 }
 
@@ -485,6 +493,8 @@ export interface LaunchObservation {
 }
 
 export interface DeveloperAllocationRequest {
+  readonly roleProfile?: ResolvedRoleProfileSnapshot;
+  readonly continuation?: import("@bflow/contracts").DeveloperContinuationAllocation;
   readonly taskId: string;
   readonly runId?: string;
   readonly worktreePath: string;
@@ -534,3 +544,23 @@ export type PaneMoveDestinationSpec =
       readonly tabLabel?: string;
       readonly focus?: boolean;
     };
+
+/** Runtime owns provider/model selection, permissions and freshness proof. */
+export interface SpecialistAllocationRequest {
+  readonly taskId: string;
+  readonly runId?: string;
+  readonly role: SpecialistRole;
+  readonly roleProfile: ResolvedRoleProfileSnapshot;
+  readonly cwd?: string;
+  readonly agentName?: string;
+  readonly agentKind?: string;
+  readonly model?: string;
+  readonly launch: AgentLaunchProfile;
+  readonly startupTimeoutMs?: number;
+}
+
+export interface SpecialistReleaseRequest {
+  readonly taskId?: string;
+  readonly agentId?: string;
+  readonly paneId?: string;
+}

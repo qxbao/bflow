@@ -35,6 +35,7 @@ import {
   validateRunTransition,
   validateEventBatch,
   validateTaskTransition,
+  validateExecutionContinuation,
   type ApprovalDecision,
   type ApprovalRequest,
   type CancellationRequest,
@@ -482,6 +483,23 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         }
         if (task.attempt !== data.attempt || task.attemptId !== data.handle.attemptId) {
           return conflict(`Execution handle does not match current attempt for task ${data.taskId}`);
+        }
+        if (data.continuation) {
+          const old = task.agentExecution, continuation = data.continuation;
+          const history = [...aggregate.commands.values()].flatMap(item => item.result.emittedEvents);
+          const previous = history.filter(event => event.type === "agent.execution_bound" && event.taskId === data.taskId &&
+            event.payload.handle.attemptId === task.attemptId && event.payload.continuation);
+          if (!validateExecutionContinuation(task, data.handle, continuation, data.occurredAt) || task.status !== "running" || aggregate.snapshot.status === "cancelling" || !old ||
+              old.executionId !== continuation.previousExecutionId || old.executionId === data.handle.executionId || old.requestId === data.handle.requestId ||
+              old.target.worktreePath !== data.handle.target.worktreePath || continuation.ordinal !== previous.length + 1 ||
+              Date.parse(continuation.stoppedAt) < Date.parse(old.acceptedAt) || Date.parse(continuation.stoppedAt) > Date.parse(data.occurredAt) ||
+              Date.parse(data.handle.acceptedAt) < Date.parse(continuation.stoppedAt) ||
+              history.some(event => event.type === "agent.result_recorded" && event.payload.executionId === old.executionId) ||
+              [...aggregate.cancellations.values()].some(record => record.request.taskId === undefined || record.request.taskId === data.taskId))
+            return conflict("Execution continuation lacks a current stopped, unsettled and uncancelled source binding");
+          const event = this.#emit(aggregate, emitted, { type: "agent.execution_bound", taskId: data.taskId, occurredAt: data.occurredAt,
+            commandKey: data.idempotencyKey, payload: { handle: data.handle, attempt: data.attempt, continuation } });
+          return event.ok ? success([]) : event;
         }
         if (task.agentExecution !== undefined &&
             JSON.stringify(stableValue(task.agentExecution)) !== JSON.stringify(stableValue(data.handle))) {
@@ -1557,6 +1575,16 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
       if (!task || !["running", "waiting", "blocked"].includes(task.status) || before?.status === "cancelling" || task.bindingVerification)
         throw new Error("Binding proof event has no current, unverified execution");
       this.#validateBindingProof(task, event.payload);
+    }
+    if (event.type === "agent.execution_bound" && event.payload.continuation) {
+      const task = before?.tasks.find(task => task.taskId === event.taskId), continuation = event.payload.continuation;
+      const history = [...aggregate.commands.values()].flatMap(item => item.result.emittedEvents);
+      const count = history.filter(prior => prior.type === "agent.execution_bound" && prior.taskId === event.taskId &&
+        prior.payload.handle.attemptId === event.payload.handle.attemptId && prior.payload.continuation).length;
+      if (!task || before?.status === "cancelling" || !validateExecutionContinuation(task, event.payload.handle, continuation, event.occurredAt) ||
+          continuation.ordinal !== count + 1 || history.some(prior => prior.type === "agent.result_recorded" && prior.payload.executionId === continuation.previousExecutionId) ||
+          [...aggregate.cancellations.values()].some(record => record.request.taskId === undefined || record.request.taskId === event.taskId))
+        throw new Error("Invalid execution continuation replay");
     }
     if (event.type === "task.status_changed") {
       if (event.payload.intent === "rework") {

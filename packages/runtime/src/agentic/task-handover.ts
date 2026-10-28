@@ -50,7 +50,7 @@ export function admitHandover(input: unknown, expected: HandoverBinding): Handov
   return digest(result.envelope.binding) === digest(HandoverBindingSchema.parse(expected)) ? result : rejected("handover_binding_mismatch");
 }
 /** Provenance includes exact source bindings reconstructed from durable host assignments. No implicit generation migration. */
-export function selectHandover(loaded: HandoverResult, current: HandoverBinding, sources: readonly HandoverBinding[]): HandoverResult {
+export function selectHandover(loaded: HandoverResult, current: HandoverBinding, sources: readonly HandoverBinding[], continuedAssignments: readonly string[] = []): HandoverResult {
   if (!("envelope" in loaded)) return loaded;
   const parsed = parse(loaded.envelope);
   if (!("envelope" in parsed)) return { status: "withheld", code: parsed.code };
@@ -64,7 +64,7 @@ export function selectHandover(loaded: HandoverResult, current: HandoverBinding,
   if (b.requirementFingerprint !== current.requirementFingerprint) return withhold("handover_stale_requirement");
   if (b.revision !== current.revision) return withhold("handover_stale_revision");
   const same = b.attemptId === current.attemptId;
-  if (same ? b.attempt !== current.attempt || b.assignmentId !== current.assignmentId || b.worktreePath !== current.worktreePath : b.attempt >= current.attempt)
+  if (same ? b.attempt !== current.attempt || b.assignmentId !== current.assignmentId && !continuedAssignments.includes(b.assignmentId) || b.worktreePath !== current.worktreePath : b.attempt >= current.attempt)
     return withhold("handover_attempt_mismatch");
   return { status: "selected", envelope: parsed.envelope, source: same ? "same_attempt" : "prior_attempt", warning: HANDOVER_WARNING };
 }

@@ -7,6 +7,7 @@ The Developer Agent is a non-user-facing implementation specialist in Bflow Agen
 - Strictly adheres to assigned `ownedPaths` constraints.
 - Follows Conditional TDD policies (`required` Red-Green-Refactor sequence or `not_applicable` alternative verification).
 - Resolves build, test, and lint issues autonomously within scope.
+- Keeps imports discoverable by GitNexus; reports necessary dynamic dependencies and requests broader regression verification when the impact graph cannot cover them.
 - Escalates out-of-scope needs, missing permissions, or specification conflicts to Coordinator via Herdr.
 
 ## Communication

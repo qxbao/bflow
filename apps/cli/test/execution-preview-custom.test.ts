@@ -1,7 +1,7 @@
 import {SUPPORTED_CLI_COMMANDS} from '../src/command-reference.js';
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import {execFileSync} from 'node:child_process';
-import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,rm,realpath} from 'node:fs/promises';
 import {join} from 'node:path';
 import {files} from '../../../packages/skills/test/fixtures.js';
 import {initializeEnvironmentConfig,readEnvironmentConfig} from '../src/environment-config.js';
@@ -17,7 +17,7 @@ import {ExecutionResolutionSourcesSchema} from '@bflow/contracts';
 import {loadHostExecutionResolution} from '../src/execution-preview.js';
 
 let root:string;
-beforeEach(async()=>{root=await mkdtemp('/tmp/preview-custom-');execFileSync('git',['init','--quiet',root]);await initializeEnvironmentConfig({cwd:root});vi.stubEnv('BFLOW_HOME',join(root,'machine'));});
+beforeEach(async()=>{root=await realpath(await mkdtemp('/tmp/preview-custom-'));execFileSync('git',['init','--quiet',root]);await initializeEnvironmentConfig({cwd:root});vi.stubEnv('BFLOW_HOME',join(root,'machine'));});
 afterEach(async()=>{vi.unstubAllEnvs();await rm(root,{recursive:true,force:true});});
 
 it('applies locked pack settings to the inherited Developer template after resolving Coordinator defaults',async()=>{

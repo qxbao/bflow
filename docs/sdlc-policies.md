@@ -216,6 +216,34 @@ export const SpecificationSchema = z
 | **Số lượng file đổi** | Tác động $\ge 5$ files | Dưới 5 files và trong cùng một package |
 | **Rủi ro vận hành** | Có migration DB hoặc ảnh hưởng state phục hồi | Không thay đổi schema DB hay định dạng checkpoint |
 
+### 3.8. Nhánh duyệt prototype tùy chọn trước thiết kế chi tiết
+
+Nhánh này chỉ mở khi người dùng hoặc delegation yêu cầu xem prototype trước khi chốt thiết kế chi tiết.
+Run không dùng prototype giữ nguyên luồng `propose_workflow` → design approval → implementation →
+delivery. Đây không phải workflow engine thứ hai: Runtime giữ state private `RunRecord.prototype` và
+dùng lại đường `approval.request`/`approval.decision` qua Conversation; không đổi public contract.
+
+```
+intake → scope prototype được chấp nhận → artifact prototype → người duyệt
+       → (cần sửa → artifact mới)* | từ chối | hủy
+       → duyệt prototype → specification/design chính thức → design approval → implementation → delivery
+```
+
+| Quy tắc | Nội dung |
+| :--- | :--- |
+| **Scope nhẹ** | `propose_prototype`: mục đích, luồng cần chứng minh, `allowedPaths` dưới vùng logic `prototype/`, artifact dự kiến, tiêu chí riêng của prototype, `disposition` (`throwaway` \| `evolvable`), `environment: "mock"`, `dataPolicy` (`synthetic` \| `anonymized_fixture`), `maxRevisions`. Schema strict; tiêu chí prototype không được trùng ID tiêu chí nghiệm thu sản phẩm. |
+| **Vùng được phép** | `submit_prototype` chỉ lưu file vào ArtifactStore; không ghi repository, không deploy. Từ chối file ngoài vùng, luồng không khai báo hoặc không được chứng minh, nội dung giống credential (bộ quét riêng: dạng secret đã biết, hoặc giá trị của key nhạy cảm không phải mặt nạ/ô template/chữ thường) và URL tới host thật. |
+| **Approval tách biệt** | Approval prototype (`prototype-…`, `approves: "prototype_only"`), design approval và delivery acceptance là ba bước riêng; không bước nào thay bước khác. Duyệt prototype luôn ghi `provesAcceptanceCriteria: false`. |
+| **Ràng buộc quyết định** | Quyết định gắn với digest manifest và phiên bản artifact, phiên bản scope, người duyệt (đã xác thực là người), thời điểm và các luồng được duyệt. Runtime kiểm lại checksum mọi artifact trước khi ghi nhận duyệt. |
+| **Phản hồi** | Qua Conversation: "đồng ý", "cần sửa <góp ý>" (yêu cầu sửa prototype, có giới hạn `maxRevisions`, vượt thì escalate), "đổi yêu cầu <nội dung>" (đề xuất sửa specification, cũng tính vào `maxRevisions`), "từ chối vì <lý do>" (kết thúc run), "hủy việc". Phản hồi không sửa yêu cầu đã chấp nhận: đề xuất sửa specification chỉ được ghi lại và báo Coordinator; nó có hiệu lực khi người dùng xác nhận requirement change qua Conversation (supersede prototype). Đổi phạm vi prototype đi qua revision scope (supersede mọi approval cũ). |
+| **Artifact thay đổi** | Approval đang chờ của bản cũ bị superseded. Sau khi đã duyệt, chỉ luồng có digest nội dung không đổi giữ duyệt cũ; luồng thay đổi phải duyệt lại và bản duyệt prototype bị thu hồi. Revision scope hoặc revision yêu cầu supersede toàn bộ. |
+| **Giữ code prototype** | `throwaway` không được giữ code. Task `metadata.retainsPrototype: true` chỉ hợp lệ với prototype `evolvable` đã duyệt; fast-path bị tắt để code giữ lại qua verification chính thức đầy đủ. |
+| **Retry/restart** | Nộp lại đúng nội dung không tạo version hay yêu cầu duyệt mới; approval đang chờ được trả lại qua `pendingApprovals`. |
+
+`propose_workflow` bị từ chối khi prototype của requirement hiện tại chưa được duyệt hoặc bản duyệt không
+khớp artifact/scope hiện tại. Prototype của requirement đã bị supersede không chặn và không làm đầu vào
+cho thiết kế mới. Chi tiết: [Runtime README](../packages/runtime/README.md#prototype-review-tùy-chọn-trước-thiết-kế-chi-tiết).
+
 ---
 
 ## 4. Chính sách 2: Conditional Test-Driven Development (Conditional TDD)

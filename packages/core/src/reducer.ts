@@ -1,5 +1,6 @@
 import {
   WorkflowRunSnapshotSchema,
+  validateExecutionContinuation,
   type DomainEvent,
   type TaskState,
   type WorkflowDefinition,
@@ -142,10 +143,11 @@ export function reduceWorkflowEvent(
         if (!["running", "waiting", "blocked", "cancelling"].includes(task.status) ||
             task.attempt !== event.payload.attempt || task.attemptId !== event.payload.handle.attemptId ||
             event.payload.handle.runId !== snapshot.runId || event.payload.handle.taskId !== taskId ||
-            task.agentExecution !== undefined) {
+            (event.payload.continuation ? !validateExecutionContinuation(task, event.payload.handle, event.payload.continuation, event.occurredAt) : task.agentExecution !== undefined)) {
           throw new Error("Execution binding does not match the current task attempt");
         }
-        return { ...task, agentExecution: event.payload.handle, version: task.version + 1 };
+        const { bindingVerification: _priorVerification, ...rest } = task;
+        return { ...rest, agentExecution: event.payload.handle, version: task.version + 1 };
       })
     };
   } else if (event.type === "agent.delivery_reconciled" && event.payload.status === "bound") {

@@ -4,6 +4,7 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import { RoleProfileCatalogSchema, RoleProfilePinSchema, ExecutorLineageSchema, sameRoleProfilePin, type RoleProfilePin, type ResolvedRoleProfileSnapshot, type ExecutorLineage } from "@bflow/contracts";
 import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema, PaneBindingSchema,
@@ -21,6 +22,8 @@ import { WorkflowRejectionCodeSchema } from "./workflow-rejection.js";
 import { NativeDiagnosticFenceSchema, type NativeDiagnosticFence } from "./native-diagnostic-fence.js";
 import { ReworkResolutionDossierSchema, type ReworkResolutionDossier } from "./rework-causality.js";
 import { CancellationStopProofSchema, NamespaceExitProofSchema, ownsCancelledAllocation, type CancellationStopProof, type NamespaceExitProof } from "./cancellation-stop.js";
+import { PrototypeRecordSchema, type PrototypeRecord } from "./prototype-review.js";
+import { TaskFailoverSchema, type TaskFailover } from "./provider-failover-state.js";
 
 export function json(value: unknown): JsonValue { return JsonValueSchema.parse(JSON.parse(JSON.stringify(value))); }
 export function digest(value: unknown): string {
@@ -45,6 +48,7 @@ export interface SpecRecord {
   specification: Specification; request: ApprovalRequest; decision?: ApprovalDecision; strategy: TestStrategy;
 }
 export interface TaskRecord {
+  failovers?: TaskFailover[];
   taskId: string; spec: SpecRecord; worktrees: TaskWorktree[]; outboundIds: string[];
   changeSet?: GitChangeSet; cycle?: VerificationCycle; result?: AgentResult;
   verificationPlan?: VerificationPlan; verificationPending?: boolean; writerReleased?: boolean;
@@ -54,6 +58,8 @@ export interface TaskRecord {
   dependencyBaseFallback?: string;
 }
 export interface RunRecord {
+  roleProfiles?: ResolvedRoleProfileSnapshot[];
+  roleProfileDefaults?: Partial<Record<import("@bflow/contracts").AgentRole, RoleProfilePin>>;
   runId: string; delegation: DelegationRequest; status: SdlcWorkStatus;
   definition?: WorkflowDefinition; workflowSpec?: SpecRecord; tasks: TaskRecord[];
   executionPlan?: import("@bflow/contracts").ExecutionPlanExpectation;
@@ -112,6 +118,8 @@ export interface RunRecord {
   workflowVerificationPlan?: VerificationPlan;
   /** Host-measured native review gate waits, newest last (at most 200). Absent in journals written before review telemetry. */
   reviewTimings?: ReviewTiming[];
+  /** Optional prototype review branch before the formal design; absent for runs that do not use a prototype. */
+  prototype?: PrototypeRecord;
 }
 /** Host wall time of one native review gate wait: from the verification request to its settlement. Never a Reviewer claim. */
 export interface ReviewTiming {
@@ -152,6 +160,7 @@ const ProposalRejectionSchema = z.object({
 export type ProposalRejectionRecord = z.infer<typeof ProposalRejectionSchema>;
 /** One P18 conflict (identified by its deterministic request message) and the resolver attempts assigned for it. */
 export interface ConflictResolutionRecord {
+  roleProfile?: RoleProfilePin;
   conflictId: string; integrationKey: string; taskKey: string; conflictPaths: string[];
   worktreePath: string; branchName: string; incomingCommitHash?: string;
   attempts: ConflictResolverAttempt[];
@@ -165,6 +174,7 @@ export interface ConflictResolverAttempt {
 }
 function parseConflictResolution(value: unknown): void {
   const item = record(value);
+  if (item.roleProfile !== undefined) RoleProfilePinSchema.parse(item.roleProfile);
   for (const key of ["conflictId", "integrationKey", "taskKey", "worktreePath", "branchName"]) textField(item[key]);
   strings(item.conflictPaths);
   if (item.incomingCommitHash !== undefined) textField(item.incomingCommitHash);
@@ -218,6 +228,10 @@ function parseUserDecisions(value: unknown, runId: string): void {
   }
 }
 export interface Outbound {
+  roleProfile?: RoleProfilePin;
+  profileAllocationTaskId?: string;
+  profileAllocationReleased?: boolean;
+  executorLineage?: ExecutorLineage;
   /** "failed" is terminal for Conversation-bound inbox writes only (after bounded Gateway retries); it is never dispatched to Herdr. */
   message: RoleMessage; status: "queued" | "sending" | "unknown_delivery" | "accepted" | "released" | "cancelled" | "delivered" | "failed";
   /** First time the recipient was observed not ready for a prompt; cleared once it is ready. Durable for the not-ready escalation. */
@@ -257,7 +271,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5 | 6; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -271,7 +285,7 @@ export function isConversationDelivery(out: Outbound): boolean {
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
@@ -292,6 +306,17 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       throw new Error("Invalid run flags/limit");
     if (!Array.isArray(run.tasks)) throw new Error("Invalid task journal");
     if (run.definition) run.definition = WorkflowDefinitionSchema.parse(run.definition);
+    if (run.roleProfiles !== undefined) run.roleProfiles = RoleProfileCatalogSchema.parse(run.roleProfiles);
+    if (run.roleProfileDefaults !== undefined) {
+      run.roleProfileDefaults = z.record(AgentRoleSchema, RoleProfilePinSchema).parse(run.roleProfileDefaults);
+      for (const [role, pin] of Object.entries(run.roleProfileDefaults))
+        if (!run.roleProfiles?.some(profile => sameRoleProfilePin(profile.pin, pin) && profile.definition.baseRole === role))
+          throw new Error("Profile default has no pinned recovery snapshot");
+    }
+    if (state.version < 7 && (run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length))
+      throw new Error("Profile authority requires private journal v7");
+    for (const task of run.definition?.tasks ?? []) if (task.roleProfile && !run.roleProfiles?.some(profile => sameRoleProfilePin(profile.pin, task.roleProfile) && profile.definition.baseRole === task.role))
+      throw new Error("Profiled task has no pinned recovery snapshot");
     if (run.executionPlan !== undefined) run.executionPlan = ExecutionPlanExpectationSchema.parse(run.executionPlan);
     if (run.executionSourceDigests !== undefined) run.executionSourceDigests = z.record(z.string().regex(/^[a-f0-9]{64}$/)).parse(run.executionSourceDigests);
     if (run.executionPlanDrift !== undefined) run.executionPlanDrift = PlanDiffSchema.parse(run.executionPlanDrift);
@@ -377,9 +402,19 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
     if (run.fastPath !== undefined) run.fastPath = FastPathRecordSchema.parse(run.fastPath);
     if (run.reviewTimings !== undefined) run.reviewTimings = z.array(ReviewTimingSchema).max(200).parse(run.reviewTimings);
+    if (run.prototype !== undefined) {
+      run.prototype = PrototypeRecordSchema.parse(run.prototype);
+      if (run.prototype.approvals.some(entry => entry.request.runId !== run.runId)) throw new Error("Prototype approval belongs to another run");
+    }
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
+      if (task.failovers !== undefined) {
+        z.array(TaskFailoverSchema).max(17).parse(task.failovers);
+        if (new Set(task.failovers.map(entry => entry.switchId)).size !== task.failovers.length || task.failovers.some(entry =>
+            entry.sourceHandle.runId !== run.runId || entry.sourceHandle.taskId !== task.taskId || entry.policyDigest !== digest(entry.policy)))
+          throw new Error("Invalid task failover ownership or policy digest");
+      }
       textField(task.taskId); parseSpec(task.spec); strings(task.outboundIds);
       if (!Array.isArray(task.worktrees)) throw new Error("Invalid worktree history");
       for (const tree of task.worktrees) { textField(tree.key); textField(tree.worktreePath); textField(tree.branchName); textField(tree.baseCommitHash); }
@@ -408,9 +443,27 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (out.coordinatorResponseBaseline !== undefined && (!Number.isSafeInteger(out.coordinatorResponseBaseline) || out.coordinatorResponseBaseline < 0 || out.coordinatorResponseBaseline > state.outbound.length))
       throw new Error("Invalid Coordinator response baseline");
     if (out.assignment) out.assignment = AgentAssignmentSchema.parse(out.assignment);
+    if (out.roleProfile !== undefined) out.roleProfile = RoleProfilePinSchema.parse(out.roleProfile);
+    if (out.profileAllocationTaskId !== undefined) textField(out.profileAllocationTaskId);
+    if (out.profileAllocationReleased !== undefined && (out.profileAllocationReleased !== true || !out.profileAllocationTaskId || !out.roleProfile))
+      throw new Error("Invalid profile allocation cleanup receipt");
+    if (out.executorLineage !== undefined) out.executorLineage = ExecutorLineageSchema.parse(out.executorLineage);
+    if (state.version < 7 && (out.roleProfile || out.executorLineage || out.profileAllocationTaskId))
+      throw new Error("Profile authority requires private journal v7");
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    const profileRun = state.runs.find(run => run.runId === out.message.run_id);
+    const expectedPin = out.message.type === "task.assignment" ? profileRun?.definition?.tasks.find(task => task.id === out.taskId)?.roleProfile ??
+      (profileRun?.conflictResolution?.attempts.some(attempt => attempt.messageId === out.message.message_id) ? profileRun.conflictResolution.roleProfile : undefined) :
+      out.message.type === "delegation.request" ? record(out.message.payload).roleProfile : out.roleProfile;
+    if (!sameRoleProfilePin(expectedPin === undefined ? undefined : RoleProfilePinSchema.parse(expectedPin), out.roleProfile) ||
+        out.assignment && !sameRoleProfilePin(out.assignment.roleProfile, out.roleProfile))
+      throw new Error("Durable profile assignment pin mismatch");
+    if (out.roleProfile && !profileRun?.roleProfiles?.some(profile => sameRoleProfilePin(profile.pin, out.roleProfile) && profile.definition.baseRole === out.message.recipient.role))
+      throw new Error("Profiled outbound has no pinned recovery snapshot");
+    if (out.roleProfile && out.handle && (!out.executorLineage || out.executorLineage.nativeSessionId !== out.handle.target.session?.value ||
+        !out.executorLineage.assignmentIds.includes(out.message.message_id))) throw new Error("Profiled execution has no matching authenticated executor lineage");
     if (out.cancellationStopProof !== undefined) {
       out.cancellationStopProof = CancellationStopProofSchema.parse(out.cancellationStopProof);
       if (state.version < 6 || !out.cancelRequested || !out.handle || digest(out.cancellationStopProof.handle) !== digest(out.handle) ||
@@ -573,6 +626,8 @@ export class AgenticJournal {
         state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
       }
       return await action(state, async () => {
+        if (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
+            state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId)) state.version = 7;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
           try { if ((await readFile(statePath)).equals(durableBytes)) return; }

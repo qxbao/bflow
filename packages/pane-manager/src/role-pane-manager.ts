@@ -1,6 +1,8 @@
 import { resolveNativeAgyPrompt } from "./native-agy-prompt.js";
 import type {
   AgentSessionLocator,
+  ResolvedRoleProfileSnapshot,
+  AgentRole,
   AgentTransportState,
   ContractError,
   OperationOptions,
@@ -10,13 +12,21 @@ import type {
   SessionManifestStatus
 } from "@bflow/contracts";
 import {
+  DeveloperContinuationAllocationSchema,
   PaneBindingSchema,
-  SessionManifestSchema
+  ResolvedRoleProfileSnapshotSchema,
+  RoleProfilePinSchema,
+  sameRoleProfilePin,
+  ROLE_PROFILE_FEATURE,
+  SessionManifestSchema,
+  canonicalReceiptJson
 } from "@bflow/contracts";
 
 import type {
   CommandOutcome,
   DeveloperAllocationRequest,
+  SpecialistAllocationRequest,
+  SpecialistReleaseRequest,
   DeveloperReleaseOutcome,
   DeveloperReleaseRequest,
   HerdrAgentInfo,
@@ -201,7 +211,7 @@ function launchEnvOf(launch: AgentLaunchProfile | undefined): Readonly<Record<st
 const SOCKET_REQUIRED_MESSAGE = "A Herdr socket port is required to create panes with launch env";
 
 /** True only for a regular, non-symlink file no larger than the prompt limit that contains `text`. */
-async function regularFileContains(path: string, text: string, expectedJson = false): Promise<string | false> {
+async function regularFileContains(path: string, text: string, expectedJson = false, prefix = false): Promise<string | false> {
   let file;
   try {
     file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -213,7 +223,7 @@ async function regularFileContains(path: string, text: string, expectedJson = fa
     if (!stat.isFile() || stat.size > PROMPT_FILE_MAX_BYTES) return false;
     const content = await file.readFile("utf8");
     if (expectedJson) return content;
-    return content.includes(text) ? path : false;
+    return (prefix ? content.startsWith(text) : content.includes(text)) ? path : false;
   } catch {
     return false;
   } finally {
@@ -273,6 +283,13 @@ export class RolePaneManager {
   readonly #socket: HerdrSocketPort | undefined;
   readonly #clock: () => Date;
   readonly #defaultTimeoutMs: number;
+  #allocations: Promise<void> = Promise.resolve();
+
+  #serializeAllocation<T>(action: () => Promise<T>): Promise<T> {
+    const pending = this.#allocations.then(action);
+    this.#allocations = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
 
   constructor(options: RolePaneManagerOptions) {
     if (!options || typeof options !== "object") {
@@ -405,10 +422,10 @@ export class RolePaneManager {
       parseOkResponse(outcome);
     }
   }
-  async #namePane(paneId: string, role: TopologyRole, agentName: string, options?: OperationOptions): Promise<OperationResult<void>> {
+  async #namePane(paneId: string, role: TopologyRole, agentName: string, options?: OperationOptions, roleProfile?: ResolvedRoleProfileSnapshot): Promise<OperationResult<void>> {
     const names: Record<TopologyRole, string> = { chat: "Chat · Conversation", coordinator: "Coordinator", planner: "Planner",
       analyst: "Analyst · Specification", architect: "Architect", reviewer: "Reviewer", "qa-verifier": "QA · Verifier", developer: `Developer · ${agentName}` };
-    const outcome = await this.#runHerdr(["pane", "rename", paneId, names[role]], options);
+    const outcome = await this.#runHerdr(["pane", "rename", paneId, roleProfile ? `${roleProfile.definition.displayName} · ${roleProfile.definition.baseRole} · ${roleProfile.pin.version} · ${roleProfile.pin.digest.slice(0, 12)}` : names[role]], options);
     if (outcome.exitCode !== 0 || outcome.failure) return toCommandError(outcome, `Could not label ${role} pane '${paneId}'`);
     parsePaneInfoResult(outcome); return ok(undefined);
   }
@@ -704,7 +721,7 @@ export class RolePaneManager {
     const persistProgress = async (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
       const panes = [...manifestPanes.filter(p => p.paneId !== binding.paneId), binding];
       for (const previous of savedManifest?.panes ?? []) {
-        if (!panes.some(p => p.paneId === previous.paneId || p.role === previous.role && p.permanent !== false)) panes.push(previous);
+        if (!panes.some(p => p.paneId === previous.paneId || p.role === previous.role && p.permanent !== false && previous.permanent !== false)) panes.push(previous);
       }
       const conversation = panes.find(p => p.role === "conversation");
       return this.#store.save(SessionManifestSchema.parse({
@@ -712,6 +729,7 @@ export class RolePaneManager {
         workspaceRoot: this.#config.workspaceRoot, herdrWorkspaceId, herdrTabId: finalConversationTabId,
         status: "initializing", conversationSessionId: this.#config.conversationSessionId ?? savedManifest?.conversationSessionId ?? `conv-${this.#config.sessionId}`,
         activeRunIds: savedManifest?.activeRunIds ?? [], panes,
+        ...(savedManifest?.roleProfiles ? { roleProfiles: savedManifest.roleProfiles } : {}),
         attachTarget: { role: "conversation", paneId: conversation?.paneId ?? binding.paneId },
         createdAt: savedManifest?.createdAt ?? this.#clock().toISOString(), updatedAt: this.#clock().toISOString(),
         metadata: { ...savedManifest?.metadata, startupPending: true }
@@ -992,7 +1010,7 @@ export class RolePaneManager {
     // Preserve any existing active/released developer panes
     if (savedManifest) {
       for (const p of savedManifest.panes) {
-        if (p.role === "developer" && !assignedPaneIds.has(p.paneId)) {
+        if ((p.role === "developer" || p.roleProfile) && !assignedPaneIds.has(p.paneId)) {
           manifestPanes.push(p);
           assignedPaneIds.add(p.paneId);
         }
@@ -1052,6 +1070,7 @@ export class RolePaneManager {
         this.#config.conversationSessionId ?? savedManifest?.conversationSessionId ?? `conv-${this.#config.sessionId}`,
       activeRunIds: savedManifest?.activeRunIds ?? [],
       panes: manifestPanes,
+      ...(savedManifest?.roleProfiles ? { roleProfiles: savedManifest.roleProfiles } : {}),
       attachTarget: {
         role: "conversation",
         paneId: chatBinding.paneId,
@@ -1078,6 +1097,7 @@ export class RolePaneManager {
   async startAgentInPane(
     request: {
       readonly role: RoleSelector;
+      readonly roleProfile?: ResolvedRoleProfileSnapshot;
       readonly paneId: string;
       readonly workspaceId: string;
       readonly tabId: string;
@@ -1140,6 +1160,17 @@ export class RolePaneManager {
         const problem = checkLaunchProfile(launch, agentKind);
         if (problem) return validationError(problem.message);
       }
+      const profileCheck = await this.#validateRoleProfileLaunch(request.roleProfile, spec.contractRole, launch, agentKind);
+      if (!profileCheck.ok) return profileCheck;
+      // The caller cannot bind a different profile to an already running native context.
+      if (request.roleProfile) {
+        const stored = await this.#store.load(this.#config.sessionId, options);
+        if (!stored.ok) return stored;
+        const previous = stored.value?.panes.find(pane => pane.paneId === request.paneId);
+        if (previous && (!sameRoleProfilePin(previous.roleProfile, request.roleProfile.pin) ||
+            previous.metadata?.["launchId"] !== launch?.launchId))
+          return conflictError("Native pane profile/launch binding mismatch");
+      }
       const launchMetadata = launch !== undefined
         ? { launchId: launch.launchId, launchFingerprint: launch.launchFingerprint,
           ...(launch.env.BFLOW_PROCESS_SCOPE_ID ? { processScopeId: launch.env.BFLOW_PROCESS_SCOPE_ID } : {}) }
@@ -1164,7 +1195,9 @@ export class RolePaneManager {
         return toCommandError(paneGetOutcome, `Pane '${request.paneId}' not found`);
       }
       const pane = parsePaneInfoResult(paneGetOutcome);
-      const named = await this.#namePane(request.paneId, spec.topologyRole, agentName, options);
+      if (request.roleProfile && pane.agent !== null)
+        return conflictError("Profile launch cannot adopt an existing native context; reconcile the saved allocation");
+      const named = await this.#namePane(request.paneId, spec.topologyRole, agentName, options, request.roleProfile);
       if (!named.ok) return named;
 
       if (pane.agent !== null) {
@@ -1274,6 +1307,18 @@ export class RolePaneManager {
         const args = [...startArgs, "--timeout", String(budget.value), ...providerArgs];
         return ok(await this.#runHerdr(args, { ...options, timeoutMs: budget.value }));
       };
+      if (request.roleProfile) {
+        const stored = await this.#store.load(this.#config.sessionId, options);
+        if (!stored.ok) return stored;
+        if (!stored.value) return notFoundError("Session manifest is required for profile launch");
+        const intent = this.#buildAndValidateBinding({ spec, agentName, agentKind,
+          agentInfo: { ...pane, name: agentName, agent: agentKind, agentStatus: "unknown", revision: pane.revision },
+          request: { ...request, metadata: { ...request.metadata, ...launchMetadata, launchIntent: true } } });
+        if (!intent.ok) return intent;
+        const saved = await this.#store.save({ ...stored.value,
+          panes: [...stored.value.panes.filter(item => item.paneId !== pane.paneId), intent.value] }, options);
+        if (!saved.ok) return saved;
+      }
       let dispatched = await dispatchStart();
       if (!dispatched.ok) return dispatched;
       let startOutcome = dispatched.value;
@@ -1320,7 +1365,7 @@ export class RolePaneManager {
       return this.#buildAndValidateBinding({
         spec,
         agentInfo,
-        request: { ...request, metadata: { ...request.metadata, ...launchMetadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
+        request: { ...request, provider: launch?.provider ?? this.#config.roleConfigs?.[spec.topologyRole]?.provider ?? this.#config.defaultProvider ?? "herdr", metadata: { ...request.metadata, ...launchMetadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
           ...(!agentInfo.session ? { nativeSessionPending: true } : {}) } },
         agentName,
         agentKind
@@ -1335,12 +1380,15 @@ export class RolePaneManager {
     readonly agentInfo: HerdrAgentInfo;
     readonly request: {
       readonly role: RoleSelector;
+      readonly roleProfile?: ResolvedRoleProfileSnapshot;
       readonly paneId: string;
       readonly workspaceId: string;
       readonly tabId: string;
       readonly cwd: string;
       readonly worktreePath?: string;
       readonly model?: string;
+      readonly launch?: AgentLaunchProfile;
+      readonly provider?: string;
       readonly permanent?: boolean;
       readonly metadata?: Record<string, unknown>;
     };
@@ -1350,7 +1398,7 @@ export class RolePaneManager {
     const { spec, agentInfo, request, agentName, agentKind } = args;
     const nowIso = this.#clock().toISOString();
     const roleConfig = this.#config.roleConfigs?.[spec.topologyRole];
-    const provider = roleConfig?.provider ?? this.#config.defaultProvider ?? "herdr";
+    const provider = request.launch?.provider ?? request.provider ?? roleConfig?.provider ?? this.#config.defaultProvider ?? "herdr";
     const model = request.model ?? roleConfig?.model ?? this.#config.defaultModel;
 
     const rawBinding = {
@@ -1368,6 +1416,7 @@ export class RolePaneManager {
       provider,
       agentKind,
       ...(model !== undefined ? { model } : {}),
+      ...(request.roleProfile ? { roleProfile: request.roleProfile.pin } : {}),
       cwd: request.cwd,
       ...(request.worktreePath !== undefined ? { worktreePath: request.worktreePath } : {}),
       isolationMode: "dedicated_pane" as const,
@@ -1830,6 +1879,21 @@ export class RolePaneManager {
         return notFoundError(`No persisted session manifest found for session '${this.#config.sessionId}' to recover`);
       }
 
+      const profiledAgents = savedManifest.panes.filter(pane => pane.roleProfile && pane.metadata?.["allocationStatus"] !== "released");
+      const confirmedProfiles = new Map<string, HerdrAgentInfo>();
+      if (profiledAgents.length) {
+        const observed = await this.#runHerdr(["agent", "list"], options);
+        if (observed.exitCode !== 0 || observed.failure) return toCommandError(observed, "Cannot reconcile profile native bindings");
+        const agents = parseAgentListResult(observed);
+        for (const binding of profiledAgents) {
+          const snapshot = savedManifest.roleProfiles?.find(item => sameRoleProfilePin(item.pin, binding.roleProfile));
+          const live = agents.find(agent => agent.paneId === binding.paneId && agent.name === binding.agentId && agent.agent === binding.agentKind);
+          if (!snapshot || snapshot.definition.baseRole !== binding.role || !binding.session || !live?.session ||
+              JSON.stringify(binding.session) !== JSON.stringify(live.session) || !binding.metadata?.["launchId"] || !binding.metadata?.["launchFingerprint"])
+            return conflictError("Profile recovery requires the exact authenticated native binding; host reconciliation is required");
+          confirmedProfiles.set(binding.bindingId, live);
+        }
+      }
       const wsListOutcome = await this.#runHerdr(["workspace", "list"], options);
       if (wsListOutcome.exitCode !== 0 || wsListOutcome.failure) {
         return toCommandError(wsListOutcome, "Failed to list workspaces during restart recovery");
@@ -1889,6 +1953,16 @@ export class RolePaneManager {
       const recoveredPanes: PaneBinding[] = [];
 
       for (const binding of savedManifest.panes) {
+        if (binding.roleProfile) {
+          const live = confirmedProfiles.get(binding.bindingId);
+          if (live) {
+            usedPaneIds.add(live.paneId);
+            recoveredPanes.push({ ...binding, transportState: live.agentStatus as AgentTransportState, lastHeartbeatAt: this.#clock().toISOString() });
+          } else if (binding.metadata?.["allocationStatus"] === "released") {
+            recoveredPanes.push({ ...binding, transportState: "disconnected" });
+          } else return conflictError("Profile native launch cannot be reconstructed from base role configuration");
+          continue;
+        }
         const topologyRole = ((binding.metadata?.["topologyRole"] as TopologyRole | undefined) ??
           resolveTopologyRole(binding.role) ??
           "developer") as TopologyRole;
@@ -2257,10 +2331,146 @@ export class RolePaneManager {
     }
   }
 
+  async #validateRoleProfileLaunch(
+    snapshot: ResolvedRoleProfileSnapshot | undefined,
+    role: AgentRole,
+    launch: AgentLaunchProfile | undefined,
+    agentKind: string
+  ): Promise<OperationResult<void>> {
+    if (!snapshot) return launch?.roleProfile === undefined ? ok(undefined) : validationError("Profile launch requires its immutable snapshot");
+    const parsed = ResolvedRoleProfileSnapshotSchema.safeParse(snapshot);
+    if (!parsed.success) return validationError("Invalid role profile snapshot");
+    if (parsed.data.definition.baseRole !== role) return validationError("Role profile base role does not match governance role");
+    if (!launch || !launch.features?.includes(ROLE_PROFILE_FEATURE))
+      return validationError(`Profile launch requires negotiated ${ROLE_PROFILE_FEATURE} support`);
+    const problem = checkLaunchProfile(launch, agentKind);
+    if (problem) return validationError(problem.message);
+    const pin = RoleProfilePinSchema.safeParse(launch.roleProfile);
+    if (!pin.success || !sameRoleProfilePin(pin.data, parsed.data.pin))
+      return validationError("Role profile launch pin mismatch");
+    if (launch.argv.some(arg => ["resume", "fork", "--resume", "--continue", "--fork-session"].includes(arg.split("=")[0]!)))
+      return validationError("Profile allocation requires a fresh native launch context");
+    const original = await readBuiltinRolePrompt(role);
+    if (!original) return validationError("Profile launch requires original base role instructions");
+    const path = await launchPromptSource(launch.argv, original.prompt) ?? launch.promptSource;
+    if (!path || await regularFileContains(path, original.prompt, false, true) === false)
+      return validationError("Profile launch must preserve the original base role prompt prefix");
+    return ok(undefined);
+  }
+
+  async #retainRoleProfile(
+    manifest: SessionManifest,
+    snapshot: ResolvedRoleProfileSnapshot | undefined,
+    options?: OperationOptions
+  ): Promise<OperationResult<SessionManifest>> {
+    if (!snapshot) return ok(manifest);
+    const parsed = ResolvedRoleProfileSnapshotSchema.safeParse(snapshot);
+    if (!parsed.success) return validationError("Invalid role profile snapshot");
+    const previous = manifest.roleProfiles?.find(item => item.pin.profileId === parsed.data.pin.profileId && item.pin.version === parsed.data.pin.version);
+    if (previous) return canonicalReceiptJson(previous) === canonicalReceiptJson(parsed.data)
+      ? ok(manifest) : conflictError("Session role profile snapshot cannot be replaced");
+    return this.#store.save({ ...manifest, roleProfiles: [...manifest.roleProfiles ?? [], parsed.data] }, options);
+  }
+
+  async allocateSpecialist(request: SpecialistAllocationRequest, options?: OperationOptions): Promise<OperationResult<PaneBinding>> {
+    return this.#serializeAllocation(() => this.#allocateSpecialist(request, options));
+  }
+
+  async #allocateSpecialist(request: SpecialistAllocationRequest, options?: OperationOptions): Promise<OperationResult<PaneBinding>> {
+    try {
+      if (!request || typeof request !== "object" || typeof request.taskId !== "string" || !request.taskId)
+        return validationError("Specialist allocation requires taskId");
+      const spec = getRoleTopologySpec(request.role);
+      // Do not turn tester->qa legacy aliases into profile authority or invent unsupported topology.
+      if (!spec || request.role === "developer" || spec.contractRole !== request.role || !spec.permanent)
+        return validationError("Profile specialist base role has no dedicated supported topology");
+      const kind = request.agentKind ?? this.#config.roleConfigs?.[spec.topologyRole]?.agentKind ?? this.#config.defaultAgentKind ?? "codex";
+      const valid = await this.#validateRoleProfileLaunch(request.roleProfile, request.role, request.launch, kind);
+      if (!valid.ok) return valid;
+      if (!request.roleProfile) return validationError("Specialist profile snapshot is required");
+      const socketCheck = this.#requireSocketFor([request.launch]);
+      if (!socketCheck.ok) return socketCheck;
+      const loaded = await this.#store.load(this.#config.sessionId, options);
+      if (!loaded.ok) return loaded;
+      if (!loaded.value) return notFoundError("Session manifest is required for specialist allocation");
+      let manifest = loaded.value;
+      const active = manifest.panes.find(pane => pane.role === request.role && pane.permanent === false && pane.metadata?.["allocationStatus"] !== "released");
+      if (active) {
+        if (active.metadata?.["taskId"] !== request.taskId || !sameRoleProfilePin(active.roleProfile, request.roleProfile.pin) ||
+            active.metadata?.["launchId"] !== request.launch.launchId || active.metadata?.["launchFingerprint"] !== request.launch.launchFingerprint)
+          return conflictError("Base specialist capacity is occupied by another assignment/profile");
+        const health = await this.inspectRoleHealth(active.bindingId, options);
+        return health.ok && health.value.status === "ready" ? ok(active) : conflictError("Profile specialist launch requires reconciliation");
+      }
+      const base = manifest.panes.find(pane => pane.role === request.role && pane.permanent !== false && !pane.roleProfile);
+      if (!base) return conflictError("Base specialist topology is not ready");
+      const health = await this.inspectRoleHealth(base.bindingId, options);
+      if (!health.ok) return health;
+      if (health.value.status !== "ready") return conflictError("Base specialist capacity is busy or not ready");
+      const retained = await this.#retainRoleProfile(manifest, request.roleProfile, options);
+      if (!retained.ok) return retained;
+      manifest = retained.value;
+      const name = request.agentName ?? `profile-${request.role}-${request.launch.launchId.replace(/[^a-z0-9_-]/gi, "").toLowerCase()}`.slice(0, 32);
+      if (!isValidAgentName(name)) return validationError("Invalid specialist agent name");
+      if (manifest.panes.some(pane => pane.metadata?.["launchId"] === request.launch.launchId))
+        return conflictError("Specialist launch context is already bound");
+      const split = await this.#splitPane(base.paneId, "right", request.cwd ?? this.#config.workspaceRoot, request.launch,
+        "Failed to create dedicated profiled specialist pane", options);
+      if (!split.ok) return split;
+      const started = await this.startAgentInPane({ role: request.role, roleProfile: request.roleProfile,
+        paneId: split.value.paneId, workspaceId: split.value.workspaceId, tabId: split.value.tabId,
+        cwd: request.cwd ?? this.#config.workspaceRoot, agentName: name, agentKind: kind,
+        ...(request.model !== undefined ? { model: request.model } : {}), launch: request.launch,
+        ...(request.startupTimeoutMs !== undefined ? { timeoutMs: request.startupTimeoutMs } : {}), permanent: false,
+        metadata: { topologyRole: spec.topologyRole, taskId: request.taskId, allocationStatus: "active",
+          ...(request.runId !== undefined ? { runId: request.runId } : {}) } }, options);
+      // Uncertain launch remains in the manifest; never retry/close it as if delivery were known.
+      if (!started.ok) return started;
+      const saved = await this.#store.save({ ...manifest, panes: [...manifest.panes, started.value], updatedAt: this.#clock().toISOString() }, options);
+      return saved.ok ? ok(started.value) : saved;
+    } catch (error) { return toProtocolError(error, "Failed to allocate profiled specialist"); }
+  }
+
+  async releaseSpecialist(request: SpecialistReleaseRequest, options?: OperationOptions): Promise<OperationResult<DeveloperReleaseOutcome>> {
+    return this.#serializeAllocation(async () => {
+      try {
+        if (!request || typeof request !== "object") return validationError("Specialist release request is required");
+        const loaded = await this.#store.load(this.#config.sessionId, options);
+        if (!loaded.ok) return loaded;
+        if (!loaded.value) return notFoundError("Session manifest is required for specialist release");
+        const manifest = loaded.value;
+        const binding = manifest.panes.find(pane => pane.role !== "developer" && pane.permanent === false && pane.roleProfile &&
+          (request.taskId !== undefined && pane.metadata?.["taskId"] === request.taskId ||
+            request.agentId !== undefined && pane.agentId === request.agentId || request.paneId !== undefined && pane.paneId === request.paneId));
+        if (!binding) return notFoundError("Profile specialist binding not found");
+        // Record the release intent before the irreversible close. If we stop in between, restart recovery sees a
+        // released allocation instead of an "active" binding whose agent no longer exists (which would block the session).
+        const releasing = await this.#store.save({ ...manifest, updatedAt: this.#clock().toISOString(),
+          panes: manifest.panes.map(pane => pane.bindingId === binding.bindingId
+            ? { ...pane, metadata: { ...pane.metadata, allocationStatus: "released" } } : pane) }, options);
+        if (!releasing.ok) return releasing;
+        const closed = await this.#runHerdr(["pane", "close", binding.paneId], options);
+        if (closed.exitCode !== 0 || closed.failure) {
+          // Retrying an interrupted release: the pane may already be gone. Only an observed absence completes it.
+          const alreadyReleased = binding.metadata?.["allocationStatus"] === "released";
+          const probe = alreadyReleased ? await this.#runHerdr(["pane", "get", binding.paneId], options) : undefined;
+          if (!probe || probe.exitCode === 0 && !probe.failure) return toCommandError(closed, "Failed to close specialist pane");
+        } else parseOkResponse(closed);
+        const saved = await this.#store.save({ ...releasing.value, panes: releasing.value.panes.filter(pane => pane.bindingId !== binding.bindingId),
+          updatedAt: this.#clock().toISOString() }, options);
+        return saved.ok ? ok({ releasedBinding: binding, paneClosed: true, worktreeRemoved: false, retainedForReuse: false, manifest: saved.value }) : saved;
+      } catch (error) { return toProtocolError(error, "Failed to release profiled specialist"); }
+    });
+  }
+
   async allocateDeveloper(
     request: DeveloperAllocationRequest,
     options?: OperationOptions
   ): Promise<OperationResult<PaneBinding>> {
+    return this.#serializeAllocation(() => this.#allocateDeveloper(request, options));
+  }
+
+  async #allocateDeveloper(request: DeveloperAllocationRequest, options?: OperationOptions): Promise<OperationResult<PaneBinding>> {
     try {
       if (!request || typeof request !== "object") {
         return validationError("DeveloperAllocationRequest must be an object");
@@ -2271,13 +2481,17 @@ export class RolePaneManager {
       if (!request.worktreePath || typeof request.worktreePath !== "string") {
         return validationError("DeveloperAllocationRequest.worktreePath is required");
       }
+      const profileCheck = await this.#validateRoleProfileLaunch(request.roleProfile, "developer", request.launch,
+        request.agentKind ?? this.#config.roleConfigs?.developer?.agentKind ?? this.#config.defaultAgentKind ?? "codex");
+      if (!profileCheck.ok) return profileCheck;
+      if (request.roleProfile && request.args !== undefined) return validationError("Profile launch arguments must come from Runtime launch material");
       const socketCheck = this.#requireSocketFor([request.launch]);
       if (!socketCheck.ok) return socketCheck;
       const developerEnv = launchEnvOf(request.launch);
 
       const loadResult = await this.#store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
-      const manifest = loadResult.value;
+      let manifest = loadResult.value;
       if (!manifest) {
         return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
       }
@@ -2289,6 +2503,10 @@ export class RolePaneManager {
           p.metadata?.["taskId"] === request.taskId &&
           p.metadata?.["allocationStatus"] !== "released"
       );
+      if (existingTaskDeveloper && (!sameRoleProfilePin(existingTaskDeveloper.roleProfile, request.roleProfile?.pin) ||
+          (request.roleProfile && (existingTaskDeveloper.metadata?.["launchId"] !== request.launch?.launchId ||
+            existingTaskDeveloper.metadata?.["launchFingerprint"] !== request.launch?.launchFingerprint))))
+        return conflictError("Active task profile/launch cannot change without a new accepted allocation");
       if (existingTaskDeveloper && existingTaskDeveloper.worktreePath === request.worktreePath) {
         const health = await this.inspectRoleHealth(existingTaskDeveloper.bindingId, options);
         if (health.ok && (health.value.status === "ready" || health.value.status === "working")) {
@@ -2320,17 +2538,37 @@ export class RolePaneManager {
         );
       }
 
-      // Cleanliness check
+      let retainedContinuation = false;
+      if (request.continuation !== undefined) {
+        const continuation = DeveloperContinuationAllocationSchema.safeParse(request.continuation);
+        if (!continuation.success) return validationError("Invalid Developer continuation allocation");
+        const proof = continuation.data;
+        const source = manifest.panes.find(pane => pane.bindingId === proof.sourceBindingId && pane.role === "developer" &&
+          pane.metadata?.["allocationStatus"] === "released" && pane.metadata?.["taskId"] === request.taskId && pane.metadata?.["runId"] === request.runId);
+        if (!source || proof.allocationTaskId !== request.taskId || proof.runId !== request.runId || proof.worktreePath !== request.worktreePath ||
+            source.worktreePath !== request.worktreePath || !await this.#authorizeStoppedRetainedRelease?.(source))
+          return conflictError("Continuation requires the exact released, proven-stopped source binding in the same task worktree");
+        retainedContinuation = true;
+      }
+      // Cleanliness check: an exact stopped task continuation may preserve its scoped unfinished files.
       const inspected = await this.#worktreeInspector.inspect(request.worktreePath, options);
       if (!inspected.ok) {
         return inspected;
       }
-      if (inspected.value.exists && !inspected.value.isClean) {
+      const within = (path: string, prefix: string) => prefix === "." || path === prefix.replace(/\/$/, "") || path.startsWith(prefix.replace(/\/$/, "") + "/");
+      const retainedDirty = retainedContinuation && request.continuation !== undefined && inspected.value.dirtyFiles.every(path =>
+        !path.startsWith("/") && !path.includes("\\") && !path.split("/").includes("..") &&
+        !request.continuation!.forbiddenPaths.some(prefix => within(path, prefix)) &&
+        (request.continuation!.ownedPaths.some(prefix => within(path, prefix)) || inspected.value.ignoredFiles?.includes(path)));
+      if (inspected.value.exists && !inspected.value.isClean && !retainedDirty) {
         return conflictError(
           `Cannot allocate developer in working tree with uncommitted changes not belonging to task: ${inspected.value.dirtyFiles.join(", ")}`
         );
       }
 
+      const snapshotted = await this.#retainRoleProfile(manifest, request.roleProfile, options);
+      if (!snapshotted.ok) return snapshotted;
+      manifest = snapshotted.value;
       const agentListOutcome = await this.#runHerdr(["agent", "list"], options);
       const liveAgents = agentListOutcome.exitCode === 0 && !agentListOutcome.failure
         ? parseAgentListResult(agentListOutcome)
@@ -2352,9 +2590,10 @@ export class RolePaneManager {
           let oldPaneToClose: string | null = null;
 
           const liveAgent = liveAgents.find((a) => a.paneId === releasedCandidate.paneId);
-          const effectiveAgentName = request.agentName ?? (liveAgent ? releasedCandidate.agentId : this.#allocateUniqueDeveloperName(request.taskId, manifest, liveAgents));
+          const profileContext = request.roleProfile !== undefined || releasedCandidate.roleProfile !== undefined;
+          const effectiveAgentName = request.agentName ?? (liveAgent && !profileContext ? releasedCandidate.agentId : this.#allocateUniqueDeveloperName(request.taskId, manifest, liveAgents));
           // Env is fixed at pane creation: a released pane made for another launch is never reused.
-          const releasedEnvMismatch = developerEnv !== undefined && releasedCandidate.metadata?.["launchId"] !== request.launch?.launchId;
+          const releasedEnvMismatch = profileContext || developerEnv !== undefined && releasedCandidate.metadata?.["launchId"] !== request.launch?.launchId;
           const splitReleased = () => this.#herdrCreate<HerdrPaneInfo>(
             {
               method: "pane.split",
@@ -2388,6 +2627,7 @@ export class RolePaneManager {
           let startResult = await this.startAgentInPane(
             {
               role: "developer",
+              ...(request.roleProfile ? { roleProfile: request.roleProfile } : {}),
               paneId: targetPane.paneId,
               workspaceId: targetPane.workspaceId,
               tabId: targetPane.tabId,
@@ -2418,6 +2658,7 @@ export class RolePaneManager {
               startResult = await this.startAgentInPane(
                 {
                   role: "developer",
+                  ...(request.roleProfile ? { roleProfile: request.roleProfile } : {}),
                   paneId: targetPane.paneId,
                   workspaceId: targetPane.workspaceId,
                   tabId: targetPane.tabId,
@@ -2526,7 +2767,7 @@ export class RolePaneManager {
         wtPaneId = wtCreated.rootPane.paneId;
       }
 
-      if (developerEnv !== undefined) {
+      if (developerEnv !== undefined || request.roleProfile !== undefined) {
         // The worktree root pane was created without launch env. The Developer pane is split with env instead,
         // and the root is closed unless the manifest still owns it.
         const split = await this.#herdrCreate<HerdrPaneInfo>(
@@ -2550,6 +2791,7 @@ export class RolePaneManager {
       const startResult = await this.startAgentInPane(
         {
           role: "developer",
+          ...(request.roleProfile ? { roleProfile: request.roleProfile } : {}),
           paneId: wtPaneId,
           workspaceId: wtWorkspaceId,
           tabId: wtTabId,

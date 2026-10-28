@@ -4,6 +4,7 @@ import { IdentifierSchema, IsoDateTimeSchema } from "./common.js";
 import type { OperationResult } from "./errors.js";
 import type { OperationOptions } from "./ports.js";
 import { AgentCapabilitySchema, AgentRoleSchema } from "./session.js";
+import { RoleProfilePinSchema } from "./role-profile.js";
 import {
   AgentProviderIdSchema, NonEmptyArgumentSchema, PlatformSchemaVersionSchema,
   SafeArgumentSchema, SecretReferenceSchema, Sha256DigestSchema, TrustScopeSchema
@@ -39,6 +40,7 @@ export type PermissionProfile = z.infer<typeof PermissionProfileSchema>;
 export const AgentEnvironmentSchema = z.object({
   schemaVersion: PlatformSchemaVersionSchema,
   environmentId: IdentifierSchema,
+  roleProfile: RoleProfilePinSchema.optional(),
   provider: AgentProviderIdSchema,
   role: AgentRoleSchema,
   scope: TrustScopeSchema.refine(scope => scope.kind === "session", "agent environment requires session scope"),
@@ -52,6 +54,7 @@ export const AgentEnvironmentSchema = z.object({
   requiredMcpServiceIds: z.array(IdentifierSchema),
   skillManifestDigest: Sha256DigestSchema
 }).strict().superRefine((env, ctx) => {
+  if (env.roleProfile && ["conversation", "coordinator"].includes(env.role)) ctx.addIssue({ code: "custom", message: "profiles are specialist-only" });
   const a = env.scope, b = env.permissionProfile.scope;
   if (a.machineId !== b.machineId || b.kind === "machine" ||
       a.repositoryId !== b.repositoryId || a.workspaceRoot !== b.workspaceRoot ||

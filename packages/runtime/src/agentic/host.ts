@@ -5,6 +5,7 @@ import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema } from "../teleme
 import { AssignmentSurvey, assignmentsForBinding } from "./assignment-survey.js";
 import { policyEvidenceView } from "./policy-evidence-view.js";
 import { execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, connect, type Socket } from "node:net";
@@ -13,7 +14,8 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { codexStartupPrompt } from "@bflow/agent-providers";
+import { classifyProviderFailure, codexStartupPrompt } from "@bflow/agent-providers";
+import { readCodexFailure } from "./provider-failure-reader.js";
 import {
   AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema, DelegationRequestSchema,
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, JsonValueSchema, MCPToolCallResultSchema, RepositoryToolPolicySchema,
@@ -60,7 +62,12 @@ import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
 import { TaskLogPane } from "./task-log-pane.js";
 import { assessmentFailureSummary } from "./assessment-input.js";
-import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema } from "./role-tool-schema.js";
+import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema, roleProfilePinToolSchema } from "./role-tool-schema.js";
+import { selectRoleProfile } from "./profile-admission.js";
+export function preserveBuiltinRolePrompt(original: string, trustedHostInstructions: string): string {
+  if (!original.trim()) throw new Error("Original role prompt is required");
+  return `${original}\n\n${trustedHostInstructions}`;
+}
 import { inspectNativeDelivery, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
 import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
@@ -83,6 +90,84 @@ import {
   type RoleToolReachability, type ToolReachabilityRecord
 } from "./tool-reachability.js";
 
+/** Builds the binding-aware CLI runner resolver shared by Developer feedback and independent verification. */
+export function createHostRtkUsageResolver(
+  configuration: Pick<HostConfiguration, "platform" | "sessionId" | "repositoryPath">,
+  toolUsage: FileToolUsageLedger,
+  currentPlatform: () => HostPlatformSession | undefined,
+  currentBinding: () => PaneBinding | undefined = () => undefined,
+  revalidateExecutionResolution?: () => Promise<void>
+): RtkOutputIntegration["resolve"] {
+  return async (input: { role: AgentRole; runId: string; taskId?: string; attemptId?: string; commandId: string; revision: string }): Promise<import("./behavioral-runner.js").RtkOutputRequest | undefined> => {
+    const platformSession = currentPlatform();
+    const policy = configuration.platform?.toolPolicy === undefined ? undefined : RepositoryToolPolicySchema.parse(configuration.platform.toolPolicy);
+    if (!policy) return undefined;
+    const requirement = rtkRequirement(policy, input.role, input.commandId);
+    const generation = platformSession?.currentGeneration;
+    if (!generation) {
+      if (requirement?.requiredness === "required")
+        throw new RtkRequiredToolUnavailable("platform_generation_missing", "Required RTK needs an active platform generation");
+      return undefined;
+    }
+    const baseInvocationId = `tool-${digest([configuration.sessionId, input.runId, input.taskId ?? "", input.attemptId ?? "", input.role,
+      "routine_command", "rtk", "pipe", input.commandId, input.revision]).slice(0, 48)}`;
+    const existingRecords = await toolUsage.list();
+    let invocationId: string;
+    try { invocationId = nextToolActionInvocationId(baseInvocationId, existingRecords); }
+    catch { throw new RtkRequiredToolUnavailable("rtk_delivery_unknown", "RTK delivery is unresolved; reconcile it before another check"); }
+    const recordDisposition = async (status: "skipped" | "degraded" | "blocked", reasonCode: string) => {
+      const existing = (await toolUsage.list()).find(item => item.invocationId === invocationId);
+      if (existing) {
+        if (existing.status === status && existing.reasonCode === reasonCode && existing.role === input.role &&
+            existing.runId === input.runId && existing.taskId === input.taskId && existing.toolId === "rtk" && existing.operation === "pipe") return;
+        throw new Error("RTK action already has a different durable usage disposition");
+      }
+      const base = ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: input.runId, ...(input.taskId ? { taskId: input.taskId } : {}), role: input.role,
+        sessionId: configuration.sessionId, generation, invocationId, toolId: "rtk", operation: "pipe", status: "planned", observedAt: new Date().toISOString() });
+      await toolUsage.put(base);
+      await toolUsage.put(ToolUsageRecordSchema.parse({ ...base, status, reasonCode, observedAt: new Date().toISOString() }));
+    };
+    if (!requirement) {
+      await recordDisposition("skipped", policy ? "runner_profile_not_triggered" : "repository_policy_absent");
+      return undefined;
+    }
+    const binding = currentBinding();
+    if (binding && binding.role !== input.role) throw new RtkRequiredToolUnavailable("profile_binding_mismatch", "RTK role does not match its authenticated caller");
+    const runnerGrants = () => binding && platformSession ? platformSession.toolActionScope(binding).grants : configuration.platform?.toolGrants ?? [];
+    const grants = runnerGrants().map(item => ResolvedToolGrantSchema.parse(item)).filter(item =>
+      item.toolId === "rtk" && item.kind === "cli_only" && item.role === input.role && item.policyDigest === policy!.digest &&
+      item.operations.includes("pipe") && (item.cliCommandProfiles === undefined || item.cliCommandProfiles.includes(input.commandId)) &&
+      item.triggers.includes("routine_command") &&
+      item.scope.kind === "session" && item.scope.sessionId === configuration.sessionId && item.scope.repositoryId === configuration.platform!.repositoryId &&
+      item.scope.workspaceRoot === configuration.repositoryPath);
+    const grant = grants.length === 1 ? grants[0] : undefined;
+    if (!grant || grant.requiredness !== requirement.requiredness || !grant.cliIdentity) {
+      const reason = grants.length > 1 ? "ambiguous_cli_grant" : "cli_grant_unavailable";
+      if (requirement.requiredness === "required") {
+        await recordDisposition("blocked", reason);
+        throw new RtkRequiredToolUnavailable(reason, "Required RTK runner grant is unavailable for this task profile");
+      }
+      await recordDisposition("degraded", reason);
+      return undefined;
+    }
+    const base = ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: input.runId, ...(input.taskId ? { taskId: input.taskId } : {}), role: input.role,
+      sessionId: configuration.sessionId, generation, invocationId, toolId: grant.toolId, operation: "pipe", status: "started", observedAt: new Date().toISOString() });
+    return { executablePath: grant.cliIdentity.executablePath, version: grant.cliIdentity.version, digest: grant.cliIdentity.digest,
+      filter: "auto", required: grant.requiredness === "required", invocationId,
+      beforeSideEffect: async () => {
+        if (currentPlatform() !== platformSession || platformSession.currentGeneration !== generation)
+          throw new RtkRequiredToolUnavailable("platform_generation_changed", "RTK platform generation changed before executable dispatch");
+        runnerGrants();
+        await revalidateExecutionResolution?.();
+        runnerGrants();
+      },
+      onIntent: async () => { runnerGrants(); await toolUsage.begin(base); },
+      onUnavailable: reasonCode => recordDisposition(grant.requiredness === "required" ? "blocked" : "degraded", reasonCode),
+      onResult: async result => toolUsage.put(ToolUsageRecordSchema.parse({ ...base, status: result.status,
+        ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}), observedAt: new Date().toISOString() })) };
+  };
+}
+
 const execute = promisify(execFile);
 const roles = ["conversation", "coordinator", "specifier", "architect", "planner", "developer", "tester", "reviewer", "qa", "security"] as const;
 const capabilities = { conversation: ["conversation"], coordinator: ["coordination", "planning", "specification", "repository.read"],
@@ -104,7 +189,7 @@ async function readRoleConfiguration(path: string): Promise<RoleConfiguration> {
     herdrBinary: textField(raw.herdrBinary), sessionId: textField(raw.sessionId) };
 }
 function shellQuote(value: string): string { return "'" + value.replaceAll("'", "'\\''") + "'"; }
-const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse"] as const;
+const NATIVE_HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "PreToolUse", "StopFailure"] as const;
 const AgyNativeToolCallSchema = z.object({ name: z.string().min(1), args: z.record(JsonValueSchema) }).strict();
 const AgyMcpOperationSchema = z.object({ nativeSessionId: z.string().min(1), anchor: AgyNativeAnchorSchema,
   nativeStepIndex: z.number().int().nonnegative(), nativeToolCall: AgyNativeToolCallSchema }).strict();
@@ -304,10 +389,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     // Same token, new provider: a platform change is only admissible while no host owns the endpoint.
     if (roleConfig.provider !== provider) { roleConfig = { ...roleConfig, provider }; await privateFile(path, JSON.stringify(roleConfig)); }
     roleTokens.set(roleConfig.token, role);
+    for (const candidateProvider of new Set(platformRoles.find(option => option.role === role)?.failover?.candidates.map(candidate => candidate.provider) ?? [])) {
+      if (candidateProvider === provider) continue;
+      const candidatePath = join(configuration.directory, `${role}.${candidateProvider}.json`);
+      await privateFile(candidatePath, JSON.stringify({ ...roleConfig, provider: candidateProvider }));
+      const runnerPath = useShortHook ? join(shortHookDir, `${role}.${candidateProvider}.sh`) : join(configuration.directory, `${role}.${candidateProvider}.hook.sh`);
+      await privateFile(runnerPath, hookRunnerScript(process.execPath, executable, candidatePath, candidateProvider), 0o700);
+      hookRunners.set(`${role}:${candidateProvider}`, runnerPath);
+    }
     const mcpConfigFile = join(configuration.directory, role + ".mcp.json");
     const hooksSettingsFile = join(configuration.directory, role + ".hooks.json");
     await privateFile(mcpConfigFile, JSON.stringify({ mcpServers: { bflow: { type: "stdio", command: process.execPath, args: [executable, "mcp", path] } } }));
-    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
+    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || provider === "claude" && platformRoles.some(option => option.role === role && option.failover)).map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     const taskLogGuidance = role === "conversation"
       ? "Use read_task_log for recent diagnostic context; do not record specialist task steps."
@@ -320,7 +413,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const basePrompt = original ? textField(original.prompt) : "";
     if (original) {
       textField(original.source);
-      systemPrompt += basePrompt;
+      systemPrompt = ["conversation", "coordinator"].includes(role) ? systemPrompt + basePrompt : preserveBuiltinRolePrompt(basePrompt, systemPrompt);
       if (role !== "conversation" && !basePrompt.includes("You are a non-user-facing execution agent.")) {
         systemPrompt += "\n\n" + NON_USER_FACING_AUTONOMOUS_POLICY + "\n\n" + NON_USER_FACING_STRUCTURED_RESULT_REQUIREMENT;
       }
@@ -352,11 +445,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     platform: configuration.platform, repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, directory: configuration.directory,
     issuerId, privateKeyPem: await readFile(keyPath, "utf8"), publicKeyPem: publicKey, hostCapabilities: capabilities,
     rolePrompt: role => launch[role]?.systemPrompt,
-    hostLaunch: role => {
-      const rolePath = join(configuration.directory, role + ".json");
-      const runner = hookRunners.get(role);
-      const provider = platformRoles.find(option => option.role === role)?.provider ?? "claude";
-      const hookEvents = provider === "agy" ? [...NATIVE_HOOK_EVENTS.filter(event => event !== "UserPromptSubmit"), "PreInvocation"] : NATIVE_HOOK_EVENTS;
+    hostLaunch: (role, requestedProvider) => {
+      const primaryProvider = platformRoles.find(option => option.role === role)?.provider ?? "claude";
+      const provider = requestedProvider ?? primaryProvider;
+      const rolePath = join(configuration.directory, provider === primaryProvider ? role + ".json" : `${role}.${provider}.json`);
+      const runner = hookRunners.get(provider === primaryProvider ? role : `${role}:${provider}`);
+      const regular = NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || provider === "claude" && platformRoles.some(option => option.role === role && option.failover));
+      const hookEvents = provider === "agy" ? [...regular.filter(event => event !== "UserPromptSubmit"), "PreInvocation"] : regular;
       const hookEntries = Object.fromEntries(hookEvents.map(event => [event, hookCommandFor(rolePath, event, runner)]));
       return { mcpServers: { bflow: { command: process.execPath, args: [executable, "mcp", rolePath] } }, hooks: hookEntries };
     },
@@ -423,7 +518,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const semanticMessage = (value: RoleMessage) => ({ ...value, message_id: undefined, occurred_at: undefined, idempotency_key: undefined });
       if (digest(semanticMessage(previous.message)) !== digest(semanticMessage(message))) throw new Error("Native operation already has a different immutable receipt; inspect its original result");
       if (previous.status === "acknowledged") {
-        await finalizeCompletedToolActionDisposition(message);
+        await finalizeCompletedToolActionDisposition(message, sender);
         return json({ delivered: true, messageId: previous.message.message_id });
       }
       throw new Error("Native delivery is uncertain; reconcile the original operation before retrying");
@@ -448,7 +543,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       let refusalCheckAt = 0;
       while (Date.now() < deadline) {
         if (deliveredMessageIds.has(message.message_id)) {
-          await finalizeCompletedToolActionDisposition(message);
+          await finalizeCompletedToolActionDisposition(message, sender);
           return json({ delivered: true, messageId: message.message_id });
         }
         if (Date.now() >= refusalCheckAt) {
@@ -475,63 +570,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const testRunners = new TestRunnerSource(behavioralCommands, configuration.repositoryPath);
   await testRunners.refresh();
   let verificationSandbox = await probeBehavioralSandbox(configuration.repositoryPath);
-  const rtkUsage = async (input: { role: AgentRole; runId: string; taskId?: string; attemptId?: string; commandId: string; revision: string }): Promise<import("./behavioral-runner.js").RtkOutputRequest | undefined> => {
-    const policy = configuration.platform?.toolPolicy === undefined ? undefined : RepositoryToolPolicySchema.parse(configuration.platform.toolPolicy);
-    if (!policy) return undefined;
-    const requirement = rtkRequirement(policy, input.role, input.commandId);
-    const generation = platformSession?.currentGeneration;
-    if (!generation) {
-      if (requirement?.requiredness === "required")
-        throw new RtkRequiredToolUnavailable("platform_generation_missing", "Required RTK needs an active platform generation");
-      return undefined;
-    }
-    const baseInvocationId = `tool-${digest([configuration.sessionId, input.runId, input.taskId ?? "", input.attemptId ?? "", input.role,
-      "routine_command", "rtk", "pipe", input.commandId, input.revision]).slice(0, 48)}`;
-    const existingRecords = await toolUsage.list();
-    let invocationId: string;
-    try { invocationId = nextToolActionInvocationId(baseInvocationId, existingRecords); }
-    catch { throw new RtkRequiredToolUnavailable("rtk_delivery_unknown", "RTK delivery is unresolved; reconcile it before another check"); }
-    const recordDisposition = async (status: "skipped" | "degraded" | "blocked", reasonCode: string) => {
-      const existing = (await toolUsage.list()).find(item => item.invocationId === invocationId);
-      if (existing) {
-        if (existing.status === status && existing.reasonCode === reasonCode && existing.role === input.role &&
-            existing.runId === input.runId && existing.taskId === input.taskId && existing.toolId === "rtk" && existing.operation === "pipe") return;
-        throw new Error("RTK action already has a different durable usage disposition");
-      }
-      const base = ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: input.runId, ...(input.taskId ? { taskId: input.taskId } : {}), role: input.role,
-        sessionId: configuration.sessionId, generation, invocationId, toolId: "rtk", operation: "pipe", status: "planned", observedAt: new Date().toISOString() });
-      await toolUsage.put(base);
-      await toolUsage.put(ToolUsageRecordSchema.parse({ ...base, status, reasonCode, observedAt: new Date().toISOString() }));
-    };
-    if (!requirement) {
-      await recordDisposition("skipped", policy ? "runner_profile_not_triggered" : "repository_policy_absent");
-      return undefined;
-    }
-    const grants = (configuration.platform?.toolGrants ?? []).map(item => ResolvedToolGrantSchema.parse(item)).filter(item =>
-      item.toolId === "rtk" && item.kind === "cli_only" && item.role === input.role && item.policyDigest === policy!.digest &&
-      item.operations.includes("pipe") && (item.cliCommandProfiles === undefined || item.cliCommandProfiles.includes(input.commandId)) &&
-      item.triggers.includes("routine_command") &&
-      item.scope.kind === "session" && item.scope.sessionId === configuration.sessionId && item.scope.repositoryId === configuration.platform!.repositoryId &&
-      item.scope.workspaceRoot === configuration.repositoryPath);
-    const grant = grants.length === 1 ? grants[0] : undefined;
-    if (!grant || grant.requiredness !== requirement.requiredness || !grant.cliIdentity) {
-      const reason = grants.length > 1 ? "ambiguous_cli_grant" : "cli_grant_unavailable";
-      if (requirement.requiredness === "required") {
-        await recordDisposition("blocked", reason);
-        throw new RtkRequiredToolUnavailable(reason, "Required RTK runner grant is unavailable for this task profile");
-      }
-      await recordDisposition("degraded", reason);
-      return undefined;
-    }
-    const base = ToolUsageRecordSchema.parse({ schemaVersion: 3, runId: input.runId, ...(input.taskId ? { taskId: input.taskId } : {}), role: input.role,
-      sessionId: configuration.sessionId, generation, invocationId, toolId: grant.toolId, operation: "pipe", status: "started", observedAt: new Date().toISOString() });
-    return { executablePath: grant.cliIdentity.executablePath, version: grant.cliIdentity.version, digest: grant.cliIdentity.digest,
-      filter: "auto", required: grant.requiredness === "required", invocationId,
-      onIntent: () => toolUsage.begin(base),
-      onUnavailable: reasonCode => recordDisposition(grant.requiredness === "required" ? "blocked" : "degraded", reasonCode),
-      onResult: async result => toolUsage.put(ToolUsageRecordSchema.parse({ ...base, status: result.status,
-        ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}), observedAt: new Date().toISOString() })) };
-  };
+  const runnerBindings = new AsyncLocalStorage<PaneBinding>();
+  const rtkUsage = createHostRtkUsageResolver(configuration, toolUsage, () => platformSession, () => runnerBindings.getStore(),
+    async () => { await readExecutionResolution?.(); });
   const rtkUsageIntegration: RtkOutputIntegration = { resolve: rtkUsage, consume: async (invocationId, evidence) => {
     const previous = (await toolUsage.list()).find(item => item.invocationId === invocationId);
     if (!previous || previous.status !== "completed" || previous.taskId === undefined) return;
@@ -554,9 +595,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }),
   async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.replaceWorkflowReview({ operationId,
     sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }));
-  const nativeSessions = new Map<string, {role: AgentRole; sessionId: string}>();
+  const nativeSessions = new Map<string, {role: AgentRole; sessionId: string; transcriptPath?: string; transcriptRoot?: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
-    const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId) });
+    const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId),
+      ...(typeof session.transcriptPath === "string" && typeof session.transcriptRoot === "string" ? { transcriptPath: session.transcriptPath, transcriptRoot: session.transcriptRoot } : {}) });
   } } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const getQueryStore = async () => {
     if (workspace) return workspace.runtime.ports.runStore;
@@ -770,13 +812,27 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await readExecutionResolution?.();
           await assertWorkspaceFileCapability();
           await readExecutionResolution?.();
-          return platformSession.allocateDeveloper(request.taskId, request.worktreePath, request.runId);
+          return platformSession.allocateDeveloper(request.taskId, request.worktreePath, request.runId, request.candidate, request.continuationId, request.roleProfile);
         },
         release: taskId => platformSession.releaseDeveloper(taskId),
         assertProcessScope: binding => platformSession.assertDeveloperProcessReady(binding),
         reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId),
         degradation: () => platformSession.degradation()
       },
+        providerFailover: {
+          policyFor: binding => {
+            const option = platformRoles.find(option => option.role === binding.role);
+            return option?.failover && option.model && option.profileName ? { policy: option.failover,
+              current: { provider: option.provider, model: option.model, profile: option.profileName } } : undefined;
+          },
+          authenticate: (binding, failure) => receipts.authenticateProviderFailure(binding, failure),
+          assertMutationSafe: async (_binding, runId, taskId) => {
+            const unresolved = (await toolUsage.list()).some(item => item.sessionId === configuration.sessionId && item.runId === runId &&
+              (item.taskId === taskId || item.taskId === undefined) && ["started", "unknown"].includes(item.status));
+            if (unresolved) throw new Error("Provider continuation retains an unreconciled tool invocation");
+          },
+          preflight: (candidate, binding) => platformSession.preflightFailoverCandidate(candidate, binding)
+        },
         pinDeveloperDispatch: (request, binding) => platformSession.pinDeveloperDispatch(request, binding),
         bindDeveloperExecutionScope: (handle, binding) => platformSession.bindDeveloperExecution(handle, binding),
         stopDeveloperExecutionScope: (handle, binding) => platformSession.stopDeveloperExecution(handle, binding),
@@ -784,6 +840,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         authorizeStoppedRetainedRelease: binding => platformSession.authorizeStoppedRetainedRelease(binding)
       } : {}), maxDeveloperCapacity: configuration.policy?.concurrency.maxConcurrency ?? configuration.maxDeveloperCapacity ?? 2,
       nativeIngressSocket: nativeSocket, bindingReceiptKeys: { [issuerId]: publicKey }, roleLaunch: launch,
+      ...(configuration.platform?.roleProfiles ? { roleProfiles: configuration.platform.roleProfiles,
+        roleProfileDefaults: Object.fromEntries(configuration.platform.roles.filter(option => option.specialistProfile).map(option => [option.role, option.specialistProfile!])) } : {}),
+      ...(platformSession ? {
+        preflightRoleProfile: async (snapshot, role, required) => platformSession.preflightProfile(snapshot, role, required),
+        attestExecutorLineage: (binding, purpose, assignmentId) => platformSession.attestProfileExecutor(binding, purpose, assignmentId),
+        specialistLaunches: { allocate: request => platformSession.allocateProfileSpecialist(request), release: taskId => platformSession.releaseDeveloper(taskId),
+          reachability: (launchId, paneId) => platformSession.developerReachability(launchId, paneId) }
+      } : {}),
       revalidateRoleSkills: binding => verifyDispatchPinnedSkills(platformSession, configuration.platform, binding),
       roleCapabilities: capabilities, preflightRoleCapabilities, taskChecks: hostChecks, workflowChecks: hostChecks, deterministicGates: [verification.deterministicGate(), verification.testIntegrityGate()],
       fastPathMode: effectiveFastPathMode(configuration.policy, true),
@@ -900,11 +964,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const toolsReceipt = record(JSON.parse(await readFile(providerToolsListPath(role, binding.paneId), "utf8")));
       if (toolsReceipt.role !== role || toolsReceipt.paneId !== binding.paneId || toolsReceipt.agentId !== binding.agentId ||
           toolsReceipt.sessionDigest !== digest(binding.session) || digest(toolsReceipt.toolNames) !== digest(availableTools(role, providerForRole(role)).map(tool => tool.name).sort()) ||
-          toolsReceipt.launchId !== platformSession?.launchIdOf(role)) throw new Error("current role session has no matching authenticated Bflow tools/list proof");
+          toolsReceipt.launchId !== platformSession?.bindingLaunchId(binding)) throw new Error("current role session has no matching authenticated Bflow tools/list proof");
       if (platformSession) {
-        const pinned = await platformSession.readPinnedInstructions(role);
-        const selectedSkills = configuration.platform?.roles.find(option => option.role === role)?.skillSelections.length ?? 0;
-        if (selectedSkills > 0 && (!pinned || pinned.launchId !== platformSession.launchIdOf(role) || !pinned.manifestDigest || !pinned.instructionText.trim()))
+        const pinned = await platformSession.readPinnedInstructions(role, undefined, 0, 8192, platformSession.bindingLaunchId(binding));
+        const selectedSkills = (configuration.platform?.roles.find(option => option.role === role)?.skillSelections.length ?? 0) +
+          (selectRoleProfile(configuration.platform?.roleProfiles, role, binding.roleProfile)?.definition.skillPins.length ?? 0);
+        if ((selectedSkills > 0 || binding.roleProfile) && (!pinned || pinned.launchId !== platformSession.bindingLaunchId(binding) || !pinned.manifestDigest || selectedSkills > 0 && !pinned.instructionText.trim()))
           throw new Error("current role has no resolved, pinned skill manifest for its launch");
       }
       // Exercise safe repository/Git access before handing a role any work.
@@ -955,11 +1020,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       toolId: item.toolId, operation: item.operation, status: item.status as "denied" | "skipped" | "degraded" | "blocked",
       reasonCode: item.reasonCode!, ...(item.serviceId ? { serviceId: item.serviceId } : {}) });
   };
-  const finalizeCompletedToolActionDisposition = async (message: RoleMessage) => {
+  const finalizeCompletedToolActionDisposition = async (message: RoleMessage, authenticatedSender?: PaneBinding) => {
     const terminalStatus = message.type === "task.status" && ["completed", "failed", "blocked", "inconclusive", "cancelled"].includes(String(record(message.payload).status));
     const resultMessage = ["implementation.submitted", "verification.result", "review.verdict", "verification.escalation"].includes(message.type);
     if ((!terminalStatus && !resultMessage) || !message.run_id || message.sender.role === "conversation") return;
-    const binding = await principal(AgentRoleSchema.parse(message.sender.role), textField(message.sender.pane_id));
+    // An acknowledged terminal result may already have released its pane; the sender authenticated before delivery
+    // remains valid for resource disposition only. Never look up a replacement occupant after the asynchronous ACK.
+    const binding = authenticatedSender ?? await principal(AgentRoleSchema.parse(message.sender.role), textField(message.sender.pane_id));
+    if (binding.role !== message.sender.role || binding.paneId !== message.sender.pane_id || binding.agentId !== message.sender.agent_id)
+      throw new Error("Terminal tool disposition sender identity mismatch");
     const state = await requireWorkspace().runtime.inspect();
     const completed = message.causation_id ? taskLogAssignmentContext(state, binding,
       { runId: message.run_id, assignmentMessageId: message.causation_id, correlationId: message.correlation_id }) : undefined;
@@ -995,7 +1064,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const policy = configuration.platform?.toolPolicy === undefined ? undefined : RepositoryToolPolicySchema.parse(configuration.platform.toolPolicy);
     const requirement = policy?.requirements.find(item => item.toolId === request.toolId && item.roles.includes(role) &&
       item.operations.includes(request.operation) && item.triggers.includes(trigger));
-    const grants = (configuration.platform?.toolGrants ?? []).map(item => ResolvedToolGrantSchema.parse(item));
+    const grants = platformSession.toolActionScope(binding).grants.map(item => ResolvedToolGrantSchema.parse(item));
     const matches = grants.filter(item => item.role === role && item.toolId === request.toolId && item.operations.includes(request.operation));
     const grant = matches.length === 1 ? matches[0] : undefined;
     if (!policy || !requirement || !grant || grant.policyDigest !== policy.digest || !grant.triggers.includes(trigger)) {
@@ -1033,7 +1102,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
             previous.toolId !== grant.toolId || previous.serviceId !== grant.serviceId || previous.operation !== request.operation)
           throw new Error("No matching unknown tool action exists for reconciliation");
       } else await toolUsage.begin(base);
-      const gatewayTaskId = assignment?.taskId && role === "developer" ? `${assignment.runId}-${assignment.taskId}` : undefined;
+      const scope = platformSession.toolActionScope(binding);
+      const gatewayTaskId = scope.taskId;
+      if (role === "developer" && (!assignment?.taskId || gatewayTaskId !== `${assignment.runId}-${assignment.taskId}`))
+        throw new Error("Developer tool action does not match its launch allocation");
       const normalizedInput = grant.toolId === "gitnexus" && request.operation === "query" &&
         typeof request.input === "object" && request.input !== null && !Array.isArray(request.input) &&
         typeof (request.input as Record<string, unknown>).query === "string" &&
@@ -1045,7 +1117,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         : request.input;
       const result = await platformSession.invokeTool(role, gatewayTaskId, grant.toolId, serviceId, request.operation,
         trigger, normalizedInput, invocationId, reconcile, undefined,
-        trigger === "browser_inspection" && assignment ? browserTransactionId(configuration.sessionId, role, assignment) : undefined);
+        trigger === "browser_inspection" && assignment ? browserTransactionId(configuration.sessionId, role, assignment) : undefined, binding);
       if (!result.ok) {
         const uncertain = result.error.code === "timeout" || result.error.code === "unknown_delivery" || result.error.code === "cancelled" ||
           ("retrySafety" in result.error && result.error.retrySafety === "observation_only");
@@ -1136,6 +1208,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
+    const providerForRole = (_role: AgentRole): AgentProviderId => AgentProviderIdSchema.parse(binding.provider);
     if (providerForRole(role) === "agy") {
       const operation = AgyMcpOperationSchema.parse(args.nativeAgyOperation);
       if (operation.nativeSessionId !== binding.session?.value || operation.nativeToolCall.name !== "call_mcp_tool" ||
@@ -1437,7 +1510,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (role === "conversation") throw new Error("Conversation asks the user directly; request_user_decision is for other roles");
       return host.runtime.requestUserDecision(binding, role, parseUserDecisionToolInput(parameters));
     }
-    if (name === "inspect_review") return verification.inspectReview(binding, parameters);
+    if (name === "inspect_review") return runnerBindings.run(binding, () => verification.inspectReview(binding, parameters));
     if (name === "request_test_integrity_exception") return verification.requestTestIntegrityException(binding, parameters);
     if (["propose_task_handover", "read_task_handover"].includes(name)) {
       if (role !== "developer") throw new Error("Task handover requires the assigned Developer");
@@ -1457,7 +1530,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return development.writeWorkspaceFile(binding, parameters);
     }
     if (name === "commit_changes") return development.commit(binding, parameters);
-    if (name === "check_work") return development.check(binding, parameters);
+    if (name === "check_work") return runnerBindings.run(binding, () => development.check(binding, parameters));
     if (name === "request_verification") {
       const current = record(await development.status(binding, parameters));
       return host.runtime.requestPhaseVerification(binding, textField(current.runId), textField(current.taskId), textField(parameters.phase), textField(current.head));
@@ -1482,7 +1555,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       try {
       let completed: Awaited<ReturnType<HostVerification["behavioralEvidence"]>>;
       try {
-        completed = await verification.behavioralEvidence(binding, parameters);
+        completed = await runnerBindings.run(binding, () => verification.behavioralEvidence(binding, parameters));
         if (record(completed.result.metadata?.conditionalTdd).sourceRevision !== record(source.payload).sourceRevision)
           throw new Error("Policy phase source changed after the request; reconcile before accepting evidence");
       } catch (error) {
@@ -1498,14 +1571,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     if (name === "inspect_alternative_verification") return verification.inspectAlternative(binding, parameters);
     if (name === "complete_review") {
-      const completed = await verification.completeReview(binding, parameters);
+      const completed = await runnerBindings.run(binding, () => verification.completeReview(binding, parameters));
       const state = record(await host.runtime.inspect());
       const out = (state.outbound as Record<string, unknown>[]).find(item => record(item.message).message_id === parameters.messageId);
       if (!out) throw new Error("Review causation unavailable");
       return nativeDeliver(envelope(RoleMessageSchema.parse(out.message), "review.verdict", completed.result, [completed.artifact]), `review:${textField(parameters.reviewId)}`);
     }
     if (name === "record_alternative_verification") {
-      const completed = await verification.alternativeEvidence(binding, parameters);
+      const completed = await runnerBindings.run(binding, () => verification.alternativeEvidence(binding, parameters));
       return nativeDeliver(envelope(RoleMessageSchema.parse(completed.assignment), "verification.result", completed.result, completed.result.evidenceArtifacts), `alternative:${textField(parameters.observationId)}`);
     }
     if (name === "propose_workflow") {
@@ -1576,20 +1649,21 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           try {
             binding = await principal(role, input.paneId);
           } catch (error) {
-            if (role !== "developer" || !platformSession?.hasActiveDeveloperLaunch(input.launchId)) throw error;
+            if (!platformSession?.activeLaunchBelongsTo(input.launchId, role)) throw error;
           }
         }
         const observed = binding ? undefined : await observeAgent(input.paneId);
         if (binding && (!binding.session || observed === undefined && currentManifest === undefined)) throw new Error("Provider tools/list cannot be bound to a current role session");
-        if (observed && (!observed.nativeSession || !platformRoles.some(option => option.role === role &&
-            (observed.nativeSession!.source === option.provider || observed.nativeSession!.source === (option.provider === "agy" ? "herdr:antigravity_cli" : `herdr:${option.provider}`)))))
+        const observedProvider = platformSession?.providerOfActiveLaunch(role, input.launchId) ?? providerForRole(role);
+        if (observed && (!observed.nativeSession ||
+            (observed.nativeSession.source !== observedProvider && observed.nativeSession.source !== (observedProvider === "agy" ? "herdr:antigravity_cli" : `herdr:${observedProvider}`))))
           throw new Error("Provider tools/list has no compatible observed Herdr native session");
         const names = availableTools(role, providerForRole(role)).map(tool => tool.name).sort();
         if (digest([...input.toolNames].sort()) !== digest(names)) throw new Error("Provider tools/list does not match the authenticated Bflow role surface");
-        const expectedLaunchId = platformSession?.launchIdOf(role);
-        const validLaunchId = role === "developer" && platformSession !== undefined && expectedLaunchId === undefined
-          ? platformSession.hasActiveDeveloperLaunch(input.launchId)
-          : expectedLaunchId === input.launchId;
+        const expectedLaunchId = binding ? platformSession?.bindingLaunchId(binding) : platformSession?.launchIdOf(role);
+        // A dynamic launch is only valid for the governance role it was prepared for; it never satisfies another role.
+        const validLaunchId = platformSession?.activeLaunchBelongsTo(input.launchId, role) === true ||
+          (expectedLaunchId === input.launchId && !(role === "developer" && platformSession !== undefined && expectedLaunchId === undefined));
         if (!validLaunchId) throw new Error("Provider tools/list belongs to another prepared launch");
         const path = providerToolsListPath(role, input.paneId);
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -1601,8 +1675,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (method === "agy_gateway_session") {
         const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), anchor: AgyNativeAnchorSchema,
           nativeStepIndex: z.number().int().nonnegative(), nativeToolCall: AgyNativeToolCallSchema }).strict().parse(params);
-        if (providerForRole(role) !== "agy") throw new Error("Agy Gateway session is unavailable for this role");
         const binding = await principal(role, input.paneId);
+        if (binding.provider !== "agy") throw new Error("Agy Gateway session is unavailable for this role");
         if (!binding.session || binding.session.value !== input.nativeSessionId)
           throw new Error("Agy Gateway native session or launch mismatch");
         await readAgyTurn(binding, input.launchId);
@@ -1612,11 +1686,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (method === "agy_native_turn") {
         const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), transcriptPath: z.string().min(1), anchor: AgyNativeAnchorSchema }).strict().parse(params);
-        if (providerForRole(role) !== "agy" || role === "conversation") throw new Error("Agy native admission requires a specialist");
+        if (role === "conversation") throw new Error("Agy native admission requires a specialist");
         // The private startup prompt establishes SessionStart before activation; no assignment is admitted here.
         if (!workspace) return { recorded: false, reason: "startup" };
         const binding = await principal(role, input.paneId);
-        if (binding.session?.value !== input.nativeSessionId) throw new Error("Agy admission native session mismatch");
+        if (binding.provider !== "agy" || binding.session?.value !== input.nativeSessionId) throw new Error("Agy admission native session mismatch");
         const current = await readAgyTurn(binding, input.launchId, input.transcriptPath);
         if (digest(input.anchor) !== digest(current.anchor)) throw new Error("Agy admission hook belongs to another transcript turn");
         const message = RoleMessageSchema.parse(JSON.parse(normalizeProviderPrompt(current.prompt.trim())));
@@ -1635,7 +1709,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const input = record(params), hook = record(input.hook), binding = await principal(role, textField(input.paneId));
         if (hook.hook_event_name !== "PreToolUse" || !binding.session || hook.session_id !== binding.session.value)
           throw new Error("Tool guard native session mismatch");
-        if (providerForRole(role) === "agy") {
+        if (binding.provider === "agy") {
           const nativeCall = AgyNativeToolCallSchema.parse(hook.native_tool_call), nativeStep = z.number().int().nonnegative().parse(hook.native_step_index);
           if (nativeCall.name !== "call_mcp_tool" || nativeCall.args.ServerName !== "bflow" ||
               hook.tool_name !== `mcp__bflow__${textField(nativeCall.args.ToolName)}` || digest(nativeCall.args.Arguments ?? {}) !== digest(hook.tool_input))
@@ -1689,9 +1763,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (method === "agy_mcp_operation") {
         const input = z.object({ paneId: z.string().min(1), launchId: z.string().min(1), name: z.string().min(1), arguments: z.record(JsonValueSchema) }).strict().parse(params);
-        if (providerForRole(role) !== "agy" || !availableTools(role, "agy").some(tool => tool.name === input.name))
-          throw new Error("No native Agy MCP operation for this role");
         const binding = await principal(role, input.paneId);
+        if (binding.provider !== "agy" || !availableTools(role, "agy").some(tool => tool.name === input.name))
+          throw new Error("No native Agy MCP operation for this role");
         const current = await readAgyTurn(binding, input.launchId, undefined, undefined, { name: input.name, arguments: input.arguments });
         if (!current.pendingTool) throw new Error("Agy MCP call has no pending native operation");
         await assertAgyTurn(binding, current.anchor, current.pendingTool, input.name);
@@ -1725,9 +1799,21 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
       }
       if (method === "native_session") {
-        const input = record(params); nativeSessions.set(textField(input.paneId), {role, sessionId:textField(input.sessionId)});
+        const input = record(params), root = typeof input.launchId === "string" ? platformSession?.nativeTranscriptRoot(input.launchId) : undefined;
+        if (root && !platformSession?.providerOfActiveLaunch(role, textField(input.launchId))) throw new Error("Foreign provider launch transcript registration");
+        nativeSessions.set(textField(input.paneId), {role, sessionId:textField(input.sessionId),
+          ...(root && typeof input.transcriptPath === "string" ? { transcriptPath: input.transcriptPath, transcriptRoot: root } : {}) });
         await persistNativeSessions();
         return {registered:true};
+      }
+      if (method === "provider_failure") {
+        if (!workspace || quiesced || !platformRoles.some(option => option.role === role && option.failover)) return { recorded: false };
+        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), event: JsonValueSchema }).strict().parse(params);
+        const binding = await principal(role, input.paneId);
+        if (binding.provider !== "claude" || binding.session?.value !== input.nativeSessionId || binding.metadata?.launchId !== input.launchId)
+          throw new Error("Provider failure belongs to a foreign native session or launch");
+        await receipts.recordProviderErrorSignal(binding, input.event, new Date().toISOString());
+        return { recorded: true };
       }
       if (method === "transport_prompt") {
         const input = record(params), message = RoleMessageSchema.parse(input.message);
@@ -1751,7 +1837,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (!workspace) return { recorded: false };
         const input = record(params), binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider Stop native session mismatch");
-        if (providerForRole(role) === "agy") {
+        if (binding.provider === "agy") {
           // Agy executionNum resets between turns. The latest transcript anchor
           // cannot prove which invocation produced a delayed/replayed Stop.
           return { recorded: false, reason: "native_stop_epoch_unproven" };
@@ -2106,9 +2192,49 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       reconciledStopGeneration = generation;
     })().catch(error => { inboundError = redactString(String(error)); process.stderr.write(`Bflow inbound: ${inboundError}\n`); }).finally(() => { pumping = false; });
   }, 100);
+  const pumpProviderFailures = async () => {
+    if (!workspace || !platformRoles.some(option => option.failover)) return;
+    const snapshot = record(await workspace.runtime.inspect());
+    const outbound = (snapshot.outbound as unknown[]).map(record);
+    const active = outbound.filter(out => out.status === "accepted" && record(out.message).type === "task.assignment" && out.handle);
+    for (const out of active) {
+      const handle = AgentExecutionHandleSchema.parse(out.handle), target = handle.target;
+      const registration = target.paneId ? nativeSessions.get(target.paneId) : undefined;
+      const bindingValue = unwrap(await workspace.runtime.ports.panes.getRoleBinding(textField(out.selector)));
+      if (!bindingValue || bindingValue.provider !== "codex" || !platformRoles.some(option => option.role === bindingValue.role && option.failover) ||
+          !registration?.transcriptRoot || !registration.transcriptPath || registration.role !== bindingValue.role || registration.sessionId !== target.session?.value) continue;
+      const observed = await readCodexFailure({ root: registration.transcriptRoot, path: registration.transcriptPath,
+        nativeSessionId: registration.sessionId, acceptedAt: handle.acceptedAt });
+      if (!observed) continue;
+      const binding = await principal(bindingValue.role, bindingValue.paneId);
+      const failure = classifyProviderFailure(observed.event, { provider: "codex", executionId: handle.executionId, observedAt: observed.observedAt });
+      await receipts.recordProviderFailure(binding, failure);
+    }
+    for (const signal of await receipts.pendingProviderErrorSignals()) {
+      const out = active.find(out => {
+        const handle = AgentExecutionHandleSchema.parse(out.handle);
+        return handle.target.agentId === signal.binding.agentId && handle.target.paneId === signal.binding.paneId &&
+          digest(handle.target.session) === digest(signal.binding.session) && Date.parse(signal.observedAt) >= Date.parse(handle.acceptedAt);
+      });
+      if (!out) continue; // An unacknowledged original dispatch must reconcile; never attach its error to another execution.
+      const handle = AgentExecutionHandleSchema.parse(out.handle);
+      await receipts.recordProviderFailure(signal.binding, classifyProviderFailure(signal.event,
+        { provider: signal.binding.provider, executionId: handle.executionId, observedAt: signal.observedAt }));
+      await receipts.completeProviderErrorSignal(signal.id);
+    }
+    for (const pending of await receipts.pendingProviderFailures()) {
+      try {
+        await workspace.runtime.observeProviderFailure(pending.binding, pending.failure);
+        await receipts.completeProviderFailure(pending.id);
+      } catch (error) {
+        // Keep unadmitted observations durable. Cancellation and stale bindings can be diagnosed without dispatching anything.
+        inboundError = redactString(String(error));
+      }
+    }
+  };
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
-    const task = workspace.runtime.tick(); scheduler = task;
+    const task = (async () => { await pumpProviderFailures(); return workspace!.runtime.tick(); })(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
   schedulerTimerAlive = true;
@@ -2354,7 +2480,10 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
       context:{type:"string",maxLength:4000},expiresInMinutes:{type:"integer",minimum:1,maximum:1440}},required:["runId","taskId","question"]},
     inspect:{properties:{runId:string,view:{type:"string",enum:["full","summary","status","tasks","blockers"]},taskId:string,cursor:{type:"string",minLength:1,maxLength:128}},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
     assess:{properties:{specification:assessmentSpecificationToolSchema},required:["specification"]},
-    request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array},required:["runId","role","objective","requiredCapabilities"]},
+    read_role_profiles:{properties:{},required:[]},
+    request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array,roleProfile:roleProfilePinToolSchema},required:["runId","role","objective","requiredCapabilities"]},
+    propose_prototype:{properties:{runId:string,scope:object},required:["runId","scope"]},
+    submit_prototype:{properties:{runId:string,submission:object},required:["runId","submission"]},
     propose_workflow:{properties:{runId:string,specification:specificationToolSchema,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},
     reconcile_delivery:{properties:{messageId:string},required:["messageId"]}, authorize_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
     accept_conflict_resolution:{properties:{runId:string,taskKey:string,resolutionCommitHash:string},required:["runId","taskKey","resolutionCommitHash"]},
@@ -2732,6 +2861,13 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   for await (const chunk of process.stdin) { size += Buffer.byteLength(chunk); if (size > 1024 * 1024) throw new Error("Oversized provider hook"); chunks.push(Buffer.from(chunk)); }
   const rawInput = Buffer.concat(chunks).toString("utf8");
   const hook = configuration.provider === "agy" ? parseAgyHookJson(rawInput, event) : parseHookJson(rawInput, event);
+  if (event === "StopFailure") {
+    if (configuration.provider !== "claude" || hook.agent_id) return;
+    await callHost(configuration.socketPath, configuration.token, "provider_failure", { paneId: textField(process.env.HERDR_PANE_ID),
+      nativeSessionId: textField(hook.session_id), launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]),
+      event: { hook_event_name: "StopFailure", error: textField(hook.error) } });
+    process.stdout.write("{}\n"); return;
+  }
   if (configuration.provider === "agy" && event === "Stop" && configuration.role !== "conversation") {
     // Permit the physical turn to end without inventing Runtime settlement or
     // an unbounded continuation. Keep its admission and business work pending.
@@ -2814,7 +2950,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     const reachability = plan === undefined ? undefined : await probeAllGateways(plan, process.env, (url, init) => fetch(url, init));
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
       ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
-    if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session});
+    if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session,
+      ...(process.env[BFLOW_LAUNCH_ID_ENV] ? { launchId: process.env[BFLOW_LAUNCH_ID_ENV] } : {}),
+      ...(typeof hook.transcript_path === "string" ? { transcriptPath: hook.transcript_path } : {}) });
     if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
     const stopBlockDecision = configuration.provider === "agy" ? "continue" : "block";
     if (event === "Stop" && configuration.role === "conversation") {

@@ -1,4 +1,4 @@
-import { AgentRoleProfileSchema, JsonValueSchema, type AgentRole, type JsonValue } from "@bflow/contracts";
+import { AgentRoleProfileSchema, JsonValueSchema, RoleProfilePinSchema, type AgentRole, type JsonValue } from "@bflow/contracts";
 import { z } from "zod";
 import { record, strings, textField } from "./journal.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
@@ -17,10 +17,13 @@ export const COORDINATOR_ROLE_PROFILE = AgentRoleProfileSchema.parse({
   requiresDedicatedPane: true, requiresIndependentVerification: true
 });
 export const COORDINATOR_TOOLS = [
+  { name: "read_role_profiles", description: "Read available exact specialist profile pins, base governance role and restrictions. Select roleProfile in task definitions or request_specialist; profile identity grants no authority." },
   { name: "inspect", description: "Read durable SDLC state, inbox, assignments, evidence and uncertain handoffs." },
   { name: "report_progress", description: "Send progress or clarification questions to Conversation through Herdr." },
   { name: "assess", description: "Evaluate the actual P15 complexity policy and fastPath preview. Requires Specification v2 with explicit metadata.sdd.assessment; read planning_reference(section=specification) for the P15 fields before calling. Never infer missing impact flags. availableRoles lists only specialist roles with a pane bound in this session, with their capabilities. This read-only assessment does not approve a specification or propose/dispatch a workflow." },
   { name: "request_specialist", description: "Queue a capability-constrained specialist delegation through Herdr. A role with no bound pane falls back security->reviewer and tester->qa when that pane has every required capability (the objective and result say so). Otherwise the call fails immediately with the roles that do have panes; nothing is dispatched and the run is unchanged, so choose another role in this turn. A bound pane missing a capability blocks the run for capability repair." },
+  { name: "propose_prototype", description: "Optional, before propose_workflow: open or revise a prototype branch with a lightweight scope (purpose, flows, allowedPaths under prototype/, artifacts, prototype-only criteria, disposition throwaway|evolvable, environment mock, dataPolicy synthetic|anonymized_fixture, maxRevisions). A revision supersedes earlier prototype approvals; it never changes accepted requirements." },
+  { name: "submit_prototype", description: "Store a prototype artifact version (files with logical prototype/ paths, mediaType, content and demonstrated flowIds) in ArtifactStore and request a separate human prototype approval through Conversation. Never writes the repository, deploys or uses real data; prototype approval is not design approval or delivery acceptance." },
   { name: "propose_workflow", description: "Submit draft Specification and implementation DAG; Runtime enforces SDD, approvals and TDD policy." },
   { name: "tick", description: "Schedule a background Runtime step and return immediately; yield the Coordinator turn so Herdr replies can arrive." },
   { name: "tick_status", description: "Read host scheduler status without waiting for another agent's turn." },
@@ -55,6 +58,7 @@ export class CoordinatorTools {
     if (principal.role !== "coordinator" && !(principal.role === "developer" && name === "authorize_implementation"))
       throw new Error("Only Coordinator may invoke orchestration tools");
     switch (name) {
+      case "read_role_profiles": return this.runtime.readRoleProfiles();
       case "inspect": {
         const query = InspectInputSchema.parse(args);
         const raw = await this.runtime.inspect(query.runId);
@@ -69,7 +73,10 @@ export class CoordinatorTools {
         try { return await this.runtime.assess(specification); }
         catch (error) { return assessmentErrorAt(error, ["specification"]); }
       }
-      case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId), textField(args.role), textField(args.objective), strings(args.requiredCapabilities));
+      case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId), textField(args.role), textField(args.objective), strings(args.requiredCapabilities),
+        args.roleProfile === undefined ? undefined : RoleProfilePinSchema.parse(args.roleProfile));
+      case "propose_prototype": return this.runtime.proposePrototype(textField(args.runId), args.scope);
+      case "submit_prototype": return this.runtime.submitPrototype(textField(args.runId), args.submission);
       case "propose_workflow": return this.runtime.proposeWorkflow(textField(args.runId), args.specification, args.definition,
         args.maxIterations === undefined ? 3 : Number(args.maxIterations));
       case "tick": return this.scheduleTick();

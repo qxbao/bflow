@@ -1,4 +1,6 @@
 import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-binding.js";
+import { ExecutorLineageSchema, RoleProfilePinSchema, sameRoleProfilePin } from "@bflow/contracts";
+import { assertProfileBinding, assertProfileSnapshotCurrent, assertIndependentProfileExecutor, selectRoleProfile } from "./profile-admission.js";
 import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentReconciliationResultSchema,
   AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, VerificationResultSchema, WorkflowRunSnapshotSchema,
@@ -71,6 +73,7 @@ export class HerdrOutbox {
     const existing = this.state.outbound.find(item => item.message.message_id === parsed.message_id || item.message.idempotency_key === parsed.idempotency_key);
     if (existing && existing.parentAssignmentId !== candidate.parentAssignmentId) throw new Error("Conflicting task notice parent");
     const out = this.enqueue(parsed, candidate.selector, candidate.taskId, candidate.attemptId);
+    if (parent.roleProfile) out.roleProfile = parent.roleProfile;
     out.parentAssignmentId = parent.message.message_id; out.lease = parent.lease!;
     return out;
   }
@@ -226,6 +229,8 @@ export class HerdrOutbox {
       delete out.leaseRelease;
     }
     if (!out.phaseFailure && !out.error?.startsWith("policy_phase_failed:")) delete out.error;
+    // Lease release is transport capacity only. A profiled specialist's native context is
+    // retained until Runtime has applied its correlated result and drained native deliveries.
     out.status = "released";
     await this.save();
     return disposition;
@@ -265,6 +270,12 @@ export class HerdrOutbox {
     if (out.error?.includes(" not ready since ")) delete out.error;
   }
   private async step(out: Outbound, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
+    const failoverRun = this.state.runs.find(run => run.runId === out.message.run_id);
+    const held = failoverRun?.tasks.flatMap(task => task.failovers ?? []).find(entry => !["dispatched", "cancelled"].includes(entry.phase));
+    if (held && out.message.recipient.role !== "conversation" && ["queued", "accepted"].includes(out.status) &&
+        !(held.phase === "allocated" && held.destinationMessageId === out.message.message_id)) {
+      out.error = "Provider continuation holds new work until reconciliation and binding settlement"; return;
+    }
     if (out.phaseRetirement || out.reviewReplacement) return; // Physical tombstone: neither resend, renew nor manufacture an expired-lease release.
     if (out.leaseRelease) { await this.release(out); return; }
     // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
@@ -329,6 +340,13 @@ export class HerdrOutbox {
     const bindingValue = unwrap(await this.ports.panes.getRoleBinding(out.selector));
     if (!bindingValue) { out.error = "Recipient pane unavailable"; return; }
     const pane = PaneBindingSchema.parse(bindingValue);
+    const profileRun = this.state.runs.find(run => run.runId === out.message.run_id);
+    const payloadPin = out.message.type === "task.assignment" ? profileRun?.definition?.tasks.find(task => task.id === out.taskId)?.roleProfile ??
+      (profileRun?.conflictResolution?.attempts.some(attempt => attempt.messageId === out.message.message_id) ? profileRun.conflictResolution.roleProfile : undefined)
+      : out.message.type === "delegation.request" ? record(out.message.payload).roleProfile : out.roleProfile;
+    if (!sameRoleProfilePin(payloadPin === undefined ? undefined : RoleProfilePinSchema.parse(payloadPin), out.roleProfile)) throw new Error("Durable dispatch profile pin was removed or changed");
+    const pinnedProfile = selectRoleProfile(profileRun?.roleProfiles, pane.role, out.roleProfile, out.capabilities);
+    assertProfileBinding(pinnedProfile, pane);
     // A platform launch's empty Gateway grant is not native readiness. Do not create an
     // immutable submission target until its real provider session has been persisted.
     if (pane.metadata?.launchId !== undefined && !pane.session) { this.markNotReady(out); return; }
@@ -384,12 +402,45 @@ export class HerdrOutbox {
     // Fail closed before Registry lease acquisition, dispatch intent, or transport side effects.
     const planRun = this.state.runs.find(run => run.runId === out.message.run_id);
     const guardWorkDispatch = async () => {
+      const continuation = planRun?.tasks.flatMap(task => task.failovers ?? []).find(entry => entry.destinationMessageId === out.message.message_id);
+      if (continuation) {
+        if (planRun!.cancelled || continuation.phase !== "allocated" || !continuation.stopProof || !this.ports.providerFailover ||
+            planRun!.nativeDeliveries?.length || planRun!.approval && planRun!.decision?.approvalId !== planRun!.approval.approvalId ||
+            Object.values(planRun!.userDecisions ?? {}).some(item => item.status === "pending") ||
+            this.state.outbound.some(item => item !== out && item.message.run_id === planRun!.runId && !isConversationDelivery(item) && ["sending", "unknown_delivery"].includes(item.status)))
+          throw new Error("Provider continuation dispatch is held by lifecycle or delivery state");
+        await this.ports.providerFailover.assertMutationSafe(continuation.sourceBinding, planRun!.runId, out.taskId);
+      }
       if (["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type)) {
         await assertRunExecutionPlan(planRun, this.ports.readExecutionResolution);
         await this.ports.revalidateRoleSkills?.(pane);
+        if (pinnedProfile) {
+          assertProfileSnapshotCurrent(pinnedProfile, this.ports.roleProfiles);
+          if (!this.ports.preflightRoleProfile) throw new Error("Profile dispatch preflight is unsupported");
+          await this.ports.preflightRoleProfile(pinnedProfile, pane.role, out.capabilities);
+          assertProfileBinding(pinnedProfile, PaneBindingSchema.parse(unwrap(await this.ports.panes.getRoleBinding(out.selector))));
+          await assertRunExecutionPlan(planRun, this.ports.readExecutionResolution);
+          assertProfileSnapshotCurrent(pinnedProfile, this.ports.roleProfiles);
+        }
       }
     };
     await guardWorkDispatch();
+    if (["reviewer", "qa", "tester"].includes(pane.role)) {
+      const implementationTargets = this.state.outbound.filter(item => item.message.run_id === out.message.run_id && item.message.type === "task.assignment" && item.handle)
+        .map(item => ({ ...item.handle!.target, executorLineage: item.executorLineage }));
+      assertIndependentProfileExecutor(pane, implementationTargets);
+    }
+    if (pinnedProfile) {
+      if (!this.ports.attestExecutorLineage) throw new Error("Profiled launch requires authenticated executor lineage");
+      const lineage = ExecutorLineageSchema.parse(await this.ports.attestExecutorLineage(pane,
+        out.message.type === "task.assignment" ? "implementation" : ["reviewer", "qa", "tester"].includes(pane.role) ? "verification" : "specialist", out.message.message_id));
+      if (!pane.session || lineage.bindingId !== pane.bindingId || lineage.nativeSessionId !== pane.session.value || !lineage.assignmentIds.includes(out.message.message_id))
+        throw new Error("Profile executor lineage does not match the authenticated pane/native session");
+      if (out.executorLineage && out.executorLineage.executorId !== lineage.executorId) throw new Error("Pinned executor lineage changed");
+      if (lineage.purpose === "verification") assertIndependentProfileExecutor({ ...pane, executorLineage: lineage }, this.state.outbound.filter(item =>
+        item.message.run_id === out.message.run_id && item.message.type === "task.assignment" && item.handle).map(item => ({ ...item.handle!.target, executorLineage: item.executorLineage })));
+      out.executorLineage = lineage; await this.save();
+    }
     await this.ports.preflightRoleCapabilities?.(pane, out.capabilities);
     await guardWorkDispatch();
     if (out.parentAssignmentId) {
@@ -429,6 +480,7 @@ export class HerdrOutbox {
       const run = this.state.runs.find(r => r.runId === wire.run_id);
       if (!run) throw new Error("Assignment without delegation");
       out.assignment = AgentAssignmentSchema.parse({ schemaVersion: 2, assignmentId: `assignment-${digest(wire.message_id)}`,
+        ...(pinnedProfile ? { roleProfile: pinnedProfile.pin } : {}),
         runId: run.runId, taskId: out.taskId, delegationId: run.delegation.delegationId, role: pane.role,
         agentId: pane.agentId, paneId: pane.paneId, leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken,
         requiredCapabilities: out.capabilities, assignedBy: "coordinator", assignedAt: out.message.occurred_at ?? this.now(),

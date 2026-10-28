@@ -3,7 +3,7 @@ import { lstat, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema,
+  AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema, ROLE_PROFILE_FEATURE,
   canonicalReceiptJson,
   type AgentEnvironment,
   type AgentHealthCheck,
@@ -16,9 +16,11 @@ import {
   type MCPClientRegistration,
   type MCPServiceObservation,
   type OperationOptions,
-  type OperationResult
+  type OperationResult,
+  type RoleProfilePin
 } from "@bflow/contracts";
-import { computeFileSha256, providerSessionEnvironment, resolveAndVerifyExecutable, type LiveReadinessObservation } from "@bflow/agent-providers";
+import { computeFileSha256, defaultRolePrompt, providerSessionEnvironment, resolveAndVerifyExecutable, type LiveReadinessObservation } from "@bflow/agent-providers";
+import { appendRoleProfileInstructions, assertRoleProfilePin, loadRoleProfileSnapshot, persistRoleProfileSnapshot, resolveRoleProfile } from "./role-profiles.js";
 import {
   preparePrivateCodexHome,
   type CodexInstructionHomeMode,
@@ -71,7 +73,7 @@ export interface DefaultPlatformReadinessServiceDeps {
   readonly rolePrompt?: ((role: AgentRole) => string | undefined) | undefined;
   readonly nativeSessionHookCommand?: ((role: AgentRole, taskId?: string) => string | undefined) | undefined;
   /** Trusted host MCP servers and hooks for a role launch (provider-neutral; adapters render them). */
-  readonly hostLaunch?: ((role: AgentRole, taskId?: string) => HostLaunchExtras | undefined) | undefined;
+  readonly hostLaunch?: ((role: AgentRole, taskId?: string, provider?: AgentProviderId) => HostLaunchExtras | undefined) | undefined;
   readonly now?: (() => Date) | undefined;
 }
 
@@ -90,6 +92,7 @@ interface LaunchMaterial {
 }
 
 interface LaunchRecord {
+  readonly roleProfile?: RoleProfilePin;
   readonly launchId: string;
   readonly role: AgentRole;
   readonly provider: AgentProviderId;
@@ -161,6 +164,7 @@ function summaryOf(
 ): RolePreflightSummary {
   return {
     role: requirement.role,
+    ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin } : {}),
     provider: requirement.provider,
     required: requirement.required,
     status,
@@ -411,7 +415,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     }
     const profile = await this.revalidateProfile(material.requirement, material.isolatorProfile, options);
     if (!profile.ok) return profile;
-    const skills = await this.deps.skills.load(material.identity, material.requirement.role, material.requirement.taskId);
+    const snapshot = await this.validateRoleProfileMaterial(material);
+    if (!snapshot.ok) return snapshot;
+    const skills = await this.deps.skills.load(
+      material.identity,
+      material.requirement.role,
+      material.requirement.taskId,
+      material.requirement.executionKey,
+      material.requirement.roleProfile?.pin,
+      material.requirement.assignmentId
+    );
     if (!skills.ok) return skills;
     if (!skills.value || canonicalReceiptJson(skills.value.manifest) !== canonicalReceiptJson(material.context.skillManifest))
       return fail("conflict", "Prepared launch pinned skills changed or are missing");
@@ -438,6 +451,9 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     if (record.state === "degraded") return degradedFailure();
     const material = record.material;
     if (!material) return fail("conflict", "launch was released");
+    await this.deps.beforeSideEffect?.();
+    const snapshot = await this.validateRoleProfileMaterial(material);
+    if (!snapshot.ok) return snapshot;
     const profileCheck = await this.revalidateProfile(material.requirement, material.isolatorProfile, options);
     if (!profileCheck.ok) {
       record.state = "failed";
@@ -495,6 +511,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       return launched;
     }
     return ok(launched.value);
+  }
+
+  async preflightDeveloper(identity: PlatformSessionIdentity, requirement: RolePlatformRequirement, options?: OperationOptions): Promise<OperationResult<AgentHealthResult>> {
+    if (requirement.role !== "developer") return fail("validation", "Developer preflight requires the developer role");
+    const checked = await this.preflightRole(identity, requirement, options);
+    if (checked.gatewayTouched) {
+      const revoked = await this.revokeRoleGateway(identity, requirement, options);
+      if (!revoked.ok) return failWith(revoked.error);
+    }
+    return checked.ready ? ok(checked.preflight) : failWith(checked.error);
   }
 
   async releaseLaunch(launchId: string, options?: OperationOptions): Promise<OperationResult<void>> {
@@ -642,6 +668,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       launches: [...this.launches.values()].map(record => ({
         launchId: record.launchId,
         role: record.role,
+        ...(record.roleProfile ? { roleProfile: record.roleProfile } : {}),
         provider: record.provider,
         state: record.state,
         ...(record.taskId !== undefined ? { taskId: record.taskId } : {}),
@@ -724,7 +751,6 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     requirement: RolePlatformRequirement,
     options?: OperationOptions
   ): Promise<RoleEnvironmentReady | RoleBlocked> {
-    const environmentId = this.deps.environments.environmentId(identity, requirement);
     let gatewayTouched = false;
     const blocked = (error: ContractError): RoleBlocked => ({
       ready: false,
@@ -734,6 +760,15 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       error,
       summary: summaryOf(requirement, statusOf(error), checksOf(error), error.message)
     });
+
+    try { if (requirement.roleProfile) requirement = resolveRoleProfile(requirement.roleProfile, structuredClone(requirement)); }
+    catch { return blocked({ code: "validation", retryable: false, message: "Role profile policy is incompatible or unsupported", details: { status: "unsupported" } }); }
+    const environmentId = this.deps.environments.environmentId(identity, requirement);
+    if (requirement.roleProfile) {
+      await this.deps.beforeSideEffect?.();
+      try { await persistRoleProfileSnapshot(identity, requirement.roleProfile); }
+      catch { return blocked({ code: "conflict", retryable: true, message: "Role profile snapshot conflicts or is corrupted" }); }
+    }
 
     const toolPolicy = await checkToolPolicy(identity, requirement);
     if (toolPolicy.error) return blocked(toolPolicy.error);
@@ -929,9 +964,12 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         });
     if (!environment.ok) return blocked(environment.error);
 
-    const rolePrompt = this.deps.rolePrompt?.(requirement.role);
+    const originalPrompt = this.deps.rolePrompt?.(requirement.role);
+    const rolePrompt = requirement.roleProfile
+      ? appendRoleProfileInstructions(originalPrompt ?? defaultRolePrompt(requirement.role), requirement.roleProfile)
+      : originalPrompt;
     const hookCommand = this.deps.nativeSessionHookCommand?.(requirement.role, requirement.taskId);
-    const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId);
+    const extras = this.deps.hostLaunch?.(requirement.role, requirement.taskId, requirement.provider);
     const tokenNames = Object.fromEntries(gateway.registrations.map(registration =>
       [registration.registrationId, tokenEnvironmentName(registration.registrationId)]));
     const profileLaunchEnvironment = isolatorProfile === undefined
@@ -1017,11 +1055,19 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     const profileCheck = await this.revalidateProfile(requirement, attempt.isolatorProfile, options);
     if (!profileCheck.ok) return profileCheck;
     await this.deps.beforeSideEffect?.();
+    if (requirement.roleProfile) {
+      try {
+        const stored = await loadRoleProfileSnapshot(identity, requirement.roleProfile.pin);
+        if (canonicalReceiptJson(stored) !== canonicalReceiptJson(requirement.roleProfile)) throw new Error("snapshot drift");
+        assertRoleProfilePin(requirement.roleProfile.pin, attempt.environment.roleProfile);
+      } catch { return fail("conflict", "Role profile snapshot missing, corrupted or mismatched before launch"); }
+    }
     const profile = await this.deps.providers.prepareLaunch(attempt.environment, attempt.context, identity.generation, options);
     if (!profile.ok) return failWith(profile.error);
 
     const prepared: PreparedRoleLaunch = {
       role: requirement.role,
+      ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin } : {}),
       provider: requirement.provider,
       required: requirement.required,
       ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
@@ -1036,12 +1082,15 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
           ...(attempt.requirement.toolGrants === undefined ? attempt.gateway.tokenEnvironment : {}),
           ...providerSessionEnvironment(requirement.provider) },
         launchId: profile.value.launchId,
-        launchFingerprint: profile.value.launchFingerprint
+        launchFingerprint: profile.value.launchFingerprint,
+        ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin, features: [ROLE_PROFILE_FEATURE],
+          promptSource: join(attempt.environment.stateDirectory, `${requirement.role}.system-prompt.txt`) } : {})
       }
     };
     const record: LaunchRecord = {
       launchId: profile.value.launchId,
       role: requirement.role,
+      ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin } : {}),
       provider: requirement.provider,
       ...(requirement.taskId !== undefined ? { taskId: requirement.taskId } : {}),
       state: "intent",
@@ -1058,6 +1107,21 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     };
     this.launches.set(record.launchId, record);
     return ok(prepared);
+  }
+
+  private async validateRoleProfileMaterial(material: LaunchMaterial): Promise<OperationResult<void>> {
+    const snapshot = material.requirement.roleProfile;
+    try {
+      assertRoleProfilePin(snapshot?.pin, material.environment.roleProfile);
+      assertRoleProfilePin(snapshot?.pin, material.profile.environment.roleProfile);
+      assertRoleProfilePin(snapshot?.pin, material.prepared.launch.roleProfile);
+      if (snapshot) {
+        resolveRoleProfile(snapshot, material.requirement);
+        const stored = await loadRoleProfileSnapshot(material.identity, snapshot.pin);
+        if (canonicalReceiptJson(stored) !== canonicalReceiptJson(snapshot)) throw new Error("snapshot mismatch");
+      }
+      return ok(undefined);
+    } catch { return fail("conflict", "Role profile snapshot missing, corrupted or mismatched"); }
   }
 
   private async revokeRoleGateway(

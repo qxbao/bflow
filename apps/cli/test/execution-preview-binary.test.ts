@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdtemp, rm, writeFile, readdir} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile, readdir, realpath} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {initializeEnvironmentConfig,readEnvironmentConfig} from '../src/environment-config.js';
@@ -12,7 +12,7 @@ import {runHighLevelCli} from '../src/high-level/index.js';
 import type {HighLevelServices} from '../src/high-level/services.js';
 
 let root:string;
-beforeEach(async()=>{root=await mkdtemp(join(tmpdir(),'preview-binary-'));execFileSync('git',['init','--quiet',root]);await initializeEnvironmentConfig({cwd:root});});
+beforeEach(async()=>{root=await realpath(await mkdtemp(join(tmpdir(),'preview-binary-')));execFileSync('git',['init','--quiet',root]);await initializeEnvironmentConfig({cwd:root});});
 afterEach(async()=>{await rm(root,{recursive:true,force:true});});
 function binary(args:string[]){return spawnSync(process.execPath,[resolve('apps/cli/dist/bin.js'),...args],{cwd:root,encoding:'utf8',env:{...process.env,HOME:join(root,'home'),BFLOW_HOME:join(root,'machine')}});}
 

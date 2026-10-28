@@ -307,3 +307,29 @@ describe("clarifications about a decided approval", () => {
     expect(persisted.ok && persisted.value?.pendingClarifications["corr-stale"]).toBeFalsy();
   });
 });
+
+describe("prototype review feedback kind", () => {
+  const PROTOTYPE = "prototype-5f0c9e1d2b3a4c5d6e7f8091a2b3c4d5";
+  const prototypeApproval = (): ApprovalRequest => ({
+    ...designApproval(PROTOTYPE), target: { type: "task", taskId: "prototype" }, requestedBy: "coordinator",
+    metadata: { kind: "prototype_review", approves: "prototype_only", provesAcceptanceCriteria: false }
+  } as ApprovalRequest);
+
+  it("marks an explicit requirement change on a prototype review as a specification revision proposal", () => {
+    expect(decided(`${PROTOTYPE}: đổi yêu cầu, cho phép trả góp 3 kỳ`, contextWith(prototypeApproval()))).toMatchObject({
+      approvalId: PROTOTYPE, decision: "changes_requested", feedbackKind: "specification_revision",
+      reason: expect.stringContaining("trả góp 3 kỳ") });
+    expect(decided(`${PROTOTYPE}: đề xuất sửa yêu cầu bỏ bước đăng nhập`, contextWith(prototypeApproval())))
+      .toMatchObject({ decision: "changes_requested", feedbackKind: "specification_revision" });
+  });
+
+  it("keeps ordinary prototype feedback as a prototype revision", () => {
+    const input = decided(`${PROTOTYPE}: cần sửa nút thanh toán to hơn`, contextWith(prototypeApproval()));
+    expect(input).toMatchObject({ approvalId: PROTOTYPE, decision: "changes_requested" });
+    expect(input).not.toHaveProperty("feedbackKind");
+  });
+
+  it("does not turn a requirement change phrase into a decision on other approvals", () => {
+    expect(decided(`${DESIGN}: đổi yêu cầu, cho phép trả góp 3 kỳ`, contextWith(designApproval()))).toBeUndefined();
+  });
+});
