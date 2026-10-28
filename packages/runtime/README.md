@@ -1,6 +1,6 @@
 # @bflow/runtime
 
-## Local web interaction port (W01–W02)
+## Local web interaction port (W01–W05)
 
 `openUserInteractionClient({repositoryPath, sessionId})` connects to an existing
 agentic host for scoped projections; it never starts or prepares one. Structured
@@ -39,10 +39,30 @@ read its additive private receipt ledger. No automatic receipt pruning or
 uncertain-command resend is performed. Guarantees are host-local on Linux/local
 POSIX filesystems, not multi-host, power-loss or hostile same-UID isolation.
 
-Events/artifacts/notice acknowledgement (W05), chat (W08), HTTP/CLI/UI wiring and
-live acceptance remain separate tasks. W02 evidence is source, local
-Runtime/Conversation fixtures and authenticated host subprocess tests; see
-[the W02 handoff](test/interaction/W02-HANDOFF.md).
+W05 implements `events`, `readArtifact` and `acknowledgeNotice`. Events use an
+in-memory projection ring of at most 1000 entries, with scoped epoch:sequence
+cursors. Missing/expired/foreign/restarted cursors yield `reset`; reload authoritative
+snapshots. Periodic generic invalidation is not a durable domain event or proof
+of a command's success. Reading/reconnecting never acknowledges a notice.
+
+Artifacts resolve from the active host's trusted store and must belong to a run
+in its repository/Conversation scope. Store verification/deadlines precede byte
+streaming; chunks are at most 64 KiB, transfers at most 64 MiB and 30 seconds.
+Inline previews are restricted to plain text/JSON/Markdown up to 1 MiB. HTTP serves
+these as inert plain text; HTML/SVG/other types are downloads. No arbitrary URI
+fetch or filesystem path is accepted. Missing/stopped hosts stay unavailable.
+
+Notice display acknowledgement requires the dedicated owner-registered web
+credential and explicit authenticated UI POST for the exact ID. It records the
+existing display receipt idempotently and never approves/answers/resumes a run.
+Native notices/watchdog and pending decision authority remain unchanged. The frozen
+web DTOs do not yet expose general notice content; UI must not acknowledge IDs
+merely received in the feed. The W05 handoff includes an integrator proposal.
+
+Chat (W08), UI (W06–W08) and live acceptance remain separate tasks. Evidence is
+source/local tests and authenticated host subprocess/HTTP fixtures, not live
+provider/Herdr workflow acceptance. See [W02](test/interaction/W02-HANDOFF.md) and
+[W05](test/interaction/W05-HANDOFF.md) handoffs.
 
 ## Custom specialist profiles (RP-01)
 
