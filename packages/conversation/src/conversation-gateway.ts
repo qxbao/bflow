@@ -386,6 +386,13 @@ export class ConversationGateway {
         }
       } else if (command.kind === "answer_decision") {
         const pending = this.snapshot!.pendingApprovals[command.decisionId], version = command.expectedVersion;
+        if (Object.values(this.snapshot!.structuredInteractions ?? {}).some(entry => {
+          if (entry.state !== "intent" && entry.state !== "unknown_delivery") return false;
+          const prior = entry.command;
+          return prior.kind === "answer_decision" && prior.runId === command.runId && prior.decisionId === command.decisionId &&
+            prior.expectedVersion.revision === version.revision && prior.expectedVersion.generation === version.generation &&
+            isDeepStrictEqual(prior.expectedVersion.target, version.target);
+        })) return fail("conflict", "An exact structured approval decision has unresolved delivery; reconcile it first");
         if (!pending || this.snapshot!.approvalDecisions[command.decisionId] || this.snapshot!.closedApprovals?.[command.decisionId] ||
           pending.runId !== command.runId || pending.sessionId !== this.config.sessionId ||
           version.revisionToken !== this.structuredHash(pending) || version.approvalId !== pending.approvalId ||
@@ -435,7 +442,8 @@ export class ConversationGateway {
         else if (command.kind === "resume") effect = await this.config.onStructuredResume!(command, principal);
       } catch { effect = { ok: false, error: { code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: "Structured admission interrupted; reconcile before retrying" } }; }
       if (!effect.ok) {
-        const saved = await persist({ ...intent, state: effect.error.code === "unknown_delivery" ? "unknown_delivery" : "failed", error: effect.error });
+        const ambiguous = ["unknown_delivery", "timeout", "transport_unavailable", "corruption", "cancelled"].includes(effect.error.code);
+        const saved = await persist({ ...intent, state: ambiguous ? "unknown_delivery" : "failed", error: effect.error });
         return saved.ok ? effect : saved;
       }
       if (command.kind === "resume" && effect.value !== undefined) result = WebOperationResultSchema.parse(effect.value);

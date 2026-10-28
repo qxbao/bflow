@@ -184,9 +184,38 @@ it("closes a native clarification about an approval answered on web", async () =
   expect(gateway.getContextSnapshot().session.unresolvedQuestions).toEqual([]);
 });
 it("observes a committed definitive rejection without retrying the bridge", async () => {
-  const f = await setup(), c = command(); f.transport.nextSubmissionStatus = "rejected";
+  const f = await setup(), c = command();
+  f.bridge.handOffToCoordinator = async () => ({ ok: false, error: { code: "validation", retryable: false, message: "Admission refused before enqueue" } });
   const result = await f.gateway.handleStructuredInteraction(c, principal(c));
   expect(result.ok).toBe(false);
   expect(await f.gateway.readStructuredInteraction(c.commandId)).toEqual(result);
-  expect(f.transport.sentRoleMessages).toHaveLength(1);
+  expect(f.transport.sentRoleMessages).toHaveLength(0);
+});
+it.each(["throw", "unknown_delivery", "timeout", "transport_unavailable", "corruption"] as const)("reserves exact approval after ambiguous callback %s and rejects a new opposing command", async code => {
+  const f = await pendingApproval();
+  let calls = 0;
+  f.config.onStructuredApproval = async () => {
+    calls++;
+    if (code === "throw") throw new Error("Lost callback acknowledgement");
+    return { ok: false, error: code === "unknown_delivery" ? { code, retryable: false, manualInterventionRequired: true, message: "Uncertain" } :
+      code === "timeout" ? { code, retryable: true, retrySafety: "observation_only", message: "Uncertain" } :
+      code === "corruption" ? { code, retryable: false, message: "Uncertain" } : { code, retryable: true, message: "Uncertain" } };
+  };
+  expect(await f.gateway.handleStructuredInteraction(f.answer, principal(f.answer))).toMatchObject({ ok: false });
+  const restored = new ConversationGateway(f.config); await restored.initializeOrRecoverSession();
+  const opposite = { ...f.answer, commandId: randomUUID(), outcome: "rejected", reason: "No" };
+  expect(await restored.handleStructuredInteraction(opposite, principal(opposite))).toMatchObject({ ok: false, error: { code: "conflict" } });
+  expect(calls).toBe(1);
+  expect(await restored.readStructuredInteraction(f.answer.commandId)).toBeUndefined();
+});
+it("does not let an unresolved old-generation approval reserve a newly issued generation", async () => {
+  const f = await pendingApproval(); let calls = 0;
+  f.config.onStructuredApproval = async () => { if (++calls === 1) throw new Error("Uncertain"); return { ok: true, value: undefined }; };
+  await f.gateway.handleStructuredInteraction(f.answer, principal(f.answer));
+  const request = ApprovalRequestSchema.parse({ ...f.request, generation: 2 });
+  await f.store.save({ ...f.gateway.getContextSnapshot(), pendingApprovals: { [request.approvalId]: request } });
+  const restored = new ConversationGateway(f.config); await restored.initializeOrRecoverSession();
+  const next = { ...f.answer, commandId: randomUUID(), expectedVersion: { ...f.answer.expectedVersion, revisionToken: hash(request), generation: 2 } };
+  expect(await restored.handleStructuredInteraction(next, principal(next))).toMatchObject({ ok: true });
+  expect(calls).toBe(2);
 });
