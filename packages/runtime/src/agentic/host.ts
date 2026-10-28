@@ -1,3 +1,7 @@
+import { ProjectionFeed } from "../interaction/events.js";
+import { readScopedArtifact, serveArtifact } from "../interaction/artifacts.js";
+import { acknowledgeDisplayedNotice } from "../interaction/notices.js";
+import { WebEventsQuerySchema, WebHttpPathParamsSchema } from "@bflow/contracts/web";
 import { interactionHostReady } from "../interaction/actions.js";
 import { hostInteractionQuery } from "../interaction/views.js";
 import { interactionProjectId } from "../interaction/client.js";
@@ -343,6 +347,26 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const activityLog = TaskActivityLog.open(join(configuration.directory, "../../agentic/task-activity.jsonl"));
   const receipts = new HostReceiptJournal(join(configuration.directory, "authentication-receipts"), configuration.repositoryPath, configuration.sessionId, activityLog);
   const webProjectId = interactionProjectId(configuration.repositoryPath);
+  const webFeed = new ProjectionFeed(webProjectId);
+  let webFeedObservedAt = 0;
+  let webFeedQueue: Promise<unknown> = Promise.resolve();
+  const readWebEvents = (params: unknown) => {
+    const work = webFeedQueue.catch(() => undefined).then(async () => {
+      const input = z.object({ projectId: z.string(), query: WebEventsQuerySchema }).strict().parse(params);
+      if (input.projectId !== webProjectId) throw new Error("Interaction project scope mismatch");
+      // Generic invalidation covers every projection, including runs outside the first page.
+      // It is explicitly not a claim that a domain event occurred or a command succeeded.
+      if (Date.now() - webFeedObservedAt >= 1000) {
+        webFeed.publish("invalidate", []);
+        const notices = [...await receipts.unsurfacedConversationNotices(), ...await receipts.undisplayedUserFacingNotices()];
+        const ids = [...new Set(notices.map(n => n.messageId))];
+        for (let offset = 0; offset < ids.length; offset += 100) webFeed.publish("notice", ids.slice(offset, offset + 100));
+        webFeedObservedAt = Date.now();
+      }
+      return webFeed.read(input.query.cursor);
+    });
+    webFeedQueue = work; return work;
+  };
   const webAuthority = new WebInteractionAuthority(webProjectId, configuration.sessionId);
   const webStore = new WebOperationStore({ directory: join(configuration.directory, "web-interactions"),
     repository: configuration.repositoryPath, sessionId: configuration.sessionId, projectId: webProjectId });
@@ -1711,6 +1735,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (token !== configuration.token) {
       const web = webCredentials.get(token);
       if (web) {
+        if (method === "interaction_notice_displayed") {
+          const input = WebHttpPathParamsSchema.parse(params);
+          if (!input.noticeId || Object.keys(input).some(k => !["id", "noticeId"].includes(k))) throw new Error("Invalid notice acknowledgement");
+          const work = userQueue.catch(() => undefined).then(() => acknowledgeDisplayedNotice(receipts, webProjectId, input.id, input.noticeId!));
+          userQueue = work; return work;
+        }
         if (method === "interaction_operation") {
           const input = InteractionOperationSchema.parse(params);
           if (input.projectId !== webProjectId) throw new Error("Interaction project scope mismatch");
@@ -2026,6 +2056,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return { credential, principalId };
       }
       case "interaction_query": return readWebQuery(params);
+      case "interaction_events": return readWebEvents(params);
       case "ping": return { active: !!workspace, quiesced, schedulerError: schedulerError ?? null, inboundError: inboundError ?? null };
       case "prepare": {
         if (quiesced || closing) throw new Error("Host is shutting down; reconcile before preparing roles");
@@ -2171,8 +2202,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     socket.on("data", chunk => { if (started) return; input += String(chunk);
       if (Buffer.byteLength(input) > 4 * 1024 * 1024) { socket.destroy(); return; }
       if (!input.includes("\n")) return; started = true;
-      void (async () => { const value = record(JSON.parse(input.split("\n")[0]!)); const result = await dispatch(textField(value.token), textField(value.method), JsonValueSchema.parse(value.params), { signal: operation.signal });
-        socket.end(JSON.stringify({ ok: true, value: result ?? null }) + "\n"); })().catch(error => socket.end(JSON.stringify({ ok: false, error: String(error) }) + "\n"));
+      void (async () => { const value = record(JSON.parse(input.split("\n")[0]!));
+        if (value.method === "interaction_artifact") {
+          if (value.token !== configuration.token) throw new Error("Artifact query requires owner authentication");
+          const request = WebHttpPathParamsSchema.parse(value.params);
+          if (!request.artifactId || Object.keys(request).some(k => !["id", "artifactId"].includes(k))) throw new Error("Invalid artifact query");
+          if (!workspace) throw new Error("Artifact store unavailable");
+          await serveArtifact(socket, await readScopedArtifact(workspace.runtime.ports.artifactStore, webProjectId, request.id, request.artifactId,
+            async runId => { try { await readWebRun(runId); return true; } catch { return false; } }, { signal: operation.signal, timeoutMs: 30000 }));
+          return;
+        }
+        const result = await dispatch(textField(value.token), textField(value.method), JsonValueSchema.parse(value.params), { signal: operation.signal });
+        socket.end(JSON.stringify({ ok: true, value: result ?? null }) + "\n"); })().catch(error => { if (socket.bytesWritten) socket.destroy(); else socket.end(JSON.stringify({ ok: false, error: String(error) }) + "\n"); });
     });
   });
   await new Promise<void>((accept, reject) => { server.once("error", reject); server.listen(configuration.socketPath, accept); });

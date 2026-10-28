@@ -1,3 +1,4 @@
+import { connectArtifact } from "../interaction/artifacts.js";
 import { WebIssuerCredentialSchema } from "@bflow/contracts/web-host";
 import { createExecutionResolutionReader } from "./execution-binding.js";
 import { OwnerKeySchema } from "../interaction/authority.js";
@@ -167,7 +168,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) });
 }
 /** Connect only to an existing endpoint. This seam cannot prepare, activate or restart a host. */
-export async function queryAgenticHostInteraction(options: { repositoryPath: string; sessionId: string }, input: unknown): Promise<unknown> {
+export async function queryAgenticHostInteraction(options: { repositoryPath: string; sessionId: string }, input: unknown, method: "interaction_query" | "interaction_events" = "interaction_query"): Promise<unknown> {
   const repositoryPath = await realpath(options.repositoryPath);
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
   const root = findPrivateRuntimeStateDirectory(repositoryPath);
@@ -176,7 +177,17 @@ export async function queryAgenticHostInteraction(options: { repositoryPath: str
   const configuration = await readHostConfiguration(join(directory, "host.json"));
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
     throw new Error("Foreign host configuration");
-  return callHost(configuration.socketPath, configuration.token, "interaction_query", input, 5000);
+  return callHost(configuration.socketPath, configuration.token, method, input, 5000);
+}
+/** Read a scoped artifact from an already existing host; never opens stores or starts a host locally. */
+export async function readHostInteractionArtifact(options: { repositoryPath: string; sessionId: string }, input: unknown) {
+  const repositoryPath = await realpath(options.repositoryPath);
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
+  const root = findPrivateRuntimeStateDirectory(repositoryPath);
+  if (!root) throw new Error("Host unavailable");
+  const directory = resolve(root, "host", options.sessionId), configuration = await readHostConfiguration(join(directory, "host.json"));
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory) throw new Error("Foreign host configuration");
+  return connectArtifact(configuration.socketPath, configuration.token, input);
 }
 /** Owner-only registration. The returned credential has user-interaction scope
  * only and stays inside trusted Local Server composition, never browser DTOs. */
@@ -194,7 +205,7 @@ export async function registerUserInteractionIssuer(options: { repositoryPath: s
 }
 /** Dedicated web credential can never call owner lifecycle or role methods. */
 export async function callUserInteractionHost(options: { repositoryPath: string; sessionId: string }, credential: string,
-  method: "interaction_execute" | "interaction_operation", input: unknown): Promise<unknown> {
+  method: "interaction_execute" | "interaction_operation" | "interaction_notice_displayed", input: unknown): Promise<unknown> {
   const repositoryPath = await realpath(options.repositoryPath);
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
   const root = findPrivateRuntimeStateDirectory(repositoryPath);

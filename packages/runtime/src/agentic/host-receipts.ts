@@ -1205,6 +1205,13 @@ export class HostReceiptJournal {
     await this.write("notice-reblock", `${id}#${attempt}`, { messageId: id, attempt });
     return attempt;
   }
+  /** Exact display observation for trusted UI acknowledgement. Reading never surfaces a notice. */
+  async readConversationNoticeDisplay(messageId: string): Promise<{ displayedAt?: string } | undefined> {
+    const id = textField(messageId), value = await this.read("conversation-notice", id);
+    if (value === undefined || renderConversationNotice(ConversationNoticeSchema.parse(value)).ackToken === undefined) return undefined;
+    const displayed = await this.read("notice-displayed", id);
+    return displayed === undefined ? {} : { displayedAt: NoticeDisplayedSchema.parse(displayed).displayedAt };
+  }
   /**
    * Marks surfaced, user-facing notices as displayed. Ids that are unknown, unsurfaced or not user-facing are ignored;
    * the returned list holds only the ids newly marked.

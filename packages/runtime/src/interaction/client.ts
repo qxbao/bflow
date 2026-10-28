@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import {
-  IdentifierSchema,
+  IdentifierSchema, WebEventsQuerySchema, WebEventSchema, WebPageSchema, WebNoticeDisplayedResultSchema, WebHttpPathParamsSchema, WebArtifactReadResultSchema,
   WebProjectSessionResultSchema,
   WebRunPageResultSchema,
   WebRunViewResultSchema,
@@ -10,7 +10,7 @@ import {
   type UserInteractionClient,
   type OperationResult,
 } from "@bflow/contracts";
-import { queryAgenticHostInteraction, callUserInteractionHost } from "../agentic/host-controller.js";
+import { queryAgenticHostInteraction, callUserInteractionHost, readHostInteractionArtifact } from "../agentic/host-controller.js";
 import { WebPrincipalSchema } from "@bflow/contracts/web-host";
 import { InteractionQuerySchema, InteractionOperationSchema } from "./schemas.js";
 /** Registry adapters must use the canonical repository path, never browser-supplied project IDs. */
@@ -158,11 +158,38 @@ export async function openUserInteractionClient(options: {
           options.interaction.credential, "interaction_operation", input));
       } catch { return unavailable(); }
     },
-    async *events() {
-      throw new Error("Interaction events are not implemented (W05).");
+    events(id, cursor) {
+      let stopped = false;
+      let wake: (() => void) | undefined;
+      const stream = (async function* () {
+        if (id !== projectId) throw new Error("Interaction project scope mismatch");
+        WebEventsQuerySchema.parse({ ...(cursor === undefined ? {} : { cursor }) });
+        while (!stopped) {
+          const page = WebPageSchema(WebEventSchema).parse(await queryAgenticHostInteraction({ repositoryPath, sessionId },
+            { projectId: id, query: cursor === undefined ? {} : { cursor } }, "interaction_events"));
+          for (const event of page.items) {
+            if (event.projectId !== id) throw new Error("Foreign projection event");
+            if (stopped) return;
+            cursor = event.cursor; yield event;
+          }
+          if (!stopped) await new Promise<void>(resolve => {
+            const timer = setTimeout(() => { wake = undefined; resolve(); }, page.items.length === 100 ? 0 : 1000);
+            wake = () => { clearTimeout(timer); resolve(); };
+          });
+        }
+      })();
+      return { [Symbol.asyncIterator]() { return {
+        next: () => stream.next(),
+        async return() { stopped = true; wake?.(); return stream.return(); },
+      }; } };
     },
-    async acknowledgeNotice() {
-      return refused();
+    async acknowledgeNotice(id, noticeId) {
+      if (!options.interaction || id !== projectId) return refused();
+      try {
+        const input = WebHttpPathParamsSchema.parse({ id, noticeId });
+        return WebNoticeDisplayedResultSchema.parse(await callUserInteractionHost({ repositoryPath, sessionId },
+          options.interaction.credential, "interaction_notice_displayed", input));
+      } catch { return unavailable(); }
     },
     async listMessages() {
       return refused();
@@ -170,8 +197,12 @@ export async function openUserInteractionClient(options: {
     async sendMessage() {
       return refused();
     },
-    async readArtifact() {
-      return refused();
+    async readArtifact(id, artifactId) {
+      if (id !== projectId) return refused();
+      try {
+        const input = WebHttpPathParamsSchema.parse({ id, artifactId });
+        return WebArtifactReadResultSchema.parse(await readHostInteractionArtifact({ repositoryPath, sessionId }, input));
+      } catch { return unavailable(); }
     },
   };
 }
