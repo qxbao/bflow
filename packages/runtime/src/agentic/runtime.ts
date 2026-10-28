@@ -21,7 +21,7 @@ import {
   type PaneBinding, type TaskDefinition, type AgentRole, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
 import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
-  type ConflictResolverAttempt, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
+  type ConflictResolverAttempt, type IngressDiagnostic, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
   FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE,
@@ -111,6 +111,13 @@ function inheritedResumeAttempts(run: RunRecord): number {
 }
 /** Automatic resumes of one blocker lineage before it waits for the user (the journal codec also caps it). */
 const AUTO_RESUME_LIMIT = 3;
+/** Recipients whose ingress applies Runtime state; their refused prompts still pause the run. */
+const INGRESS_AUTHORITATIVE_ROLES: readonly string[] = ["coordinator", "runtime", "conversation"];
+const INGRESS_DIAGNOSTIC_LIMIT = 20;
+const UNMEASURED_PHASE_SUMMARY = "No measurement was recorded: the verifier request was released without evidence or failure; an explicit resume authorized a new independent measurement of the same revision";
+function isProviderDeliveryMismatch(reason: string): boolean {
+  return reason.includes("Inbound provider prompt is not an exact Runtime outbox delivery");
+}
 /** Explicit user resumes ("tiếp tục <run-id>") of one blocker lineage; separate from, and still allowed after, the automatic budget. */
 const MANUAL_RESUME_LIMIT = 3;
 /** Minimum wait before automatic resume n+1 (n = attempts already spent), from the episode start or the previous resume. */
@@ -471,6 +478,30 @@ export class AgenticWorkflowRuntime {
       run_id: run.runId, sender: { role: "coordinator" }, recipient: { role: recipient }, type,
       payload: json(payload), artifact_references: artifacts, occurred_at: this.now(), idempotency_key: messageId }));
   }
+  /** Released conditional-evidence requests of a live task attempt that ended without any measurement, failure or retirement. */
+  private unmeasuredPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
+    return state.outbound.filter(item => {
+      const payload = record(item.message.payload);
+      if (item.message.run_id !== run.runId || item.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
+          item.status !== "released" || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
+      if (state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected")) return false;
+      const task = run.tasks.find(entry => entry.taskId === payload.taskId);
+      if (!task || task.writerReleased || task.result) return false;
+      const receipts = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
+      const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : receipts.length === 0 ? "verification" : undefined;
+      if (payload.phase !== expected) return false;
+      // Only the newest request for this phase and attempt; an earlier one was already superseded.
+      return !state.outbound.some(other => other !== item && other.message.run_id === run.runId && other.message.type === "verification.requested" &&
+        record(other.message.payload).taskId === payload.taskId && record(other.message.payload).phase === payload.phase &&
+        record(other.message.payload).implementationAttemptId === payload.implementationAttemptId &&
+        (other.message.occurred_at ?? "") > (item.message.occurred_at ?? ""));
+    });
+  }
+  private recordIngressDiagnostic(run: RunRecord, message: RoleMessage, reason: string, disposition: IngressDiagnostic["disposition"]): void {
+    if ((run.ingressDiagnostics ?? []).some(item => item.messageId === message.message_id && item.disposition === disposition)) return;
+    run.ingressDiagnostics = [...(run.ingressDiagnostics ?? []), { messageId: message.message_id, type: message.type, senderRole: message.sender.role,
+      recipientRole: message.recipient.role, reason: redactString(reason).slice(0, 500), at: this.now(), disposition }].slice(-INGRESS_DIAGNOSTIC_LIMIT);
+  }
   private progress(state: JournalState, outbox: HerdrOutbox, run: RunRecord, headline: string): void {
     this.emit(state, outbox, run, "conversation.progress", { sdlcStatus: run.status, headline,
       ...(run.error ? { blockageReason: run.error } : {}),
@@ -669,7 +700,21 @@ export class AgenticWorkflowRuntime {
           `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text, INBOUND_FAILURE_OPTIONS);
         await save(); return;
       }
-      if (inboundFailureFinal(text) && run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
+      // A refused provider prompt for a specialist recipient changes no Runtime state by itself: its delivery stands while it is
+      // accepted and leased, and every action the recipient takes is re-checked against that delivery, binding and lease. Pausing
+      // the run there only rejected the specialist's legitimate work, so the run continues and the refusal stays diagnosable.
+      const delivered = state.outbound.find(item => item.message.message_id === data.message_id);
+      const continued = isProviderDeliveryMismatch(text) && !INGRESS_AUTHORITATIVE_ROLES.includes(data.recipient.role) &&
+        delivered?.status === "accepted" && delivered.handle !== undefined && delivered.lease !== undefined &&
+        Date.parse(delivered.lease.expiresAt) > Date.parse(this.now()) && digest(delivered.message) === digest(data);
+      const escalates = !continued && inboundFailureFinal(text) && run.status !== "awaiting_approval" &&
+        !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending");
+      this.recordIngressDiagnostic(run, data, text, continued ? "continued" : escalates ? "escalated" : "reported");
+      if (continued) {
+        this.progress(state, outbox, run, `Ingress check of ${data.type} to ${data.recipient.role} failed; its accepted delivery stands and the run continues`);
+        await save(); return;
+      }
+      if (escalates) {
         const previousStatus = run.status;
         run.error = `${data.type} ingress failed: ${text}`.slice(0, 2000);
         run.status = "escalated";
@@ -2057,6 +2102,12 @@ export class AgenticWorkflowRuntime {
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
       const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && item.phaseFailure?.repairable === false);
       if (measurement) measurement.phaseFailure!.retryAuthorized = true;
+      // A verifier request released with no evidence, no recorded failure and no retirement can never settle on its own. The explicit
+      // resume authorizes one new measurement of the same revision through the existing bounded phase-retry path; no outcome is claimed.
+      if (!options.automatic) for (const orphan of this.unmeasuredPhaseRequests(state, run)) {
+        orphan.phaseFailure = { summary: UNMEASURED_PHASE_SUMMARY, repairable: false, applied: true, retryAuthorized: true };
+        orphan.error = `policy_phase_failed:${UNMEASURED_PHASE_SUMMARY}`;
+      }
       action.state = "queued";
       action.lastResumedAt = this.now();
       if (options.automatic) action.resumeAttempts = (action.resumeAttempts ?? 0) + 1;
