@@ -531,6 +531,7 @@ export interface CliContext {
   /** Engine facades for high-level commands; defaults compose the reviewed packages. */
   readonly highLevelServices?: HighLevelServices | undefined;
   readonly setup?: SetupIntegrationOptions | undefined;
+  readonly web?: import("./web-command.js").WebCommandOptions | undefined;
   readonly docs?: import("./docs-command.js").DocsCommandDependencies | undefined;
   readonly presentation?: PresentationOptions | undefined;
 }
@@ -538,7 +539,7 @@ export interface CliContext {
 export interface CliExecutionResult {
   readonly exitCode: CliExitCode;
   readonly ok: boolean;
-  readonly command?: CliCommandName | "iso" | undefined;
+  readonly command?: CliCommandName | "iso" | "web" | undefined;
   readonly stdout: string;
   readonly stderr: string;
   readonly data?: CliCommandData | undefined;

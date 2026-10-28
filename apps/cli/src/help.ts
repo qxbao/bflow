@@ -9,6 +9,7 @@ Lệnh / Commands:
   init            Khởi tạo cấu hình kho mã bflow và quy trình mặc định
   config-migrate  Chuyển đổi tệp cấu hình cũ sang .bflow/config.yml
   setup           Lập kế hoạch và cài đặt môi trường máy cùng các thành phần nền tảng
+  web             Mở web localhost: bflow web [--port N] [--no-open]
   up              Khởi động/đồng bộ môi trường làm việc của kho mã
   down            Tạo checkpoint và dừng môi trường làm việc của kho mã
   attach          Kết nối vào khung trò chuyện (Conversation pane) của kho mã

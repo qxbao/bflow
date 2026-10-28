@@ -1,0 +1,36 @@
+# Integrator proposal only. After applying, regenerate pnpm-lock.yaml with pinned pnpm@12.5.1.
+diff --git a/apps/cli/package.json b/apps/cli/package.json
+--- a/apps/cli/package.json
++++ b/apps/cli/package.json
+@@ -27,6 +27,7 @@
+     "@bflow/contracts": "workspace:*",
+     "@bflow/docs-retrieval": "workspace:*",
+     "@bflow/git-orchestrator": "workspace:*",
++    "@bflow/local-server": "workspace:*",
+     "@bflow/machine-setup": "workspace:*",
+     "@bflow/mcp-gateway": "workspace:*",
+     "@bflow/pane-manager": "workspace:*",
+@@ -36,6 +37,7 @@
+     "@bflow/test-strategy": "workspace:*",
+     "@bflow/tool-installer": "workspace:*",
+     "@bflow/verification": "workspace:*",
++    "@bflow/web": "workspace:*",
+     "yaml": "^2.7.0",
+     "zod": "^3.24.2"
+   }
+diff --git a/apps/cli/tsconfig.json b/apps/cli/tsconfig.json
+--- a/apps/cli/tsconfig.json
++++ b/apps/cli/tsconfig.json
+@@ -51,6 +51,12 @@
+     },
+     {
+       "path": "../../packages/tool-installer"
++    },
++    {
++      "path": "../local-server"
++    },
++    {
++      "path": "../web/tsconfig.node.json"
+     }
+   ]
+ }

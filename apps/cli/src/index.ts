@@ -225,3 +225,7 @@ export type {
 } from "./high-level/services.js";
 export { deriveTaskGraph } from "./high-level/commands/task-plan.js";
 export { describeHighLevelCommands } from "./high-level/reference.js";
+
+export type { WebArgs, WebCommandOptions, WebCommandHandle } from './web-command.js';
+export { createWebWorkspaceServices } from './web-workspace-services.js';
+export type { WebWorkspaceOptions } from './web-workspace-services.js';

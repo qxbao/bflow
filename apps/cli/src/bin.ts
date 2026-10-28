@@ -53,6 +53,32 @@ export async function main(
     stderr: (msg) => process.stderr.write(msg + "\n")
   };
 
+  // Web owns its foreground HTTP lifetime. Never route it through legacy RuntimeService.
+  if (args[0] === "web" || (args[0] === "help" && args[1] === "web")) {
+    const { parseWebArgs, runWebCommand, WEB_HELP } = await import("./web-command.js");
+    let webArgs;
+    try { webArgs = parseWebArgs(args[0] === "help" ? ["--help", ...args.slice(2)] : args.slice(1)); }
+    catch {
+      realIo.stderr(WEB_HELP);
+      process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;
+      return { ok: false, command: "web", exitCode: CLI_EXIT_CODES.USAGE_ERROR, stdout: "", stderr: WEB_HELP };
+    }
+    if (webArgs.help) {
+      realIo.stdout(WEB_HELP);
+      return { ok: true, command: "web", exitCode: 0, stdout: WEB_HELP, stderr: "" };
+    }
+    try {
+      await runWebCommand(webArgs, { ...context?.web, io: realIo, isTerminal: (context?.web?.isTerminal ?? (context?.io === undefined && Boolean(process.stdout.isTTY))) });
+      process.exitCode = 0;
+      // Pairing URL is deliberately absent from buffered results and JSON telemetry.
+      return { ok: true, command: "web", exitCode: 0, stdout: "", stderr: "" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không khởi động được web. Kiểm tra build và private web state.";
+      realIo.stderr(message); process.exitCode = CLI_EXIT_CODES.RUNTIME_ERROR;
+      return { ok: false, command: "web", exitCode: CLI_EXIT_CODES.RUNTIME_ERROR, stdout: "", stderr: message };
+    }
+  }
+
   // Keep provider flags, TTY streams, and its exit code outside bflow's parser and buffer.
   if (isIsoInvocation(args)) {
     const result = await runIsolator(args.slice(1), context);
