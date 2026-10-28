@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 3,
+  "id": "bflow-ba-handoff",
+  "version": "1.0.0",
+  "digest": "d5cb72412cf5717e04600e65fbc618b0abedc55581c0c4a592ab974e207df776",
+  "defaults": {
+    "workflow.id": "bflow.analysis-only",
+    "workflow.version": "1",
+    "capabilities.required": [
+      "workflow.analysis_only",
+      "analysis.output.scope",
+      "analysis.output.functional_requirements",
+      "analysis.output.acceptance_criteria",
+      "analysis.output.nfr",
+      "analysis.output.business_flows",
+      "analysis.output.glossary",
+      "analysis.output.context_notes",
+      "analysis.output.data_notes",
+      "analysis.output.api_notes"
+    ]
+  },
+  "lockedFields": [
+    "capabilities.required",
+    "workflow.id"
+  ]
+}
