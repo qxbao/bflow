@@ -1,7 +1,12 @@
 import { isAbsolute, relative } from "node:path";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { digest, record, textField } from "./journal.js";
-import { BehavioralIdentityMismatch } from "./node-tap.js";
+import { BehavioralIdentityMismatch, NodeTapTestCodeFailure } from "./node-tap.js";
+
+/** Complete, identity-matched Vitest run whose test bodies failed without assertion evidence: a bounded test repair, as for TAP. */
+export class VitestTestCodeFailure extends NodeTapTestCodeFailure {
+  readonly protocol = "vitest_json" as const;
+}
 
 /** Private codec for the actual Vitest 2.1 JSON reporter, with the trusted runtime companion.
  * Suite totals count files plus describe suites; reconstruct ancestors instead of equating suites with files.
@@ -23,6 +28,7 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
   const suites = new Map<string, boolean>(), files = new Set<string>();
   const results: { name: string; passed: boolean }[] = [];
   let observedPassed = 0, observedFailed = 0, filtered = 0;
+  const codeFailures: string[] = [];
   for (const input of report.testResults) {
     const file = record(input), name = textField(file.name), path = relative(outcome.cwd, name);
     if (!isAbsolute(name) || path.startsWith("../") || path === ".." || isAbsolute(path) || files.has(name) || file.message !== "" ||
@@ -36,7 +42,10 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
           fullName !== [...leaf.ancestorTitles, title].join(" ") || !["passed", "failed", ...(nameSelection ? ["skipped"] : [])].includes(String(leaf.status)) ||
           !Array.isArray(leaf.failureMessages) || leaf.failureMessages.some(value => typeof value !== "string" || !value.trim())) throw new Error("Malformed, skipped or incomplete Vitest leaf result");
       const isFailed = leaf.status === "failed";
-      if (isFailed ? !leaf.failureMessages.length || leaf.failureMessages.some(message => !/^AssertionError(?:\s*\[ERR_ASSERTION\])?:/.test(message)) : leaf.failureMessages.length !== 0) throw new Error("Vitest failure is infrastructure or unrelated, not an assertion regression");
+      if (isFailed ? !leaf.failureMessages.length : leaf.failureMessages.length !== 0) throw new Error("Vitest failure is infrastructure or unrelated, not an assertion regression");
+      // A test body that throws something other than an assertion (for example calling still-absent code) is a test defect,
+      // reported only after the whole run is proven complete and identity-matched.
+      if (isFailed && leaf.failureMessages.some(message => !/^AssertionError(?:\s*\[ERR_ASSERTION\])?:/.test(message))) codeFailures.push(fullName);
       const ancestorTitles = leaf.ancestorTitles.map(value => textField(value));
       const ancestors = [fileKey, ...ancestorTitles.map((_value, index) => digest([name, ...ancestorTitles.slice(0, index + 1)]))];
       for (const key of ancestors) suites.set(key, suites.get(key) === true || isFailed);
@@ -55,5 +64,6 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
   if (tests !== results.length + filtered || filtered !== counter("numPendingTests") || passed !== observedPassed || failed !== observedFailed || counter("numTotalTestSuites") !== suites.size ||
       counter("numFailedTestSuites") !== failedSuites || counter("numPassedTestSuites") !== suites.size - failedSuites ||
       report.success !== (failed === 0) || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("Vitest counters, leaf results or process exit code contradict one another");
+  if (codeFailures.length) throw new VitestTestCodeFailure(outcome, codeFailures);
   return { testNames: names, testResults: results, tests: results.length, passed, failed, targetFailure: failed > 0 };
 }

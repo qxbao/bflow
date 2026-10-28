@@ -8,6 +8,7 @@ import { PaneBindingSchema, QualityGateContextSchema } from "@bflow/contracts";
 import { assertEvidenceComplete, assertReadyToImplement } from "../../../test-strategy/src/index.js";
 import { spec } from "../../../test-strategy/test/fixtures.js";
 import { HostDevelopment } from "../../src/agentic/host-development.js";
+import { HostBehavioralFailure } from "../../src/agentic/host-verification.js";
 import { FileToolUsageLedger } from "../../src/platform/tool-usage-ledger.js";
 import { parseVitestJson } from "../../src/agentic/vitest-json.js";
 import { BehavioralMeasurementError, measureBehavior, measurementDiagnostics, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
@@ -176,6 +177,30 @@ exit 2
     const f = await fixture("bugfix", "vitest_json"); await writeFile(join(f.cwd, "test/behavior.test.cjs"), source); f.commit("invalid Vitest evidence");
     await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" })).rejects.toThrow();
     expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
+  });
+  // Live regression (2026-10-28): a Vitest Red test that calls the still-absent export failed with a TypeError. node_tap
+  // returns that as a bounded test repair; Vitest threw a plain error, so Runtime escalated the run as unrepairable.
+  it("returns the same bounded test repair as node_tap for a Vitest Red that calls absent code", async () => {
+    const f = await fixture("bugfix", "vitest_json");
+    await writeFile(join(f.cwd, "test/behavior.test.cjs"), `const value=require('../source.cjs');it(${JSON.stringify(testName)},()=>value.multiply(2,3));\n`);
+    f.commit("Red calls an absent export without an assertion");
+    let failure: unknown;
+    try { await f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" }); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(HostBehavioralFailure);
+    if (!(failure instanceof HostBehavioralFailure)) throw failure;
+    expect(failure.message).toContain("assertion");
+    expect(() => assertReadyToImplement(f.strategy)).toThrow(/Red/);
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of f.store.get(failure.evidence)) { if (!chunk.ok) throw new Error(chunk.error.message); chunks.push(chunk.value); }
+    const observed = JSON.parse(Buffer.concat(chunks).toString());
+    expect(observed.accepted).toBe(false);
+    expect(observed.measurementFailure).toMatchObject({ protocol: "vitest_json", outcome: { exitCode: 1 } });
+    expect(observed.measurementFailure.outcome.stdout).toContain("TypeError");
+    // An unrelated exception beside an otherwise valid run is still a plain infrastructure block, never a repair.
+    await writeFile(join(f.cwd, "test/behavior.test.cjs"), `afterAll(()=>{throw new Error('cleanup failed')}); ${vitestSource}`);
+    f.commit("hook failure");
+    await expect(f.host.behavioralEvidence(f.binding, { runId: "run-1", taskId: "task-1", phase: "red" })).rejects.not.toBeInstanceOf(HostBehavioralFailure);
   });
   it("Vitest preserves Red test blobs and rejects unrelated assertion failures", async () => {
     const f = await fixture("bugfix", "vitest_json");
