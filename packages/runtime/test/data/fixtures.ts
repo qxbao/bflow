@@ -1,0 +1,11 @@
+export const liveContract = () => ({ schemaVersion: 1, id: 'orders_fixture', revision: 1, model: 'orders', fields: [
+  { name: 'id', type: 'integer', nullable: false, unique: true }, { name: 'status', type: 'text', nullable: false, unique: false },
+  { name: 'customer_id', type: 'integer', nullable: true, unique: false }], keys: ['id'], consumer: { direction: 'candidate_to_accepted', schema: 'open' }, policy: { integerWidening: true }, checks: [
+  { id: 'id_null', kind: 'not_null', column: 'id', maxFailures: 0 }, { id: 'id_unique', kind: 'unique', column: 'id', maxFailures: 0 },
+  { id: 'status_null', kind: 'not_null', column: 'status', maxFailures: 0 }, { id: 'status_values', kind: 'accepted_values', column: 'status', values: ['new', 'paid'], maxFailures: 0 },
+  { id: 'customer_fk', kind: 'relationships', column: 'customer_id', reference: { model: 'customers', column: 'id' }, maxFailures: 0 }] });
+export const snapshot = () => ({ schemaVersion: 1, id: 'fixture_snapshot_1', declaredModelRevision: 'a'.repeat(40), model: 'orders', rows: [[1, 'new', 10], [2, 'paid', 20]], references: [{ model: 'customers', fields: [{ name: 'id', type: 'integer', nullable: false, unique: true }], rows: [[10], [20]] }] });
+
+export function manifestFor(c = liveContract()): any { return { metadata: { dbt_schema_version: 'https://schemas.getdbt.com/dbt/manifest/v12.json', dbt_version: '1.10.15' }, nodes: {
+  'model.fixture.orders': { resource_type: 'model', name: c.model, columns: Object.fromEntries(c.fields.map(f => [f.name, { name: f.name, data_type: f.type, meta: { nullable: f.nullable, unique: f.unique, key: c.keys.includes(f.name) } }])) },
+  ...Object.fromEntries(c.checks.map(t => [`test.fixture.${t.id}`, { resource_type: 'test', depends_on: { nodes: ['model.fixture.orders'], macros: [`macro.dbt.test_${t.kind}`] }, test_metadata: { name: t.kind, kwargs: { model: `{{ get_where_subquery(ref('${c.model}')) }}`, column_name: t.column, ...(t.values ? { values: t.values } : {}), ...(t.reference ? { to: `ref('${t.reference.model}')`, field: t.reference.column } : {}) } }, config: { severity: 'ERROR', meta: { bflow_check_id: t.id }, error_if: `> ${t.maxFailures}`, warn_if: `> ${t.maxFailures}` } }])) } }; }

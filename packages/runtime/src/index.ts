@@ -181,3 +181,7 @@ export { hostRoleCapabilities } from "./agentic/host.js";
 
 export { openUserInteractionClient, interactionProjectId } from "./interaction/client.js";
 export { registerUserInteractionIssuer } from "./agentic/host-controller.js";
+
+// Opt-in, Runtime-owned data snapshot verification. No daemon/CLI configuration adapter.
+export { DataVerificationHost, specificationContent as dataSpecificationContent } from "./data/host.js";
+export { digest as dataVerificationDigest, contractDigest as dataContractDigest } from "./data/contract.js";

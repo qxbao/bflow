@@ -1,0 +1,362 @@
+{
+  "schemaVersion": 2,
+  "specId": "dc-01",
+  "runId": "dc-01-local",
+  "sessionId": "dc-01-design",
+  "level": "full",
+  "title": "Data contract drift and isolated dbt fixture verification",
+  "summary": "Implement separate structural and actual data quality checks with approved contract pins and host-owned dbt DuckDB fixture evidence.",
+  "problemStatement": "Existing Runtime runners have no data-contract compatibility model or dbt fixture evidence adapter.",
+  "scope": {
+    "inScope": [
+      "Runtime-private data contract and directional drift checking",
+      "Host-owned dbt Core DuckDB fixture runner and QualityGate adapter",
+      "Standard-role skills through P28 ownership review"
+    ],
+    "outOfScope": [
+      "Real warehouse access or destructive migrations",
+      "CLI command/config wiring without CLI-owner review",
+      "Public contract changes and live-provider/Herdr acceptance"
+    ]
+  },
+  "acceptanceCriteria": [
+    {
+      "id": "DC-01",
+      "description": "Validate accepted contract revision, digest and matching approval; block stale pins",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-02",
+      "description": "Classify field removal, rename, type, nullability, key and schema evolution per consumer direction",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-03",
+      "description": "Reject missing required tests and unapproved threshold changes",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-04",
+      "description": "Separate structural and data quality outcomes and reject malformed or incomplete reports",
+      "category": "functional",
+      "verificationMethod": "unit_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-05",
+      "description": "Run real dbt Core and DuckDB on isolated passing and violating fixtures with provenance",
+      "category": "functional",
+      "verificationMethod": "integration_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-06",
+      "description": "Measure required null, unique, referential integrity and accepted values checks",
+      "category": "functional",
+      "verificationMethod": "integration_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-07",
+      "description": "Block prerequisite gaps and uncertain termination, clean only owned resources",
+      "category": "functional",
+      "verificationMethod": "integration_test",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-08",
+      "description": "Use standard roles in data pipeline, dbt and contract skills and document adapter limits",
+      "category": "functional",
+      "verificationMethod": "manual_review",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    },
+    {
+      "id": "DC-09",
+      "description": "Run repository validation and report exact results without committing or external writes",
+      "category": "functional",
+      "verificationMethod": "manual_review",
+      "required": true,
+      "status": "pending",
+      "evidenceArtifactIds": []
+    }
+  ],
+  "affectedPaths": [
+    "packages/runtime/src/data/**",
+    "packages/runtime/test/data/**",
+    "packages/runtime/README.md",
+    "skills/**",
+    "packages/skills/test/**"
+  ],
+  "architectureNotes": "See data-verification-design.md. Strict Runtime-private Zod models; existing exported contracts govern approvals, gates and trusted artifact ingress. Independent static and runtime outcomes.",
+  "dataModelChanges": "Additive private fixture data models only; no existing database, journal or public contract migration.",
+  "securityConsiderations": "Execute only host templates and safe fixture data against an owned temporary DuckDB database; no warehouse credentials, arbitrary candidate macros/hooks or outside cleanup.",
+  "rollbackPlan": "Remove opt-in Runtime adapter and P28 skills; no persistence migration or production-resource rollback is necessary.",
+  "complexity": "complex",
+  "riskLevel": "high",
+  "version": 1,
+  "traceabilityTaskIds": [
+    "dc-contract",
+    "dc-reports",
+    "dc-runner",
+    "dc-skills",
+    "dc-validation"
+  ],
+  "testStrategy": {
+    "schemaVersion": 2,
+    "strategyId": "dc-01-strategy-v1",
+    "specId": "dc-01",
+    "tddDecision": {
+      "schemaVersion": 2,
+      "decisionId": "dc-01-tdd-v1",
+      "runId": "dc-01-local",
+      "specId": "dc-01",
+      "mode": "required",
+      "rationale": "Directional compatibility, approval pins and evidence parsing are deterministic domain logic with reproducible failure cases.",
+      "verifiableConditions": [
+        "Observe failing structural and report tests before implementation",
+        "Observe real dbt fixture pass and real data violation without synthetic runtime evidence"
+      ],
+      "changeClassification": "domain_logic",
+      "requiresFailingTestFirst": true,
+      "decidedBy": "coordinator",
+      "decidedAt": "2026-10-28T00:00:00Z",
+      "metadata": {
+        "accepted": true,
+        "approvalSource": "explicit project owner message in current conversation"
+      }
+    },
+    "requiredTestLevels": [
+      "unit",
+      "integration",
+      "regression"
+    ],
+    "targetCommands": [
+      "pnpm exec vitest run packages/runtime/test/data"
+    ],
+    "independentVerificationRequired": true,
+    "criterionMappings": [
+      {
+        "criterionId": "DC-01",
+        "testNames": [
+          "Validate accepted contract revision, digest and matching approval; block stale pins"
+        ]
+      },
+      {
+        "criterionId": "DC-02",
+        "testNames": [
+          "Classify field removal, rename, type, nullability, key and schema evolution per consumer direction"
+        ]
+      },
+      {
+        "criterionId": "DC-03",
+        "testNames": [
+          "Reject missing required tests and unapproved threshold changes"
+        ]
+      },
+      {
+        "criterionId": "DC-04",
+        "testNames": [
+          "Separate structural and data quality outcomes and reject malformed or incomplete reports"
+        ]
+      },
+      {
+        "criterionId": "DC-05",
+        "testNames": [
+          "Run real dbt Core and DuckDB on isolated passing and violating fixtures with provenance"
+        ]
+      },
+      {
+        "criterionId": "DC-06",
+        "testNames": [
+          "Measure required null, unique, referential integrity and accepted values checks"
+        ]
+      },
+      {
+        "criterionId": "DC-07",
+        "testNames": [
+          "Block prerequisite gaps and uncertain termination, clean only owned resources"
+        ]
+      },
+      {
+        "criterionId": "DC-08",
+        "testNames": [
+          "Use standard roles in data pipeline, dbt and contract skills and document adapter limits"
+        ]
+      },
+      {
+        "criterionId": "DC-09",
+        "testNames": [
+          "Run repository validation and report exact results without committing or external writes"
+        ]
+      }
+    ],
+    "createdAt": "2026-10-28T00:00:00Z"
+  },
+  "tddDecision": {
+    "schemaVersion": 2,
+    "decisionId": "dc-01-tdd-v1",
+    "runId": "dc-01-local",
+    "specId": "dc-01",
+    "mode": "required",
+    "rationale": "Directional compatibility, approval pins and evidence parsing are deterministic domain logic with reproducible failure cases.",
+    "verifiableConditions": [
+      "Observe failing structural and report tests before implementation",
+      "Observe real dbt fixture pass and real data violation without synthetic runtime evidence"
+    ],
+    "changeClassification": "domain_logic",
+    "requiresFailingTestFirst": true,
+    "decidedBy": "coordinator",
+    "decidedAt": "2026-10-28T00:00:00Z",
+    "metadata": {
+      "accepted": true,
+      "approvalSource": "explicit project owner message in current conversation"
+    }
+  },
+  "status": "approved",
+  "artifactRef": {
+    "trust": "stored",
+    "artifactId": "dc01-development-spec-v1",
+    "runId": "dc-01-local",
+    "kind": "document",
+    "uri": "artifact://dc01-development/dc01-development-spec-v1",
+    "mediaType": "application/json",
+    "sizeBytes": 9483,
+    "checksum": {
+      "algorithm": "sha256",
+      "value": "d74ad9946c4ef05b0082114e4cabe974906db5e0e179d4fb725ca5457826aa2a"
+    },
+    "createdAt": "2026-10-28T12:07:14.800Z"
+  },
+  "createdBy": "coordinator",
+  "approvedBy": "project-owner",
+  "createdAt": "2026-10-28T00:00:00Z",
+  "updatedAt": "2026-10-28T00:00:00Z",
+  "metadata": {
+    "ownerRequest": "Project owner explicitly approved DC-01 design and implementation in the current conversation: \"tôii phê duyệt bạn triển khai đi\". No commit/push/PR authority.",
+    "baseline": "2041d7efa860981833eb6bd58fd9023ce8a727d3",
+    "sdd": {
+      "policyVersion": 1,
+      "assessment": {
+        "kind": "feature",
+        "behaviorChange": true,
+        "modules": [
+          "runtime",
+          "skills"
+        ],
+        "securityImpact": true,
+        "publicApiImpact": false,
+        "dataSchemaImpact": false,
+        "architectureImpact": false,
+        "migrationRequired": false,
+        "risk": "high",
+        "unresolvedQuestions": []
+      },
+      "functionalRequirements": [
+        "Validate accepted contract revision, digest and matching approval; block stale pins",
+        "Classify field removal, rename, type, nullability, key and schema evolution per consumer direction",
+        "Reject missing required tests and unapproved threshold changes",
+        "Separate structural and data quality outcomes and reject malformed or incomplete reports",
+        "Run real dbt Core and DuckDB on isolated passing and violating fixtures with provenance",
+        "Measure required null, unique, referential integrity and accepted values checks",
+        "Block prerequisite gaps and uncertain termination, clean only owned resources",
+        "Use standard roles in data pipeline, dbt and contract skills and document adapter limits",
+        "Run repository validation and report exact results without committing or external writes"
+      ],
+      "proposedTestStrategy": "Conditional TDD required for deterministic domain logic; actual dbt subprocess fixtures for quality outcomes; catalog/schema checks and independent review for skills.",
+      "designProposal": "data-verification-design.md",
+      "technicalConstraints": [
+        "Node >=22.13; pnpm 12.5.1",
+        "No shared contracts, root config, lockfile or docs edits",
+        "No commit, push, PR, real warehouse write or destructive migration"
+      ],
+      "apiDataContracts": [
+        "Existing @bflow/contracts approval, specification, gate and artifact schemas at package boundaries",
+        "New data models remain private to Runtime"
+      ],
+      "risksAndTradeoffs": [
+        "Fixture-only checks do not execute arbitrary candidate model SQL",
+        "CLI/daemon configuration integration deferred to owning agent",
+        "Missing tools/sandbox remains a prerequisite gap"
+      ],
+      "migrationStrategy": "No existing persistent schema changes. Additive private opt-in adapter only.",
+      "traceability": [
+        {
+          "criterionId": "DC-01",
+          "taskIds": [
+            "dc-contract"
+          ]
+        },
+        {
+          "criterionId": "DC-02",
+          "taskIds": [
+            "dc-contract"
+          ]
+        },
+        {
+          "criterionId": "DC-03",
+          "taskIds": [
+            "dc-contract"
+          ]
+        },
+        {
+          "criterionId": "DC-04",
+          "taskIds": [
+            "dc-reports"
+          ]
+        },
+        {
+          "criterionId": "DC-05",
+          "taskIds": [
+            "dc-runner"
+          ]
+        },
+        {
+          "criterionId": "DC-06",
+          "taskIds": [
+            "dc-runner"
+          ]
+        },
+        {
+          "criterionId": "DC-07",
+          "taskIds": [
+            "dc-runner"
+          ]
+        },
+        {
+          "criterionId": "DC-08",
+          "taskIds": [
+            "dc-skills"
+          ]
+        },
+        {
+          "criterionId": "DC-09",
+          "taskIds": [
+            "dc-validation"
+          ]
+        }
+      ]
+    }
+  }
+}

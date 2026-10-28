@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "id": "orders_fixture",
+  "revision": 1,
+  "model": "orders",
+  "fields": [
+    {
+      "name": "id",
+      "type": "integer",
+      "nullable": false,
+      "unique": true
+    },
+    {
+      "name": "status",
+      "type": "text",
+      "nullable": false,
+      "unique": false
+    },
+    {
+      "name": "customer_id",
+      "type": "integer",
+      "nullable": true,
+      "unique": false
+    }
+  ],
+  "keys": [
+    "id"
+  ],
+  "consumer": {
+    "direction": "candidate_to_accepted",
+    "schema": "open"
+  },
+  "policy": {
+    "integerWidening": true
+  },
+  "checks": [
+    {
+      "id": "id_null",
+      "kind": "not_null",
+      "column": "id",
+      "maxFailures": 0
+    },
+    {
+      "id": "id_unique",
+      "kind": "unique",
+      "column": "id",
+      "maxFailures": 0
+    },
+    {
+      "id": "status_null",
+      "kind": "not_null",
+      "column": "status",
+      "maxFailures": 0
+    },
+    {
+      "id": "status_values",
+      "kind": "accepted_values",
+      "column": "status",
+      "values": [
+        "new",
+        "paid"
+      ],
+      "maxFailures": 0
+    },
+    {
+      "id": "customer_fk",
+      "kind": "relationships",
+      "column": "customer_id",
+      "reference": {
+        "model": "customers",
+        "column": "id"
+      },
+      "maxFailures": 0
+    }
+  ]
+}
