@@ -13,7 +13,8 @@ export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
  * Seatbelt (`sandbox-exec`) policy. Everything is denied by default; the paths below are the only grants.
  * Unlike the Linux namespace, Seatbelt cannot hide paths: the host filesystem still exists but its contents are
  * unreadable and unwritable. `file-read-metadata` is granted globally only because Node's `realpath` must `lstat`
- * every ancestor of an allowed path. There is no network, IPC or signal grant.
+ * every ancestor of an allowed path. There is no network, IPC or signal grant. Besides the Node executable, only files of
+ * the read-only dependency trees may be executed (native tools such as esbuild); files of the writable checkout never.
  */
 const BASE_PROFILE = `(version 1)
 (deny default)
@@ -96,7 +97,8 @@ export async function sandboxBehaviorDarwin(command: BoundBehavioralCommand, che
   const readOnly = (path: string) => {
     const name = `RO${params.length}`;
     params.push([name, path]);
-    rules.push(`(allow file-read* (subpath (param "${name}")))`);
+    // Read-only dependency trees may hold native tools (esbuild for Vite/Vitest); they can run but never be modified.
+    rules.push(`(allow file-read* process-exec (subpath (param "${name}")))`);
   };
   for (const path of command.dependencyRoots ?? []) {
     if (basename(path) !== "node_modules" || await realpath(path) !== resolve(path) || !(await lstat(path)).isDirectory())
@@ -107,7 +109,8 @@ export async function sandboxBehaviorDarwin(command: BoundBehavioralCommand, che
     const name = `DEP${params.length}`;
     params.push([name, target]);
     // Later rules win: the cloned tree is readable but not writable even though it lives inside the writable checkout.
-    rules.push(`(deny file-write* (subpath (param "${name}")))`);
+    // Its native tools may execute; the rest of the writable checkout never may, so nothing written can be run.
+    rules.push(`(deny file-write* (subpath (param "${name}")))`, `(allow process-exec (subpath (param "${name}")))`);
   }
   if (reporter) {
     const name = `REPORTER${params.length}`;

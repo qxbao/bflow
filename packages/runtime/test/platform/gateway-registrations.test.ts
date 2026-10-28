@@ -569,6 +569,33 @@ describe("GatewayRegistrationManager", () => {
       for (const id of ids) expect(entries[id].state).toBe("revoked");
     });
 
+    // Live regression (2026-10-28): the machine restarted, so the host daemon died together with the Gateway and nothing marked
+    // its registrations lost. The restarted Gateway refused to revoke registrations it no longer knows ("validation"), so every
+    // later host startup failed in recoverPreviousDaemon and the repository could not be brought up again.
+    it("retires still-registered entries a restarted Gateway no longer lists when the old daemon never observed the restart", async () => {
+      const gateway = manager();
+      expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+      expect((await gateway.ensureForRole(identity, coordinatorRequest())).ok).toBe(true);
+      const ids = [...control.registrations.keys()];
+      control.restart();
+      control.unknownRevokeCode = "validation";
+
+      expect(await manager().revokeSession(identity)).toEqual({ ok: true, value: undefined });
+
+      expect(control.revokeCalls).toEqual([]);
+      const entries = JSON.parse(await readLedger()).entries;
+      for (const id of ids) expect(entries[id].state).toBe("revoked");
+    });
+
+    it("still revokes a registered entry the Gateway lists, and keeps it when that revoke fails", async () => {
+      const gateway = manager();
+      expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);
+      const id = [...control.registrations.keys()][0] ?? "";
+      expect(await manager().revokeSession(identity)).toEqual({ ok: true, value: undefined });
+      expect(control.revokeCalls).toEqual([id]);
+      expect(JSON.parse(await readLedger()).entries[id].state).toBe("revoked");
+    });
+
     it("keeps an unconfirmed entry when the Gateway listing is uncertain", async () => {
       const gateway = manager();
       expect((await gateway.ensureForRole(identity, request())).ok).toBe(true);

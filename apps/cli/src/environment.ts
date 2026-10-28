@@ -1,4 +1,6 @@
 import { AGY_LOGIN_REMEDIATION, probeAgyAccess } from "./agy-access.js";
+import type { WorkflowRunSnapshot } from "@bflow/contracts";
+import { unverifiedWriterBlocker, unverifiedWriters } from "./shutdown-safety.js";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
@@ -1032,15 +1034,16 @@ export class EnvironmentLifecycle {
           manifest = this.validateManifest(live, repository);
         }
         const activeRuns = new Map<string, { version: number }>();
+        const activeSnapshots: WorkflowRunSnapshot[] = [];
         const collectActiveRuns = async () => {
-          activeRuns.clear();
+          activeRuns.clear(); activeSnapshots.length = 0;
           let cursor: string | undefined;
           const seen = new Set<string>();
           do {
             const page = unwrap(await deadline.call((opts) => integration.runtime!.findRuns({ status: ["queued", "running", "waiting", "blocked", "cancelling"], limit: 500, ...(cursor ? { cursor } : {}) }, opts)));
             for (const run of page.items) {
               const parsed = WorkflowRunSnapshotSchema.parse(run);
-              if (!["succeeded", "failed", "cancelled"].includes(parsed.status)) activeRuns.set(parsed.runId, { version: parsed.version });
+              if (!["succeeded", "failed", "cancelled"].includes(parsed.status)) { activeRuns.set(parsed.runId, { version: parsed.version }); activeSnapshots.push(parsed); }
             }
             if (!page.nextCursor) break;
             if (typeof page.nextCursor !== "string" || seen.has(page.nextCursor)) fail("Runtime pagination did not advance; cannot establish shutdown safety");
@@ -1050,12 +1053,15 @@ export class EnvironmentLifecycle {
             const result = unwrap(await deadline.call((opts) => integration.runtime!.getRun(id, opts)));
             if (result === null) fail(`Runtime cannot resolve manifest run '${id}'`);
             const run = WorkflowRunSnapshotSchema.parse(result);
-            if (!["succeeded", "failed", "cancelled"].includes(run.status)) activeRuns.set(id, { version: run.version });
+            if (!["succeeded", "failed", "cancelled"].includes(run.status)) { activeRuns.set(id, { version: run.version }); activeSnapshots.push(run); }
           }
         };
         await collectActiveRuns();
         const changes = await this.command(repository, "git", ["status", "--porcelain=v1", "--untracked-files=normal"], deadline);
         const busy = manifest.panes.some((p) => ["working", "starting", "accepted", "unknown", "disconnected", "blocked"].includes(p.transportState));
+        // --yes confirms an orderly checkpointed stop; it cannot accept losing an unverified Developer attempt. Only --force can.
+        const writerBlocker = force ? undefined : unverifiedWriterBlocker(unverifiedWriters(activeSnapshots));
+        if (writerBlocker) fail(writerBlocker);
         if ((changes.trim() || activeRuns.size || busy) && !confirmed) fail(`Unsafe shutdown: ${activeRuns.size} active runs${changes.trim() ? ", uncommitted changes" : ""}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
         if (activeRuns.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
         if (!integration.quiesce) fail("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");

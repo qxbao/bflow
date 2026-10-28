@@ -2158,8 +2158,25 @@ export class AgenticWorkflowRuntime {
       out.request.target.paneId === binding.paneId && out.request.target.agentId === binding.agentId &&
       out.request.target.workspaceId === binding.workspaceId && out.request.target.tabId === binding.tabId &&
       digest(out.request.target.session) === digest(binding.session) && digest(out.request.context) === digest(message));
-    if (!outbound || message.recipient.role !== binding.role) throw new Error("Inbound provider prompt is not an exact Runtime outbox delivery");
+    if (!outbound || message.recipient.role !== binding.role)
+      throw new Error(`Inbound provider prompt is not an exact Runtime outbox delivery (${this.providerDeliveryMismatch(state, message, binding)})`);
     return outbound;
+  }
+  /** Diagnostic only, for the refusal above: names the fields that differ from the outbound with the same message_id. Never weakens the check. */
+  private providerDeliveryMismatch(state: JournalState, message: RoleMessage, binding: PaneBinding): string {
+    const candidates = state.outbound.filter(out => out.message.message_id === message.message_id);
+    if (!candidates.length) return `no outbound with this message_id; recipient ${message.recipient.role}, binding ${binding.role}`;
+    return candidates.map(out => {
+      const target = out.request?.target, problems: string[] = [];
+      if (!out.request) problems.push("no request");
+      if (!["sending", "unknown_delivery", "accepted", "released"].includes(out.status)) problems.push(`status ${out.status}`);
+      if (target) for (const field of ["paneId", "agentId", "workspaceId", "tabId"] as const)
+        if (target[field] !== binding[field]) problems.push(field);
+      if (target && digest(target.session) !== digest(binding.session)) problems.push("session");
+      if (out.request && digest(out.request.context) !== digest(message)) problems.push("content digest");
+      if (message.recipient.role !== binding.role) problems.push("recipient role");
+      return `message_id matched (${out.status}); mismatch: ${problems.join(", ") || "none"}`;
+    }).join("; ");
   }
   async validateProviderDelivery(input: unknown, bindingInput: unknown): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);

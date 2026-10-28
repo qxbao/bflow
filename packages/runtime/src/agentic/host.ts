@@ -77,7 +77,7 @@ export function preserveBuiltinRolePrompt(original: string, trustedHostInstructi
   if (!original.trim()) throw new Error("Original role prompt is required");
   return `${original}\n\n${trustedHostInstructions}`;
 }
-import { inspectNativeDelivery, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
+import { inspectNativeDelivery, NativeAckGrace, nativeAckGraceMs, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
 import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import {
@@ -2411,10 +2411,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
    * Also writes Conversation notices for failed Conversation deliveries when Runtime exposes them.
    */
   const reportedUncertain = new Set<string>();
+  // An intent is written just before delivery and its ACK follows moments later: report only intents still unacknowledged
+  // after the grace period, never one that is merely in flight at the watchdog tick.
+  const ackGrace = new NativeAckGrace(nativeAckGraceMs(process.env.BFLOW_NATIVE_ACK_GRACE_MS));
   const reconcileRuntimeDeliveries = async () => {
     const host = requireWorkspace();
-    for (const { operationId, message } of await receipts.unacknowledgedNativeDeliveries()) {
-      if (reportedUncertain.has(operationId)) continue;
+    const unacknowledged = await receipts.unacknowledgedNativeDeliveries();
+    const due = new Set(ackGrace.due(unacknowledged.map(item => item.operationId), Date.now()));
+    for (const { operationId, message } of unacknowledged) {
+      if (reportedUncertain.has(operationId) || !due.has(operationId)) continue;
       // A refused delivery is settled by Runtime's refusal notice: it is not uncertain and is never resent.
       if (await host.runtime.inboundRejection(message.message_id) !== undefined) { reportedUncertain.add(operationId); continue; }
       await reportNativeDeliveryUncertainty(receipts, host.runtime, message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
