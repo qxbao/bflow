@@ -1,3 +1,5 @@
+import { recoverUnqueuedWebCancellations } from "../interaction/cancellation-recovery.js";
+import type { WebOperationStore } from "../interaction/operation-store.js";
 import { unmeasuredPolicyPhaseRequests } from "./phase-recovery.js";
 import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReconciliationReportSchema, ownsCancellationPane, ownsCancelledAllocation, type CancellationStopProof, type CancellationReconciliationReport } from "./cancellation-stop.js";
 import { actionVersion } from "../interaction/actions.js";
@@ -1329,6 +1331,10 @@ export class AgenticWorkflowRuntime {
       return raw;
     }
     return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
+  }
+  /** Owner startup only, before intake; use the full locked journal, never a compact diagnostic view. */
+  async recoverUnqueuedWebCancellations(store: WebOperationStore): Promise<string[]> {
+    return this.journal.exclusive(state => recoverUnqueuedWebCancellations(store, json(state), this.now()));
   }
   /** Read-only receipt view: no Core restore, coroutine recovery or semantic writes as part of diagnostics. */
   async nativeDeliveryInbox(): Promise<JournalState["inbox"]> {

@@ -1951,3 +1951,5 @@ implementing Coordinator continuation. The web action binds the exact pending ac
 version and follows the existing capability preflight, lease/fence, human-gate and
 bounded retry checks. It never reuses an old review verdict or automatically resumes
 an active measurement. Ordinary Coordinator continuations remain unchanged.
+
+Owner startup can settle an interrupted web cancellation as failed when its validated host receipt has a dispatch intent but the complete retained Runtime journal proves the cancellation was never enqueued. This runs after receipt replay and before intake, never replays the cancellation, and leaves accepted-only intents, queued/uncertain deliveries, pending Core writes and unverifiable snapshots unresolved. A failed cancellation is not proof that a process stopped; a new owner cancellation still uses normal stop/lease reconciliation.

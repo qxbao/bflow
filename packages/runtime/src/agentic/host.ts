@@ -1125,6 +1125,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     });
     // Stops of an earlier host session are not re-judged here: the new Coordinator has had no turn yet, so a missing next action
     // from a previous session is not "no response". Unsettled Stops of this session are reconciled by the normal Stop loop.
+    // Explicit owner startup after receipt replay, before intake: never replay a web mutation.
+    for (const commandId of await workspace.runtime.recoverUnqueuedWebCancellations(webStore))
+      process.stderr.write(`Bflow web cancellation ${commandId}: not enqueued before daemon restart; no command replayed\n`);
     for (const turn of await receipts.recoverAgyNativeTurns()) queueAgyNativePrompt(turn);
     await workspace.runtime.resumeRecoverableRuns();
     manifest = accepted;
