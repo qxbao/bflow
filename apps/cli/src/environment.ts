@@ -168,6 +168,21 @@ class Deadline {
 
 interface OperationIntent { repositoryId: string; sessionName: string; phase: "server_starting" | "manager_pending" | "ready" | "stopping" | "down"; serverPid?: number; }
 
+function readyPane(pane: PaneBinding): boolean {
+  if (["starting", "blocked", "disconnected", "cancelled", "unknown"].includes(pane.transportState)) return false;
+  if (pane.metadata?.["partialStart"] === true || pane.metadata?.["startupStatus"] === "partial") return false;
+  return READY_TRANSPORT_STATES.has(pane.transportState);
+}
+/**
+ * Each required role needs exactly one ready permanent pane. Runtime-owned non-permanent panes (dynamic Developers,
+ * profiled specialists, marked permanent: false) may survive a restart in the manifest and are checked by Runtime, never as startup readiness.
+ */
+export function requiredRolesReady(manifest: SessionManifest, roles: EnvironmentConfig["environment"]["roles"]): boolean {
+  return manifest.status === "up" && roles.filter((r) => r.role !== "developer" && r.role !== "sos" && (r.required ?? true)).every((r) => {
+    const permanent = manifest.panes.filter((pane) => pane.role === r.role && pane.permanent !== false);
+    return permanent.length === 1 && readyPane(permanent[0]!);
+  });
+}
 export class EnvironmentLifecycle {
   private readonly runner: EnvironmentProcessRunner;
   private readonly env: NodeJS.ProcessEnv;
@@ -300,16 +315,8 @@ export class EnvironmentLifecycle {
     if (error instanceof EnvironmentError) return new EnvironmentError({ ...error.contractError, message: `${message}\nAutomatic cleanup ${outcome}.` });
     return new Error(`${message}\nAutomatic cleanup ${outcome}.`, { cause: error });
   }
-  private readyPane(pane: PaneBinding): boolean {
-    if (["starting", "blocked", "disconnected", "cancelled", "unknown"].includes(pane.transportState)) return false;
-    if (pane.metadata?.["partialStart"] === true || pane.metadata?.["startupStatus"] === "partial") return false;
-    return READY_TRANSPORT_STATES.has(pane.transportState);
-  }
-  private ready(manifest: SessionManifest, config: EnvironmentConfig): boolean {
-    return manifest.status === "up" && config.environment.roles.filter((r) => r.role !== "developer" && r.role !== "sos" && (r.required ?? true)).every((r) =>
-      manifest.panes.filter((pane) => pane.role === r.role).length === 1 &&
-      manifest.panes.some((pane) => pane.role === r.role && this.readyPane(pane)));
-  }
+  private readyPane(pane: PaneBinding): boolean { return readyPane(pane); }
+  private ready(manifest: SessionManifest, config: EnvironmentConfig): boolean { return requiredRolesReady(manifest, config.environment.roles); }
   private async checkpointRuns(integration: EnvironmentIntegration, runs: Map<string, { version: number }>, deadline: Deadline) {
     if (runs.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable. Recovery data was preserved.");
     for (const [runId, run] of runs) {

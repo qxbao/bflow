@@ -364,6 +364,8 @@ function record(value: unknown): Record<string, unknown> {
 function integer(value: unknown, max: number): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max;
 }
+/** Value-free diagnostic, safe to show verbatim. */
+export const CONFIG_REPOSITORY_IDENTITY_MISMATCH = "Configuration belongs to another repository or was moved. Reconcile its repository identity before use.";
 export async function readEnvironmentConfig(repository: RepositoryIdentity): Promise<EnvironmentConfig> {
   const path = resolveReadableConfigPath(repository.root);
   try {
@@ -372,7 +374,7 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity): Pro
     const raw: unknown = parseConfigYaml(await readFile(path, "utf8"));
     const env = record(record(raw)["environment"]);
     if (env["repositoryId"] !== repository.id || env["workspaceRoot"] !== repository.root || env["sessionName"] !== repository.sessionName)
-      throw new Error("Configuration belongs to another repository or was moved. Reconcile its repository identity before use.");
+      throw new Error(CONFIG_REPOSITORY_IDENTITY_MISMATCH);
     if (typeof env["herdrBinary"] !== "string" || !env["herdrBinary"].trim()) throw new Error("Invalid Herdr executable");
     const rawRoles = env["roles"];
     if (!Array.isArray(rawRoles) || !rawRoles.length) throw new Error("Missing role configuration");
