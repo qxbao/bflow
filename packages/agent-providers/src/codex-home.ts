@@ -383,6 +383,12 @@ export async function preparePrivateCodexHome(
   await chmod(privateCodexHome, 0o700);
   await mkdir(privateProcessHome, { recursive: true, mode: 0o700 });
   await chmod(privateProcessHome, 0o700);
+  // Herdr types the provider launch into the pane's interactive shell, which runs with this HOME.
+  // A zsh without any startup file starts zsh-newuser-install, which consumes the typed command.
+  // This Bflow-owned home gets an intentionally empty rc; the user's real home is never touched.
+  const shellRc = join(privateProcessHome, ".zshrc");
+  if (!(await readSafeRegularFile(shellRc, 4096)).exists)
+    await writePrivateRegularFile(shellRc, "# Bflow private Codex process home: intentionally empty so interactive zsh starts without setup prompts.\n");
 
   for (const forbidden of FORBIDDEN_PRIVATE_HOME_ENTRIES) {
     await rm(join(privateCodexHome, forbidden), { recursive: true, force: true }).catch(() => undefined);

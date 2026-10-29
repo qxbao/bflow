@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -3016,6 +3016,11 @@ describe("@bflow/agent-providers", () => {
       const prepared = await preparePrivateCodexHome(preparedStateDir, sourceHome, testBaseDir, {});
       expect(prepared.mode).toBe("private");
       expect(prepared.authFilePath).toBeUndefined();
+      // Herdr types the launch into an interactive shell whose HOME is this private directory. Without a
+      // startup file zsh runs zsh-newuser-install, which swallows the typed provider command.
+      const shellRc = await readFile(join(prepared.HOME, ".zshrc"), "utf8");
+      expect(shellRc).toContain("Bflow");
+      expect((await stat(join(prepared.HOME, ".zshrc"))).mode & 0o777).toBe(0o600);
       const sanitizedConfig = await readFile(join(prepared.CODEX_HOME, "config.toml"), "utf8");
       expect(sanitizedConfig).toContain("model_context_window = 1000000");
       expect(sanitizedConfig).toContain("model_auto_compact_token_limit = 900000");
