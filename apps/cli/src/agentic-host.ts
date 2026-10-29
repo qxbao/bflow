@@ -16,6 +16,9 @@ export type { HostPrepareResponse, HostRoleLaunch };
 export interface LifecycleHost {
   /** Parsed with `HostPrepareResponseSchema`; `platform.ready === false` means no pane may be started. */
   prepare(options?: OperationOptions): Promise<HostPrepareResponse>;
+  /** Startup-only inspection of the current daemon; never used by read-only lifecycle commands. */
+  rolesNeedPreparation?(): Promise<boolean>;
+  platformStatus?(): Promise<{ readonly report: { readonly ready: boolean } | null }>;
   activate(manifest: SessionManifest, options?: OperationOptions): Promise<OperationResult<void>>;
   /** Optional private progressive check; older/mock hosts retain final activation only. */
   verifyRoleStartup?(manifest: SessionManifest, role: AgentRole, options?: OperationOptions): Promise<OperationResult<void>>;
@@ -171,6 +174,11 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
   };
 
   return {
+    rolesNeedPreparation: async () => {
+      const host = await openForStartup();
+      return host.rolesNeedPreparation ? host.rolesNeedPreparation() :
+        host.platformStatus ? (await host.platformStatus()).report?.ready !== true : false;
+    },
     prepare: async options => {
       const prepared: unknown = await (await openForStartup()).prepare(options);
       const { HostPrepareResponseSchema } = await loadRuntime();

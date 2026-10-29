@@ -36,6 +36,17 @@ describe("P12 composition with real P13 RolePaneManager", () => {
   });
   afterEach(async () => { vi.restoreAllMocks(); await rm(dir, { recursive: true, force: true }); });
   const starts = (runner: HerdrProcesses) => runner.calls.filter((r) => r.args[0] === "agent" && r.args[1] === "start");
+  it("checks cold-host preparation only when startup explicitly requests it", async () => {
+    const connect = vi.fn(async () => host);
+    host.rolesNeedPreparation = vi.fn(async () => true);
+    const integration = openPaneManagerEnvironment(input, runner, connect, async () => ["--test-host-role-config"]);
+    await integration.manager.getManifest(input.repository.sessionName);
+    expect(connect).not.toHaveBeenCalled();
+    expect(await integration.rolesNeedPreparation!({})).toBe(true);
+    expect(host.rolesNeedPreparation).toHaveBeenCalledOnce();
+    expect(host.prepare).not.toHaveBeenCalled();
+    expect(starts(runner)).toHaveLength(0);
+  });
   // EnvironmentLifecycle startup/shutdown uses the Linux flock guard.
   linuxIt("pipelines health after durable role publication without holding later launches, and drains before up returns", async () => {
     let release!: () => void;

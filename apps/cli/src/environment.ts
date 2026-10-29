@@ -29,6 +29,8 @@ export interface EnvironmentIntegration {
   readonly requiresNativeSession?: boolean;
   /** Provider checks and launch material only. Must not create panes or dispatch roles. */
   readonly prepareRoles?: (options: OperationOptions) => Promise<void>;
+  /** Startup-only: a surviving pane is not proof of prepared launch material in the current host. */
+  readonly rolesNeedPreparation?: (options: OperationOptions) => Promise<boolean>;
   readonly manager: SessionLifecycleManager;
   readonly runtime?: Pick<RuntimeService, "findRuns" | "getRun">;
   /** Establish a shutdown barrier: stop intake/dispatch and drain in-flight state writes. */
@@ -662,7 +664,9 @@ export class EnvironmentLifecycle {
         let manifestRaw = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
         let manifest = manifestRaw === null ? null : this.validateManifest(manifestRaw, repository);
         if (running && previous?.phase === "manager_pending" && (manifest !== null || saved !== null)) cleanupEligible = true;
-        const needsRoleStartup = !running || manifest === null || manifest.status === "down" || manifest.status === "degraded" ||
+        const hostNeedsPreparation = running && integration.rolesNeedPreparation
+          ? await deadline.call(opts => integration.rolesNeedPreparation!(opts)) : false;
+        const needsRoleStartup = hostNeedsPreparation || !running || manifest === null || manifest.status === "down" || manifest.status === "degraded" ||
           manifest.metadata?.["panePresentationVersion"] !== 1 || previous?.phase === "manager_pending";
         let roleStartupPrepared = false;
         if (!running) {
