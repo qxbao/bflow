@@ -5,9 +5,11 @@ import {
 } from "@bflow/contracts";
 import {
   digest,
+  isConversationDelivery,
   type JournalState,
   type RunRecord,
 } from "../agentic/journal.js";
+import { unmeasuredPolicyPhaseRequests } from "../agentic/phase-recovery.js";
 export const terminal = (r: RunRecord) =>
   r.cancelled ||
   !!r.supersededBy ||
@@ -73,7 +75,11 @@ export function availableActions(
           : undefined,
     ),
   ];
-  if (r.pendingAction && r.pendingAction.kind !== "coordinator_continuation") {
+  const unmeasuredResume = r.pendingAction?.kind === "coordinator_continuation" && r.status === "implementing" &&
+    unmeasuredPolicyPhaseRequests(state, r).length > 0;
+  const resumeUncertain = !!r.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === r.runId &&
+    ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out));
+  if (r.pendingAction && (r.pendingAction.kind !== "coordinator_continuation" || unmeasuredResume)) {
     const a = r.pendingAction;
     const issued = new Set(
       state.outbound
@@ -98,13 +104,13 @@ export function availableActions(
     actions.push(
       action(
         "resume",
-        uncertain
+        resumeUncertain
           ? "delivery_reconciliation_required"
           : Math.max(a.manualResumeAttempts ?? 0, issued) >= 3
             ? "resume_budget_exhausted"
             : gate && !restore
               ? "decision_required"
-              : r.status !== "escalated" || a.state !== "pending"
+              : (r.status !== "escalated" && !unmeasuredResume) || a.state !== "pending"
                 ? "action_not_pending"
                 : a.requiredRole
                   ? "capability_revalidation_required"

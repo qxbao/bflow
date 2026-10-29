@@ -1938,3 +1938,16 @@ existing behavior; this is not general lint or polyglot typechecker support.
 Evidence includes local tests with a real compiler, syntax errors outside project
 includes, original-config drift and gate receipt binding. A sandboxed measurement of
 this repository also passed; this does not establish full SDLC live acceptance.
+
+Policy-phase inspection keeps the complete committed diff and all unique accepted
+requirements inline while removing duplicated strategy fields and prior raw measurement
+logs. Prior evidence is referenced by immutable receipt/artifact identity and is still
+authenticated in full before accepting a later phase. Large source diffs can still
+exceed a provider's output budget; this compaction is not arbitrary diff truncation.
+
+An owner may explicitly resume a released, current conditional-evidence request that
+has no measurement or recorded outcome, even when its QA blocker left the run in an
+implementing Coordinator continuation. The web action binds the exact pending action
+version and follows the existing capability preflight, lease/fence, human-gate and
+bounded retry checks. It never reuses an old review verdict or automatically resumes
+an active measurement. Ordinary Coordinator continuations remain unchanged.

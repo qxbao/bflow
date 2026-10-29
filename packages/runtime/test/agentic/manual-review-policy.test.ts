@@ -36,6 +36,7 @@ import { WorkflowProposalRejected } from "../../src/agentic/workflow-rejection.j
 import { parseBehavioralCommands, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { digest } from "../../src/agentic/journal.js";
 import { projectTaskSpecificationInput } from "../../src/agentic/runtime.js";
+import { compactPolicyReviewDossier } from "../../src/agentic/mcp-output-views.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -526,6 +527,21 @@ describe("manual-review policy proposal ingress and evidence lifecycle", () => {
     await writeFile(join(f.cwd, "source.cjs"), "module.exports = x => x * 2;\n"); f.commit("implement behavior");
     f.requestPhase(readiness === "ready" ? "green" : "verification"); return f;
   }
+  it("keeps unique review requirements without duplicating prior raw measurement payloads", async () => {
+    const f = await implemented(), strategy = structuredClone(f.strategy);
+    const evidence = strategy.metadata!.tddEvidence as any[];
+    evidence[0].metadata.largeRawOutput = "x".repeat(150000);
+    const result = compactPolicyReviewDossier(f.specification, strategy) as any;
+    expect(JSON.stringify(result).length).toBeLessThan(30000);
+    expect(result.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
+    expect(result.specification.securityConsiderations).toBe(f.specification.securityConsiderations);
+    expect(result.specification.metadata).toEqual(f.specification.metadata);
+    expect(result.strategy.metadata.conditionalTdd.requiredVerificationMethods).toEqual((strategy.metadata!.conditionalTdd as any).requiredVerificationMethods);
+    expect(result.strategy.metadata.tddEvidence).toBeUndefined();
+    expect(result.priorEvidence[0].verificationId).toBe(evidence[0].verificationId);
+    expect(result.priorEvidence[0].artifactReferences).toEqual(evidence[0].evidenceArtifacts);
+    expect(evidence[0].metadata.largeRawOutput).toHaveLength(150000);
+  });
   it("completes Red Green Refactor through assigned QA inspection and explicit judgment without a task review gate", async () => {
     const f = await implemented();
     const artifacts = new Set<string>();

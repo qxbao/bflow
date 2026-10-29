@@ -1,3 +1,4 @@
+import { unmeasuredPolicyPhaseRequests } from "./phase-recovery.js";
 import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReconciliationReportSchema, ownsCancellationPane, ownsCancelledAllocation, type CancellationStopProof, type CancellationReconciliationReport } from "./cancellation-stop.js";
 import { actionVersion } from "../interaction/actions.js";
 import { WebCommandSchema, type WebCommand } from "@bflow/contracts";
@@ -486,22 +487,7 @@ export class AgenticWorkflowRuntime {
   }
   /** Released conditional-evidence requests of a live task attempt that ended without any measurement, failure or retirement. */
   private unmeasuredPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
-    return state.outbound.filter(item => {
-      const payload = record(item.message.payload);
-      if (item.message.run_id !== run.runId || item.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
-          item.status !== "released" || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
-      if (state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected")) return false;
-      const task = run.tasks.find(entry => entry.taskId === payload.taskId);
-      if (!task || task.writerReleased || task.result) return false;
-      const receipts = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
-      const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : receipts.length === 0 ? "verification" : undefined;
-      if (payload.phase !== expected) return false;
-      // Only the newest request for this phase and attempt; an earlier one was already superseded.
-      return !state.outbound.some(other => other !== item && other.message.run_id === run.runId && other.message.type === "verification.requested" &&
-        record(other.message.payload).taskId === payload.taskId && record(other.message.payload).phase === payload.phase &&
-        record(other.message.payload).implementationAttemptId === payload.implementationAttemptId &&
-        (other.message.occurred_at ?? "") > (item.message.occurred_at ?? ""));
-    });
+    return unmeasuredPolicyPhaseRequests(state, run);
   }
   private recordIngressDiagnostic(run: RunRecord, message: RoleMessage, reason: string, disposition: IngressDiagnostic["disposition"]): void {
     if ((run.ingressDiagnostics ?? []).some(item => item.messageId === message.message_id && item.disposition === disposition)) return;
@@ -1992,6 +1978,8 @@ export class AgenticWorkflowRuntime {
           digest(command.expectedVersion) !== digest(actionVersion(run, "resume"))) throw new Error("Stale web resume version or action");
       }
       const explicitId = options.conversationUserMessageId ?? options.webCommand?.commandId;
+      const resumeUnmeasured = !options.automatic && !!explicitId && run.status === "implementing" &&
+        action?.kind === "coordinator_continuation" && action.state === "pending" && this.unmeasuredPhaseRequests(state, run).length > 0;
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before resume");
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
@@ -2018,7 +2006,8 @@ export class AgenticWorkflowRuntime {
         return json({ queued: true, messageId: priorResume.messageId, actionId });
       }
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
-      if ((!explicitAfterAutomatic && run.status !== "escalated") || !action || action.actionId !== actionId || !["resume_coordinator", "reconcile_delivery"].includes(action.kind)) {
+      if ((!explicitAfterAutomatic && run.status !== "escalated" && !resumeUnmeasured) || !action || action.actionId !== actionId ||
+          !["resume_coordinator", "reconcile_delivery"].includes(action.kind) && !resumeUnmeasured) {
         const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
         if (prior) return json({ queued: true, messageId: prior.message.message_id, actionId });
         throw new Error("No matching recoverable blocker to resume");

@@ -18,6 +18,7 @@ import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
 import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { captureTypecheck, captureTypeScriptSyntax } from "./typecheck.js";
+import { compactPolicyReviewDossier } from "./mcp-output-views.js";
 import { unconfiguredImpactIndex, type ImpactIndex } from "./impact-index.js";
 import { selectRegressionTests } from "./regression-selection.js";
 import { pinRunnerDefinitions } from "./runner-provenance.js";
@@ -159,7 +160,7 @@ export class HostVerification {
       sourceMessageId: assignment.requestId, observation });
     this.policyReviews.set(observationId, { binding: PaneBindingSchema.parse(binding), observation });
     return json({ observationId, observation: captured, phase: args.phase, requestId: assignment.requestId,
-      dossier: { specification: assignment.specification, strategy: assignment.strategy } });
+      dossier: compactPolicyReviewDossier(assignment.specification, assignment.strategy) });
   }
   /** Runner-based ingress only sees criteria that no real-app gate verifies. */
   private splitApp(specification: Specification, strategy: TestStrategy): { specification: Specification; strategy: TestStrategy } {

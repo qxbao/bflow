@@ -6,6 +6,25 @@ import { z } from "zod";
 import type { AgentProviderId, AgentRole, JsonValue } from "@bflow/contracts";
 import { digest, json, record } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
+import { VerificationResultSchema, type Specification, type TestStrategy } from "@bflow/contracts";
+
+/** Keep every unique accepted requirement; prior measurement logs stay in authenticated host receipts. */
+export function compactPolicyReviewDossier(specification: Specification, strategy: TestStrategy) {
+  const { testStrategy: _duplicateStrategy, tddDecision: _duplicateDecision, ...specificationView } = specification;
+  const { tddEvidence, conditionalTdd, ...otherMetadata } = strategy.metadata ?? {};
+  const policy = record(conditionalTdd);
+  const { assessment: _assessmentInSpec, acceptanceCriteria: _criteriaInSpec, affectedPaths: _pathsInSpec,
+    riskLevel: _riskInSpec, ...policyRules } = policy;
+  const priorEvidence = Array.isArray(tddEvidence) ? tddEvidence.map(value => {
+    const result = VerificationResultSchema.parse(value), details = record(result.metadata?.conditionalTdd);
+    return { verificationId: result.verificationId, phase: details.phase, sourceRevision: details.sourceRevision,
+      artifactReferences: result.evidenceArtifacts };
+  }) : [];
+  return json({ specification: specificationView,
+    strategy: { ...strategy, metadata: { ...otherMetadata, conditionalTdd: policyRules } },
+    priorEvidence,
+    presentation: "Duplicate strategy/policy inputs are in specification. Prior raw measurement payloads remain in immutable host receipts and are authenticated again before a phase is accepted. No verification requirement is omitted." });
+}
 
 export const PlanningReferenceInputSchema = z
   .object({
