@@ -49,7 +49,12 @@ if mode=='entry':
     witness=signed(root+'/witness.json'); ack=signed(root+'/admit.json')
     if ack!={'scopeId':cfg['scopeId'],'witnessDigest':digest(witness)} or witness['scopeId']!=cfg['scopeId'] or witness['launchId']!=cfg['launchId'] or witness['launchFingerprint']!=cfg['launchFingerprint'] or boot()!=witness['bootId'] or identity(1)['start']!=witness['initStartTime'] or os.path.exists(root+'/sealed.json') or os.readlink('/proc/self/ns/pid')!=witness['namespace']: raise RuntimeError('Provider entry acknowledgement mismatch')
     target_valid(); os.environ['PATH']=cfg['originalPath']; signal.signal(signal.SIGINT,signal.SIG_DFL)
-    os.execv(cfg['target'],[cfg['target']]+sys.argv[3:])
+    # Native agent detection needs the canonical CLI name, even when discovery pinned a versioned executable.
+    target=cfg['target']
+    if cfg.get('providerCommand'):
+        target=root+'/provider/'+cfg['providerCommand']
+        if not os.path.islink(target) or os.path.realpath(target)!=cfg['target']: raise RuntimeError('Pinned provider entry link changed')
+    os.execv(target,[target]+sys.argv[3:])
 elif mode=='inspect':
     witness=signed(root+'/witness.json')
     if boot()!=witness['bootId'] or os.path.exists(root+'/sealed.json'): raise RuntimeError('Process scope is no longer dispatchable')

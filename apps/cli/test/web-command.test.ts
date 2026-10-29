@@ -70,10 +70,31 @@ it('binary web help/invalid options stay outside business composition and JSON o
  process.exitCode=0;
 });
 it('rejects unsafe reuse rather than trusting a locator PID or taking over',async()=>{
- const {server,stateDirectory}=await start();await server.close();
  const {writeFile}=await import('node:fs/promises');
- await writeFile(join(stateDirectory,'instance.json'),JSON.stringify({origin:server.origin,controlPort:1,controlSecret:'x'.repeat(43)}),{mode:0o600});
- await expect(start({stateDirectory,port:Number(new URL(server.origin).port)})).rejects.toThrow(/xác minh/);
+ // A listener that is not the authenticated owner keeps the locator: fail closed.
+ const impostor=createServer((_req,res)=>{res.writeHead(403);res.end();});await new Promise<void>(r=>impostor.listen(0,'127.0.0.1',r));
+ const impostorPort=(impostor.address() as {port:number}).port;
+ const first=await start();await first.server.close();
+ await writeFile(join(first.stateDirectory,'instance.json'),JSON.stringify({origin:first.server.origin,controlPort:impostorPort,controlSecret:'x'.repeat(43)}),{mode:0o600});
+ await expect(start({stateDirectory:first.stateDirectory,port:Number(new URL(first.server.origin).port)})).rejects.toThrow(/xác minh/);
+ await new Promise<void>(r=>impostor.close(()=>r()));
+ // Control port refused, but the kernel lock on the server state is still held: not provably dead.
+ const second=await start();await second.server.close();
+ await writeFile(join(second.stateDirectory,'instance.json'),JSON.stringify({origin:second.server.origin,controlPort:1,controlSecret:'x'.repeat(43)}),{mode:0o600});
+ const holder=spawn('flock',['--exclusive',join(second.stateDirectory,'server','server.lock'),'sleep','30'],{stdio:'ignore'});
+ try{
+  await new Promise(r=>setTimeout(r,300));
+  await expect(start({stateDirectory:second.stateDirectory,port:Number(new URL(second.server.origin).port)})).rejects.toThrow(/xác minh/);
+ }finally{holder.kill();}
+});
+it('recovers a dead owner only from a refused control port plus a free server-state lock (no PID)',async()=>{
+ const {writeFile}=await import('node:fs/promises');
+ const dead=await start();await dead.server.close();
+ await writeFile(join(dead.stateDirectory,'instance.json'),JSON.stringify({origin:dead.server.origin,controlPort:1,controlSecret:'x'.repeat(43)}),{mode:0o600});
+ const recovered=await start({stateDirectory:dead.stateDirectory,port:Number(new URL(dead.server.origin).port)});
+ expect(recovered.server.reused).toBe(false);
+ expect(recovered.output.join('\n')).toMatch(/Đã dọn web instance cũ/);
+ expect((await fetch(recovered.server.origin)).status).toBe(200);
 });
 it('does not print a pairing secret into redirected output',async()=>{
  const {output}=await start({isTerminal:false});expect(output.join('')).not.toContain('#');expect(output.join('')).toMatch(/terminal/i);

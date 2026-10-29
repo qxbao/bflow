@@ -1,6 +1,7 @@
 import { WebHttpContracts as contracts, WebApiErrorSchema, WEB_LIMITS, type WebSessionSummary } from '@bflow/contracts/web';
 
 type Parser<T> = { parse(input: unknown): T };
+export class ConfigurationError extends Error {}
 export class ApiError extends Error {
   constructor(readonly code: string) { super(code); }
 }
@@ -11,9 +12,11 @@ const messages: Record<string, string> = {
   stale_version: 'Dữ liệu đã thay đổi. Tải lại trang để xem phiên bản hiện tại.',
   invalid_response: 'Dữ liệu trả về không hợp lệ. Hãy tải lại hoặc kiểm tra phiên dự án.',
   invalid_request: 'Thông tin chưa hợp lệ. Kiểm tra đường dẫn Git tuyệt đối trên máy này.',
+  operation_conflict: 'Dự án còn thao tác chưa được xác nhận. Kiểm tra trạng thái thao tác trước khi hủy đăng ký.',
+  operation_not_allowed: 'Dịch vụ đang chạy chưa hỗ trợ thao tác này. Hãy khởi động lại Bflow Web bằng phiên bản mới.',
   unavailable: 'Chưa kết nối được dịch vụ. Kiểm tra phiên dự án rồi thử tải lại.',
 };
-export function explain(error: unknown): string { return error instanceof ApiError ? messages[error.code] ?? messages.unavailable! : messages.unavailable!; }
+export function explain(error: unknown): string { return error instanceof ConfigurationError ? error.message : error instanceof ApiError ? messages[error.code] ?? messages.unavailable! : messages.unavailable!; }
 /** Capture and erase secrets before rendering, requests, or asynchronous work. */
 export function consumeBootstrap(): string | undefined {
   const fragment = location.hash.slice(1);
@@ -35,7 +38,7 @@ export class ApiClient {
       if (response.status === 401) { this.csrf = undefined; this.session = undefined; }
       throw new ApiError(error.success ? error.data.code : 'invalid_response');
     }
-    try { return schema.parse(await response.json()); } catch { throw new ApiError('invalid_response'); }
+    try { return schema.parse(response.status === 204 ? undefined : await response.json()); } catch { throw new ApiError('invalid_response'); }
   }
   async authenticate(secret?: string) {
     const value = secret
@@ -46,6 +49,11 @@ export class ApiClient {
   get expiresAt() { return this.session?.expiresAt; }
   projects() { return this.request('/api/v1/projects', contracts.projects.response); }
   register(path: string) { return this.request('/api/v1/projects', contracts.registerProject.response, 'POST', contracts.registerProject.body.parse({apiVersion:1,path})); }
+  unregister(id: string) { return this.request(projectPath(id), contracts.unregisterProject.response, 'DELETE', contracts.unregisterProject.body.parse({apiVersion:1,confirmed:true})); }
+  configuration(id: string) { return this.request(`${projectPath(id)}/configuration`, contracts.configuration.response); }
+  async saveConfiguration(id: string, input: unknown) { const result = await this.request(`${projectPath(id)}/configuration`, contracts.saveConfiguration.response, 'PUT', contracts.saveConfiguration.body.parse(input)); if(!result.ok)throw new ConfigurationError(result.error.message);return result.value; }
+  initialize(id: string, input: unknown) { return this.request(`${projectPath(id)}/initializations`, contracts.initializeProject.response, 'POST', contracts.initializeProject.body.parse(input)); }
+  initialization(id: string, operationId: string) { return this.request(`${projectPath(id)}/initializations/${encodeURIComponent(operationId)}`, contracts.initialization.response); }
   sessionView(id: string) { return this.request(`${projectPath(id)}/session`, contracts.projectSession.response); }
   preview(id: string) { return this.request(`${projectPath(id)}/preview`, contracts.preview.response); }
   runs(id: string, search = '', phase = '', cursor?: string) {

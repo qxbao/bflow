@@ -3,7 +3,7 @@ import { JsonValueSchema, PaneBindingSchema, type JsonValue, type PaneBinding } 
 import { digest, json, record } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { HostReceiptJournal, AgyNativeAnchorSchema, parseConversationResumeRequest, type TrustedConversationTurn } from "./host-receipts.js";
-import { parseNativeDiagnosticFenceCommand, parsePolicyPhaseRetirementCommand, parseWorkflowReviewReplacementCommand } from "./native-diagnostic-fence.js";
+import { isBflowSosCommand, parseNativeDiagnosticFenceCommand, parsePolicyPhaseRetirementCommand, parseWorkflowReviewReplacementCommand } from "./native-diagnostic-fence.js";
 
 interface ConversationIntakePort {
   getContext(): Promise<unknown>;
@@ -28,7 +28,8 @@ export class HostConversationIntake {
   constructor(readonly receipts: HostReceiptJournal, private readonly conversation: () => ConversationIntakePort,
     private readonly fenceDiagnostic?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>,
     private readonly retirePolicyPhase?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>,
-    private readonly replaceWorkflowReview?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>) {}
+    private readonly replaceWorkflowReview?: (turn: TrustedConversationTurn, operationId: string) => Promise<JsonValue>,
+    private readonly spawnSosAgent?: (turn: TrustedConversationTurn) => Promise<JsonValue>) {}
   private exclusive<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.catch(() => undefined).then(work);
     this.pending = result;
@@ -42,7 +43,7 @@ export class HostConversationIntake {
   private async recoverableTurns(binding: PaneBinding): Promise<TrustedConversationTurn[]> {
     const turns: TrustedConversationTurn[] = [];
     for (const turn of await this.receipts.conversationTurns()) {
-      if (identity(turn.binding) !== identity(binding) || parseConversationResumeRequest(turn.content) || (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content)) ||
+      if (identity(turn.binding) !== identity(binding) || parseConversationResumeRequest(turn.content) || (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content) || isBflowSosCommand(turn.content)) ||
           await this.receipts.conversationDecision(turn.messageId) !== undefined ||
           await this.receipts.conversationApprovalFailure(turn.messageId) !== undefined) continue;
       if (await this.receipts.wasConversationTurnNudged(turn)) turns.push(turn);
@@ -68,6 +69,21 @@ export class HostConversationIntake {
       await this.receipts.recordConversationTurn(trusted);
       const saved = await this.receipts.conversationDecision(turn.messageId);
       if (saved?.result !== undefined) return this.reply(binding, { messageId: turn.messageId, requiresConversationDecision: false, result: saved.result });
+      if (isBflowSosCommand(trusted.content)) {
+        // Exact physical BFLOWSOS: the host spawns the rescue agent once per trusted messageId; Chat never decides this turn.
+        const intent = json({ intent: "trusted_sos_spawn", trigger: "BFLOWSOS" });
+        if (saved && digest(saved.decision) !== digest(intent)) throw new Error("Conflicting physical BFLOWSOS command");
+        await this.receipts.recordConversationIntent(turn.messageId, intent);
+        let result: JsonValue;
+        try {
+          if (!this.spawnSosAgent) throw new Error("This host does not support BFLOWSOS");
+          result = json(await this.spawnSosAgent(trusted));
+        } catch (error) {
+          result = json({ ok: false, error: { code: "sos_spawn_failed", message: redactString(String(error)).slice(0, 2000) } });
+        }
+        await this.receipts.recordConversationResult(turn.messageId, intent, result);
+        return this.reply(binding, { messageId: turn.messageId, requiresConversationDecision: false, result });
+      }
       const phaseRetirement = parsePolicyPhaseRetirementCommand(trusted.content);
       const reviewReplacement = parseWorkflowReviewReplacementCommand(trusted.content);
       const operationId = parseNativeDiagnosticFenceCommand(trusted.content) ?? phaseRetirement ?? reviewReplacement;
@@ -167,7 +183,7 @@ export class HostConversationIntake {
       if (await this.receipts.isConversationRuntimeNudge(binding)) return undefined;
       const turn = (await this.receipts.conversationTurns()).filter(value => identity(value.binding) === identity(binding)).at(-1);
       const latest = turn ? await this.receipts.conversationDecision(turn.messageId) : undefined;
-      if (turn && (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content))) return undefined;
+      if (turn && (parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content) || isBflowSosCommand(turn.content))) return undefined;
       if (turn && latest?.result === undefined) {
         // An ordinary intent is not a committed correction/cancellation; retain its exact retry ahead of older work.
         if (await this.receipts.conversationApprovalFailure(turn.messageId) === undefined &&
@@ -189,7 +205,7 @@ export class HostConversationIntake {
       const turn = args.messageId === undefined ? turns.filter(value => identity(value.binding) === identity(binding)).at(-1)
         : turns.find(value => value.messageId === args.messageId);
       if (!turn) throw new Error(args.messageId === undefined ? "No trusted user turn has been recorded for this Conversation pane" : "Unknown trusted user turn");
-      if ((parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content))) throw new Error("Diagnostic fencing requires the physical user hook; model decisions cannot authorize it");
+      if ((parseNativeDiagnosticFenceCommand(turn.content) || parsePolicyPhaseRetirementCommand(turn.content) || parseWorkflowReviewReplacementCommand(turn.content) || isBflowSosCommand(turn.content))) throw new Error("Physical commands (diagnostic fencing, BFLOWSOS) require the physical user hook; model decisions cannot authorize them");
       const messageId = turn.messageId;
       if (identity(turn.binding) !== identity(binding)) throw new Error("Conversation decision pane/native session changed");
       const approvalFailure = await this.receipts.conversationApprovalFailure(messageId);

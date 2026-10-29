@@ -10,7 +10,7 @@ import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile } from 
 import type { LocalWebServer, LocalWebServices } from '@bflow/local-server';
 import { readPreviewFile } from './preview-files.js';
 import { withLifecycleLock } from './lifecycle-lock.js';
-import { createWebWorkspaceServices, type WebWorkspaceOptions } from './web-workspace-services.js';
+import { createWebWorkspaceServices, type WebWorkspaceOptions, type WebWorkspaceServices } from './web-workspace-services.js';
 import { createWebInteractionServices } from './web-interaction.js';
 import type { CliIo } from './types.js';
 
@@ -40,7 +40,7 @@ export interface WebCommandOptions extends Partial<WebWorkspaceOptions> {
   isTerminal?: boolean;
   openBrowser?: (url: string) => Promise<void>;
 }
-export interface WebCommandHandle { origin: string; reused: boolean; close(): Promise<void> }
+export interface WebCommandHandle { origin: string; reused: boolean; close(): Promise<void>; pendingLifecycle?(): Promise<void>[] }
 
 // Private locator is local state, never a browser or host credential. The bootstrap itself is not saved.
 const LocatorSchema = z.object({ origin: z.string().regex(/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/),
@@ -125,11 +125,23 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
     try { existing = await readLocator(locatorPath); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (existing) {
-      if (args.port !== Number(new URL(existing.origin).port)) throw new Error(`Web đã chạy tại ${existing.origin}; dùng đúng --port để mở lại. Không đổi origin tự động.`);
-      let secret: string;
+      let secret: string | undefined;
       try { secret = await bootstrapFromOwner(existing); }
-      catch { throw new Error('Không xác minh được web instance. Dừng owner cũ và kiểm tra private web state/locks trước khi khôi phục; không takeover theo PID.'); }
-      return { bootstrap: secret, handle: { origin: existing.origin, reused: true, async close() {} } };
+      catch (error) {
+        // A dead owner (crash, SIGKILL, closed terminal on older builds) leaves its locator behind.
+        // Recover only with two independent proofs: nothing listens on its control port, and the
+        // kernel lock of its server state is free. Never decide by PID; any other failure fails closed.
+        const refused = (error as NodeJS.ErrnoException).code === 'ECONNREFUSED';
+        if (!refused || !await (await import('@bflow/local-server')).privateStateIsFree(join(stateDirectory, 'server')))
+          throw new Error('Không xác minh được web instance. Dừng owner cũ và kiểm tra private web state/locks trước khi khôi phục; không takeover theo PID.');
+        await unlink(locatorPath);
+        io.stderr(`Đã dọn web instance cũ tại ${existing.origin} (không còn tiến trình sở hữu).`);
+        existing = undefined;
+      }
+      if (existing && secret !== undefined) {
+        if (args.port !== Number(new URL(existing.origin).port)) throw new Error(`Web đã chạy tại ${existing.origin}; dùng đúng --port để mở lại. Không đổi origin tự động.`);
+        return { bootstrap: secret, handle: { origin: existing.origin, reused: true, async close() {} } };
+      }
     }
     let assetsDirectory: string;
     try {
@@ -146,14 +158,16 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
     }
     catch { throw new Error('Thiếu production web assets. Chạy pnpm run build từ source checkout đã cài dependencies, rồi chạy lại bflow web.'); }
     let server: LocalWebServer;
+    let workspace: WebWorkspaceServices | undefined;
     try {
       const { createLocalWebServer } = await import('@bflow/local-server');
       server = await createLocalWebServer({ host: '127.0.0.1', port: args.port,
       stateDirectory: join(stateDirectory, 'server'), assetsDirectory, compose(context){
         const resolveProject=options.resolveProject??context.resolveProject;
         const signed=createWebInteractionServices({principalId:context.principalId,resolveProject});
-        return {workspace:createWebWorkspaceServices({...options,resolveProject,
-          receiptDirectory:options.receiptDirectory??join(stateDirectory,'lifecycle-receipts')}),
+        workspace=createWebWorkspaceServices({...options,resolveProject,
+          receiptDirectory:options.receiptDirectory??join(stateDirectory,'lifecycle-receipts')});
+        return {workspace,
           interaction:options.interaction??signed.interaction,
           hostSessionId:signed.hostSessionId,
           readHistoricalOperation:options.readHistoricalOperation??signed.readHistoricalOperation};
@@ -198,7 +212,7 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
       await writeLocator(locatorPath, { origin: server.origin, controlPort: controlAddress.port, controlSecret }); published = true;
       const secret = await server.issueBootstrap();
       let closing: Promise<void> | undefined;
-      return { bootstrap: secret, handle: { origin: server.origin, reused: false, close() {
+      return { bootstrap: secret, handle: { origin: server.origin, reused: false, pendingLifecycle: () => workspace?.pendingLifecycle() ?? [], close() {
         return closing ??= (async () => {
           await new Promise<void>(r => { control.close(() => r()); control.closeAllConnections(); });
           await server.close();
@@ -222,16 +236,37 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
   } else printPairing(pairingUrl);
   return handle;
 }
-/** Only a newly-created owner waits for signals; a reuse invocation returns immediately. */
-export async function runWebCommand(args: WebArgs, options: WebCommandOptions = {}): Promise<void> {
-  let stopped = false;
+/** Only a newly-created owner waits for signals; a reuse invocation returns immediately.
+ * SIGHUP (terminal closed) is handled like Ctrl-C so the owner locator is removed. Closing
+ * never calls up/down: an in-flight start/stop is allowed to settle its receipt, and a second
+ * signal leaves immediately with that operation left for reconciliation. */
+export async function runWebCommand(args: WebArgs, options: WebCommandOptions & { exitProcess?: boolean } = {}): Promise<void> {
+  const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  const io = options.io ?? { stdout: (s: string) => process.stdout.write(s + '\n'), stderr: (s: string) => process.stderr.write(s + '\n') };
+  const say = (text: string) => { try { io.stderr(text); } catch { /* terminal may be gone after SIGHUP */ } };
+  let signalled = 0;
   let notify: (() => void) | undefined;
-  const stop = () => { stopped = true; notify?.(); };
-  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+  const stop = () => {
+    signalled++; notify?.();
+    if (signalled > 1 && options.exitProcess) {
+      say('Thoát ngay. Thao tác khởi động/dừng phiên đang chạy sẽ cần đối chiếu theo operation ID; không gửi lại.');
+      process.exit(130);
+    }
+  };
+  for (const signal of signals) process.on(signal, stop);
   try {
     const handle = await startWebCommand(args, options);
     if (handle.reused) return;
-    if (!stopped) await new Promise<void>(accept => { notify = accept; });
+    if (!signalled) await new Promise<void>(accept => { notify = accept; });
     await handle.close();
-  } finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
+    const pending = handle.pendingLifecycle?.() ?? [];
+    if (pending.length) {
+      say('Đã đóng web. Đang chờ thao tác khởi động/dừng phiên kết thúc để lưu kết quả; Ctrl-C lần nữa để thoát ngay.');
+      await Promise.allSettled(pending);
+    }
+  } finally {
+    for (const signal of signals) process.off(signal, stop);
+    // A finished owner must not linger on stray handles left by lifecycle composition.
+    if (options.exitProcess) setImmediate(() => process.exit(process.exitCode ?? 0));
+  }
 }

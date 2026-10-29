@@ -7,7 +7,7 @@ import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { join, extname, sep } from 'node:path';
 import { WebHttpContracts, WebHttpPathParamsSchema, WebProjectInspectionResultSchema, WebProjectPreviewResultSchema,
-  WebProjectSessionResultSchema, WebRunPageResultSchema, WebRunViewResultSchema, WebDecisionPageResultSchema, WEB_LIMITS,
+  WebProjectMutationStatusResultSchema, WebProjectConfigurationResultSchema, WebProjectInitializationResultSchema, WebProjectSessionResultSchema, WebRunPageResultSchema, WebRunViewResultSchema, WebDecisionPageResultSchema, WEB_LIMITS,
   type UserInteractionClient } from '@bflow/contracts/web';
 import { WebAuthenticatedContextSchema, type WebAuthenticatedContext } from '@bflow/contracts/web-host';
 import { BrowserSessions } from './session.js';
@@ -60,9 +60,26 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       if(name==='registerProject'){const b=WebHttpContracts.registerProject.body.parse(input);const result=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return ctx.registry.register(b.path);});respond(result.project,result.created?201:200);return;}
       if(!id)throw new HttpError('not_found');
       await ctx.registry.get(id);
-      if(name==='unregisterProject'){await ctx.serialize(()=>{ctx.sessions.authenticate(req);return ctx.registry.unregister(id);});respond(undefined,204);return;}
+      if(name==='unregisterProject'){await ctx.serialize(async()=>{ctx.sessions.authenticate(req);if(ctx.operations.workspace.projectMutationStatus){const value=unwrap(WebProjectMutationStatusResultSchema.parse(await ctx.operations.workspace.projectMutationStatus(id)));if(value.projectId!==id)throw new HttpError('unavailable');if(value.initializationPending)throw new HttpError('operation_conflict');}return ctx.registry.unregister(id);});respond(undefined,204);return;}
       if(name==='operation'){respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);},authentication));return;}
       await ctx.registry.require(id);
+      if(name==='configuration' || name==='saveConfiguration'){
+        const workspace=ctx.operations.workspace;
+        const result=name==='configuration'
+          ? workspace.readConfiguration && await workspace.readConfiguration(id)
+          : workspace.saveConfiguration && await ctx.serialize(()=>{ctx.sessions.authenticate(req);return workspace.saveConfiguration!(id,WebHttpContracts.saveConfiguration.body.parse(input));});
+        if(!result)throw new HttpError('operation_not_allowed');
+        if(name==='saveConfiguration'){const parsed=WebProjectConfigurationResultSchema.parse(result);if(parsed.ok && parsed.value.projectId!==id)throw new HttpError('unavailable');respond(parsed);return;}
+        const value=unwrap(WebProjectConfigurationResultSchema.parse(result));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+      }
+      if(name==='initializeProject' || name==='initialization'){
+        const workspace=ctx.operations.workspace;
+        const result=name==='initialization'
+          ? workspace.readInitialization && await workspace.readInitialization(id,params.operationId!)
+          : workspace.initializeProject && await ctx.serialize(()=>{ctx.sessions.authenticate(req);return workspace.initializeProject!(id,WebHttpContracts.initializeProject.body.parse(input));});
+        if(!result)throw new HttpError('operation_not_allowed');
+        const value=unwrap(WebProjectInitializationResultSchema.parse(result));if(value.projectId!==id || value.operationId!==(name==='initialization'?params.operationId:WebHttpContracts.initializeProject.body.parse(input).operationId))throw new HttpError('unavailable');respond(value,name==='initializeProject'?202:200);return;
+      }
       if(name==='startSession'||name==='stopSession'){
         const b=WebHttpContracts.startSession.body.parse(name==='startSession'?input:{apiVersion:1,operationId:WebHttpContracts.stopSession.body.parse(input).operationId});
         respond(await ctx.operations.lifecycle(id,b.operationId,name==='startSession'?'session_start':'session_stop',input,()=>{ctx.sessions.authenticate(req);}),202);return;

@@ -26,7 +26,7 @@ const basePolicy: NonNullable<AgenticHostOptions["policy"]> = {
 };
 
 describe.skipIf(process.platform !== "linux")("empty stopped host execution-source recovery", () => {
-  async function fixture() {
+  async function fixture(pinned = true) {
     const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-host-source-recovery-")));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const binary = join(root, "herdr-fixture.mjs");
@@ -34,7 +34,8 @@ describe.skipIf(process.platform !== "linux")("empty stopped host execution-sour
     const watched = join(root, "settings.json");
     const sources = (model: string) => ExecutionResolutionSourcesSchema.parse({ schemaVersion: 3,
       plan: { schemaVersion: 3, resolverVersion: "test", policyVersion: "test", repository: { revision: "baseline" }, mode: "intake" },
-      files: [{ component: "native-settings", path: watched, format: "json", expectedDigest: canonicalPlanDigest({ model }) }] });
+      files: [{ component: "native-settings", path: watched, format: "json",
+        ...(pinned ? { expectedDigest: canonicalPlanDigest({ model }) } : {}) }] });
     await writeFile(watched, JSON.stringify({ model: "before-trust" }));
     const options = { repositoryPath: root, sessionId: "source-recovery", herdrBinary: binary };
     const original = await ensureAgenticHost({ ...options, executionResolution: sources("before-trust") });
@@ -62,6 +63,31 @@ describe.skipIf(process.platform !== "linux")("empty stopped host execution-sour
     expect({ token: after.token, socketPath: after.socketPath, directory: after.directory })
       .toEqual({ token: before.token, socketPath: before.socketPath, directory: before.directory });
   }, 30_000);
+
+  it.each(["inbox", "missing-owner", "live-owner-missing-socket"])(
+    "guards changed unpinned source contents against %s without rewriting authority", async scenario => {
+      const { root, watched, options, configPath, before, sources, stop } = await fixture(false);
+      await stop();
+      await writeFile(watched, JSON.stringify({ model: "after-trust" }));
+      if (scenario === "missing-owner") await rm(join(before.directory, "owner.json"));
+      if (scenario === "live-owner-missing-socket")
+        await writeFile(join(before.directory, "owner.json"), JSON.stringify({ pid: process.pid }));
+      if (scenario === "inbox") {
+        const directory = join(root, ".bflow/state/agentic/journal");
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const state = { version: 1, repository: root, runs: [], outbound: [], pendingCore: [], pendingVerifications: [],
+          inbox: [{ status: "applied", message: { schema_version: 2, message_id: "prior-message", correlation_id: "prior-correlation",
+            run_id: "prior-run", sender: { role: "coordinator" }, recipient: { role: "conversation" },
+            type: "conversation.progress", payload: {}, artifact_references: [] } }] };
+        parseAgenticJournalState(state, root);
+        await writeFile(join(directory, "state.json"), JSON.stringify(state), { mode: 0o600 });
+      }
+      const bytes = await readFile(configPath);
+      await expect(ensureAgenticHost({ ...options, executionResolution: sources("after-trust") }).then(controller => {
+        cleanup.push(() => controller.shutdown().catch(() => undefined)); return controller;
+      })).rejects.toThrow();
+      expect(await readFile(configPath)).toEqual(bytes);
+    }, 30_000);
 
   it.each([false, true])("ignores observation-only changes when reusing a host (stopped=%s)", async stopped => {
     const { root, options, configPath, sources, stop } = await fixture();
@@ -378,4 +404,29 @@ describe("persisted host policy regressionScope recovery", () => {
 
     await expect(readHostConfiguration(hostJsonPath)).rejects.toThrow("Invalid persisted host");
   });
+});
+
+it('reopens a live owner for quiesce despite stale execution sources while preserving startup validation',async()=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'bflow-live-owner-drift-')));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ const sessionId='drift-recovery',binary=join(root,'herdr-fixture.mjs');await writeFile(binary,'#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n',{mode:0o700});
+ const controller=await ensureAgenticHost({repositoryPath:root,sessionId,herdrBinary:binary});cleanup.push(()=>controller.shutdown().catch(()=>undefined));
+ const path=join(root,'.bflow/state/host',sessionId,'host.json');const {readFile}=await import('node:fs/promises');const saved=JSON.parse(await readFile(path,'utf8'));
+ // A persisted execution source no longer exists; stop/recovery must connect without granting execution.
+ saved.executionResolution={schemaVersion:3,plan:{schemaVersion:3,resolverVersion:'1',policyVersion:'1',repository:{revision:'abc'},mode:'intake'},files:[{component:'project-config',path:join(root,'missing.json'),format:'json'}]};
+ await writeFile(path,JSON.stringify(saved),{mode:0o600});
+ const reopened=await openPersistedAgenticHost({repositoryPath:root,sessionId});
+ expect(await reopened.quiesce()).toMatchObject({ok:true});await reopened.shutdown();
+ await expect(ensureAgenticHost({repositoryPath:root,sessionId,herdrBinary:binary,executionResolution:saved.executionResolution})).rejects.toThrow();
+});
+
+it('refreshes inactive source snapshots only from explicit resolved startup and keeps persisted recovery fail-closed',async()=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'bflow-resolved-restart-')));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ const binary=join(root,'herdr.mjs');await writeFile(binary,'#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n',{mode:0o700});
+ const sourcePath=join(root,'source.json');await writeFile(sourcePath,'{"model":"haiku"}');
+ const source={schemaVersion:3 as const,plan:{schemaVersion:3,resolverVersion:'1',policyVersion:'1',repository:{revision:'abc'},mode:'intake'},files:[{component:'project-config',path:sourcePath,format:'json' as const}]};
+ const first=await ensureAgenticHost({repositoryPath:root,sessionId:'resolved-restart',herdrBinary:binary,executionResolution:source});cleanup.push(()=>first.shutdown().catch(()=>undefined));
+ expect(await first.quiesce()).toMatchObject({ok:true});await first.shutdown();
+ await writeFile(sourcePath,'{"model":"haiku","effort":"low"}');
+ const next=await ensureAgenticHost({repositoryPath:root,sessionId:'resolved-restart',herdrBinary:binary,executionResolution:source});cleanup.push(()=>next.shutdown().catch(()=>undefined));
+ expect(await next.quiesce()).toMatchObject({ok:true});await next.shutdown();
 });

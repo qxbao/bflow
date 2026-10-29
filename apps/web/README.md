@@ -1,6 +1,6 @@
 # @bflow/web
 
-W06 implements the local Vietnamese read UI. Serve `dist/client` with the real
+The local Vietnamese UI supports project registration, initialization, configuration and workflow interaction. Serve `dist/client` with the real
 Local Server (`bflow web` after a root build). Vite preview alone has no API and
 shows a pairing error; there is no production mock mode, proxy or security bypass.
 Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
@@ -14,7 +14,7 @@ Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 | Tổng quan | Session readiness, pending intakes, recent run page, pending decisions, preview, ephemeral feed timeline | Stopped/starting/ready/stopping/unavailable; browser connectivity independent of session and transport |
 | Công việc | Search/phase URL filters, cursor pages, run detail, tasks/blockers, lineage links | Pre-Core null, all engine/task statuses, unknown/done terminal observations, historical continuation, empty/error/stale |
 | Cần bạn quyết định | DecisionCard, revision/status/expiry, safe evidence | Pending/expired/superseded etc. as returned; view-only, no approval inferred from phase |
-| Cài đặt dự án | Read-only inspect, configuration readiness, separate diagnostics disclosure | Failed/unsupported checks, missing host and remediation; no terminal editor or message scraping |
+| Cài đặt dự án | Explicit init/update/GitNexus repair, readiness inspection, role/provider/model forms, policy/tool/MCP/skills groups, full YAML, confirmed unregister | Durable initialization ID/progress/recovery, revision conflict and validation errors; config changes apply after session restart |
 | Trò chuyện | Run detail panel on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
 
 Workflow create/revise/clarification/approval/resume/cancel and lifecycle start/stop
@@ -51,7 +51,7 @@ Bootstrap fragment is consumed and erased synchronously before rendering or
 requests. Cookie session recovery uses GET `/api/v1/session`; CSRF stays only in
 ApiClient memory, mutations include X-Bflow-CSRF, all calls stay same origin with
 cookies/no-store, responses parse frozen schemas. Expiry unmounts protected views.
-No credentials, private host token, operation authority or app state in storage.
+No credentials or private host tokens are stored in the browser. Initialization stores only its operation ID and selected non-secret options for explicit same-ID recovery.
 
 SSE validates schema/project/type/cursor, then invalidates authoritative reads.
 Errors close and recreate EventSource with bounded 3–30s backoff and the last
@@ -177,3 +177,50 @@ recovery IDs, not message content or credentials. Queued/unknown/delivered are
 transport states, never workflow success. Approval buttons retain exact versions
 and independent Runtime gates. See [W08 handoff](W08-HANDOFF.md) for measured
 source, browser-fixture and isolated live-adapter evidence and their limits.
+
+## Project setup and configuration
+
+Register the absolute path of an existing Git clone, then open **Cài đặt dự án**.
+**Khởi tạo / sửa GitNexus** creates missing `.bflow/config.yml`, indexes the selected
+repository and registers it with the running machine Gateway through the existing
+CLI services. GitNexus requires explicit PolyForm-Noncommercial approval; choose
+initialization without GitNexus to persist its disabled setting instead. Default
+repair preserves existing config; opt into update to add defaults/rebind a clone's
+repository identity. Initialization needs existing machine setup and never installs
+tools or changes provider credentials. Long jobs expose durable IDs and receipts;
+reload observes them, and missing delivery offers explicit retry of the same ID.
+
+Form edits and full YAML share server-side CLI validation. Saves use a SHA-256
+revision of the configuration and local Git ignore rules and an atomic replacement under the repository lifecycle lock. Form edits
+retain comments on untouched mappings and same-position array entries. Invalid
+input and stale revisions preserve disk content. Existing fields are editable in
+forms; optional advanced fields can be added through YAML. Unsaved/invalid drafts
+block initialization and mode switching. Unregister asks for confirmation, removes
+only the web registry entry and refuses unresolved lifecycle/initialization effects;
+it preserves source/config/history and does not stop a running session.
+
+The new optional backend ports and web v1 endpoints are described in
+[the implementation decision and evidence](PROJECT-MANAGEMENT.md). Old backends
+continue serving their existing endpoints and explicitly reject unsupported new
+operations. These controls cover repository setup; machine installation and native
+provider login remain host prerequisites.
+
+Before starting the project session or creating a workflow, review the YAML/form values and the displayed local
+`.bflow/.gitignore`, then optionally select **Commit cấu hình đã xem vào Git** in
+initialization. Only those two files are committed, using the configured Git author;
+no global identity is invented. Unrelated staged files and executable Git filters
+block the action before staging. Repository hooks/fsmonitor and signing are disabled
+as in the existing Git integration engine. A completed commit is retained in the
+initialization diagnostic if later indexing fails. Updating defaults and committing
+in the same request is rejected: review/save the new revision first. To disable
+GitNexus and commit, save/review its disabled setting before selecting commit.
+
+If a session was already active before the configuration commit, stop/start it
+through the overview page so its execution resolution captures the new Git HEAD.
+A web-owner restart alone does not refresh the independently running Runtime host.
+
+The overview also exposes **Dừng phục hồi**, an explicitly confirmed checkpointed
+force stop using the existing lifecycle implementation. It has a separate intent
+from normal stop and retains quiesce/checkpoint barriers; interrupted unverified
+attempts may be lost, while worktrees/history remain available for reconciliation.
+Use it for failed pane/worktree-group closure after reviewing the displayed warning.

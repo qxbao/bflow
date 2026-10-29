@@ -16,6 +16,7 @@ import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProc
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
 import { RoleStartupChecks } from "./role-startup-checks.js";
 import { formatPlatformNotReady } from "./platform-options.js";
+import { isGovernanceRoleConfig } from "./environment-config.js";
 
 function failure<T>(message: string): OperationResult<T> {
   return { ok: false, error: { code: "validation", retryable: false, message } };
@@ -60,7 +61,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
       const topologyRole = resolveTopologyRole(role.role);
       // Developer is a Runtime-launched task/worktree role. Its optional config entry
       // supplies a dynamic launch template and never creates a permanent P13 pane.
-      if (role.role === "developer") continue;
+      // The sos role is spawned on demand by an exact BFLOWSOS chat turn, never at startup.
+      if (role.role === "developer" || role.role === "sos") continue;
       if (topologyRole === null || topologyRole === "developer") {
         throw new Error(`Role '${role.role}' is not a permanent P13 role. Developers must be allocated by Runtime in task worktrees.`);
       }
@@ -219,7 +221,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
     const args: Partial<Record<TopologyRole, readonly string[]>> = {};
     const launches: Partial<Record<TopologyRole, AgentLaunchProfile>> = {};
     for (const role of input.config.environment.roles) {
-      if (role.role === "developer") continue;
+      if (role.role === "developer" || role.role === "sos") continue;
       const launch = descriptors.roleLaunch[role.role];
       const topology = resolveTopologyRole(role.role);
       if (!launch || !topology) return failure(`Host has no trusted launch descriptor for ${role.role}`);
@@ -231,7 +233,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
         args[topology] = await launchArguments(role.cli, role.role, launch);
       }
     }
-    startupChecks = new RoleStartupChecks(input.config.environment.roles.filter(role => role.role !== "developer" && (role.required ?? true)).map(role => role.role),
+    startupChecks = new RoleStartupChecks(input.config.environment.roles.filter(isGovernanceRoleConfig).filter(role => role.role !== "developer" && (role.required ?? true)).map(role => role.role),
       async (manifest, role, operation) => {
         const active = await connect();
         return active.verifyRoleStartup ? active.verifyRoleStartup(manifest, role, operation) : { ok: true, value: undefined };

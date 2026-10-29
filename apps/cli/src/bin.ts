@@ -68,7 +68,7 @@ export async function main(
       return { ok: true, command: "web", exitCode: 0, stdout: WEB_HELP, stderr: "" };
     }
     try {
-      await runWebCommand(webArgs, { ...context?.web, io: realIo, isTerminal: (context?.web?.isTerminal ?? (context?.io === undefined && Boolean(process.stdout.isTTY))) });
+      await runWebCommand(webArgs, { ...context?.web, io: realIo, exitProcess: context === undefined, isTerminal: (context?.web?.isTerminal ?? (context?.io === undefined && Boolean(process.stdout.isTTY))) });
       process.exitCode = 0;
       // Pairing URL is deliberately absent from buffered results and JSON telemetry.
       return { ok: true, command: "web", exitCode: 0, stdout: "", stderr: "" };

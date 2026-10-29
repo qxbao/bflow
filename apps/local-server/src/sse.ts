@@ -35,10 +35,20 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
     });
   };
   try {
-    const first=await observeWithinDeadline(readNext);
-    if(!first || stopped || res.destroyed)return {maxQueued};
-    if(first.done)throw new HttpError('unavailable');
-    queue.push(frame(first.value));maxQueued=1;
+    // Upstream publishes only on change, so a resumed cursor may legitimately have nothing new.
+    // Open the stream once the first poll answered or a short quiet period passed; a failing
+    // upstream still rejects before headers. The pending read carries into the produce loop.
+    const pendingFirst=readNext();pendingFirst.catch(()=>{});
+    const quiet=Symbol('quiet');let quietTimer:ReturnType<typeof setTimeout>|undefined;
+    const first=await observeWithinDeadline(()=>Promise.race([pendingFirst,new Promise<typeof quiet>(resolve=>{quietTimer=setTimeout(()=>resolve(quiet),1500);})]))
+      .finally(()=>clearTimeout(quietTimer));
+    let carried:Promise<IteratorResult<WebEvent>|undefined>|undefined;
+    if(first===quiet)carried=pendingFirst;
+    else{
+      if(!first || stopped || res.destroyed)return {maxQueued};
+      if(first.done)throw new HttpError('unavailable');
+      queue.push(frame(first.value));maxQueued=1;
+    }
     authenticate();
     res.statusCode=200;res.setHeader('Content-Type','text/event-stream; charset=utf-8');res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Accel-Buffering','no');res.setTimeout(0);res.flushHeaders();
@@ -46,7 +56,7 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
       try{authenticate();if(!stopped && res.writableLength===0)res.write(': heartbeat\n\n');}catch{res.destroy();}
     },WEB_LIMITS.heartbeatSeconds*1000);
     const produce=(async()=>{
-      try {while(!stopped){const next=await readNext();if(!next || stopped)break;
+      try {while(!stopped){const next=carried?await carried:await readNext();carried=undefined;if(!next || stopped)break;
         if(next.done){stop();break;}
         const value=frame(next.value);
         if(queue.length>=WEB_LIMITS.eventsPerClient){res.destroy();stop();break;}

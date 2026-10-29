@@ -5,7 +5,7 @@ import { reason as explainReason } from '../../components/reasons';
 import { ActionConfirmation } from '../../components/ActionConfirmation';
 import { useCommands } from '../operations';
 import { RequestForm } from '../requests';
-export function RunActions({api,id,run,fresh}:{api:ApiClient;id:string;run:WebRunView;fresh:boolean}) {
+export function RunActions({api,id,run,fresh,refreshing=false}:{api:ApiClient;id:string;run:WebRunView;fresh:boolean;refreshing?:boolean}) {
   const [confirm,setConfirm]=useState<WebAction>(),[reason,setReason]=useState(''),[error,setError]=useState(''),[revise,setRevise]=useState(false),uid=useId();
   const cancel=useCommands(`cancel:${run.runId}`),resume=useCommands(`resume:${run.runId}`);
   async function send(action:WebAction){
@@ -22,7 +22,7 @@ export function RunActions({api,id,run,fresh}:{api:ApiClient;id:string;run:WebRu
     }catch(e){setError(e instanceof Error && !('code' in e)?e.message:explain(e));}
   }
   const historical=run.currentRunId!==run.runId;
-  return <><div className="action-buttons">{run.availableActions.filter(a=>['resume','cancel','revise_request'].includes(a.kind)).map(action=><div key={action.actionId}><button disabled={!fresh || !action.enabled || historical || cancel.busy || resume.busy || !cancel.online} onClick={()=>action.kind==='cancel'?setConfirm(action):action.kind==='revise_request'?setRevise(v=>!v):void send(action)}>{action.kind==='resume'?'Tiếp tục':action.kind==='cancel'?'Hủy công việc':'Chỉnh yêu cầu'}</button>{!action.enabled && <p>{explainReason(action.disabledReason)}</p>}</div>)}</div>
+  return <><div className="action-buttons">{run.availableActions.filter(a=>['resume','cancel','revise_request'].includes(a.kind)).map(action=><div key={action.actionId}><button disabled={(!fresh && !(refreshing && action.kind==='cancel')) || !action.enabled || historical || cancel.busy || resume.busy || !cancel.online} onClick={()=>action.kind==='cancel'?setConfirm(action):action.kind==='revise_request'?setRevise(v=>!v):void send(action)}>{action.kind==='resume'?'Tiếp tục':action.kind==='cancel'?'Hủy công việc':'Chỉnh yêu cầu'}</button>{!action.enabled && <p>{explainReason(action.disabledReason)}</p>}</div>)}</div>
     {confirm && <ActionConfirmation title="Xác nhận yêu cầu hủy" onBack={()=>{setConfirm(undefined);setError('');}}><p>Yêu cầu hủy cần được xử lý và xác nhận. Tiếp nhận chưa có nghĩa tiến trình đã dừng.</p><label htmlFor={uid}>Lý do hủy</label><textarea id={uid} maxLength={16000} rows={3} value={reason} onChange={e=>setReason(e.target.value)}/><button disabled={!fresh || historical || cancel.busy || !cancel.online} onClick={()=>void send(confirm)}>Gửi yêu cầu hủy</button></ActionConfirmation>}
     {error && <p role="alert">{error}</p>}{revise && run.availableActions.filter(a=>a.kind==='revise_request').map(action=><RequestForm key={action.actionId} api={api} id={id} sessionId={run.sessionId} runId={run.runId} action={action} enabled={fresh && action.enabled && !historical}/>)}</>;
 }

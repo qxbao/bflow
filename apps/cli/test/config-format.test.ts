@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveSosRoleConfig } from "@bflow/runtime";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "../src/config-format.js";
 import {
   defaultEnvironmentConfig,
@@ -168,6 +172,45 @@ describe("configuration YAML format", () => {
     expect(rendered.indexOf("verification:")).toBeLessThan(rendered.indexOf("fastPath:"));
     expect(rendered.indexOf("fastPath:")).toBeLessThan(rendered.indexOf("concurrency:"));
     expect(parseConfigYaml(rendered)).toEqual(config);
+  });
+
+  it("generates an optional sos rescue role and validates its supported fields", () => {
+    const repository = { id: "repo-1234567890abcdef1234", root: "/workspace/demo", sessionName: "bf-1234567890abcdef1234" };
+    const config = defaultEnvironmentConfig(repository, "sos-defaults", new Date("2026-10-18T00:00:00.000Z"), "claude");
+    expect(config.environment.roles).toContainEqual({ role: "sos", cli: "claude", required: false });
+    expect(config.environment.roles.find(role => role.role === "developer")?.required).toBe(false);
+    expect(config.environment.roles.filter(role => role.role !== "developer" && role.role !== "sos").every(role => role.required === true)).toBe(true);
+    expect(renderEnvironmentConfigYaml(config)).toContain("#   - sos          : Emergency rescue agent");
+    expect(EnvironmentRoleConfigSchema.parse({ role: "sos", cli: "codex", model: "gpt-model", effort: "high", "profile-name": "rescue", fallbackCli: "claude", required: false }))
+      .toMatchObject({ role: "sos", model: "gpt-model", effort: "high", "profile-name": "rescue", fallbackCli: "claude" });
+    const specialistProfile = { profileId: "rescue", version: "1.0.0", digest: "a".repeat(64) };
+    expect(EnvironmentRoleConfigSchema.safeParse({ role: "reviewer", cli: "codex", specialistProfile }).success).toBe(true);
+    const rejected = EnvironmentRoleConfigSchema.safeParse({ role: "sos", cli: "codex", specialistProfile });
+    expect(rejected.success).toBe(false);
+    expect(rejected.error?.issues).toContainEqual(expect.objectContaining({ path: ["specialistProfile"], message: "The sos role cannot select a specialist profile." }));
+    const failover = { schemaVersion: 3, policyVersion: "v1", role: "coordinator", candidates: [], maxSwitches: 0, cooldownMs: 0, maxRetries: 0 };
+    const withFailover = EnvironmentRoleConfigSchema.safeParse({ role: "sos", cli: "codex", model: "m", "profile-name": "p", failover });
+    expect(withFailover.success).toBe(false);
+    expect(withFailover.error?.issues).toContainEqual(expect.objectContaining({ path: ["failover"], message: "The sos role does not support failover." }));
+    expect(EnvironmentRoleConfigSchema.safeParse({ role: "rescue", cli: "codex" }).success).toBe(false);
+  });
+
+  it("lets the dependency-free Runtime reader resolve role: sos from the rendered config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-sos-config-"));
+    try {
+      const repository = { id: "repo-1234567890abcdef1234", root, sessionName: "bf-1234567890abcdef1234" };
+      const config = defaultEnvironmentConfig(repository, "sos-render", new Date("2026-10-18T00:00:00.000Z"), "codex");
+      await mkdir(join(root, ".bflow"));
+      await writeFile(join(root, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
+      expect(await resolveSosRoleConfig(root, "claude")).toMatchObject({ provider: "codex", source: "config" });
+      const customized = { ...config, environment: { ...config.environment,
+        defaults: { ...config.environment.defaults, claude: { "profile-name": "personal" } },
+        roles: config.environment.roles.map(role => role.role === "sos"
+          ? { role: "sos" as const, cli: "claude", model: "claude-model", effort: "max" as const, fallbackCli: "codex" as const, required: false } : role) } };
+      await writeFile(join(root, ".bflow/config.yml"), renderEnvironmentConfigYaml(customized));
+      expect(await resolveSosRoleConfig(root, "codex")).toEqual({ provider: "claude", model: "claude-model", effort: "max", profileName: "personal",
+        fallbackCli: "codex", source: "config", configPath: join(root, ".bflow/config.yml") });
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it.each([

@@ -1,7 +1,7 @@
 import { WebHttpContracts, WebCommandSchema, type WebCommand, type WebOperation } from '@bflow/contracts/web';
 import { ApiClient, ApiError, projectPath } from './client';
 export type InteractionBody = WebCommand extends infer C ? C extends WebCommand ? Omit<C,'apiVersion'|'projectId'|'commandId'> : never : never;
-export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop'};
+export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop';force?:boolean};
 export async function execute(api:ApiClient, command:WebCommand) {
   const parsed=WebCommandSchema.parse(command);
   const value=await api.request(`${projectPath(parsed.projectId)}/commands`,WebHttpContracts.command.response,'POST',parsed);
@@ -19,14 +19,16 @@ export async function fingerprint(body:CommandBody) {
   const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(canonical(body))));
   return Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
 }
-export async function executeLifecycle(api:ApiClient,project:string,id:string,kind:'session_start'|'session_stop'){
+export async function executeLifecycle(api:ApiClient,project:string,id:string,kind:'session_start'|'session_stop',force=false){
   const route=kind==='session_start'?WebHttpContracts.startSession:WebHttpContracts.stopSession;
-  const body=route.body.parse({apiVersion:1,operationId:id,...(kind==='session_stop'?{confirmed:true}:{})});
+  const body=route.body.parse({apiVersion:1,operationId:id,...(kind==='session_stop'?{confirmed:true,...(force?{force:true}:{})}:{})});
   const value=await api.request(`${projectPath(project)}/session/${kind==='session_start'?'start':'stop'}`,route.response,'POST',body);
   return check(value,project,id,kind);
 }
 
-export type RecordEntry={slot:string;scope:string;commandId:string;fingerprint:string;kind:CommandBody['kind']};
+export type DecisionOutcome='approved'|'rejected'|'changes_requested';
+/** `outcome` is non-sensitive display metadata for decisions; never a body, reason or authority. */
+export type RecordEntry={slot:string;scope:string;commandId:string;fingerprint:string;kind:CommandBody['kind'];outcome?:DecisionOutcome};
 export type Observation={record:RecordEntry;operation?:WebOperation;uncertain?:boolean;error?:unknown};
 /** Recovery metadata only. This is never authority or a persisted command body. */
 export class CommandStore {
@@ -39,7 +41,7 @@ export class CommandStore {
     const records:RecordEntry[]=[];
     for(let i=0;i<localStorage.length;i++){
       const key=localStorage.key(i);if(!key?.startsWith(this.projectPrefix))continue;
-      try{const v=JSON.parse(localStorage.getItem(key)!);if(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && key===this.key(v))records.push({slot:v.slot,scope:v.scope,commandId:v.commandId,fingerprint:v.fingerprint,kind:v.kind});else throw new Error('invalid metadata');}catch{throw new Error('Mã phục hồi bị hỏng; cần đối chiếu thao tác trước khi tạo yêu cầu mới.');}
+      try{const v=JSON.parse(localStorage.getItem(key)!);if(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))records.push({slot:v.slot,scope:v.scope,commandId:v.commandId,fingerprint:v.fingerprint,kind:v.kind,...(v.outcome?{outcome:v.outcome}:{})});else throw new Error('invalid metadata');}catch{throw new Error('Mã phục hồi bị hỏng; cần đối chiếu thao tác trước khi tạo yêu cầu mới.');}
     }return records;
   }
   async observe(record:RecordEntry):Promise<Observation>{
@@ -58,9 +60,9 @@ export class CommandStore {
         if(existing.fingerprint!==digest)throw new Error('Thao tác trước cần được đối chiếu trước khi gửi nội dung mới.');
         return this.observe(existing);
       }
-      const record:RecordEntry={slot,scope:this.scope,commandId:crypto.randomUUID(),fingerprint:digest,kind:body.kind};
+      const record:RecordEntry={slot,scope:this.scope,commandId:crypto.randomUUID(),fingerprint:digest,kind:body.kind,...(body.kind==='answer_decision'?{outcome:body.outcome}:{})};
       localStorage.setItem(this.key(record),JSON.stringify(record));this.changed();
-      try{const operation=body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
+      try{const operation=body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind,body.force):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
       catch(error){
         // Registered definitive refusal has no accepted side effect. Persist no body/error text.
         if(error instanceof ApiError && ['invalid_request','forbidden','session_required','stale_version','operation_not_allowed','payload_too_large'].includes(error.code)){

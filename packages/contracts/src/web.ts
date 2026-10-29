@@ -138,7 +138,7 @@ export const WebSessionBootstrapRequestSchema = z.object({ apiVersion: version, 
 export const WebProjectRegistrationRequestSchema = z.object({ apiVersion: version, path: nonblank(4096) }).strict();
 export const WebProjectUnregisterRequestSchema = z.object({ apiVersion: version, confirmed: z.literal(true) }).strict();
 export const WebSessionStartRequestSchema = z.object({ apiVersion: version, operationId: uuid }).strict();
-export const WebSessionStopRequestSchema = WebSessionStartRequestSchema.extend({ confirmed: z.literal(true) }).strict();
+export const WebSessionStopRequestSchema = WebSessionStartRequestSchema.extend({ confirmed: z.literal(true), force: z.boolean().optional() }).strict();
 export const WebSessionInspectRequestSchema = z.object({ apiVersion: version }).strict();
 export const WebNoticeDisplayedRequestSchema = z.object({ apiVersion: version }).strict();
 export const WebNoticeDisplayedSchema = z.object({ apiVersion: version, noticeId: id, displayedAt: time }).strict();
@@ -180,10 +180,43 @@ export const WebArtifactReadSchema = z.object({ metadata: WebArtifactMetadataSch
 }).strict();
 export const WebArtifactReadResultSchema = OperationResultSchema(WebArtifactReadSchema);
 export type WebArtifactRead = z.infer<typeof WebArtifactReadSchema>;
+/** Additive project settings API. Configuration authority stays in CLI composition. */
+export type WebConfigValue = string | number | boolean | null | WebConfigValue[] | { [key: string]: WebConfigValue };
+export const WebConfigValueSchema: z.ZodType<WebConfigValue> = z.lazy(() => z.union([
+  z.string(), z.number().finite(), z.boolean(), z.null(), z.array(WebConfigValueSchema), z.record(WebConfigValueSchema)
+]));
+export const WebProjectConfigurationSchema = z.object({ apiVersion: version, projectId: id, revision: digest,
+  yaml: z.string().max(180000), gitIgnore: z.string().max(180000).optional(), values: z.record(WebConfigValueSchema) }).strict();
+export const WebConfigurationSaveSchema = z.object({ apiVersion: version, expectedRevision: digest,
+  yaml: z.string().min(1).max(180000).optional(), values: z.record(WebConfigValueSchema).optional()
+}).strict().refine(value => (value.yaml === undefined) !== (value.values === undefined), "provide YAML or form values");
+export const WebProjectInitRequestSchema = z.object({ apiVersion: version, operationId: uuid,
+  acceptGitNexusLicense: z.boolean(), update: z.boolean().default(false),
+  skipGitNexus: z.boolean().optional(),
+  commitConfiguration: z.boolean().optional(), expectedConfigurationRevision: digest.optional(),
+  provider: z.enum(["claude", "codex", "agy"]).optional() }).strict().superRefine((value,ctx)=>{
+    if(value.commitConfiguration && (!value.expectedConfigurationRevision || value.update))
+      ctx.addIssue({code:"custom",message:"configuration commit requires a reviewed revision and cannot update config in the same request"});
+  });
+export const WebProjectInitializationSchema = z.object({ apiVersion: version, projectId: id, operationId: uuid,
+  state: z.enum(["running", "succeeded", "failed", "interrupted"]), message: z.string().max(16000), updatedAt: time }).strict();
+export type WebProjectConfiguration = z.infer<typeof WebProjectConfigurationSchema>;
+export type WebConfigurationSave = z.infer<typeof WebConfigurationSaveSchema>;
+export type WebProjectInitRequest = z.infer<typeof WebProjectInitRequestSchema>;
+export type WebProjectInitialization = z.infer<typeof WebProjectInitializationSchema>;
+export const WebProjectConfigurationResultSchema = OperationResultSchema(WebProjectConfigurationSchema);
+export const WebProjectInitializationResultSchema = OperationResultSchema(WebProjectInitializationSchema);
+export const WebProjectMutationStatusSchema = z.object({ apiVersion: version, projectId: id, initializationPending: z.boolean() }).strict();
+export const WebProjectMutationStatusResultSchema = OperationResultSchema(WebProjectMutationStatusSchema);
 export interface LocalWorkspaceServices {
+  projectMutationStatus?(projectId: string): Promise<OperationResult<z.infer<typeof WebProjectMutationStatusSchema>>>;
+  readConfiguration?(projectId: string): Promise<OperationResult<WebProjectConfiguration>>;
+  saveConfiguration?(projectId: string, request: WebConfigurationSave): Promise<OperationResult<WebProjectConfiguration>>;
+  initializeProject?(projectId: string, request: WebProjectInitRequest): Promise<OperationResult<WebProjectInitialization>>;
+  readInitialization?(projectId: string, operationId: string): Promise<OperationResult<WebProjectInitialization>>;
   inspectProject(projectId: string): Promise<OperationResult<WebProjectInspection>>;
   startSession(projectId: string, operationId: string): Promise<OperationResult<WebProjectSession>>;
-  stopSession(projectId: string, operationId: string): Promise<OperationResult<WebProjectSession>>;
+  stopSession(projectId: string, operationId: string, force?: boolean): Promise<OperationResult<WebProjectSession>>;
   reconcileSessionOperation(operation: WebOperation): Promise<OperationResult<WebOperation>>;
   preview(projectId: string): Promise<OperationResult<WebProjectPreview>>;
 }
@@ -226,6 +259,10 @@ export const WebHttpContracts = {
   projects: { method: "GET", path: "/api/v1/projects", body: noBody, query: noQuery, response: WebPageSchema(WebProjectSchema), statuses: [200] },
   registerProject: { method: "POST", path: "/api/v1/projects", body: WebProjectRegistrationRequestSchema, query: noQuery, response: WebProjectSchema, statuses: [201, 200] },
   unregisterProject: { method: "DELETE", path: "/api/v1/projects/:id", body: WebProjectUnregisterRequestSchema, query: noQuery, response: z.undefined(), statuses: [204] },
+  configuration: { method: "GET", path: "/api/v1/projects/:id/configuration", body: noBody, query: noQuery, response: WebProjectConfigurationSchema, statuses: [200] },
+  saveConfiguration: { method: "PUT", path: "/api/v1/projects/:id/configuration", body: WebConfigurationSaveSchema, query: noQuery, response: WebProjectConfigurationResultSchema, statuses: [200] },
+  initializeProject: { method: "POST", path: "/api/v1/projects/:id/initializations", body: WebProjectInitRequestSchema, query: noQuery, response: WebProjectInitializationSchema, statuses: [202] },
+  initialization: { method: "GET", path: "/api/v1/projects/:id/initializations/:operationId", body: noBody, query: noQuery, response: WebProjectInitializationSchema, statuses: [200] },
   projectSession: { method: "GET", path: "/api/v1/projects/:id/session", body: noBody, query: noQuery, response: WebProjectSessionSchema, statuses: [200] },
   startSession: { method: "POST", path: "/api/v1/projects/:id/session/start", body: WebSessionStartRequestSchema, query: noQuery, response: WebOperationSchema, statuses: [202] },
   stopSession: { method: "POST", path: "/api/v1/projects/:id/session/stop", body: WebSessionStopRequestSchema, query: noQuery, response: WebOperationSchema, statuses: [202] },

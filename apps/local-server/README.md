@@ -100,3 +100,27 @@ pnpm test:affected --base <baseline> --run
 Tests use real HTTP on ephemeral loopback ports, actual Git repositories and
 private filesystem state, with injected host/lifecycle fixtures. They establish
 HTTP security and ledger behavior, not live provider/Herdr workflow readiness.
+
+## Additive repository settings API
+
+The authenticated v1 API also exposes GET/PUT `projects/:id/configuration`,
+POST `projects/:id/initializations` and GET
+`projects/:id/initializations/:operationId`. Config PUT returns a strict
+`OperationResult` so field validation failures remain readable without weakening
+generic error redaction. CLI composition supplies optional settings ports; older
+backend injections report `operation_not_allowed`. Init POST reserves a durable
+owner receipt and returns 202 promptly; reading never replays its effect. Confirmed
+unregister consults the owner's pending-init guard as well as the existing operation
+index. All routes retain authentication, exact Origin, CSRF, schema and canonical
+registered-project checks. Config paths and command arguments are never browser
+inputs. Machine-wide setup/install/login is outside these repository endpoints.
+
+Initialization optionally includes an explicitly confirmed configuration-only Git
+commit, pinned to the last reviewed configuration/ignore-rules revision. This uses
+the same durable initialization receipt; retries observe the original operation,
+and a later indexing failure does not erase proof of a completed commit.
+
+Stop requests may add optional `force:true` with `confirmed:true`; the local
+operation fingerprint includes that choice. Legacy stop methods remain compatible,
+and a reused operation ID with a changed force value conflicts. The CLI forwards
+it to the existing checkpointed force-stop implementation, never a direct kill.

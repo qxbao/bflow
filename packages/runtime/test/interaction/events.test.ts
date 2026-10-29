@@ -42,3 +42,15 @@ it('polls an actual host, rejects cross-project reads and resets after host rest
  expect(await client.readArtifact('foreign','a')).toMatchObject({ok:false});
  }finally{await host.shutdown();await rm(repositoryPath,{recursive:true,force:true});}
 });
+it('publishes nothing while the projection is unchanged, so polling clients cannot self-sustain a refresh loop',async()=>{
+ const repositoryPath=await mkdtemp('/tmp/w09-events-quiet-'),sessionId='events-quiet',herdrBinary=join(repositoryPath,'herdr.mjs');
+ await writeFile(herdrBinary,"#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+'\\n');",{mode:0o700});
+ const host=await ensureAgenticHost({repositoryPath,sessionId,herdrBinary});
+ const projectId=interactionProjectId(repositoryPath);
+ const poll=async(cursor?:string)=>WebPageSchema(WebEventSchema).parse(await queryAgenticHostInteraction({repositoryPath,sessionId},{projectId,query:cursor?{cursor}:{}},'interaction_events'));
+ try{
+  let cursor=(await poll()).items[0]!.cursor;const seen:string[]=[];
+  for(let i=0;i<4;i++){await new Promise(r=>setTimeout(r,1100));const page=await poll(cursor);for(const event of page.items){seen.push(event.type);cursor=event.cursor;}}
+  expect(seen).toEqual([]);
+ }finally{await host.shutdown();await rm(repositoryPath,{recursive:true,force:true});}
+},30000);

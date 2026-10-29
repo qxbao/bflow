@@ -1895,3 +1895,25 @@ Conversation instead of sending repair notices to a terminal Developer execution
 This uses existing private observation/receipt storage and adds no public contract or
 database migration. Coverage is source plus local Runtime tests; it does not establish live
 provider/Herdr reviewer judgment quality, dbt results, or warehouse acceptance.
+
+A Coordinator progress report containing questions preserves an existing pending
+design approval. Initialization also restores pre-Core design approvals hidden in
+preparation phases by older progress reports; it keeps the exact pending request,
+evidence and decision authority and never approves or replays transport messages.
+Settled/nonpending approvals, terminal runs and cancelled runs are not restored.
+
+Persisted lifecycle reopening may connect to an authenticated live host for
+quiesce/checkpoint even when execution inputs changed. Explicit new startup
+still validates current sources. Refreshing an inactive source snapshot requires a
+proven-stopped owner and an empty journal and RunStore; changed unpinned file contents
+use that same guard. Observation-only updates leave configuration bytes unchanged.
+Existing accepted run plans stay pinned and retain their own drift checks. This does
+not grant execution from a stale plan.
+
+Supervised Linux Developer launches use private zsh startup files to keep their
+process-scope wrapper first on PATH. Account `.zshrc` cannot prepend an ordinary
+provider binary around the witness bootstrap. Provider HOME/auth and the original
+PATH inside the supervised provider remain unchanged; account shell files are not
+modified. The private launch opts out of optional system completion discovery where
+Debian/Ubuntu zsh supports `skip_global_compinit`, so completion hooks cannot delay
+that startup path. Missing/invalid supervision witnesses still block dispatch.

@@ -9,7 +9,8 @@ import { MCPServiceDefinitionSchema, OperationResultSchema, RepositoryToolPolicy
 import { digest as canonicalDigest } from "@bflow/machine-setup";
 import { readGatewayReadiness, type ServiceReadiness } from "./gateway-readiness.js";
 import type { EnvironmentCompositionInput } from "./environment.js";
-import { EnvironmentProviderSchema, type EnvironmentProvider, type EnvironmentRoleConfig } from "./environment-config.js";
+import { EnvironmentProviderSchema, isGovernanceRoleConfig, type EnvironmentGovernanceRoleConfig, type EnvironmentProvider,
+  type EnvironmentRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { readGatewayRepositoriesState } from "./gateway-repositories.js";
 import { CONTEXT7_SERVICE_ID, CONTEXT7_TOOLS } from "./context7-constants.js";
@@ -223,7 +224,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const gatewayLocatorPath = (deps.fileExists ?? existsSync)(locatorPath) ? { gatewayLocatorPath: locatorPath } : {};
-  const hasSelectedProfiles = environment.roles.some(role => selectedProfileName(role, environment) !== undefined) ||
+  const hasSelectedProfiles = environment.roles.filter(isGovernanceRoleConfig).some(role => selectedProfileName(role, environment) !== undefined) ||
     (!configured.has("developer") && selectedProfileName(coordinator, environment) !== undefined);
   return AgenticHostPlatformOptionsSchema.parse({
     schemaVersion: 3,
@@ -251,8 +252,9 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
 }
 
 /** Preserve governance roles while inheriting only the Developer launch template. */
-export function configuredPlatformRoles(input: EnvironmentCompositionInput): EnvironmentRoleConfig[] {
-  const roles = [...input.config.environment.roles];
+export function configuredPlatformRoles(input: EnvironmentCompositionInput): EnvironmentGovernanceRoleConfig[] {
+  // The sos rescue role is launched by the host on demand and never joins platform readiness.
+  const roles = input.config.environment.roles.filter(isGovernanceRoleConfig);
   const coordinator = roles.find(role => role.role === "coordinator");
   if (!coordinator) throw new Error("Configuration must include a coordinator role");
   if (!roles.some(role => role.role === "developer")) {
@@ -262,7 +264,7 @@ export function configuredPlatformRoles(input: EnvironmentCompositionInput): Env
   return roles;
 }
 
-export function resolveRolePlatformOption(role: EnvironmentRoleConfig, input: EnvironmentCompositionInput, skills: MachineSkillCatalog,
+export function resolveRolePlatformOption(role: EnvironmentGovernanceRoleConfig, input: EnvironmentCompositionInput, skills: MachineSkillCatalog,
   grants: readonly ResolvedToolGrant[] = [], warn?: (message: string) => void): PlatformRoleOption {
   const environment = input.config.environment;
   const provider = EnvironmentProviderSchema.safeParse(role.cli);

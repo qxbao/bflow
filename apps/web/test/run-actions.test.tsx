@@ -35,3 +35,18 @@ test('revise retains run context and sends the available action version with ful
   fireEvent.click(screen.getByRole('button',{name:'Chỉnh yêu cầu'}));fireEvent.change(screen.getByLabelText('Mục tiêu'),{target:{value:'Giữ mục tiêu và thêm bộ lọc'}});fireEvent.change(screen.getByLabelText('Tiêu chí chấp nhận (mỗi dòng một tiêu chí)'),{target:{value:'Giữ tìm kiếm tên\nThêm lọc tác giả'}});fireEvent.change(screen.getByLabelText('Ràng buộc (mỗi dòng một ràng buộc)'),{target:{value:'Giữ tương thích API'}});fireEvent.click(screen.getByRole('button',{name:'Gửi chỉnh sửa'}));
   await waitFor(()=>expect(commands).toHaveLength(1));expect(commands[0]).toMatchObject({kind:'revise_request',runId:'run',expectedVersion:{revisionToken:'revise-version'},objective:'Giữ mục tiêu và thêm bộ lọc',constraints:['Giữ tương thích API']});expect(commands[0].acceptanceCriteria).toHaveLength(2);
 });
+test('recovery stop requires confirmation and uses a separate force intent',async()=>{
+ const {SessionActions}=await import('../src/features/run-actions/session');const session={apiVersion:1 as const,projectId:'p',state:'unavailable' as const,pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()};const posts:any[]=[];
+ vi.stubGlobal('fetch',async(path:string,init?:RequestInit)=>{if(init?.method==='POST'){const body=JSON.parse(init.body as string);posts.push(body);return Response.json({apiVersion:1,projectId:'p',operationId:body.operationId,owner:'local_lifecycle',operationKind:'session_stop',state:'accepted',updatedAt:new Date().toISOString()});}if(path.includes('/operations/'))return Response.json({apiVersion:1,projectId:'p',operationId:path.split('/').at(-1),owner:'local_lifecycle',operationKind:'session_stop',state:'accepted',updatedAt:new Date().toISOString()});return Response.json(session);});
+ const api=new ApiClient();render(<MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><SessionActions api={api} id="p" session={session} fresh/></Operations></MemoryRouter>);
+ fireEvent.click(screen.getByRole('button',{name:'Dừng phục hồi'}));expect(posts).toHaveLength(0);expect(screen.getByText(/Buộc dừng phiên Herdr sau quiesce và checkpoint/)).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'Gửi yêu cầu dừng phiên'}));await waitFor(()=>expect(posts).toHaveLength(1));expect(posts[0]).toMatchObject({apiVersion:1,confirmed:true,force:true,operationId:expect.any(String)});
+ expect(Object.keys(localStorage).some(key=>key.endsWith(':session_stop_force'))).toBe(true);
+});
+test('can open a cancellation confirmation during background refresh while mutation stays blocked until fresh',async()=>{
+ const current={...run,availableActions:[cancel]};const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);const api=new ApiClient();
+ render(<MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><RunActions api={api} id="p" run={current} fresh={false} refreshing/></Operations></MemoryRouter>);
+ const open=screen.getByRole('button',{name:'Hủy công việc'});expect((open as HTMLButtonElement).disabled).toBe(false);fireEvent.click(open);
+ fireEvent.change(screen.getByLabelText('Lý do hủy'),{target:{value:'Giữ lý do trong lúc tải lại'}});
+ expect((screen.getByRole('button',{name:'Gửi yêu cầu hủy'}) as HTMLButtonElement).disabled).toBe(true);expect(fetcher).not.toHaveBeenCalled();
+});

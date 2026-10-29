@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { CODEX_CONFIG_HOOK_MAX_BYTES } from "./codex-hook-toml.js";
 
@@ -139,7 +139,21 @@ function sanitizeProviderTable(table: Record<string, unknown>): Record<string, u
   return sanitized;
 }
 
-function buildSanitizedCodexConfig(parsed: Record<string, unknown>): string {
+/**
+ * Provider auth helpers are user programs that resolve credentials from the user's real HOME
+ * (for example `~/.runsystem/api-key`). The private process HOME would hide them, so the
+ * private config runs the same command with only HOME restored to the source process home.
+ */
+function withSourceHome(provider: Record<string, unknown>, sourceProcessHome: string | undefined): Record<string, unknown> {
+  const auth = provider["auth"];
+  if (!sourceProcessHome || !isAbsolute(sourceProcessHome) || !isPlainRecord(auth) || typeof auth["command"] !== "string" || !auth["command"].trim())
+    return provider;
+  const args = Array.isArray(auth["args"]) ? auth["args"] : [];
+  if (!args.every(arg => typeof arg === "string")) return provider;
+  return { ...provider, auth: { ...auth, command: "/usr/bin/env", args: [`HOME=${sourceProcessHome}`, auth["command"], ...args] } };
+}
+
+function buildSanitizedCodexConfig(parsed: Record<string, unknown>, trustedProjects: readonly string[] = [], sourceProcessHome?: string): string {
   const sanitized: Record<string, unknown> = {};
   for (const key of ALLOWED_TOP_LEVEL_SCALAR_KEYS) {
     const value = parsed[key];
@@ -154,13 +168,16 @@ function buildSanitizedCodexConfig(parsed: Record<string, unknown>): string {
     for (const [providerId, table] of Object.entries(modelProviders)) {
       if (!isPlainRecord(table)) continue;
       if (activeProvider === undefined || providerId === activeProvider) {
-        sanitizedProviders[providerId] = sanitizeProviderTable(table);
+        sanitizedProviders[providerId] = withSourceHome(sanitizeProviderTable(table), sourceProcessHome);
       }
     }
     if (Object.keys(sanitizedProviders).length > 0) {
       sanitized["model_providers"] = sanitizedProviders;
     }
   }
+  // Only absolute paths the caller already admitted as trusted workspaces; the user's own trust list is not copied.
+  const projects = [...new Set(trustedProjects.filter(path => isAbsolute(path)).map(path => resolve(path)))];
+  if (projects.length > 0) sanitized["projects"] = Object.fromEntries(projects.map(path => [path, { trust_level: "trusted" }]));
   return Object.keys(sanitized).length === 0 ? "" : stringify(sanitized);
 }
 
@@ -286,7 +303,11 @@ export async function preparePrivateCodexHome(
   stateDirectory: string,
   sourceHome: string,
   sourceProcessHome?: string,
-  env: Readonly<Record<string, string | undefined>> = process.env
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  options: {
+    /** Workspaces the host already admitted (repository trust policy); written only to the private config. */
+    readonly trustedProjects?: readonly string[];
+  } = {}
 ): Promise<PreparedCodexHome> {
   const resolvedSourceHome = resolve(sourceHome);
   const resolvedSourceProcessHome =
@@ -383,12 +404,18 @@ export async function preparePrivateCodexHome(
   await chmod(privateCodexHome, 0o700);
   await mkdir(privateProcessHome, { recursive: true, mode: 0o700 });
   await chmod(privateProcessHome, 0o700);
+  // Herdr types the provider launch into the pane's interactive shell, which runs with this HOME.
+  // A zsh without any startup file starts zsh-newuser-install, which consumes the typed command.
+  // This Bflow-owned home gets an intentionally empty rc; the user's real home is never touched.
+  const shellRc = join(privateProcessHome, ".zshrc");
+  if (!(await readSafeRegularFile(shellRc, 4096)).exists)
+    await writePrivateRegularFile(shellRc, "# Bflow private Codex process home: intentionally empty so interactive zsh starts without setup prompts.\n");
 
   for (const forbidden of FORBIDDEN_PRIVATE_HOME_ENTRIES) {
     await rm(join(privateCodexHome, forbidden), { recursive: true, force: true }).catch(() => undefined);
   }
 
-  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig);
+  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig, options.trustedProjects, resolvedSourceProcessHome);
   const configFilePath = join(privateCodexHome, "config.toml");
   await writePrivateRegularFile(configFilePath, sanitizedConfigText);
   const configDigest = createHash("sha256").update(sanitizedConfigText, "utf8").digest("hex");

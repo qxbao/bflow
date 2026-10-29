@@ -75,6 +75,8 @@ import { browserTransactionId, describeToolActions, nextToolActionInvocationId, 
 import { patchFilePaths } from "./patch-paths.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
+import { newSosAgentName, spawnSosAgent } from "./sos-agent.js";
+import { isBflowSosCommand } from "./native-diagnostic-fence.js";
 import { TaskLogPane } from "./task-log-pane.js";
 import { assessmentFailureSummary } from "./assessment-input.js";
 import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema, roleProfilePinToolSchema } from "./role-tool-schema.js";
@@ -351,6 +353,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const webProjectId = interactionProjectId(configuration.repositoryPath);
   const webFeed = new ProjectionFeed(webProjectId);
   let webFeedObservedAt = 0;
+  let webFeedFingerprint: string | undefined;
+  const webFeedNotices = new Set<string>();
+  // Observation timestamps change on every read; they are not projection changes.
+  const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable)
+    : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== "updatedAt" && key !== "observedAt").map(([key, item]) => [key, stable(item)])) : value;
+  const webProjectionFingerprint = async (): Promise<string> => {
+    const views = await Promise.all([
+      readWebQuery({ kind: "session", projectId: webProjectId }),
+      readWebQuery({ kind: "runs", projectId: webProjectId, query: { limit: 100 } }),
+      readWebQuery({ kind: "decisions", projectId: webProjectId })
+    ].map(view => view.catch(() => "unavailable")));
+    return digest(JSON.stringify(stable(views)));
+  };
   let webFeedQueue: Promise<unknown> = Promise.resolve();
   const readWebEvents = (params: unknown) => {
     const work = webFeedQueue.catch(() => undefined).then(async () => {
@@ -358,12 +374,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (input.projectId !== webProjectId) throw new Error("Interaction project scope mismatch");
       // Generic invalidation covers every projection, including runs outside the first page.
       // It is explicitly not a claim that a domain event occurred or a command succeeded.
+      // Publish only on an observed change: every client polls this once a second and reloads its
+      // views on each event, so an unconditional publish is a self-sustaining refresh loop.
       if (Date.now() - webFeedObservedAt >= 1000) {
-        webFeed.publish("invalidate", []);
-        const notices = [...await receipts.unsurfacedConversationNotices(), ...await receipts.undisplayedUserFacingNotices()];
-        const ids = [...new Set(notices.map(n => n.messageId))];
-        for (let offset = 0; offset < ids.length; offset += 100) webFeed.publish("notice", ids.slice(offset, offset + 100));
         webFeedObservedAt = Date.now();
+        const fingerprint = await webProjectionFingerprint();
+        if (fingerprint !== webFeedFingerprint) {
+          if (webFeedFingerprint !== undefined) webFeed.publish("invalidate", []);
+          webFeedFingerprint = fingerprint;
+        }
+        const notices = [...await receipts.unsurfacedConversationNotices(), ...await receipts.undisplayedUserFacingNotices()];
+        const pending = new Set(notices.map(n => n.messageId));
+        const fresh = [...pending].filter(id => !webFeedNotices.has(id));
+        // Forget settled notices so a later re-surface is announced again.
+        for (const id of webFeedNotices) if (!pending.has(id)) webFeedNotices.delete(id);
+        for (const id of fresh) webFeedNotices.add(id);
+        for (let offset = 0; offset < fresh.length; offset += 100) webFeed.publish("notice", fresh.slice(offset, offset + 100));
       }
       return webFeed.read(input.query.cursor);
     });
@@ -675,7 +701,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   }, async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.retirePolicyPhase({ operationId,
     sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }),
   async (turn, operationId) => json({ ok: true, value: await requireWorkspace().runtime.replaceWorkflowReview({ operationId,
-    sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }));
+    sessionId: turn.conversationSessionId, userMessageId: turn.messageId, userId: turn.userId }) }),
+  // BFLOWSOS works even when the workspace is broken. Herdr tab creation and `agent start` can outlast the 30s provider hook,
+  // so the trusted turn records the dispatch immediately; the spawn outcome lands in task activity (`sos_agent_spawned`).
+  async turn => {
+    const agentName = newSosAgentName();
+    void (async () => spawnSosAgent({ directory: configuration.directory, repositoryPath: configuration.repositoryPath,
+      sessionId: configuration.sessionId, herdrBinary: binary, manifest: manifest ?? attemptedManifest, turn, activityLog, agentName,
+      runtimeSnapshot: await (async () => { try { return workspace ? await workspace.runtime.inspect() : null; }
+        catch (error) { return { unavailable: redactString(String(error)) }; } })(),
+      schedulerError, inboundError, defaultProvider: providerForRole("coordinator"),
+      herdr: async args => (await execute(binary, ["--session", configuration.sessionId, ...args],
+        { cwd: configuration.repositoryPath, env: environment, timeout: 90_000, maxBuffer: 4 * 1024 * 1024 })).stdout }))()
+      .catch(error => { process.stderr.write(`Bflow SOS: ${redactString(String(error))}\n`); });
+    return json({ ok: true, value: { status: "spawning", agentName, sosDirectory: join(configuration.directory, "sos"),
+      note: "BFLOWSOS rescue agent is starting in a new Herdr tab named SOS; its outcome is recorded in task activity as sos_agent_spawned." } });
+  });
   const nativeSessions = new Map<string, {role: AgentRole; sessionId: string; transcriptPath?: string; transcriptRoot?: string}>();
   try { for (const [pane, value] of Object.entries(record(JSON.parse(await readFile(join(configuration.directory, "native-sessions.json"), "utf8"))))) {
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId),
@@ -3290,7 +3331,8 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   }
   if (event === "UserPromptSubmit" && configuration.role === "conversation") {
     const result = await callHost(configuration.socketPath, configuration.token, "user_prompt", { paneId, hook });
-    if (configuration.provider === "codex") {
+    // BFLOWSOS was handled by the host; Codex needs its trusted result (requiresConversationDecision=false), not the generic marker.
+    if (configuration.provider === "codex" && !isBflowSosCommand(textField(hook.prompt))) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: CODEX_CONVERSATION_USER_TURN_MARKER } }) + "\n");
       return;
     }

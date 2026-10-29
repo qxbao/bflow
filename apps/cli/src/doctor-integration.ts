@@ -1326,7 +1326,9 @@ export async function runDoctorDiagnostics(
       Boolean(skillsConfig?.requiredSkills && skillsConfig.requiredSkills.length > 0) ||
       configuredRoles.some((r) => r.skills && r.skills.length > 0);
 
-    if ((isSkillsRequired || hasRequestedSkills) && !skillsOverride?.catalogDir && !skillsConfig?.catalogDir) {
+    // Startup always builds each role's default pinned skill manifest from the machine store, even
+    // when the repository requests no extra skills. Check the same pins, or doctor reports a false ready.
+    if (config && !skillsOverride?.catalogDir && !skillsConfig?.catalogDir && !skillsConfig?.bindingsPath) {
       try {
         const { loadHostPlatformContext } = await import("./platform-options.js");
         const { validateBundledStartupSkills } = await import("./skill-catalog.js");

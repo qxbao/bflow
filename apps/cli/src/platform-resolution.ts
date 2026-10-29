@@ -4,7 +4,8 @@ import { configuredPlatformRoles, resolveRepositoryToolPolicy } from './platform
 import { RepositoryToolPolicySchema, WorkflowPackSchema, sameRoleProfilePin, type JsonValue, type PlanDecision } from '@bflow/contracts';
 import { canonicalPlanDigest, resolveWorkflowPack, workflowPackDigest } from '@bflow/runtime';
 import type { EnvironmentCompositionInput } from './environment.js';
-import { EnvironmentConfigEnvironmentSchema, type EnvironmentRoleConfig, type EnvironmentProvider } from './environment-config.js';
+import { EnvironmentConfigEnvironmentSchema, isGovernanceRoleConfig, type EnvironmentGovernanceRoleConfig,
+    type EnvironmentProvider } from './environment-config.js';
 import { loadMachineSkillCatalog } from './skill-catalog.js';
 import { readPreviewFile } from './preview-files.js';
 import { loadSpecialistProfiles } from './specialist-profiles.js';
@@ -15,7 +16,10 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
     const roleProfiles = await loadSpecialistProfiles(input);
     const project: Record<string, JsonValue> = {};
     const catalog = await loadMachineSkillCatalog(input);
-    for (const role of environment.roles) {
+    // The on-demand sos rescue role bypasses pack resolution and skill pins; it is passed through unchanged.
+    const governanceRoles = environment.roles.filter(isGovernanceRoleConfig);
+    const nonGovernanceRoles = environment.roles.filter(role => !isGovernanceRoleConfig(role));
+    for (const role of governanceRoles) {
         project[`roles.${role.role}.provider`] = role.cli;
         if (role.specialistProfile !== undefined)
             project[`roles.${role.role}.specialistProfile`] = role.specialistProfile;
@@ -55,7 +59,7 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
     const resolution = resolveWorkflowPack({ ...(pack ? { pack } : {}), ...(unavailable ? { unavailable } : {}), project });
     for (const decision of resolution.decisions) {
         const parts = decision.field.split('.');
-        const role = environment.roles.find(item => item.role === parts[1]);
+        const role = governanceRoles.find(item => item.role === parts[1]);
         const field = parts[2];
         const locator = parts[0] === 'roles' && role
             ? field === 'profile' && role['profile-name'] === undefined
@@ -68,7 +72,7 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
         if (decision.source.kind === 'project')
             decision.source.locator = locator;
     }
-    const materializeRole = (role: EnvironmentRoleConfig): EnvironmentRoleConfig => {
+    const materializeRole = (role: EnvironmentGovernanceRoleConfig): EnvironmentGovernanceRoleConfig => {
         const result: Record<string, unknown> = { ...role };
         for (const decision of resolution.decisions) {
             const prefix = `roles.${role.role}.`;
@@ -85,15 +89,15 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
                 result.skills = ids;
             }
         }
-        return result as EnvironmentRoleConfig;
+        return result as EnvironmentGovernanceRoleConfig;
     };
-    const explicitRoles = environment.roles.map(materializeRole);
+    const explicitRoles = governanceRoles.map(materializeRole);
     const inheritedRoles = environment.roles.some(role => role.role === 'developer') ? [] : ['developer'];
     // Inheritance sees the effective Coordinator, then Developer-specific pack defaults apply.
     const roles = configuredPlatformRoles({ ...input, config: { ...input.config,
         environment: { ...environment, roles: explicitRoles } } })
         .map(role => inheritedRoles.includes(role.role) ? materializeRole(role) : role);
-    let resolved = EnvironmentConfigEnvironmentSchema.parse({ ...environment, roles });
+    let resolved = EnvironmentConfigEnvironmentSchema.parse({ ...environment, roles: [...roles, ...nonGovernanceRoles] });
     for (const role of resolved.roles) {
         if (!role.specialistProfile) continue;
         const snapshot = roleProfiles.find(item => sameRoleProfilePin(item.pin, role.specialistProfile));
@@ -120,7 +124,7 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
 export function decisionFor(decisions: readonly PlanDecision[], field: string) { return decisions.find(item => item.field === field); }
 
 /** Preserve only real pack locks; an explicit base-role setting remains a profile default. */
-export function rolePreferenceConstraints(decisions: readonly PlanDecision[], role: EnvironmentRoleConfig): Pick<PlatformRoleOption, 'preferenceConstraints'> {
+export function rolePreferenceConstraints(decisions: readonly PlanDecision[], role: EnvironmentGovernanceRoleConfig): Pick<PlatformRoleOption, 'preferenceConstraints'> {
     const locked = (key: 'model' | 'effort') => decisionFor(decisions, `roles.${role.role}.${key}`)?.rule?.kind === 'pack';
     const constraints = {
         ...(locked('model') && role.model !== undefined ? { model: role.model } : {}),
