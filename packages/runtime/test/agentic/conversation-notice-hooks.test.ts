@@ -124,7 +124,7 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     // The surfaced notice's rendered card travels in the reason, so it is not lost if the model skips read_updates.
     expect(block.reason).toContain(renderConversationNotice(decisionNotice).display);
     for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(block.reason).not.toContain(forbidden);
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
   });
 
   it("re-blocks a surfaced decision the final turn did not name, at most twice", async () => {
@@ -133,13 +133,13 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const transcript = await f.transcript([{ type: "user", message: { content: "hi" } }, assistantTurn("Đã xem, không có gì mới.")]);
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
     expect(JSON.parse(result.stdout).reason).toContain("Bflow: còn 1 cập nhật chưa báo người dùng (1 cần quyết định).");
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_reblocked"]);
-    expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision", "conversation_notices", "conversation_notices_reblocked"]);
+    expect(f.calls[3]!.params.messageIds).toEqual([decisionNotice.messageId]);
 
     const exhausted = await fixture({ conversation_notices: { notices: [], undisplayed: [{ ...undisplayed, reblocks: 2 }] } });
     const quiet = await exhausted.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
     expect(quiet.stdout).toBe("");
-    expect(exhausted.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices"]);
+    expect(exhausted.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision", "conversation_notices"]);
   });
 
   it("records the display once the final Conversation turn names the approval id, and stays silent", async () => {
@@ -150,8 +150,8 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", transcript_path: transcript });
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_displayed"]);
-    expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision", "conversation_notices", "conversation_notices_displayed"]);
+    expect(f.calls[3]!.params.messageIds).toEqual([decisionNotice.messageId]);
   });
 
   it("ignores the approval id in an earlier turn when the final turn does not show it", async () => {
@@ -175,7 +175,7 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(block.reason).not.toContain("x".repeat(120));
     for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(block.reason).not.toContain(forbidden);
     // Notices wait for the next Stop; the decision refusal is the only output of this one.
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision"]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision"]);
   });
 
   it("reports a trusted approval failure on Stop without asking for an ordinary decision or automatic retry", async () => {
@@ -190,7 +190,7 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     expect(blocked.reason).toContain("Do not call conversation_decide");
     expect(blocked.reason).not.toContain("Call conversation_decide now");
     for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(blocked.reason).not.toContain(forbidden);
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision"]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision"]);
   });
 
   it("requires the explicit original ID when Stop resumes a suspended ordinary turn", async () => {
@@ -210,8 +210,8 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
       transcript_path: null, last_assistant_message: `Coordinator hỏi bạn: Dùng schema v2 hay giữ v1? Trả lời ${APPROVAL_ID}: 1` });
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_displayed"]);
-    expect(f.calls[2]!.params.messageIds).toEqual([decisionNotice.messageId]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision", "conversation_notices", "conversation_notices_displayed"]);
+    expect(f.calls[3]!.params.messageIds).toEqual([decisionNotice.messageId]);
   });
 
   it("puts the MUST SHOW section in the inbox nudge context without raw JSON for claude", async () => {
