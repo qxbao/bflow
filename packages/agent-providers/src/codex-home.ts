@@ -139,7 +139,21 @@ function sanitizeProviderTable(table: Record<string, unknown>): Record<string, u
   return sanitized;
 }
 
-function buildSanitizedCodexConfig(parsed: Record<string, unknown>, trustedProjects: readonly string[] = []): string {
+/**
+ * Provider auth helpers are user programs that resolve credentials from the user's real HOME
+ * (for example `~/.runsystem/api-key`). The private process HOME would hide them, so the
+ * private config runs the same command with only HOME restored to the source process home.
+ */
+function withSourceHome(provider: Record<string, unknown>, sourceProcessHome: string | undefined): Record<string, unknown> {
+  const auth = provider["auth"];
+  if (!sourceProcessHome || !isAbsolute(sourceProcessHome) || !isPlainRecord(auth) || typeof auth["command"] !== "string" || !auth["command"].trim())
+    return provider;
+  const args = Array.isArray(auth["args"]) ? auth["args"] : [];
+  if (!args.every(arg => typeof arg === "string")) return provider;
+  return { ...provider, auth: { ...auth, command: "/usr/bin/env", args: [`HOME=${sourceProcessHome}`, auth["command"], ...args] } };
+}
+
+function buildSanitizedCodexConfig(parsed: Record<string, unknown>, trustedProjects: readonly string[] = [], sourceProcessHome?: string): string {
   const sanitized: Record<string, unknown> = {};
   for (const key of ALLOWED_TOP_LEVEL_SCALAR_KEYS) {
     const value = parsed[key];
@@ -154,7 +168,7 @@ function buildSanitizedCodexConfig(parsed: Record<string, unknown>, trustedProje
     for (const [providerId, table] of Object.entries(modelProviders)) {
       if (!isPlainRecord(table)) continue;
       if (activeProvider === undefined || providerId === activeProvider) {
-        sanitizedProviders[providerId] = sanitizeProviderTable(table);
+        sanitizedProviders[providerId] = withSourceHome(sanitizeProviderTable(table), sourceProcessHome);
       }
     }
     if (Object.keys(sanitizedProviders).length > 0) {
@@ -401,7 +415,7 @@ export async function preparePrivateCodexHome(
     await rm(join(privateCodexHome, forbidden), { recursive: true, force: true }).catch(() => undefined);
   }
 
-  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig, options.trustedProjects);
+  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig, options.trustedProjects, resolvedSourceProcessHome);
   const configFilePath = join(privateCodexHome, "config.toml");
   await writePrivateRegularFile(configFilePath, sanitizedConfigText);
   const configDigest = createHash("sha256").update(sanitizedConfigText, "utf8").digest("hex");

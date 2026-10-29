@@ -3023,6 +3023,12 @@ describe("@bflow/agent-providers", () => {
       expect(privateConfig).toContain(`[projects."${trustedRoot}"]`);
       expect(privateConfig).toContain('trust_level = "trusted"');
       expect(privateConfig).not.toContain("relative/ignored");
+      // The user's auth helper resolves its credential from the real HOME (e.g. ~/.runsystem/api-key);
+      // the private process HOME must not hide it, so the command runs with the source HOME restored.
+      const { parse } = await import("smol-toml");
+      const auth = (parse(privateConfig) as any).model_providers.runsystem.auth;
+      expect(auth.command).toBe("/usr/bin/env");
+      expect(auth.args).toEqual([`HOME=${testBaseDir}`, "/usr/local/bin/codex-token"]);
       // Herdr types the launch into an interactive shell whose HOME is this private directory. Without a
       // startup file zsh runs zsh-newuser-install, which swallows the typed provider command.
       const shellRc = await readFile(join(prepared.HOME, ".zshrc"), "utf8");
