@@ -844,7 +844,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const mismatch = () => new Error(`Pane '${pane.paneId}' has no matching native Bflow launch receipt; preserve it and reconcile provider startup`);
       if (receipt.role !== pane.role || receipt.paneId !== pane.paneId) throw mismatch();
       if (typeof receipt.nativeSessionId === "string") {
-        if (!pane.session || receipt.nativeSessionId !== pane.session.value) throw mismatch();
+        if (!pane.session)
+          throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId}: the manifest has not recorded its SessionStart native session yet.`);
+        if (receipt.nativeSessionId !== pane.session.value) throw mismatch();
         startupPaths.set(pane.role, "hook");
       } else {
         // The bootstrap receipt must name the launch this host prepared for the role (when one is prepared).
