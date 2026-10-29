@@ -363,7 +363,12 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
   });
 
   it("blocks prepare without launch material when a required provider is not ready, and persists codex role providers", async () => {
-    const f = await fixture(root => platformFor(root));
+    // An installed/logged-in provider on the test machine must not change this deliberately unready scenario.
+    const f = await fixture(root => platformFor(root, { codexHomeDirectory: join(root, "unauthed-codex"),
+      codexProcessHomeDirectory: join(root, "empty-process-home"), codexHookApprovalPath: join(root, "unapproved-hooks.json") }), async root => {
+      await mkdir(join(root, "unauthed-codex"), { mode: 0o700 });
+      await mkdir(join(root, "empty-process-home"), { mode: 0o700 });
+    });
     const prepared = await f.controller.prepare();
     expect(prepared.platform?.ready).toBe(false);
     expect(prepared.platform?.generation).toBe(1);
