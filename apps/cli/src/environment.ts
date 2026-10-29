@@ -488,7 +488,9 @@ export class EnvironmentLifecycle {
       }
       // Same opt-in for Codex: headless panes otherwise stop on "Trust this folder?". Record the answer
       // in each Codex home a required role will use (selected isolator profile, or the account's own).
-      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true && distinctRequiredClis.includes("codex")) {
+      // Not distinctRequiredClis: that list omits profile-selected roles (it only drives native auth checks).
+      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true &&
+          rolesToRun.some(role => (role.required ?? true) && role.cli === "codex")) {
         const { ensureCodexWorkspaceTrust } = await import("@bflow/agent-providers");
         const homes = new Set<string>();
         for (const role of rolesToRun.filter(item => (item.required ?? true) && item.cli === "codex")) {
