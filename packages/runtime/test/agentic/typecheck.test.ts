@@ -123,6 +123,9 @@ it.skipIf(process.platform !== "linux")("admits compiler criteria through policy
   expect(host.configuredMethods()).toContain("typecheck");
   expect(() => host.assertSupported(specification, strategy)).not.toThrow();
   expect(() => host.assertTaskSupported(specification, strategy, ["source.ts", "tsconfig.json", "test/unit.test.cjs"])).not.toThrow();
+  const taskSpecification = SpecificationSchema.parse({ ...specification, acceptanceCriteria: specification.acceptanceCriteria.filter(criterion => criterion.verificationMethod === "unit_test") });
+  const taskStrategy = new TestStrategyResolver().resolve(taskSpecification);
+  expect(() => host.assertTaskSupported(taskSpecification, taskStrategy, ["test/unit.test.cjs"])).not.toThrow();
   const definition = host.behavioralChecks(specification, strategy).find(check => check.configuration?.command === "auto:typecheck")!;
   expect(definition.configuration?.method).toBe("typecheck");
   expect(definition.configuration?.testNames).toEqual(strategy.criterionMappings.find(mapping => mapping.criterionId === "ac-types")!.testNames);

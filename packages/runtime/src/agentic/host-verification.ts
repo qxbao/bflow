@@ -506,7 +506,7 @@ export class HostVerification {
         return infraCommands.some(cmd => cmd.method === "static_analysis" && isAutomaticStaticCommand(textField(cmd.command)) && automaticCheckMethod(textField(cmd.command)) === "static_analysis");
       }
       if (this.runners.automatic && method === "typecheck") return Boolean(this.runners.typecheck) &&
-        infraCommands.some(cmd => cmd.method === "typecheck" && cmd.command === "auto:typecheck") && criterionMethods.has("typecheck");
+        infraCommands.some(cmd => cmd.method === "typecheck" && cmd.command === "auto:typecheck");
       if (!configured.includes(method)) return false;
       // Detected runners only execute test identities mapped from accepted criteria; a method without such a criterion has no evidence.
       return !this.runners.automatic || infraCommands.some(cmd => cmd.method === method) && criterionMethods.has(method as never);
