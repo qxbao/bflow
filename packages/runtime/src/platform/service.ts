@@ -925,7 +925,10 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
               : {}),
             ...(codexLaunchEnvironment ?? {}),
             ...(requirement.environmentVariables ?? {})
-          }
+          },
+          // Startup already enforced the repository trust policy for this workspace; record it in the
+          // private config so the headless pane is not stopped by Codex's "Trust this folder?" dialog.
+          { trustedProjects: [identity.workspaceRoot, preliminaryEnvironment.value.cwd] }
         );
       } catch (error) {
         return blocked({

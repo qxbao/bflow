@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, realpath, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { CODEX_CONFIG_HOOK_MAX_BYTES } from "./codex-hook-toml.js";
 
@@ -139,7 +139,7 @@ function sanitizeProviderTable(table: Record<string, unknown>): Record<string, u
   return sanitized;
 }
 
-function buildSanitizedCodexConfig(parsed: Record<string, unknown>): string {
+function buildSanitizedCodexConfig(parsed: Record<string, unknown>, trustedProjects: readonly string[] = []): string {
   const sanitized: Record<string, unknown> = {};
   for (const key of ALLOWED_TOP_LEVEL_SCALAR_KEYS) {
     const value = parsed[key];
@@ -161,6 +161,9 @@ function buildSanitizedCodexConfig(parsed: Record<string, unknown>): string {
       sanitized["model_providers"] = sanitizedProviders;
     }
   }
+  // Only absolute paths the caller already admitted as trusted workspaces; the user's own trust list is not copied.
+  const projects = [...new Set(trustedProjects.filter(path => isAbsolute(path)).map(path => resolve(path)))];
+  if (projects.length > 0) sanitized["projects"] = Object.fromEntries(projects.map(path => [path, { trust_level: "trusted" }]));
   return Object.keys(sanitized).length === 0 ? "" : stringify(sanitized);
 }
 
@@ -286,7 +289,11 @@ export async function preparePrivateCodexHome(
   stateDirectory: string,
   sourceHome: string,
   sourceProcessHome?: string,
-  env: Readonly<Record<string, string | undefined>> = process.env
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  options: {
+    /** Workspaces the host already admitted (repository trust policy); written only to the private config. */
+    readonly trustedProjects?: readonly string[];
+  } = {}
 ): Promise<PreparedCodexHome> {
   const resolvedSourceHome = resolve(sourceHome);
   const resolvedSourceProcessHome =
@@ -394,7 +401,7 @@ export async function preparePrivateCodexHome(
     await rm(join(privateCodexHome, forbidden), { recursive: true, force: true }).catch(() => undefined);
   }
 
-  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig);
+  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig, options.trustedProjects);
   const configFilePath = join(privateCodexHome, "config.toml");
   await writePrivateRegularFile(configFilePath, sanitizedConfigText);
   const configDigest = createHash("sha256").update(sanitizedConfigText, "utf8").digest("hex");

@@ -3013,9 +3013,16 @@ describe("@bflow/agent-providers", () => {
       });
       const preparedStateDir = join(testBaseDir, "private-codex-state");
       await mkdir(preparedStateDir, { recursive: true, mode: 0o700 });
-      const prepared = await preparePrivateCodexHome(preparedStateDir, sourceHome, testBaseDir, {});
+      const trustedRoot = join(testBaseDir, "repo with space");
+      const prepared = await preparePrivateCodexHome(preparedStateDir, sourceHome, testBaseDir, {}, { trustedProjects: [trustedRoot, "relative/ignored"] });
       expect(prepared.mode).toBe("private");
       expect(prepared.authFilePath).toBeUndefined();
+      // The Bflow-owned private config carries trust for the already-trusted workspace so the
+      // provider does not stop on its interactive "Trust this folder?" dialog in a headless pane.
+      const privateConfig = await readFile(join(prepared.CODEX_HOME, "config.toml"), "utf8");
+      expect(privateConfig).toContain(`[projects."${trustedRoot}"]`);
+      expect(privateConfig).toContain('trust_level = "trusted"');
+      expect(privateConfig).not.toContain("relative/ignored");
       // Herdr types the launch into an interactive shell whose HOME is this private directory. Without a
       // startup file zsh runs zsh-newuser-install, which swallows the typed provider command.
       const shellRc = await readFile(join(prepared.HOME, ".zshrc"), "utf8");
