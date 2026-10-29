@@ -16,7 +16,7 @@ export function DecisionCard({decision,api,projectId,headingLevel=3}:{decision:W
   return <article className="panel"><div className="eyebrow">Gói xem xét · Phiên bản {decision.expectedVersion.revision}</div><Heading>{decision.question}</Heading><StatusBadge value={decision.status}/>
     {decision.expiresAt && <p>Hạn xem xét: {new Date(decision.expiresAt).toLocaleString('vi')}</p>}
     {decision.options.length>0 && <ul>{decision.options.map(option=><li key={option}>{option}</li>)}</ul>}
-    <p className="muted">Bản này chỉ hỗ trợ xem quyết định và tài liệu.</p>
+    <p className="muted">Đọc tài liệu và đối chiếu phiên bản trước khi quyết định.</p>
     {decision.evidence.length===0?<p>Chưa có tài liệu đính kèm.</p>:decision.evidence.map(item=><Evidence key={item.artifactId} api={api} projectId={projectId} evidence={item}/>)}
   </article>;
 }

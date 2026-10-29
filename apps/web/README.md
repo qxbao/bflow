@@ -100,3 +100,64 @@ checks responsive overflow, font loading, focus and reduced motion. It never
 starts a provider/Herdr host. Synthetic fixture data exists only under `test/`.
 Screenshots/results stay ignored under `dist/test-results`; no tokens/logs/state
 or generated output is committed. Exact measured results are in `W06-HANDOFF.md`.
+
+## W07 direct actions
+
+The overview now offers a structured request form, intake clarification and
+explicit session start/stop. Run detail offers exact-question clarification,
+full requirement replacement, exact-action resume and confirmed cancel. Review
+pins the version, generation, target and evidence digest; stale or expired
+packages require an explicit reread. User decisions can select an option;
+ordinary approval metadata never becomes a selected option. All workflow commands
+use the frozen HTTP API and Conversation-owned ingress, without sending terminal
+text or a Conversation model turn. Runtime still grants authority independently.
+
+The forms reuse W06 tokens/components and DESIGN's light, square, hairline
+conventions. The installed UI skill's focused error-summary/validation and
+confirmation/focus guidance is applied. Inline confirmation moves focus to its
+heading and offers a return button; validation has field-linked errors and a
+focused summary. Textareas use the existing semantic tokens.
+
+Recovery records in origin-local storage contain only project/browser-session
+scope, action slot, operation ID, kind and SHA-256 body fingerprint. They retain
+no command body, credentials, action version or approval authority. Same-project
+records from earlier browser sessions are observed after server re-pairing;
+current server authentication still authorizes every read. Request drafts live
+in session storage under project/host/browser-session keys. Drafts may contain
+user-entered requirements: avoid entering secrets. No server credentials or
+CSRF token are persisted. Web Locks serialize tabs and recheck the durable ID
+inside the lock; browsers without Web Locks cannot mutate.
+
+Reload/back/resubmit only reads an existing operation. Timeout, invalid response,
+404, offline and reconciliation-required never authorize an automatic new POST.
+A definitive refusal permits correction; a conclusive applied/failed operation
+can be cleared only with the explicit “Bắt đầu thao tác mới” control, which
+rereads it first. HTTP 202 and operation applied are distinct from workflow
+completion. Cancellation acceptance remains unconfirmed until the run snapshot
+reports cancellation. Follow-up links keep historical evidence on the parent.
+
+Frozen-interface limitations: WebRunView has no original requirement draft, so
+revise explains that it replaces the complete objective/criteria/constraints;
+it cannot prepopulate authoritative original criteria. Session DTO has no
+availableActions list: create/start/stop reread readiness and defer authority to
+server/host; run mutations use availableActions. Clarification is the existing
+question/version capability validated directly by HostStructuredCommands; Runtime
+does not emit an answer_clarification action. No missing public field is invented.
+
+Run after the root build:
+
+```sh
+pnpm --filter @bflow/web test
+BFLOW_WEB_TEST_BROWSER=/usr/bin/google-chrome pnpm --filter @bflow/web exec playwright test e2e/direct-actions.spec.ts
+```
+
+The browser scenario serves the production bundle through the actual Local
+Server with real HTTP cookies/CSRF, a temporary Git root and deterministic
+injected host fixtures. It checks host command/effect counts via test-process IPC,
+including two tabs, lost response, restart/re-pair, stale review, intake/run
+clarification, follow-up navigation, resume/cancel and session lifecycle. There
+is no production mock mode or additional test HTTP endpoint. Separate existing
+Runtime/Conversation integration tests exercise structured admission without a
+model. These checks do not establish live Herdr/provider/full SDLC acceptance.
+
+See W07-HANDOFF.md for measured results and integration-owned runner proposal.

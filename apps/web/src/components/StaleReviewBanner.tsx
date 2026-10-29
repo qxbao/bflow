@@ -1,0 +1,1 @@
+export function StaleReviewBanner({onRead}:{onRead:()=>void}){return <div className="connection stale" role="alert"><p>Gói xem xét đã thay đổi hoặc không còn hiệu lực. Đọc lại và xem xét rõ ràng phiên bản mới trước khi quyết định.</p><button onClick={onRead}>Đọc lại gói hiện hành</button></div>;}
