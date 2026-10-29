@@ -40,3 +40,9 @@ it('keeps normalized assistant messages in immutable receipts through native rep
  expect((await reopened.chatAssistantMessages('conversation')).map(m=>m.content)).toEqual(['Old assistant answer']);
  expect(await reopened.chatAssistantMessages('other')).toEqual([]);
 });
+it('does not advertise chat capability when the current normalized transcript cannot be validated',async()=>{
+ const {registeredChatAvailable}=await import('../../src/interaction/chat-history.js');
+ const path=await file([{type:'session_meta',payload:{id:'foreign'}}]);
+ expect(await registeredChatAvailable({role:'conversation',sessionId:'native',transcriptPath:path,transcriptRoot:path.slice(0,path.lastIndexOf('/'))},'codex','native','conversation')).toBe(false);
+ expect(await registeredChatAvailable({role:'conversation',sessionId:'native',transcriptPath:path,transcriptRoot:path.slice(0,path.lastIndexOf('/'))},'agy','native','conversation')).toBe(false);
+});

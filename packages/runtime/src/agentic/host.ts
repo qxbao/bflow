@@ -1,5 +1,5 @@
 import { HostChat } from "../interaction/chat.js";
-import { registeredAssistantHistory, chatMessageId } from "../interaction/chat-history.js";
+import { registeredAssistantHistory, registeredChatAvailable, chatMessageId } from "../interaction/chat-history.js";
 import { ProjectionFeed } from "../interaction/events.js";
 import { readScopedArtifact, serveArtifact } from "../interaction/artifacts.js";
 import { acknowledgeDisplayedNotice } from "../interaction/notices.js";
@@ -691,7 +691,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const b=await chatBinding(), native=nativeSessions.get(b.paneId);
       const live=record(record(record(JSON.parse(await herdr(["agent","get",b.paneId]))).result).agent);
       return {sessionId:manifest!.conversationSessionId,nativeSessionId:b.session!.value,paneId:b.paneId,provider:b.provider ?? b.agentKind,
-        ready:interactionReady() && native?.role==="conversation" && !!native.transcriptPath && !!native.transcriptRoot && native.sessionId===b.session!.value,
+        ready:interactionReady() && native?.role==="conversation" && !!native.transcriptPath && !!native.transcriptRoot && native.sessionId===b.session!.value && await registeredChatAvailable(native,b.provider??b.agentKind,b.session!.value,manifest!.conversationSessionId),
         busy:!["idle","done"].includes(String(live.agent_status))};
     },
     observeAdmission: async record => {

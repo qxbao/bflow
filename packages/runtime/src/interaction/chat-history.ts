@@ -36,7 +36,7 @@ export async function normalizedAssistantHistory(provider:string,path:string,nat
    const content=parts.flatMap(part=>{const p=z.object({type:z.string(),text:z.string().optional()}).passthrough().parse(part);return ['text','output_text'].includes(p.type)&&p.text?[p.text]:[];}).join('\n');
    if(!content.trim()||Buffer.byteLength(content)>WEB_LIMITS.chatBytes)continue;
    result.push(WebChatMessageSchema.parse({apiVersion:1,messageId:chatMessageId(provider,nativeSessionId,id),sessionId,...(runId?{runId}:{}),sender:'conversation',content,createdAt:time,delivery:'delivered',source:'native'}));
-  }return result.slice(-100);
+  }if(provider==='codex'&&!codexSessionVerified)throw Error('Codex transcript session unverified');return result.slice(-100);
  }finally{await file.close();}
 }
 
@@ -51,4 +51,8 @@ export async function registeredAssistantHistory(registration:unknown,provider:s
  const path=await realpath(r.transcriptPath),root=await realpath(r.transcriptRoot);
  if(!path.startsWith(root+'/'))throw Error('Foreign native transcript root');
  return normalizedAssistantHistory(provider,path,nativeSessionId,sessionId);
+}
+
+export async function registeredChatAvailable(registration:unknown,provider:string,nativeSessionId:string,sessionId:string):Promise<boolean>{
+ try{await registeredAssistantHistory(registration,provider,nativeSessionId,sessionId);return true;}catch{return false;}
 }
