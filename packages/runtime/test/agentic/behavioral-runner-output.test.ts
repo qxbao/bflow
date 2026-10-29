@@ -12,7 +12,7 @@ import { HostBehavioralFailure } from "../../src/agentic/host-verification.js";
 import { FileToolUsageLedger } from "../../src/platform/tool-usage-ledger.js";
 import { parseVitestJson } from "../../src/agentic/vitest-json.js";
 import { BehavioralMeasurementError, measureBehavior, measurementDiagnostics, parseBehavioralCommands } from "../../src/agentic/behavioral-runner.js";
-import { BehavioralIdentityMismatch, parseNodeTap } from "../../src/agentic/node-tap.js";
+import { BehavioralIdentityMismatch, BehavioralIdentityRepair, NodeTapTestCodeFailure, parseNodeTap } from "../../src/agentic/node-tap.js";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { cleanups, testName, vitestSource, fixture } from "../helpers/behavioral-runner-fixture.js";
@@ -240,11 +240,15 @@ exit 2
     expect(() => parseVitestJson({ ...measured.outcome, timedOut: true }, names)).toThrow("infrastructure");
     expect(() => parseVitestJson(measured.outcome, ["different identity"])).toThrow("identities");
   });
-  it("attaches expected and observed names with a bounded stdout tail to identity mismatches", async () => {
+  it("returns an identity mismatch to the Developer as a bounded repair naming the exact expected and observed tests", async () => {
+    // As an escalation nobody could act on it: the Coordinator saw progress while the Developer waited for its Red result.
     const f = await fixture();
     const error = await measureBehavior({ ...f.command, testNames: ["renamed behavior"] }, f.cwd, f.redRevision).catch((value: unknown) => value);
-    expect(error).toBeInstanceOf(BehavioralMeasurementError);
-    expect(String(error)).toBe(`Error: Observed test names differ from owner-configured identities`);
+    expect(error).toBeInstanceOf(BehavioralIdentityRepair);
+    expect(error).toBeInstanceOf(NodeTapTestCodeFailure);
+    expect(String(error)).toContain('expected exactly ["renamed behavior"]');
+    expect(String(error)).toContain(`observed ${JSON.stringify([testName])}`);
+    expect(String(error)).toContain("do not change the accepted mapping");
     expect(error).toMatchObject({ diagnostics: { expectedNames: ["renamed behavior"], observedNames: [testName], stdoutTail: expect.stringContaining(`ok 1 - ${testName}`) } });
   });
   it("rejects unsupported owner configuration and unmapped automated specification methods", async () => {

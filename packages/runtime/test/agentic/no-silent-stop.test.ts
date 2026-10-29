@@ -36,7 +36,7 @@ describe("renderer: design and task approvals carry full content", () => {
     expect(rendered.display).toContain("🔔 Cần bạn duyệt · #1");
     expect(rendered.display).toContain("Cần bạn duyệt: Human design approval required before implementation (do Trưởng nhóm kỹ thuật gửi)");
     expect(rendered.display).toContain('Kèm 2 tài liệu (gõ "xem chi tiết #1" để xem)');
-    expect(rendered.display).toContain("1. Đồng ý\n  2. Chưa đồng ý (ghi lý do)");
+    expect(rendered.display).toContain("1. Đồng ý\n  2. Từ chối hẳn (ghi lý do, dừng công việc)");
     expect(rendered.display).toContain('Bạn trả lời: "#1: đồng ý"');
     expect(isUserFacingNotice(rendered)).toBe(true);
   });

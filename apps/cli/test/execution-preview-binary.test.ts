@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdtemp, rm, writeFile, readdir, realpath} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile, readFile, readdir, realpath} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {initializeEnvironmentConfig,readEnvironmentConfig} from '../src/environment-config.js';
@@ -65,6 +65,18 @@ it('does not leak secret canaries from invalid role selections in JSON or text',
  config.environment.roles[0]!.cli='sk-canary-preview-value';
  await writeFile(path,renderEnvironmentConfigYaml(config));
  for(const flags of [[],['--json']]){const out=binary(['task','preview',...flags]);expect(out.status).not.toBe(0);expect(out.stdout+out.stderr).not.toContain('sk-canary-preview-value');}
+});
+
+it('names a moved or copied repository configuration instead of a generic invalid-input error',async()=>{
+ const path=join(root,'.bflow/config.yml');
+ await writeFile(path,(await readFile(path,'utf8')).replace(/repositoryId: [a-f0-9]{64}/,`repositoryId: ${'a'.repeat(64)}`));
+ for(const flags of [[],['--json']]){
+  const out=binary(['task','preview',...flags]);
+  expect(out.status).not.toBe(0);
+  expect(out.stdout+out.stderr).toContain('Configuration belongs to another repository or was moved');
+ }
+ const json=JSON.parse(binary(['task','preview','--json']).stdout);
+ expect(json.result.error.details).toEqual({reason:'repository_identity_mismatch'});
 });
 
 it('fingerprints verification invocation changes even when command identities stay the same',async()=>{

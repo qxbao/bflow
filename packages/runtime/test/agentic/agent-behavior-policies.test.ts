@@ -184,6 +184,9 @@ describe("Bflow Agent Behavioral Policies & Autonomous Non-User-Facing Execution
       // The pane shows only assistant text: a directReply that is never written out is invisible to the user.
       expect(chatPrompt).toMatch(/không thấy tham số hay kết quả tool/);
       expect(chatPrompt).toMatch(/Không bịa nguyên nhân lỗi/);
+      // A prototype request is delegated work: Runtime owns its artifact and separate approval, never a Conversation reply.
+      expect(chatPrompt).toMatch(/prototype[^\n]*`workflow_request`/);
+      expect(chatPrompt).toMatch(/Không bao giờ tự viết prototype/);
     });
 
     it("enforces plain Vietnamese tone policy in agents/chat/system-prompt.md while preserving all Section 4 guardrails and approval/delegation rules", async () => {

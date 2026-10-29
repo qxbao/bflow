@@ -40,7 +40,8 @@ export const SpecificationDocumentSchema = SpecificationSchema.superRefine((spec
   const details = parsed.data;
   const classification = classifyChange(details.assessment, spec.affectedPaths);
   if (spec.complexity !== classification.complexity || spec.riskLevel !== classification.riskLevel || spec.level !== classification.level) {
-    issue("classification must match assessed impact and affected paths", ["complexity"]);
+    // Enum values only, so the proposer can correct the declared fields instead of guessing.
+    issue(`classification must match assessed impact and affected paths: expected complexity ${classification.complexity}, riskLevel ${classification.riskLevel}, level ${classification.level}; got complexity ${spec.complexity}, riskLevel ${spec.riskLevel}, level ${spec.level}; derived from metadata.sdd.assessment and affectedPaths (${classification.reasons.join(", ")}), so correct an inaccurate assessment rather than the declared fields`, ["complexity"]);
   }
   if ([...spec.scope.inScope, ...spec.scope.outOfScope].some(item => !item.trim())) issue("scope entries cannot be blank", ["scope"]);
   if (!spec.version) issue("explicit specification version is required", ["version"]);

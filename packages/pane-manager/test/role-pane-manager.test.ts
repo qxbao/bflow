@@ -536,6 +536,8 @@ class FakeHerdrCommandRunner implements HerdrCommandRunner {
       }
       if (action === "close") {
         const paneId = rest[0]!;
+        // Herdr answers pane_not_found for a pane that no longer exists.
+        if (!this.panes.has(paneId)) return { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "pane_not_found", message: `pane ${paneId} not found` } }) };
         this.panes.delete(paneId);
         this.processInfos.delete(paneId);
         for (const [key, ag] of this.agents.entries()) {
@@ -1653,6 +1655,44 @@ describe("RolePaneManager Verification Suite", () => {
 
   // Scenario 7: Developer chạy song song & Ràng buộc Worktree
   describe("Scenario 7: Parallel developers, capacity limits, and dirty worktree guards", () => {
+    it("does not count retained developers whose panes are gone against capacity, but still guards their worktrees", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      await manager.initializeTopology();
+      const gone: string[] = [];
+      for (const n of [1, 2]) {
+        inspector.setCleanliness(`/repo/.worktrees/stale-${n}`, { exists: false, isClean: true, dirtyFiles: [] });
+        const dev = await manager.allocateDeveloper({ taskId: `stale-${n}`, worktreePath: `/repo/.worktrees/stale-${n}` });
+        expect(dev.ok).toBe(true); if (!dev.ok) return;
+        gone.push(dev.value.paneId);
+      }
+      // Cancelled runs keep these allocations without stop proof; their panes were closed, so no process can write.
+      for (const paneId of gone) {
+        runner.panes.delete(paneId);
+        for (const [name, agent] of runner.agents) if (agent.paneId === paneId) runner.agents.delete(name);
+        for (const tab of runner.tabs.values()) tab.paneIds = tab.paneIds.filter(id => id !== paneId);
+      }
+      inspector.setCleanliness("/repo/.worktrees/fresh", { exists: false, isClean: true, dirtyFiles: [] });
+      const fresh = await manager.allocateDeveloper({ taskId: "fresh", worktreePath: "/repo/.worktrees/fresh" });
+      expect(fresh.ok).toBe(true);
+      const reuse = await manager.allocateDeveloper({ taskId: "other", worktreePath: "/repo/.worktrees/stale-1" });
+      expect(reuse.ok).toBe(false);
+    });
+
+    it("reallocates a task whose previous developer pane vanished with an earlier host generation", async () => {
+      const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
+      await manager.initializeTopology();
+      inspector.setCleanliness("/repo/.worktrees/task-r", { exists: false, isClean: true, dirtyFiles: [] });
+      const first = await manager.allocateDeveloper({ taskId: "task-r", worktreePath: "/repo/.worktrees/task-r" });
+      expect(first.ok).toBe(true); if (!first.ok) return;
+      runner.panes.delete(first.value.paneId);
+      for (const [name, agent] of runner.agents) if (agent.paneId === first.value.paneId) runner.agents.delete(name);
+      for (const tab of runner.tabs.values()) tab.paneIds = tab.paneIds.filter(id => id !== first.value.paneId);
+      const again = await manager.allocateDeveloper({ taskId: "task-r", worktreePath: "/repo/.worktrees/task-r" });
+      expect(again.ok).toBe(true); if (!again.ok) return;
+      const saved = await manager.getManifest();
+      expect(saved.ok && saved.value?.panes.filter(pane => pane.role === "developer" && pane.metadata?.["taskId"] === "task-r")).toHaveLength(1);
+    });
+
     it("allocates multiple developers concurrently up to capacity and enforces guards", async () => {
       const manager = createRolePaneManager({ config, runner, store, worktreeInspector: inspector });
       await manager.initializeTopology();
@@ -2505,6 +2545,20 @@ describe("custom specialist profile native allocation", () => {
     const released = await manager.releaseSpecialist({ taskId: "review-1" }); expect(released.ok).toBe(true);
     expect(runner.panes.has(first.value.paneId)).toBe(false); expect(runner.panes.has(original.value.paneId)).toBe(true);
     const saved = await manager.getManifest(); expect(saved.ok && saved.value?.roleProfiles).toEqual([profile]);
+  });
+
+  it("completes a specialist release on the first attempt when its pane is already gone, then frees the capacity", async () => {
+    const profile = snapshot("security-reviewer", "reviewer"); const launch = await launchFor(profile);
+    const first = await manager.allocateSpecialist({ role: "reviewer", taskId: "review-1", roleProfile: profile, launch });
+    expect(first.ok).toBe(true); if (!first.ok) return;
+    // The operator closed a stale profiled pane left by an earlier host generation.
+    runner.panes.delete(first.value.paneId);
+    for (const [name, agent] of runner.agents) if (agent.paneId === first.value.paneId) runner.agents.delete(name);
+    for (const tab of runner.tabs.values()) tab.paneIds = tab.paneIds.filter(id => id !== first.value.paneId);
+    const released = await manager.releaseSpecialist({ taskId: "review-1" }); expect(released.ok).toBe(true);
+    const saved = await manager.getManifest(); expect(saved.ok && saved.value?.panes.some(pane => pane.paneId === first.value.paneId)).toBe(false);
+    const again = await manager.allocateSpecialist({ role: "reviewer", taskId: "review-2", roleProfile: profile, launch: await launchFor(profile) });
+    expect(again.ok).toBe(true);
   });
 
   it("blocks a profile when its base specialist slot is working and rejects tester-to-qa alias", async () => {

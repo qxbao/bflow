@@ -2618,6 +2618,12 @@ export class AgenticWorkflowRuntime {
       if (!this.ports.preflightRoleProfile) throw new Error("Profiled task preflight is unsupported by this host");
       await this.ports.preflightRoleProfile(profile, profile.definition.baseRole, ["implementation"]);
     }
+    // Dispatch checks each task's own capabilities against its profile scope; reject them here, before design approval.
+    for (const task of originalProposal.tasks) {
+      const required = task.metadata?.requiredCapabilities ? strings(task.metadata.requiredCapabilities) : ["implementation"];
+      const profile = selectRoleProfile(proposalProfiles, task.role, task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)], required);
+      if (profile) await this.ports.preflightRoleProfile!(profile, profile.definition.baseRole, required);
+    }
     const proposed = WorkflowDefinitionSchema.parse({ ...originalProposal, tasks: originalProposal.tasks.map(task => {
       const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
       return narrowProfileTask(task, selectRoleProfile(proposalProfiles, task.role, pin,
@@ -3076,10 +3082,12 @@ export class AgenticWorkflowRuntime {
     }
     // Throws on any approvalId, revision, generation, target, option or timing mismatch; nothing is mutated before this.
     const answer = validateUserDecisionAnswer(entry.request, decision, now);
+    // An answered decision selects one offered option; only the approve option can later grant the exception.
     if (entry.request.metadata?.testIntegrityException !== undefined && decision.decision === "approved") {
-      if (!decision.reason?.trim()) throw new Error("Test-integrity exception approval requires an owner reason");
-      if (decision.metadata?.selectedOption !== TEST_INTEGRITY_APPROVE_OPTION)
-        throw new Error("Test-integrity exception approval must select the approve option");
+      const selected = decision.metadata?.selectedOption;
+      if (selected !== TEST_INTEGRITY_APPROVE_OPTION && selected !== TEST_INTEGRITY_REJECT_OPTION)
+        throw new Error("Test-integrity exception answer must select the approve or reject option");
+      if (selected === TEST_INTEGRITY_APPROVE_OPTION && !decision.reason?.trim()) throw new Error("Test-integrity exception approval requires an owner reason");
     }
     entry.decision = decision;
     entry.status = answer.outcome === "rejected" ? "rejected" : "answered";
@@ -4083,15 +4091,23 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (!run || run.nativeDeliveries?.length) continue;
       const safelyQueued = run.cancelled && out.status === "cancelled" && !out.handle;
       const stopped = run.cancelled && out.status === "released" && out.cancelRequested && out.cancellationStopProof;
-      if (!safelyQueued && !stopped && !(out.status === "released" && out.handle && !this.outboundOwesResult(state, run, out))) continue;
+      // A cancelled run's released (lease-relinquished) execution may still owe a result; only a vanished pane settles it below.
+      const strandedAfterCancel = run.cancelled && out.status === "released" && !!out.handle && !out.cancelRequested;
+      const settled = out.status === "released" && out.handle && !this.outboundOwesResult(state, run, out);
+      if (!safelyQueued && !stopped && !settled && !strandedAfterCancel) continue;
       if (state.outbound.some(item => item !== out && (item.selector === out.selector || out.handle && item.handle?.target.paneId === out.handle.target.paneId) &&
         (["sending", "unknown_delivery"].includes(item.status) || this.outboundOwesResult(state, run, item)))) continue;
       const health = await this.ports.panes.inspectRoleHealth(out.selector);
       if (!health.ok) continue;
-      if (!health.value.occupantMatches || !safelyQueued && !health.value.readyForPrompt || out.handle &&
-          (health.value.paneId !== out.handle.target.paneId || health.value.agentId !== out.handle.target.agentId)) continue;
-      const current = unwrap(await this.ports.panes.getRoleBinding(out.selector));
-      if (!current || !sameRoleProfilePin(current.roleProfile, out.roleProfile) || out.handle && digest(current.session) !== digest(out.handle.target.session)) continue;
+      // Herdr reporting the exact pane gone means its provider process cannot still produce the owed result.
+      const paneGone = health.value.paneExists === false && !!out.handle && health.value.paneId === out.handle.target.paneId;
+      if (!safelyQueued && !stopped && !settled && !paneGone) continue;
+      if (!paneGone) {
+        if (!health.value.occupantMatches || !safelyQueued && !health.value.readyForPrompt || out.handle &&
+            (health.value.paneId !== out.handle.target.paneId || health.value.agentId !== out.handle.target.agentId)) continue;
+        const current = unwrap(await this.ports.panes.getRoleBinding(out.selector));
+        if (!current || !sameRoleProfilePin(current.roleProfile, out.roleProfile) || out.handle && digest(current.session) !== digest(out.handle.target.session)) continue;
+      }
       const cleanup = await this.ports.panes.releaseSpecialist({ taskId: out.profileAllocationTaskId });
       if (!cleanup.ok && cleanup.error.code !== "not_found") unwrap(cleanup);
       out.profileAllocationReleased = true; await save();

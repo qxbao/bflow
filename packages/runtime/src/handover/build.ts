@@ -35,6 +35,26 @@ function scrubber(paths: readonly string[]): { field: Scrub; body: (text: string
 }
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
+/**
+ * Prototype reviews are separate human decisions bound to one prototype manifest. They approve the prototype only and
+ * never prove acceptance criteria, but a handover must still show them beside the specification and delivery decisions.
+ */
+export function handoverPrototypeApprovals(prototype: RunRecord["prototype"], superseded: ReadonlySet<string>,
+  scrub: Scrub = value => String(value ?? "")): HandoverApproval[] {
+  return (prototype?.approvals ?? []).map(entry => {
+    const request = entry.request, decision = entry.decision, reasons = ["Prototype only; does not prove acceptance criteria"];
+    let validity: HandoverApproval["validity"] = entry.status === "pending" ? "pending" : entry.status === "approved" && decision?.decision === "approved" ? "valid"
+      : ["superseded", "cancelled"].includes(entry.status) ? "superseded" : "refused";
+    if (validity === "valid" && (decision!.approvalId !== request.approvalId || decision!.metadata?.manifestDigest !== entry.manifestDigest)) {
+      validity = "stale"; reasons.push("Decision is bound to another prototype manifest");
+    }
+    if (superseded.has(request.approvalId)) validity = "superseded";
+    return { approvalId: request.approvalId, kind: "prototype" as const, target: `prototype v${entry.version} manifest ${entry.manifestDigest.slice(0, 12)}`,
+      requestedAt: request.requestedAt, decision: decision?.decision ?? (entry.status === "pending" ? "pending" : "cancelled"),
+      ...(decision ? { decidedBy: scrub(decision.decidedBy, 200), decidedAt: decision.decidedAt } : {}), validity, reasons };
+  });
+}
+
 const latest = (cycle: VerificationCycle | undefined): VerificationResult | undefined => cycle?.history.at(-1);
 const sameEvidence = (a: readonly ArtifactReference[], b: readonly ArtifactReference[]) =>
   digest(a.map(ref => [ref.artifactId, ref.checksum]).sort()) === digest(b.map(ref => [ref.artifactId, ref.checksum]).sort());
@@ -131,6 +151,7 @@ export async function buildHandover(snapshot: HandoverSnapshot, sources: Handove
       requestedAt: request.requestedAt, decision: decision?.decision ?? "pending", ...(decision ? { decidedBy: scrub(decision.decidedBy, 200), decidedAt: decision.decidedAt } : {}),
       validity, reasons });
   }
+  approvals.push(...handoverPrototypeApprovals(run.prototype, superseded, scrub));
   let deliveryValidity: HandoverApproval["validity"] | undefined;
   if (run.approval && (run.approvalKind === "delivery" || run.approvalKind === "task" || run.approvalKind === "design")) {
     // While a gate waits, `run.decision` may still hold the previous gate's decision. A completed delivery must carry its own.

@@ -63,6 +63,18 @@ describe("RP-01 actual Runtime admission and dispatch", () => {
       expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(0);
     }
   });
+  it("preflights a profiled task with its own required capabilities before design approval", async () => {
+    const f = await fixture(); configure(f);
+    const seen: string[][] = [];
+    f.ports.preflightRoleProfile = async (_profile, _role, required) => {
+      seen.push([...required]);
+      if (required.includes("typescript")) throw new Error("Profile capability scope cannot satisfy the assignment");
+    };
+    f.def.tasks[0]!.metadata = { ...f.def.tasks[0]!.metadata, requiredCapabilities: ["typescript", "git"] };
+    await expect(f.runtime.proposeWorkflow("run-1", f.spec, f.def)).rejects.toThrow(/capability scope/);
+    expect(seen).toContainEqual(expect.arrayContaining(["typescript", "git"]));
+    expect((await f.inspect()).definition).toBeUndefined();
+  });
   it("refuses a base pane as fallback for a selected specialist profile", async () => {
     const f = await fixture(), profile = snapshot();
     profile.definition = { ...definition, profileId: "database-reviewer", baseRole: "reviewer" }; profile.pin = pinRoleProfile(profile.definition);
@@ -242,6 +254,32 @@ describe("RP-01 actual Runtime admission and dispatch", () => {
     await f.runtime.tick();
     expect(releases).toBe(1);
     await f.runtime.tick(); expect(releases).toBe(1);
+  });
+  it.each([true, false])("after cancellation releases a released specialist allocation only once its pane is gone: %s", async gone => {
+    const f = await fixture(), profile = snapshot();
+    profile.definition = { ...definition, profileId: "database-reviewer", baseRole: "reviewer" }; profile.pin = pinRoleProfile(profile.definition);
+    f.ports.roleProfiles = [profile]; f.ports.preflightRoleProfile = async () => {};
+    const manifest = f.panes.getManifest.bind(f.panes);
+    f.ports.panes.getManifest = async () => { const result = await manifest(); return { ...result, value: { ...result.value, roleProfiles: [profile] } }; };
+    f.ports.attestExecutorLineage = async (binding, purpose, assignmentId) => ({ schemaVersion: 3, executorId: binding.agentId,
+      launchId: `launch-${binding.agentId}`, nativeSessionId: binding.session!.value, bindingId: binding.bindingId,
+      freshContext: true, purpose, assignmentIds: [assignmentId] });
+    f.ports.panes.allocateSpecialist = async request => {
+      const binding = { ...f.panes.bindings.find(value => value.role === "reviewer")!, bindingId: request.taskId, paneId: `pane-${request.taskId}`,
+        agentId: `agent-${request.taskId}`, roleProfile: request.roleProfile.pin };
+      f.panes.bindings.push(binding); return { ok: true, value: binding };
+    };
+    let releases = 0;
+    f.ports.panes.releaseSpecialist = async () => { releases++; return { ok: true, value: undefined }; };
+    await f.runtime.requestSpecialist("run-1", "reviewer", "Review the database", ["review"], profile.pin);
+    await f.runtime.flushOutbound(); await f.runtime.flushOutbound();
+    const out = (await f.runtime.inspect() as any).outbound.find((value: any) => value.message.recipient.role === "reviewer");
+    expect(out.status).toBe("released"); // The lease is relinquished but no result arrived (e.g. its gate timed out).
+    // A host restart left the profiled pane from the previous generation; the operator closed it, so its process is gone.
+    if (gone) f.panes.missing.add(out.handle.target.paneId);
+    await f.runtime.cancel("run-1", "Cancel after a stranded review");
+    await f.runtime.reconcileCancellation("run-1"); await f.runtime.tick();
+    expect(releases).toBe(gone ? 1 : 0);
   });
   it("keeps the accepted profile on automatic integration conflict resolver allocations", async () => {
     const f = await fixture({ parallel: true, conflict: true }), profile = configure(f);

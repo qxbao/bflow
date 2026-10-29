@@ -22,7 +22,7 @@ import { selectRegressionTests } from "./regression-selection.js";
 import { pinRunnerDefinitions } from "./runner-provenance.js";
 import type { RegressionScope } from "./host-controller.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
-import { NodeTapTestCodeFailure } from "./node-tap.js";
+import { BehavioralIdentityRepair, NodeTapTestCodeFailure } from "./node-tap.js";
 import { VitestTestCodeFailure } from "./vitest-json.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 import { exceedsAgyInlineReply } from "./agy-assignment-admission.js";
@@ -1034,7 +1034,7 @@ export class HostVerification {
         const observation = await this.capture(cwd, textField(run.baseRevision), revision);
         const originalOutcome = error instanceof NodeTapTestCodeFailure ? error.outcome : error.originalOutcome!;
         const evidence = await this.artifact(runId, taskId, { phase, observation, verifiedBy: binding.agentId, accepted: false,
-          measurementFailure: { protocol: error instanceof VitestTestCodeFailure ? "vitest_json" : error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
+          measurementFailure: { protocol: error instanceof BehavioralIdentityRepair ? error.protocol : error instanceof VitestTestCodeFailure ? "vitest_json" : error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
             outcome: originalOutcome, ...(error instanceof NodeTapTestCodeFailure && error.rtk ? { rtk: error.rtk } : {}),
             ...(error instanceof RtkRequiredToolUnavailable ? { rawOutput: error.rawOutput ?? "", reasonCode: error.reasonCode } : {}) } });
         if (error instanceof NodeTapTestCodeFailure && (error.rtk?.status === "compressed" || error.rtk?.status === "passthrough") && error.rtk.invocationId) await this.rtk?.consume(error.rtk.invocationId, evidence);
