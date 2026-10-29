@@ -18,7 +18,7 @@ import type {
 } from "@bflow/skills";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import { renderEnvironmentConfigYaml } from "./config-format.js";
-import { ENVIRONMENT_CONFIG_PATH, readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
+import { ENVIRONMENT_CONFIG_PATH, isGovernanceRoleConfig, readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
 import type { RepositoryIdentity } from "./repository.js";
 import { loadMachineSkillCatalog } from "./skill-catalog.js";
 
@@ -256,7 +256,7 @@ export async function planSkillApproval(repository: RepositoryIdentity, config: 
         definition.supportedProviders.some(provider => !target.supportedProviders.includes(provider)))
       throw new Error(`Dependency '${dependency.skillId}' does not support every role/provider of '${definition.skillId}'`);
   }
-  const configured = config.environment.roles.filter(role => definition.allowedRoles.includes(role.role));
+  const configured = config.environment.roles.filter(isGovernanceRoleConfig).filter(role => definition.allowedRoles.includes(role.role));
   for (const role of configured)
     if (!(definition.supportedProviders as string[]).includes(role.cli))
       throw new Error(`Role '${role.role}' uses provider '${role.cli}', which '${definition.skillId}' does not support; re-import with that provider`);
@@ -454,7 +454,7 @@ export async function customSkillStatus(repository: RepositoryIdentity, config: 
     const pin = pins.find(item => item.skillId === definition.skillId);
     const pinState = !pin ? "missing" : pin.version === definition.version && pin.digest === definition.digest ? "exact" : "mismatch";
     const approvals = [];
-    for (const role of config.environment.roles.filter(item => definition.allowedRoles.includes(item.role))) {
+    for (const role of config.environment.roles.filter(isGovernanceRoleConfig).filter(item => definition.allowedRoles.includes(item.role))) {
       const valid = pin !== undefined && await runtime.readSkillApproval(approvalPath, { approvalReceiptId: pin.approvalReceiptId,
         skillId: definition.skillId, version: definition.version, digest: definition.digest, dependencies: definition.dependencies,
         role: role.role, provider: role.cli, repositoryId: repository.id, sessionId: repository.sessionName }, () => now);

@@ -5,7 +5,7 @@ import { readPreviewFile } from "./preview-files.js";
 import type { EnvironmentCompositionInput } from "./environment.js";
 import type { AgentRole, SkillDefinition, SkillPin, ResolvedToolGrant } from "@bflow/contracts";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
-import type { EnvironmentConfig } from "./environment-config.js";
+import { isGovernanceRoleConfig, type EnvironmentConfig } from "./environment-config.js";
 
 /** P28 loader and pin binder from the built `@bflow/skills` package; loaded dynamically like the other workspace packages. */
 interface SkillsModule {
@@ -85,7 +85,7 @@ export async function validateBundledStartupSkills(environment: EnvironmentConfi
     installed = await new module.SkillManager({ store: new module.SkillFileStore(storeRoot),
       supportedCommands: SUPPORTED_CLI_COMMANDS, approvedBuiltinDigests: catalog.approvedBuiltinSkillDigests }).list();
   }
-  for (const role of environment.roles) {
+  for (const role of environment.roles.filter(isGovernanceRoleConfig)) {
     const defaults = catalog.resolveRolePins(role.role, []).map(item => item.skill.skillId);
     const required = (environment.skills?.requiredSkills ?? []).filter(id =>
       !catalog.definitions.some(definition => definition.skillId === id) ||

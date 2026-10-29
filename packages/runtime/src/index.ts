@@ -178,6 +178,9 @@ export { createHostSkillManager, launchMaterial, requirementFor } from "./agenti
 
 export { defaultHostChecks } from "./agentic/host-verification.js";
 export { hostRoleCapabilities } from "./agentic/host.js";
+export { BFLOW_SOS_TRIGGER, isBflowSosCommand } from "./agentic/native-diagnostic-fence.js";
+export { buildSosProviderArguments, newSosAgentName, resolveSosRoleConfig, spawnSosAgent, type SosRoleConfig, type SpawnSosAgentOptions,
+  type SpawnedSosAgentResult } from "./agentic/sos-agent.js";
 
 export { openUserInteractionClient, interactionProjectId } from "./interaction/client.js";
 export { registerUserInteractionIssuer } from "./agentic/host-controller.js";
