@@ -25,7 +25,8 @@ test.beforeAll(async()=>{
 test.afterAll(async()=>{
   if(evidenceDir)await writeFile(join(evidenceDir,'browser-workflow.json'),JSON.stringify(log,null,1));
   // Ctrl-C closes the web owner only; the project session must keep running (checked by the operator with `bflow status`).
-  if(child?.pid){const node=execFileSync('ps',['-o','pid=,args=','-g',String(child.pid)],{encoding:'utf8'}).split('\n').find(l=>l.includes('bin.js web'));
+  if(child?.pid && child.exitCode===null){let node:string|undefined;
+    try{node=execFileSync('ps',['-o','pid=,args=','-g',String(child.pid)],{encoding:'utf8'}).split('\n').find(l=>l.includes('bin.js web'));}catch{node=undefined;}
     if(node)process.kill(Number(node.trim().split(/\s+/)[0]),'SIGINT');await new Promise<void>(r=>{child!.once('exit',()=>r());setTimeout(r,10000);});}
 });
 const api=(page:Page,path:string)=>page.evaluate(async p=>{const r=await fetch(p,{cache:'no-store'});return {status:r.status,body:await r.json().catch(()=>null)};},path);
