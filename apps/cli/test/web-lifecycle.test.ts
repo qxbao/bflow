@@ -93,3 +93,7 @@ describe('W09 lifecycle settlement and readiness',()=>{
   expect(failure).toBeInstanceOf(Error);expect(startupLeftSessionUnchanged(failure)).toBe(true);
  });
 });
+it('passes an explicit recovery stop through the existing checkpointed force lifecycle',async()=>{
+ const p=await project(),down=vi.fn(async()=>({status:'down'}));const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:vi.fn(),down,doctor:vi.fn()})});
+ expect(await s.stopSession(p.projectId,randomUUID(),true)).toMatchObject({ok:true,value:{state:'stopped'}});expect(down).toHaveBeenCalledWith(true,undefined,true);
+});

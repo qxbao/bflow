@@ -17,6 +17,7 @@ import { EnvironmentLifecycle, startupLeftSessionUnchanged, type EnvironmentDepe
 import { identifyRepository } from './repository.js';
 import { readEnvironmentConfig } from './environment-config.js';
 import { readPreviewFile } from './preview-files.js';
+import { createWebProjectSettings } from './web-project-settings.js';
 import { loadExecutionPreview } from './execution-preview.js';
 
 /** Owner-side resolver only. Never accept a path or cwd from an HTTP command. */
@@ -80,6 +81,8 @@ export interface WebWorkspaceServices extends LocalWorkspaceServices {
 }
 export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWorkspaceServices {
   const inFlight = new Set<Promise<void>>();
+  const settings=createWebProjectSettings({resolveProject:options.resolveProject,
+    receiptDirectory:options.receiptDirectory??join(process.cwd(),'.bflow/state/web-settings')});
   const registered = async (projectId: string) => {
     IdentifierSchema.parse(projectId);
     const project = WebProjectSchema.parse(await options.resolveProject(projectId));
@@ -132,9 +135,10 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
       error:{apiVersion:1,code:'reconciliation_required',message:result.error.message.slice(0,4000),retryable:false,operationId:id,correlationId:randomUUID()},updatedAt:new Date().toISOString()}));
     return result;
   };
-  const remediation = 'Kiểm tra project đã đăng ký và cấu hình. Chạy bflow init trong kho mã; chạy bflow setup --check để kiểm tra môi trường. Web không tự khởi tạo hoặc cài đặt.';
+  const remediation = 'Mở Cài đặt dự án trên web để khởi tạo hoặc sửa cấu hình. Kiểm tra project đã đăng ký và cấu hình. Chạy bflow init trong kho mã; chạy bflow setup --check để kiểm tra môi trường. Dùng nút Khởi tạo / sửa GitNexus trong Cài đặt để khởi tạo rõ ràng; cài đặt máy vẫn thuộc machine setup.';
   return {
-    pendingLifecycle: () => [...inFlight],
+    ...settings,
+    pendingLifecycle: () => [...inFlight,...settings.pending()],
     async inspectProject(projectId) {
       try {
         const { repository } = await registered(projectId);
@@ -144,7 +148,7 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
           const missing = (failure as NodeJS.ErrnoException).code === 'ENOENT';
           return WebProjectInspectionResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId, ready: false,
             checks: [{ id: 'repository-config', state: 'failed', message: missing
-              ? 'Kho mã chưa có .bflow/config.yml. Chạy bflow init trong kho mã rồi kiểm tra lại; web không tự khởi tạo.'
+              ? 'Kho mã chưa có .bflow/config.yml. Dùng Khởi tạo / sửa GitNexus bên trên rồi kiểm tra lại.'
               : `Cấu hình .bflow/config.yml không hợp lệ: ${String(failure instanceof Error ? failure.message : failure).slice(0, 1000)}` }],
             observedAt: new Date().toISOString() } });
         }
@@ -172,14 +176,14 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         });
       } catch { return error('transport_unavailable', 'Khởi động chưa được xác nhận. Giữ operation ID; kiểm tra bflow status và bflow doctor trước khi khôi phục.'); }
     },
-    async stopSession(projectId, operationId) {
+    async stopSession(projectId, operationId, force = false) {
       let ctx: Awaited<ReturnType<typeof context>>;
       try { WebSessionStartRequestSchema.parse({ apiVersion: 1, operationId }); ctx = await context(projectId); }
       catch { return error('validation', remediation); }
       try {
         // Explicit web confirmation is checked by W03. Never force past unverified writers/checkpoints.
         return await perform(ctx.project,operationId,'session_stop',async()=>{
-        const stopped = await lifecycle(ctx.repository.root).down(true, undefined, false);
+        const stopped = await lifecycle(ctx.repository.root).down(true, undefined, force);
         if (!('status' in stopped && stopped.status === 'down') && !('server' in stopped && stopped.server === 'stopped'))
           return error('transport_unavailable', 'Chưa xác nhận dừng phiên. Đọc lại operation; không tự gửi lại stop.');
         return WebProjectSessionResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId,

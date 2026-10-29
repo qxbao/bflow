@@ -5,7 +5,7 @@ import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -155,7 +155,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
   const persisted = await readHostConfiguration(join(directory, "host.json"));
   if (persisted.repositoryPath !== repositoryPath || persisted.sessionId !== options.sessionId || persisted.directory !== directory)
     throw new Error("Foreign host configuration");
-  return ensureAgenticHost({ repositoryPath, sessionId: options.sessionId,
+  return ensureHost({ repositoryPath, sessionId: options.sessionId,
     ...(persisted.herdrBinary !== undefined ? { herdrBinary: persisted.herdrBinary } : {}),
     ...(persisted.manifestDirectory !== undefined ? { manifestDirectory: persisted.manifestDirectory } : {}),
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
@@ -165,7 +165,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}),
-    ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) });
+    ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) }, true);
 }
 /** Connect only to an existing endpoint. This seam cannot prepare, activate or restart a host. */
 export async function queryAgenticHostInteraction(options: { repositoryPath: string; sessionId: string }, input: unknown, method: "interaction_query" | "interaction_events" = "interaction_query"): Promise<unknown> {
@@ -222,8 +222,12 @@ function failure<T>(error: unknown): OperationResult<T> {
 }
 /** Idempotently starts a durable host before provider MCP startup. Never steals a stale socket. */
 export async function ensureAgenticHost(options: AgenticHostOptions): Promise<AgenticHostController> {
+  return ensureHost(options, false);
+}
+/** Recovery may connect to an already authenticated owner despite source drift; it never grants fresh execution. */
+async function ensureHost(options: AgenticHostOptions, reopening: boolean): Promise<AgenticHostController> {
   const repositoryPath = await realpath(options.repositoryPath);
-  const startupReader = options.executionResolution === undefined ? undefined : await createExecutionResolutionReader(options.executionResolution);
+  let startupReader = !reopening && options.executionResolution !== undefined ? await createExecutionResolutionReader(options.executionResolution) : undefined;
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
   const identity = createHash("sha256").update(repositoryPath + "\0" + options.sessionId).digest("hex").slice(0, 24);
   const directory = resolve(resolvePrivateRuntimeStateDirectory(repositoryPath), "host", options.sessionId);
@@ -301,6 +305,8 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
     throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
   if (!alive) {
+    // A new daemon still requires fresh execution inputs, including recovery after owner loss.
+    if (reopening && options.executionResolution !== undefined) startupReader = await createExecutionResolutionReader(options.executionResolution);
     try {
       await lstat(configuration.socketPath);
       const owner = record(JSON.parse(await readFile(join(directory,"owner.json"),"utf8")));
@@ -318,6 +324,19 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
         ...(options.policy !== undefined ? { policy: options.policy } : {}),
         ...(options.impactIndex !== undefined ? { impactIndex: options.impactIndex } : {})
       });
+      configuration = await readHostConfiguration(configPath);
+    }
+    // Only an explicitly resolved startup may refresh the inactive host's source snapshot.
+    // Accepted run plans remain journal-pinned and still fail their own drift checks.
+    if (!reopening && startupReader && options.executionResolution !== undefined) {
+      const executionSourceDigests = await startupReader.readPrivateSources?.();
+      await startupReader();
+      const next = { ...configuration, executionResolution: options.executionResolution,
+        ...(executionSourceDigests ? { executionSourceDigests } : {}) };
+      const temporaryConfig = `${configPath}.${randomBytes(8).toString("hex")}.tmp`;
+      const file = await open(temporaryConfig, "wx", 0o600);
+      try { await file.writeFile(JSON.stringify(next)); await file.sync(); await file.close(); await rename(temporaryConfig, configPath); }
+      finally { await file.close(); await unlink(temporaryConfig).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }); }
       configuration = await readHostConfiguration(configPath);
     }
     const log = await open(join(directory, "host.log"), "a", 0o600);

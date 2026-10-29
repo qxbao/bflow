@@ -1,7 +1,7 @@
 import { WebHttpContracts, WebCommandSchema, type WebCommand, type WebOperation } from '@bflow/contracts/web';
 import { ApiClient, ApiError, projectPath } from './client';
 export type InteractionBody = WebCommand extends infer C ? C extends WebCommand ? Omit<C,'apiVersion'|'projectId'|'commandId'> : never : never;
-export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop'};
+export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop';force?:boolean};
 export async function execute(api:ApiClient, command:WebCommand) {
   const parsed=WebCommandSchema.parse(command);
   const value=await api.request(`${projectPath(parsed.projectId)}/commands`,WebHttpContracts.command.response,'POST',parsed);
@@ -19,9 +19,9 @@ export async function fingerprint(body:CommandBody) {
   const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(canonical(body))));
   return Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
 }
-export async function executeLifecycle(api:ApiClient,project:string,id:string,kind:'session_start'|'session_stop'){
+export async function executeLifecycle(api:ApiClient,project:string,id:string,kind:'session_start'|'session_stop',force=false){
   const route=kind==='session_start'?WebHttpContracts.startSession:WebHttpContracts.stopSession;
-  const body=route.body.parse({apiVersion:1,operationId:id,...(kind==='session_stop'?{confirmed:true}:{})});
+  const body=route.body.parse({apiVersion:1,operationId:id,...(kind==='session_stop'?{confirmed:true,...(force?{force:true}:{})}:{})});
   const value=await api.request(`${projectPath(project)}/session/${kind==='session_start'?'start':'stop'}`,route.response,'POST',body);
   return check(value,project,id,kind);
 }
@@ -62,7 +62,7 @@ export class CommandStore {
       }
       const record:RecordEntry={slot,scope:this.scope,commandId:crypto.randomUUID(),fingerprint:digest,kind:body.kind,...(body.kind==='answer_decision'?{outcome:body.outcome}:{})};
       localStorage.setItem(this.key(record),JSON.stringify(record));this.changed();
-      try{const operation=body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
+      try{const operation=body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind,body.force):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
       catch(error){
         // Registered definitive refusal has no accepted side effect. Persist no body/error text.
         if(error instanceof ApiError && ['invalid_request','forbidden','session_required','stale_version','operation_not_allowed','payload_too_large'].includes(error.code)){

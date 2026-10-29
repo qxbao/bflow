@@ -1,8 +1,9 @@
 import { RolePaneManager } from "../../../pane-manager/src/role-pane-manager.js";
 import { InMemorySessionManifestStore } from "../../../pane-manager/src/manifest-store.js";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { once } from "node:events";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -12,12 +13,13 @@ import { AgentExecutionHandleSchema, AgentRequestSchema, PaneBindingSchema, Sess
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
-async function fixture(code: string) {
+async function fixture(code: string, versioned = false) {
   const root = await mkdtemp(join(tmpdir(), "bflow-process-scope-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const bin = join(root, "original-bin"); await mkdir(bin);
   const provider = join(bin, "codex"); const script = `#!${process.execPath}\n${code}\n`;
-  await writeFile(provider, script, { mode: 0o700 });
+  if(versioned){const binary=join(root,"2.1.312");await writeFile(binary,script,{mode:0o700});await symlink(binary,provider);}
+  else await writeFile(provider, script, { mode: 0o700 });
   const manager = new DeveloperProcessScopes({ directory: join(root, "scopes") });
   const wrapped = await manager.prepare({ runId: "run-1", taskId: "run-1-task-1", executable: provider, executableDigest: hash(script), configFiles: [],
     material: { provider: "codex", argv: [], env: { PATH: bin + ":" + process.env.PATH }, launchId: "launch-1", launchFingerprint: "a".repeat(64) } });
@@ -33,6 +35,26 @@ async function fixture(code: string) {
 }
 
 describe.skipIf(process.platform !== "linux")("future Developer process supervision", () => {
+  it("preserves the canonical provider entry name for Herdr when discovery resolves a versioned binary", async () => {
+    const f=await fixture(`console.log('entry:'+require('node:path').basename(process.argv[1]));setInterval(()=>{},1000);`,true);
+    const child=spawn(join(f.wrapped.env.PATH!.split(':')[0]!,'codex'),[],{cwd:f.root,env:{...process.env,...f.wrapped.env},stdio:['ignore','pipe','pipe']});
+    cleanups.push(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');});let output='';child.stdout.on('data',chunk=>{output+=String(chunk);});
+    await expect.poll(()=>output,{timeout:10000}).toContain('entry:codex');
+    await expect(f.manager.assertBindingReady(f.binding)).resolves.toBeUndefined();await f.manager.stopUnbound(f.binding);
+  });
+  it.skipIf(!existsSync("/usr/bin/zsh"))("keeps the supervised provider first after an interactive zsh startup without reading account rc files", async () => {
+    const f = await fixture(`console.log('supervised-shell-ready');setInterval(()=>{},1000);`);
+    const home=join(f.root,'account-home'),other=join(f.root,'account-bin');await mkdir(home);await mkdir(other);
+    await writeFile(join(other,'codex'), '#!/bin/sh\necho unsupervised-provider\n', {mode:0o700});
+    await writeFile(join(home,'.zshrc'), `export PATH='${other}':$PATH\n`);
+    const child=spawn('/usr/bin/zsh',['-lic','codex'],{cwd:f.root,env:{...process.env,...f.wrapped.env,HOME:home},stdio:['ignore','pipe','pipe']});
+    cleanups.push(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');});
+    let output='',errors='';child.stdout.on('data',chunk=>{output+=String(chunk);});child.stderr.on('data',chunk=>{errors+=String(chunk);});
+    await expect.poll(()=>output+errors,{timeout:10000}).toContain('supervised-shell-ready');
+    expect(output).not.toContain('unsupervised-provider');await expect(f.manager.assertBindingReady(f.binding)).resolves.toBeUndefined();
+    expect(await readFile(join(home,'.zshrc'),'utf8')).toContain(other);
+    expect(await f.manager.stopUnbound(f.binding)).toMatchObject({source:'linux_pid_namespace'});
+  });
   it("proves namespace exit and stops a detached descendant while retaining the worktree and original PATH", async () => {
     const f = await fixture(`const fs=require('node:fs'),cp=require('node:child_process');
       fs.writeFileSync(process.env.PROBE_PATH,process.env.PATH);

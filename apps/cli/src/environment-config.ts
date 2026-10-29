@@ -4,7 +4,7 @@ import { lstatSync } from "node:fs";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema, RoleProfilePinSchema } from "@bflow/contracts";
-import { createDefaultRepositoryConfig, loadRepositoryConfig, resolveReadableConfigPath } from "./config.js";
+import { createDefaultRepositoryConfig, loadRepositoryConfig, parseRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import type { BflowRepositoryConfig, InitCommandOutput } from "./types.js";
@@ -350,12 +350,13 @@ function record(value: unknown): Record<string, unknown> {
 function integer(value: unknown, max: number): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max;
 }
-export async function readEnvironmentConfig(repository: RepositoryIdentity): Promise<EnvironmentConfig> {
+export async function readEnvironmentConfig(repository: RepositoryIdentity, content?: string): Promise<EnvironmentConfig> {
   const path = resolveReadableConfigPath(repository.root);
   try {
-    const base = await loadRepositoryConfig(path);
+    const source = content ?? await readFile(path, "utf8");
+    const base = parseRepositoryConfig(source, path);
     if (!base.ok) throw new Error(base.error.message);
-    const raw: unknown = parseConfigYaml(await readFile(path, "utf8"));
+    const raw: unknown = parseConfigYaml(source);
     const env = record(record(raw)["environment"]);
     if (env["repositoryId"] !== repository.id || env["workspaceRoot"] !== repository.root || env["sessionName"] !== repository.sessionName)
       throw new Error("Configuration belongs to another repository or was moved. Reconcile its repository identity before use.");

@@ -1113,7 +1113,12 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     if (workflowId === undefined || workflowVersion === undefined) {
       return validation("Recovery requires a checkpoint or run.created event to identify the workflow definition");
     }
-    const definition = this.#definition(workflowId, workflowVersion);
+    // Generated workflows may reuse a catalogue label across different runs. A seeded
+    // aggregate already carries this run's validated immutable definition; another
+    // createRun must not redirect its checkpoint recovery to a different task graph.
+    const boundDefinition = this.#runs.get(data.runId)?.definition;
+    const definition = boundDefinition?.id === workflowId && boundDefinition.version === workflowVersion
+      ? boundDefinition : this.#definition(workflowId, workflowVersion);
     if (definition === undefined) {
       return validation(`Workflow definition ${workflowId}@${workflowVersion} is unavailable for recovery`);
     }

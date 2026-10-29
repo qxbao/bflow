@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { WebOperationSchema, WebOperationResponseSchema, WebProjectSessionResultSchema,
+import { WebOperationSchema, WebOperationResponseSchema, WebSessionStopRequestSchema, WebProjectSessionResultSchema,
   type WebOperation, type WebCommand, type LocalWorkspaceServices, type UserInteractionClient } from '@bflow/contracts/web';
 import { canonicalWebJson, webCommandFingerprint, WebOperationIndexRecordSchema } from '@bflow/contracts/web-host';
 import type { WebAuthenticatedContext, WebOperationIndexRecord } from '@bflow/contracts/web-host';
@@ -42,7 +42,7 @@ export class Operations {
     if(old){if(old.index.fingerprint!==fingerprint || old.index.operationKind!==kind || old.index.owner!=='local_lifecycle')throw new HttpError('operation_conflict');return this.observe(old);}
     const record=await this.reserve(projectId,id,kind,fingerprint,authorize);
     try{
-      const result=WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>kind==='session_start'?this.workspace.startSession(projectId,id):this.workspace.stopSession(projectId,id)));
+      const result=WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>kind==='session_start'?this.workspace.startSession(projectId,id):WebSessionStopRequestSchema.parse(body).force===true?this.workspace.stopSession(projectId,id,true):this.workspace.stopSession(projectId,id)));
       if(!result.ok){
         // The lifecycle composition is owner-local and returns its own remediation (no browser input, no secrets).
         if(result.error.code==='validation')return await this.update(record,{...record.operation,state:'failed',error:{...publicError(new HttpError('operation_not_allowed',id)),message:lifecycleMessage(result.error.message)},updatedAt:now()});

@@ -1,3 +1,18 @@
+## Web project administration
+
+The web settings page composes `initializeEnvironmentConfig`, repository GitNexus
+preparation and the same environment validator used by CLI startup. Explicit init
+creates missing config and indexes/registers the selected repository; update can
+rebind a cloned config while preserving existing choices. Initialization receipts
+are private, durable and scoped to the registered project/operation; interrupted
+jobs are observed rather than replayed. Web saves validate YAML before an atomic
+revision-checked write under the lifecycle lock. Form edits preserve untouched
+comments. The API never accepts arbitrary paths/commands or performs machine setup.
+Use the settings UI for role/model/policy/tool/MCP/skills changes, full YAML edits,
+readiness inspection and confirmed removal from the web registry. Apply new runtime
+settings by stopping and starting the session. Existing machine setup/provider login
+remain prerequisites.
+
 # Vòng đời môi trường của Bflow CLI (P12)
 
 `bflow web [--port N] [--no-open]` là command riêng, mặc định phục vụ UI/API
@@ -7,9 +22,9 @@ Instance đang chạy chỉ được reuse sau khi xác minh owner; URL ghép n�
 trong fragment và chỉ in ra terminal. Chạy lại lệnh để lấy URL mới sau 60 giây.
 Ctrl-C đóng web, không dừng host dự án. Start/stop qua API dùng EnvironmentLifecycle
 và receipt gắn operation ID; mất ACK được đối soát, không tự gọi lại effect.
-W04 cung cấp command/backend composition; trang bundle hiện vẫn là W00 skeleton,
-chưa có các màn hình W06/W07 hay SSE/artifact/chat của W05/W08. Evidence hiện tại
-là source và local tests, chưa phải nghiệm thu workflow live.
+Web bundle cung cấp màn hình dự án, cấu hình, workflow, SSE, artifact và chat.
+Các mức bằng chứng source/local tests, browser fixtures và live workflow được ghi
+riêng; việc hiển thị trang hay readiness không chứng minh workflow thành công.
 
 Khi session đang offline, `up` chuẩn bị và kiểm tra provider trước khi tạo Herdr
 server mới. Nếu preflight từ chối, CLI giữ manifest/run cũ và trả lỗi provider;
@@ -727,3 +742,10 @@ bflow skills status
 - Update: import with a new `--version`, approve and sync. Running sessions keep and recover their exact old manifest (its receipt stays valid until expiry); recovery never selects the latest version. A catalog bundle edited after approval no longer matches its pin, so startup and sync refuse it.
 - `disable` unbinds for future manifests only. `revoke` deletes this session's receipts; persisted manifests containing the skill then fail verification on recovery and `revoke`/`status` report them as `reconciliation_required`. A running provider keeps instructions it already loaded until the role is relaunched.
 - Approval writes are a CLI human action (`--approve`) to machine state outside role write roots; this is not protection against a hostile same-UID process. Evidence: source plus local tests (`apps/cli/test/custom-skill-import.test.ts`), not live provider/Herdr acceptance.
+
+Web initialization can optionally commit only the reviewed `.bflow/config.yml` and
+`.bflow/.gitignore`. It pins both file contents, requires the account's configured Git
+author, refuses unrelated staged changes and executable clean filters, and uses
+the existing Git engine's no-hook/fsmonitor/signing execution policy. It does not
+commit application edits or push. Commit configuration before workflow admission;
+changing HEAD later correctly invalidates the pinned execution plan.
