@@ -8,6 +8,7 @@ import { OperationIndex, type IndexedOperation } from './operation-index.js';
 import { HttpError, publicError, contractError, unwrap, observeWithinDeadline } from './errors.js';
 const now=()=>new Date().toISOString();
 const final=(op:WebOperation)=>op.state==='applied'||op.state==='failed';
+const lifecycleMessage=(text:string)=>text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,'').trim().slice(0,4000)||'Thao tác chưa được hỗ trợ.';
 export class Operations {
   private closing=false;
   private queues=new Map<string,Promise<void>>();
@@ -42,7 +43,12 @@ export class Operations {
     const record=await this.reserve(projectId,id,kind,fingerprint,authorize);
     try{
       const result=WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>kind==='session_start'?this.workspace.startSession(projectId,id):this.workspace.stopSession(projectId,id)));
-      if(!result.ok){if(['validation','conflict','not_found','unsupported_version'].includes(result.error.code))return await this.update(record,{...record.operation,state:'failed',error:publicError(new HttpError(contractError(result.error).code,id)),updatedAt:now()});return await this.uncertain(record);}
+      if(!result.ok){
+        // The lifecycle composition is owner-local and returns its own remediation (no browser input, no secrets).
+        if(result.error.code==='validation')return await this.update(record,{...record.operation,state:'failed',error:{...publicError(new HttpError('operation_not_allowed',id)),message:lifecycleMessage(result.error.message)},updatedAt:now()});
+        if(['conflict','not_found','unsupported_version'].includes(result.error.code))return await this.update(record,{...record.operation,state:'failed',error:publicError(new HttpError(contractError(result.error).code,id)),updatedAt:now()});
+        return await this.uncertain(record);
+      }
       if(result.value.projectId!==projectId)throw new Error('Lifecycle project mismatch');
       return await this.update(record,{...record.operation,state:'applied',result:{kind:'lifecycle',session:result.value},updatedAt:now()});
     }catch{return this.uncertain(record);}

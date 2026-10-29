@@ -26,7 +26,9 @@ export async function executeLifecycle(api:ApiClient,project:string,id:string,ki
   return check(value,project,id,kind);
 }
 
-export type RecordEntry={slot:string;scope:string;commandId:string;fingerprint:string;kind:CommandBody['kind']};
+export type DecisionOutcome='approved'|'rejected'|'changes_requested';
+/** `outcome` is non-sensitive display metadata for decisions; never a body, reason or authority. */
+export type RecordEntry={slot:string;scope:string;commandId:string;fingerprint:string;kind:CommandBody['kind'];outcome?:DecisionOutcome};
 export type Observation={record:RecordEntry;operation?:WebOperation;uncertain?:boolean;error?:unknown};
 /** Recovery metadata only. This is never authority or a persisted command body. */
 export class CommandStore {
@@ -39,7 +41,7 @@ export class CommandStore {
     const records:RecordEntry[]=[];
     for(let i=0;i<localStorage.length;i++){
       const key=localStorage.key(i);if(!key?.startsWith(this.projectPrefix))continue;
-      try{const v=JSON.parse(localStorage.getItem(key)!);if(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && key===this.key(v))records.push({slot:v.slot,scope:v.scope,commandId:v.commandId,fingerprint:v.fingerprint,kind:v.kind});else throw new Error('invalid metadata');}catch{throw new Error('Mã phục hồi bị hỏng; cần đối chiếu thao tác trước khi tạo yêu cầu mới.');}
+      try{const v=JSON.parse(localStorage.getItem(key)!);if(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))records.push({slot:v.slot,scope:v.scope,commandId:v.commandId,fingerprint:v.fingerprint,kind:v.kind,...(v.outcome?{outcome:v.outcome}:{})});else throw new Error('invalid metadata');}catch{throw new Error('Mã phục hồi bị hỏng; cần đối chiếu thao tác trước khi tạo yêu cầu mới.');}
     }return records;
   }
   async observe(record:RecordEntry):Promise<Observation>{
@@ -58,7 +60,7 @@ export class CommandStore {
         if(existing.fingerprint!==digest)throw new Error('Thao tác trước cần được đối chiếu trước khi gửi nội dung mới.');
         return this.observe(existing);
       }
-      const record:RecordEntry={slot,scope:this.scope,commandId:crypto.randomUUID(),fingerprint:digest,kind:body.kind};
+      const record:RecordEntry={slot,scope:this.scope,commandId:crypto.randomUUID(),fingerprint:digest,kind:body.kind,...(body.kind==='answer_decision'?{outcome:body.outcome}:{})};
       localStorage.setItem(this.key(record),JSON.stringify(record));this.changed();
       try{const operation=body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
       catch(error){

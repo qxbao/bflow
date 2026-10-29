@@ -114,6 +114,18 @@ export interface EnvironmentStatus {
 export class EnvironmentError extends Error {
   constructor(readonly contractError: ContractError) { super(contractError.message); }
 }
+// Startup failures raised before any session/pane side effect. Callers that keep their own
+// operation receipts (Local Web) may settle these as definitive failures instead of uncertain.
+const unchangedStartupFailures = new WeakSet<object>();
+export function markStartupUnchanged(error: unknown): unknown {
+  const value = error instanceof Error ? error : new Error(String(error));
+  unchangedStartupFailures.add(value);
+  return value;
+}
+/** True only when `up` proved the repository session was not changed before it failed. */
+export function startupLeftSessionUnchanged(error: unknown): boolean {
+  return typeof error === "object" && error !== null && unchangedStartupFailures.has(error);
+}
 function fail(message: string, details?: any): never {
   throw new EnvironmentError({ code: "validation", retryable: false, message, ...(details !== undefined ? { details } : {}) });
 }
@@ -321,6 +333,11 @@ export class EnvironmentLifecycle {
     }
   }
   async up(timeoutMs?: number, checkExpectation?: ExecutionExpectationGuard): Promise<SessionManifest> {
+    const phase = { composing: false };
+    try { return await this.startup(phase, timeoutMs, checkExpectation); }
+    catch (error) { throw phase.composing ? error : markStartupUnchanged(error); }
+  }
+  private async startup(phase: { composing: boolean }, timeoutMs?: number, checkExpectation?: ExecutionExpectationGuard): Promise<SessionManifest> {
     // Step 1: load_project_config
     this.progress("Đang kiểm tra kho mã nguồn và cấu hình...");
     const repository = await identifyRepository(this.cwd, this.runner);
@@ -588,6 +605,8 @@ export class EnvironmentLifecycle {
         ? { ...config, environment: { ...config.environment, roles: rolesToRun } }
         : config;
       await checkExpectation?.();
+      // From here on the integration may register or start session resources.
+      phase.composing = true;
       const integration = await deadline.call(() => this.integration(repository, compositionConfig, checkExpectation, config));
       if (!integration) fail("P13 SessionLifecycleManager is not composed. Supply CliContext.environment.openIntegration or BFLOW_ENVIRONMENT_MODULE; no roles were started.");
 
@@ -812,8 +831,11 @@ export class EnvironmentLifecycle {
           cleanupOutcome = `failed after the startup integration failed to close (${String(cleanupError)})`;
         }
       }
-      if (startupError !== undefined) throw this.startupFailureWithCleanup(startupError,
-        cleanupOutcome ?? (cleanupEligible ? "was not completed" : "was not attempted because startup had not changed the session"));
+      if (startupError !== undefined) {
+        const failure = this.startupFailureWithCleanup(startupError,
+          cleanupOutcome ?? (cleanupEligible ? "was not completed" : "was not attempted because startup had not changed the session"));
+        throw !cleanupEligible && closeError === undefined ? markStartupUnchanged(failure) : failure;
+      }
       if (!outcome) fail("Startup completed without a session manifest.");
       await rm(this.statePath(repository, "operation.json"), { force: true });
       return outcome;

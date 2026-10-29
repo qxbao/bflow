@@ -76,10 +76,10 @@ describe("AC02/AC03 project registration and honest readiness without a host", (
     expect(list.items.map(item => item.projectId)).toEqual([project.projectId]);
     // Readiness is an inspection, never an init/install/index.
     const inspected = await http(web.origin, `/api/v1/projects/${project.projectId}/session/inspect`, { method: "POST", headers: session.headers, body: { apiVersion: 1 } });
-    // Finding W09-F01 (CLI owner): an uninitialized repository yields a generic 400 instead of a
-    // readiness report with a failed configuration check. Either form must stay not-ready.
-    if (inspected.status === 200) expect(inspected.json.ready).toBe(false);
-    else expect(WebApiErrorSchema.parse(inspected.json).code).toBe("invalid_request");
+    // W09-F01 fix: an uninitialized repository is a not-ready report with an actionable check.
+    expect(inspected.status).toBe(200);
+    expect(inspected.json).toMatchObject({ ready: false, checks: [{ id: "repository-config", state: "failed" }] });
+    expect(inspected.json.checks[0].message).toContain("bflow init");
     // No host exists: the session is readable as not ready, runs are honestly unavailable.
     const projectSession = await http(web.origin, `/api/v1/projects/${project.projectId}/session`, { headers: { cookie: session.cookie } });
     expect(projectSession.status).toBe(200);
@@ -128,6 +128,19 @@ describe("AC12 traditional CLI semantics are not re-advertised as a host API", (
 });
 
 describe("AC01 Ctrl-C closes only the web owner", () => {
+  it("SIGHUP (terminal closed) cleans up like Ctrl-C, and a SIGKILLed owner is recovered without PID takeover", async () => {
+    const state = join(env.home, "state", "web");
+    expect(await web.stop("SIGHUP")).not.toBeNull();
+    expect((await readdir(state)).includes("instance.json")).toBe(false);
+    web = await startWeb(env.home, port);
+    expect(await web.stop("SIGKILL")).not.toBeNull();
+    expect((await readdir(state)).includes("instance.json")).toBe(true);
+    web = await startWeb(env.home, port);
+    expect(web.output()).toContain("Đã dọn web instance cũ");
+    const session = await pair(web.origin, web.pairing);
+    expect(WebPageSchema(WebProjectSchema).parse((await http(web.origin, "/api/v1/projects", { headers: { cookie: session.cookie } })).json).items).toHaveLength(1);
+  });
+
   it("SIGINT removes the locator and frees the port; a new owner starts on the same port", async () => {
     const state = join(env.home, "state", "web");
     const previous = await pair(web.origin, await reissue());

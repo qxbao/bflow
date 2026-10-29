@@ -70,13 +70,11 @@ test('AC08/AC05 two tabs with conflicting decisions commit exactly one; the oppo
   expect(state.commands.map((c:any)=>c.outcome)).toHaveLength(1);
   const winner=state.decisionOutcome==='approved'?a:b,loser=winner===a?b:a;
   const loserText=(await loser.locator('main').innerText()).replace(/\s+/g,' ');
-  expect(loserText).not.toMatch(/Từ chối.*Đã áp dụng|đã từ chối/i);
+  expect(loserText).not.toContain(`Quyết định gói: ${state.decisionOutcome==='approved'?'Từ chối':'Duyệt'}`);
   await expect(winner.getByText(/Đã áp dụng thao tác|Mất phản hồi/).first()).toBeVisible();
-  // Finding W09-F03 (Web owner): same-context tabs share the decision operation record, so the
-  // tab whose "Từ chối" was never sent shows the other tab's "Quyết định gói — Đã áp dụng" without
-  // the applied outcome or a "your decision was not applied" explanation. Recorded, not asserted away.
-  if(/Quyết định gói Đã áp dụng thao tác/.test(loserText) && !/không được áp dụng|Đọc lại gói hiện hành/.test(loserText))
-    test.info().annotations.push({type:'finding W09-F03',description:'Losing tab shows shared applied decision without outcome; its own reject is silently absorbed'});
+  // W09-F03 fix: the applied operation names its outcome, and the suppressed opposite choice is explained.
+  await expect(winner.getByText(`Quyết định gói: ${state.decisionOutcome==='approved'?'Duyệt':'Từ chối'}`).first()).toBeVisible();
+  await expect(loser.getByText(/chưa được gửi|không được áp dụng/).first()).toBeVisible({timeout:10000});
   await context.close();
 });
 
