@@ -76,7 +76,8 @@ Runtime never emits; ordinary approvals incorrectly forced/forwarded user option
 fields. Added production-shape regression and removed the fixture's invented action.
 No second independent fix review is claimed. Final commands/results recorded below.
 
-Deferred Minor from review: OperationStatus shows a generic definitive-failure label
+Initially deferred Minor from review (resolved in the follow-up below):
+OperationStatus showed a generic definitive-failure label
 but does not translate operation.error into a specific remediation. No raw backend
 error text is exposed; the user can inspect work state or begin a corrected intent.
 
@@ -154,8 +155,8 @@ or live guarantee is inferred from the harness corrections.
   integrator fix: dispatch package web Vitest/Playwright scripts after build,
   preserving all other selected tests and truthful file/count reporting. No root
   change made. The inherited W06 runner gap remains a non-green handoff gate.
-- **Deferred Minor:** safe translated operation.error/remediation in OperationStatus,
-  as described above. No Critical/Important review finding remains unaddressed.
+- **Resolved follow-up:** safe translated operation.error/remediation in OperationStatus
+  is now implemented; see the follow-up checks below. No review finding remains deferred.
 
 W07 checklist steps1–4 have source and local unit coverage; step5's dedicated
 unit/browser/backend scenario passes while shared affected execution remains
@@ -171,3 +172,49 @@ links; chat must keep the same real authority and supported-provider constraints
 W09/integrator must retain the runner and original-draft findings above and test
 live Runtime/provider/Herdr separately. Keep the worktree/branch for integration.
 No push, PR, local merge or remote merge performed.
+
+
+## Owner-requested follow-up — resolve operation failure guidance
+
+Based on handoff `79fad4f530a0c8cd5cbe1285bf58b703f559b82a`, in the same isolated
+`agent/web/w07` worktree. Only OperationStatus, its package-local recovery tests, browser fixture
+synchronization and this handoff change. No schema/authority/storage/transport change.
+
+OperationStatus translates every frozen WebApiError code into a local Vietnamese
+reason and next step: correct request fields, reread a stale review, re-pair an
+expired browser session, check project/session readiness or resolve a conflicting
+operation. It never renders backend message/details or arbitrary exception text.
+For missing observations or reconciliation_required, recovery advice always says
+to observe the original operation and forbids resending/new intent until conclusive;
+input-correction guidance cannot accidentally authorize an uncertain retry.
+
+Four regressions failed before implementation and pass afterward: workflow-input
+correction, stale-review reread, uncertain-state advice and expired-session lookup.
+They also check that synthetic private backend text is absent from the DOM.
+The initially deferred Minor above is resolved; the affected-runner and original-
+requirement-draft findings remain unchanged.
+
+Follow-up measured checks:
+
+- `pnpm --filter @bflow/web test`: exit0, 43 passed / 10 files, no failed/skipped.
+- `pnpm check:deps`: exit0, existing 24 packages / 54 edges.
+- `pnpm typecheck`: exit0, root and web.
+- `pnpm test:affected --base 79fad4f530a0c8cd5cbe1285bf58b703f559b82a --run`:
+  package apps/web fallback, GitNexus commit_mismatch; build passes; exit1 at
+  unchanged root Vitest executor (no .tsx/Playwright tests discovered).
+- Dedicated browser command and final whitespace/status result are recorded below.
+
+Evidence remains local component and browser integration; no live Herdr/SDLC claim.
+
+The follow-up browser run exposed a fixture race after server restart: it navigated
+off the bootstrap page before authentication completed, leaving the next page
+without its session cookie. The test now waits for the authenticated registered-
+project link before navigating. Operation ID/count assertions and timeout budgets
+are unchanged; no authentication or production check was bypassed.
+
+Final follow-up browser command:
+`BFLOW_WEB_TEST_BROWSER=/usr/bin/google-chrome pnpm --filter @bflow/web exec playwright test e2e/direct-actions.spec.ts e2e/build.spec.ts`
+→ exit0, 2 passed, no failed/skipped after successful `pnpm --filter @bflow/web build`.
+`git diff --check` and staged whitespace checks pass. Only the four owned web
+files listed above changed; the local follow-up commit follows the W07 handoff.
+No push, PR or merge. The unaffected two integration findings remain open.

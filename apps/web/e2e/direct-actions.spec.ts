@@ -40,7 +40,7 @@ test('structured create, clarify, stale review, changes, resume/cancel and lost 
   await expect.poll(async()=>(await host('inspect')).effects.filter((k:string)=>k==='cancel').length).toBe(1);
   await expect(page.getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();expect((await host('inspect')).cancelled).toBe(false);
   // Restart the real HTTP server; re-pair and observe the same original operation ID.
-  const before=await host('inspect');const repair=await host('restart');await page.goto(repair);await page.goto(new URL(base+'/runs/run',repair).href);
+  const before=await host('inspect');const repair=await host('restart');await page.goto(repair);await expect(page.getByRole('link',{name:/books.*Xem dự án/})).toBeVisible();await page.goto(new URL(base+'/runs/run',repair).href);
   await expect(page.getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();
   await host('configure',{cancelled:true});await expect(page.getByText('Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.')).toBeVisible({timeout:10000});
   const after=await host('inspect');expect(after.operationCount).toBe(before.operationCount);expect(after.commands.map((c:any)=>c.commandId)).toEqual(before.commands.map((c:any)=>c.commandId));

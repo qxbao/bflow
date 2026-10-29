@@ -1,10 +1,10 @@
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
 import { CommandStore } from '../src/api/commands';
-import { ApiClient } from '../src/api/client';
+import { ApiClient, ApiError } from '../src/api/client';
 const body={kind:'create_request' as const,title:'Tìm sách',requestKind:'feature' as const,objective:'Tìm nhanh',acceptanceCriteria:[{description:'Tìm theo tên',verificationMethod:'integration_test' as const}],constraints:[]};
 const op=(id:string)=>({apiVersion:1,operationId:id,projectId:'p',owner:'host_interaction',operationKind:'create_request',state:'accepted',updatedAt:new Date().toISOString()});
-beforeEach(()=>{localStorage.clear();vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('navigator',{onLine:true,locks:{request:async(_key:string,callback:()=>unknown)=>callback()}});});afterEach(()=>vi.unstubAllGlobals());
+beforeEach(()=>{localStorage.clear();vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('navigator',{onLine:true,locks:{request:async(_key:string,callback:()=>unknown)=>callback()}});});afterEach(()=>{cleanup();vi.unstubAllGlobals();});
 test('lost response, reload and changed body never send another mutation',async()=>{
   let posts=0;const fetcher=vi.fn(async(_path:string,options?:RequestInit)=>{if(options?.method==='POST'){posts++;throw new TypeError('lost ACK');}return new Response(JSON.stringify(op(store.records()[0]!.commandId)));});vi.stubGlobal('fetch',fetcher);
   const store=new CommandStore(new ApiClient(),'p','session');
@@ -41,4 +41,26 @@ test('definitive refusal permits a corrected new intent with a new ID',async()=>
 test('corrupt project recovery metadata blocks creating an untracked replacement',async()=>{
   const store=new CommandStore(new ApiClient(),'p','session');localStorage.setItem(store.prefix+'create','broken');
   const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);await expect(store.submit('create',body)).rejects.toThrow('đối chiếu');expect(fetcher).not.toHaveBeenCalled();
+});
+
+// Failure guidance must come from a local translation, never backend message text.
+import { cleanup, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
+import { WebOperationSchema } from '@bflow/contracts/web';
+import { OperationStatus } from '../src/components/OperationStatus';
+import type { Observation } from '../src/api/commands';
+const record={slot:'create',scope:'browser',commandId:'00000000-0000-4000-8000-000000000001',fingerprint:'a'.repeat(64),kind:'create_request' as const};
+function failed(code:'invalid_request'|'stale_version'|'unavailable',state:'failed'|'reconciliation_required'='failed'):Observation{return {record,operation:WebOperationSchema.parse({...op(record.commandId),state,error:{apiVersion:1,code,message:'PRIVATE /secret/socket host-token',retryable:code==='unavailable',correlationId:'safe-correlation'}})};}
+function show(observation:Observation){return render(<MemoryRouter><OperationStatus observation={observation} projectId="p"/></MemoryRouter>);}
+test('failed input explains correction for workflow forms without raw backend text',()=>{
+  show(failed('invalid_request'));expect(screen.getByText(/Kiểm tra nội dung yêu cầu, câu trả lời và các trường bắt buộc/)).toBeTruthy();expect(screen.getByText(/Sau khi sửa thông tin, chọn “Bắt đầu thao tác mới”/)).toBeTruthy();expect(document.body.textContent).not.toContain('PRIVATE');expect(document.body.textContent).not.toContain('socket');cleanup();
+});
+test('stale failure requires rereading the current review before a new intent',()=>{
+  show(failed('stale_version'));expect(screen.getByText(/Phiên bản công việc hoặc gói xem xét đã thay đổi/)).toBeTruthy();expect(screen.getByText(/Đọc lại công việc và xem xét gói hiện hành trước khi bắt đầu thao tác mới/)).toBeTruthy();cleanup();
+});
+test('uncertain operation explains the cause but never suggests a new mutation',()=>{
+  show(failed('invalid_request','reconciliation_required'));expect(screen.getByText(/Kiểm tra nội dung yêu cầu/)).toBeTruthy();expect(screen.getByText(/Chỉ đọc lại thao tác để đối chiếu; chưa gửi lại hoặc bắt đầu thao tác mới/)).toBeTruthy();expect(screen.queryByText(/Sau khi sửa thông tin/)).toBeNull();cleanup();
+});
+test('lost operation lookup explains session expiry without exposing exception messages',()=>{
+  show({record,uncertain:true,error:new ApiError('session_required')});expect(screen.getByText(/Phiên trình duyệt đã hết hạn/)).toBeTruthy();expect(document.body.textContent).not.toContain('PRIVATE');cleanup();
 });
