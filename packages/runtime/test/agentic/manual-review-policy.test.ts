@@ -542,6 +542,37 @@ describe("manual-review policy proposal ingress and evidence lifecycle", () => {
     expect(result.priorEvidence[0].artifactReferences).toEqual(evidence[0].evidenceArtifacts);
     expect(evidence[0].metadata.largeRawOutput).toHaveLength(150000);
   });
+  it("pages an oversized policy review losslessly before exposing its judgment observation", async () => {
+    const f = await implemented();
+    await writeFile(join(f.cwd, "source.cjs"), "/*" + "漢字λ🙂".repeat(10000) + "*/\nmodule.exports = x => x * 2;\n");
+    f.commit("large committed review"); f.requestPhase("green");
+    const first = await f.host.inspectAlternative(f.binding, input("green")) as any;
+    expect(first.code).toBe("policy_review_paged");
+    expect(first.observationId).toBeUndefined();
+    const pages = [first.page]; let current = first;
+    while (current.nextOffset !== null) {
+      current = await f.host.inspectAlternative(f.binding, { ...input("green"), cursor: first.cursor, offset: current.nextOffset }) as any;
+      expect(Buffer.byteLength(JSON.stringify(current))).toBeLessThan(24000);
+      pages.push(current.page);
+    }
+    const raw = pages.join(""), body = JSON.parse(raw);
+    expect(createHash("sha256").update(raw).digest("hex")).toBe(first.sha256);
+    expect(body.observation.diff).toContain("漢字λ🙂".repeat(10000));
+    expect(body.dossier.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
+    expect(current.observationId).toEqual(expect.any(String));
+    const completed = await f.host.behavioralEvidence(f.binding, { ...input("green"), review: { observationId: current.observationId, criteria } });
+    expect(completed.result.status).toBe("passed");
+  }, 120_000);
+  it.each(["revision", "dirty", "replacement", "expired-lease"])("revalidates %s before serving a captured policy review page", async mode => {
+    const f = await implemented();
+    const request = f.requestPhase("green");
+    const first = await f.host.inspectAlternative(f.binding, { ...input("green"), view: "page" }) as any;
+    if (mode === "revision") { await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>2*x;\n"); f.commit("source advanced"); }
+    if (mode === "dirty") await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>2*x;\n");
+    if (mode === "replacement") f.binding.session = { ...f.binding.session!, value: "new-native" };
+    if (mode === "expired-lease") request.lease.expiresAt = new Date(Date.now()-1000).toISOString();
+    await expect(f.host.inspectAlternative(f.binding, { ...input("green"), cursor: first.cursor, offset: 0 })).rejects.toThrow(/cursor|review|assignment|lease|request/i);
+  });
   it("completes Red Green Refactor through assigned QA inspection and explicit judgment without a task review gate", async () => {
     const f = await implemented();
     const artifacts = new Set<string>();

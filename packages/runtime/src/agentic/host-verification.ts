@@ -18,6 +18,7 @@ import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
 import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
 import { captureTypecheck, captureTypeScriptSyntax } from "./typecheck.js";
+import { PolicyReviewPages, PolicyReviewPageInputSchema } from "./policy-review-pages.js";
 import { compactPolicyReviewDossier } from "./mcp-output-views.js";
 import { unconfiguredImpactIndex, type ImpactIndex } from "./impact-index.js";
 import { selectRegressionTests } from "./regression-selection.js";
@@ -140,27 +141,38 @@ export class HostVerification {
         config.method === "manual_review" && config.role === "qa";
     });
   }
+  private readonly policyReviewPages = new PolicyReviewPages();
   private readonly policyReviews = new Map<string, { binding: PaneBinding; observation: JsonValue }>();
   private async policyReviewAssignment(binding: PaneBinding, runId: string, taskId: string, phase: string) {
     return policyPhaseReviewAssignment(await this.runtime().inspect(), await this.runtime().inspect(runId), binding, runId, taskId, phase);
   }
   private async inspectPolicyReview(binding: PaneBinding, input: unknown) {
-    const args = z.object({ runId: z.string().min(1), taskId: z.string().min(1),
-      phase: z.enum(["green", "refactor", "verification"]) }).strict().parse(input);
+    const args = PolicyReviewPageInputSchema.parse(input);
     const assignment = await this.policyReviewAssignment(binding, args.runId, args.taskId, args.phase);
     if (!this.hasReviewCapability() || assignment.requestStatus !== "accepted") throw new Error("No active independent policy review capability/assignment");
     const prior = assignment.strategy.metadata?.tddEvidence;
     const expected = assignment.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][Array.isArray(prior) ? prior.length : 0] : "verification";
     if (args.phase !== expected) throw new Error(`Policy review requires the current ${expected} phase`);
+    const scope = { binding: digest(this.bindingIdentity(binding)), runId: args.runId, taskId: args.taskId,
+      phase: args.phase, stamp: assignment.stamp };
+    if (args.cursor !== undefined) {
+      if ((await this.git(assignment.cwd, ["rev-parse", "HEAD"])).trim() !== assignment.revision ||
+          await this.git(assignment.cwd, ["status", "--porcelain=v1", "-z"])) throw new Error("policy_review_source_changed: inspect the current committed revision again");
+      const current = await this.policyReviewAssignment(binding, args.runId, args.taskId, args.phase);
+      if (current.stamp !== assignment.stamp || current.requestStatus !== "accepted") throw new Error("Policy review assignment changed during paging");
+      return this.policyReviewPages.read(scope, args.cursor, args.offset ?? 0);
+    }
+    if ((args.offset ?? 0) !== 0) throw new Error("policy_review_cursor_required");
     const captured = await this.capture(assignment.cwd, assignment.base, assignment.revision);
     const current = await this.policyReviewAssignment(binding, args.runId, args.taskId, args.phase);
-    if (current.stamp !== assignment.stamp) throw new Error("Policy review assignment changed during inspection");
+    if (current.stamp !== assignment.stamp || current.requestStatus !== "accepted") throw new Error("Policy review assignment changed during inspection");
     const observationId = randomUUID(), observation = json({ kind: "policy-phase-review", stamp: assignment.stamp, captured });
     await this.receipts?.putObservation("alternative", observationId, { binding, runId: args.runId, taskId: args.taskId,
       sourceMessageId: assignment.requestId, observation });
     this.policyReviews.set(observationId, { binding: PaneBindingSchema.parse(binding), observation });
-    return json({ observationId, observation: captured, phase: args.phase, requestId: assignment.requestId,
-      dossier: compactPolicyReviewDossier(assignment.specification, assignment.strategy) });
+    return this.policyReviewPages.open(scope, json({ observationId, observation: captured, phase: args.phase, requestId: assignment.requestId,
+      dossier: compactPolicyReviewDossier(assignment.specification, assignment.strategy) }),
+      binding.provider === "agy" || binding.agentKind === "agy", args.view === "page");
   }
   /** Runner-based ingress only sees criteria that no real-app gate verifies. */
   private splitApp(specification: Specification, strategy: TestStrategy): { specification: Specification; strategy: TestStrategy } {
@@ -1601,6 +1613,7 @@ export class HostVerification {
   private readonly alternatives = new Map<string, { binding: PaneBinding; runId: string; taskId: string; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
   async inspectAlternative(binding: PaneBinding, input: unknown) {
     if (record(input).phase !== undefined) return this.inspectPolicyReview(binding, input);
+    if (record(input).cursor !== undefined || record(input).offset !== undefined || record(input).view === "page") throw new Error("policy_review_paging_requires_phase");
     if (!["tester", "qa"].includes(binding.role)) throw new Error("Independent Tester or QA required");
     const args = record(input), runId = textField(args.runId), taskId = textField(args.taskId), state = record(await this.runtime().inspect());
     const run = record(await this.runtime().inspect(runId));
