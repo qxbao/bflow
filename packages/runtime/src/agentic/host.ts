@@ -846,7 +846,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (typeof receipt.nativeSessionId === "string") {
         if (!pane.session)
           throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId}: the manifest has not recorded its SessionStart native session yet.`);
-        if (receipt.nativeSessionId !== pane.session.value) throw mismatch();
+        if (receipt.nativeSessionId !== pane.session.value) {
+          const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
+          const native = actual.agent_session ? record(actual.agent_session) : undefined;
+          const provider = platformRoles.find(option => option.role === pane.role)?.provider ?? pane.agentKind;
+          if (native?.kind === "id" && native.value === receipt.nativeSessionId &&
+              (native.source === provider || native.source === `herdr:${provider}`) && (actual.name ?? actual.agent) === pane.agentId)
+            throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId}: the manifest still records an earlier native session; wait for the observed SessionStart session.`);
+          throw mismatch();
+        }
         startupPaths.set(pane.role, "hook");
       } else {
         // The bootstrap receipt must name the launch this host prepared for the role (when one is prepared).

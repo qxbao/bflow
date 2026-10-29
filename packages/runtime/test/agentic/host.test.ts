@@ -477,7 +477,7 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     }
   };
 
-  it.each(["missing", "mismatched"])("distinguishes a %s manifest session from the published SessionStart receipt", async state => {
+  it.each(["missing", "stale", "mismatched"])("distinguishes a %s manifest session from the published SessionStart receipt", async state => {
     const f = await fixture(root => platformFor(root));
     await observeCodexPanes(f.root);
     for (const [index, role] of codexRoles.entries()) {
@@ -488,9 +488,11 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     const manifest = codexManifest(f.root, f.config.sessionId);
     if (state === "missing") delete manifest.panes[0]!.session;
     else manifest.panes[0]!.session!.value = "wrong-native-session";
+    if (state === "mismatched") await writeFile(join(f.root, "agents", "p1.json"), JSON.stringify({ name: "conversation-agent", agent_status: "idle",
+      agent_session: { source: "herdr:codex", kind: "id", value: "wrong-native-session" } }));
     const result = await f.controller.activate(manifest);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.message).toContain(state === "missing"
+    if (!result.ok) expect(result.error.message).toContain(state !== "mismatched"
       ? "[bflow:native-startup-pending]" : "has no matching native Bflow launch receipt");
   });
 
