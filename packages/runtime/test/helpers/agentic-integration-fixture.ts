@@ -52,7 +52,8 @@ export class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-export async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource } = {}) {
+export async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial" } = {}) {
+  if (options.highRisk) options = { ...options, complex: true };
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
   git(repository, "config", "user.name", "Test"); git(repository, "config", "user.email", "test@example.test");
@@ -112,8 +113,8 @@ export async function fixture(options: { dynamicGate?: boolean; parallel?: boole
   } }));
   let runtime: AgenticWorkflowRuntime;
   const receipts = new HostReceiptJournal(join(root, "host-receipts"), repository, "session-1");
-  const verification = new HostVerification(() => runtime, () => artifacts, receipts, options.runners ?? (options.behavioral ? [options.behavioral] : []));
-  if (options.behavioral) checks.splice(0, checks.length, ...DEFAULT_HOST_CHECKS, ...verification.behavioralChecks());
+  const verification = new HostVerification(() => runtime, () => artifacts, receipts, options.runners ?? (options.behavioral ? [options.behavioral] : []), undefined, undefined, [], { suites: [] }, DEFAULT_HOST_CHECKS);
+  if (options.behavioral) checks.splice(0, checks.length, ...DEFAULT_HOST_CHECKS, ...(options.highRisk ? [] : verification.behavioralChecks()));
   const actualGates = options.behavioral ? [
     ...DEFAULT_HOST_CHECKS.filter(check => (check.configuration as any).kind === "review").map(check => ({ id: check.id,
       evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(check.id).evaluate(...args) })),
@@ -136,6 +137,10 @@ export async function fixture(options: { dynamicGate?: boolean; parallel?: boole
     deliverToConversation: async (message: RoleMessage) => { conversationInbox.push(message); await conversationReentry?.(message); },
     roleCapabilities: { developer: ["implementation"], coordinator: ["coordination", "repository.read"], conversation: ["conversation"], specifier: ["specification", "repository.read"], architect: ["architecture", "repository.read"], planner: ["planning", "repository.read"], reviewer: ["review", "repository.read"], qa: ["verification", "repository.read", ...(options.behavioral ? ["testing"] : [])], tester: ["testing", "repository.read"] },
     taskChecks: checks, workflowChecks: checks,
+    ...(options.highRisk ? {
+      validateTaskCommands: (specification, strategy, paths) => verification.assertTaskSupported(specification, strategy, paths),
+      behavioralChecks: (specification, strategy, originalRevision) => verification.behavioralChecks(specification, strategy, originalRevision)
+    } satisfies Partial<AgenticRuntimePorts> : {}),
     authenticateMessage: async () => true, authenticateResult: async () => true, authenticateEvidence: async (result: any) => options.behavioral ? verification.authenticateEvidence(result) : true,
     authenticateGateResult: async (result: any) => options.behavioral ? verification.authenticateGate(result) : true,
     authorizeHuman: async (decision: any) => options.behavioral ? receipts.authenticateHuman(decision) : decision.decidedBy === "human-1",
@@ -154,6 +159,16 @@ export async function fixture(options: { dynamicGate?: boolean; parallel?: boole
     infrastructure: { readiness: "ready", commands: [{ method: "integration_test", command: options.behavioral?.command ?? "test-regression", level: "integration" }, ...(options.complex ? [{ method: "static_analysis", command: "static-check" }] : [])] },
     testability: { level: "automated", rationale: "Independent repeatable behavioral checks are available" }, riskClassification: "low",
     conventions: { tdd: "contextual", requiredMethods: [], suggestedLevels: [] } };
+  if (options.highRisk) {
+    spec.riskLevel = "high";
+    spec.testStrategy!.criterionMappings = [{ criterionId: "ac-1", testNames: [phaseTestName] }];
+    (spec.metadata!.sdd as any).assessment.risk = "high";
+    const assessment = spec.metadata!.conditionalTdd as any;
+    assessment.riskClassification = "high"; assessment.changeImpact.securitySensitive = true;
+    assessment.infrastructure = { readiness: options.readiness ?? "ready", commands: [
+      { method: "integration_test", command: options.behavioral!.command, level: "integration" }, { method: "static_analysis", command: "auto:static" }
+    ] };
+  }
   if (options.tdd || options.behavioral) spec.acceptanceCriteria[0]!.verificationMethod = "integration_test";
   if (options.complex) {
     const strategy = policies.strategy.resolve(spec);
@@ -261,7 +276,7 @@ export async function automaticRunners(): Promise<TestRunnerSource> {
   await runners.refresh();
   return runners;
 }
-export async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3, automatic = false) {
+export async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json", maxIterations = 3, automatic = false, policy: { highRisk?: boolean; readiness?: "ready" | "partial" } = {}) {
   const testPath = "test/double.test.cjs", sourcePath = "src/double.cjs";
   const dependencies = await realpath(await mkdtemp(join(tmpdir(), "bflow-integration-deps-")));
   cleanups.push(() => rm(dependencies, { recursive: true, force: true }));
@@ -273,8 +288,10 @@ export async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json"
     ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [staged] } : {}), method: "integration_test", levels: ["integration", "regression"],
     testPaths: [testPath], testNames: [phaseTestName], timeoutMs: 10_000 }])[0]!;
   const runners = automatic ? await automaticRunners() : undefined;
-  const f = await fixture({ behavioral: automatic ? { ...command, command: "auto:integration" } : command, runners });
-  await f.runtime.proposeWorkflow("run-1", f.spec, f.def, maxIterations); await f.runtime.tick();
+  const f = await fixture({ behavioral: automatic ? { ...command, command: "auto:integration" } : command, runners, ...policy });
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def, maxIterations);
+  if (policy.highRisk) await f.approve();
+  await f.runtime.tick();
   const original = (await f.runtime.inspect() as any).outbound.find((item: any) => item.message.type === "task.assignment");
   expect(original.status).toBe("accepted");
   const developer = f.panes.bindings.find(binding => binding.paneId === original.handle.target.paneId)!;
@@ -308,7 +325,11 @@ export async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json"
   }
   async function measure(phase: string) {
     const { pending, head } = await request(phase);
-    const completed = await f.verification.behavioralEvidence(qa, { runId: "run-1", taskId: "implement", phase });
+    const args = { runId: "run-1", taskId: "implement", phase };
+    const manual = phase !== "red" && ((await f.dossier()).strategy.metadata.conditionalTdd.requiredVerificationMethods as string[]).includes("manual_review");
+    const observed = manual ? await f.verification.inspectAlternative(qa, args) as any : undefined;
+    const completed = await f.verification.behavioralEvidence(qa, { ...args, ...(observed ? { review: { observationId: observed.observationId,
+      criteria: observed.dossier.specification.acceptanceCriteria.map((criterion: any) => ({ criterionId: criterion.id, passed: true, summary: "QA independently reviewed this exact committed change" })) } } : {}) });
     expect((completed.result.metadata!.conditionalTdd as any).sourceRevision).toBe(head);
     await f.runtime.receiveHerdr(f.envelope("verification.result", completed.result, { causation_id: pending.message.message_id,
       sender: { role: "qa", agent_id: qa.agentId, pane_id: qa.paneId }, artifact_references: completed.result.evidenceArtifacts }));

@@ -1863,3 +1863,30 @@ stale/superseded authority blocks acceptance. Linux Bubblewrap is required; miss
 unsupported checks are prerequisite gaps. This does not add daemon/CLI configuration wiring,
 execute arbitrary candidate SQL or establish warehouse/live acceptance. See
 [adapter inputs, evidence, reproduction and limits](DATA-VERIFICATION.md).
+
+### Policy-required manual review in behavioral phases
+
+High-risk policy may require `manual_review` in addition to automated criterion methods.
+The host declares this capability through its required native QA review check; it does
+not assign a command runner to a judgment. Automated method/command/test mappings still
+have to pass proposal ingress validation. Human design approval remains required where
+SDD policy requires it and does not constitute implementation or delivery acceptance.
+
+For a successful policy phase (`green`, `refactor`, or recommended-mode `verification`),
+Runtime's assigned QA first calls `inspect_alternative_verification` with `runId`, `taskId`
+and `phase`. It then submits explicit judgments for every active criterion in
+`record_behavioral_verification.review = { observationId, criteria }`. Test execution and
+stored evidence remain host-owned. Red requires its actual failing behavioral evidence
+and does not manufacture a successful manual judgment.
+
+Inspection binds the current request, implementation attempt, native independent executor
+and lineage, lease/fencing token, Spec fingerprint, source revision and phase. Changes to
+those bindings require a fresh inspection. Each successful phase stores a new artifact;
+Green's review cannot satisfy refactor. Immutable retries retain the same judgment and
+verifier identity. Missing/rejected/stale review does not count as accepted evidence.
+After submission, failed automatic policy verification escalates to Coordinator through
+Conversation instead of sending repair notices to a terminal Developer execution.
+
+This uses existing private observation/receipt storage and adds no public contract or
+database migration. Coverage is source plus local Runtime tests; it does not establish live
+provider/Herdr reviewer judgment quality, dbt results, or warehouse acceptance.

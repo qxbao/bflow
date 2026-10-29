@@ -1751,7 +1751,8 @@ export class AgenticWorkflowRuntime {
           await this.verifyReferences(result.evidenceArtifacts, run.runId);
           task.spec.strategy = TestStrategySchema.parse(this.ports.policies.recordEvidence(task.spec.strategy, result));
           if (request?.status === "accepted") await outbox.release(request);
-          if (request && typeof record(request.message.payload).phase === "string")
+          // A post-submission verification result must not wake an execution that already returned its result.
+          if (request && typeof record(request.message.payload).phase === "string" && !task.result)
             this.phaseNotice(state, outbox, run, task, textField(record(request.message.payload).phase), "passed",
               "Independent policy phase recorded. Continue the accepted TDD sequence; do not modify frozen Red tests.", result.verificationId);
         } else if (message.type === "review.verdict") {
@@ -3370,12 +3371,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); evidenceComplete = true; } catch { /* Independent evidence is still required. */ }
     if (this.ports.automaticAlternativeEvidence && result.status === "succeeded" && !evidenceComplete && task.spec.strategy.tddDecision.mode !== "required") {
       const requestId = `alternative-${result.requestId}`;
+      const behavioral = task.spec.strategy.targetCommands.length > 0;
+      const change = behavioral ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key)) : undefined;
+      if (change && (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== result.attemptId))
+        throw new Error("Automatic policy verification source does not match the implementation attempt");
       const recipient = await this.profileEvidenceRecipient(run, "qa", requestId, ["testing"]);
       const evidenceOut = outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: requestId,
         correlation_id: run.delegation.correlationId, causation_id: message.message_id, run_id: run.runId,
         sender: { role: "coordinator" }, recipient: { role: "qa" }, type: "verification.requested",
         payload: json({ kind: "conditional_evidence", runId: run.runId, taskId: task.taskId,
-          instruction: "Inspect the exact committed diff with inspect_alternative_verification, evaluate the accepted criteria independently, then record_alternative_verification. Do not invent evidence.",
+          ...(change ? { phase: "verification", sourceRevision: change.headCommitHash, implementationAttemptId: result.attemptId } : {}),
+          instruction: behavioral
+            ? "For this verification phase, inspect_alternative_verification with phase when policy requires manual_review, judge every criterion independently, then record_behavioral_verification with the inspected review observation and criteria. Never supply measured output or invent a judgment."
+            : "Inspect the exact committed diff with inspect_alternative_verification, evaluate the accepted criteria independently, then record_alternative_verification. Do not invent evidence.",
           specification: task.spec.specification, strategy: task.spec.strategy }), artifact_references: [],
         occurred_at: this.now(), idempotency_key: requestId }), recipient.selector, `evidence-${task.taskId}`, `evidence-${result.attemptId}`, ["testing"]);
       Object.assign(evidenceOut, recipient);
@@ -3787,7 +3795,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         type: "verification.requested", artifact_references: [], occurred_at: this.now(), idempotency_key: id,
         payload: json({ kind: "conditional_evidence", phase, runId, taskId, sourceRevision, implementationAttemptId: current.attemptId,
           specification: task.spec.specification, strategy: task.spec.strategy,
-          instruction: "Run record_behavioral_verification for this exact phase and revision using the owner-configured independent runner. Never supply measured output yourself." })
+          instruction: phase !== "red" && strings(record(task.spec.strategy.metadata?.conditionalTdd).requiredVerificationMethods).includes("manual_review")
+            ? "First inspect_alternative_verification with runId, taskId and this phase. Review the exact committed diff and every accepted criterion independently. Then record_behavioral_verification with review:{observationId,criteria:[{criterionId,passed,summary}]}. A design approval is not a review; never invent a judgment or measured output."
+            : "Run record_behavioral_verification for this exact phase and revision using the owner-configured independent runner. Never supply measured output yourself." })
       }), recipient.selector, `phase-${taskId}-${phase}`, `phase-${current.attemptId}-${phase}`, ["testing"]);
       Object.assign(evidenceOut, recipient);
       await save(); return json({ queued: true, messageId: id });
@@ -3812,7 +3822,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       outcome: { requestId: request.message.message_id, taskId: payload.taskId, phase: payload.phase,
         sourceRevision: payload.sourceRevision, summary: failure.summary, repairable: failure.repairable,
         evidenceArtifacts: request.phaseFailureEvidence ? [request.phaseFailureEvidence] : [] },
-      next: failure.repairable
+      next: run.tasks.some(task => task.taskId === payload.taskId && task.result !== undefined)
+        ? "Runtime retained this submitted execution's failed evidence for manual Coordinator reconciliation through Conversation. Do not wake the terminal Developer or claim accepted evidence."
+        : failure.repairable
         ? "Runtime stored the rejected phase outcome and controls bounded Developer repair. This is not missing execution output, valid Red or implementation authorization. Do not report a new missing-evidence blocker; reconcile this exact request if needed."
         : "Runtime stored an infrastructure blocker, not accepted policy evidence. Reconcile this exact outcome before an explicit resume; never resend uncertain work." });
   }
@@ -3864,12 +3876,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
       if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) {
         // Retain the receipt while preserving a newer terminal decision.
-      } else if (!repairable || failures >= run.maxIterations) {
+      } else if (!repairable || failures >= run.maxIterations || task.result !== undefined) {
         const previousStatus = run.status;
-        run.status = "escalated"; run.error = !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
+        run.status = "escalated"; run.error = task.result
+          ? `Submitted implementation requires independent policy repair: ${summary}`
+          : !repairable ? `Policy measurement blocked: ${summary}` : `Policy phase repair limit exhausted: ${summary}`;
         // An infrastructure failure (runner, sandbox, build) is not a code defect: once fixed, an explicit resume re-measures the
         // same revision. An exhausted repair limit stays a human stop, so the bound is never widened.
-        if (!repairable) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
+        if (!repairable || task.result) run.pendingAction = { actionId: `next-${digest([run.runId, request.message.message_id])}`, kind: "resume_coordinator",
           owner: "coordinator", reason: run.error.slice(0, 2000), sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
           previousStatus, ...inheritedManualResume(run), recovery: "manual" };
         this.progress(state, outbox, run, run.error);
