@@ -480,6 +480,17 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     await rm(temporary, { recursive: true, force: true });
   }
 }
+/** Reuse only the isolated raw execution boundary: compiler exits are never parsed as test results or Red evidence. */
+export async function measureCompiler(profile: RunnerProfile, cwd: string, revision: string, originalRevision?: string, testPaths: string[] = []) {
+  if (testPaths.some(path => !testFilePattern.test(path))) throw new Error("Compiler test exceptions must be selected behavioral test paths");
+  const command: BoundBehavioralCommand = { ...profile, reporter: "node_tap", testNames: [], testPaths,
+    ...(originalRevision ? { originalRevision } : {}) };
+  const { outcome } = await runMeasurementCommand(command, cwd, revision);
+  if (outcome.spawnError || outcome.signal || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.exitCode === null || SANDBOX_ERROR.test(outcome.stderr))
+    throw new Error(`Typecheck infrastructure failure: ${outcome.spawnError ?? outcome.signal ?? (outcome.timedOut ? "deadline exceeded" : outcome.aborted ? "aborted" : outcome.outputTruncated ? "truncated output" : outcome.stderr)}`);
+  return { exitCode: outcome.exitCode, output: (outcome.stdout + outcome.stderr).slice(0, 4096) };
+}
+
 /** Parser failure that keeps the original message and carries bounded, JSON-safe runner evidence for audit and Conversation. */
 export class BehavioralMeasurementError extends Error {
   constructor(readonly original: unknown, readonly diagnostics: JsonValue) { super(original instanceof Error ? original.message : String(original)); }

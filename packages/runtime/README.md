@@ -1913,3 +1913,28 @@ Conversation instead of sending repair notices to a terminal Developer execution
 This uses existing private observation/receipt storage and adds no public contract or
 database migration. Coverage is source plus local Runtime tests; it does not establish live
 provider/Herdr reviewer judgment quality, dbt results, or warehouse acceptance.
+
+## Automatic TypeScript verification
+
+With automatic runner detection, an installed repository-local TypeScript compiler
+and regular `tsconfig.json` projects provide the `auto:typecheck` planning label.
+The host runs a fixed compiler build over the discovered projects in a temporary,
+revision-pinned checkout using the existing verification sandbox and read-only
+dependency mounts. It does not run a package script supplied by an agent. Compiler
+diagnostics fail the check; timeout, truncated output and launcher failures remain
+infrastructure errors. Compiler checks supplement mapped behavioral acceptance and
+never establish the failing behavioral assertion required for TDD Red.
+
+`auto:static` also parses changed TypeScript files through that compiler, including
+test files outside project includes, without executing emitted code. Missing compiler
+support and other unsupported source types fail closed. Original execution-definition
+pins remain enforced. Successful measurements bind the accepted criterion, revision
+and command and receive the same authenticated host receipts as existing checks.
+Compiler execution is bounded to five minutes and shares the independent phase's
+nine-minute budget with behavioral commands. The planning view reports the compiler
+version and project scope. Owner-only behavioral runner configuration retains its
+existing behavior; this is not general lint or polyglot typechecker support.
+
+Evidence includes local tests with a real compiler, syntax errors outside project
+includes, original-config drift and gate receipt binding. A sandboxed measurement of
+this repository also passed; this does not establish full SDLC live acceptance.
