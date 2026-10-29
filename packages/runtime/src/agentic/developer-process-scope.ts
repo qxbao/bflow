@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, open, readFile, realpath, rename, readdir, link, unlink } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, realpath, rename, readdir, link, unlink, symlink } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -13,7 +13,7 @@ const execute = promisify(execFile);
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const sha = z.string().regex(/^[0-9a-f]{64}$/);
 const ConfigSchema = z.object({ schemaVersion: z.literal(1), scopeId: z.string().uuid(), runId: z.string().min(1), taskId: z.string().min(1), launchId: z.string().min(1),
-  launchFingerprint: sha, secret: sha, python: z.string().min(1), bwrap: z.string().min(1), target: z.string().min(1), targetDigest: sha,
+  launchFingerprint: sha, secret: sha, python: z.string().min(1), bwrap: z.string().min(1), target: z.string().min(1), targetDigest: sha, providerCommand: z.enum(["claude", "codex", "agy"]).optional(),
   originalPath: z.string(), supervisorDigest: sha }).strict();
 const WitnessSchema = z.object({ scopeId: z.string().uuid(), launchId: z.string().min(1), launchFingerprint: sha, bootId: z.string().uuid(),
   initPid: z.number().int().positive(), initStartTime: z.string().regex(/^\d+$/), namespace: z.string().regex(/^pid:\[\d+\]$/), startedAt: IsoDateTimeSchema }).strict();
@@ -91,13 +91,21 @@ export class DeveloperProcessScopes {
     const expected = target === await realpath(input.executable) ? input.executableDigest : input.configFiles.find(file => file.path === target)?.digest;
     if (targetDigest !== expected) throw new Error("Actual Herdr provider command does not match the pinned executable/environment wrapper");
     const scopeId = randomUUID(), root = join(this.directory, scopeId); await mkdir(join(root, "bin"), { recursive: true, mode: 0o700 });
+    await mkdir(join(root, "provider"), { mode: 0o700 });
+    await symlink(target, join(root, "provider", name));
     const script = join(root, "supervisor.py"), config = join(root, "config.json");
     await writeFilePrivate(script, PROCESS_SCOPE_SUPERVISOR, 0o500);
     await writeRecord(config, ConfigSchema.parse({ schemaVersion: 1, scopeId, runId: input.runId, taskId: input.taskId, launchId: material.launchId,
-      launchFingerprint: material.launchFingerprint, secret: randomBytes(32).toString("hex"), ...tools, target, targetDigest, originalPath,
+      launchFingerprint: material.launchFingerprint, secret: randomBytes(32).toString("hex"), ...tools, target, targetDigest, providerCommand: name, originalPath,
       supervisorDigest: hash(PROCESS_SCOPE_SUPERVISOR) }));
     await writeFilePrivate(join(root, "bin", name), `#!/bin/sh\nexec ${quote(tools.python)} ${quote(script)} launch ${quote(config)} "$@"\n`, 0o500);
-    return HostLaunchMaterialSchema.parse({ ...material, env: { ...material.env, PATH: join(root, "bin") + delimiter + originalPath, BFLOW_PROCESS_SCOPE_ID: scopeId } });
+    // Herdr starts the canonical provider name from an interactive shell. Account zshrc files
+    // may prepend another CLI and bypass the supervision shim despite env-at-pane-creation.
+    // Give this launch private startup files; provider HOME/auth and its original PATH stay intact.
+    const shellRoot = join(root, "shell"); await mkdir(shellRoot, { mode: 0o700 });
+    const launchPath = join(root, "bin") + delimiter + originalPath;
+    await writeFilePrivate(join(shellRoot, ".zshenv"), `export PATH=${quote(launchPath)}\n`, 0o500);
+    return HostLaunchMaterialSchema.parse({ ...material, env: { ...material.env, PATH: launchPath, ZDOTDIR: shellRoot, BFLOW_PROCESS_SCOPE_ID: scopeId } });
   }
   /** Bindings launched under a scope carry its id; legacy/unsupervised panes have none and keep pre-scope semantics. */
   private static supervised(binding: PaneBinding): boolean { return binding.metadata?.processScopeId !== undefined; }

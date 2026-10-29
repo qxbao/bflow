@@ -26,6 +26,7 @@ import {
 } from "@bflow/contracts";
 import {
   computeFileSha256,
+  computeLaunchConfigDigest,
   computeLaunchFingerprint,
   resolveAndVerifyExecutable,
   verifyLaunchAttestation
@@ -1300,7 +1301,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
                 );
                 break;
               }
-              const currentDigest = await computeFileSha256(cf.path);
+              const currentDigest = await computeLaunchConfigDigest(cf.path, this.descriptor.provider);
               if (currentDigest !== cf.digest) {
                 bindingOk = false;
                 hasFailed = true;
@@ -1816,7 +1817,7 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         try {
           const info = await lstat(candidatePath);
           if (info.isFile()) {
-            configFiles.push({ path: candidatePath, digest: await computeFileSha256(candidatePath) });
+            configFiles.push({ path: candidatePath, digest: await computeLaunchConfigDigest(candidatePath, this.descriptor.provider) });
           }
         } catch {
           // Private codex-home is absent when native_auth_compatible or isolator is used

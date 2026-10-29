@@ -1869,6 +1869,24 @@ unsupported checks are prerequisite gaps. This does not add daemon/CLI configura
 execute arbitrary candidate SQL or establish warehouse/live acceptance. See
 [adapter inputs, evidence, reproduction and limits](DATA-VERIFICATION.md).
 
+A Coordinator progress report containing questions preserves an existing pending
+design approval. Initialization also restores pre-Core design approvals hidden in
+preparation phases by older progress reports; it keeps the exact pending request,
+evidence and decision authority and never approves or replays transport messages.
+Settled/nonpending approvals, terminal runs and cancelled runs are not restored.
+
+Persisted lifecycle reopening may connect to an authenticated live host for
+quiesce/checkpoint even when execution inputs changed. Explicit new startup
+still validates current sources; it refreshes the inactive host's source snapshot
+only after no live owner is detected. Existing accepted run plans stay pinned and
+retain their own drift checks. This does not grant execution from a stale plan.
+
+Supervised Linux Developer launches use private zsh startup files to keep their
+process-scope wrapper first on PATH. Account `.zshrc` cannot prepend an ordinary
+provider binary around the witness bootstrap. Provider HOME/auth and the original
+PATH inside the supervised provider remain unchanged; account shell files are not
+modified. Missing/invalid supervision witnesses still block dispatch.
+
 ### Policy-required manual review in behavioral phases
 
 High-risk policy may require `manual_review` in addition to automated criterion methods.

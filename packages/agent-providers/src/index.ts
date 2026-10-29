@@ -10,6 +10,7 @@ export * from "./base-adapter.js";
 export * from "./claude-adapter.js";
 export * from "./codex-adapter.js";
 export * from "./codex-home.js";
+export * from "./codex-trust.js";
 export * from "./codex-plugin-policy.js";
 export * from "./codex-hook-trust.js";
 export * from "./codex-hook-toml.js";

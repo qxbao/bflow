@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -10,6 +10,10 @@ import type { AgenticRuntimePorts } from "../../src/agentic/ports.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
 import { HostConversationIntake } from "../../src/agentic/host-conversation.js";
 import { availableTools } from "../../src/agentic/host.js";
+import { isBflowSosCommand } from "../../src/agentic/native-diagnostic-fence.js";
+import { buildSosProviderArguments, parseSosConfigDocument, spawnSosAgent } from "../../src/agentic/sos-agent.js";
+import { TaskActivityLog } from "../../src/agentic/task-activity-log.js";
+import { json, record } from "../../src/agentic/journal.js";
 
 describe("Chat-owned Conversation decisions", () => {
   it("advertises a structured decision tool only to Conversation", () => {
@@ -552,4 +556,111 @@ it("requires an exact physical Conversation turn for a workflow review replaceme
   for (const [id, content] of [["quoted-replacement", 'Explain "replace workflow review gate-old-review"'], ["mixed-replacement", "replace workflow review gate-old-review and approve delivery"]])
     expect(await intake().receive(f.binding, f.turn(id!, content!))).toMatchObject({ requiresConversationDecision: true });
   expect(calls).toBe(1);
+});
+
+describe("BFLOWSOS physical rescue command", () => {
+  async function sosFixture() {
+    const f = await fixture();
+    const directory = join(f.directory, "host-state");
+    const activityLog = TaskActivityLog.open(join(f.directory, "agentic", "task-activity.jsonl"));
+    await activityLog.record({ kind: "error", role: "runtime", action: "scheduler_stalled", outcome: "stuck" });
+    const at = "2026-10-19T00:00:00.000Z";
+    const coordinator = PaneBindingSchema.parse({ ...f.binding, bindingId: "coord-binding", role: "coordinator", agentId: "coord",
+      paneId: "coord-pane", permanent: true, session: undefined, transportState: "blocked" });
+    const manifest = SessionManifestSchema.parse({ schemaVersion: 2, sessionId: "herdr-session", workspaceRoot: f.directory, projectName: "sos-test",
+      herdrWorkspaceId: "workspace-1", herdrTabId: "tab", status: "up", conversationSessionId: "chat-session", activeRunIds: [],
+      attachTarget: { role: "conversation", paneId: f.binding.paneId }, panes: [f.binding, coordinator], createdAt: at, updatedAt: at });
+    const herdrCalls: string[][] = [];
+    const herdr = async (args: string[]) => {
+      herdrCalls.push(args);
+      if (args[0] === "tab" && args[1] === "create")
+        return JSON.stringify({ id: "1", result: { type: "tab_created", tab: { tab_id: "sos-tab", workspace_id: "workspace-1", label: "SOS" },
+          root_pane: { pane_id: "sos-pane", tab_id: "sos-tab", workspace_id: "workspace-1" } } });
+      return JSON.stringify({ id: "1", result: { type: "ok" } });
+    };
+    let spawns = 0;
+    const intake = () => new HostConversationIntake(f.journal(), () => f.port, undefined, undefined, undefined, async turn => {
+      spawns++;
+      return json(await spawnSosAgent({ agentName: "bflow-sos-abc123", directory, repositoryPath: f.directory, sessionId: "herdr-session", herdrBinary: "herdr", manifest, turn,
+        activityLog, runtimeSnapshot: { runs: [] }, schedulerError: "scheduler stalled", inboundError: undefined, defaultProvider: "codex", herdr }));
+    });
+    return { ...f, directory, activityLog, herdrCalls, intake, spawnCount: () => spawns };
+  }
+
+  it("ignores anything other than the exact BFLOWSOS content", async () => {
+    const f = await sosFixture();
+    for (const [index, content] of ["bflowsos", " BFLOWSOS", "BFLOWSOS ", "BFLOWSOS fix giúp tôi", '"BFLOWSOS"'].entries())
+      expect(await f.intake().receive(f.binding, f.turn(`not-sos-${index}`, content))).toMatchObject({ requiresConversationDecision: true });
+    expect(f.spawnCount()).toBe(0);
+    expect(f.herdrCalls).toEqual([]);
+    expect(isBflowSosCommand("BFLOWSOS")).toBe(true);
+    expect(isBflowSosCommand("BFLOWSOS\n")).toBe(false);
+  });
+
+  it("spawns a full-permission SOS agent with scene context once per trusted messageId", async () => {
+    const f = await sosFixture();
+    const received = await f.intake().receive(f.binding, f.turn("user-sos", "BFLOWSOS"));
+    expect(received).toMatchObject({ messageId: "user-sos", requiresConversationDecision: false,
+      result: { ok: true, value: { provider: "codex", tabId: "sos-tab", paneId: "sos-pane", initialPromptDelivered: true } } });
+    const agentName = String(record(record(record(received).result).value).agentName);
+    expect(agentName).toBe("bflow-sos-abc123");
+    expect(f.herdrCalls[0]).toEqual(["tab", "create", "--workspace", "workspace-1", "--cwd", f.binding.cwd, "--label", "SOS", "--no-focus"]);
+    expect(f.herdrCalls[1]).toEqual(["pane", "rename", "sos-pane", agentName]);
+    const start = f.herdrCalls[2]!;
+    const systemPromptPath = join(f.directory, "sos", "sos-system-prompt.md");
+    expect(start.slice(0, 6)).toEqual(["agent", "start", agentName, "--kind", "codex", "--pane"]);
+    expect(start.slice(start.indexOf("--") + 1)).toEqual(["--dangerously-bypass-approvals-and-sandbox", "-C", f.binding.cwd,
+      "-c", `model_instructions_file=${JSON.stringify(systemPromptPath)}`]);
+    expect(f.herdrCalls[3]?.slice(0, 3)).toEqual(["agent", "prompt", "sos-pane"]);
+
+    const context = await readFile(join(f.directory, "sos", "sos-context.md"), "utf8");
+    expect(context).toContain("herdr --session herdr-session pane read coord-pane --source recent --lines 120");
+    expect(context).toContain("herdr --session herdr-session pane process-info --pane chat-pane");
+    expect(context).toContain("role=coordinator paneId=coord-pane");
+    expect(context).toContain("task-activity.jsonl");
+    expect(context).toContain(join(f.binding.cwd, ".bflow/logs/herdr.log"));
+    expect(await readFile(systemPromptPath, "utf8")).toContain("BFLOWSOS — Emergency Rescue Agent");
+    const snapshot = JSON.parse(await readFile(join(f.directory, "sos", "sos-runtime-snapshot.json"), "utf8"));
+    expect(snapshot).toMatchObject({ manifest: { herdrWorkspaceId: "workspace-1" }, runtimeSnapshot: { runs: [] }, schedulerError: "scheduler stalled",
+      inboundError: null, sosConfig: { provider: "codex", source: "default" }, recentActivity: [expect.objectContaining({ action: "scheduler_stalled" })] });
+    expect(await f.activityLog.read({ lines: 5 })).toContainEqual(expect.objectContaining({ kind: "recovery", role: "sos", action: "sos_agent_spawned", outcome: "spawned" }));
+
+    // Retrying the same physical turn replays the recorded result instead of spawning another agent.
+    expect(await f.intake().receive(f.binding, f.turn("user-sos", "BFLOWSOS"))).toMatchObject({ requiresConversationDecision: false,
+      result: { ok: true, value: { agentName } } });
+    expect(f.spawnCount()).toBe(1);
+    expect(f.herdrCalls.filter(args => args[0] === "tab")).toHaveLength(1);
+    expect(await f.intake().pendingDecision(f.binding)).toBeUndefined();
+    await expect(f.intake().decide(f.binding, { messageId: "user-sos", decision: { intent: "conversation_only", directReply: "Done" } }))
+      .rejects.toThrow(/physical user hook/);
+    expect(f.applied).toEqual([]);
+  });
+
+  it("records a failed spawn as a trusted result without asking Chat to decide", async () => {
+    const f = await fixture();
+    const intake = new HostConversationIntake(f.journal(), () => f.port);
+    expect(await intake.receive(f.binding, f.turn("sos-unsupported", "BFLOWSOS"))).toMatchObject({ requiresConversationDecision: false,
+      result: { ok: false, error: { code: "sos_spawn_failed" } } });
+  });
+
+  it("builds provider arguments for every supported CLI", () => {
+    expect(buildSosProviderArguments({ provider: "codex", model: "gpt-x", effort: "high" }, "/repo", "/state/sos.md")).toEqual(["--dangerously-bypass-approvals-and-sandbox",
+      "-C", "/repo", "-c", 'model_instructions_file="/state/sos.md"', "-m", "gpt-x", "-c", 'model_reasoning_effort="high"']);
+    expect(buildSosProviderArguments({ provider: "claude", model: "opus", effort: "max" }, "/repo", "/state/sos.md"))
+      .toEqual(["--dangerously-skip-permissions", "--append-system-prompt-file", "/state/sos.md", "--model", "opus", "--effort", "max"]);
+    expect(buildSosProviderArguments({ provider: "agy", model: "gemini" }, "/repo", "/state/sos.md")).toEqual(["--workspace", "/repo", "--model", "gemini"]);
+  });
+
+  it("reads the configuration subset without a YAML dependency", () => {
+    const source = [
+      "# header", "projectName: demo", "notes: |", "  roles: not-these", "  - role: sos", "environment:",
+      "  description: >", "    folded text: ignored", "  roles:", "  - role: coordinator # inline comment", "    cli: claude",
+      "  - role: sos", "    cli: \"codex\"", "    model: 'gpt-x'", "    skills: [a, b]", "    required: false",
+      "  defaults:", "    codex: {}", "    claude:", "      profile-name: personal", "storage:", "  runStorePath: .bflow/runs.db"
+    ].join("\n");
+    expect(parseSosConfigDocument(source)).toEqual({ projectName: "demo", notes: "|", storage: { runStorePath: ".bflow/runs.db" },
+      environment: { description: ">", defaults: { codex: {}, claude: { "profile-name": "personal" } },
+        roles: [{ role: "coordinator", cli: "claude" }, { role: "sos", cli: "codex", model: "gpt-x", skills: ["a", "b"], required: false }] } });
+    expect(parseSosConfigDocument('{"environment":{"roles":[{"role":"sos","cli":"agy"}]}}')).toEqual({ environment: { roles: [{ role: "sos", cli: "agy" }] } });
+  });
 });

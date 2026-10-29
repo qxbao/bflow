@@ -373,6 +373,44 @@ describe("workflow liveness recovery boundaries", () => {
     expect((await f.inspect()).outbound.some(out => (out.message.payload as { kind?: string }).kind === "resume_run")).toBe(false);
   });
 
+  it("keeps a pending design approval visible when the Coordinator reports a question", async () => {
+    const approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: "approval-run-1", runId: "run-1", sessionId: "session-1",
+      status: "pending", target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: T0,
+      reason: "Human design approval", evidence: [], idempotencyKey: "approval-run-1" });
+    const f = await fixture({ runs: [run("run-1", "awaiting_approval", { approval, approvalKind: "design" })] });
+    await f.runtime.reportProgress("run-1", "The test names need review", ["Approve or revise the proposed test mapping?"]);
+    const current = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(current).toMatchObject({ status: "awaiting_approval", approval });
+    expect((await f.inspect()).outbound.some(out => out.message.type === "conversation.clarification")).toBe(true);
+    expect(current.decision).toBeUndefined();
+  });
+
+  it("recovers a pre-Core design approval hidden by an older progress report without approving or replaying it", async () => {
+    const approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: "approval-run-1", runId: "run-1", sessionId: "session-1",
+      status: "pending", target: { type: "run" }, revision: 1, generation: 0, requestedBy: "coordinator", requestedAt: T0,
+      reason: "Human design approval", evidence: [], idempotencyKey: "approval-run-1" });
+    const f = await fixture({ runs: [run("run-1", "clarifying", { approval, approvalKind: "design" })] });
+    await f.runtime.initialize();
+    expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "awaiting_approval", approval });
+    expect((await f.inspect()).outbound).toHaveLength(0);
+    expect((await f.runtime.inspect("run-1") as unknown as RunRecord).decision).toBeUndefined();
+  });
+
+  it.each(["settled", "nonpending", "terminal", "cancelled"] as const)("does not recover a %s approval as a new pending human gate", async kind => {
+    const approval = ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId: "approval-run-1", runId: "run-1", sessionId: "session-1",
+      status: kind === "nonpending" ? "approved" : "pending", target: { type: "run" }, revision: 1, generation: 0,
+      requestedBy: "coordinator", requestedAt: T0, reason: "Human design approval", evidence: [], idempotencyKey: "approval-run-1" });
+    const decision = kind === "settled" ? ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: approval.approvalId,
+      runId: "run-1", sessionId: "session-1", target: approval.target, revision: 1, generation: 0, decision: "approved",
+      decidedBy: "owner", decidedAt: T0, feedbackArtifacts: [], idempotencyKey: "settled-approval" }) : undefined;
+    const initial = run("run-1", kind === "terminal" ? "completed" : "clarifying", { approval, approvalKind: "design",
+      ...(decision ? { decision } : {}), cancelled: kind === "cancelled" });
+    const f = await fixture({ runs: [initial] });await f.runtime.initialize();
+    const current = await f.runtime.inspect("run-1") as unknown as RunRecord;
+    expect(current.status).toBe(initial.status);expect(current.decision).toEqual(decision);expect(current.approval).toEqual(approval);
+    expect((await f.inspect()).outbound).toHaveLength(0);
+  });
+
   it("refuses to resume a cancelled blocker without queuing a Coordinator message", async () => {
     const sourceMessageId = "blocked-source";
     const action = { actionId: `next-${digest(["run-1", sourceMessageId])}`, kind: "resume_coordinator" as const, owner: "coordinator" as const,

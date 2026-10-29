@@ -514,3 +514,18 @@ describe("DeterministicWorkflowEngine", () => {
     });
   });
 });
+
+it('recovers each run using its own definition when generated workflow labels are reused',async()=>{
+ const engine=new DeterministicWorkflowEngine();
+ const first=unwrap(await engine.createRun({runId:'run-first',definition:definition(['first-task']),createdAt:time,idempotencyKey:'create-first'}));
+ const checkpoint=unwrap(await engine.createCheckpoint({runId:'run-first',expectedVersion:first.snapshot.version,checkpointId:'checkpoint-first',createdAt:later}));
+ const second=unwrap(await engine.createRun({runId:'run-second',definition:definition(['second-task']),createdAt:time,idempotencyKey:'create-second'}));
+ expect(first.snapshot.workflowId).toBe(second.snapshot.workflowId);expect(first.snapshot.workflowVersion).toBe(second.snapshot.workflowVersion);
+ const recovered=unwrap(await engine.recover({runId:'run-first',checkpoint,events:[],expectedVersion:first.snapshot.version}));
+ expect(recovered.snapshot.tasks.map(task=>task.taskId)).toEqual(['first-task']);
+ expect(unwrap(await engine.getSnapshot('run-second'))?.tasks.map(task=>task.taskId)).toEqual(['second-task']);
+ const restarted=new DeterministicWorkflowEngine();
+ await restarted.createRun({runId:'run-first',definition:definition(['first-task']),createdAt:time,idempotencyKey:'create-first'});
+ await restarted.createRun({runId:'run-second',definition:definition(['second-task']),createdAt:time,idempotencyKey:'create-second'});
+ expect(unwrap(await restarted.recover({runId:'run-first',checkpoint,events:[],expectedVersion:first.snapshot.version})).snapshot.tasks.map(task=>task.taskId)).toEqual(['first-task']);
+});

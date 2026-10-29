@@ -5,7 +5,7 @@ import { readPreviewFile } from "./preview-files.js";
 import type { EnvironmentCompositionInput } from "./environment.js";
 import type { AgentRole, SkillDefinition, SkillPin, ResolvedToolGrant } from "@bflow/contracts";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
-import type { EnvironmentConfig } from "./environment-config.js";
+import { isGovernanceRoleConfig, type EnvironmentConfig } from "./environment-config.js";
 
 /** P28 loader and pin binder from the built `@bflow/skills` package; loaded dynamically like the other workspace packages. */
 interface SkillsModule {
@@ -85,15 +85,16 @@ export async function validateBundledStartupSkills(environment: EnvironmentConfi
     installed = await new module.SkillManager({ store: new module.SkillFileStore(storeRoot),
       supportedCommands: SUPPORTED_CLI_COMMANDS, approvedBuiltinDigests: catalog.approvedBuiltinSkillDigests }).list();
   }
-  for (const role of environment.roles) {
+  for (const role of environment.roles.filter(isGovernanceRoleConfig)) {
     const defaults = catalog.resolveRolePins(role.role, []).map(item => item.skill.skillId);
     const required = (environment.skills?.requiredSkills ?? []).filter(id =>
       !catalog.definitions.some(definition => definition.skillId === id) ||
       catalog.definitions.some(definition => definition.skillId === id && definition.allowedRoles.includes(role.role)));
     const ids = [...new Set([...(role.skills ?? defaults), ...required])];
     const pins = catalog.resolvePins(role.role, ids);
-    if (installed && pins.some(pin => !installed.some(definition => definition.digest === pin.skill.digest)))
-      throw new Error(`Role '${role.role}' is missing an exact pinned skill bundle in the machine skill store; run approved skills setup.`);
+    const missing = installed ? pins.filter(pin => !installed.some(definition => definition.digest === pin.skill.digest)).map(pin => pin.skill.skillId) : [];
+    if (missing.length)
+      throw new Error(`Role '${role.role}' is missing exact pinned skill bundle(s) in the machine skill store: ${missing.join(", ")}; run approved skills setup ('bflow setup').`);
     if (environment.skills?.required && !pins.some(item => item.skill.skillId === "using-bflow"))
       throw new Error(`Role '${role.role}' requires its approved workflow skills; preserve using-bflow.`);
   }

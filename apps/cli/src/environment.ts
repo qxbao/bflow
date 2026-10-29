@@ -4,7 +4,8 @@ import { unverifiedWriterBlocker, unverifiedWriters } from "./shutdown-safety.js
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
-import { delimiter, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import {
   ContractErrorSchema, CreateCheckpointCommandSchema,
@@ -113,6 +114,18 @@ export interface EnvironmentStatus {
 
 export class EnvironmentError extends Error {
   constructor(readonly contractError: ContractError) { super(contractError.message); }
+}
+// Startup failures raised before any session/pane side effect. Callers that keep their own
+// operation receipts (Local Web) may settle these as definitive failures instead of uncertain.
+const unchangedStartupFailures = new WeakSet<object>();
+export function markStartupUnchanged(error: unknown): unknown {
+  const value = error instanceof Error ? error : new Error(String(error));
+  unchangedStartupFailures.add(value);
+  return value;
+}
+/** True only when `up` proved the repository session was not changed before it failed. */
+export function startupLeftSessionUnchanged(error: unknown): boolean {
+  return typeof error === "object" && error !== null && unchangedStartupFailures.has(error);
 }
 function fail(message: string, details?: any): never {
   throw new EnvironmentError({ code: "validation", retryable: false, message, ...(details !== undefined ? { details } : {}) });
@@ -306,7 +319,7 @@ export class EnvironmentLifecycle {
     return READY_TRANSPORT_STATES.has(pane.transportState);
   }
   private ready(manifest: SessionManifest, config: EnvironmentConfig): boolean {
-    return manifest.status === "up" && config.environment.roles.filter((r) => r.role !== "developer" && (r.required ?? true)).every((r) =>
+    return manifest.status === "up" && config.environment.roles.filter((r) => r.role !== "developer" && r.role !== "sos" && (r.required ?? true)).every((r) =>
       manifest.panes.filter((pane) => pane.role === r.role).length === 1 &&
       manifest.panes.some((pane) => pane.role === r.role && this.readyPane(pane)));
   }
@@ -321,6 +334,11 @@ export class EnvironmentLifecycle {
     }
   }
   async up(timeoutMs?: number, checkExpectation?: ExecutionExpectationGuard): Promise<SessionManifest> {
+    const phase = { composing: false };
+    try { return await this.startup(phase, timeoutMs, checkExpectation); }
+    catch (error) { throw phase.composing ? error : markStartupUnchanged(error); }
+  }
+  private async startup(phase: { composing: boolean }, timeoutMs?: number, checkExpectation?: ExecutionExpectationGuard): Promise<SessionManifest> {
     // Step 1: load_project_config
     this.progress("Đang kiểm tra kho mã nguồn và cấu hình...");
     const repository = await identifyRepository(this.cwd, this.runner);
@@ -460,10 +478,38 @@ export class EnvironmentLifecycle {
       if (config.environment.permissions?.trustedWorkspace === false) {
         fail("Workspace trust check failed: repository workspace is not trusted. Remediation: Set environment.permissions.trustedWorkspace to true in .bflow/config.yml or trust the workspace.", { component: "permissions" });
       }
+      // Provider trust records serve real provider launches only: a custom composition (tests, embedded
+      // integrations) never writes into the account's provider configuration.
+      const defaultComposition = !this.dependencies.integration && !this.dependencies.openIntegration && !process.env.BFLOW_ENVIRONMENT_MODULE;
       // Explicit opt-in only: pre-accept Claude Code's per-project trust dialog so headless panes are not stuck on it.
-      if (config.environment.permissions?.trustedWorkspace === true && distinctRequiredClis.includes("claude")) {
+      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true && distinctRequiredClis.includes("claude")) {
         const { claudeConfigFile, ensureClaudeWorkspaceTrust } = await import("./claude-trust.js");
         await ensureClaudeWorkspaceTrust(repository.root, claudeConfigFile(this.env));
+      }
+      // Same opt-in for Codex: headless panes otherwise stop on "Trust this folder?". Record the answer
+      // in each Codex home a required role will use (selected isolator profile, or the account's own).
+      // Not distinctRequiredClis: that list omits profile-selected roles (it only drives native auth checks).
+      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true &&
+          rolesToRun.some(role => (role.required ?? true) && role.cli === "codex")) {
+        const { ensureCodexWorkspaceTrust } = await import("@bflow/agent-providers");
+        const homes = new Set<string>();
+        for (const role of rolesToRun.filter(item => (item.required ?? true) && item.cli === "codex")) {
+          const profileName = role["profile-name"] ?? selectedProfiles?.codex?.["profile-name"];
+          if (profileName === undefined) {
+            homes.add(this.env.CODEX_HOME?.trim() || join(this.env.HOME?.trim() || homedir(), ".codex"));
+            continue;
+          }
+          try {
+            const { resolveIsolatorStateRoot } = await import("./platform-options.js");
+            const profiles = await import("@bflow/runtime/platform/isolator-profile");
+            const resolved = await new profiles.IsolatorProfileResolver({
+              stateRoot: resolveIsolatorStateRoot(this.env, this.env.HOME ?? homedir()), environment: this.env
+            }).resolve("codex", profileName, { timeoutMs: Math.min(8000, deadline.remaining()) });
+            const env = resolved.ok ? resolved.value.environment : undefined;
+            if (env?.CODEX_HOME || env?.HOME) homes.add(env.CODEX_HOME || join(env.HOME!, ".codex"));
+          } catch { /* Profile readiness is reported by provider preflight; trust stays a dialog. */ }
+        }
+        for (const home of homes) await ensureCodexWorkspaceTrust(repository.root, join(home, "config.toml"));
       }
       const isUnattended = config.environment.permissions?.mode === "unattended_isolated" || rolesToRun.some((r) => r.permissionMode === "unattended_isolated");
       if (isUnattended && config.environment.permissions?.isolation !== "os_sandbox" && config.environment.permissions?.isolation !== "container") {
@@ -588,6 +634,8 @@ export class EnvironmentLifecycle {
         ? { ...config, environment: { ...config.environment, roles: rolesToRun } }
         : config;
       await checkExpectation?.();
+      // From here on the integration may register or start session resources.
+      phase.composing = true;
       const integration = await deadline.call(() => this.integration(repository, compositionConfig, checkExpectation, config));
       if (!integration) fail("P13 SessionLifecycleManager is not composed. Supply CliContext.environment.openIntegration or BFLOW_ENVIRONMENT_MODULE; no roles were started.");
 
@@ -688,7 +736,7 @@ export class EnvironmentLifecycle {
           await this.saveManifest(repository, { ...manifest, status: manifest.status === "up" && (!this.ready(manifest, config) || !nativeReady) ? "initializing" : manifest.status });
 
           for (const p of manifest.panes) {
-            if (config.environment.roles.some((r) => r.role !== "developer" && r.role === p.role && (r.required ?? true))) {
+            if (config.environment.roles.some((r) => r.role !== "developer" && r.role !== "sos" && r.role === p.role && (r.required ?? true))) {
               if (p.metadata?.["partialStart"] === true || p.metadata?.["startupStatus"] === "partial") {
                 await this.saveManifest(repository, { ...manifest, status: "degraded" });
                 fail(`Agent provider for role '${p.role}' only partially started. Remediation: Inspect role pane logs via 'bflow doctor' or restart the session with 'bflow down --yes && bflow up'.`, { component: `role:${p.role}` });
@@ -696,7 +744,7 @@ export class EnvironmentLifecycle {
             }
           }
 
-          const blocked = manifest.panes.find((p) => config.environment.roles.some((r) => r.role !== "developer" && r.role === p.role && (r.required ?? true)) && p.transportState === "blocked");
+          const blocked = manifest.panes.find((p) => config.environment.roles.some((r) => r.role !== "developer" && r.role !== "sos" && r.role === p.role && (r.required ?? true)) && p.transportState === "blocked");
           if (blocked) {
             await this.saveManifest(repository, { ...manifest, status: "degraded" });
             fail(`Required role '${blocked.role}' is blocked during startup in pane '${blocked.paneId}'. Resolve it before retrying up.`);
@@ -720,7 +768,7 @@ export class EnvironmentLifecycle {
             break;
           }
 
-          const missingOrStarting = config.environment.roles.filter(r => r.role !== "developer" && (r.required ?? true)).find(r => {
+          const missingOrStarting = config.environment.roles.filter(r => r.role !== "developer" && r.role !== "sos" && (r.required ?? true)).find(r => {
             const p = manifest!.panes.find(pane => pane.role === r.role);
             return !p || !this.readyPane(p);
           });
@@ -812,8 +860,11 @@ export class EnvironmentLifecycle {
           cleanupOutcome = `failed after the startup integration failed to close (${String(cleanupError)})`;
         }
       }
-      if (startupError !== undefined) throw this.startupFailureWithCleanup(startupError,
-        cleanupOutcome ?? (cleanupEligible ? "was not completed" : "was not attempted because startup had not changed the session"));
+      if (startupError !== undefined) {
+        const failure = this.startupFailureWithCleanup(startupError,
+          cleanupOutcome ?? (cleanupEligible ? "was not completed" : "was not attempted because startup had not changed the session"));
+        throw !cleanupEligible && closeError === undefined ? markStartupUnchanged(failure) : failure;
+      }
       if (!outcome) fail("Startup completed without a session manifest.");
       await rm(this.statePath(repository, "operation.json"), { force: true });
       return outcome;

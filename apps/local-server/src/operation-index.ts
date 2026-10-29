@@ -2,12 +2,28 @@ import { constants } from 'node:fs';
 import { mkdir, lstat, realpath, open, rename, unlink, readdir } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { spawn } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { IdentifierSchema } from '@bflow/contracts';
 import { WebOperationSchema, type WebOperation } from '@bflow/contracts/web';
 import { canonicalWebJson, WebOperationIndexRecordSchema, type WebOperationIndexRecord } from '@bflow/contracts/web-host';
 import { HttpError } from './errors.js';
 
+/** Kernel advisory lock: released on exit, Ctrl-C, SIGKILL or crash, so a dead owner never wedges the state. */
+function exclusiveLock(file:FileHandle):Promise<boolean>{
+  return new Promise((accept,reject)=>{
+    const child=spawn('flock',['--nonblock','--exclusive','3'],{stdio:['ignore','ignore','ignore',file.fd]});
+    child.once('error',reject);child.once('exit',code=>accept(code===0));
+  });
+}
+/** True when no live Local Server holds this state directory (missing state counts as free). */
+export async function privateStateIsFree(directory:string):Promise<boolean>{
+  let file:FileHandle;
+  try{file=await open(join(directory,'server.lock'),constants.O_RDWR|constants.O_NOFOLLOW);}
+  catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return true;throw error;}
+  try{const info=await file.stat();if(!info.isFile()||info.nlink!==1)throw new Error('Unsafe server lock');return await exclusiveLock(file);}
+  finally{await file.close();}
+}
 /** Local POSIX private files. Fails closed on foreign/symlink state; no same-UID or power-loss claim. */
 export class PrivateState {
   private constructor(readonly directory:string,private lock:FileHandle,readonly principalId:string) {}
@@ -16,7 +32,12 @@ export class PrivateState {
     await mkdir(directory,{recursive:true,mode:0o700});
     const info=await lstat(directory);
     if(!info.isDirectory() || info.uid!==process.getuid?.() || (info.mode&0o077)!==0 || await realpath(directory)!==resolve(directory)) throw new Error('Unsafe private state directory');
-    const lock=await open(join(directory,'server.lock'),constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);
+    const lock=await open(join(directory,'server.lock'),constants.O_CREAT|constants.O_RDWR|constants.O_NOFOLLOW,0o600);
+    try{
+      const held=await lock.stat();
+      if(!held.isFile() || held.nlink!==1 || held.uid!==process.getuid?.() || (held.mode&0o077)!==0)throw new Error('Unsafe server lock');
+      if(!await exclusiveLock(lock))throw new Error('Another Local Server owns this private state directory');
+    }catch(error){await lock.close();throw error;}
     const state=new PrivateState(directory,lock,'');
     try {
       let principal=await state.read('principal.json');
@@ -38,7 +59,8 @@ export class PrivateState {
     finally{await file.close();await unlink(temporary).catch(()=>{});}
   }
   async names():Promise<string[]> {return readdir(this.directory);}
-  async close():Promise<void>{await this.lock.close();await unlink(join(this.directory,'server.lock'));}
+  // Keep the lock inode: unlinking a locked file would let a racing owner lock a different inode.
+  async close():Promise<void>{await this.lock.close();}
 }
 export interface IndexedOperation {index:WebOperationIndexRecord;operation:WebOperation}
 export class OperationIndex {
