@@ -115,3 +115,27 @@ own those). Uncertain lifecycle receipts from the live attempt were never resent
 - Re-run W09 live after the owner approves `bflow setup` (skill pins, gateway service reconcile) and F04 is fixed:
   `BFLOW_W09_LIVE=1 BFLOW_W09_REPO=… BFLOW_W09_EVIDENCE=… pnpm --filter @bflow/web exec playwright test e2e/workflow.spec.ts`.
   Then add live resume (controlled recoverable block) and live chat-in-same-run rows.
+
+## Fix pass (owner granted full permission, 2026-10-29)
+
+Branch `fix/web/w09-findings` (from `cf9a327`). Commits `5fa7a2e`, `a84dcdd`, `74b3c5d`,
+`5969043`, `ea3bde9`, `986a34d`, `eb6c9bb`. No contract/public-schema/lockfile change.
+
+| Finding | Fix | Evidence |
+| --- | --- | --- |
+| F04 web start "hang" | Root cause: `perform` let an `up` exception escape before settling the receipt (up itself failed in ~7 s). `up` now marks failures proven to leave the session unchanged; web settles them `failed` with the lifecycle remediation, everything else `reconciliation_required` with its message, never `running`. Local Server keeps lifecycle remediation text; UI shows it. Ctrl-C closes the listener at once, waits for an in-flight start/stop to settle (second signal exits), real binary exits. | web-lifecycle tests incl. real `EnvironmentLifecycle`; live: receipts settled with exact messages |
+| F02 stale owner | SIGHUP handled like Ctrl-C. Server state lock is a kernel `flock` (was an O_EXCL file that also blocked restart after a crash). A dead owner is recovered only when its control port refuses AND the lock is free; impostor listener or held lock still fail closed. | web-command tests, acceptance SIGHUP/SIGKILL |
+| F05 doctor false-ready | Doctor always checks each role's default exact skill pins against the machine store and names missing skills. Machine fixed with `bflow setup --apply --yes` (36 skills, profile sync). | doctor reported the real missing pin, then healthy after setup |
+| F01 generic 400 | Missing/invalid `.bflow/config.yml` is a failed `repository-config` readiness check with the `bflow init` remediation. | web-lifecycle + acceptance |
+| F03 two tabs | Decision operations show their outcome; a suppressed opposite choice gets a persistent "chưa được gửi" notice. | recovery.spec asserts it |
+
+New live blockers found and fixed (Codex roles):
+- Private Codex process home had no shell rc → zsh-newuser-install swallowed the typed launch (`odex`). Empty `.zshrc` now created in the Bflow-owned home.
+- Private Codex config dropped `[projects]` → "Trust this folder?" dialog. Runtime passes workspace root + role cwd; written only to the private config.
+- Codex writes `[tui]` state into config.toml → `native_binding_config_mismatch`. Launch/health digest of `codex-home/config.toml` excludes only `[tui]`.
+- Provider auth helper resolved its key from the private HOME → "credential missing". Private config runs the auth command via `/usr/bin/env HOME=<source home>`.
+- Profile/native Codex homes: with `trustedWorkspace: true`, `up` appends the trust table (never rewrites, never overrides a decision) like the existing Claude handling. Both Claude and Codex trust writes now require the default Runtime composition: tests previously leaked trust for temporary repos into `~/.claude.json` (908 stale `/tmp/bflow-*` entries exist from earlier runs; not cleaned automatically because Claude Code owns that file).
+
+Live evidence reached (real Herdr 0.9.5 + Codex 0.165.0, disposable repos): web session start → `applied`, environment UP 7/7; form `create_request` admitted directly (no Conversation model) and delegated to Coordinator. With the account's native Codex config the RunSystem gateway rejected the configured model (`gpt-6.1-terra is not authorized`) — an account limit, not a Bflow defect. The profile path's trust fix (`eb6c9bb`) has unit/resolver evidence only; its live rerun was stopped. Per owner instruction the full live SDLC workflow and the full monorepo suite were not rerun: AC03–AC07/AC11 live rows and full SDLC remain **not_run**; M3 stays incomplete.
+
+Final scoped checks: `pnpm check:deps` 0, `pnpm typecheck` 0, `git diff --check` 0; apps/cli+local-server 1145/1145 (before trust commits), cli web + agent-providers 361/361, agent-providers+runtime platform 555/555, runtime host-platform/developer-launch/native-adapters + pane-manager 277/277, web unit 52/52, web e2e 9 passed/1 skipped, acceptance 11/11.
