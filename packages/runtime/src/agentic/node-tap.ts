@@ -17,6 +17,22 @@ export class BehavioralIdentityMismatch extends Error {
   }
 }
 
+/**
+ * An identity mismatch the Developer must repair by naming the mapped tests exactly as the accepted strategy does. It reuses
+ * the bounded test-code repair route: an escalation left the run stranded while the Developer waited for its phase result.
+ */
+export class BehavioralIdentityRepair extends NodeTapTestCodeFailure {
+  constructor(outcome: QualityCommandOutcome, readonly expectedNames: readonly string[], readonly observedNames: readonly string[],
+    readonly protocol: "node_tap" | "vitest_json", readonly diagnostics: unknown,
+    rtk?: import("./behavioral-runner.js").BehavioralMeasurement["rtk"]) {
+    super(outcome, observedNames, rtk);
+    const list = (names: readonly string[]) => JSON.stringify(names.slice(0, 20)).slice(0, 1000);
+    this.message = `Observed test names differ from the accepted test identities: expected exactly ${list(expectedNames)}, observed ${list(observedNames)}. ` +
+      "Rename the mapped tests so each full name (suite titles and test title joined by a space) equals an expected name; do not change the accepted mapping. " +
+      "Do not implement before valid Red evidence.";
+  }
+}
+
 /** Supported measurement protocol: complete, flat Node test-runner TAP with assertion diagnostics. */
 export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: readonly string[], nameSelection = false, selectedPaths: readonly string[] = []) {
   if (outcome.spawnError || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.signal || outcome.exitCode === null) throw new Error("Behavioral runner infrastructure failure (spawn, deadline, signal or truncated output)");
