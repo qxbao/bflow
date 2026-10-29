@@ -2,12 +2,14 @@ import { execFile } from "node:child_process";
 import { readFile, lstat, readdir } from "node:fs/promises";
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { sign } from "node:crypto";
 import { AgentBindingReceiptSchema, RoleMessageSchema, SessionManifestSchema, canonicalReceiptJson } from "@bflow/contracts";
 import { createSignedBindingReceipt } from "./receipt-host.js";
 import { record, textField } from "./journal.js";
+import { HostReceiptJournal } from "./host-receipts.js";
+import { resolveNativePluginSelection } from "./native-intent-selection.js";
 
 /** Native Herdr action entrypoint; not a model tool and never loads a model API. */
 export async function deliverNativeHerdrMessage(env = process.env): Promise<void> {
@@ -40,8 +42,12 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
   const keyStat = await lstat(keyPath);
   if (!keyStat.isFile() || (keyStat.mode & 0o077) !== 0) throw new Error("Native signing key must be a private regular file");
   const privateKey = await readFile(keyPath, "utf8");
-  let message = RoleMessageSchema.parse(JSON.parse(textField(context.selected_text)));
   const manifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(config.manifestFile), "utf8")));
+  let message = await resolveNativePluginSelection(textField(context.selected_text), async operationId => {
+    const receipts = new HostReceiptJournal(join(dirname(keyPath), "authentication-receipts"), manifest.workspaceRoot, manifest.sessionId);
+    const delivery = await receipts.nativeDelivery(operationId);
+    return delivery === undefined ? undefined : { ...delivery, rejected: (await receipts.nativeRejection(delivery.message.message_id)) !== undefined };
+  });
   const binding = manifest.panes.find(pane => pane.paneId === message.sender.pane_id && pane.agentId === message.sender.agent_id && pane.role === message.sender.role);
   if (!binding || context.focused_pane_id !== binding.paneId || context.workspace_id !== binding.workspaceId)
     throw new Error("Native message sender is outside the host's role manifest");
