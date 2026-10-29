@@ -7,7 +7,7 @@ import { AgentConfigurationSchema, ApprovalDecisionSchema, ApprovalRequestSchema
   RoleMessageSchema, SessionManifestSchema, type AgentRole, type ApprovalDecision, type PaneBinding, type RoleMessage } from "@bflow/contracts";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import { draft } from "../../../specification/test/fixtures.js";
-import { AgenticJournal, type JournalState } from "../../src/agentic/journal.js";
+import { AgenticJournal, digest, type JournalState } from "../../src/agentic/journal.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "../../src/agentic/conversation.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
@@ -147,6 +147,53 @@ async function reply(host: AgenticConversationHost, content: string, messageId =
 const resumeOf = async (instance: AgenticWorkflowRuntime) => (await outbound(instance)).filter(entry => entry.message.type === "task.status");
 
 describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", () => {
+  it.each(["direct", "received", "delivered", "malformed"])("keeps a paused Coordinator question pending across ticks and delivers its answer without resuming work (%s)", async recovery => {
+    const f = await fixture(); let runtime = f.runtime();
+    const action = { actionId: `next-${digest([RUN, "allocation-blocked"])}`, kind: "resume_coordinator" as const,
+      owner: "coordinator" as const, reason: "Separate plan approval required", sourceMessageId: "allocation-blocked",
+      createdAt: new Date().toISOString(), state: "pending" as const, previousStatus: "implementing" as const,
+      recovery: "manual" as const, resumeAttempts: 0 };
+    await f.journal.exclusive(async (state, save) => {
+      state.runs[0]!.status = "escalated";
+      state.runs[0]!.pendingAction = action;
+      await save();
+    });
+    const receipt = await runtime.requestUserDecision(f.coordinator, "coordinator", parseUserDecisionToolInput({
+      runId: RUN, taskId: TASK, question: "Approve the accepted task plan?", options: ["Approve plan", "Request changes"]
+    })) as { approvalId: string };
+    await runtime.tick();
+    expect(await userDecisions(runtime, receipt.approvalId)).toMatchObject({ status: "pending" });
+    expect(inboxTo(f.inbox, "approval.request")).toHaveLength(1);
+    const host = await f.chat(runtime);
+    await host.receiveHerdr(await promptOf(runtime));
+    expect((await reply(host, "1")).ok).toBe(true);
+    const decision = (await outbound(runtime)).find(entry => entry.message.type === "approval.decision")!.message;
+    if (recovery === "malformed") {
+      const malformed = RoleMessageSchema.parse({ ...decision, message_id: "malformed-paused-answer",
+        idempotency_key: "malformed-paused-answer", payload: { ...ApprovalDecisionSchema.parse(decision.payload), decision: "invalid" } });
+      await expect(runtime.receiveHerdr(malformed)).rejects.toThrow();
+      runtime = f.runtime();
+      // The rejected payload may remain durably received; it must not poison the host-wide recovery selection.
+      await runtime.tick();
+      expect(await userDecisions(runtime, receipt.approvalId)).toMatchObject({ status: "pending" });
+      await runtime.receiveHerdr(decision);
+    } else if (recovery !== "direct") {
+      // Simulate a crash after the authenticated envelope's durable inbox write and before semantic application.
+      if (recovery === "received")
+        await f.journal.exclusive(async (state, save) => { state.inbox.push({ message: decision, status: "received" }); await save(); });
+      else await runtime.flushOutbound(); // Transport delivery succeeded before host reception was recorded.
+      runtime = f.runtime();
+      await runtime.recoverMissingCoordinatorWakeups();
+    } else await runtime.receiveHerdr(decision);
+    await runtime.tick(); await runtime.tick();
+    expect(await userDecisions(runtime, receipt.approvalId)).toMatchObject({ status: "answered", answer: { selectedOption: "Approve plan" } });
+    const notifications = sentTo(f.transport, "coordinator", "task.status").filter(item =>
+      JSON.parse(item.instruction).payload.kind === "user_decision_answer");
+    expect(notifications).toHaveLength(1);
+    expect(await runtime.inspect(RUN)).toMatchObject({ status: "escalated", pendingAction: action });
+    expect(sentTo(f.transport, "developer", "task.assignment")).toHaveLength(0);
+  });
+
   it("does not consume the Logs scope correction as a governance option, even on a repeated hook call", async () => {
     const f = await fixture(), runtime = f.runtime();
     const receipt = await runtime.requestUserDecision(f.coordinator, "coordinator", parseUserDecisionToolInput({

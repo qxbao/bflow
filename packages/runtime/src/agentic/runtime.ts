@@ -529,6 +529,7 @@ export class AgenticWorkflowRuntime {
     const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
         (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
           TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
+          !this.acceptsPausedUserDecision(run, item.message) &&
           !(run.status === "escalated" && isConversationContext(item.message))))))
       .map(item => RoleMessageSchema.parse(item.message)));
     let replayed = 0;
@@ -552,7 +553,8 @@ export class AgenticWorkflowRuntime {
         out.message.type === "approval.decision" && out.handle !== undefined && ["accepted", "released"].includes(out.status) &&
         !state.inbox.some(item => item.message.message_id === out.message.message_id ||
           (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
-        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)))
+        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+          (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
         .map(out => RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
           ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
           : out.message));
@@ -1695,7 +1697,9 @@ export class AgenticWorkflowRuntime {
         // A known native result may arrive after a schema failure paused its run. Admit only the exact immutable
         // intent and bound specialist reply; keep the pause and human gates. This breaks the ACK/resume deadlock
         // without authorizing new work, task success, or arbitrary late messages during an escalation.
-        if (!this.acceptsPausedNativeReply(state, run, message)) this.live(run);
+        // Answering a known Coordinator question can resolve a pause; it never resumes the workflow itself.
+        if (!this.acceptsPausedUserDecision(run, message) &&
+            !this.acceptsPausedNativeReply(state, run, message)) this.live(run);
         if (message.type === "approval.decision") {
           if (message.sender.role !== "conversation") throw new Error("Approval must return via Conversation");
           const decision = ApprovalDecisionSchema.parse(message.payload);
@@ -1855,6 +1859,15 @@ export class AgenticWorkflowRuntime {
     this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, reason, fromRole: message.sender.role,
       options: ["Ask Coordinator to resolve the blocker (answer it or re-plan the task)", "Cancel this run"],
       headline: `Workflow blocked: ${reason}`, sdlcStatus: run.status }, `specialist-blocked:${message.message_id}`, "conversation");
+  }
+
+  private acceptsPausedUserDecision(run: RunRecord, message: RoleMessage): boolean {
+    if (!resumablyPaused(run) || run.supersededBy || message.type !== "approval.decision" ||
+        message.sender.role !== "conversation") return false;
+    const decision = ApprovalDecisionSchema.safeParse(message.payload);
+    if (!decision.success) return false;
+    const entry = run.userDecisions?.[decision.data.approvalId];
+    return entry?.role === "coordinator" && entry.status === "pending";
   }
 
   private acceptsPausedNativeReply(state: JournalState, run: RunRecord, message: RoleMessage): boolean {
@@ -2965,7 +2978,10 @@ export class AgenticWorkflowRuntime {
     if (role === "conversation" || binding.role !== role) throw new Error("User decisions are requested by the bound non-Conversation role");
     return this.transaction(async (state, save, _core, outbox) => {
       if (this.quiesced) throw new Error("Runtime is quiesced");
-      const run = this.run(state, input.runId); this.live(run);
+      const run = this.run(state, input.runId);
+      const pausedCoordinator = role === "coordinator" && resumablyPaused(run) && !run.supersededBy &&
+        run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.owner === "coordinator";
+      if (!pausedCoordinator) this.live(run);
       if (role !== "coordinator" && !state.outbound.some(out => out.message.run_id === run.runId && ["accepted", "released"].includes(out.status) &&
           out.handle !== undefined && out.handle.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
           (out.message.type === "task.assignment" ? out.taskId === input.taskId : out.message.type === "delegation.request")))
@@ -3099,7 +3115,8 @@ export class AgenticWorkflowRuntime {
     let changed = false;
     for (const run of state.runs) for (const entry of Object.values(run.userDecisions ?? {})) {
       if (entry.status !== "pending") continue;
-      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) {
+      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) &&
+          !(entry.role === "coordinator" && resumablyPaused(run) && !run.supersededBy)) {
         // A terminal run never resumes its askers, but Conversation still drops the now-unanswerable prompt.
         entry.status = run.cancelled ? "cancelled" : "expired"; changed = true;
         this.notifyUserDecisionClosed(state, outbox, run, entry);

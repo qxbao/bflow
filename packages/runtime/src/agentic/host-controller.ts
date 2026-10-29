@@ -1,6 +1,7 @@
 import { connectArtifact } from "../interaction/artifacts.js";
 import { WebIssuerCredentialSchema } from "@bflow/contracts/web-host";
-import { createExecutionResolutionReader } from "./execution-binding.js";
+import { createExecutionResolutionReader, readResolutionFile, type ExecutionResolutionReader } from "./execution-binding.js";
+import { buildExecutionPlan } from "../planning/index.js";
 import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
@@ -12,11 +13,11 @@ import { fileURLToPath } from "node:url";
 import {
   ExecutionResolutionSourcesSchema, type ExecutionResolutionSources, AgentRoleSchema, CreateCheckpointCommandSchema, RecoveryCheckpointSchema, RunQuerySchema, SessionManifestSchema, WorkflowRunSnapshotSchema,
   type AgentRole, type CreateCheckpointCommand, type OperationOptions, type OperationResult, type RecoveryCheckpoint,
-  type RuntimeService, type SessionManifest
+  StoredRunSchema, type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
-import { digest, record, textField } from "./journal.js";
+import { AgenticJournal, digest, record, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
 import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
@@ -155,7 +156,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
   const persisted = await readHostConfiguration(join(directory, "host.json"));
   if (persisted.repositoryPath !== repositoryPath || persisted.sessionId !== options.sessionId || persisted.directory !== directory)
     throw new Error("Foreign host configuration");
-  return ensureAgenticHost({ repositoryPath, sessionId: options.sessionId,
+  return ensureOwnedAgenticHost({ repositoryPath, sessionId: options.sessionId,
     ...(persisted.herdrBinary !== undefined ? { herdrBinary: persisted.herdrBinary } : {}),
     ...(persisted.manifestDirectory !== undefined ? { manifestDirectory: persisted.manifestDirectory } : {}),
     ...(persisted.maxDeveloperCapacity !== undefined ? { maxDeveloperCapacity: persisted.maxDeveloperCapacity } : {}),
@@ -165,7 +166,7 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}),
-    ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) });
+    ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) }, false);
 }
 /** Connect only to an existing endpoint. This seam cannot prepare, activate or restart a host. */
 export async function queryAgenticHostInteraction(options: { repositoryPath: string; sessionId: string }, input: unknown, method: "interaction_query" | "interaction_events" = "interaction_query"): Promise<unknown> {
@@ -222,6 +223,49 @@ function failure<T>(error: unknown): OperationResult<T> {
 }
 /** Idempotently starts a durable host before provider MCP startup. Never steals a stale socket. */
 export async function ensureAgenticHost(options: AgenticHostOptions): Promise<AgenticHostController> {
+  return ensureOwnedAgenticHost(options, true);
+}
+
+/** A fresh owner resolution may repair an interrupted bootstrap, never an existing workflow binding. */
+async function refreshEmptyStartupSources(configuration: HostConfiguration, configPath: string,
+  sources: ExecutionResolutionSources, reader: ExecutionResolutionReader): Promise<void> {
+  const owner = record(JSON.parse((await readResolutionFile(join(configuration.directory, "owner.json"))).toString("utf8")));
+  if (!Number.isSafeInteger(owner.pid) || Number(owner.pid) < 1) throw new Error("Startup refresh requires a valid stopped host owner");
+  try { process.kill(Number(owner.pid), 0); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    const storage = resolve(configuration.directory, "../../agentic");
+    await new AgenticJournal(join(storage, "journal"), configuration.repositoryPath).exclusive(async state => {
+      if ([state.runs, state.outbound, state.inbox, state.pendingCore, state.pendingVerifications].some(items => items.length))
+        throw new Error("Startup source refresh is forbidden when workflow state exists");
+      // A missing journal is legitimate before intake only when the authoritative RunStore is also empty.
+      const database = join(storage, "runs.db");
+      try {
+        const info = await lstat(database);
+        if (!info.isFile() || info.isSymbolicLink() || await realpath(database) !== database)
+          throw new Error("Startup refresh requires a safe existing RunStore");
+        const persistence = await import("@bflow/persistence");
+        const opened = persistence.openSqliteRunStore({ filename: database });
+        if (!opened.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
+        try {
+          const found = await opened.value.find(RunQuerySchema.parse({ limit: 1 }));
+          if (!found.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
+          if (found.value.items.map(item => StoredRunSchema.parse(item)).length || found.value.nextCursor)
+            throw new Error("Startup source refresh is forbidden when workflow state exists");
+        } finally { opened.value.close(); }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const executionSourceDigests = await reader.readPrivateSources!();
+      await reader();
+      await rewritePersistedPlatform(configPath, configuration.platform, { executionResolution: sources, executionSourceDigests });
+      const parent = await open(configuration.directory, "r");
+      try { await parent.sync(); } finally { await parent.close(); }
+    });
+    return;
+  }
+  throw new Error("Startup source refresh requires the recorded host owner to be stopped");
+}
+
+async function ensureOwnedAgenticHost(options: AgenticHostOptions, allowEmptyStartupRefresh: boolean): Promise<AgenticHostController> {
   const repositoryPath = await realpath(options.repositoryPath);
   const startupReader = options.executionResolution === undefined ? undefined : await createExecutionResolutionReader(options.executionResolution);
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
@@ -286,6 +330,11 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
   const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
   const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
+  // Live readiness observations are deliberately absent from the planner's authority fingerprint.
+  const resolutionAuthority = (sources: ExecutionResolutionSources | undefined) => sources === undefined ? null
+    : { ...sources, plan: buildExecutionPlan(sources.plan).fingerprint };
+  const resolutionChanged = options.executionResolution !== undefined &&
+    digest(resolutionAuthority(configuration.executionResolution)) !== digest(resolutionAuthority(options.executionResolution));
   const request = (method: string, params: unknown = {}, op?: OperationOptions) => {
     const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000),
       op?.deadline === undefined ? Infinity : Math.max(1, Date.parse(op.deadline) - Date.now()));
@@ -300,6 +349,7 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
   if (alive && options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy))
     throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
+  if (alive && resolutionChanged) throw new Error("Persisted host execution sources differ; quiesce the existing host before re-resolution");
   if (!alive) {
     try {
       await lstat(configuration.socketPath);
@@ -313,6 +363,12 @@ export async function ensureAgenticHost(options: AgenticHostOptions): Promise<Ag
       try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
       catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
     } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
+    if (resolutionChanged) {
+      if (!allowEmptyStartupRefresh || !startupReader || !options.executionResolution)
+        throw new Error("Persisted recovery cannot refresh execution sources");
+      await refreshEmptyStartupSources(configuration, configPath, options.executionResolution, startupReader);
+      configuration = await readHostConfiguration(configPath);
+    }
     if (platformChanged || policyChanged || impactIndexChanged) {
       await rewritePersistedPlatform(configPath, requestedPlatform, {
         ...(options.policy !== undefined ? { policy: options.policy } : {}),

@@ -1149,7 +1149,8 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
 export async function rewritePersistedPlatform(
   path: string,
   platform: AgenticHostPlatformOptions | undefined,
-  extras?: { readonly policy?: unknown; readonly impactIndex?: unknown }
+  extras?: { readonly policy?: unknown; readonly impactIndex?: unknown;
+    readonly executionResolution?: unknown; readonly executionSourceDigests?: unknown }
 ): Promise<void> {
   const current = z.record(z.unknown()).parse(JSON.parse(await readFile(path, "utf8")));
   await writePrivateAtomic(
@@ -1158,7 +1159,9 @@ export async function rewritePersistedPlatform(
       ...current,
       platform,
       ...(extras && "policy" in extras ? { policy: extras.policy } : {}),
-      ...(extras && "impactIndex" in extras ? { impactIndex: extras.impactIndex } : {})
+      ...(extras && "impactIndex" in extras ? { impactIndex: extras.impactIndex } : {}),
+      ...(extras && "executionResolution" in extras ? { executionResolution: extras.executionResolution } : {}),
+      ...(extras && "executionSourceDigests" in extras ? { executionSourceDigests: extras.executionSourceDigests } : {})
     })
   );
 }

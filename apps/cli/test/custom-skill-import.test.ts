@@ -16,6 +16,7 @@ import { identifyRepository, type RepositoryIdentity } from "../src/repository.j
 import { loadMachineSkillCatalog } from "../src/skill-catalog.js";
 import { buildHostPlatformOptions } from "../src/platform-options.js";
 import { runHighLevelCli } from "../src/high-level/index.js";
+import { probeDoctorModels } from "../src/provider-model-diagnostics.js";
 
 const SOURCE_SKILL = `---
 name: review-checklist
@@ -118,6 +119,26 @@ async function prepareReviewer(options: AgenticHostPlatformOptions, generation: 
 }
 
 describe("custom skill import: CLI → resolver → Runtime", () => {
+  it("uses repository-approved custom pins when composing deep doctor model diagnostics", async () => {
+    const digest = await importAndApprove();
+    const runtime = await import("@bflow/runtime");
+    // Keep the real repository/catalog/permission composition; replace only paid inference.
+    const probe = vi.spyOn(runtime, "probeConfiguredProviderModels").mockResolvedValue([]);
+    try {
+      const config = await readEnvironmentConfig(repository);
+      await expect(probeDoctorModels({ repository, config, env: process.env })).resolves.toEqual([]);
+      const platform = probe.mock.calls[0]![0].platform;
+      expect(platform.roles.find(role => role.role === "reviewer")!.skillSelections).toContainEqual(
+        expect.objectContaining({ skill: { skillId: "review-checklist", version: "1.0.0", digest },
+          approvalReceiptId: expect.any(String), required: true })
+      );
+      expect(platform.roles.find(role => role.role === "developer")!.skillSelections
+        .some(selection => selection.skill.skillId === "review-checklist")).toBe(false);
+    } finally {
+      probe.mockRestore();
+    }
+  }, 120_000);
+
   it("scans read-only, stages without approval and carries an approved exact pin into the Runtime manifest and launch material", async () => {
     const scan = await cli("skills", "scan", "--source", join(sources, "review-checklist"));
     expect(scan.exitCode).toBe(0);

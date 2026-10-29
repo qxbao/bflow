@@ -2,7 +2,7 @@ import { RolePaneManager } from "../../../pane-manager/src/role-pane-manager.js"
 import { InMemorySessionManifestStore } from "../../../pane-manager/src/manifest-store.js";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -33,6 +33,23 @@ async function fixture(code: string) {
 }
 
 describe.skipIf(process.platform !== "linux")("future Developer process supervision", () => {
+  it("skips a PATH directory named codex and pins the actual later executable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bflow-process-scope-path-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const shadow = join(root, "instructions"), bin = join(root, "bin");
+    await mkdir(join(shadow, "codex"), { recursive: true });
+    await mkdir(bin);
+    const provider = join(bin, "codex"), script = "#!/bin/sh\nexit 0\n";
+    await writeFile(provider, script, { mode: 0o700 });
+    const manager = new DeveloperProcessScopes({ directory: join(root, "scopes") });
+    const wrapped = await manager.prepare({ runId: "run-1", taskId: "task-1", executable: provider,
+      executableDigest: hash(script), configFiles: [], material: { provider: "codex", argv: [],
+        env: { PATH: shadow + ":" + bin }, launchId: "launch-path", launchFingerprint: "a".repeat(64) } });
+    const config = JSON.parse(await readFile(join(root, "scopes", wrapped.env.BFLOW_PROCESS_SCOPE_ID!, "config.json"), "utf8"));
+    expect(config.target).toBe(await realpath(provider));
+    expect(config.targetDigest).toBe(hash(script));
+  });
+
   it("proves namespace exit and stops a detached descendant while retaining the worktree and original PATH", async () => {
     const f = await fixture(`const fs=require('node:fs'),cp=require('node:child_process');
       fs.writeFileSync(process.env.PROBE_PATH,process.env.PATH);

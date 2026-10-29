@@ -54,7 +54,8 @@ async function writeImmutable(path: string, value: unknown): Promise<void> {
 }
 async function executable(name: string): Promise<string> {
   for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
-    try { const path = await realpath(join(directory, name)); await access(path, constants.X_OK); return path; } catch { /* continue installed discovery */ }
+    try { const path = await realpath(join(directory, name)); if (!(await lstat(path)).isFile()) continue;
+      await access(path, constants.X_OK); return path; } catch { /* continue installed discovery */ }
   }
   throw new Error(`Developer process supervision requires installed ${name}`);
 }
@@ -84,7 +85,8 @@ export class DeveloperProcessScopes {
     const name = material.provider === "claude" ? "claude" : material.provider === "agy" ? "agy" : "codex";
     let target: string | undefined;
     for (const dir of originalPath.split(delimiter)) {
-      try { const candidate = await realpath(join(dir, name)); await access(candidate, constants.X_OK); target = candidate; break; } catch { /* continue effective Herdr PATH */ }
+      try { const candidate = await realpath(join(dir, name)); if (!(await lstat(candidate)).isFile()) continue;
+        await access(candidate, constants.X_OK); target = candidate; break; } catch { /* continue effective Herdr PATH */ }
     }
     if (!target) throw new Error("Provider command is absent from its actual launch PATH");
     const targetDigest = hash(await readFile(target));
