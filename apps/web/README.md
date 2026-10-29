@@ -37,11 +37,12 @@ The prescribed Big Shoulders Display / Inter / IBM Plex Sans / JetBrains Mono
 Vietnamese/Latin/Latin-ext variable WOFF2 faces are served locally under
 `public/fonts`, with SIL OFL notices. No external fonts/network request or CSP
 relaxation. Font source: Google Fonts CSS service and Google Fonts repository
-license files. Body 18px (17px on small screens), detail titles 32px, responsive
-display titles; a yellow registry CTA uses ink text. No workflow CTA is invented.
+license files. Tailwind builds the styles through its Vite plugin. Body 16px, page titles
+28–32px and section titles 20px; a yellow registry CTA uses ink text. No workflow CTA is invented.
 
-Desktop sidebar layout; gutters reduce at 900px, navigation stacks at 720px.
-Focus rings are 3px; text colors follow DESIGN's AAA pairs. Screenshot inspection
+Desktop uses a 224px sidebar at 1024px and up; smaller viewports have an inline
+navigation disclosure. Gutters are 16–32px. Desktop controls are 36px high; small-screen
+controls are at least 44px with 16px form text. Focus rings are 2px; text colors follow DESIGN's AAA pairs. Screenshot inspection
 and browser overflow checks cover 1440/1280/768 and 375px. These are local browser
 checks, not comprehensive WCAG certification or owner visual acceptance.
 
@@ -224,3 +225,34 @@ force stop using the existing lifecycle implementation. It has a separate intent
 from normal stop and retains quiesce/checkpoint barriers; interrupted unverified
 attempts may be lost, while worktrees/history remain available for reconciliation.
 Use it for failed pane/worktree-group closure after reviewing the displayed warning.
+
+## Compact UX and Tailwind
+
+Layout/component styles use Tailwind utilities in JSX. `styles/global.css` contains
+semantic theme values and shared document/control defaults; `styles/fonts.css`
+retains local font declarations. The old token/layout, request and chat stylesheets
+are removed. No CSS CDN or new runtime styling dependency is used.
+
+Initial reads show accessible skeletons. Background reads retain visible content,
+focus and drafts with a small update indicator; failed refreshes still identify stale
+data and disable actions through the existing freshness/authority checks.
+
+- Projects: name/path search and local pages of 12 on the loaded registry.
+- Runs: server cursor pages of 25, previous/next/first controls, URL filters and
+  browser-history cursor trails scoped to project/filter. Cursor deep links without
+  a known trail show “Trang hiện tại” and only offer a return to the first page.
+  Total pages are not inferred. Retry retains filters.
+- Review: status filter and local pages of 10 on the API snapshot, with one run
+  read per distinct visible run. This does not expand the API aggregate cap.
+  Paging/filtering after editing asks before discarding the decision input. Browser
+  Back/Forward keeps in-memory drafts pinned to the reviewed package; a changed
+  revision still requires explicit rereview. One failed run read affects its own
+  packages without disabling other authorized reviews.
+- Chat: previous/next/first history controls preserve the mounted composer draft.
+- Overview prioritizes session readiness, recent work and pending decisions;
+  diagnostic/observed-feed detail is expandable. Run detail groups reading and
+  action sections into columns when space allows. Settings uses anchor navigation
+  without unmounting configuration drafts and a separate unregister section.
+
+See [approved scope](UX-IMPROVEMENTS.md), [implementation plan](UX-PLAN.md) and
+`test/ux.test.tsx` / `e2e/ux.spec.ts` for interaction and responsive checks.

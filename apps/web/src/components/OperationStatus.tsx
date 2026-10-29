@@ -23,11 +23,11 @@ export function OperationStatus({observation,projectId}:{observation:Observation
   const guidance=code.success?failureGuidance[code.data]:undefined;
   const uncertain=!op || op.state==='reconciliation_required';
   return <div role="status" aria-live="polite"><h3>{operationLabels[observation.record.kind]}{observation.record.outcome?`: ${outcomeLabels[observation.record.outcome]}`:''}</h3><p>{op?labels[op.state]:'Mất phản hồi hoặc chưa tìm được thao tác. Đọc lại để đối chiếu; không tự gửi lại.'}</p>
-    {op?.owner==='local_lifecycle' && op.error?.message && op.error.message.split('\n').filter(line=>line.trim()).slice(0,20).map((line,i)=><p key={i} className="identifier">{line}</p>)}
+    {op?.owner==='local_lifecycle' && op.error?.message && op.error.message.split('\n').filter(line=>line.trim()).slice(0,20).map((line,i)=><p key={i} className="font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">{line}</p>)}
     {guidance && (op?.state==='failed' || uncertain) && <><p>{guidance.reason}</p><p>{uncertain?'Chỉ đọc lại thao tác để đối chiếu; chưa gửi lại hoặc bắt đầu thao tác mới.':guidance.remedy}</p>{uncertain && code.success && ['session_required','forbidden','unavailable'].includes(code.data) && <p>{guidance.remedy}</p>}</>}
     {observation.record.kind==='cancel' && <p>{op?.state==='applied'?'Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.':op?.state==='running'?'Đang xử lý yêu cầu hủy; chưa xác nhận đã dừng.':'Yêu cầu hủy chưa xác nhận tiến trình đã dừng.'}</p>}
     {result?.kind==='interaction' && <Link to={`/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(result.currentRunId)}`}>{result.continuedAsRunId?'Mở công việc tiếp nối →':'Xem công việc sau thao tác →'}</Link>}
     {result?.kind==='intake' && <p>Đã tiếp nhận yêu cầu. Xem câu hỏi làm rõ và công việc trên Tổng quan.</p>}
-    <details><summary>Mã đối chiếu thao tác</summary><span className="identifier">{observation.record.commandId}</span></details>
+    <details><summary>Mã đối chiếu thao tác</summary><span className="font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">{observation.record.commandId}</span></details>
   </div>;
 }

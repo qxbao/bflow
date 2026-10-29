@@ -45,6 +45,7 @@ test('pairs with actual HTTP, registers a real Git root, reloads deep links and 
   await expect(page.getByRole('alert')).toBeVisible();
   await page.getByRole('link',{name:'Tổng quan',exact:true}).click();
   for(const width of [1440,1280,768]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}
+  if(await page.getByRole('button',{name:'Điều hướng',exact:true}).isVisible())await page.getByRole('button',{name:'Điều hướng',exact:true}).click();
   await page.getByRole('link',{name:'Quản lý dự án'}).click();
   for(const width of [1440,1280,768,375]){
     await page.setViewportSize({width,height:900});
@@ -59,6 +60,7 @@ test('pairs with actual HTTP, registers a real Git root, reloads deep links and 
   expect(await page.evaluate(()=>document.fonts.check('900 40px "Big Shoulders Display"'))).toBe(true);
   // Repository settings use the real CLI composition and filesystem (no host/model fixture).
   await page.getByRole('link',{name:/sach.*Xem dự án/}).click();
+  if(await page.getByRole('button',{name:'Điều hướng',exact:true}).isVisible())await page.getByRole('button',{name:'Điều hướng',exact:true}).click();
   await page.getByRole('link',{name:'Cài đặt dự án',exact:true}).click();
   await page.getByLabel('Khởi tạo không dùng GitNexus (tắt công cụ này trong cấu hình)').check();
   await page.getByRole('button',{name:'Khởi tạo / sửa GitNexus',exact:true}).click();
@@ -71,9 +73,10 @@ test('pairs with actual HTTP, registers a real Git root, reloads deep links and 
   await expect(page.getByText('Đã hoàn tất',{exact:true})).toBeVisible({timeout:30000});
   expect(execFileSync('git',['-C',repository,'show','--pretty=format:','--name-only','HEAD'],{encoding:'utf8'}).trim().split('\n').sort()).toEqual(['.bflow/.gitignore','.bflow/config.yml']);
   await page.getByRole('button',{name:'YAML đầy đủ',exact:true}).click();
+  expect(await page.getByLabel('Nội dung YAML đầy đủ').evaluate(node=>getComputedStyle(node).fontSize)).toBe('16px');
   await page.getByLabel('Nội dung YAML đầy đủ').fill('schemaVersion: "1"\n');
   await page.getByRole('button',{name:'Lưu cấu hình',exact:true}).click();
-  await expect(page.getByRole('alert')).toContainText('missing required');
+  await expect(page.locator('#settings-configuration').getByRole('alert')).toContainText('missing required');
   await page.getByRole('button',{name:'Bỏ thay đổi',exact:true}).click();
   await page.getByRole('button',{name:'Form cấu hình',exact:true}).click();
   await expect(page.getByRole('textbox',{name:'Model (conversation)',exact:true})).toHaveValue('haiku');

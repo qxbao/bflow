@@ -49,8 +49,8 @@ export function ChatComposer({api,projectId,sessionId,runId,revision,historyRead
   finally{setBusy(false);}
  }
  const tooLarge=new TextEncoder().encode(draft).byteLength>WEB_LIMITS.chatBytes;
- return <form onSubmit={submit} className="chat-composer" aria-busy={busy}>
-  {!ready&&<p id="chat-unavailable" className="quote">Trò chuyện qua web chưa sẵn sàng trong phiên này. Bạn vẫn có thể dùng biểu mẫu và nút quyết định.</p>}
+ return <form onSubmit={submit} className="min-w-0 [&_textarea]:my-3" aria-busy={busy}>
+  {!ready&&<p id="chat-unavailable" className="my-3 border-l-3 border-warning pl-3 text-sm">Trò chuyện qua web chưa sẵn sàng trong phiên này. Bạn vẫn có thể dùng biểu mẫu và nút quyết định.</p>}
   <label htmlFor="chat-draft">Tin nhắn cho Conversation</label><textarea id="chat-draft" value={draft} onChange={e=>setDraft(e.target.value)} disabled={!ready||busy||uncertain} aria-describedby={!ready?'chat-unavailable':undefined} rows={3}/>
   {tooLarge&&<p role="alert">Tin nhắn vượt quá giới hạn 16 KiB.</p>}
   <button type="submit" disabled={!ready||busy||uncertain||tooLarge||!draft.trim()}>{busy?'Đang xử lý…':'Gửi tin nhắn'}</button>

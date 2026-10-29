@@ -3,7 +3,6 @@ import { WebCommandSchema, type WebAction } from '@bflow/contracts/web';
 import { ApiClient, explain } from '../../api/client';
 import { useCommands } from '../operations';
 import type { CommandBody } from '../../api/commands';
-import './requests.css';
 type Draft={title:string;requestKind:'feature'|'bugfix'|'refactor'|'spike';objective:string;criteria:string;constraints:string;verificationMethod:'unit_test'|'integration_test'|'e2e_test'|'typecheck'|'lint'|'static_analysis'|'manual_review'};
 const empty:Draft={title:'',requestKind:'feature',objective:'',criteria:'',constraints:'',verificationMethod:'integration_test'};
 export function RequestForm({api,id,sessionId,enabled,runId,action}:{api:ApiClient;id:string;sessionId:string;enabled:boolean;runId?:string;action?:WebAction}) {
@@ -26,12 +25,12 @@ export function RequestForm({api,id,sessionId,enabled,runId,action}:{api:ApiClie
       await commands.submit(body);setMessage('Đã gửi hoặc đang đối chiếu yêu cầu. Theo dõi thao tác bên dưới.');
     }catch(e){setMessage(e instanceof Error && !('code' in e)?e.message:explain(e));}
   }
-  const input=(key:'title'|'objective'|'criteria'|'constraints',label:string,max:number,multiline=false)=><div className="request-field"><label htmlFor={uid+key}>{label}</label>{multiline?<textarea {...field(key)} maxLength={max} rows={4}/>:<input {...field(key)} maxLength={max}/>} {errors[key] && <p id={uid+key+'-error'} role="alert">{errors[key]}</p>}</div>;
-  return <section className="panel"><h2>{runId?'Chỉnh yêu cầu':'Tạo công việc'}</h2><p>Bản nháp yêu cầu được gửi qua tiếp nhận của phiên dự án. Tiêu chí chưa phải đặc tả đã duyệt.</p><form noValidate onSubmit={e=>void submit(e)}>
+  const input=(key:'title'|'objective'|'criteria'|'constraints',label:string,max:number,multiline=false)=><div className="my-4"><label htmlFor={uid+key}>{label}</label>{multiline?<textarea {...field(key)} maxLength={max} rows={4}/>:<input {...field(key)} maxLength={max}/>} {errors[key] && <p id={uid+key+'-error'} role="alert">{errors[key]}</p>}</div>;
+  return <section className="panel min-w-0 border border-line bg-surface p-4 sm:p-5"><h2>{runId?'Chỉnh yêu cầu':'Tạo công việc'}</h2><p>Bản nháp yêu cầu được gửi qua tiếp nhận của phiên dự án. Tiêu chí chưa phải đặc tả đã duyệt.</p><form noValidate onSubmit={e=>void submit(e)}>
     {Object.keys(errors).length>0 && <div role="alert" ref={summary} tabIndex={-1}><h3>Kiểm tra thông tin</h3>{Object.keys(errors).map(key=><p key={key}><a href={'#'+uid+key}>{errors[key]}</a></p>)}</div>}
     {!runId && <>{input('title','Tên công việc',200)}<label htmlFor={uid+'kind'}>Loại yêu cầu</label><select id={uid+'kind'} value={draft.requestKind} onChange={e=>setDraft({...draft,requestKind:e.target.value as Draft['requestKind']})}><option value="feature">Tính năng</option><option value="bugfix">Sửa lỗi</option><option value="refactor">Cải tiến mã</option><option value="spike">Khảo sát</option></select></>}
     {runId && <p>Bản đọc hiện tại chưa có nội dung yêu cầu gốc. Nhập đầy đủ mục tiêu, tiêu chí và ràng buộc thay thế; đối chiếu lịch sử trước khi gửi.</p>}
     {input('objective','Mục tiêu',16000,true)}{input('criteria','Tiêu chí chấp nhận (mỗi dòng một tiêu chí)',16000,true)}<label htmlFor={uid+'method'}>Cách kiểm chứng tiêu chí</label><select id={uid+'method'} value={draft.verificationMethod} onChange={e=>setDraft({...draft,verificationMethod:e.target.value as Draft['verificationMethod']})}>{Object.entries({unit_test:'Kiểm thử đơn vị',integration_test:'Kiểm thử tích hợp',e2e_test:'Kiểm thử toàn luồng',typecheck:'Kiểm tra kiểu',lint:'Kiểm tra mã',static_analysis:'Phân tích tĩnh',manual_review:'Xem xét thủ công'}).map(([v,label])=><option key={v} value={v}>{label}</option>)}</select>
-    {input('constraints','Ràng buộc (mỗi dòng một ràng buộc)',16000,true)}<button className="primary" disabled={!enabled || commands.busy || !commands.online}>{commands.busy?'Đang gửi…':runId?'Gửi chỉnh sửa':'Tạo công việc'}</button>{!enabled && <p>Phiên hoặc thao tác chưa sẵn sàng; tải lại trạng thái để kiểm tra.</p>}{message && <p role="status">{message}</p>}
+    {input('constraints','Ràng buộc (mỗi dòng một ràng buộc)',16000,true)}<button className="border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface" disabled={!enabled || commands.busy || !commands.online}>{commands.busy?'Đang gửi…':runId?'Gửi chỉnh sửa':'Tạo công việc'}</button>{!enabled && <p>Phiên hoặc thao tác chưa sẵn sàng; tải lại trạng thái để kiểm tra.</p>}{message && <p role="status">{message}</p>}
   </form></section>;
 }
