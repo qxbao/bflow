@@ -259,11 +259,14 @@ import {
   WebDecisionPageResultSchema,
 } from "@bflow/contracts";
 import { ConversationContextSnapshotSchema } from "@bflow/conversation";
-import { parseAgenticJournalState } from "../agentic/journal.js";
+import { ProjectionSnapshots } from "./projection-snapshots.js";
 import type { HostConfiguration } from "../agentic/host-controller.js";
 import { InteractionQuerySchema } from "./schemas.js";
 import { interactionProjectId } from "./client.js";
-async function readSnapshot(path: string): Promise<unknown | undefined> {
+const projectionSnapshots = new ProjectionSnapshots();
+async function readSnapshot(path: string): Promise<unknown | undefined>;
+async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T): Promise<T | undefined>;
+async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown): Promise<unknown | undefined> {
   let file;
   try {
     file = await open(
@@ -281,7 +284,7 @@ async function readSnapshot(path: string): Promise<unknown | undefined> {
     const bytes = await file.readFile();
     if (bytes.byteLength > 16 * 1024 * 1024)
       throw new Error("Read source too large");
-    return JSON.parse(bytes.toString("utf8"));
+    return decode ? decode(bytes) : JSON.parse(bytes.toString("utf8"));
   } finally {
     await file.close();
   }
@@ -354,7 +357,8 @@ export async function hostInteractionQuery(
       },
     };
   }
-  const journal = await readSnapshot(join(root, "agentic/journal/state.json"));
+  const journalPath = join(root, "agentic/journal/state.json");
+  const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes));
   const state =
     journal === undefined
       ? {
@@ -366,7 +370,7 @@ export async function hostInteractionQuery(
           pendingCore: [],
           pendingVerifications: [],
         }
-      : parseAgenticJournalState(journal, configuration.repositoryPath);
+      : journal;
   const core = new Map<string, WorkflowRunSnapshot>();
   for (const r of state.runs.filter(
     (r) => r.delegation.sessionId === sessionId && r.coreCreated,
