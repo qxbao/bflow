@@ -177,7 +177,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     rolesNeedPreparation: async () => {
       const host = await openForStartup();
       return host.rolesNeedPreparation ? host.rolesNeedPreparation() :
-        host.platformStatus ? (await host.platformStatus()).report?.ready !== true : false;
+        host.platformStatus ? (await host.platformStatus()).report === null : false;
     },
     prepare: async options => {
       const prepared: unknown = await (await openForStartup()).prepare(options);
