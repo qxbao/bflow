@@ -75,6 +75,13 @@ export function availableActions(
           : undefined,
     ),
   ];
+  const previousResume = r.resumeReceipts?.find(item => item.actionId === r.pendingAction?.actionId);
+  // Runtime accepts a separately identified explicit resume after its automatic wake, including while queued.
+  const explicitAfterAutomatic = r.pendingAction?.kind === "resume_coordinator" && previousResume !== undefined &&
+    state.outbound.some(out => out.message.message_id === previousResume.messageId && out.message.run_id === r.runId &&
+      out.message.type === "task.status" && out.message.sender.role === "runtime" &&
+      typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
+      out.message.payload.kind === "resume_run" && out.message.payload.actionId === r.pendingAction?.actionId && out.message.payload.automatic === true);
   const unmeasuredResume = r.pendingAction?.kind === "coordinator_continuation" && r.status === "implementing" &&
     unmeasuredPolicyPhaseRequests(state, r).length > 0;
   const resumeUncertain = !!r.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === r.runId &&
@@ -110,7 +117,7 @@ export function availableActions(
             ? "resume_budget_exhausted"
             : gate && !restore
               ? "decision_required"
-              : (r.status !== "escalated" && !unmeasuredResume) || a.state !== "pending"
+              : !explicitAfterAutomatic && ((r.status !== "escalated" && !unmeasuredResume) || a.state !== "pending")
                 ? "action_not_pending"
                 : a.requiredRole
                   ? "capability_revalidation_required"
