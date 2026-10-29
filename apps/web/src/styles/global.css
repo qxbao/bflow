@@ -5,3 +5,5 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 
 input::placeholder{color:var(--z-mute);opacity:1}
+
+.check-row{display:flex;align-items:flex-start;gap:12px;margin:16px 0;min-height:44px}.check-row input{width:20px;height:20px;min-height:20px;flex:0 0 20px;margin-top:3px}.check-row small{display:block;color:var(--z-mute)}.config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:16px}.config-group{border:1px solid var(--z-line);margin:16px 0;padding:16px;min-width:0}.config-group legend{font-weight:600;padding:0 8px}.config-field{margin:16px 0}.config-field small{display:block;margin-bottom:6px}.config-editor{border:0;padding:0;min-width:0}.yaml-editor{width:100%;font:var(--fs-13)/1.6 var(--font-mono);white-space:pre;overflow:auto;tab-size:2}.config-editor textarea{width:100%}.action-buttons{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}

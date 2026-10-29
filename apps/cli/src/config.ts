@@ -180,6 +180,10 @@ export async function loadRepositoryConfig(
     };
   }
 
+  return parseRepositoryConfig(content, configPath);
+}
+
+export function parseRepositoryConfig(content: string, configPath: string): OperationResult<BflowRepositoryConfig> {
   let raw: unknown;
   try {
     raw = parseConfigYaml(content);

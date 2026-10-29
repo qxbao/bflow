@@ -267,3 +267,28 @@ describe("persisted host policy regressionScope recovery", () => {
     await expect(readHostConfiguration(hostJsonPath)).rejects.toThrow("Invalid persisted host");
   });
 });
+
+it('reopens a live owner for quiesce despite stale execution sources while preserving startup validation',async()=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'bflow-live-owner-drift-')));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ const sessionId='drift-recovery',binary=join(root,'herdr-fixture.mjs');await writeFile(binary,'#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n',{mode:0o700});
+ const controller=await ensureAgenticHost({repositoryPath:root,sessionId,herdrBinary:binary});cleanup.push(()=>controller.shutdown().catch(()=>undefined));
+ const path=join(root,'.bflow/state/host',sessionId,'host.json');const {readFile}=await import('node:fs/promises');const saved=JSON.parse(await readFile(path,'utf8'));
+ // A persisted execution source no longer exists; stop/recovery must connect without granting execution.
+ saved.executionResolution={schemaVersion:3,plan:{schemaVersion:3,resolverVersion:'1',policyVersion:'1',repository:{revision:'abc'},mode:'intake'},files:[{component:'project-config',path:join(root,'missing.json'),format:'json'}]};
+ await writeFile(path,JSON.stringify(saved),{mode:0o600});
+ const reopened=await openPersistedAgenticHost({repositoryPath:root,sessionId});
+ expect(await reopened.quiesce()).toMatchObject({ok:true});await reopened.shutdown();
+ await expect(ensureAgenticHost({repositoryPath:root,sessionId,herdrBinary:binary,executionResolution:saved.executionResolution})).rejects.toThrow();
+});
+
+it('refreshes inactive source snapshots only from explicit resolved startup and keeps persisted recovery fail-closed',async()=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'bflow-resolved-restart-')));cleanup.push(()=>rm(root,{recursive:true,force:true}));
+ const binary=join(root,'herdr.mjs');await writeFile(binary,'#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({running:false})+"\\n");\n',{mode:0o700});
+ const sourcePath=join(root,'source.json');await writeFile(sourcePath,'{"model":"haiku"}');
+ const source={schemaVersion:3 as const,plan:{schemaVersion:3,resolverVersion:'1',policyVersion:'1',repository:{revision:'abc'},mode:'intake'},files:[{component:'project-config',path:sourcePath,format:'json' as const}]};
+ const first=await ensureAgenticHost({repositoryPath:root,sessionId:'resolved-restart',herdrBinary:binary,executionResolution:source});cleanup.push(()=>first.shutdown().catch(()=>undefined));
+ expect(await first.quiesce()).toMatchObject({ok:true});await first.shutdown();
+ await writeFile(sourcePath,'{"model":"haiku","effort":"low"}');
+ const next=await ensureAgenticHost({repositoryPath:root,sessionId:'resolved-restart',herdrBinary:binary,executionResolution:source});cleanup.push(()=>next.shutdown().catch(()=>undefined));
+ expect(await next.quiesce()).toMatchObject({ok:true});await next.shutdown();
+});

@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../../..",
+    "types": ["node"],
+    "paths": {
+      "@bflow/contracts/web": ["../../../packages/contracts/src/web.ts"],
+      "@bflow/contracts/web-host": ["../../../packages/contracts/src/web-host.ts"],
+      "@bflow/contracts": ["../../../packages/contracts/src/index.ts"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

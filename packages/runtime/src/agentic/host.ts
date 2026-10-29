@@ -364,6 +364,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const webProjectId = interactionProjectId(configuration.repositoryPath);
   const webFeed = new ProjectionFeed(webProjectId);
   let webFeedObservedAt = 0;
+  let webFeedFingerprint: string | undefined;
+  const webFeedNotices = new Set<string>();
+  // Observation timestamps change on every read; they are not projection changes.
+  const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable)
+    : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key !== "updatedAt" && key !== "observedAt").map(([key, item]) => [key, stable(item)])) : value;
+  const webProjectionFingerprint = async (): Promise<string> => {
+    const views = await Promise.all([
+      readWebQuery({ kind: "session", projectId: webProjectId }),
+      readWebQuery({ kind: "runs", projectId: webProjectId, query: { limit: 100 } }),
+      readWebQuery({ kind: "decisions", projectId: webProjectId })
+    ].map(view => view.catch(() => "unavailable")));
+    return digest(JSON.stringify(stable(views)));
+  };
   let webFeedQueue: Promise<unknown> = Promise.resolve();
   const readWebEvents = (params: unknown) => {
     const work = webFeedQueue.catch(() => undefined).then(async () => {
@@ -371,12 +385,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (input.projectId !== webProjectId) throw new Error("Interaction project scope mismatch");
       // Generic invalidation covers every projection, including runs outside the first page.
       // It is explicitly not a claim that a domain event occurred or a command succeeded.
+      // Publish only on an observed change: every client polls this once a second and reloads its
+      // views on each event, so an unconditional publish is a self-sustaining refresh loop.
       if (Date.now() - webFeedObservedAt >= 1000) {
-        webFeed.publish("invalidate", []);
-        const notices = [...await receipts.unsurfacedConversationNotices(), ...await receipts.undisplayedUserFacingNotices()];
-        const ids = [...new Set(notices.map(n => n.messageId))];
-        for (let offset = 0; offset < ids.length; offset += 100) webFeed.publish("notice", ids.slice(offset, offset + 100));
         webFeedObservedAt = Date.now();
+        const fingerprint = await webProjectionFingerprint();
+        if (fingerprint !== webFeedFingerprint) {
+          if (webFeedFingerprint !== undefined) webFeed.publish("invalidate", []);
+          webFeedFingerprint = fingerprint;
+        }
+        const notices = [...await receipts.unsurfacedConversationNotices(), ...await receipts.undisplayedUserFacingNotices()];
+        const pending = new Set(notices.map(n => n.messageId));
+        const fresh = [...pending].filter(id => !webFeedNotices.has(id));
+        // Forget settled notices so a later re-surface is announced again.
+        for (const id of webFeedNotices) if (!pending.has(id)) webFeedNotices.delete(id);
+        for (const id of fresh) webFeedNotices.add(id);
+        for (let offset = 0; offset < fresh.length; offset += 100) webFeed.publish("notice", fresh.slice(offset, offset + 100));
       }
       return webFeed.read(input.query.cursor);
     });

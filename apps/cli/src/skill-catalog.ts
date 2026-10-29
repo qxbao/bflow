@@ -92,8 +92,9 @@ export async function validateBundledStartupSkills(environment: EnvironmentConfi
       catalog.definitions.some(definition => definition.skillId === id && definition.allowedRoles.includes(role.role)));
     const ids = [...new Set([...(role.skills ?? defaults), ...required])];
     const pins = catalog.resolvePins(role.role, ids);
-    if (installed && pins.some(pin => !installed.some(definition => definition.digest === pin.skill.digest)))
-      throw new Error(`Role '${role.role}' is missing an exact pinned skill bundle in the machine skill store; run approved skills setup.`);
+    const missing = installed ? pins.filter(pin => !installed.some(definition => definition.digest === pin.skill.digest)).map(pin => pin.skill.skillId) : [];
+    if (missing.length)
+      throw new Error(`Role '${role.role}' is missing exact pinned skill bundle(s) in the machine skill store: ${missing.join(", ")}; run approved skills setup ('bflow setup').`);
     if (environment.skills?.required && !pins.some(item => item.skill.skillId === "using-bflow"))
       throw new Error(`Role '${role.role}' requires its approved workflow skills; preserve using-bflow.`);
   }

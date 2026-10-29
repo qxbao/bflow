@@ -1,7 +1,8 @@
 import { constants } from "node:fs";
 import { access, open, realpath, stat } from "node:fs/promises";
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
-import { delimiter, sep } from "node:path";
+import { basename, delimiter, dirname, sep } from "node:path";
+import { parse as parseToml } from "smol-toml";
 import {
   type AgentEnvironment,
   type AgentLaunchAttestation,
@@ -186,6 +187,34 @@ export function verifyLaunchAttestation(
 
 export function computeCanonicalSha256(value: unknown): string {
   return createHash("sha256").update(canonicalReceiptJson(value), "utf8").digest("hex");
+}
+
+/**
+ * Digest bound into a launch profile for a config file. Codex persists its own TUI first-run
+ * state (`[tui]`, e.g. screen_reader_detection_done, model_availability_nux) into CODEX_HOME's
+ * config.toml at startup; that table is provider-owned UI state, not Bflow-governed launch
+ * policy. For a Codex `codex-home/config.toml` the digest covers every other table (model,
+ * providers, MCP, projects trust); any other file, provider or unparsable config keeps the
+ * exact byte digest.
+ */
+export async function computeLaunchConfigDigest(filePath: string, provider: string): Promise<string> {
+  if (provider === "codex" && basename(filePath) === "config.toml" && basename(dirname(filePath)) === "codex-home") {
+    try {
+      const fd = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      let text: string;
+      try {
+        const info = await fd.stat();
+        if (!info.isFile() || info.size > 1024 * 1024) throw new Error("unsupported config file");
+        text = await fd.readFile("utf8");
+      } finally { await fd.close(); }
+      const parsed = parseToml(text) as Record<string, unknown>;
+      delete parsed["tui"];
+      return computeCanonicalSha256({ codexGovernedConfig: parsed });
+    } catch {
+      return computeFileSha256(filePath);
+    }
+  }
+  return computeFileSha256(filePath);
 }
 
 export async function computeFileSha256(

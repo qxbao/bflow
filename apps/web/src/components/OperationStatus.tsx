@@ -2,6 +2,7 @@ import { Link } from 'react-router';
 import { WebApiErrorCodeSchema, type WebApiError } from '@bflow/contracts/web';
 import { ApiError } from '../api/client';
 import type { Observation } from '../api/commands';
+export const outcomeLabels={approved:'Duyệt',rejected:'Từ chối',changes_requested:'Yêu cầu sửa'} as const;
 export const operationLabels={create_request:'Tạo yêu cầu',revise_request:'Chỉnh yêu cầu',answer_clarification:'Trả lời làm rõ',answer_decision:'Quyết định gói',resume:'Tiếp tục công việc',cancel:'Hủy công việc',session_start:'Khởi động phiên',session_stop:'Dừng phiên'};
 const labels={accepted:'Đã tiếp nhận, đang chờ xử lý.',running:'Đang áp dụng thao tác.',applied:'Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.',failed:'Thao tác không được áp dụng.',reconciliation_required:'Chưa xác định kết quả. Cần đối chiếu; không gửi lại.'};
 const failureGuidance:Record<WebApiError['code'],{reason:string;remedy:string}>={
@@ -21,7 +22,8 @@ export function OperationStatus({observation,projectId}:{observation:Observation
   const code=WebApiErrorCodeSchema.safeParse(op?.error?.code??(observation.error instanceof ApiError?observation.error.code:undefined));
   const guidance=code.success?failureGuidance[code.data]:undefined;
   const uncertain=!op || op.state==='reconciliation_required';
-  return <div role="status" aria-live="polite"><h3>{operationLabels[observation.record.kind]}</h3><p>{op?labels[op.state]:'Mất phản hồi hoặc chưa tìm được thao tác. Đọc lại để đối chiếu; không tự gửi lại.'}</p>
+  return <div role="status" aria-live="polite"><h3>{operationLabels[observation.record.kind]}{observation.record.outcome?`: ${outcomeLabels[observation.record.outcome]}`:''}</h3><p>{op?labels[op.state]:'Mất phản hồi hoặc chưa tìm được thao tác. Đọc lại để đối chiếu; không tự gửi lại.'}</p>
+    {op?.owner==='local_lifecycle' && op.error?.message && op.error.message.split('\n').filter(line=>line.trim()).slice(0,20).map((line,i)=><p key={i} className="identifier">{line}</p>)}
     {guidance && (op?.state==='failed' || uncertain) && <><p>{guidance.reason}</p><p>{uncertain?'Chỉ đọc lại thao tác để đối chiếu; chưa gửi lại hoặc bắt đầu thao tác mới.':guidance.remedy}</p>{uncertain && code.success && ['session_required','forbidden','unavailable'].includes(code.data) && <p>{guidance.remedy}</p>}</>}
     {observation.record.kind==='cancel' && <p>{op?.state==='applied'?'Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.':op?.state==='running'?'Đang xử lý yêu cầu hủy; chưa xác nhận đã dừng.':'Yêu cầu hủy chưa xác nhận tiến trình đã dừng.'}</p>}
     {result?.kind==='interaction' && <Link to={`/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(result.currentRunId)}`}>{result.continuedAsRunId?'Mở công việc tiếp nối →':'Xem công việc sau thao tác →'}</Link>}

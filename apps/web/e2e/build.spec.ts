@@ -8,6 +8,8 @@ let child:ChildProcess, scratch:string, pairing:string, repository:string;
 test.beforeAll(async()=>{
   scratch=await mkdtemp(join(tmpdir(),'bflow-web-w06-'));repository=join(scratch,'sach');
   await mkdir(repository);execFileSync('git',['init','--quiet',repository]);
+  execFileSync('git',['-C',repository,'config','user.name','Web settings test']);
+  execFileSync('git',['-C',repository,'config','user.email','web-settings@localhost']);
   const binary=resolve('../cli/dist/bin.js');
   const quote=(text:string)=>"'"+text.replaceAll("'","'\\''")+"'";
   child=spawn('script',['-q','-c',`${quote(process.execPath)} ${quote(binary)} web --port 4318 --no-open`,'/dev/null'],{
@@ -24,6 +26,7 @@ test.afterAll(async()=>{
   if(scratch)await rm(scratch,{recursive:true,force:true});
 });
 test('pairs with actual HTTP, registers a real Git root, reloads deep links and preserves accessible layouts',async({page})=>{
+  test.setTimeout(90000); // Includes two durable init jobs, config commit and responsive screenshots.
   let feeds=0;page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/events'))feeds++;});
   const errors:string[]=[];page.on('pageerror',error=>errors.push(error.message));
   await page.goto(pairing);
@@ -54,5 +57,28 @@ test('pairs with actual HTTP, registers a real Git root, reloads deep links and 
   expect(await page.evaluate(()=>{const target=document.activeElement;return target?getComputedStyle(target).outlineStyle!== 'none':false;})).toBe(true);
   expect(await page.evaluate(()=>localStorage.length)).toBe(0);
   expect(await page.evaluate(()=>document.fonts.check('900 40px "Big Shoulders Display"'))).toBe(true);
+  // Repository settings use the real CLI composition and filesystem (no host/model fixture).
+  await page.getByRole('link',{name:/sach.*Xem dự án/}).click();
+  await page.getByRole('link',{name:'Cài đặt dự án',exact:true}).click();
+  await page.getByLabel('Khởi tạo không dùng GitNexus (tắt công cụ này trong cấu hình)').check();
+  await page.getByRole('button',{name:'Khởi tạo / sửa GitNexus',exact:true}).click();
+  await expect(page.getByText('Đã hoàn tất',{exact:true})).toBeVisible({timeout:30000});
+  await page.getByRole('textbox',{name:'Model (conversation)',exact:true}).fill('haiku');
+  await page.getByRole('button',{name:'Lưu cấu hình',exact:true}).click();
+  await expect(page.getByText('Đã lưu cấu hình. Các thay đổi áp dụng khi khởi động lại phiên.')).toBeVisible();
+  await page.getByLabel(/Commit cấu hình đã xem vào Git/).check();
+  await page.getByRole('button',{name:'Khởi tạo / sửa GitNexus',exact:true}).click();
+  await expect(page.getByText('Đã hoàn tất',{exact:true})).toBeVisible({timeout:30000});
+  expect(execFileSync('git',['-C',repository,'show','--pretty=format:','--name-only','HEAD'],{encoding:'utf8'}).trim().split('\n').sort()).toEqual(['.bflow/.gitignore','.bflow/config.yml']);
+  await page.getByRole('button',{name:'YAML đầy đủ',exact:true}).click();
+  await page.getByLabel('Nội dung YAML đầy đủ').fill('schemaVersion: "1"\n');
+  await page.getByRole('button',{name:'Lưu cấu hình',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('missing required');
+  await page.getByRole('button',{name:'Bỏ thay đổi',exact:true}).click();
+  await page.getByRole('button',{name:'Form cấu hình',exact:true}).click();
+  await expect(page.getByRole('textbox',{name:'Model (conversation)',exact:true})).toHaveValue('haiku');
+  await page.getByRole('button',{name:'Hủy đăng ký dự án',exact:true}).click();
+  await page.getByRole('button',{name:'Xác nhận hủy đăng ký',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'Chưa có dự án',exact:true})).toBeVisible();
   expect(errors).toEqual([]);
 });

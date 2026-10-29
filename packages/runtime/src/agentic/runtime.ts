@@ -332,6 +332,12 @@ export class AgenticWorkflowRuntime {
           // A diagnostic handoff in older hosts could regress an approved,
           // already-created Core workflow into a preparation-only phase.
           const preparationPhases = ["intake", "clarifying", "specifying", "planning"];
+          // Older report_progress calls could hide a still-pending design approval under clarification.
+          // Restore only its waiting phase; retain the exact request, evidence and human decision authority.
+          if (!run.coreCreated && run.approvalKind === "design" && run.approval?.status === "pending" &&
+              run.decision?.approvalId !== run.approval.approvalId && preparationPhases.includes(run.status)) {
+            run.status = "awaiting_approval"; changed = true;
+          }
           const resumePreparation = run.status === "escalated" && run.pendingAction?.kind === "resume_coordinator" &&
             preparationPhases.includes(run.pendingAction.previousStatus ?? "");
           if (run.coreCreated && run.definition && run.workflowSpec?.specification.status === "approved" &&
@@ -2482,7 +2488,8 @@ export class AgenticWorkflowRuntime {
       const run = this.run(state, runId); this.live(run);
       // Once Core exists the scheduler owns the run (dispatch retries, verification, integration); a question is still
       // delivered, but "clarifying" would remove the run from scheduling with no recorded action to resume it.
-      if (questions.length && !run.coreCreated) run.status = "clarifying";
+      const pendingApproval = run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId;
+      if (questions.length && !run.coreCreated && !pendingApproval && run.status !== "awaiting_approval") run.status = "clarifying";
       if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
       this.emit(state, outbox, run, questions.length ? "conversation.clarification" : "conversation.progress",
         { headline: textField(headline), questions: strings(questions), sdlcStatus: run.status }, `coordinator-progress:${digest([headline, questions])}`);
