@@ -19,7 +19,7 @@ Review deep links without cursor history, background refresh with focus/drafts, 
 - [x] 2. Navigation/loading: AppShell mobile disclosure, route focus and compact desktop layout; LoadingState skeleton only on initial read, background status otherwise. Test mobile open/close/navigation and retained content while refreshing. Files: AppShell.tsx, LoadingState.tsx, app.tsx, feature read consumers, test/ux.test.tsx.
 - [x] 3. Lists: Pagination.tsx and pagination.ts shared helpers; projects search/12-item pages, runs cursor stack/query sync/retry preserving filters, review filter/10-item pages and same-run read deduplication with dirty-form protection, chat previous/next cursor while preserving composer. Test actual next/previous, deep links, browser history, empty filters and page clamping.
 - [x] 4. Screen hierarchy: compact overview priority and supporting disclosures; run detail column layout; settings anchors/groups and compact role configuration with drafts preserved. Files: app.tsx, runs.tsx, settings.tsx, project-configuration.tsx, requests/decisions/chat. Verify existing form/recovery suite.
-- [ ] 5. Validation/review: package build/typecheck/tests, dependency guard, affected selection and browser suite against built production assets. Extend browser checks for compact dimensions, pagination, mobile menu, zoom/reduced motion and long text; inspect screenshots. Update package README and measured evidence. Fresh reviewer checks final diff; fix material findings and rerun affected checks.
+- [x] 5. Validation/review: package build/typecheck/tests, dependency guard, affected selection and browser suite against built production assets. Extend browser checks for compact dimensions, pagination, mobile menu, zoom/reduced motion and long text; inspect screenshots. Update package README and measured evidence. Fresh reviewer checks final diff; fix material findings and rerun affected checks.
 
 Strategy: recommended; test new interaction behavior, avoid tests that mirror utility class strings. Visual-only migration verified with existing behavior suite and browser render checks. No extra owner approval needed for implementation choices within approved design.
 
@@ -37,3 +37,5 @@ drafts, isolate per-run errors and switch control density at 1024px. Targeted te
 cover history restoration and stale revision blocking. Rereview found no additional
 important issues. An empty-track project-grid artifact found in screenshots was
 fixed with auto-fit tracks. Confirmation cleanup returns focus to the trigger.
+
+Final measured results and broad-suite limits: UX-VALIDATION.md.
