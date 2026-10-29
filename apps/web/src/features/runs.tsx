@@ -9,6 +9,7 @@ import { EmptyState } from '../components/EmptyState';
 import { DecisionReview } from './decisions';
 import { ClarificationForm } from './clarifications';
 import { RunActions } from './run-actions';
+import { ChatHistory } from './chat';
 export function Runs({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) {
   const [query,setQuery]=useSearchParams(),[search,setSearch]=useState(query.get('search')??'');
   const phase=query.get('phase')??'',term=query.get('search')??'',cursor=query.get('cursor')??undefined;
@@ -28,6 +29,7 @@ export function RunView({api,id,runId,revision,refresh}:{api:ApiClient;id:string
     <section><h2>Nhiệm vụ</h2>{run.tasks.length?<ul className="tasks">{run.tasks.map(task=><li key={task.taskId}><span>{task.title===task.taskId?'Nhiệm vụ chưa có tên hiển thị':task.title}</span><StatusBadge value={task.status}/></li>)}</ul>:<p>Chưa có nhiệm vụ được công bố.</p>}</section>
     <section><h2>Thiết kế, kết quả và kiểm chứng</h2>{run.decisions.length?run.decisions.map(decision=><DecisionReview key={decision.decisionId} decision={decision} api={api} id={id} actions={run.availableActions} fresh={!result.loading && !result.error && run.currentRunId===run.runId} refresh={refresh}/>):<p>Chưa có gói thiết kế, thay đổi hoặc kết quả kiểm chứng được công bố trong bản đọc này. Không suy luận đã kiểm tra từ trạng thái terminal.</p>}</section>
     <section><h2>Thao tác tiếp theo</h2><RunActions api={api} id={id} run={run} fresh={!result.loading && !result.error}/>{run.availableActions.filter(action=>!action.enabled).map(action=><p key={action.actionId} className="quote">{reason(action.disabledReason)}</p>)}</section>
+    <ChatHistory api={api} projectId={id} sessionId={run.sessionId} runId={run.runId} revision={revision}/>
     <section><h2>Mốc quan sát</h2><p><time dateTime={run.updatedAt}>{new Date(run.updatedAt).toLocaleString('vi')}</time> · Lần cập nhật của bản đọc hiện tại.</p><p className="muted">Chưa có dữ liệu lịch sử công việc đầy đủ để hiển thị. Cập nhật trực tiếp ở trang tổng quan chỉ phản ánh lần mở trang này.</p></section>
     <details><summary>Thông tin đối chiếu</summary><dl><dt>Mã công việc</dt><dd className="identifier">{run.runId}</dd><dt>Cập nhật</dt><dd>{new Date(run.updatedAt).toLocaleString('vi')}</dd></dl></details>
   </>}</>;
