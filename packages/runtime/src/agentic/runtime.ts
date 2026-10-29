@@ -669,6 +669,15 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === data.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, data.message_id)) return;
       const text = redactString(reason);
+      // A late refusal of an exactly admitted historical intake cannot pause newer accepted requirements.
+      // Keep the immutable delivery and audit; never suppress current or merely claimed old envelopes.
+      const historical = isConversationHandoff(data) ? DelegationRequestSchema.safeParse(data.payload) : undefined;
+      if (historical?.success && historical.data.messageId === data.message_id && historical.data.runId === run.runId &&
+          historical.data.correlationId === data.correlation_id && revisionOf(historical.data) < revisionOf(run.delegation) &&
+          run.delegationHistory?.some(previous => digest(previous) === digest(historical.data))) {
+        this.recordIngressDiagnostic(run, data, `Superseded requirement revision ${revisionOf(historical.data)}: ${text}`, "reported");
+        await save(); return;
+      }
       // The message's own content failed validation: retrying the same envelope cannot help, but the sender can fix it. Return the
       // readable error to the sender; only the INVALID_ROLE_MESSAGE_LIMIT-th invalid message for one assignment involves the
       // Coordinator (bounded auto_resume). Transport/uncertain failures keep the delivery-failure path below.

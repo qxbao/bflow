@@ -1953,3 +1953,5 @@ bounded retry checks. It never reuses an old review verdict or automatically res
 an active measurement. Ordinary Coordinator continuations remain unchanged.
 
 Owner startup can settle an interrupted web cancellation as failed when its validated host receipt has a dispatch intent but the complete retained Runtime journal proves the cancellation was never enqueued. This runs after receipt replay and before intake, never replays the cancellation, and leaves accepted-only intents, queued/uncertain deliveries, pending Core writes and unverifiable snapshots unresolved. A failed cancellation is not proof that a process stopped; a new owner cancellation still uses normal stop/lease reconciliation.
+
+Ingress refusals of an exactly admitted, superseded Conversation requirement remain diagnostic-only. They cannot pause a newer requirement revision; current and unrecognized envelopes retain the normal bounded failure/escalation path.
