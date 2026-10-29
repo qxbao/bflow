@@ -306,7 +306,7 @@ export class EnvironmentLifecycle {
     return READY_TRANSPORT_STATES.has(pane.transportState);
   }
   private ready(manifest: SessionManifest, config: EnvironmentConfig): boolean {
-    return manifest.status === "up" && config.environment.roles.filter((r) => r.role !== "developer" && (r.required ?? true)).every((r) =>
+    return manifest.status === "up" && config.environment.roles.filter((r) => r.role !== "developer" && r.role !== "sos" && (r.required ?? true)).every((r) =>
       manifest.panes.filter((pane) => pane.role === r.role).length === 1 &&
       manifest.panes.some((pane) => pane.role === r.role && this.readyPane(pane)));
   }
@@ -688,7 +688,7 @@ export class EnvironmentLifecycle {
           await this.saveManifest(repository, { ...manifest, status: manifest.status === "up" && (!this.ready(manifest, config) || !nativeReady) ? "initializing" : manifest.status });
 
           for (const p of manifest.panes) {
-            if (config.environment.roles.some((r) => r.role !== "developer" && r.role === p.role && (r.required ?? true))) {
+            if (config.environment.roles.some((r) => r.role !== "developer" && r.role !== "sos" && r.role === p.role && (r.required ?? true))) {
               if (p.metadata?.["partialStart"] === true || p.metadata?.["startupStatus"] === "partial") {
                 await this.saveManifest(repository, { ...manifest, status: "degraded" });
                 fail(`Agent provider for role '${p.role}' only partially started. Remediation: Inspect role pane logs via 'bflow doctor' or restart the session with 'bflow down --yes && bflow up'.`, { component: `role:${p.role}` });
@@ -696,7 +696,7 @@ export class EnvironmentLifecycle {
             }
           }
 
-          const blocked = manifest.panes.find((p) => config.environment.roles.some((r) => r.role !== "developer" && r.role === p.role && (r.required ?? true)) && p.transportState === "blocked");
+          const blocked = manifest.panes.find((p) => config.environment.roles.some((r) => r.role !== "developer" && r.role !== "sos" && r.role === p.role && (r.required ?? true)) && p.transportState === "blocked");
           if (blocked) {
             await this.saveManifest(repository, { ...manifest, status: "degraded" });
             fail(`Required role '${blocked.role}' is blocked during startup in pane '${blocked.paneId}'. Resolve it before retrying up.`);
@@ -720,7 +720,7 @@ export class EnvironmentLifecycle {
             break;
           }
 
-          const missingOrStarting = config.environment.roles.filter(r => r.role !== "developer" && (r.required ?? true)).find(r => {
+          const missingOrStarting = config.environment.roles.filter(r => r.role !== "developer" && r.role !== "sos" && (r.required ?? true)).find(r => {
             const p = manifest!.panes.find(pane => pane.role === r.role);
             return !p || !this.readyPane(p);
           });
