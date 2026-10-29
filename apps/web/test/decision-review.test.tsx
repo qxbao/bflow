@@ -8,8 +8,23 @@ import { ApiClient } from '../src/api/client';
 import { decision,run,installApi } from './fixtures';
 const action={actionId:'decide',kind:'answer_decision' as const,enabled:true,expectedVersion:decision.expectedVersion};
 beforeEach(()=>{vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('navigator',{onLine:true,locks:{request:async(_key:string,callback:()=>unknown)=>callback()}});localStorage.clear();});afterEach(()=>{cleanup();vi.unstubAllGlobals();});
-function view(d=decision){return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><DecisionReview api={api} id="p" decision={d} actions={[{...action,expectedVersion:d.expectedVersion}]} fresh refresh={()=>{}}/></Operations></MemoryRouter>;}
+function view(d=decision,fresh=true,refreshing=false){return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><DecisionReview api={api} id="p" decision={d} actions={[{...action,expectedVersion:d.expectedVersion}]} fresh={fresh} refreshing={refreshing} refresh={()=>{}}/></Operations></MemoryRouter>;}
 let api:ApiClient;
+test('keeps a pinned decision editable during background reads and revalidates before sending',async()=>{
+  const posts:any[]=[];vi.stubGlobal('fetch',async(_path:string,init?:RequestInit)=>{if(init?.method==='POST'){const body=JSON.parse(init.body as string);posts.push(body);return Response.json({apiVersion:1,projectId:'p',operationId:body.commandId,owner:'host_interaction',operationKind:'answer_decision',state:'accepted',updatedAt:new Date().toISOString()});}return Response.json({...run,decisions:[decision],availableActions:[action]});});
+  api=new ApiClient();const mounted=render(view());fireEvent.click(screen.getByRole('button',{name:'Xem xét gói'}));
+  mounted.rerender(view(decision,false,true));
+  expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).disabled).toBe(false);
+  fireEvent.change(screen.getByLabelText(/Lý do/),{target:{value:'Đã đọc đúng gói'}});fireEvent.click(screen.getByRole('button',{name:'Duyệt gói'}));
+  await waitFor(()=>expect(posts).toHaveLength(1));expect(posts[0]).toMatchObject({expectedVersion:decision.expectedVersion,reason:'Đã đọc đúng gói'});
+});
+test('does not send a background-read decision when live evidence changed',async()=>{
+  const changed={...decision,expectedVersion:{...decision.expectedVersion,revision:2,evidenceDigest:'b'.repeat(64)}};
+  const {fetcher}=installApi({'/api/v1/projects/p/runs/run':{...run,decisions:[changed],availableActions:[{...action,expectedVersion:changed.expectedVersion}]}});
+  api=new ApiClient();const mounted=render(view());fireEvent.click(screen.getByRole('button',{name:'Xem xét gói'}));mounted.rerender(view(decision,false,true));
+  fireEvent.click(screen.getByRole('button',{name:'Duyệt gói'}));await screen.findByRole('button',{name:'Đọc lại gói hiện hành'});
+  expect(fetcher.mock.calls.filter(call=>(call as unknown as [string,RequestInit?])[1]?.method==='POST')).toHaveLength(0);
+});
 test('review pins evidence/version; changed revision requires explicit rereview and sends no POST',async()=>{
   const {fetcher}=installApi({'/api/v1/projects/p/runs/run':{...run,availableActions:[action]}});api=new ApiClient();const result=render(view());
   fireEvent.click(screen.getByRole('button',{name:'Xem xét gói'}));
