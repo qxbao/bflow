@@ -979,6 +979,12 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       ? undefined
       : { ...isolatorProfile.environment };
     const launchEnvironmentValues: Record<string, string> = {
+      // Native Claude otherwise inherits these selectors from Herdr's host process.
+      // Pin the same effective locations so transcript registration uses validated launch material.
+      ...(requirement.provider === "claude" && isolatorProfile === undefined ? {
+        HOME: process.env["HOME"] ?? homedir(),
+        CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] ?? join(process.env["HOME"] ?? homedir(), ".claude")
+      } : {}),
       ...(codexLaunchEnvironment ?? {}),
       ...(preparedCodexHome !== undefined
         ? {

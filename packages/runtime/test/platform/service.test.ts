@@ -329,6 +329,23 @@ describe("DefaultPlatformReadinessService", () => {
     return { service, journal };
   }
 
+  it("pins the native Claude transcript home into launch material for verified web chat", async () => {
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = join(baseDir, "native-claude-account");
+    try {
+      let context: ProviderAdapterContext | undefined;
+      const providers = contextProviderFactory((_provider, value) => { context = value; });
+      const { service } = buildService({ providerFactory: providers });
+      const result = await service.prepareDeveloper(identity, requirement());
+      expect(result.ok).toBe(true);
+      expect(context?.launchEnvironment?.CLAUDE_CONFIG_DIR).toBe(process.env.CLAUDE_CONFIG_DIR);
+      expect(context?.launchEnvironment?.HOME).toBeTruthy();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+    }
+  });
+
   it("pins profile instructions, environment, launch intent and status without replacing builtin policy", async () => {
     const { service, journal } = buildService();
     const snapshot = specialistProfile();
@@ -1629,7 +1646,9 @@ rl.on("line", line => {
     expect(gatewayLaunch?.launch.argv).toEqual(gatewayLaunch?.profile.argv);
     const { DISABLE_AUTOUPDATER, ...tokenEnv } = gatewayLaunch?.launch.env ?? {};
     expect(DISABLE_AUTOUPDATER).toBe("1");
-    const tokenValues = Object.values(tokenEnv);
+    expect(tokenEnv.HOME).toBeTruthy();
+    expect(tokenEnv.CLAUDE_CONFIG_DIR).toBeTruthy();
+    const tokenValues = Object.entries(tokenEnv).filter(([name]) => !["HOME", "CLAUDE_CONFIG_DIR"].includes(name)).map(([,value]) => value);
     expect(tokenValues).toHaveLength(1);
     expect(tokenValues[0]).toBe(gatewayControl.tokens()[0]);
     expect(gatewayLaunch?.launch.launchId).toBe(gatewayLaunch?.profile.launchId);
@@ -2029,7 +2048,9 @@ rl.on("line", line => {
     expect(launched.ok).toBe(true);
     if (!launched.ok) return;
     expect(launched.value.taskId).toBe("t1");
-    expect(Object.keys(launched.value.launch.env)).toHaveLength(2);
+    expect(Object.keys(launched.value.launch.env).filter(name => !["HOME", "CLAUDE_CONFIG_DIR"].includes(name))).toHaveLength(2);
+    expect(launched.value.launch.env["HOME"]).toBeTruthy();
+    expect(launched.value.launch.env["CLAUDE_CONFIG_DIR"]).toBeTruthy();
     expect(launched.value.launch.env["DISABLE_AUTOUPDATER"]).toBe("1");
     expect(await journalKinds(journal)).toEqual(["intent"]);
 
