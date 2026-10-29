@@ -16,7 +16,7 @@ interface ConversationIntakePort {
 const DecisionCallSchema = z.object({ messageId: z.string().min(1).optional(), decision: JsonValueSchema }).strict();
 const ReceivedTurnSchema = z.object({ messageId: z.string().min(1), conversationSessionId: z.string().min(1),
   content: z.string().min(1), userId: z.string().min(1),
-  agyLaunchId: z.string().min(1).optional(), agyAnchor: AgyNativeAnchorSchema.optional() }).strict();
+  agyLaunchId: z.string().min(1).optional(), agyAnchor: AgyNativeAnchorSchema.optional(), source: z.literal("local_web").optional(), runId: z.string().min(1).optional() }).strict();
 const TRUSTED_APPROVAL = json({ intent: "trusted_approval" });
 function identity(binding: PaneBinding): string {
   return digest({ ...binding, transportState: undefined, lastHeartbeatAt: undefined });
@@ -35,8 +35,8 @@ export class HostConversationIntake {
     return result;
   }
   private userInput(turn: TrustedConversationTurn) {
-    return { sessionId: turn.conversationSessionId, messageId: turn.messageId, content: turn.content, occurredAt: turn.occurredAt,
-      provenance: { origin: "user", authenticatedUser: true, userId: turn.userId, paneId: turn.binding.paneId, channel: "herdr_attach" } };
+    return { sessionId: turn.conversationSessionId, messageId: turn.messageId, content: turn.content, occurredAt: turn.occurredAt, ...(turn.runId?{runId:turn.runId}:{}),
+      provenance: { origin: "user", authenticatedUser: true, userId: turn.userId, paneId: turn.binding.paneId, ...(turn.source === "local_web" ? {} : { channel: "herdr_attach" }) } };
   }
   /** Only unfinished ordinary turns explicitly interrupted by a Runtime nudge are recoverable; no approval or old resume authority. */
   private async recoverableTurns(binding: PaneBinding): Promise<TrustedConversationTurn[]> {
@@ -61,7 +61,7 @@ export class HostConversationIntake {
       const turns = await this.receipts.conversationTurns();
       const previous = turns.find(value => value.messageId === turn.messageId);
       if (previous && (identity(previous.binding) !== identity(binding) || previous.content !== turn.content ||
-          previous.conversationSessionId !== turn.conversationSessionId || previous.userId !== turn.userId)) {
+          previous.conversationSessionId !== turn.conversationSessionId || previous.userId !== turn.userId || previous.source !== turn.source || previous.runId !== turn.runId)) {
         throw new Error("Conflicting trusted user turn");
       }
       const trusted = previous ?? { binding, ...turn, occurredAt: new Date().toISOString(), sequence: (turns.at(-1)?.sequence ?? 0) + 1 };

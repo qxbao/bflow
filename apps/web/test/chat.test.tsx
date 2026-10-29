@@ -13,7 +13,7 @@ it('renders normalized text as text and leaves send unavailable even after histo
  expect(await screen.findByText(message.content)).toBeTruthy();expect(document.querySelector('img')).toBeNull();
  expect(screen.getByRole<HTMLButtonElement>('button',{name:'Gửi tin nhắn'}).disabled).toBe(true);
  expect(screen.getByText(/Trò chuyện qua web chưa sẵn sàng/)).toBeTruthy();
- expect(fetcher.mock.calls[0]?.[0]).toBe('/api/v1/projects/p/sessions/host/messages');
+ expect(fetcher.mock.calls.some(([path])=>path==='/api/v1/projects/p/sessions/host/messages')).toBe(true);
  expect(fetcher.mock.calls.every(([,init])=>init.method==='GET')).toBe(true);
 });
 it('refuses a foreign session and never exposes its content',async()=>{
@@ -51,4 +51,18 @@ it('keeps intentionally identical text as distinct stable messages',async()=>{
 it('refuses duplicate message IDs instead of hiding a conflicting replay',async()=>{
  response({apiVersion:1,items:[message,{...message,content:'conflicting replay'}]});render(open());
  expect(await screen.findByRole('alert')).toBeTruthy();expect(screen.queryByText('conflicting replay')).toBeNull();
+});
+it('sends a validated message with exact run/session and never auto retries a lost ACK',async()=>{
+ localStorage.clear();Object.defineProperty(navigator,'locks',{configurable:true,value:{request:async(_key:string,work:()=>Promise<unknown>)=>work()}});
+ let sent=0,original:string|undefined;const metadata:unknown[]=[];
+ vi.stubGlobal('fetch',vi.fn(async(path:string,init:RequestInit)=>{
+  if(path.endsWith('/session'))return new Response(JSON.stringify({apiVersion:1,projectId:'p',sessionId:'host',state:'ready',pendingIntakes:[],blockers:[],updatedAt:now}));
+  if(init.method==='POST'){const input=JSON.parse(String(init.body));metadata.push(input);sent++;original=input.messageId;throw Error('Lost ACK');}
+  return new Response(JSON.stringify({apiVersion:1,items:original?[{...message,messageId:original,sender:'user',source:'web',content:'Nội dung mới',delivery:'queued'}]:[]}));
+ }));
+ render(open());const input=await screen.findByLabelText<HTMLTextAreaElement>('Tin nhắn cho Conversation');await vi.waitFor(()=>expect(input.disabled).toBe(false));
+ fireEvent.change(input,{target:{value:'Nội dung mới'}});fireEvent.click(screen.getByRole('button',{name:'Gửi tin nhắn'}));
+ await screen.findByText(/Chưa xác định được kết quả gửi/);expect(sent).toBe(1);expect(metadata[0]).toMatchObject({projectId:'p',sessionId:'host',runId:'run',content:'Nội dung mới'});
+ expect(JSON.stringify(localStorage)).not.toContain('Nội dung mới');
+ fireEvent.click(screen.getByRole('button',{name:'Đối chiếu tin nhắn'}));await screen.findByText(/Đã tìm thấy tin nhắn gốc/);expect(sent).toBe(1);
 });

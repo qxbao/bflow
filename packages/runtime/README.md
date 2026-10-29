@@ -59,9 +59,14 @@ Native notices/watchdog and pending decision authority remain unchanged. The fro
 web DTOs do not yet expose general notice content; UI must not acknowledge IDs
 merely received in the feed. The W05 handoff includes an integrator proposal.
 
-Chat (W08), UI (W06–W08) and live acceptance remain separate tasks. Evidence is
-source/local tests and authenticated host subprocess/HTTP fixtures, not live
-provider/Herdr workflow acceptance. See [W02](test/interaction/W02-HANDOFF.md) and
+W08 adds host-private durable chat delivery, exact nonce/session/pane correlation,
+normalized Claude/Codex history and immutable assistant receipts. Web turns retain
+local_web provenance and their run/session; they never fabricate physical hooks.
+Uncertain delivery is observation-only; queued drafts replaced before dispatch
+retain conclusive not-delivered state. Chat approval authority is pinned to the
+original approval context and still passes independent Runtime gates. Agy Conversation
+remains unsupported. Source/local and browser-fixture tests are separate from
+isolated real provider/Herdr adapter probes; none establishes full workflow acceptance. See [W02](test/interaction/W02-HANDOFF.md) and
 [W05](test/interaction/W05-HANDOFF.md) handoffs.
 
 ## Custom specialist profiles (RP-01)

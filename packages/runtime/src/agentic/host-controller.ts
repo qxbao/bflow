@@ -205,7 +205,7 @@ export async function registerUserInteractionIssuer(options: { repositoryPath: s
 }
 /** Dedicated web credential can never call owner lifecycle or role methods. */
 export async function callUserInteractionHost(options: { repositoryPath: string; sessionId: string }, credential: string,
-  method: "interaction_execute" | "interaction_operation" | "interaction_notice_displayed", input: unknown): Promise<unknown> {
+  method: "interaction_execute" | "interaction_operation" | "interaction_notice_displayed" | "interaction_chat_send" | "interaction_chat_history", input: unknown): Promise<unknown> {
   const repositoryPath = await realpath(options.repositoryPath);
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
   const root = findPrivateRuntimeStateDirectory(repositoryPath);

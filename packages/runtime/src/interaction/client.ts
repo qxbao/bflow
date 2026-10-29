@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import {
-  IdentifierSchema, WebEventsQuerySchema, WebEventSchema, WebPageSchema, WebNoticeDisplayedResultSchema, WebHttpPathParamsSchema, WebArtifactReadResultSchema,
+  WebChatSendSchema, WebChatMessageResultSchema, WebChatPageResultSchema, WebMessagesQuerySchema, IdentifierSchema, WebEventsQuerySchema, WebEventSchema, WebPageSchema, WebNoticeDisplayedResultSchema, WebHttpPathParamsSchema, WebArtifactReadResultSchema,
   WebProjectSessionResultSchema,
   WebRunPageResultSchema,
   WebRunViewResultSchema,
@@ -191,11 +191,18 @@ export async function openUserInteractionClient(options: {
           options.interaction.credential, "interaction_notice_displayed", input));
       } catch { return unavailable(); }
     },
-    async listMessages() {
-      return refused();
+    async listMessages(id, conversationSessionId, cursor) {
+      if(!options.interaction || id!==projectId)return refused();
+      try{const result=WebChatPageResultSchema.parse(await callUserInteractionHost({repositoryPath,sessionId},options.interaction.credential,"interaction_chat_history",
+        {projectId:id,sessionId:IdentifierSchema.parse(conversationSessionId),query:WebMessagesQuerySchema.parse(cursor===undefined?{}:{cursor})}));
+        if(!result.ok)return result;return {ok:true,value:{apiVersion:1,items:result.value.items,...(result.value.nextCursor?{nextCursor:result.value.nextCursor}:{})}};}
+      catch{return {ok:false,error:{code:"validation",retryable:false,message:"Chat provider/session adapter unavailable; inspect session readiness.",details:{reason:"chat_adapter_unavailable"}}};}
     },
-    async sendMessage() {
-      return refused();
+    async sendMessage(raw) {
+      if(!options.interaction)return refused();
+      let input;try{input=WebChatSendSchema.parse(raw);if(input.projectId!==projectId) return refused();}catch{return refused();}
+      try{return WebChatMessageResultSchema.parse(await callUserInteractionHost({repositoryPath,sessionId},options.interaction.credential,"interaction_chat_send",input));}
+      catch{return {ok:false,error:{code:"unknown_delivery",retryable:false,manualInterventionRequired:true,message:"Observe the original message ID; do not resend."}};}
     },
     async readArtifact(id, artifactId) {
       if (id !== projectId) return refused();

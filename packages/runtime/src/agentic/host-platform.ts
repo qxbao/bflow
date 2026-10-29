@@ -1,3 +1,4 @@
+import { nativeChatTranscriptRoot } from "../interaction/chat-history.js";
 import { RoleCapabilityPreflightError } from "./ports.js";
 import { resolveRoleProfile } from "../platform/role-profiles.js";
 import { assertProfileSnapshotCurrent } from "./profile-admission.js";
@@ -895,7 +896,8 @@ export class HostPlatformSession {
   }
 
   private rememberNativeAgyHome(prepared: PreparedRoleLaunch): void {
-    if (prepared.provider === "codex" && prepared.launch.env.CODEX_HOME) this.nativeTranscriptRoots.set(prepared.launch.launchId, prepared.launch.env.CODEX_HOME);
+    const transcriptRoot = nativeChatTranscriptRoot(prepared.provider, prepared.launch.env);
+    if (transcriptRoot) this.nativeTranscriptRoots.set(prepared.launch.launchId, transcriptRoot);
     if (prepared.provider !== "agy") return;
     const expectedSuffix = join(".gemini", "config", "mcp_config.json");
     const matches = prepared.profile.configFiles.filter(file => file.path.endsWith(`/${expectedSuffix}`));

@@ -4,13 +4,13 @@ import { WebHttpContracts, type WebChatMessage } from '@bflow/contracts/web';
 import { ApiClient, ApiError, projectPath } from '../../api/client';
 import { useRead } from '../data';
 import './chat.css';
+import { ChatComposer } from './composer';
 
 const delivery:Record<WebChatMessage['delivery'],string>={
   accepted:'Đã tiếp nhận',queued:'Đang chờ gửi',delivered:'Đã chuyển',
   unknown_delivery:'Chưa rõ đã gửi',failed:'Gửi thất bại',
 };
-/** Observation only until the host exposes verified chat capability and authority.
- * A successful history read never establishes permission to send or retry. */
+/** Normalized session history; the host rechecks send authority independently. */
 export function ChatHistory({api,projectId,sessionId,runId,revision}:{
   api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;
 }) {
@@ -33,7 +33,6 @@ function SessionHistory({api,projectId,sessionId,runId,revision}:{
   return <section className="chat-history panel" aria-label="Trò chuyện cùng phiên">
     <h2>Trò chuyện</h2>
     <p>Lịch sử Conversation của phiên đang gắn với công việc này. Các quyết định vẫn được xử lý tại gói xem xét của công việc.</p>
-    <p className="quote" id="chat-unavailable">Trò chuyện qua web chưa sẵn sàng trong phiên này. Bạn vẫn có thể dùng biểu mẫu và nút quyết định.</p>
     <Link to={`/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}`}>Mở công việc và quyết định →</Link>
     <div aria-busy={result.loading}>
       {result.loading && <p role="status">Đang đọc lịch sử trò chuyện…</p>}
@@ -49,8 +48,6 @@ function SessionHistory({api,projectId,sessionId,runId,revision}:{
       {result.data?.nextCursor && <button disabled={result.loading || Boolean(result.error)} onClick={()=>setCursor(result.data!.nextCursor!)}>Trang tin nhắn tiếp theo</button>}
       {cursor && <button onClick={()=>setCursor(undefined)}>Về đầu lịch sử</button>}
     </div>
-    <label htmlFor="chat-draft">Tin nhắn cho Conversation</label>
-    <textarea id="chat-draft" disabled aria-describedby="chat-unavailable" rows={3}/>
-    <button disabled aria-describedby="chat-unavailable">Gửi tin nhắn</button>
+    <ChatComposer api={api} projectId={projectId} sessionId={sessionId} runId={runId} revision={revision} historyReady={!!result.data&&!result.error&&!result.loading} refresh={()=>setReload(value=>value+1)}/>
   </section>;
 }

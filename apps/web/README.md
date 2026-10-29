@@ -15,7 +15,7 @@ Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 | Công việc | Search/phase URL filters, cursor pages, run detail, tasks/blockers, lineage links | Pre-Core null, all engine/task statuses, unknown/done terminal observations, historical continuation, empty/error/stale |
 | Cần bạn quyết định | DecisionCard, revision/status/expiry, safe evidence | Pending/expired/superseded etc. as returned; view-only, no approval inferred from phase |
 | Cài đặt dự án | Read-only inspect, configuration readiness, separate diagnostics disclosure | Failed/unsupported checks, missing host and remediation; no terminal editor or message scraping |
-| Trò chuyện | Explicit unsupported navigation state | Sending/history belong to W08 |
+| Trò chuyện | Run detail panel on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
 
 Workflow create/revise/clarification/approval/resume/cancel and lifecycle start/stop
 controls belong to W07. The registry form and read-only inspect call the frozen
@@ -161,3 +161,19 @@ Runtime/Conversation integration tests exercise structured admission without a
 model. These checks do not establish live Herdr/provider/full SDLC acceptance.
 
 See W07-HANDOFF.md for measured results and integration-owned runner proposal.
+
+## W08 optional chat
+
+Run detail includes normalized session history and a bounded text composer. It uses
+the same authenticated HTTP origin and run/session as direct actions. The host
+rechecks readiness and native binding; successful history alone grants no authority.
+Claude/Codex adapters use correlated real native hooks and provider transcript IDs.
+Agy Conversation remains unsupported. Native registration or transcript capability
+missing means chat stays unavailable while direct forms/buttons remain usable.
+
+A message ID is reserved before POST. Lost ACK/reload/multiple tabs observe that
+original ID; the browser never automatically resends. Local storage holds only
+recovery IDs, not message content or credentials. Queued/unknown/delivered are
+transport states, never workflow success. Approval buttons retain exact versions
+and independent Runtime gates. See [W08 handoff](W08-HANDOFF.md) for measured
+source, browser-fixture and isolated live-adapter evidence and their limits.

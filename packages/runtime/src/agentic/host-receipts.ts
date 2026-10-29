@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { basename, join, resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
+  WebChatMessageSchema, AgentProviderIdSchema, IdentifierSchema, type WebChatMessage, ApprovalDecisionSchema, JsonValueSchema, PaneBindingSchema, QualityGateContextSchema,
   QualityGateResultSchema, RoleMessageSchema, VerificationResultSchema,
   type ApprovalDecision, type JsonValue, type PaneBinding, type QualityGateResult, type RoleMessage, type VerificationResult
 } from "@bflow/contracts";
@@ -19,7 +19,7 @@ import { BFLOW_INBOX_NUDGE } from "./conversation-inbox.js";
 import { TaskActivityLog, type TaskActivityInput } from "./task-activity-log.js";
 import type { AgyNativeAnchor } from "./agy-native-transcript.js";
 
-type Kind = "provider-error-signal" | "provider-error-signal-handled" | "provider-failure" | "provider-failure-handled" | "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
+type Kind = "chat-assistant" | "provider-error-signal" | "provider-error-signal-handled" | "provider-failure" | "provider-failure-handled" | "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
 export const AgyNativeAnchorSchema = z.object({ transcriptPath: z.string().min(1), device: z.string().min(1), inode: z.string().min(1),
   stepIndex: z.number().int().nonnegative(), rowDigest: z.string().regex(/^[a-f0-9]{64}$/), prefixDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 export interface HumanHookProvenance {
@@ -30,8 +30,9 @@ export interface HumanHookProvenance {
 export const TrustedConversationTurnSchema = z.object({
   binding: PaneBindingSchema, messageId: z.string().min(1), conversationSessionId: z.string().min(1),
   content: z.string().min(1), occurredAt: z.string().datetime(), userId: z.string().min(1), sequence: z.number().int().positive(),
-  agyLaunchId: z.string().min(1).optional(), agyAnchor: AgyNativeAnchorSchema.optional()
+  agyLaunchId: z.string().min(1).optional(), agyAnchor: AgyNativeAnchorSchema.optional(), source: z.literal("local_web").optional(), runId: z.string().min(1).optional()
 }).strict();
+const ConversationAssistantSchema=z.object({paneId:IdentifierSchema,provider:AgentProviderIdSchema,nativeSessionId:IdentifierSchema,message:WebChatMessageSchema}).strict().refine(v=>v.message.source==="native"&&v.message.sender==="conversation","Normalized assistant provenance required");
 export type TrustedConversationTurn = z.infer<typeof TrustedConversationTurnSchema>;
 /** Durable, sanitised inbox entry for a RoleMessage applied by Conversation; a notice is delivery evidence, never task success. */
 const NOTICE_SUMMARY_LIMIT = 4096;
@@ -228,6 +229,7 @@ export class HostReceiptJournal {
       return json(value);
     }
     if (kind === "provider-failure-handled") return json(z.object({ id: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(input));
+    if (kind === "chat-assistant") return json(ConversationAssistantSchema.parse(input));
     if (kind === "conversation-turn") {
       const turn = TrustedConversationTurnSchema.parse(input);
       if (turn.binding.role !== "conversation" || turn.binding.sessionId !== this.sessionId || !turn.binding.session)
@@ -331,6 +333,7 @@ export class HostReceiptJournal {
         kind === "approval-failure" && digest([record(payload).messageId, record(payload).attempt]) !== id ||
         kind === "runtime-nudge" && digest([record(payload).bindingDigest, record(payload).sequence]) !== id ||
         kind.startsWith("conversation-") && record(payload).messageId !== id ||
+        kind === "chat-assistant" && WebChatMessageSchema.parse(record(payload).message).messageId !== id ||
         kind === "human" && ApprovalDecisionSchema.parse(record(payload).decision).approvalId !== id ||
         kind === "agy-admission" && digest([record(payload).binding, record(payload).launchId, RoleMessageSchema.parse(record(payload).message).message_id,
           record(payload).envelopeDigest]) !== id ||
@@ -896,6 +899,18 @@ export class HostReceiptJournal {
       return await this.write("decision-reblock", id, { messageId, attempt, reblockedAt: new Date().toISOString() }) ? attempt : undefined;
     }
     return undefined;
+  }
+  async recordChatAssistant(paneId:string,provider:string,nativeSessionId:string,message:WebChatMessage):Promise<void>{
+    const value=ConversationAssistantSchema.parse({paneId,provider,nativeSessionId,message});await this.write("chat-assistant",message.messageId,value);
+  }
+  async chatAssistantMessages(sessionId:string):Promise<WebChatMessage[]>{
+    const messages:WebChatMessage[]=[];
+    for(const id of await this.receiptIds("chat-assistant")){
+      const value=ConversationAssistantSchema.parse(await this.read("chat-assistant",id));
+      if(value.message.sessionId===sessionId)messages.push(value.message);
+      if(messages.length>10000)throw new Error("Normalized history limit");
+    }
+    return messages.sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
   }
   async recordConversationTurn(turn: TrustedConversationTurn): Promise<void> { await this.write("conversation-turn", turn.messageId, turn); }
   async conversationDecision(messageId: string): Promise<{ decision: JsonValue; result?: JsonValue } | undefined> {

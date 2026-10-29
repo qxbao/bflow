@@ -1,7 +1,9 @@
+import { HostChat } from "../interaction/chat.js";
+import { registeredAssistantHistory, chatMessageId } from "../interaction/chat-history.js";
 import { ProjectionFeed } from "../interaction/events.js";
 import { readScopedArtifact, serveArtifact } from "../interaction/artifacts.js";
 import { acknowledgeDisplayedNotice } from "../interaction/notices.js";
-import { WebEventsQuerySchema, WebHttpPathParamsSchema } from "@bflow/contracts/web";
+import { WebEventsQuerySchema, WebHttpPathParamsSchema, WebChatSendSchema, WebChatMessageSchema, WebMessagesQuerySchema } from "@bflow/contracts/web";
 import { interactionHostReady } from "../interaction/actions.js";
 import { hostInteractionQuery } from "../interaction/views.js";
 import { interactionProjectId } from "../interaction/client.js";
@@ -373,9 +375,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const webCredentials = new Map<string, { principalId: string; issuerId: string; keyId: string }>();
   const webContext = new AsyncLocalStorage<{ command: WebCommand; principal: WebPrincipal; acceptedAt: string }>();
   const interactionReady = () => interactionHostReady({ workspace: !!workspace, manifest: !!manifest, activating: !!activation, closing, quiesced });
-  const readWebQuery = (params: unknown) => hostInteractionQuery(configuration, params, {
-    ready: interactionReady(), commandsSupported: webCredentials.size > 0,
-    readCore: async runId => { if (!workspace) return undefined; const result = await workspace.runtime.ports.engine.getSnapshot(runId); return result.ok ? result.value ?? undefined : undefined; } });
+  const readWebQuery = async (params: unknown) => {
+    const result=await hostInteractionQuery(configuration, params, {
+      ready: interactionReady(), commandsSupported: webCredentials.size > 0,
+      readCore: async runId => { if (!workspace) return undefined; const result = await workspace.runtime.ports.engine.getSnapshot(runId); return result.ok ? result.value ?? undefined : undefined; } });
+    if(record(params).kind==="session"){
+      const session=WebProjectSessionResultSchema.parse(result);
+      if(session.ok && !await webChat.supported().catch(()=>false))return {ok:true as const,value:{...session.value,blockers:[...session.value.blockers,{code:"chat_adapter_unavailable",message:"Verified chat adapter unavailable; direct actions remain available."}]}};
+    }
+    return result;
+  };
   const readWebRun = async (runId: string) => {
     const result = WebRunViewResultSchema.parse(await readWebQuery({ kind: "run", projectId: webProjectId, runId }));
     if (!result.ok) throw new Error("Run projection unavailable");
@@ -671,6 +680,46 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const session = record(value); nativeSessions.set(pane, { role: AgentRoleSchema.parse(session.role), sessionId: textField(session.sessionId),
       ...(typeof session.transcriptPath === "string" && typeof session.transcriptRoot === "string" ? { transcriptPath: session.transcriptPath, transcriptRoot: session.transcriptRoot } : {}) });
   } } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const webChatContext = new AsyncLocalStorage<{messageId:string}>();
+  const chatBinding = async () => {
+    const pane = manifest?.panes.find(p => p.role === "conversation");
+    if (!pane) throw new Error("Conversation unavailable");
+    return principal("conversation", pane.paneId);
+  };
+  const webChat = new HostChat({directory:join(configuration.directory,"web-chat"),projectId:webProjectId,hostSessionId:configuration.sessionId,
+    session: async () => {
+      const b=await chatBinding(), native=nativeSessions.get(b.paneId);
+      const live=record(record(record(JSON.parse(await herdr(["agent","get",b.paneId]))).result).agent);
+      return {sessionId:manifest!.conversationSessionId,nativeSessionId:b.session!.value,paneId:b.paneId,provider:b.provider ?? b.agentKind,
+        ready:interactionReady() && native?.role==="conversation" && !!native.transcriptPath && !!native.transcriptRoot && native.sessionId===b.session!.value,
+        busy:!["idle","done"].includes(String(live.agent_status))};
+    },
+    observeAdmission: async record => {
+      const turn=(await receipts.conversationTurns()).find(t=>t.messageId===record.input.messageId);
+      if(!turn)return undefined;
+      if(turn.source!=="local_web"||turn.content!==record.input.content||turn.userId!==record.principalId||turn.conversationSessionId!==record.input.sessionId||turn.binding.paneId!==record.paneId||turn.binding.session?.value!==record.nativeSessionId)throw new Error("Chat admission receipt mismatch");
+      return {messageId:turn.messageId,requiresConversationDecision:(await receipts.conversationDecision(turn.messageId))?.result===undefined};
+    },
+    approvalContext: async runId => runId?(await readWebRun(runId)).decisions.filter(d=>d.status==="pending"):[],
+    prompt: async (wire,target) => {const b=await chatBinding();if(b.paneId!==target.paneId||b.session!.value!==target.nativeSessionId||manifest!.conversationSessionId!==target.sessionId)throw new Error("Chat dispatch binding changed");await herdr(["agent","prompt",b.paneId,wire]);},
+    admit: (messageId,content,userId,runId) => webChatContext.run({messageId},async()=>{
+      const b=await chatBinding();return conversationIntake.receive(b,{conversationSessionId:manifest!.conversationSessionId,messageId,content,userId,source:"local_web",...(runId?{runId}:{})});
+    }),
+    history: async sessionId => {
+      const savedBefore=await receipts.chatAssistantMessages(sessionId);
+      const turns=(await receipts.conversationTurns()).filter(t=>t.conversationSessionId===sessionId&&t.source!=="local_web");
+      let saved=savedBefore;
+      if(sessionId===manifest?.conversationSessionId){
+        try{const b=await chatBinding(),native=nativeSessions.get(b.paneId);
+          const assistant=await registeredAssistantHistory(native,b.provider??b.agentKind,b.session!.value,sessionId);
+          for(const message of assistant)await receipts.recordChatAssistant(b.paneId,b.provider??b.agentKind,b.session!.value,message);
+          saved=await receipts.chatAssistantMessages(sessionId);
+        }catch(error){if(!saved.length&&!turns.length)throw error;}
+      }else if(!saved.length&&!turns.length)throw new Error("Unknown chat history session");
+      return [...turns.map(t=>WebChatMessageSchema.parse({apiVersion:1,messageId:chatMessageId("native",t.binding.session!.value,t.messageId),sessionId,
+        sender:"user",content:t.content,createdAt:t.occurredAt,delivery:"delivered",source:"native"})),...saved];
+    }
+  });
   const getQueryStore = async () => {
     if (workspace) return workspace.runtime.ports.runStore;
     if (!queryStore) {
@@ -932,7 +981,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
       ...(readExecutionResolution ? { readExecutionResolution } : {}),
-      authorizeHuman: async decision => await receipts.authenticateHuman(decision) ||
+      authorizeHuman: async decision => await receipts.authenticateHuman(decision) || await webChat.authenticateHuman(decision) ||
         decision.sessionId === accepted.conversationSessionId && await webStore.authenticateHuman(decision, accepted.conversationSessionId),
       hasPolicyPhaseReceipt: async request => activePolicyMeasurements.has(request.message_id) || receipts.hasPolicyPhaseEvidence(request),
       authorizePolicyPhaseRetirement: async authority => {
@@ -977,7 +1026,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         // Recorded only after Conversation applied the message: a durable notice, not task-success evidence.
         if (message.recipient.role === "conversation") await receipts.appendConversationNotice(message);
         deliveredMessageIds.add(message.message_id); },
-      onHumanDecision: async decision => { if (!humanHookProvenance) throw new Error("Human approval requires physical user input hook");
+      onHumanDecision: async decision => { const chat=webChatContext.getStore(); if(chat){await webChat.recordApproval(chat.messageId,decision);return;} if (!humanHookProvenance) throw new Error("Human approval requires physical user input hook");
         await receipts.recordHuman(ApprovalDecisionSchema.parse(decision), humanHookProvenance); }
     });
     workspace.conversation.configureStructuredInteraction({
@@ -1735,6 +1784,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (token !== configuration.token) {
       const web = webCredentials.get(token);
       if (web) {
+        if (method === "interaction_chat_send") {
+          const input=WebChatSendSchema.parse(params);
+          if(input.runId){const run=await readWebRun(input.runId);if(run.sessionId!==input.sessionId||run.currentRunId!==run.runId)throw new Error("Foreign or superseded chat run");}
+          return {ok:true,value:await webChat.send(input,web.principalId)};
+        }
+        if (method === "interaction_chat_history") {
+          const input=z.object({projectId:z.string(),sessionId:z.string(),query:WebMessagesQuerySchema}).strict().parse(params);
+          if(input.projectId!==webProjectId)throw new Error("Foreign chat history project");
+          return {ok:true,value:await webChat.list(input.sessionId,input.query.cursor)};
+        }
         if (method === "interaction_notice_displayed") {
           const input = WebHttpPathParamsSchema.parse(params);
           if (!input.noticeId || Object.keys(input).some(k => !["id", "noticeId"].includes(k))) throw new Error("Invalid notice acknowledgement");
@@ -1912,6 +1971,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           throw error;
         }
       }
+      if (method === "conversation_chat_history") {
+        if(role!=="conversation")throw new Error("Only Conversation has normalized chat history");
+        const input=z.object({paneId:z.string().min(1),nativeSessionId:z.string().min(1)}).strict().parse(params);
+        const b=await principal(role,input.paneId);
+        if(b.session!.value!==input.nativeSessionId)throw new Error("Stale normalized chat session");
+        try{const messages=await registeredAssistantHistory(nativeSessions.get(b.paneId),b.provider??b.agentKind,b.session!.value,manifest!.conversationSessionId);
+          for(const message of messages)await receipts.recordChatAssistant(b.paneId,b.provider??b.agentKind,b.session!.value,message);
+          return {stored:true};
+        }catch{return {stored:false};}
+      }
       if (method === "native_session") {
         const input = record(params), root = typeof input.launchId === "string" ? platformSession?.nativeTranscriptRoot(input.launchId) : undefined;
         if (root && !platformSession?.providerOfActiveLaunch(role, textField(input.launchId))) throw new Error("Foreign provider launch transcript registration");
@@ -2008,6 +2077,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (isAgy ? hook.hook_event_name !== "PreInvocation" : hook.hook_event_name !== "UserPromptSubmit")
           throw new Error("Physical user input hook required");
         const prompt = textField(hook.prompt), nativeSessionId = textField(hook.session_id);
+        if(prompt.startsWith("[bflow-web:")) {
+          const work=userQueue.catch(()=>undefined).then(()=>webChat.echo({nativeSessionId,paneId:binding.paneId,prompt}));
+          userQueue=work;return work;
+        }
         if (!binding.session || binding.session.value !== nativeSessionId) throw new Error("Physical user input native session mismatch");
         const agyCurrent = isAgy ? await readAgyTurn(binding, textField(input.launchId), textField(input.transcriptPath)) : undefined;
         if (agyCurrent) {
@@ -2370,8 +2443,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
     }
   };
+  let chatPump:Promise<void>|undefined;
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
+    if(!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
     const task = (async () => { await pumpProviderFailures(); return workspace!.runtime.tick(); })(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
@@ -3096,6 +3171,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
     if (event === "SessionStart") await callHost(configuration.socketPath, configuration.token, "native_session", {paneId, sessionId:session,
       ...(process.env[BFLOW_LAUNCH_ID_ENV] ? { launchId: process.env[BFLOW_LAUNCH_ID_ENV] } : {}),
       ...(typeof hook.transcript_path === "string" ? { transcriptPath: hook.transcript_path } : {}) });
+    if (event === "Stop" && configuration.role === "conversation" && configuration.provider !== "agy") {
+      await callHost(configuration.socketPath,configuration.token,"conversation_chat_history",{paneId,nativeSessionId:session});
+    }
     if (event === "Stop" && configuration.role !== "conversation") await callHost(configuration.socketPath, configuration.token, "provider_stopped", { paneId, nativeSessionId: session });
     const stopBlockDecision = configuration.provider === "agy" ? "continue" : "block";
     if (event === "Stop" && configuration.role === "conversation") {
@@ -3189,7 +3267,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
         const reachability = plan === undefined ? undefined : await probeAllGateways(plan, process.env, (url, init) => fetch(url, init));
         await callHost(configuration.socketPath, configuration.token, "provider_started", { paneId, nativeSessionId: session,
           ...(plan === undefined || reachability === undefined ? {} : { launchId: plan.launchId, toolReachability: reachability }) });
-        await callHost(configuration.socketPath, configuration.token, "native_session", { paneId, sessionId: session });
+        await callHost(configuration.socketPath, configuration.token, "native_session", { paneId, sessionId: session,
+          ...(process.env[BFLOW_LAUNCH_ID_ENV] ? {launchId:process.env[BFLOW_LAUNCH_ID_ENV]} : {}),
+          ...(typeof hook.transcript_path === "string" ? {transcriptPath:hook.transcript_path} : {}) });
         await markBoundary();
         process.stdout.write(JSON.stringify({ decision: "block", reason: "Bflow startup registered locally; no model request is needed." }) + "\n");
         process.stderr.write("Bflow startup registered locally; waiting for work.\n");

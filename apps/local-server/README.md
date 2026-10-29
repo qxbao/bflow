@@ -28,8 +28,10 @@ and never stops a host.
 Only the injected `LocalWorkspaceServices` and `UserInteractionClient` perform
 workspace/host operations. The package imports neither CLI nor a workflow engine;
 there is no mock fallback. W04 owns CLI lifecycle/key registration/signer wiring.
-W05 implements authenticated SSE/artifact/notices; W08 chat routes still reject
-explicitly after authentication, validation and project scope.
+W05 implements authenticated SSE/artifact/notices. W08 routes chat history/send
+through the injected UserInteractionClient after auth/CSRF/schema/project/session
+checks; delivery/admission/reconciliation remain host-owned. Unsupported adapters
+return explicit errors, and no traditional mutation CLI is invoked.
 No Herdr/provider or full SDLC acceptance is claimed.
 
 Private state uses user-owned 0700 directories/0600 files and an exclusive owner
@@ -57,8 +59,9 @@ reconciliation_required and never redirects to another host. Legacy explicit
 workspace/client injection remains supported. Construction config and browser
 context use server-only contracts/web-host codecs (D-WEB-02); HTTP DTOs unchanged.
 The CLI owns lifecycle receipts and issuer/key registration; this server imports
-no CLI or provider modules. W06 UI and W08 chat remain separate tasks. The bundled
-W00 page is still an asset/build skeleton.
+no CLI or provider modules. The web application supplies its separately built
+production assets. Chat provider readiness and normalized history belong to Runtime;
+HTTP success is never workflow success.
 
 W05 SSE accepts a query cursor or `Last-Event-ID` (both must agree). Its public
 cursor combines this server's epoch and the host projection epoch plus sequence.

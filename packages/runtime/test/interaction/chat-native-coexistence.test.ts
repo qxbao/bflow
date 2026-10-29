@@ -1,0 +1,22 @@
+import { afterEach, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PaneBindingSchema } from '@bflow/contracts';
+import { HostChat } from '../../src/interaction/chat.js';
+import { HostReceiptJournal } from '../../src/agentic/host-receipts.js';
+import { HostConversationIntake } from '../../src/agentic/host-conversation.js';
+const dirs:string[]=[];afterEach(async()=>{for(const d of dirs.splice(0))await rm(d,{recursive:true,force:true});});
+it('binds duplicate web echoes once, preserves run and web origin, and never turns a nudge into human input',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'chat-coexist-'));dirs.push(dir);
+ const binding=PaneBindingSchema.parse({schemaVersion:2,bindingId:'binding',sessionId:'host',role:'conversation',agentId:'chat',paneId:'pane',workspaceId:'workspace',tabId:'tab',provider:'claude',agentKind:'claude',cwd:dir,readOnlyWorkspace:true,permanent:true,session:{source:'herdr:claude',kind:'id',value:'native'},isolationMode:'dedicated_pane',transportState:'idle',boundAt:new Date().toISOString()});
+ const receipts=new HostReceiptJournal(join(dir,'receipts'),dir,'host'),applied:unknown[]=[];
+ const intake=new HostConversationIntake(receipts,()=>({getContext:async()=>({}),parseDecision:async input=>input,validateDecision:async()=>{},handleTrustedApproval:async()=>undefined,handleUserTurn:async input=>{applied.push(input);return {ok:true,value:{}};}}));
+ let wire='';const chat=new HostChat({directory:join(dir,'chat'),projectId:'p',hostSessionId:'host',session:async()=>({sessionId:'conv',nativeSessionId:'native',paneId:'pane',provider:'claude',ready:true,busy:false}),prompt:async input=>{wire=input;},admit:async(messageId,content,userId,runId)=>intake.receive(binding,{conversationSessionId:'conv',messageId,content,userId,source:'local_web',runId})});
+ const input={apiVersion:1,messageId:'2ac8910d-bd7d-4766-bcc1-dc0ab2321d42',projectId:'p',sessionId:'conv',runId:'run',content:'Xin chào'};
+ await chat.send(input,'user');await chat.echo({nativeSessionId:'native',paneId:'pane',prompt:wire});await chat.echo({nativeSessionId:'native',paneId:'pane',prompt:wire});
+ expect(await receipts.conversationTurns()).toHaveLength(1);
+ await intake.decide(binding,{messageId:input.messageId,decision:{intent:'conversation_only',directReply:'Chào bạn'}});
+ expect(applied).toHaveLength(1);expect(applied[0]).toMatchObject({messageId:input.messageId,runId:'run',provenance:{authenticatedUser:true,origin:'user'}});expect((applied[0] as any).provenance.channel).toBeUndefined();
+ await intake.runtimeNudge(binding);expect(await receipts.conversationTurns()).toHaveLength(1);
+});

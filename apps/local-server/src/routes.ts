@@ -1,7 +1,7 @@
 import { streamEvents, upstreamCursor } from './sse.js';
 import { artifactResponse } from './artifact-response.js';
 import { uniqueHeader } from './security.js';
-import { WebEventsQuerySchema, WebArtifactReadResultSchema, WebNoticeDisplayedResultSchema } from '@bflow/contracts/web';
+import { WebChatMessageResultSchema, WebChatPageResultSchema, WebEventsQuerySchema, WebArtifactReadResultSchema, WebNoticeDisplayedResultSchema } from '@bflow/contracts/web';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
@@ -93,8 +93,18 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         const value=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.acknowledgeNotice(id,params.noticeId!));});
         const displayed=unwrap(WebNoticeDisplayedResultSchema.parse(value));if(displayed.noticeId!==params.noticeId)throw new HttpError('unavailable');respond(displayed);return;
       }
-      // W08 owns chat. These routes still pass auth/schema/scope checks.
-      void parsedQuery;throw new HttpError('operation_not_allowed');
+      if(name==='messages'){
+        const q=WebHttpContracts.messages.query.parse(parsedQuery);
+        const value=unwrap(WebChatPageResultSchema.parse(await observeWithinDeadline(()=>client.listMessages(id,params.sessionId!,q.cursor))));
+        if(value.items.some(message=>message.sessionId!==params.sessionId))throw new HttpError('unavailable');respond(value);return;
+      }
+      if(name==='sendMessage'){
+        const b=WebHttpContracts.sendMessage.body.parse(input);
+        if(b.projectId!==id||b.sessionId!==params.sessionId)throw new HttpError('forbidden');
+        const value=unwrap(WebChatMessageResultSchema.parse(await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.sendMessage(b));})));
+        if(value.messageId!==b.messageId||value.sessionId!==b.sessionId)throw new HttpError('unavailable');respond(value,202);return;
+      }
+      throw new HttpError('operation_not_allowed');
     })();return;
   }
   if(req.method!=='GET'&&req.method!=='HEAD')throw new HttpError('not_found');

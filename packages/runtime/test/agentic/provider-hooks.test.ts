@@ -108,6 +108,12 @@ describe.skipIf(process.platform === "win32")("provider hook ingress", () => {
     expect(f.calls.map(call => call.method)).toEqual(["provider_started", "native_session", ...(role === "coordinator" ? ["provider_prompt_boundary"] : [])]);
     expect(f.calls[0]?.params).toEqual({ paneId: "pane-1", nativeSessionId: "native-1" });
   });
+  it("preserves the real Codex bootstrap transcript and launch identity for normalized chat readiness",async()=>{
+    const f=await fixture("conversation","codex");
+    const result=await f.invoke("UserPromptSubmit",JSON.stringify({hook_event_name:"UserPromptSubmit",session_id:"native-1",transcript_path:"/private/native-rollout.jsonl",prompt:"[bflow startup env-test] Initialize the local Bflow session; do not send this prompt to the model."}),{BFLOW_LAUNCH_ID:"launch-chat"});
+    expect(result.code).toBe(2);
+    expect(f.calls.find(call=>call.method==="native_session")?.params).toEqual({paneId:"pane-1",sessionId:"native-1",launchId:"launch-chat",transcriptPath:"/private/native-rollout.jsonl"});
+  });
   it("selects the matching hook after unrelated plugin JSON", async () => {
     const f = await fixture();
     const result = await f.invoke("UserPromptSubmit", 'Plugin metadata: {"plugin":"example-plugin"}\n' + JSON.stringify({ ...prompt, prompt: "hello" }) + "\nfinished");
@@ -371,15 +377,16 @@ describe.skipIf(process.platform === "win32")("Conversation inbox hooks", () => 
     expect(parsed).toMatchObject({ decision: "block", reason: expect.stringContaining("còn 1 cập nhật chưa báo người dùng") });
     expect(parsed.reason).toContain("read_updates");
     for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(parsed.reason).not.toContain(forbidden);
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
-    expect(f.calls[2]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision", "conversation_notices", "conversation_notices_surfaced"]);
+    expect(f.calls[0]!.params).toEqual({paneId:"pane-1",nativeSessionId:"native-1"});
+    expect(f.calls[3]!.params).toMatchObject({ messageIds: ["notice-1"], nativeSessionId: "native-1" });
   });
   it("stays silent on Stop with no unsurfaced notices, even when stop_hook_active is set", async () => {
     const f = await fixture("conversation", "claude", { conversation_notices: { notices: [] } });
     const result = await f.invoke("Stop", JSON.stringify({ hook_event_name: "Stop", session_id: "native-1", stop_hook_active: true }));
     expect(result.code).toBe(0);
     expect(result.stdout).toBe("");
-    expect(f.calls.map(call => call.method)).toEqual(["conversation_pending_decision", "conversation_notices"]);
+    expect(f.calls.map(call => call.method)).toEqual(["conversation_chat_history", "conversation_pending_decision", "conversation_notices"]);
   });
   it("never blocks a non-Claude Stop without last_assistant_message, leaving notices for the next user turn", async () => {
     const f = await fixture("conversation", "codex", { conversation_notices: { notices: [notice] } });
