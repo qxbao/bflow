@@ -8,6 +8,7 @@ import { createDefaultRepositoryConfig, loadRepositoryConfig, parseRepositoryCon
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import type { BflowRepositoryConfig, InitCommandOutput } from "./types.js";
+import type { AgentRole } from "@bflow/contracts";
 
 export const EnvironmentProviderSchema = z.enum(["claude", "codex", "agy"]);
 export type EnvironmentProvider = z.infer<typeof EnvironmentProviderSchema>;
@@ -52,9 +53,13 @@ export const EnvironmentToolsConfigSchema = z.object({
 }).strict();
 export type EnvironmentToolsConfig = z.infer<typeof EnvironmentToolsConfigSchema>;
 
+/** Governance roles plus `sos`, the emergency rescue agent spawned on demand by an exact `BFLOWSOS` chat turn. */
+export const EnvironmentRoleNameSchema = z.union([AgentRoleSchema, z.literal("sos")]);
+export type EnvironmentRoleName = z.infer<typeof EnvironmentRoleNameSchema>;
+
 export const EnvironmentRoleConfigSchema = z
   .object({
-    role: AgentRoleSchema,
+    role: EnvironmentRoleNameSchema,
     cli: z.string().trim().min(1),
     "profile-name": EnvironmentProfileNameSchema.optional(),
     specialistProfile: RoleProfilePinSchema.optional(),
@@ -70,6 +75,10 @@ export const EnvironmentRoleConfigSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.role === "sos" && value.specialistProfile)
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["specialistProfile"], message: "The sos role cannot select a specialist profile." });
+    if (value.role === "sos" && value.failover)
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["failover"], message: "The sos role does not support failover." });
     if (value.specialistProfile && (value.role === "conversation" || value.role === "coordinator"))
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["specialistProfile"], message: "Only specialist governance roles may select a specialist profile." });
     if (value.failover && (value.failover.role !== value.role || !value.model || !value["profile-name"]))
@@ -79,6 +88,11 @@ export const EnvironmentRoleConfigSchema = z
     }
   });
 export type EnvironmentRoleConfig = z.infer<typeof EnvironmentRoleConfigSchema>;
+export type EnvironmentGovernanceRoleConfig = EnvironmentRoleConfig & { role: AgentRole };
+
+export function isGovernanceRoleConfig(role: EnvironmentRoleConfig): role is EnvironmentGovernanceRoleConfig {
+  return role.role !== "sos";
+}
 
 export const EnvironmentConfigEnvironmentSchema = z
   .object({
@@ -201,10 +215,10 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
       workspaceRoot: repository.root,
       sessionName: repository.sessionName,
       herdrBinary: "herdr",
-      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "developer", "reviewer", "qa"].map((role) => ({
-        role: AgentRoleSchema.parse(role),
+      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "developer", "reviewer", "qa", "sos"].map((role) => ({
+        role: EnvironmentRoleNameSchema.parse(role),
         cli: provider,
-        required: role !== "developer"
+        required: role !== "developer" && role !== "sos"
       })),
       defaults: {
         codex: {},

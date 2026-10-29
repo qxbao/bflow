@@ -33,3 +33,10 @@ export function parsePolicyPhaseRetirementCommand(content: string): string | und
 export function parseWorkflowReviewReplacementCommand(content: string): string | undefined {
   return /^replace workflow review ([A-Za-z0-9][A-Za-z0-9._:-]{0,199})$/u.exec(content.trim())?.[1];
 }
+
+export const BFLOW_SOS_TRIGGER = "BFLOWSOS";
+
+/** Exact match only (`BFLOWSOS`); partial matches, surrounding prose, or different casing never trigger SOS. */
+export function isBflowSosCommand(content: string): boolean {
+  return content === BFLOW_SOS_TRIGGER;
+}
