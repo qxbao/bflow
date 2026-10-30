@@ -170,7 +170,7 @@ async function enableSharedService() {
       if (message.id === undefined) { response.writeHead(202); response.end(); return; }
       const result = message.method === "initialize"
         ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "shared-docs", version: "1" } }
-        : message.method === "tools/list" ? { tools: [{ name: "query-docs", inputSchema: { type: "object" } }] }
+        : message.method === "tools/list" ? { tools: [{ name: "read_wiki_contents", inputSchema: { type: "object" } }] }
         : { content: [{ type: "text", text: "shared documentation" }] };
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
@@ -180,7 +180,7 @@ async function enableSharedService() {
   const address = upstream.address();
   if (!address || typeof address === "string") throw new Error("Missing shared service address");
   sharedService = MCPServiceDefinitionSchema.parse({ ...service, serviceId: "shared-docs",
-    tool: { ...service.tool, toolId: "context7", kind: "native_remote_mcp", operations: ["query-docs"],
+    tool: { ...service.tool, toolId: "deepwiki", kind: "native_remote_mcp", operations: ["read_wiki_contents"],
       resource: { sharing: "concurrent", maxConcurrency: 16 } },
     connection: { kind: "native_remote_mcp", endpoint: `http://127.0.0.1:${address.port}/mcp`, ownership: "external" } });
   expect((await gateway.serviceManager.ensure(sharedService, operation)).ok).toBe(true);
@@ -191,7 +191,7 @@ async function enableSharedService() {
   await mkdir(foreignRoot);
   const foreignOperation = { ...operation, scope: { ...operation.scope, repositoryId: "other-repository", workspaceRoot: foreignRoot } };
   const foreignClient = client({ registrationId: "foreign-reviewer", idempotencyKey: "foreign-register", scope: foreignOperation.scope,
-    serviceIds: [sharedService.serviceId], allowedTools: ["query-docs"] });
+    serviceIds: [sharedService.serviceId], allowedTools: ["read_wiki_contents"] });
   return { foreignRoot, foreignOperation, foreignClient };
 }
 
@@ -206,7 +206,7 @@ it("shares only host-approved machine services across worktrees while preserving
   const response = await fetch(control!.locator.endpoint, { method: "POST",
     headers: { Authorization: `Bearer ${registered.value.token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: "docs-call", method: "tools/call",
-      params: { name: "query-docs", serviceId: sharedService.serviceId, arguments: {}, callId: "docs-call", idempotencyKey: "docs-call" } }) });
+      params: { name: "read_wiki_contents", serviceId: sharedService.serviceId, arguments: {}, callId: "docs-call", idempotencyKey: "docs-call" } }) });
   const result = await response.json() as any;
   expect(response.ok).toBe(true);
   expect(result.error).toBeUndefined();

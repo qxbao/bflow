@@ -877,8 +877,8 @@ rl.on("line", line => {
   it("keeps an optional missing grant visible as degraded while allowing the unrelated role to launch", async () => {
     const policy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
       scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
-      digest: "c".repeat(64), requirements: [{ toolId: "context7", kind: "native_remote_mcp" as const, serviceId: "svc-docs",
-        operations: ["query_docs"], requiredness: "optional" as const, roles: ["developer" as const], triggers: ["external_documentation" as const] }] };
+      digest: "c".repeat(64), requirements: [{ toolId: "deepwiki", kind: "native_remote_mcp" as const, serviceId: "svc-docs",
+        operations: ["ask_wiki_question"], requiredness: "optional" as const, roles: ["developer" as const], triggers: ["external_documentation" as const] }] };
     const { service } = buildService();
 
     const result = await service.prepareSession(identity, [requirement({ toolPolicy: policy, toolGrants: [], mcpServiceIds: [] })]);
@@ -894,17 +894,17 @@ rl.on("line", line => {
     gatewayControl.services = [observation("svc-docs", { status: "unavailable", diagnosticCode: "missing_process" })];
     const policy = { schemaVersion: 3 as const, repositoryId: identity.repositoryId,
       scope: { kind: "repository" as const, machineId: identity.machineId, repositoryId: identity.repositoryId, workspaceRoot: identity.workspaceRoot },
-      digest: "d".repeat(64), requirements: [{ toolId: "context7", kind: "native_remote_mcp" as const, serviceId: "svc-docs",
-        operations: ["query_docs"], requiredness: "optional" as const, roles: ["developer" as const], triggers: ["external_documentation" as const] }] };
+      digest: "d".repeat(64), requirements: [{ toolId: "deepwiki", kind: "native_remote_mcp" as const, serviceId: "svc-docs",
+        operations: ["ask_wiki_question"], requiredness: "optional" as const, roles: ["developer" as const], triggers: ["external_documentation" as const] }] };
     const grant: ResolvedToolGrant = { schemaVersion: 3, grantId: "grant-docs", policyDigest: policy.digest,
-      toolId: "context7", kind: "native_remote_mcp", requiredness: "optional", role: "developer",
+      toolId: "deepwiki", kind: "native_remote_mcp", requiredness: "optional", role: "developer",
       scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
         workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId },
-      triggers: ["external_documentation"], serviceId: "svc-docs", operations: ["query_docs"] };
+      triggers: ["external_documentation"], serviceId: "svc-docs", operations: ["ask_wiki_question"] };
     const { service } = buildService();
 
     const result = await service.prepareSession(identity, [requirement({ toolPolicy: policy, toolGrants: [grant],
-      mcpServiceIds: ["svc-docs"], mcpOperations: ["query_docs"] })]);
+      mcpServiceIds: ["svc-docs"], mcpOperations: ["ask_wiki_question"] })]);
 
     expect(result.ok && result.value.report.ready).toBe(true);
     if (!result.ok) return;

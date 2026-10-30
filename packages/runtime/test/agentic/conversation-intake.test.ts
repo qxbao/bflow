@@ -226,11 +226,11 @@ describe("trusted raw turns and model decision receipts", () => {
     const f = await fixture();
     await f.intake.receive(f.binding, f.turn("user-1"));
     await f.intake.decide(f.binding, { messageId: "user-1", decision: { intent: "conversation_only", directReply: "First" } });
-    await f.intake.receive(f.binding, f.turn("user-2", "Tích hợp nốt Context7 đi"));
-    expect(await f.reopen().pendingDecision(f.binding)).toEqual({ messageId: "user-2", content: "Tích hợp nốt Context7 đi" });
+    await f.intake.receive(f.binding, f.turn("user-2", "Tích hợp nốt DeepWiki đi"));
+    expect(await f.reopen().pendingDecision(f.binding)).toEqual({ messageId: "user-2", content: "Tích hợp nốt DeepWiki đi" });
     const decision = { intent: "conversation_only", directReply: "Second" };
     await f.reopen().decide(f.binding, { decision });
-    expect(f.applied.at(-1)).toMatchObject({ messageId: "user-2", content: "Tích hợp nốt Context7 đi", conversationDecision: decision });
+    expect(f.applied.at(-1)).toMatchObject({ messageId: "user-2", content: "Tích hợp nốt DeepWiki đi", conversationDecision: decision });
     expect(await f.reopen().pendingDecision(f.binding)).toBeUndefined();
     // An explicit stale messageId is still refused; omission never reaches an older turn.
     await f.intake.receive(f.binding, f.turn("user-3", "Thêm một việc"));

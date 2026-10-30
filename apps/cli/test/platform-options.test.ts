@@ -166,7 +166,7 @@ describe("buildHostPlatformOptions", () => {
   });
 
   it("keeps production role skills while denying tools unless repository policy and inventory authorize them", async () => {
-    const options = await buildHostPlatformOptions(base, { context, fileExists: absent, context7Ready: true });
+    const options = await buildHostPlatformOptions(base, { context, fileExists: absent, deepwikiReady: true });
     const developer = options.roles.find(role => role.role === "developer")!;
     expect(developer.skillSelections.map(item => item.skill.skillId)).toContain("using-bflow");
     expect(developer.toolIds).toEqual([]);
@@ -174,11 +174,11 @@ describe("buildHostPlatformOptions", () => {
     expect(options).not.toHaveProperty("toolGrants");
   });
 
-  it("does not turn a legacy Context7 opt-in or its skill into a tool grant", async () => {
-    const input = configure(environment => { environment.context7 = { enabled: true, required: false }; });
-    const options = await buildHostPlatformOptions(input, { context, fileExists: absent, context7Ready: true });
+  it("does not turn a legacy DeepWiki opt-in or its skill into a tool grant", async () => {
+    const input = configure(environment => { environment.deepwiki = { enabled: true, required: false }; });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent, deepwikiReady: true });
     const developer = options.roles.find(role => role.role === "developer")!;
-    expect(developer.skillSelections.map(item => item.skill.skillId)).not.toContain("use-context7");
+    expect(developer.skillSelections.map(item => item.skill.skillId)).not.toContain("use-deepwiki");
     expect(developer.toolIds).toEqual([]);
     expect(developer.mcpServiceIds).toEqual([]);
   });
@@ -191,7 +191,7 @@ describe("buildHostPlatformOptions", () => {
 
   it("rejects a repository policy whose digest does not bind its canonical contents", async () => {
     const input = configure(environment => {
-      delete environment.context7;
+      delete environment.deepwiki;
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
         requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "optional" as const,
@@ -205,8 +205,8 @@ describe("buildHostPlatformOptions", () => {
     const input = configure(environment => {
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
-        requirements: [{ toolId: "context7", kind: "native_remote_mcp" as const, serviceId: "context7",
-          operations: ["resolve-library-id", "query-docs"], requiredness: "optional" as const,
+        requirements: [{ toolId: "deepwiki", kind: "native_remote_mcp" as const, serviceId: "deepwiki",
+          operations: ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"], requiredness: "optional" as const,
           roles: ["specifier" as const, "architect" as const], triggers: ["external_documentation" as const] }] };
       environment.toolPolicy = RepositoryToolPolicySchema.parse({ ...body, digest: digest(body) });
     });
@@ -217,7 +217,7 @@ describe("buildHostPlatformOptions", () => {
 
   it("blocks required CLI grants without a verified managed executable identity", async () => {
     const input = configure(environment => {
-      delete environment.context7;
+      delete environment.deepwiki;
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
         requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "required" as const,
@@ -230,7 +230,7 @@ describe("buildHostPlatformOptions", () => {
 
   it("does not copy repository requested capability IDs into a resolved grant", async () => {
     const input = configure(environment => {
-      delete environment.context7;
+      delete environment.deepwiki;
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
         requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "optional" as const,
@@ -252,7 +252,7 @@ describe("buildHostPlatformOptions", () => {
         executableDigest: "b".repeat(64), ownership: "bflow", bridgeRequired: true },
       authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0 });
     const input = configure(environment => {
-      delete environment.context7;
+      delete environment.deepwiki;
       environment.roles.push({ role: "tester", cli: "codex" });
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
@@ -271,7 +271,7 @@ describe("buildHostPlatformOptions", () => {
     expect(options.exclusiveMcpResources).toEqual({ "chrome-session": "chrome-profile" });
     expect(statuses.find(status => status.toolId === "browser")).toMatchObject({ granted: true, ready: true });
     const requiredInput = configure(environment => {
-      delete environment.context7;
+      delete environment.deepwiki;
       environment.roles.push({ role: "tester", cli: "codex" });
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
@@ -294,7 +294,7 @@ describe("buildHostPlatformOptions", () => {
         executableDigest: "b".repeat(64), ownership: "bflow", bridgeRequired: true },
       authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0 });
     const input = configure(environment => {
-      delete environment.context7;
+      delete environment.deepwiki;
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
         requirements: [{ toolId: "gitnexus", kind: "stdio_mcp" as const, operations: ["query", "context", "impact"],
@@ -312,7 +312,7 @@ describe("buildHostPlatformOptions", () => {
 
   it("reports installed, allowed, granted and ready as separate policy observations", async () => {
     const input = configure(environment => {
-      delete environment.context7;
+      delete environment.deepwiki;
       const body = { schemaVersion: 3 as const, repositoryId: base.repository.id,
         scope: { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root },
         requirements: [{ toolId: "rtk", kind: "cli_only" as const, operations: ["test"], requiredness: "required" as const,
@@ -437,25 +437,24 @@ describe("formatPlatformNotReady", () => {
   });
 });
 
-describe("Context7 role grants", () => {
+describe("DeepWiki role grants", () => {
   const roleMap = (options: Awaited<ReturnType<typeof buildHostPlatformOptions>>) => Object.fromEntries(options.roles.map(role => [role.role, role]));
-  const enabled = (extra: Record<string, unknown> = {}) => configure(environment => { environment.context7 = { enabled: true, ...extra }; });
+  const enabled = (extra: Record<string, unknown> = {}) => configure(environment => { environment.deepwiki = { enabled: true, ...extra }; });
   const readyContext = () => ({
     ...context,
-    mcpServices: [MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "context7", revision: 1,
+    mcpServices: [MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: "deepwiki", revision: 1,
       scope: { kind: "machine", machineId: context.machineId },
-      tool: { schemaVersion: 3, toolId: "context7", kind: "native_remote_mcp", version: "1", operations: ["resolve-library-id", "query-docs"],
+      tool: { schemaVersion: 3, toolId: "deepwiki", kind: "native_remote_mcp", version: "1", operations: ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"],
         required: true, resource: { sharing: "concurrent", maxConcurrency: 8 } },
-      connection: { kind: "native_remote_mcp", endpoint: "https://mcp.context7.com/mcp", ownership: "external" },
+      connection: { kind: "native_remote_mcp", endpoint: "https://mcp.deepwiki.com/mcp", ownership: "external" },
       authentication: { mode: "none" }, healthTimeoutMs: 10_000, idleTimeoutMs: 60_000, restartLimit: 0 })],
-    serviceReadiness: new Map([["context7", { status: "ready" as const, discoveredTools: ["resolve-library-id", "query-docs"] }]])
+    serviceReadiness: new Map([["deepwiki", { status: "ready" as const, discoveredTools: ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"] }]])
   });
 
   it("is on in a repository created by init, as an optional service", () => {
-    expect(base.config.environment?.context7).toEqual({
+    expect(base.config.environment?.deepwiki).toEqual({
       enabled: true,
-      required: false,
-      cache: { enabled: false, ttlSeconds: 3_600, allowAuthenticated: false }
+      required: false
     });
     expect(base.config.environment?.tools).toEqual({
       rtk: { enabled: true, required: false },
@@ -469,40 +468,40 @@ describe("Context7 role grants", () => {
     const options = await buildHostPlatformOptions(enabled(), { context: readyContext(), fileExists: absent });
     const roles = roleMap(options);
     for (const role of ["specifier", "architect", "planner", "developer", "reviewer", "qa"]) {
-      expect(roles[role]?.mcpServiceIds, role).toEqual(["context7"]);
-      expect(roles[role]?.toolIds, role).toEqual(["context7"]);
+      expect(roles[role]?.mcpServiceIds, role).toEqual(["deepwiki"]);
+      expect(roles[role]?.toolIds, role).toEqual(["deepwiki"]);
     }
     for (const role of ["conversation", "coordinator"]) {
       expect(roles[role]?.mcpServiceIds, role).toEqual([]);
       expect(roles[role]?.toolIds, role).toEqual([]);
     }
-    expect(options.toolGrants?.filter(grant => grant.toolId === "context7").every(grant =>
-      grant.serviceId === "context7" && grant.operations.join(",") === "resolve-library-id,query-docs")).toBe(true);
+    expect(options.toolGrants?.filter(grant => grant.toolId === "deepwiki").every(grant =>
+      grant.serviceId === "deepwiki" && grant.operations.join(",") === "ask_wiki_question,read_wiki_contents,read_wiki_structure")).toBe(true);
     expect(AgenticHostPlatformOptionsSchema.parse(options)).toEqual(options);
   });
 
-  it("starts without an optional legacy Context7 tool and records its degraded reason", async () => {
+  it("starts without an optional legacy DeepWiki tool and records its degraded reason", async () => {
     const warnings: string[] = [];
-    const options = await buildHostPlatformOptions(enabled({ required: false }), { context, fileExists: absent, context7Ready: false, warn: message => warnings.push(message) });
+    const options = await buildHostPlatformOptions(enabled({ required: false }), { context, fileExists: absent, deepwikiReady: false, warn: message => warnings.push(message) });
     expect(options.roles.every(role => role.mcpServiceIds.length === 0 && role.toolIds.length === 0)).toBe(true);
-    expect(warnings.some(message => /Context7.*degraded|Optional tool 'context7'.*degraded/i.test(message))).toBe(true);
+    expect(warnings.some(message => /DeepWiki.*degraded|Optional tool 'deepwiki'.*degraded/i.test(message))).toBe(true);
     const unknown = await buildHostPlatformOptions(enabled(), { context, fileExists: absent, warn: message => warnings.push(message) });
     expect(roleMap(unknown)["developer"]?.mcpServiceIds).toEqual([]);
     expect(warnings.length).toBeGreaterThan(1);
   });
 
-  it("blocks a required legacy Context7 policy when its service is missing", async () => {
+  it("blocks a required legacy DeepWiki policy when its service is missing", async () => {
     const warnings: string[] = [];
-    await expect(buildHostPlatformOptions(enabled({ required: true }), { context, fileExists: absent, context7Ready: false, warn: message => warnings.push(message) }))
-      .rejects.toThrow(/Required tool 'context7'.*unavailable/i);
+    await expect(buildHostPlatformOptions(enabled({ required: true }), { context, fileExists: absent, deepwikiReady: false, warn: message => warnings.push(message) }))
+      .rejects.toThrow(/Required tool 'deepwiki'.*unavailable/i);
     expect(warnings).toEqual([]);
   });
 
   it("changes nothing for a repository that has not enabled it", async () => {
-    for (const edit of [(environment: EnvironmentCompositionInput["config"]["environment"]) => { delete environment.context7; },
-      (environment: EnvironmentCompositionInput["config"]["environment"]) => { environment.context7 = { enabled: false, required: true }; }]) {
+    for (const edit of [(environment: EnvironmentCompositionInput["config"]["environment"]) => { delete environment.deepwiki; },
+      (environment: EnvironmentCompositionInput["config"]["environment"]) => { environment.deepwiki = { enabled: false, required: true }; }]) {
       const warnings: string[] = [];
-      const options = await buildHostPlatformOptions(configure(edit), { context, fileExists: absent, context7Ready: true, warn: message => warnings.push(message) });
+      const options = await buildHostPlatformOptions(configure(edit), { context, fileExists: absent, deepwikiReady: true, warn: message => warnings.push(message) });
       expect(options.roles.every(role => role.mcpServiceIds.length === 0)).toBe(true);
       expect(warnings.some(message => /skipped because tool .* has no approved grant/i.test(message))).toBe(true);
     }
@@ -512,11 +511,11 @@ describe("Context7 role grants", () => {
     const omittedConfig = configure(environment => {
       delete environment.toolPolicy;
       delete environment.tools;
-      delete environment.context7;
+      delete environment.deepwiki;
     });
     const defaultPolicy = resolveRepositoryToolPolicy(omittedConfig, context.machineId);
     expect(defaultPolicy?.requirements.map(item => item.toolId)).toEqual([
-      "context7",
+      "deepwiki",
       "rtk",
       "gitnexus",
       "mempalace",
@@ -526,7 +525,7 @@ describe("Context7 role grants", () => {
 
     const selectiveDisable = configure(environment => {
       delete environment.toolPolicy;
-      environment.context7 = { enabled: false };
+      environment.deepwiki = { enabled: false };
       environment.tools = {
         rtk: { enabled: false },
         gitnexus: { enabled: true, required: true },
@@ -542,7 +541,7 @@ describe("Context7 role grants", () => {
 
     const allDisabled = configure(environment => {
       delete environment.toolPolicy;
-      environment.context7 = { enabled: false };
+      environment.deepwiki = { enabled: false };
       environment.tools = {
         rtk: { enabled: false },
         gitnexus: { enabled: false },

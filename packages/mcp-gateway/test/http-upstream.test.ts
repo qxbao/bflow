@@ -7,7 +7,7 @@ import {
   type HttpUpstreamOptions, type MCPUpstreamToolCallInput
 } from "../src/index.js";
 
-// --- A fake remote MCP server that behaves like the hosted Context7 endpoint observed on 2026-10-19 -------------
+// --- A fake remote MCP server that behaves like the hosted DeepWiki endpoint (three read-only tools, no authentication by default) -------------
 
 type Fault = { status: number; headers?: Record<string, string> } | "reset" | "hang";
 interface FakeOptions {
@@ -19,7 +19,7 @@ interface FakeOptions {
   faultList?: boolean;
   /** Also applied to initialize. */
   faultInitialize?: boolean;
-  /** Tools advertise readOnlyHint/idempotentHint, as Context7 does. */
+  /** Tools advertise readOnlyHint/idempotentHint, as DeepWiki does. */
   annotateReadOnly?: boolean;
   /** Number of `notifications/initialized` requests to answer with HTTP 500 before accepting one. */
   failNotifications?: number;
@@ -43,7 +43,7 @@ async function startFake(options: FakeOptions = {}) {
       res.end(JSON.stringify(body));
     }
   };
-  const tools = ["resolve-library-id", "query-docs"].map(name => ({ name, inputSchema: { type: "object", properties: {} },
+  const tools = ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"].map(name => ({ name, inputSchema: { type: "object", properties: {} },
     ...(options.annotateReadOnly === false ? {} : { annotations: { readOnlyHint: true, idempotentHint: true } }) }));
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     if (req.method === "DELETE") { const id = String(req.headers["mcp-session-id"] ?? ""); deleted.push(id); sessions.delete(id); res.writeHead(200).end(); return; }
@@ -85,8 +85,8 @@ async function startFake(options: FakeOptions = {}) {
       if (body.method === "tools/list") { send(res, { jsonrpc: "2.0", id: body.id, result: { tools } }); return; }
       if (body.method === "tools/call") {
         const args = body.params.arguments ?? {};
-        if (body.params.name === "query-docs" && args.libraryId === "/bad/id")
-          send(res, { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: 'Library "/bad/id" not found.' }], isError: true } });
+        if (body.params.name === "read_wiki_contents" && args.repoName === "bad/id")
+          send(res, { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: 'Repository "bad/id" not found.' }], isError: true } });
         else send(res, { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: `ok:${body.params.name}` }] } });
         return;
       }
@@ -103,13 +103,13 @@ function makeDriver(endpoint: string, driverOptions: HttpUpstreamOptions = {}, c
   const definition: MCPServiceDefinition = {
     schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION, serviceId: "docs-fake", revision: 1, scope: { kind: "machine", machineId: "machine-1" },
     tool: { schemaVersion: CURRENT_PLATFORM_SCHEMA_VERSION, toolId: "docs-fake", kind: "native_remote_mcp", version: "1.0.0",
-      operations: ["resolve-library-id", "query-docs"], resource: { sharing: "concurrent", maxConcurrency: 16 }, required: true },
+      operations: ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"], resource: { sharing: "concurrent", maxConcurrency: 16 }, required: true },
     connection: { kind: "native_remote_mcp", endpoint, ownership: "external" },
     authentication: config.authenticate ? { mode: "bearer", credential: "secret://bflow/fake/api-key" } : { mode: "none" },
     healthTimeoutMs: 2000, idleTimeoutMs: 60_000, restartLimit: 2
   };
   // The host declares the tools read-only; the fake server's own annotations are never consulted for replay.
-  const registered = new MCPServiceRegistry().registerService(definition, { readOnlyTools: config.readOnlyTools ?? ["resolve-library-id", "query-docs"] });
+  const registered = new MCPServiceRegistry().registerService(definition, { readOnlyTools: config.readOnlyTools ?? ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"] });
   if (!registered.ok) throw new Error(registered.error.message);
   const secrets = new GatewaySecretStore();
   if (config.storeToken) secrets.setSecret("secret://bflow/fake/api-key", config.storeToken);
@@ -130,10 +130,10 @@ describe("remote MCP upstream driver", () => {
     const fake = await startFake({ mode: "sse" });
     const { driver } = makeDriver(fake.endpoint);
     const initialized = await driver.initialize();
-    expect(initialized.ok && initialized.value.discoveredTools).toEqual(["resolve-library-id", "query-docs"]);
+    expect(initialized.ok && initialized.value.discoveredTools).toEqual(["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"]);
     expect(initialized.ok && initialized.value.serverInfo?.name).toBe("FakeDocs");
-    const result = await driver.callTool(call("resolve-library-id", { query: "q", libraryName: "react" }));
-    expect(result.ok && result.value).toEqual({ isError: false, content: [{ type: "text", text: "ok:resolve-library-id" }] });
+    const result = await driver.callTool(call("ask_wiki_question", { repoName: "facebook/react", question: "q" }));
+    expect(result.ok && result.value).toEqual({ isError: false, content: [{ type: "text", text: "ok:ask_wiki_question" }] });
     expect(fake.seen.every(item => item.accept.includes("application/json") && item.accept.includes("text/event-stream"))).toBe(true);
     expect(fake.seen.map(item => item.method)).toEqual(["initialize", "notifications/initialized", "tools/list", "tools/call"]);
     expect(fake.seen[2]!.protocol).toBe("2025-06-18");
@@ -142,14 +142,14 @@ describe("remote MCP upstream driver", () => {
   it("also accepts plain JSON responses", async () => {
     const fake = await startFake({ mode: "json" });
     const { driver } = makeDriver(fake.endpoint);
-    const result = await driver.callTool(call("query-docs", { libraryId: "/org/lib", query: "x" }));
+    const result = await driver.callTool(call("read_wiki_contents", { repoName: "org/lib" }));
     expect(result.ok && result.value.isError).toBe(false);
   });
 
   it("returns a tool-level error as isError content without treating the HTTP call as failed", async () => {
     const fake = await startFake();
     const { driver, metrics } = makeDriver(fake.endpoint);
-    const result = await driver.callTool(call("query-docs", { libraryId: "/bad/id", query: "x" }));
+    const result = await driver.callTool(call("read_wiki_contents", { repoName: "bad/id" }));
     expect(result.ok && result.value.isError).toBe(true);
     expect(JSON.stringify(result.ok && result.value.content)).toContain("not found");
     expect(counters(metrics)?.upstream_error).toBe(0);
@@ -158,7 +158,7 @@ describe("remote MCP upstream driver", () => {
   it("performs one handshake for many concurrent callers", async () => {
     const fake = await startFake();
     const { driver } = makeDriver(fake.endpoint);
-    const results = await Promise.all(Array.from({ length: 24 }, (_, index) => driver.callTool(call("resolve-library-id", { query: `q${index}`, libraryName: "x" }))));
+    const results = await Promise.all(Array.from({ length: 24 }, (_, index) => driver.callTool(call("ask_wiki_question", { repoName: "a/b", question: `q${index}` }))));
     expect(results.every(result => result.ok)).toBe(true);
     expect(fake.seen.filter(item => item.method === "initialize")).toHaveLength(1);
     expect(fake.seen.filter(item => item.method === "tools/call")).toHaveLength(24);
@@ -168,7 +168,7 @@ describe("remote MCP upstream driver", () => {
     it("lets no request overtake the initialized notification, however many callers arrive together", async () => {
       const fake = await startFake();
       const { driver } = makeDriver(fake.endpoint);
-      await Promise.all(Array.from({ length: 12 }, () => driver.callTool(call("resolve-library-id", { query: "q", libraryName: "x" }))));
+      await Promise.all(Array.from({ length: 12 }, () => driver.callTool(call("ask_wiki_question", { repoName: "a/b", question: "q" }))));
       const order = fake.seen.map(item => item.method);
       const initialized = order.indexOf("notifications/initialized");
       expect(order.indexOf("initialize")).toBe(0);
@@ -180,9 +180,9 @@ describe("remote MCP upstream driver", () => {
     it("repeats the whole handshake for a later caller when the initialized notification failed", async () => {
       const fake = await startFake({ failNotifications: 1 });
       const { driver } = makeDriver(fake.endpoint, { retry: { maxAttempts: 1 } });
-      const first = await driver.callTool(call("resolve-library-id", { query: "q", libraryName: "x" }));
+      const first = await driver.callTool(call("ask_wiki_question", { repoName: "a/b", question: "q" }));
       expect(first.ok).toBe(false);
-      const second = await driver.callTool(call("resolve-library-id", { query: "q", libraryName: "x" }));
+      const second = await driver.callTool(call("ask_wiki_question", { repoName: "a/b", question: "q" }));
       expect(second.ok).toBe(true);
       expect(fake.seen.filter(item => item.method === "initialize")).toHaveLength(2);
     });
@@ -192,7 +192,7 @@ describe("remote MCP upstream driver", () => {
       const { driver } = makeDriver(fake.endpoint);
       const controller = new AbortController();
       controller.abort(new Error("caller gave up"));
-      const result = await driver.callTool(call("query-docs", {}, { signal: controller.signal }));
+      const result = await driver.callTool(call("read_wiki_contents", {}, { signal: controller.signal }));
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error.code).toBe("cancelled");
       expect(fake.seen).toHaveLength(0);
@@ -202,8 +202,8 @@ describe("remote MCP upstream driver", () => {
       const fake = await startFake();
       const { driver } = makeDriver(fake.endpoint);
       const controller = new AbortController();
-      const cancelled = driver.callTool(call("resolve-library-id", {}, { signal: controller.signal }));
-      const healthy = driver.callTool(call("resolve-library-id", {}));
+      const cancelled = driver.callTool(call("ask_wiki_question", {}, { signal: controller.signal }));
+      const healthy = driver.callTool(call("ask_wiki_question", {}));
       controller.abort(new Error("cancelled by caller"));
       const [first, second] = await Promise.all([cancelled, healthy]);
       expect(second.ok).toBe(true);
@@ -215,7 +215,7 @@ describe("remote MCP upstream driver", () => {
       const { driver } = makeDriver(fake.endpoint, { retry: { maxAttempts: 1 } });
       await driver.initialize();
       const controller = new AbortController();
-      const pending = driver.callTool(call("resolve-library-id", {}, { signal: controller.signal, timeoutMs: 5000 }));
+      const pending = driver.callTool(call("ask_wiki_question", {}, { signal: controller.signal, timeoutMs: 5000 }));
       await new Promise(resolve => setTimeout(resolve, 80));
       controller.abort(new Error("Call timeout"));
       const result = await pending;
@@ -228,7 +228,7 @@ describe("remote MCP upstream driver", () => {
     it("keeps and replays an upstream session id, and ends it on stop", async () => {
       const fake = await startFake({ stateful: true });
       const { driver, metrics } = makeDriver(fake.endpoint);
-      await driver.callTool(call("resolve-library-id"));
+      await driver.callTool(call("ask_wiki_question"));
       const issued = [...fake.sessions][0]!;
       expect(fake.seen.filter(item => item.method !== "initialize").every(item => item.session === issued)).toBe(true);
       expect(counters(metrics)?.session_started).toBe(1);
@@ -240,7 +240,7 @@ describe("remote MCP upstream driver", () => {
     it("treats a server that issues no session id as stateless", async () => {
       const fake = await startFake({ stateful: false });
       const { driver } = makeDriver(fake.endpoint);
-      await driver.callTool(call("resolve-library-id"));
+      await driver.callTool(call("ask_wiki_question"));
       expect(fake.seen.every(item => item.session === undefined)).toBe(true);
       await driver.stop();
       expect(fake.deleted).toEqual([]);
@@ -249,9 +249,9 @@ describe("remote MCP upstream driver", () => {
     it("repeats the handshake once when the server drops the session, then succeeds", async () => {
       const fake = await startFake({ stateful: true });
       const { driver, metrics } = makeDriver(fake.endpoint);
-      await driver.callTool(call("resolve-library-id"));
+      await driver.callTool(call("ask_wiki_question"));
       fake.sessions.clear();
-      const result = await driver.callTool(call("resolve-library-id"));
+      const result = await driver.callTool(call("ask_wiki_question"));
       expect(result.ok).toBe(true);
       expect(fake.seen.filter(item => item.method === "initialize")).toHaveLength(2);
       expect(counters(metrics)?.session_reinitialized).toBe(1);
@@ -262,7 +262,7 @@ describe("remote MCP upstream driver", () => {
     it("retries a read-only call after 429, waits at least Retry-After and counts it", async () => {
       const fake = await startFake({ faults: [{ status: 429, headers: { "retry-after": "2" } }] });
       const { driver, metrics, sleeps } = makeDriver(fake.endpoint);
-      const result = await driver.callTool(call("query-docs", { libraryId: "/a/b", query: "x" }));
+      const result = await driver.callTool(call("read_wiki_contents", { repoName: "a/b" }));
       expect(result.ok).toBe(true);
       expect(sleeps).toEqual([2000]);
       expect(counters(metrics)).toMatchObject({ rate_limited: 1, retry: 1 });
@@ -271,7 +271,7 @@ describe("remote MCP upstream driver", () => {
     it("backs off exponentially for server errors and gives up with a structured error", async () => {
       const fake = await startFake({ faults: [{ status: 503 }, { status: 503 }, { status: 503 }] });
       const { driver, sleeps, metrics } = makeDriver(fake.endpoint, { retry: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 10_000, jitter: 0 } });
-      const result = await driver.callTool(call("query-docs", { libraryId: "/a/b", query: "x" }));
+      const result = await driver.callTool(call("read_wiki_contents", { repoName: "a/b" }));
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.code).toBe("transport_unavailable");
@@ -283,7 +283,7 @@ describe("remote MCP upstream driver", () => {
     it("surfaces rate_limited with retryAfterMs when Retry-After exceeds the wait cap", async () => {
       const fake = await startFake({ faults: [{ status: 429, headers: { "retry-after": "120" } }] });
       const { driver, sleeps } = makeDriver(fake.endpoint, { retry: { maxRetryAfterMs: 5_000 } });
-      const result = await driver.callTool(call("query-docs", { libraryId: "/a/b", query: "x" }));
+      const result = await driver.callTool(call("read_wiki_contents", { repoName: "a/b" }));
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.details).toMatchObject({ kind: "rate_limited", status: 429, retryAfterMs: 120_000 });
@@ -294,7 +294,7 @@ describe("remote MCP upstream driver", () => {
       const fake = await startFake({ annotateReadOnly: true, faults: [{ status: 503 }] });
       const { driver } = makeDriver(fake.endpoint, {}, { readOnlyTools: [] });
       await driver.listTools("s");
-      const result = await driver.callTool(call("query-docs", { libraryId: "/a/b", query: "x" }));
+      const result = await driver.callTool(call("read_wiki_contents", { repoName: "a/b" }));
       expect(result.ok).toBe(false);
       expect(fake.seen.filter(item => item.method === "tools/call")).toHaveLength(1);
     });
@@ -302,7 +302,7 @@ describe("remote MCP upstream driver", () => {
     it("retries a dropped connection for a read-only call", async () => {
       const fake = await startFake({ faults: ["reset"] });
       const { driver, metrics } = makeDriver(fake.endpoint);
-      const result = await driver.callTool(call("resolve-library-id", { query: "q", libraryName: "x" }));
+      const result = await driver.callTool(call("ask_wiki_question", { repoName: "a/b", question: "q" }));
       expect(result.ok).toBe(true);
       expect(counters(metrics)).toMatchObject({ network_error: 1, retry: 1 });
     });
@@ -317,25 +317,25 @@ describe("remote MCP upstream driver", () => {
 
   describe("authentication", () => {
     it("sends the bearer token and never places it in an error or metric", async () => {
-      const secret = "ctx7sk-super-secret-value";
+      const secret = "bearer-super-secret-value";
       const fake = await startFake({ token: secret });
-      const wrong = makeDriver(fake.endpoint, {}, { authenticate: true, storeToken: "ctx7sk-wrong" });
-      const rejected = await wrong.driver.callTool(call("resolve-library-id"));
+      const wrong = makeDriver(fake.endpoint, {}, { authenticate: true, storeToken: "bearer-wrong" });
+      const rejected = await wrong.driver.callTool(call("ask_wiki_question"));
       expect(rejected.ok).toBe(false);
       if (rejected.ok) return;
       expect(rejected.error.details).toMatchObject({ kind: "auth_rejected", status: 401 });
       expect(rejected.error.retryable).toBe(false);
-      expect(JSON.stringify(rejected.error)).not.toContain("ctx7sk-wrong");
-      expect(JSON.stringify(wrong.metrics.snapshot())).not.toContain("ctx7sk-wrong");
+      expect(JSON.stringify(rejected.error)).not.toContain("bearer-wrong");
+      expect(JSON.stringify(wrong.metrics.snapshot())).not.toContain("bearer-wrong");
       const right = makeDriver(fake.endpoint, {}, { authenticate: true, storeToken: secret });
-      expect((await right.driver.callTool(call("resolve-library-id"))).ok).toBe(true);
+      expect((await right.driver.callTool(call("ask_wiki_question"))).ok).toBe(true);
       expect(fake.seen.some(item => item.auth === `Bearer ${secret}`)).toBe(true);
     });
 
     it("fails before any request when a configured credential is missing", async () => {
       const fake = await startFake();
       const { driver, metrics } = makeDriver(fake.endpoint, {}, { authenticate: true });
-      const result = await driver.callTool(call("resolve-library-id"));
+      const result = await driver.callTool(call("ask_wiki_question"));
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.details).toMatchObject({ kind: "auth_missing" });
@@ -348,7 +348,7 @@ describe("remote MCP upstream driver", () => {
     it("reports a timeout with the contract timeout code", async () => {
       const fake = await startFake({ faults: ["hang", "hang", "hang"] });
       const { driver, metrics } = makeDriver(fake.endpoint, { retry: { maxAttempts: 1 } });
-      const result = await driver.callTool(call("resolve-library-id", {}, { timeoutMs: 150 }));
+      const result = await driver.callTool(call("ask_wiki_question", {}, { timeoutMs: 150 }));
       expect(result.ok).toBe(false);
       if (result.ok) return;
       expect(result.error.code).toBe("timeout");
@@ -360,7 +360,7 @@ describe("remote MCP upstream driver", () => {
       const fake = await startFake({ faults: ["hang"] });
       const { driver } = makeDriver(fake.endpoint, { retry: { maxAttempts: 1 } });
       await driver.initialize();
-      const input = call("resolve-library-id", {}, { timeoutMs: 5_000 });
+      const input = call("ask_wiki_question", {}, { timeoutMs: 5_000 });
       const pending = driver.callTool(input);
       await new Promise(resolve => setTimeout(resolve, 80));
       await driver.cancelRequest(input.requestId);

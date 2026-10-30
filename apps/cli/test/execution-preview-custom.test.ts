@@ -37,11 +37,11 @@ it('applies locked pack settings to the inherited Developer template after resol
 
 it('retains the tool policy transformation source when an explicit skill is omitted without its grant',async()=>{
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
- config.environment.roles.find(role=>role.role==='developer')!.skills=['using-bflow','use-context7'];
+ config.environment.roles.find(role=>role.role==='developer')!.skills=['using-bflow','use-deepwiki'];
  await writeFile(join(root,'.bflow/config.yml'),renderEnvironmentConfigYaml(config));
  const preview=await loadExecutionPreview(root);
  const decision=preview.decisions.find(item=>item.field==='skills.developer')!;
- expect(decision.effective).not.toContainEqual(expect.objectContaining({skillId:'use-context7'}));
+ expect(decision.effective).not.toContainEqual(expect.objectContaining({skillId:'use-deepwiki'}));
  expect(decision.source).toEqual({kind:'policy',locator:'environment.toolPolicy'});
  expect(decision.candidates).toContainEqual(expect.objectContaining({reason:'tool_policy_filter'}));
 });

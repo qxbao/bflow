@@ -97,7 +97,7 @@ it('checks actual Runtime resolution before launch when preflight resolves a pre
  const runtime=await import('@bflow/runtime');const {loadMachineSkillCatalog}=await import('../src/skill-catalog.js');
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
  const catalog=await loadMachineSkillCatalog({repository,config,env:process.env});
- const skill=catalog.definitions.find(item=>item.skillId==='use-context7')!;
+ const skill=catalog.definitions.find(item=>item.skillId==='use-deepwiki')!;
  const before=await loadExecutionPreview(root);await writeFile(join(root,'.bflow/preview.json'),JSON.stringify(before));
  const {fingerprint:_,...actual}=before;
  const decision=actual.decisions.find(item=>item.field==='skills.developer')!;
@@ -113,7 +113,7 @@ it('checks actual Runtime resolution before launch when preflight resolves a pre
 it('blocked required tools retain requirement sources without contacting machine ports',async()=>{
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
  config.environment.tools={rtk:{enabled:true,required:true},gitnexus:{enabled:false},mempalace:{enabled:false},'chrome-devtools-mcp':{enabled:false}};
- config.environment.context7={enabled:false};
+ config.environment.deepwiki={enabled:false};
  await writeFile(join(root,'.bflow/config.yml'),renderEnvironmentConfigYaml(config));
  const before=await readdir(root);
  const forbidden=vi.fn(()=>{throw new Error('FORBIDDEN blocked preview effect');});
