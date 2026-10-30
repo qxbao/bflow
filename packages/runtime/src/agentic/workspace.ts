@@ -9,9 +9,7 @@ import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "
 import { createAgenticConversationHost, type AgenticConversationHost } from "./conversation.js";
 import { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { CoordinatorTools } from "./tools.js";
-import { redactString } from "../resilience/redaction.js";
-import { record, parseAgenticJournalState } from "./journal.js";
-import { recoverPrelaunchPolicyDeliveries } from "./policy-prompt.js";
+import { record } from "./journal.js";
 import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 
@@ -384,10 +382,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();
     // An owner reopen may restore a request whose Node process never launched. Unknown remote deliveries remain untouched.
-    const recovered = parseAgenticJournalState(await runtime.inspect(), repository);
-    await recoverPrelaunchPolicyDeliveries(runtime, recovered, error => {
-      process.stderr.write(`Bflow prelaunch recovery held: ${redactString(String(error)).slice(0,500)}\n`);
-    });
+    await runtime.recoverProvenPrelaunchPolicyDeliveries();
     await options.beforeRecovery?.(runtime);
     conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),

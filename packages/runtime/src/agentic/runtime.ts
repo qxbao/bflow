@@ -1,3 +1,4 @@
+import { provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError } from "./policy-prompt.js";
 import { recoverUnqueuedWebCancellations } from "../interaction/cancellation-recovery.js";
 import type { WebOperationStore } from "../interaction/operation-store.js";
 import { unmeasuredPolicyPhaseRequests } from "./phase-recovery.js";
@@ -4758,6 +4759,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         await save(); return json({ committed: true, accepted: false, head, reason: attempt.reason ?? String(error) });
       }
     });
+  }
+  /** Owner startup only: select from the full locked journal, never the diagnostic inspect view. */
+  async recoverProvenPrelaunchPolicyDeliveries(): Promise<JsonValue> {
+    const ids = await this.journal.exclusive(async state => state.outbound.filter(out => provenPrelaunchPolicyFailure(out, state.inbox)).map(out => out.message.message_id));
+    let recovered = 0, held = 0;
+    for (const id of ids) {
+      try { await this.reconcileDelivery(id); recovered++; }
+      catch (error) {
+        if (!(error instanceof PrelaunchRegistryRecoveryError)) throw error;
+        held++; process.stderr.write(`Bflow prelaunch recovery held: ${redactString(String(error)).slice(0,500)}\n`);
+      }
+    }
+    return json({recovered,held});
   }
   async reconcileDelivery(messageId: string): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
