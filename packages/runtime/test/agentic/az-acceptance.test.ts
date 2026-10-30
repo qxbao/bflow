@@ -678,6 +678,29 @@ describe("human fencing of a stale diagnostic without claiming delivery", () => 
     await expect(reopened.inspect("run-1")).rejects.toThrow("require private journal v2");
   }, 60000);
 
+  it("fences a blocked report from a retired specialist pane only, never from a live pane or a Developer", async () => {
+    const f = await fencedFixture();
+    const qa = f.binding("qa");
+    const blocked = (id: string, patch: Record<string, unknown>) => RoleMessageSchema.parse({ ...f.message, ...patch, message_id: id, idempotency_key: id });
+    const stale = blocked("qa-stale", { recipient: { role: "coordinator" }, sender: { role: "qa", agent_id: qa.agentId, pane_id: "retired-qa" } });
+    await f.runtime.recordNativeDeliveryIntent(stale, "qa-stale");
+    await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, operationId: "qa-stale" })).resolves.toMatchObject({ disposition: "fenced_without_delivery_claim", resendAllowed: false });
+    expect((await f.record()).nativeDiagnosticFences?.map(item => item.message.message_id)).toEqual(["qa-stale"]);
+    const reopened = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    await reopened.initialize();
+    await reopened.recordNativeDeliveryIntent(stale, "qa-stale");
+    const restored = await reopened.inspect("run-1") as unknown as RunRecord;
+    expect((restored.nativeDeliveries ?? []).map(item => item.operationId)).toEqual(["old-diagnostic"]);
+    expect(restored.nativeDiagnosticFences).toHaveLength(1);
+    for (const [id, patch] of [
+      ["qa-live", { recipient: { role: "coordinator" }, sender: { role: "qa", agent_id: qa.agentId, pane_id: qa.paneId } }],
+      ["dev-to-coordinator", { recipient: { role: "coordinator" }, sender: { role: "developer", agent_id: "dev-1", pane_id: "retired-dev" } }]
+    ] as const) {
+      await f.runtime.recordNativeDeliveryIntent(blocked(id, patch), id).catch(() => undefined);
+      await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, operationId: id })).rejects.toThrow();
+    }
+  }, 60000);
+
   it("refuses missing human authority, cross-session input, live-sender diagnostics and conclusive payloads", async () => {
     const f = await fencedFixture();
     f.ports.authorizeNativeDiagnosticFence = async () => false;

@@ -5313,12 +5313,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (state.inbox.some(item => item.message.message_id === fence.message.message_id ||
           fence.message.idempotency_key !== undefined && item.message.idempotency_key === fence.message.idempotency_key))
         throw new Error("Admitted native messages require receipt reconciliation, not fencing");
-      const currentValue = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
-      if (!currentValue) throw new Error("Current Coordinator session is unavailable");
-      const current = PaneBindingSchema.parse(currentValue), health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
-      if (!current.session || current.role !== "coordinator" || current.agentId !== fence.message.sender.agent_id ||
+      const senderRole = fence.message.sender.role;
+      const currentValue = unwrap(await this.ports.panes.getRoleBinding(senderRole));
+      if (!currentValue) throw new Error(`Current ${senderRole} session is unavailable`);
+      const current = PaneBindingSchema.parse(currentValue), health = unwrap(await this.ports.panes.inspectRoleHealth(senderRole));
+      if (!current.session || current.role !== senderRole || current.agentId !== fence.message.sender.agent_id ||
           current.paneId === fence.message.sender.pane_id || !health.occupantMatches || health.paneId !== current.paneId || health.agentId !== current.agentId)
-        throw new Error("Only a diagnostic from a retired Coordinator pane can be fenced");
+        throw new Error("Only a diagnostic from a retired pane of its sender role can be fenced");
       run.nativeDiagnosticFences = [...run.nativeDiagnosticFences ?? [], fence];
       if (state.version < 2) state.version = 2; // Old binaries must reject the journal rather than ignore a durable late-arrival fence.
       run.nativeDeliveries = run.nativeDeliveries!.filter(item => item !== intent);
