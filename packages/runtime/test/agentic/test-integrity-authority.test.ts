@@ -142,8 +142,18 @@ describe("per-candidate test-integrity owner authority", () => {
     const f = await fixture(), receipt = await request(f); f.setNow(T1);
     await expect(answer(f.runtime(), decision(receipt.approvalId, { decidedBy: "developer", idempotencyKey: "forged" }))).rejects.toThrow(/authenticated/);
     await expect(answer(f.runtime(), decision(receipt.approvalId, { reason: undefined, idempotencyKey: "without-reason" }))).rejects.toThrow(/reason/);
-    await expect(answer(f.runtime(), decision(receipt.approvalId, { metadata: { selectedOption: "Reject test-integrity exception" }, idempotencyKey: "mismatch" }))).rejects.toThrow(/option/);
+    await expect(answer(f.runtime(), decision(receipt.approvalId, { metadata: { selectedOption: "Waive every test" }, idempotencyKey: "unknown-option" }))).rejects.toThrow(/option/);
     expect(await f.runtime().testIntegrityExceptions(query)).toEqual([]);
+  });
+
+  it("records the owner's numbered reject choice without granting the exception", async () => {
+    // Conversation encodes "#n: 2" as an answered decision selecting the reject option; refusing it would strand the run.
+    const f = await fixture(), receipt = await request(f); f.setNow(T1);
+    await answer(f.runtime(), decision(receipt.approvalId, { reason: "2", metadata: { selectedOption: "Reject test-integrity exception" } }));
+    expect(await f.runtime().testIntegrityExceptions(query)).toEqual([]);
+    const entry = await f.journal.exclusive(async state => state.runs[0]!.userDecisions![receipt.approvalId]!);
+    expect(entry.status).toBe("answered");
+    expect(entry.answer).toMatchObject({ selectedOption: "Reject test-integrity exception" });
   });
 
   it("never grants a rejected request or an expired unanswered request", async () => {

@@ -106,6 +106,7 @@ flowchart TD
 1. **`conversation_only`**:
    - *Đặc điểm*: Chào hỏi, câu hỏi lý thuyết, giải thích code hiện tại, hướng dẫn sử dụng công cụ.
    - *Hành động*: Trả lời trực tiếp bằng văn bản thân thiện, chính xác. Không tạo `DelegationRequest`.
+   - Yêu cầu tạo prototype, mẫu thử hay bản nháp code là `workflow_request` (giữ nguyên yêu cầu prototype và phê duyệt prototype trong objective), không phải `conversation_only`. Coordinator tạo prototype qua Runtime và Runtime gửi thẻ duyệt prototype riêng. Không bao giờ tự viết prototype hay mã triển khai trong `directReply`, kể cả khi người dùng muốn xem nhanh.
 2. **`clarify`**:
    - *Đặc điểm*: Yêu cầu có mục đích thực thi nhưng thiếu thông tin kỹ thuật cốt lõi (ví dụ: phạm vi file, tiêu chí chấp thuận, hành vi biên).
    - *Hành động*: Đặt tối đa 2–3 câu hỏi trúng đích, gợi ý phương án lựa chọn, cập nhật bản thảo yêu cầu (`PendingClarificationContext`).

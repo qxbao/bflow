@@ -57,6 +57,17 @@ describe("isProviderInputEmpty on the current Claude layout", () => {
 });
 
 describe("Conversation notice rendering", () => {
+  it("shows the Coordinator's clarification questions instead of only saying that questions arrived", () => {
+    const rendered = renderConversationNotice(notice("clarify-1", "conversation.clarification", {
+      headline: "Specification requires additional verification methods", sdlcStatus: "clarifying",
+      questions: ["Should securitySensitive be false for pure arithmetic?", "Keep unit_test only for the four criteria?"]
+    }));
+    expect(rendered.display).toContain("Việc #1: Specification requires additional verification methods");
+    expect(rendered.display).toContain("1. Should securitySensitive be false for pure arithmetic?");
+    expect(rendered.display).toContain("2. Keep unit_test only for the four criteria?");
+    expect(rendered.display).not.toContain("Đã nhận câu hỏi làm rõ");
+  });
+
   it.each([
     "SDD mismatch: policy requires lightweight SDD, not full SDD.",
     "Xung đột SDD: giữ lightweight, không cần full SDD.",
@@ -155,8 +166,10 @@ describe("Conversation notice rendering", () => {
     expect(rendered.display).toContain("Việc #1: Thêm trang đăng nhập");
     expect(rendered.display).toContain("Cần bạn duyệt: Duyệt bản thiết kế xác thực người dùng (do Trưởng nhóm kỹ thuật gửi)");
     expect(rendered.display).toContain('Kèm 2 tài liệu (gõ "xem chi tiết #2" để xem)');
-    expect(rendered.display).toContain("  1. Đồng ý\n  2. Chưa đồng ý (ghi lý do)");
-    expect(rendered.display).toContain('Bạn trả lời: "#2: đồng ý" (hoặc "#2: 1") để duyệt, hoặc "#2: từ chối vì <lý do>" (hoặc "#2: 2 <lý do>") nếu cần sửa');
+    expect(rendered.display).toContain("  1. Đồng ý\n  2. Từ chối hẳn (ghi lý do, dừng công việc)");
+    // A revision request keeps the work; only an explicit rejection ends it, so the card never steers a fix towards "2".
+    expect(rendered.display).toContain('Bạn trả lời: "#2: đồng ý" (hoặc "#2: 1") để duyệt, "#2: cần sửa <góp ý>" để yêu cầu sửa và giữ công việc, hoặc "#2: từ chối vì <lý do>" (hoặc "#2: 2 <lý do>") để từ chối hẳn và dừng công việc');
+    expect(rendered.display).not.toContain("nếu cần sửa");
     expect(rendered.display).not.toContain("artifact://");
     expect(rendered.display).not.toContain("design-abc123");
     expect(rendered.display).not.toContain("run-42");

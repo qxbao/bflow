@@ -1046,16 +1046,8 @@ export class RolePaneManager {
 
     // Step 4: Persist Manifest
     const coordinatorBinding = manifestPanes.find((p) => p.role === "coordinator");
-    // Developer panes are Runtime-owned task panes; a stale one (e.g. from a cancelled run) is reconciled by Runtime after
-    // activation and must not keep the permanent topology from coming up.
-    const allHealthy = manifestPanes.every(
-      (p) =>
-        p.role === "developer" ||
-        p.transportState === "idle" ||
-        p.transportState === "done" ||
-        p.transportState === "working" ||
-        p.transportState === "accepted"
-    );
+    // Runtime-owned panes (Developers, profiled specialists) are reconciled by Runtime after activation; see startupPanesHealthy.
+    const allHealthy = startupPanesHealthy(manifestPanes);
     const status: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
     const manifest: SessionManifest = {
@@ -1823,7 +1815,9 @@ export class RolePaneManager {
       const hasCoordinator = updatedPanes.some(
         (p) => p.role === "coordinator" && isHealthyTransport(p.transportState)
       );
-      const healthy = anomalies.length === 0;
+      // A stale Runtime-owned pane is reported, but only permanent role panes decide the topology status.
+      const runtimeOwned = new Set(manifest.panes.filter(isRuntimeOwnedPane).map((p) => p.bindingId));
+      const healthy = anomalies.every((anomaly) => runtimeOwned.has(anomaly.bindingId));
       const newStatus: SessionManifestStatus = healthy && hasConversation && hasCoordinator ? "up" : "degraded";
       const updatedConversation = updatedPanes.find((p) => p.role === "conversation" && p.permanent);
 
@@ -2225,15 +2219,7 @@ export class RolePaneManager {
       parseAgentInfoResult(agentFocusOutcome, "agent_info");
 
       const coordinatorBinding = recoveredPanes.find((p) => p.role === "coordinator");
-      // Developer panes are Runtime-owned and reconciled after activation; they do not gate the restored topology.
-      const allHealthy = recoveredPanes.every(
-        (p) =>
-          p.role === "developer" ||
-          p.transportState === "idle" ||
-          p.transportState === "done" ||
-          p.transportState === "working" ||
-          p.transportState === "accepted"
-      );
+      const allHealthy = startupPanesHealthy(recoveredPanes);
       const newStatus: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
       const recoveredManifest: SessionManifest = {
@@ -2451,10 +2437,9 @@ export class RolePaneManager {
         if (!releasing.ok) return releasing;
         const closed = await this.#runHerdr(["pane", "close", binding.paneId], options);
         if (closed.exitCode !== 0 || closed.failure) {
-          // Retrying an interrupted release: the pane may already be gone. Only an observed absence completes it.
-          const alreadyReleased = binding.metadata?.["allocationStatus"] === "released";
-          const probe = alreadyReleased ? await this.#runHerdr(["pane", "get", binding.paneId], options) : undefined;
-          if (!probe || probe.exitCode === 0 && !probe.failure) return toCommandError(closed, "Failed to close specialist pane");
+          // The pane may already be gone (an interrupted release, or a stale pane the operator closed). Only an observed absence completes it.
+          const probe = await this.#runHerdr(["pane", "get", binding.paneId], options);
+          if (probe.exitCode === 0 && !probe.failure) return toCommandError(closed, "Failed to close specialist pane");
         } else parseOkResponse(closed);
         const saved = await this.#store.save({ ...releasing.value, panes: releasing.value.panes.filter(pane => pane.bindingId !== binding.bindingId),
           updatedAt: this.#clock().toISOString() }, options);
@@ -2507,7 +2492,18 @@ export class RolePaneManager {
           (request.roleProfile && (existingTaskDeveloper.metadata?.["launchId"] !== request.launch?.launchId ||
             existingTaskDeveloper.metadata?.["launchFingerprint"] !== request.launch?.launchFingerprint))))
         return conflictError("Active task profile/launch cannot change without a new accepted allocation");
-      if (existingTaskDeveloper && existingTaskDeveloper.worktreePath === request.worktreePath) {
+      // The same allocation whose pane vanished (e.g. with an earlier host generation) runs no provider process; drop it so
+      // Runtime can reallocate the task instead of colliding with its stale binding or a reused Herdr pane ID.
+      if (existingTaskDeveloper) {
+        const health = await this.inspectRoleHealth(existingTaskDeveloper.bindingId, options);
+        if (health.ok && (!health.value.paneExists || !health.value.occupantMatches)) {
+          const pruned = await this.#store.save({ ...manifest, updatedAt: this.#clock().toISOString(),
+            panes: manifest.panes.filter(pane => pane.bindingId !== existingTaskDeveloper.bindingId) }, options);
+          if (!pruned.ok) return pruned;
+          manifest = pruned.value;
+        }
+      }
+      if (existingTaskDeveloper && manifest.panes.includes(existingTaskDeveloper) && existingTaskDeveloper.worktreePath === request.worktreePath) {
         const health = await this.inspectRoleHealth(existingTaskDeveloper.bindingId, options);
         if (health.ok && (health.value.status === "ready" || health.value.status === "working")) {
           return ok(existingTaskDeveloper);
@@ -2530,11 +2526,17 @@ export class RolePaneManager {
         );
       }
 
-      // Concurrency limit check
+      // Concurrency limit check. A retained allocation whose pane is gone (or now holds another occupant) runs no provider
+      // process, so it uses no capacity; its worktree stays guarded by the single-writer check above until Runtime settles it.
       const maxCapacity = this.#config.maxDeveloperCapacity ?? 2;
-      if (activeDevelopers.length >= maxCapacity) {
+      const occupying: PaneBinding[] = [];
+      for (const developer of activeDevelopers) {
+        const health = await this.inspectRoleHealth(developer.bindingId, options);
+        if (!health.ok || health.value.paneExists && health.value.occupantMatches) occupying.push(developer);
+      }
+      if (occupying.length >= maxCapacity) {
         return conflictError(
-          `Developer capacity limit reached: active developers (${activeDevelopers.length}) >= limit (${maxCapacity})`
+          `Developer capacity limit reached: active developers (${occupying.length}) >= limit (${maxCapacity})`
         );
       }
 
@@ -3145,6 +3147,18 @@ export class RolePaneManager {
     }
     return `dev-${Date.now().toString(36).slice(-6)}`;
   }
+}
+
+/** Developer task panes and profiled specialist panes (permanent: false) belong to Runtime, not to the startup topology. */
+function isRuntimeOwnedPane(pane: Pick<PaneBinding, "role" | "permanent">): boolean {
+  return pane.role === "developer" || pane.permanent === false;
+}
+/**
+ * Whether the permanent role panes are healthy enough for "up". A stale Runtime-owned pane (e.g. from a cancelled run, or a
+ * profiled reviewer whose provider died with the previous host) is reconciled by Runtime after activation instead.
+ */
+export function startupPanesHealthy(panes: readonly Pick<PaneBinding, "role" | "permanent" | "transportState">[]): boolean {
+  return panes.every((p) => isRuntimeOwnedPane(p) || ["idle", "done", "working", "accepted"].includes(p.transportState));
 }
 
 export function createRolePaneManager(options: RolePaneManagerOptions): RolePaneManager {

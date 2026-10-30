@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -22,4 +22,16 @@ it("reads only current structured native errors from the pinned session transcri
   await write([{ timestamp, type: "event_msg", payload: { type: "error", codex_error_info: "usage_limit_exceeded" } },
     { timestamp, type: "event_msg", payload: { type: "task_started" } }]);
   expect(await readCodexFailure(input)).toBeUndefined();
+});
+it("reads a transcript reached through a symlinked ancestor but rejects a symlinked transcript file", async () => {
+  const real = await mkdtemp(join(tmpdir(), "bflow-failure-reader-real-")); directories.push(real);
+  const link = `${real}-link`; directories.push(link);
+  await symlink(real, link);
+  const metadata = { type: "session_meta", payload: { id: "session-1" } };
+  const event = { timestamp: "2026-10-28T00:00:01.000Z", type: "event_msg", payload: { type: "error", codex_error_info: "usage_limit_exceeded" } };
+  await writeFile(join(real, "rollout.jsonl"), [metadata, event].map(item => JSON.stringify(item)).join("\n"));
+  const input = { path: join(link, "rollout.jsonl"), root: link, nativeSessionId: "session-1", acceptedAt: "2026-10-28T00:00:00.000Z" };
+  expect((await readCodexFailure(input))?.event).toMatchObject({ payload: { codex_error_info: "usage_limit_exceeded" } });
+  await symlink(join(real, "rollout.jsonl"), join(real, "alias.jsonl"));
+  expect(await readCodexFailure({ ...input, path: join(link, "alias.jsonl") })).toBeUndefined();
 });

@@ -328,7 +328,7 @@ function updateNotice(notice: NoticeLike): RenderedNotice {
   const type = notice.type ?? "notice";
   const truncated = notice.truncated === true;
   // A Runtime progress message says why it matters in blockageReason (or headline); show that instead of only the type.
-  const payload = ["conversation.progress", "delegation.accepted"].includes(type) ? parseSummary(notice) : undefined;
+  const payload = ["conversation.progress", "conversation.clarification", "delegation.accepted"].includes(type) ? parseSummary(notice) : undefined;
   const rawText = payload && typeof payload === "object" && !Array.isArray(payload)
     ? [(payload as Record<string, unknown>).blockageReason, (payload as Record<string, unknown>).headline].find(value => typeof value === "string" && value.length > 0) as string | undefined
     : undefined;
@@ -339,11 +339,18 @@ function updateNotice(notice: NoticeLike): RenderedNotice {
   const ackToken = notice.runId && rawText ? `${workTag}: ${cleanText}` : undefined;
   const headline = `▶ ${workTag}: ${cleanText}`;
   const note = truncated ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
+  // The user can only answer a clarification whose questions are shown; the headline alone hides them.
+  const rawQuestions = type === "conversation.clarification" && payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>).questions : undefined;
+  const questions = Array.isArray(rawQuestions)
+    ? rawQuestions.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 10)
+      .map((item, index) => `  ${index + 1}. ${sanitizeCardProse(item.slice(0, 1000), { runId: notice.runId, workTag })}`)
+    : [];
   // Substantive progress needs display recovery too. Its text is an acknowledgement token, never approval authority.
   return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}),
     ...(runLabel ? { runLabel } : {}), headline,
     ...(ackToken ? { ackToken, ackText: cleanText } : {}),
-    display: `${headline}${note}` };
+    display: [`${headline}${note}`, ...(questions.length ? ["Câu hỏi cần bạn trả lời:", ...questions] : [])].join("\n") };
 }
 
 function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): RenderedNotice {
@@ -385,7 +392,7 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype =
     { number: 2, text: "Từ chối hẳn prototype (ghi lý do)" }
   ] : [
     { number: 1, text: "Đồng ý" },
-    { number: 2, text: "Chưa đồng ý (ghi lý do)" }
+    { number: 2, text: "Từ chối hẳn (ghi lý do, dừng công việc)" }
   ];
   const headline = `🔔 Cần bạn duyệt${prototype ? " prototype" : ""} · ${shortId}`;
   const evidenceLine = fields.evidenceCount > 0 ? `Kèm ${fields.evidenceCount} tài liệu (gõ "xem chi tiết ${shortId}" để xem)` : undefined;
@@ -394,7 +401,9 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype =
   const reply = prototype
     ? `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt prototype, "${shortId}: cần sửa <góp ý>" để yêu cầu sửa prototype, ` +
       `"${shortId}: đổi yêu cầu <nội dung>" nếu góp ý cần đổi yêu cầu đã chấp nhận, "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn, hoặc "hủy ${workCommand}" để hủy công việc — ${expiryText}`
-    : `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") nếu cần sửa — ${expiryText}`;
+    // "2"/"từ chối" records a final rejection that ends the work; a fix is requested with "cần sửa" (changes_requested).
+    : `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, "${shortId}: cần sửa <góp ý>" để yêu cầu sửa và giữ công việc, ` +
+      `hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn và dừng công việc — ${expiryText}`;
   const lines = [
     headline,
     ...(runLabel ? [runLabel] : []),

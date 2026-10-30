@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { open, realpath } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import { ProviderNativeFailureEventSchema } from "@bflow/contracts";
 import { z } from "zod";
 
@@ -10,8 +10,9 @@ const frameSchema = z.object({ timestamp: z.string().datetime({ offset: true }),
 export async function readCodexFailure(raw: unknown) {
   const input = inputSchema.parse(raw);
   try {
+    // Symlinked ancestors (macOS /var, /tmp) are allowed; a symlinked transcript file is not.
     const root = await realpath(input.root), path = await realpath(input.path), child = relative(root, path);
-    if (path !== resolve(input.path) || !child || child === ".." || child.startsWith("../") || resolve(root, child) !== path) return;
+    if (path !== resolve(await realpath(dirname(input.path)), basename(input.path)) || !child || child === ".." || child.startsWith("../") || resolve(root, child) !== path) return;
     const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const stat = await file.stat();

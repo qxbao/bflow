@@ -65,7 +65,7 @@ export interface GitPolicy {
 export interface PanePolicy {
   getManifest(options?: OperationOptions): Promise<OperationResult<SessionManifest | null>>;
   getRoleBinding(role: string, options?: OperationOptions): Promise<OperationResult<PaneBinding | null>>;
-  inspectRoleHealth(role: string, options?: OperationOptions): Promise<OperationResult<{ readyForPrompt: boolean; occupantMatches: boolean; paneId: string; agentId: string }>>;
+  inspectRoleHealth(role: string, options?: OperationOptions): Promise<OperationResult<{ readyForPrompt: boolean; occupantMatches: boolean; paneExists?: boolean; paneId: string; agentId: string }>>;
   allocateDeveloper(request: {
     taskId: string; runId: string; worktreePath: string; branchName: string; agentName: string;
     roleProfile?: import("@bflow/contracts").ResolvedRoleProfileSnapshot;

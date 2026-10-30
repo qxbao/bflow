@@ -42,7 +42,10 @@ export class Panes implements PanePolicy {
   async getManifest() { return { ok: true as const, value: { schemaVersion: 2 as const, sessionId: "session-1", projectName: "Test", workspaceRoot: "/tmp", herdrWorkspaceId: "workspace-1", herdrTabId: "tab-1", status: "up" as const,
     conversationSessionId: "session-1", activeRunIds: [], panes: this.bindings, attachTarget: { role: "conversation" as const, paneId: "pane-conversation" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } }; }
   async getRoleBinding(selector: string) { return { ok: true as const, value: this.bindings.find(p => [p.role, p.bindingId, p.paneId, p.agentId].includes(selector)) ?? null }; }
-  async inspectRoleHealth(selector: string) { const p = unwrap(await this.getRoleBinding(selector)); if (!p) throw new Error("No pane"); return { ok: true as const, value: { readyForPrompt: !this.busy.has(p.role), occupantMatches: true, paneId: p.paneId, agentId: p.agentId } }; }
+  readonly missing = new Set<string>();
+  async inspectRoleHealth(selector: string) { const p = unwrap(await this.getRoleBinding(selector)); if (!p) throw new Error("No pane");
+    if (this.missing.has(p.paneId)) return { ok: true as const, value: { readyForPrompt: false, occupantMatches: false, paneExists: false, paneId: p.paneId, agentId: p.agentId } };
+    return { ok: true as const, value: { readyForPrompt: !this.busy.has(p.role), occupantMatches: true, paneExists: true, paneId: p.paneId, agentId: p.agentId } }; }
   async allocateDeveloper(request: { taskId: string; worktreePath: string; agentName: string }) {
     const old = this.bindings.find(p => p.agentId === request.agentName); if (old) return { ok: true as const, value: old };
     const p = { ...this.bindings[0]!, bindingId: request.agentName, role: "developer" as const, agentId: request.agentName,

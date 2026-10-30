@@ -328,7 +328,8 @@ export class HostPlatformSession {
     if (!template) throw new Error("Profile base role has no configured platform template");
     const effective = resolveRoleProfile(snapshot, requirementFor(template, this.options.hostCapabilities, this.options.repositoryPath, undefined,
       this.options.platform.toolGrants, this.options.platform.toolPolicy));
-    if (requiredCapabilities.some(capability => !effective.capabilityIds.includes(capability))) throw new Error("Profile capability scope cannot satisfy the assignment");
+    const missing = requiredCapabilities.filter(capability => !effective.capabilityIds.includes(capability));
+    if (missing.length) throw new Error(`Profile capability scope cannot satisfy the assignment: missing ${missing.join(", ")}; available ${effective.capabilityIds.join(", ") || "none"}`);
   }
   async attestProfileExecutor(binding: PaneBinding, purpose: ExecutorLineage["purpose"], assignmentId: string): Promise<ExecutorLineage> {
     const launchId = this.bindingLaunchId(binding), launch = launchId ? this.profiledLaunches.get(launchId) : undefined;

@@ -2,7 +2,6 @@ import { createRoot } from 'react-dom/client';
 import { ApiClient, consumeBootstrap } from './api/client';
 import { Router } from './router';
 import './styles/fonts.css';
-import './styles/tokens.css';
 import './styles/global.css';
 const bootstrap=consumeBootstrap();
 const root=document.getElementById('root');

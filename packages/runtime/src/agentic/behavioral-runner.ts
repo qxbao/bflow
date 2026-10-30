@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type JsonValue, type QualityGateDefinition } from "@bflow/contracts";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { json, record, textField } from "./journal.js";
-import { BehavioralIdentityMismatch, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
+import { BehavioralIdentityMismatch, BehavioralIdentityRepair, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
 import { parseVitestJson } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
 import type { AdapterRunner } from "./runner-adapter.js";
@@ -503,6 +503,9 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
       if (rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
       throw error;
     }
+    if (error instanceof BehavioralIdentityMismatch)
+      throw new BehavioralIdentityRepair(outcome, error.expectedNames, error.observedNames, command.reporter === "vitest_json" ? "vitest_json" : "node_tap",
+        measurementDiagnostics(command, outcome, error), rtkResult);
     throw new BehavioralMeasurementError(error, measurementDiagnostics(command, outcome, error));
   }
   return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,
