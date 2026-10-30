@@ -118,4 +118,5 @@ The final opt-in campaign command passed: one test passed, six ordinary explorer
 ## Commit hashes
 
 - Exploration baseline before this change: `120d7dc0dac6c83f6ce0ac9e943c69452bf920b4`.
-- Implementation and report commits: to be filled after the isolated worktree commits are created.
+- Stateful explorer implementation commit: `936dac346054f0b90002a32ad0c6e7a18cc1c0da`.
+- This final report revision is committed immediately after the implementation; its exact commit is recorded in the final handoff.
