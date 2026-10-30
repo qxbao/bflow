@@ -1,3 +1,4 @@
+import { projectPolicyPhaseRequest, provenPrelaunchPolicyFailure } from "./policy-prompt.js";
 import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-binding.js";
 import { ExecutorLineageSchema, RoleProfilePinSchema, sameRoleProfilePin } from "@bflow/contracts";
 import { assertProfileBinding, assertProfileSnapshotCurrent, assertIndependentProfileExecutor, selectRoleProfile } from "./profile-admission.js";
@@ -502,6 +503,9 @@ export class HerdrOutbox {
       out.coordinatorResponseBaseline ??= this.state.outbound.length;
     await guardWorkDispatch();
     if (pane.role === "developer" && !out.parentAssignmentId) await this.ports.pinDeveloperDispatch?.(out.request, pane);
+    let presentedRequest;
+    try { presentedRequest = projectPolicyPhaseRequest(out.request); }
+    catch (error) { out.status = "queued"; out.error = `Prompt presentation blocked before transport: ${String(error)}`; await this.save(); return; }
     out.status = "sending";
     await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
     if (out.parentAssignmentId) {
@@ -522,7 +526,7 @@ export class HerdrOutbox {
     try { await guardWorkDispatch(); }
     catch (error) { if (error instanceof ExecutionPlanDriftError || error instanceof RoleCapabilityPreflightError) { out.status = "queued"; await this.save(); } throw error; }
     try {
-      const value = unwrap(await this.ports.transport.send(out.request));
+      const value = unwrap(await this.ports.transport.send(presentedRequest));
       const receipt = AgentSubmissionReceiptSchema.parse(value);
       if (receipt.requestId !== out.request.requestId || receipt.attemptId !== out.attemptId || receipt.runId !== out.request.runId || receipt.taskId !== out.taskId)
         throw new Error("Transport receipt ownership mismatch");
@@ -545,6 +549,10 @@ export class HerdrOutbox {
   async reconcile(messageId: string, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
     const out = this.state.outbound.find(item => item.message.message_id === messageId);
     if (!out?.request || !["sending", "unknown_delivery"].includes(out.status)) throw new Error("No uncertain handoff to reconcile");
+    if (provenPrelaunchPolicyFailure(out, this.state.inbox)) {
+      out.status = "queued"; out.error = "Reconciled exact oversized Node prelaunch E2BIG; no invocation started";
+      await this.save(); return;
+    }
     const req = out.request;
     const result = AgentReconciliationResultSchema.parse(unwrap(await this.ports.transport.reconcile({
       requestId: req.requestId, attemptId: req.attemptId, runId: req.runId, taskId: req.taskId,

@@ -1,3 +1,6 @@
+import { createHerdrAdapter } from "@bflow/herdr-adapter";
+import { projectPolicyPhaseRequest } from "../../src/agentic/policy-prompt.js";
+import { AgentRequestSchema, RoleMessageSchema } from "@bflow/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
@@ -531,6 +534,27 @@ describe("manual-review policy proposal ingress and evidence lifecycle", () => {
     const f = await implemented(), strategy = structuredClone(f.strategy);
     const evidence = strategy.metadata!.tddEvidence as any[];
     evidence[0].metadata.largeRawOutput = "x".repeat(150000);
+    const wire = RoleMessageSchema.parse({schema_version:2,message_id:"phase-presentation",correlation_id:"corr",run_id:"run-dq-1",sender:{role:"coordinator"},recipient:{role:"qa"},type:"verification.requested",artifact_references:[],occurred_at:"2026-01-01T00:00:00Z",idempotency_key:"phase-presentation",payload:{kind:"conditional_evidence",phase:"green",runId:"run-dq-1",taskId:"dq-structural",specification:f.specification,strategy}});
+    const req = AgentRequestSchema.parse({requestId:"request-present",attemptId:"attempt-present",runId:"run-dq-1",taskId:"dq-structural",role:"qa",target:{transport:"herdr",agentId:"qa",paneId:"p1"},instruction:JSON.stringify(wire),context:wire,inputs:[],attempt:1,retry:{maxAttempts:1,strategy:"fixed",initialDelayMs:0,maxDelayMs:0,jitter:false},timeout:{executionTimeoutMs:1000,onTimeout:"block"},idempotency:{key:"phase-presentation",scope:"agent-request",fingerprint:"digest"},createdAt:"2026-01-01T00:00:00Z"});
+    const presentation = projectPolicyPhaseRequest(req);
+    expect(Buffer.byteLength(presentation.instruction)).toBeLessThan(60000);
+    expect(presentation.context).toEqual(req.context);
+    expect(presentation.idempotency).toEqual(req.idempotency);
+    expect(JSON.parse(presentation.instruction).payload.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
+    expect(req.instruction).toContain("largeRawOutput");
+    let promptCalls = 0;
+    const newAdapter = () => createHerdrAdapter({runner:{run:async ({args}:any)=>{
+      const prompt=args[1]==="prompt"; if(prompt){promptCalls++;if(Buffer.byteLength(args[3])>131072)return {exitCode:null,stdout:"",stderr:"",failure:"spawn",started:false,cause:"spawn E2BIG"};}
+      return {exitCode:0,stderr:"",stdout:JSON.stringify({id:"1",result:{type:prompt?"agent_prompted":"agent_info",agent:{agent:"claude",name:"qa",agent_status:"idle",workspace_id:"w1",tab_id:"t1",pane_id:"p1",terminal_id:"term1",revision:1,state_change_seq:2}}})};
+    }}});
+    expect((await newAdapter().send(req)).ok).toBe(false);
+    // Recovery reopens the host after deploying the fix, so the old process idempotency cache is not reused.
+    const adapter = newAdapter();
+    const sent=await adapter.send(presentation);
+    expect(sent, JSON.stringify(sent)).toMatchObject({ok:true,value:{status:"accepted"}});
+    expect(await adapter.send(presentation)).toEqual(sent);
+    expect(promptCalls).toBe(2);
+
     const result = compactPolicyReviewDossier(f.specification, strategy) as any;
     expect(JSON.stringify(result).length).toBeLessThan(30000);
     expect(result.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
