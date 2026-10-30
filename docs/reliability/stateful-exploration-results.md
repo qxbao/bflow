@@ -119,4 +119,5 @@ The final opt-in campaign command passed: one test passed, six ordinary explorer
 
 - Exploration baseline before this change: `120d7dc0dac6c83f6ce0ac9e943c69452bf920b4`.
 - Initial explorer implementation commit: `936dac346054f0b90002a32ad0c6e7a18cc1c0da`.
-- Final review corrections and report commit: `8a99d28645a155f769be7d356da73f41d09ab5e9`.
+- Final review source corrections: `8a99d28645a155f769be7d356da73f41d09ab5e9`.
+- Final report pin commit: `dec6546` (this commit).
