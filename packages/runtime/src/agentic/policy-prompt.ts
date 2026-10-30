@@ -23,13 +23,25 @@ export function projectPolicyPhaseRequest(input: AgentRequest): AgentRequest {
  * Runtime must still reconcile, renew its lease and dispatch normally. Never edits the request. */
 export function provenPrelaunchPolicyFailure(out: Outbound, inbox: JournalState['inbox'], platform=process.platform): boolean {
  try {
-  if(platform!=='linux'||out.status!=='unknown_delivery'||out.handle||out.error!=='Error: transport_unavailable: spawn E2BIG'||!out.request)return false;
+  if(out.leaseRenewal||out.leaseReacquisition||out.prelaunchFailure||platform!=='linux'||out.status!=='unknown_delivery'||out.handle||out.error!=='Error: transport_unavailable: spawn E2BIG'||!out.request)return false;
   const request=AgentRequestSchema.parse(out.request),message=RoleMessageSchema.parse(out.message),payload=record(message.payload);
   return message.type==='verification.requested'&&payload.kind==='conditional_evidence'&&message.recipient.role==='qa'&&
    request.requestId===`request-${digest(message.message_id)}`&&request.idempotency.key===message.idempotency_key&&
-   request.runId===message.run_id&&request.taskId===payload.taskId&&request.role==='qa'&&request.attemptId===out.attemptId&&request.taskId===out.taskId&&
+   request.runId===message.run_id&&request.taskId===`phase-${payload.taskId}-${payload.phase}`&&request.role==='qa'&&request.attemptId===out.attemptId&&request.taskId===out.taskId&&
    request.instruction===JSON.stringify(message)&&digest(request.context)===digest(message)&&
    Buffer.byteLength(request.instruction,'utf8')>131072&&
    !inbox.some(item=>item.status!=='rejected'&&item.message.causation_id===message.message_id);
  }catch{return false;}
+}
+
+export class PrelaunchRegistryRecoveryError extends Error {}
+export function prelaunchLeaseIdentity(out: Outbound) {
+ const seed=out.prelaunchFailure ? digest([out.message.message_id,'prelaunch-rebind',out.prelaunchFailure.reconciledAt]) : digest(out.message.message_id);
+ return {leaseId:`lease-${seed}`,idempotencyKey:out.prelaunchFailure?`acquire:prelaunch:${seed}`:`acquire:${out.message.message_id}`};
+}
+export async function recoverPrelaunchPolicyDeliveries(runtime: {reconcileDelivery(id:string):Promise<unknown>}, state: Pick<JournalState,'outbound'|'inbox'>, held:(error:Error)=>void) {
+ for(const pending of state.outbound) if(provenPrelaunchPolicyFailure(pending,state.inbox)) {
+  try {await runtime.reconcileDelivery(pending.message.message_id);}
+  catch(error) {if(!(error instanceof PrelaunchRegistryRecoveryError))throw error;held(error);}
+ }
 }

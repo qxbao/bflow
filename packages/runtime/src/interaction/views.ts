@@ -265,8 +265,8 @@ import { InteractionQuerySchema } from "./schemas.js";
 import { interactionProjectId } from "./client.js";
 const projectionSnapshots = new ProjectionSnapshots();
 async function readSnapshot(path: string): Promise<unknown | undefined>;
-async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T): Promise<T | undefined>;
-async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown): Promise<unknown | undefined> {
+async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
+async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown, maxBytes = 16 * 1024 * 1024): Promise<unknown | undefined> {
   let file;
   try {
     file = await open(
@@ -279,10 +279,10 @@ async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown): 
   }
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > 16 * 1024 * 1024)
+    if (!stat.isFile() || stat.size > maxBytes)
       throw new Error("Invalid read source");
     const bytes = await file.readFile();
-    if (bytes.byteLength > 16 * 1024 * 1024)
+    if (bytes.byteLength > maxBytes)
       throw new Error("Read source too large");
     return decode ? decode(bytes) : JSON.parse(bytes.toString("utf8"));
   } finally {
@@ -358,7 +358,7 @@ export async function hostInteractionQuery(
     };
   }
   const journalPath = join(root, "agentic/journal/state.json");
-  const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes));
+  const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
   const state =
     journal === undefined
       ? {

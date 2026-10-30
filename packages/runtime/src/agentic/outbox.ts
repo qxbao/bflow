@@ -1,4 +1,4 @@
-import { projectPolicyPhaseRequest, provenPrelaunchPolicyFailure } from "./policy-prompt.js";
+import { projectPolicyPhaseRequest, provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError, prelaunchLeaseIdentity } from "./policy-prompt.js";
 import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-binding.js";
 import { ExecutorLineageSchema, RoleProfilePinSchema, sameRoleProfilePin } from "@bflow/contracts";
 import { assertProfileBinding, assertProfileSnapshotCurrent, assertIndependentProfileExecutor, selectRoleProfile } from "./profile-admission.js";
@@ -458,13 +458,15 @@ export class HerdrOutbox {
       if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; return; }
       if (!out.lease) {
         await guardWorkDispatch();
+        const identity = prelaunchLeaseIdentity(out);
         const acquired = await this.ports.registry.acquireLease({
-          leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
+          leaseId: identity.leaseId, agentId: pane.agentId, runId: out.message.run_id!,
           taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
-          idempotencyKey: `acquire:${out.message.message_id}`
+          idempotencyKey: identity.idempotencyKey
         });
         if (!acquired.ok) { out.error = acquired.error.message; return; }
         out.lease = AgentLeaseSchema.parse(acquired.value);
+        if (out.prelaunchFailure?.lease && out.lease.fencingToken <= out.prelaunchFailure.lease.fencingToken) throw new Error("Recovered dispatch requires a fresh Registry fence");
         await this.save();
       }
     }
@@ -550,6 +552,18 @@ export class HerdrOutbox {
     const out = this.state.outbound.find(item => item.message.message_id === messageId);
     if (!out?.request || !["sending", "unknown_delivery"].includes(out.status)) throw new Error("No uncertain handoff to reconcile");
     if (provenPrelaunchPolicyFailure(out, this.state.inbox)) {
+      // Retain exact release arguments before touching Registry, while the original prelaunch proof remains replayable.
+      if (out.lease) {
+        out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({leaseId:out.lease.leaseId,fencingToken:out.lease.fencingToken,
+          expectedVersion:out.lease.version,releasedAt:this.now(),idempotencyKey:`prelaunch-release:${out.request.requestId}:${out.lease.version}`});
+        await this.save();
+        const released = await this.ports.registry.releaseLease(out.leaseRelease);
+        if (!released.ok && !(released.error.code === "conflict" && Date.parse(out.lease.expiresAt) <= Date.parse(this.now()))) throw new PrelaunchRegistryRecoveryError(`${released.error.code}: ${released.error.message}`);
+      }
+      out.prelaunchFailure = { request: out.request, reconciledAt: this.now(),
+        ...(out.executorLineage ? {executorLineage:out.executorLineage} : {}), ...(out.lease ? {lease:out.lease} : {}) };
+      delete out.lease; delete out.leaseRelease; delete out.leaseRenewal; delete out.executorLineage;
+      delete out.request; // No invocation exists: normal dispatch must pin the current recipient after host recovery.
       out.status = "queued"; out.error = "Reconciled exact oversized Node prelaunch E2BIG; no invocation started";
       await this.save(); return;
     }
