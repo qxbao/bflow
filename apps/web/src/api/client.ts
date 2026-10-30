@@ -13,7 +13,7 @@ const messages: Record<string, string> = {
   invalid_response: 'Dữ liệu trả về không hợp lệ. Hãy tải lại hoặc kiểm tra phiên dự án.',
   invalid_request: 'Thông tin chưa hợp lệ. Kiểm tra đường dẫn Git tuyệt đối trên máy này.',
   operation_conflict: 'Dự án còn thao tác chưa được xác nhận. Kiểm tra trạng thái thao tác trước khi hủy đăng ký.',
-  operation_not_allowed: 'Dịch vụ đang chạy chưa hỗ trợ thao tác này. Hãy khởi động lại Bflow Web bằng phiên bản mới.',
+  operation_not_allowed: 'Trạng thái hiện tại chưa cho phép thao tác này. Tải lại để xem thao tác hợp lệ; nếu vẫn bị từ chối, khởi động lại Bflow Web bằng phiên bản mới.',
   unavailable: 'Chưa kết nối được dịch vụ. Kiểm tra phiên dự án rồi thử tải lại.',
 };
 export function explain(error: unknown): string { return error instanceof ConfigurationError ? error.message : error instanceof ApiError ? messages[error.code] ?? messages.unavailable! : messages.unavailable!; }

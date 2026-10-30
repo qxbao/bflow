@@ -256,3 +256,17 @@ data and disable actions through the existing freshness/authority checks.
 
 See [approved scope](UX-IMPROVEMENTS.md), [implementation plan](UX-PLAN.md) and
 `test/ux.test.tsx` / `e2e/ux.spec.ts` for interaction and responsive checks.
+
+## Operational UX handoff (UX-01..UX-28)
+
+Source plus local tests; not live acceptance. Behaviour added on top of the frozen web contract:
+
+- Run page: "Bước hiện tại" states who the run is waiting on from projection fields only, never terminal idle/done. The elapsed text is time since the last change, not processing time.
+- Blockers are classified as required, in-progress check or optional degradation. Unknown codes stay required. Several reads failing for one cause on the overview render one notice.
+- Settled approvals are read from the run page under "Đã có hiệu lực". The review inbox stays a to-do list. Runtime keeps only the run's latest approval, so an earlier design approval is replaced once a task or delivery approval is issued.
+- A request form still tracking an operation says so, disables sending and offers a new intent only after the outcome is known.
+- Chat defaults to the latest messages of this run plus session-wide ones, reading at most 20 pages; "Toàn phiên" keeps the paged history.
+- Operations settled over ten minutes ago and unrelated to the open run move to a collapsed history.
+- Each acceptance criterion carries its own verification method; the default applies only until changed.
+
+Not implementable without an additive contract decision (`WebRunView`/`WebTransportSummary` are strict): per-task Red/Green/Refactor phase and owner (UX-05), QA progress (UX-20), role per transport state (UX-16), notice feed grouping (UX-11), checked model catalog (UX-25) and provider onboarding by role with a pane link (UX-26).

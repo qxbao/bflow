@@ -73,6 +73,13 @@ export function projectDecision(
     ...(request.expiresAt ? { expiresAt: request.expiresAt } : {}),
   });
 }
+function pendingActionBlocker(action: NonNullable<RunRecord["pendingAction"]>): string {
+  if (action.kind === "reconcile_delivery" || action.recovery === "reconcile_delivery") return "delivery_reconciliation_required";
+  if (action.kind === "coordinator_continuation") return "coordinator_continuation_pending";
+  if (action.recovery === "auto_resume") return "auto_resume_scheduled";
+  if (action.recovery === "capability_repair") return "capability_repair_pending";
+  return "manual_resume_required";
+}
 export function projectRun(s: ReadSources, runId: string): WebRunView {
   const runs = s.state.runs.filter(
     (r) => r.delegation.sessionId === s.sessionId,
@@ -97,6 +104,10 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
     for (const request of pendingPrototypeApprovals(r.prototype))
       decisions.push(projectDecision(s, r, request, "approval"));
   }
+  // A decided approval stays readable; only its pending form is actionable (actions and admission require "pending").
+  const decided = r.approval && r.decision?.approvalId === r.approval.approvalId ? r.decision.decision : undefined;
+  if (decided)
+    decisions.push({ ...projectDecision(s, r, r.approval!, "approval"), status: decided });
   let current = r;
   const visited = new Set([r.runId]);
   while (current.supersededBy) {
@@ -187,15 +198,31 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
             },
           ]
         : []),
-      ...(r.error
+      ...(r.executionPlanDrift
         ? [
             {
-              code: "runtime_blocked",
-              message:
-                "Runtime requires attention; inspect the current action or decision.",
+              code: "execution_plan_drift",
+              message: "Source changed before dispatch; nothing was sent for this plan.",
             },
           ]
         : []),
+      // Codes only: the raw action reason is private Runtime state and never leaves the host.
+      ...(r.pendingAction && !terminal(r)
+        ? [
+            {
+              code: pendingActionBlocker(r.pendingAction),
+              message: "Runtime is waiting on a recorded recovery action.",
+            },
+          ]
+        : r.error
+          ? [
+              {
+                code: "runtime_blocked",
+                message:
+                  "Runtime requires attention; inspect the current action or decision.",
+              },
+            ]
+          : []),
       ...(stale
         ? [
             {
@@ -218,14 +245,14 @@ export function paginateRuns(s: ReadSources, input: WebRunQuery) {
   const query = WebRunQuerySchema.parse(input);
   const rows = s.state.runs
     .filter((r) => r.delegation.sessionId === s.sessionId)
-    .sort((a, b) => a.runId.localeCompare(b.runId))
     .map((r) => projectRun(s, r.runId))
     .filter(
       (v) =>
         (!query.search ||
           v.title.toLowerCase().includes(query.search.toLowerCase())) &&
         (!query.sdlcStatus || v.sdlcStatus === query.sdlcStatus),
-    );
+    )
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.runId.localeCompare(b.runId));
   const scope = digest([
     s.sessionId,
     query.search,
@@ -511,7 +538,9 @@ export async function hostInteractionQuery(
   }
   const decisions = state.runs
     .filter((r) => r.delegation.sessionId === sessionId)
-    .flatMap((r) => projectRun(source, r.runId).decisions);
+    .flatMap((r) => projectRun(source, r.runId).decisions)
+    // The review inbox stays a to-do list; settled approvals are read from their run.
+    .filter((d) => !["approved", "rejected", "changes_requested"].includes(d.status));
   if (decisions.length > 100)
     return {
       ok: false as const,

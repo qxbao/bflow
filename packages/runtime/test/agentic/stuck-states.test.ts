@@ -218,6 +218,33 @@ describe("run watchdog facts", () => {
     expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", pendingAction: { recovery: "auto_resume", sourceMessageId: "assign-dev" } });
   });
 
+  it("treats a Developer yielding for its requested phase measurement as waiting, and reports the stop once that wait is gone", async () => {
+    const f = await fixture(), strategy = specification.testStrategy!;
+    await f.runtime.queueHerdr(message("assign-dev", { type: "delegation.request", payload: { objective: "Inspect" }, recipient: { role: "developer" } }));
+    await f.runtime.flushOutbound();
+    await f.journal.exclusive(async (state: JournalState, save) => {
+      const run = state.runs.find(item => item.runId === "run-1")!;
+      run.tasks.push({ taskId: "task-1", spec: { specification, strategy, request: ApprovalRequestSchema.parse({
+        schemaVersion: 2, approvalId: "approval-task-1", runId: "run-1", target: { type: "run" }, revision: 1, generation: 0,
+        requestedBy: "coordinator", requestedAt: T0, reason: "Accept design", evidence: [], idempotencyKey: "approve-task-1" }) },
+      worktrees: [], outboundIds: ["assign-dev"] } as never);
+      const assignment = state.outbound.find(item => item.message.message_id === "assign-dev")!;
+      assignment.taskId = "task-1"; assignment.attemptId = "attempt-1";
+      state.outbound.push({ ...assignment, handle: undefined, status: "released", message: message("phase-red", { type: "verification.requested", recipient: { role: "qa" },
+        payload: { kind: "conditional_evidence", phase: strategy.tddDecision.mode === "required" ? "red" : "verification", taskId: "task-1", implementationAttemptId: "attempt-1" } }) } as never);
+      await save();
+    });
+    const developer = f.panes.bindings.find(pane => pane.role === "developer")!;
+    await f.runtime.specialistTurnStopped(developer, "developer");
+    expect(await f.notices("developer_no_response")).toHaveLength(0);
+    await f.journal.exclusive(async (state: JournalState, save) => {
+      state.outbound.find(item => item.message.message_id === "phase-red")!.error = "policy_phase_failed:test";
+      await save();
+    });
+    await f.runtime.specialistTurnStopped(developer, "developer");
+    expect(await f.notices("developer_no_response")).toHaveLength(1);
+  });
+
   it("does not count a queued handoff as activity once its recipient has been not-ready past the window", async () => {
     const f = await fixture();
     f.panes.busy.add("coordinator");
