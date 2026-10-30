@@ -144,7 +144,7 @@ export class HerdrOutbox {
         !run || run.cancelled || run.status !== "implementing" || authorization.message.run_id !== run.runId ||
         authorization.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
         payload.taskId !== owner.taskId || payload.implementationAttemptId !== owner.attemptId ||
-        !(authorization.phaseRetirement?.resumeAuthorizedBy || authorization.phaseFailure?.repairable === false && authorization.phaseFailure.applied && authorization.phaseFailure.retryAuthorized === true) || run.nativeDeliveries?.length ||
+        !(authorization.phaseRetirement?.resumeAuthorizedBy || (authorization.phaseFailure?.repairable === false || authorization.phaseFailure?.leaseRecoveryRequired === true) && authorization.phaseFailure!.applied && authorization.phaseFailure!.retryAuthorized === true) || run.nativeDeliveries?.length ||
         run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
         Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)))

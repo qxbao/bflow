@@ -1994,6 +1994,8 @@ export class AgenticWorkflowRuntime {
           digest(command.expectedVersion) !== digest(actionVersion(run, "resume"))) throw new Error("Stale web resume version or action");
       }
       const explicitId = options.conversationUserMessageId ?? options.webCommand?.commandId;
+      const leaseFailure = action && state.outbound.find(out => out.message.message_id === action.sourceMessageId && out.phaseFailure?.leaseRecoveryRequired);
+      if (leaseFailure && (options.automatic || !explicitId)) throw new Error("Expired writer lease requires authenticated explicit owner resume");
       const resumeUnmeasured = !options.automatic && !!explicitId && run.status === "implementing" &&
         action?.kind === "coordinator_continuation" && action.state === "pending" && this.unmeasuredPhaseRequests(state, run).length > 0;
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
@@ -2112,7 +2114,7 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
-      const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && item.phaseFailure?.repairable === false);
+      const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && (item.phaseFailure?.repairable === false || item.phaseFailure?.leaseRecoveryRequired === true));
       if (measurement) measurement.phaseFailure!.retryAuthorized = true;
       // A verifier request released with no evidence, no recorded failure and no retirement can never settle on its own. The explicit
       // resume authorizes one new measurement of the same revision through the existing bounded phase-retry path; no outcome is claimed.
@@ -3805,7 +3807,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const failedHere = state.outbound.filter(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
           record(item.message.payload).taskId === taskId && record(item.message.payload).phase === phase &&
           record(item.message.payload).implementationAttemptId === current.attemptId && record(item.message.payload).sourceRevision === sourceRevision);
-      if (failedHere.some(item => item.phaseFailure?.retryAuthorized !== true))
+      if (failedHere.some(item => item.phaseFailure?.repairable === true || item.phaseFailure?.retryAuthorized !== true))
         throw new Error("This revision already failed the phase; commit a repair before requesting another measurement");
       // A resumed infrastructure failure re-measures the same revision under a new request identity.
       const id = `phase-${digest(retired.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length, "retired", retired.length] : failedHere.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length] : [runId, taskId, current.attemptId, phase, sourceRevision])}`;
@@ -3907,7 +3909,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           owner: "coordinator", reason: run.error.slice(0, 2000), sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
           previousStatus, ...inheritedManualResume(run), recovery: "manual" };
         this.progress(state, outbox, run, run.error);
-      } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+      } else {
+        const parent = state.outbound.find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
+          item.taskId === task.taskId && item.status === "accepted" && item.handle?.attemptId === payload.implementationAttemptId);
+        if (parent?.lease && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) {
+          request.phaseFailure!.leaseRecoveryRequired = true;
+          const previousStatus = run.status;
+          run.status = "escalated"; run.error = `Policy repair blocked by expired writer lease: ${summary}`;
+          run.pendingAction = {actionId:`next-${digest([run.runId,request.message.message_id])}`,kind:"resume_coordinator",owner:"coordinator",
+            sourceMessageId:request.message.message_id,reason:run.error,createdAt:this.now(),state:"pending",previousStatus,
+            ...inheritedManualResume(run),recovery:"manual"};
+          this.progress(state,outbox,run,run.error);
+        } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+      }
       request.phaseFailure!.applied = true;
       await save();
     }
@@ -3915,7 +3929,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     // Developer-only phase tools. Recover the missing handoff from that durable authority.
     if (this.quiesced) return;
     for (const request of state.outbound.filter(item => item.phaseFailure?.applied &&
-      item.phaseFailure.repairable === false && item.phaseFailure.retryAuthorized === true)) {
+      (item.phaseFailure.repairable === false || item.phaseFailure.leaseRecoveryRequired === true) && item.phaseFailure.retryAuthorized === true)) {
       const run = this.run(state, request.message.run_id!), payload = record(request.message.payload);
       if (run.cancelled || run.status !== "implementing" || run.nativeDeliveries?.length ||
           run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
@@ -3951,9 +3965,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         continue; // Keep the original control message and any submission handle; never re-send an uncertain notice.
       }
-      this.phaseNotice(state, outbox, run, task, phase, "retry",
-        `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. ` +
-        "Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.", request.message.message_id);
+      this.phaseNotice(state, outbox, run, task, phase, request.phaseFailure?.leaseRecoveryRequired ? "failed" : "retry",
+        request.phaseFailure?.leaseRecoveryRequired
+          ? `Explicit owner resume restored the same writer lease after: ${request.phaseFailure.summary}. Inspect the independent failure evidence, repair source and commit before requesting this phase again. Frozen Red tests and verification limits remain unchanged.`
+          : `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.`, request.message.message_id);
       await save();
     }
     await this.recoverPolicyPhaseRetirements(state, save, outbox);
