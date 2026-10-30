@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { fixture as runtimeFixture, cleanups as runtimeCleanups } from "../helpers/agentic-integration-fixture.js";
 import { classifyProviderFailure } from "@bflow/agent-providers";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -576,8 +576,13 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(start.args[start.args.indexOf("--kind") + 1]).toBe("claude");
     expect(start.args[start.args.indexOf("--pane") + 1]).toBe(paneId);
     expect(start.args.slice(start.args.indexOf("--") + 1)).toEqual(launch.argv);
-    // With no Gateway grant, the launch carries only the session lifecycle policy.
-    expect(launch.env).toEqual({ DISABLE_AUTOUPDATER: "1" });
+    // With no Gateway grant, the launch carries the session lifecycle policy and the pinned native Claude selectors
+    // (HOME and CLAUDE_CONFIG_DIR) that transcript registration validates, never a token or registration.
+    const home = process.env["HOME"] ?? homedir();
+    expect(launch.env).toEqual({
+      DISABLE_AUTOUPDATER: "1", HOME: home,
+      CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] ?? join(home, ".claude")
+    });
 
     expect(result.value.metadata).toEqual(expect.objectContaining({
       topologyRole: "developer",

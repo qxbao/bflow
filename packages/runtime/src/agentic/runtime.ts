@@ -3467,7 +3467,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (!allocation.ok) {
         run.error = `Developer allocation pending for ${task.taskId}: ${allocation.error.message}`;
-        if (allocation.error.code !== "conflict" || !allocation.error.retryable) this.pauseDeveloperAllocation(run, task.taskId, run.error);
+        if (allocation.error.code !== "conflict" || !allocation.error.retryable) this.pauseDeveloperAllocation(run, task.taskId, run.error, allocation.error.retryable);
         this.progress(state, outbox, run, run.error); await save(); continue;
       }
       if (run.error?.startsWith(`Developer allocation pending for ${task.taskId}: `)) delete run.error;
@@ -3877,14 +3877,18 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       return this.phaseFailureReply(run, request);
     });
   }
-  private pauseDeveloperAllocation(run: RunRecord, taskId: string, reason: string): void {
+  /**
+   * A refused Developer allocation leaves no pane or launch behind. A retryable infrastructure refusal resumes automatically within
+   * the bounded, backed-off automatic budget and then falls back to the explicit resume; a deliberate refusal waits for the user.
+   */
+  private pauseDeveloperAllocation(run: RunRecord, taskId: string, reason: string, automatic = false): void {
     const sourceMessageId = `developer-allocation-${digest([run.runId, taskId, reason])}`;
     const prior = run.pendingAction?.sourceMessageId === sourceMessageId ? run.pendingAction : undefined;
     run.status = "escalated";
     run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
       reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus: "implementing",
       ...inheritedAutoResume(run),
-      recovery: "manual" };
+      recovery: automatic ? "auto_resume" : "manual" };
   }
   private async recoverPhaseFailures(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox): Promise<void> {
     for (const request of state.outbound.filter(item => item.phaseFailure && !item.phaseFailure.applied)) {
