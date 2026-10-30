@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgenticJournal, type JournalState } from "../../src/agentic/journal.js";
 import { probeBehavioralSandbox } from "../../src/agentic/sandbox-readiness.js";
 import { cleanups, connectedPhaseFixture } from "../helpers/agentic-integration-fixture.js";
+import { availableActions } from "../../src/interaction/actions.js";
 
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
 
@@ -30,6 +31,33 @@ async function measureRed(f: Awaited<ReturnType<typeof connectedPhaseFixture>>, 
 }
 
 describe.skipIf((await probeBehavioralSandbox()).status !== "ready")("ingress refusal self-healing", () => {
+  it("lets a version-bound user resume recover a QA phase blocked before measurement", async () => {
+    const { f, pending } = await redRequested();
+    await f.runtime.receiveHerdr(f.envelope("task.status", { status: "blocked", summary: "Inspection output exceeds provider limit" }, {
+      causation_id: pending.message.message_id, sender: { role: "qa", agent_id: f.qa.agentId, pane_id: f.qa.paneId } }));
+    // The native verifier turn has ended and its capacity is returned; no measurement is in flight.
+    const active = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.message_id === pending.message.message_id);
+    expect((await f.ports.registry.releaseLease({ leaseId: active.lease.leaseId, fencingToken: active.lease.fencingToken,
+      expectedVersion: active.lease.version, releasedAt: new Date().toISOString(), idempotencyKey: "blocked-review-release" })).ok).toBe(true);
+    await editJournal(f, state => { state.outbound.find(out => out.message.message_id === pending.message.message_id)!.status = "released"; });
+    const run = await f.inspect(), state = await f.runtime.inspect() as any;
+    expect(run.status).toBe("implementing");
+    expect(run.pendingAction.kind).toBe("coordinator_continuation");
+    const action = availableActions(run, state, [], true, true).find(action => action.kind === "resume");
+    expect(action?.enabled).toBe(true);
+    await expect(f.runtime.resumeBlockedRun("run-1", run.pendingAction.actionId, { automatic: true })).rejects.toThrow();
+    await expect(f.runtime.resumeBlockedRun("run-1", run.pendingAction.actionId, { webCommand: { apiVersion: 1, projectId: "project-1",
+      commandId: "1ead4554-a20e-4555-bfd9-98badc43578d", kind: "resume", runId: "run-1", actionId: run.pendingAction.actionId,
+      expectedVersion: { revisionToken: "0".repeat(64) } } })).rejects.toThrow("Stale web resume");
+    f.ports.preflightRoleCapabilities = async () => undefined;
+    await f.runtime.resumeBlockedRun("run-1", run.pendingAction.actionId, { webCommand: { apiVersion: 1, projectId: "project-1",
+      commandId: "9d37dc75-d44d-4cd9-894d-bf2ad9d82cc3", kind: "resume", runId: "run-1", actionId: run.pendingAction.actionId,
+      expectedVersion: action!.expectedVersion } });
+    await f.runtime.flushOutbound();
+    const next = await f.request("red");
+    expect(next.pending.message.message_id).not.toBe(pending.message.message_id);
+    expect((await measureRed(f, next.pending.message.message_id)).status).toBe("failed");
+  }, 120_000);
   it("keeps the run going when a specialist's ingress is refused while its delivery is accepted and leased, and records the diagnostic", async () => {
     const { f, pending } = await redRequested();
     await f.runtime.reportInboundFailure(pending.message, INGRESS);

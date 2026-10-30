@@ -44,11 +44,11 @@ bflow init --check
 
 `init` tạo `.bflow/config.yml` và ignore file tại thư mục gốc Git chuẩn với identity riêng. Các defaults hiện tại: Codex, `workspace_auto`, `trustedWorkspace: true`, SDD lightweight có approval, Conditional TDD, verification 3 vòng, `regressionScope: affected`, `fastPath.mode: auto`, concurrency 2, startup 300.000 ms. `init --update` bổ sung default fields/comment và giữ giá trị cũ; `--force`/`--yes` thay toàn bộ config bằng defaults mới. Config `.yaml`/`.json` cũ cần `bflow config-migrate` trước.
 
-`bflow setup` có phạm vi cấp máy (chạy một lần cho môi trường tài khoản; `bflow setup --check` cho cùng kết quả từ bất kỳ thư mục nào, và `--dir` chỉ còn là cờ tương thích ngược). Việc chuẩn bị GitNexus theo từng repository được chuyển sang `bflow init`: khi chạy `bflow init`, CLI hỏi xác nhận giấy phép GitNexus PolyForm-Noncommercial lần đầu (hoặc tự động chấp nhận khi truyền `--yes`), lập chỉ mục kho mã và đăng ký dịch vụ `gitnexus-<repo>` vào Gateway đang chạy (`bflow init --check` kiểm tra chỉ đọc, `bflow init --remove` gỡ đăng ký dịch vụ kể cả khi thư mục repo đã xóa, `--no-gitnexus` bỏ qua lập chỉ mục/đăng ký). **Context7 và MemPalace** (phân vùng theo `wing` mặc định là repository ID) được chia sẻ giữa các repository/worktree qua Gateway cấp máy; **GitNexus và Chrome profile** vẫn gắn riêng theo từng repository/session (profile Chrome của `setup` không dùng chung với phiên repository).
+`bflow setup` có phạm vi cấp máy (chạy một lần cho môi trường tài khoản; `bflow setup --check` cho cùng kết quả từ bất kỳ thư mục nào, và `--dir` chỉ còn là cờ tương thích ngược). Việc chuẩn bị GitNexus theo từng repository được chuyển sang `bflow init`: khi chạy `bflow init`, CLI hỏi xác nhận giấy phép GitNexus PolyForm-Noncommercial lần đầu (hoặc tự động chấp nhận khi truyền `--yes`), lập chỉ mục kho mã và đăng ký dịch vụ `gitnexus-<repo>` vào Gateway đang chạy (`bflow init --check` kiểm tra chỉ đọc, `bflow init --remove` gỡ đăng ký dịch vụ kể cả khi thư mục repo đã xóa, `--no-gitnexus` bỏ qua lập chỉ mục/đăng ký). **DeepWiki và MemPalace** (phân vùng theo `wing` mặc định là repository ID) được chia sẻ giữa các repository/worktree qua Gateway cấp máy; **GitNexus và Chrome profile** vẫn gắn riêng theo từng repository/session (profile Chrome của `setup` không dùng chung với phiên repository).
 
 Index GitNexus fresh có thể được đọc khi `init` hoặc `setup` hội tụ cấu hình. Rebuild index stale cần quyền storage độc quyền: nếu reader/writer còn giữ lock, thao tác báo blocked và giữ lock, không tự dừng Gateway hoặc thu hồi quyền đang dùng. Thực hiện bảo trì rồi chạy lại.
 
-Các tích hợp RTK/GitNexus/MemPalace/Chrome và Context7 được bật ở mức **optional** khi tạo config mới. Cấu hình không khai toggle cũng dùng optional defaults trong CLI composition. `enabled: false` tắt yêu cầu tương ứng; `required: true` chặn nếu chưa đủ inventory/grant/readiness. **Skill không cấp quyền tool.** Xem [tool policy](tools-sdlc-integration.md) và [config](guide/configuration-reference.md).
+Các tích hợp RTK/GitNexus/MemPalace/Chrome và DeepWiki được bật ở mức **optional** khi tạo config mới. Cấu hình không khai toggle cũng dùng optional defaults trong CLI composition. `enabled: false` tắt yêu cầu tương ứng; `required: true` chặn nếu chưa đủ inventory/grant/readiness. **Skill không cấp quyền tool.** Xem [tool policy](tools-sdlc-integration.md) và [config](guide/configuration-reference.md).
 
 MemPalace dùng wheel PyPI pin checksum trong virtualenv do Bflow sở hữu, cần `uv` hoặc Python phù hợp. `wing` mặc định là repository ID, chỉ search read-only trong scope đó; setup không tạo memory fixture hoặc ghi memory. Có palace sẵn không chứng minh có dữ liệu đúng wing.
 
@@ -67,22 +67,21 @@ bflow setup --codex-hooks --apply
 
 `BFLOW_HOME` chọn isolated machine/provider source. Để trỏ source checkout trong script, dùng biến ví dụ `BFLOW_SOURCE`; không đánh đồng hai biến. Khi dùng `AI_ISOLATOR_HOME`, giữ nhất quán trong setup, iso và up. [CLI profile reference](../apps/cli/README.md).
 
-## 4. Context7
+## 4. DeepWiki
 
-Setup đăng ký `https://mcp.context7.com/mcp` qua Shared Gateway, không cài `ctx7` CLI. Dùng anonymous hoặc API key tùy chọn:
+Setup đăng ký `https://mcp.deepwiki.com/mcp` qua Shared Gateway (endpoint cố định, **không cần API key**, không cài CLI nào). Ba tool chỉ đọc: `ask_wiki_question`, `read_wiki_contents`, `read_wiki_structure`.
 
 ```bash
-# KEY được nhập từ nguồn bí mật của operator, không commit vào repository.
-printf %s "$KEY" | bflow setup --apply --context7-api-key-stdin
-# Hoặc cấp CONTEXT7_API_KEY trong environment của setup.
-bflow docs search react
-bflow docs lookup react --query "cleanup function trong useEffect" --json
+bflow docs ask --repo facebook/react --public --question "Hooks được lập lịch thế nào?" --json
+bflow docs structure --repo facebook/react --public
 bflow docs status
 ```
 
-Secret lưu riêng dưới machine state, mode `0600`; config/log/receipt chỉ giữ reference/fingerprint. `--no-context7` bỏ dịch vụ trong setup; `environment.context7.enabled: false` tắt yêu cầu của repo. Cache mặc định tắt; authenticated cache cần opt-in riêng. OAuth chưa hỗ trợ. Truy vấn gửi ra Context7, vì vậy không đưa secret hoặc mã nội bộ vào query.
+`--repo owner/repo` và `--public` là bắt buộc: chỉ repository công khai do bạn chỉ định rõ mới được hỏi, không suy ra từ Git remote hay hình dạng `owner/repo`. `--no-deepwiki` bỏ dịch vụ trong setup; `environment.deepwiki.enabled: false` tắt yêu cầu của repo. Chỉ tên repository và câu hỏi rời máy, vì vậy không đưa secret, mã nguồn hay tên repository riêng tư vào câu hỏi.
 
-Version lookup dùng lockfile/manifest trong scope repository và không tự chọn tài liệu mới hơn phiên bản dự án. Kết quả `docs status` là probe dịch vụ/config, không chứng minh provider đang chạy đã dùng tài liệu. [Docs retrieval](../packages/docs-retrieval/README.md).
+**Migration từ Context7 (dịch vụ đã được thay thế).** Config cũ có `environment.context7` vẫn đọc được; `bflow init --update` ghi lại thành `environment.deepwiki`, giữ `enabled`/`required`, tạo backup `.bflow/config.yml.context7-<timestamp>.bak` (chỉ owner đọc được) và bỏ cache/khóa; chạy lại không đổi gì. Khóa Context7 cũ (biến `CONTEXT7_API_KEY` hoặc file trong machine state) bị bỏ qua, không bao giờ được đọc, chuyển tiếp hay ghi log; bạn có thể xóa nó. Gateway đã duyệt cho Context7 được nhận biết là cũ và thay bằng DeepWiki khi chạy lại `bflow setup`.
+
+Kết quả `docs status` là probe dịch vụ/config, không chứng minh provider đang chạy đã dùng tài liệu. Bằng chứng live do owner chạy bằng `bflow docs probe --live`; kết quả ghi rõ `mode=live`, `fixture` hoặc `skipped`, kèm timestamp và revision, và chỉ `live` mới là bằng chứng live. [Docs retrieval](../packages/docs-retrieval/README.md).
 
 ## 5. Chẩn đoán và khởi động
 
@@ -95,7 +94,7 @@ bflow skills sync --dry-run
 
 `skills sync --dry-run` preview catalog; CLI hiện chưa nhận `skills list` hoặc `skills sync --list`. Khi cần áp dụng skill vào machine scope, review preview rồi dùng `bflow skills sync --allow-machine-scope`. Standalone `agent check <provider>` có thể gọi model probe và không đọc role/profile/model từ config; nó không thay `doctor`/`up`.
 
-`mcp status` đọc machine config và pin inventory; đường CLI mặc định chưa inject `mcpGateway`, nên `configured: false`/`not_ready` có thể là giới hạn composition dù daemon đang chạy. Dùng `doctor` cho platform diagnostics và `docs status` cho probe Context7; không lặp setup chỉ để xóa nhãn này.
+`mcp status` đọc machine config và pin inventory; đường CLI mặc định chưa inject `mcpGateway`, nên `configured: false`/`not_ready` có thể là giới hạn composition dù daemon đang chạy. Dùng `doctor` cho platform diagnostics và `docs status` cho probe DeepWiki; không lặp setup chỉ để xóa nhãn này.
 
 `doctor`/`up` mặc định không gửi ping tới model. `bflow doctor --deep` chạy model probe theo từng bộ provider/profile/model/effort và có thể tiêu hao usage. Auth, native hooks, skills, permission, Gateway và activated health vẫn phải đạt riêng.
 

@@ -29,23 +29,23 @@ describe("tool policy v3 contracts", () => {
       scope: repoScope,
       digest,
       requirements: [{
-        toolId: "context7",
+        toolId: "deepwiki",
         kind: "native_remote_mcp",
         requiredness: "optional",
         roles: ["developer"],
         triggers: ["external_documentation"],
-        operations: ["search"]
+        operations: ["ask_wiki_question"]
       }]
     };
     expect(schema.safeParse(policy).success).toBe(true);
     expect(schema.safeParse({ ...policy, schemaVersion: 2 }).success).toBe(false);
     expect(schema.safeParse({ ...policy, extraPermission: true }).success).toBe(false);
     const splitByRole = [
-      { ...policy.requirements[0], roles: ["developer"], operations: ["search", "fetch"] },
-      { ...policy.requirements[0], roles: ["reviewer"], operations: ["search"] }
+      { ...policy.requirements[0], roles: ["developer"], operations: ["ask_wiki_question", "read_wiki_contents"] },
+      { ...policy.requirements[0], roles: ["reviewer"], operations: ["ask_wiki_question"] }
     ];
     expect(schema.safeParse({ ...policy, requirements: splitByRole }).success).toBe(true);
-    expect(schema.safeParse({ ...policy, requirements: [...splitByRole, { ...splitByRole[0], roles: ["developer"], operations: ["fetch"] }] }).success).toBe(false);
+    expect(schema.safeParse({ ...policy, requirements: [...splitByRole, { ...splitByRole[0], roles: ["developer"], operations: ["read_wiki_contents"] }] }).success).toBe(false);
     expect(schema.safeParse({ ...policy, requirements: [{ ...policy.requirements[0], kind: "cli_only", serviceId: "unexpected" }] }).success).toBe(false);
     expect(schema.safeParse({ ...policy, requirements: [{ ...policy.requirements[0], memoryScope: { wing: "engineering", repositoryId: "other", access: "read_only" } }] }).success).toBe(false);
   });
@@ -58,20 +58,20 @@ describe("tool policy v3 contracts", () => {
       schemaVersion: 3,
       grantId: "grant-1",
       policyDigest: digest,
-      toolId: "context7",
+      toolId: "deepwiki",
       capabilityIds: ["docs.read"],
       kind: "native_remote_mcp",
       requiredness: "required",
       role: "developer",
       scope: { ...repoScope, kind: "session", sessionId: "session-1" },
       triggers: ["external_documentation"],
-      serviceId: "context7-service",
-      operations: ["search", "fetch"]
+      serviceId: "deepwiki",
+      operations: ["ask_wiki_question", "read_wiki_contents"]
     };
     expect(schema.safeParse(grant).success).toBe(true);
     expect(schema.safeParse({ ...grant, serviceId: undefined }).success).toBe(false);
     expect(schema.safeParse({ ...grant, operations: [] }).success).toBe(false);
-    expect(schema.safeParse({ ...grant, operations: ["search", "search"] }).success).toBe(false);
+    expect(schema.safeParse({ ...grant, operations: ["ask_wiki_question", "ask_wiki_question"] }).success).toBe(false);
   });
 
   it("requires a trusted executable identity for CLI grants and denies service fields", () => {
@@ -114,7 +114,7 @@ describe("tool policy v3 contracts", () => {
       scope: { ...repoScope, kind: "session", sessionId: "session-1" },
       triggers: ["prior_context"],
       serviceId: "memory-service",
-      operations: ["search"],
+      operations: ["ask_wiki_question"],
       memoryScope: { wing: "engineering", repositoryId: "repo-1", access: "read_only" }
     };
     expect(schema.safeParse(grant).success).toBe(true);
@@ -134,7 +134,7 @@ describe("tool policy v3 contracts", () => {
     const schema = contracts.ToolActionRequestSchema;
     expect(schema).toBeDefined();
     if (!schema) return;
-    const action = { schemaVersion: 3, actionId: "action-1", toolId: "context7", operation: "search", input: { query: "API" } };
+    const action = { schemaVersion: 3, actionId: "action-1", toolId: "deepwiki", operation: "ask_wiki_question", input: { repoName: "facebook/react", question: "API" } };
     expect(schema.safeParse(action).success).toBe(true);
     expect(schema.safeParse({ ...action, role: "developer" }).success).toBe(false);
     expect(schema.safeParse({ ...action, principalId: "agent-controlled" }).success).toBe(false);
@@ -153,9 +153,9 @@ describe("tool policy v3 contracts", () => {
       sessionId: "session-1",
       generation: 2,
       invocationId: "invocation-1",
-      toolId: "context7",
-      serviceId: "context7-service",
-      operation: "search",
+      toolId: "deepwiki",
+      serviceId: "deepwiki",
+      operation: "ask_wiki_question",
       status: "completed",
       consumption: { status: "consumed", source: "accepted_artifact", evidenceReferences: [{ ...artifactReference, taskId: "task-1" }] },
       evidenceReferences: [{ ...artifactReference, taskId: "task-1" }],

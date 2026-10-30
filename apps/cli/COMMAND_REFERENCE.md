@@ -30,7 +30,7 @@ Sau [bootstrap một lần](../../docs/guide/installation.md) bằng `node apps/
 | `bflow down [--yes] [--force] [--timeout <ms>]` | Quiesce/checkpoint/revoke, rồi dừng owned panes/server; confirmation/force không bỏ Runtime barrier |
 | `bflow recover --yes` | Recover empty legacy directory lifecycle lock sau khi owner process đã chết; không reconstruct workflow |
 
-Setup có `--context7-api-key-stdin` (hoặc `CONTEXT7_API_KEY` trong environment), `--no-context7`; không đưa API key vào argv/config. Hook operator policy có `--trust-all` và `--revoke-trust-all` trong hook-only apply flow. [Setup guide](../../docs/setup-guide.md) · [Security](../../docs/guide/security-approval.md).
+Setup có `--no-deepwiki`; DeepWiki không cần API key (cờ `--context7-api-key-stdin` và biến `CONTEXT7_API_KEY` là legacy của Context7, đã được replaced và bị bỏ qua); không đưa secret vào argv/config. Hook operator policy có `--trust-all` và `--revoke-trust-all` trong hook-only apply flow. [Setup guide](../../docs/setup-guide.md) · [Security](../../docs/guide/security-approval.md).
 
 ## Lệnh cấp cao
 
@@ -66,7 +66,7 @@ bflow iso help
 bflow iso status
 ```
 
-Docs qua Context7/Gateway, query gửi ra ngoài; flags gồm `--library-id`, `--version`, `--language`, `--no-cache`, `--role`, `--timeout`. OAuth chưa hỗ trợ. [Docs package](../../packages/docs-retrieval/README.md).
+Docs qua DeepWiki/Gateway (`ask`, `structure`, `contents`, `status`, `probe`), repository công khai gửi ra ngoài; flags gồm `--repo owner/repo`, `--public`, `--question`, `--live` (probe), `--role`, `--timeout`. Không cần API key. [Docs package](../../packages/docs-retrieval/README.md).
 
 `iso` chạy ai-isolator đi kèm để tạo/login/chọn profile; provider args giữ riêng. Đây là profile isolation, không tự chứng minh sandbox/readiness của workflow. [CLI README](README.md) và `bflow iso help` có exact subcommands.
 

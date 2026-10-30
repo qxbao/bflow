@@ -8,7 +8,7 @@ import { useCommands } from '../operations';
 const same=(a:WebDecision,b:WebDecision)=>JSON.stringify(a)===JSON.stringify(b);
 function authorized(decision:WebDecision,actions:WebAction[]){return actions.some(action=>action.kind==='answer_decision' && action.enabled && JSON.stringify(action.expectedVersion)===JSON.stringify(decision.expectedVersion));}
 export type DecisionDraft={review:WebDecision|undefined;reason:string;option:string};
-export function DecisionReview({api,id,decision,actions,fresh,refresh,draft,onDraftChange}:{api:ApiClient;id:string;decision:WebDecision;actions:WebAction[];fresh:boolean;refresh:()=>void;draft?:DecisionDraft|undefined;onDraftChange?:((draft:DecisionDraft)=>void)|undefined}) {
+export function DecisionReview({api,id,decision,actions,fresh,refreshing=false,refresh,draft,onDraftChange}:{api:ApiClient;id:string;decision:WebDecision;actions:WebAction[];fresh:boolean;refreshing?:boolean;refresh:()=>void;draft?:DecisionDraft|undefined;onDraftChange?:((draft:DecisionDraft)=>void)|undefined}) {
   const [review,setReview]=useState<WebDecision|undefined>(()=>draft?.review),[reason,setReason]=useState(draft?.reason??''),[option,setOption]=useState(draft?.option??''),[error,setError]=useState(''),[stale,setStale]=useState(false),[clock,setClock]=useState(Date.now());const uid=useId();
   const commands=useCommands(`decision:${decision.decisionId}`);
   const report=useRef(onDraftChange);report.current=onDraftChange;
@@ -16,7 +16,7 @@ export function DecisionReview({api,id,decision,actions,fresh,refresh,draft,onDr
   useEffect(()=>{const timer=setInterval(()=>setClock(Date.now()),1000);return()=>clearInterval(timer);},[]);
   useEffect(()=>{if(commands.operation?.error?.code==='stale_version')setStale(true);},[commands.operation]);
   const changed=Boolean(review && !same(review,decision)),expired=Boolean(decision.expiresAt && Date.parse(decision.expiresAt)<=clock);
-  const canReview=fresh && decision.status==='pending' && !expired && authorized(decision,actions) && commands.online;
+  const canReview=(fresh || refreshing) && decision.status==='pending' && !expired && authorized(decision,actions) && commands.online;
   async function decide(outcome:'approved'|'rejected'|'changes_requested'){
     if(!review || !canReview || changed || stale || commands.busy)return;
     if(outcome!=='approved' && !reason.trim()){setError('Cần nêu lý do từ chối hoặc yêu cầu sửa.');return;}

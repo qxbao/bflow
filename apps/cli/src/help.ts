@@ -21,7 +21,7 @@ Lệnh / Commands:
   resume          Tiếp tục một lượt chạy quy trình đang hoạt động hoặc đang chờ
   cancel          Hủy một lượt chạy quy trình hoặc tác vụ đang hoạt động
   iso             Chạy hồ sơ nhà cung cấp cô lập thông qua ai-isolator đi kèm
-  docs            Look up current library documentation — Tra cứu tài liệu thư viện qua dịch vụ Context7 dùng chung
+  docs            Read public repository documentation through DeepWiki — Đọc tài liệu kho mã công khai qua dịch vụ DeepWiki dùng chung
   help            Hiển thị trợ giúp cho một lệnh
 
 ${HIGH_LEVEL_SUMMARY}
@@ -116,9 +116,7 @@ Tùy chọn (Options):
   -y, --yes             Xác nhận thiết lập, phê duyệt bản chụp chính xác (--hook-digest), hoặc xác nhận tường minh --trust-all
   --dir <path>          Cờ tương thích ngược (setup áp dụng toàn máy; dùng 'bflow init --dir <path>' cho từng kho mã)
   --catalog-dir <path>  Thư mục danh mục kỹ năng tùy chỉnh
-  --context7-api-key-stdin  Đọc khóa API Context7 từ đầu vào chuẩn (stdin) và lưu trữ riêng tư (--apply/--repair).
-                        Biến môi trường CONTEXT7_API_KEY cũng được sử dụng theo cách tương tự. Nếu không có khóa, Context7 chạy ở chế độ ẩn danh.
-  --no-context7         Không đưa Context7 vào MCP Gateway dùng chung
+  --no-deepwiki         Không đưa DeepWiki (https://mcp.deepwiki.com/mcp, không cần API key) vào MCP Gateway dùng chung
   -j, --json            Xuất kết quả theo định dạng phong bì JSON
       --debug           Hiển thị đầy đủ thông tin chi tiết và chẩn đoán kỹ thuật
   -h, --help            Hiển thị trợ giúp cho lệnh setup
@@ -128,7 +126,7 @@ Ví dụ / Examples:
   bflow setup --check
   bflow setup --dry-run
   bflow setup --codex-hooks --plan
-  printf %s "$KEY" | bflow setup --apply --context7-api-key-stdin
+  bflow setup --apply --no-deepwiki
   bflow setup --codex-hooks --apply --trust-all --yes
   bflow setup --codex-hooks --apply --revoke-trust-all
   bflow setup --apply --yes
@@ -500,37 +498,39 @@ Ví dụ / Examples:
   bflow agent check claude
   bflow agent check --provider codex --stage activated`;
 
-const DOCS_HELP = `Usage: bflow docs <search|lookup|status> [options]
+const DOCS_HELP = `Usage: bflow docs <ask|structure|contents|status|probe> [options]
 
-Look up current, version-specific documentation of an external library through Context7, a hosted
-documentation service reached through the shared MCP Gateway. Commands are read-only. They use your own
-Gateway registration when run inside an agent pane, and never start a documentation server of their own.
-Queries (library names and documentation questions) leave the machine: never put source code or secrets in them.
+Read documentation of a PUBLIC GitHub repository through DeepWiki (https://mcp.deepwiki.com/mcp), a hosted service reached
+through the shared MCP Gateway. It needs no API key. Commands are read-only. They use your own Gateway registration when run
+inside an agent pane, and never start a documentation server of their own.
+Only the repository name (owner/repo, declared public with --public) and your question leave the machine: never put source
+code, private repository names or secrets in them. Nothing is inferred from Git remotes.
 
 Subcommands:
-  search <library>             Resolve a library and show candidates, ids and the version choice for this project
-  lookup [<library>] --query   Return documentation for a question, with the version used and any warnings
-  status                       Report whether Context7 is enabled, reachable, authenticated and usable
+  ask --repo owner/repo --public --question   Ask a question about the repository (tool ask_wiki_question)
+  structure --repo owner/repo --public        List the documentation topics of the repository (read_wiki_structure)
+  contents --repo owner/repo --public         Read the repository's wiki pages (read_wiki_contents)
+  status                                      Report whether DeepWiki is enabled, reachable and usable
+  probe [--live]                              Owner-run evidence: list the tools and make one read call. Without --live nothing is contacted
 
 Options:
-  --query <text>        Search: optional phrasing for ranking. Lookup: the specific question (required)
-  --library-id <id>     Lookup: a Context7 id such as /org/project or /org/project/v1.2.3 instead of a name
-  --version <version>   Override the version detected from package.json, lockfiles or other dependency metadata
-  --language <name>     Lookup: language hint for libraries with several
-  --no-cache            Lookup: bypass the local documentation cache
+  --repo <owner/repo>   The public repository, for example facebook/react (not a URL, Git remote or path)
+  --public              You declare the repository public; without it nothing is sent
+  --question <text>     Ask: the specific question, 1-2000 characters
+  --live                Probe: contact the hosted service; the result is labelled live, fixture or skipped and only live counts as live evidence
   --role <role>         When run by an operator outside an agent pane, act under this role's grant (default developer)
   --timeout <ms>        Per-request timeout, 1000-120000 (default 30000)
   -j, --json            Output a JSON envelope
   -h, --help            Show help for docs
 
-Exit codes: 0 succeeded, 1 the lookup failed or Context7 is not healthy, 2 invalid usage.
-Failures are classified (network, timeout, auth_invalid, rate_limited, library_not_found, version_not_found, no_documentation, permission_denied, ...).
+Exit codes: 0 succeeded, 1 the request failed or DeepWiki is not healthy, 2 invalid usage.
+Failures are classified (network, timeout, rate_limited, library_not_found, no_documentation, permission_denied, ...).
 
 Examples:
-  bflow docs search react
-  bflow docs lookup react --query "how do I clean up a subscription in useEffect" --json
-  bflow docs lookup --library-id /vercel/next.js --version v15.1.8 --query "route handlers"
-  bflow docs status --json`;
+  bflow docs ask --repo facebook/react --public --question "How are hooks scheduled?" --json
+  bflow docs structure --repo vercel/next.js --public
+  bflow docs status --json
+  bflow docs probe --live`;
 
 const HELP_MAP: Record<CliCommandName, string> = {
   docs: DOCS_HELP,

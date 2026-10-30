@@ -1,3 +1,7 @@
+import { provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError } from "./policy-prompt.js";
+import { recoverUnqueuedWebCancellations } from "../interaction/cancellation-recovery.js";
+import type { WebOperationStore } from "../interaction/operation-store.js";
+import { unmeasuredPolicyPhaseRequests } from "./phase-recovery.js";
 import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReconciliationReportSchema, ownsCancellationPane, ownsCancelledAllocation, type CancellationStopProof, type CancellationReconciliationReport } from "./cancellation-stop.js";
 import { actionVersion } from "../interaction/actions.js";
 import { WebCommandSchema, type WebCommand } from "@bflow/contracts";
@@ -486,22 +490,7 @@ export class AgenticWorkflowRuntime {
   }
   /** Released conditional-evidence requests of a live task attempt that ended without any measurement, failure or retirement. */
   private unmeasuredPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
-    return state.outbound.filter(item => {
-      const payload = record(item.message.payload);
-      if (item.message.run_id !== run.runId || item.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
-          item.status !== "released" || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
-      if (state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected")) return false;
-      const task = run.tasks.find(entry => entry.taskId === payload.taskId);
-      if (!task || task.writerReleased || task.result) return false;
-      const receipts = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
-      const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : receipts.length === 0 ? "verification" : undefined;
-      if (payload.phase !== expected) return false;
-      // Only the newest request for this phase and attempt; an earlier one was already superseded.
-      return !state.outbound.some(other => other !== item && other.message.run_id === run.runId && other.message.type === "verification.requested" &&
-        record(other.message.payload).taskId === payload.taskId && record(other.message.payload).phase === payload.phase &&
-        record(other.message.payload).implementationAttemptId === payload.implementationAttemptId &&
-        (other.message.occurred_at ?? "") > (item.message.occurred_at ?? ""));
-    });
+    return unmeasuredPolicyPhaseRequests(state, run);
   }
   private recordIngressDiagnostic(run: RunRecord, message: RoleMessage, reason: string, disposition: IngressDiagnostic["disposition"]): void {
     if ((run.ingressDiagnostics ?? []).some(item => item.messageId === message.message_id && item.disposition === disposition)) return;
@@ -681,6 +670,15 @@ export class AgenticWorkflowRuntime {
       const run = state.runs.find(item => item.runId === data.run_id);
       if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.refused(state, data.message_id)) return;
       const text = redactString(reason);
+      // A late refusal of an exactly admitted historical intake cannot pause newer accepted requirements.
+      // Keep the immutable delivery and audit; never suppress current or merely claimed old envelopes.
+      const historical = isConversationHandoff(data) ? DelegationRequestSchema.safeParse(data.payload) : undefined;
+      if (historical?.success && historical.data.messageId === data.message_id && historical.data.runId === run.runId &&
+          historical.data.correlationId === data.correlation_id && revisionOf(historical.data) < revisionOf(run.delegation) &&
+          run.delegationHistory?.some(previous => digest(previous) === digest(historical.data))) {
+        this.recordIngressDiagnostic(run, data, `Superseded requirement revision ${revisionOf(historical.data)}: ${text}`, "reported");
+        await save(); return;
+      }
       // The message's own content failed validation: retrying the same envelope cannot help, but the sender can fix it. Return the
       // readable error to the sender; only the INVALID_ROLE_MESSAGE_LIMIT-th invalid message for one assignment involves the
       // Coordinator (bounded auto_resume). Transport/uncertain failures keep the delivery-failure path below.
@@ -1344,6 +1342,10 @@ export class AgenticWorkflowRuntime {
     }
     return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
   }
+  /** Owner startup only, before intake; use the full locked journal, never a compact diagnostic view. */
+  async recoverUnqueuedWebCancellations(store: WebOperationStore): Promise<string[]> {
+    return this.journal.exclusive(state => recoverUnqueuedWebCancellations(store, json(state), this.now()));
+  }
   /** Read-only receipt view: no Core restore, coroutine recovery or semantic writes as part of diagnostics. */
   async nativeDeliveryInbox(): Promise<JournalState["inbox"]> {
     return this.journal.exclusive(async state => structuredClone(state.inbox));
@@ -1992,6 +1994,10 @@ export class AgenticWorkflowRuntime {
           digest(command.expectedVersion) !== digest(actionVersion(run, "resume"))) throw new Error("Stale web resume version or action");
       }
       const explicitId = options.conversationUserMessageId ?? options.webCommand?.commandId;
+      const leaseFailure = action && state.outbound.find(out => out.message.message_id === action.sourceMessageId && out.phaseFailure?.leaseRecoveryRequired);
+      if (leaseFailure && (options.automatic || !explicitId)) throw new Error("Expired writer lease requires authenticated explicit owner resume");
+      const resumeUnmeasured = !options.automatic && !!explicitId && run.status === "implementing" &&
+        action?.kind === "coordinator_continuation" && action.state === "pending" && this.unmeasuredPhaseRequests(state, run).length > 0;
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before resume");
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
@@ -2018,7 +2024,8 @@ export class AgenticWorkflowRuntime {
         return json({ queued: true, messageId: priorResume.messageId, actionId });
       }
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
-      if ((!explicitAfterAutomatic && run.status !== "escalated") || !action || action.actionId !== actionId || !["resume_coordinator", "reconcile_delivery"].includes(action.kind)) {
+      if ((!explicitAfterAutomatic && run.status !== "escalated" && !resumeUnmeasured) || !action || action.actionId !== actionId ||
+          !["resume_coordinator", "reconcile_delivery"].includes(action.kind) && !resumeUnmeasured) {
         const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
         if (prior) return json({ queued: true, messageId: prior.message.message_id, actionId });
         throw new Error("No matching recoverable blocker to resume");
@@ -2107,7 +2114,7 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
-      const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && item.phaseFailure?.repairable === false);
+      const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && (item.phaseFailure?.repairable === false || item.phaseFailure?.leaseRecoveryRequired === true));
       if (measurement) measurement.phaseFailure!.retryAuthorized = true;
       // A verifier request released with no evidence, no recorded failure and no retirement can never settle on its own. The explicit
       // resume authorizes one new measurement of the same revision through the existing bounded phase-retry path; no outcome is claimed.
@@ -3800,7 +3807,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const failedHere = state.outbound.filter(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
           record(item.message.payload).taskId === taskId && record(item.message.payload).phase === phase &&
           record(item.message.payload).implementationAttemptId === current.attemptId && record(item.message.payload).sourceRevision === sourceRevision);
-      if (failedHere.some(item => item.phaseFailure?.retryAuthorized !== true))
+      if (failedHere.some(item => item.phaseFailure?.repairable === true || item.phaseFailure?.retryAuthorized !== true))
         throw new Error("This revision already failed the phase; commit a repair before requesting another measurement");
       // A resumed infrastructure failure re-measures the same revision under a new request identity.
       const id = `phase-${digest(retired.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length, "retired", retired.length] : failedHere.length ? [runId, taskId, current.attemptId, phase, sourceRevision, failedHere.length] : [runId, taskId, current.attemptId, phase, sourceRevision])}`;
@@ -3902,7 +3909,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           owner: "coordinator", reason: run.error.slice(0, 2000), sourceMessageId: request.message.message_id, createdAt: this.now(), state: "pending",
           previousStatus, ...inheritedManualResume(run), recovery: "manual" };
         this.progress(state, outbox, run, run.error);
-      } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+      } else {
+        const parent = state.outbound.find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
+          item.taskId === task.taskId && item.status === "accepted" && item.handle?.attemptId === payload.implementationAttemptId);
+        if (parent?.lease && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) {
+          request.phaseFailure!.leaseRecoveryRequired = true;
+          const previousStatus = run.status;
+          run.status = "escalated"; run.error = `Policy repair blocked by expired writer lease: ${summary}`;
+          run.pendingAction = {actionId:`next-${digest([run.runId,request.message.message_id])}`,kind:"resume_coordinator",owner:"coordinator",
+            sourceMessageId:request.message.message_id,reason:run.error,createdAt:this.now(),state:"pending",previousStatus,
+            ...inheritedManualResume(run),recovery:"manual"};
+          this.progress(state,outbox,run,run.error);
+        } else this.phaseNotice(state, outbox, run, task, textField(payload.phase), "failed", summary, request.message.message_id);
+      }
       request.phaseFailure!.applied = true;
       await save();
     }
@@ -3910,7 +3929,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     // Developer-only phase tools. Recover the missing handoff from that durable authority.
     if (this.quiesced) return;
     for (const request of state.outbound.filter(item => item.phaseFailure?.applied &&
-      item.phaseFailure.repairable === false && item.phaseFailure.retryAuthorized === true)) {
+      (item.phaseFailure.repairable === false || item.phaseFailure.leaseRecoveryRequired === true) && item.phaseFailure.retryAuthorized === true)) {
       const run = this.run(state, request.message.run_id!), payload = record(request.message.payload);
       if (run.cancelled || run.status !== "implementing" || run.nativeDeliveries?.length ||
           run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
@@ -3946,9 +3965,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         continue; // Keep the original control message and any submission handle; never re-send an uncertain notice.
       }
-      this.phaseNotice(state, outbox, run, task, phase, "retry",
-        `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. ` +
-        "Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.", request.message.message_id);
+      this.phaseNotice(state, outbox, run, task, phase, request.phaseFailure?.leaseRecoveryRequired ? "failed" : "retry",
+        request.phaseFailure?.leaseRecoveryRequired
+          ? `Explicit owner resume restored the same writer lease after: ${request.phaseFailure.summary}. Inspect the independent failure evidence, repair source and commit before requesting this phase again. Frozen Red tests and verification limits remain unchanged.`
+          : `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.`, request.message.message_id);
       await save();
     }
     await this.recoverPolicyPhaseRetirements(state, save, outbox);
@@ -4755,6 +4775,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
     });
   }
+  /** Owner startup only: select from the full locked journal, never the diagnostic inspect view. */
+  async recoverProvenPrelaunchPolicyDeliveries(): Promise<JsonValue> {
+    const ids = await this.journal.exclusive(async state => state.outbound.filter(out => provenPrelaunchPolicyFailure(out, state.inbox)).map(out => out.message.message_id));
+    let recovered = 0, held = 0;
+    for (const id of ids) {
+      try { await this.reconcileDelivery(id); recovered++; }
+      catch (error) {
+        if (!(error instanceof PrelaunchRegistryRecoveryError)) throw error;
+        held++; process.stderr.write(`Bflow prelaunch recovery held: ${redactString(String(error)).slice(0,500)}\n`);
+      }
+    }
+    return json({recovered,held});
+  }
   async reconcileDelivery(messageId: string): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
       await outbox.reconcile(messageId, (out, handle) => this.bind(state, core, out, handle));
@@ -5280,12 +5313,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (state.inbox.some(item => item.message.message_id === fence.message.message_id ||
           fence.message.idempotency_key !== undefined && item.message.idempotency_key === fence.message.idempotency_key))
         throw new Error("Admitted native messages require receipt reconciliation, not fencing");
-      const currentValue = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
-      if (!currentValue) throw new Error("Current Coordinator session is unavailable");
-      const current = PaneBindingSchema.parse(currentValue), health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
-      if (!current.session || current.role !== "coordinator" || current.agentId !== fence.message.sender.agent_id ||
+      const senderRole = fence.message.sender.role;
+      const currentValue = unwrap(await this.ports.panes.getRoleBinding(senderRole));
+      if (!currentValue) throw new Error(`Current ${senderRole} session is unavailable`);
+      const current = PaneBindingSchema.parse(currentValue), health = unwrap(await this.ports.panes.inspectRoleHealth(senderRole));
+      if (!current.session || current.role !== senderRole || current.agentId !== fence.message.sender.agent_id ||
           current.paneId === fence.message.sender.pane_id || !health.occupantMatches || health.paneId !== current.paneId || health.agentId !== current.agentId)
-        throw new Error("Only a diagnostic from a retired Coordinator pane can be fenced");
+        throw new Error("Only a diagnostic from a retired pane of its sender role can be fenced");
       run.nativeDiagnosticFences = [...run.nativeDiagnosticFences ?? [], fence];
       if (state.version < 2) state.version = 2; // Old binaries must reject the journal rather than ignore a durable late-arrival fence.
       run.nativeDeliveries = run.nativeDeliveries!.filter(item => item !== intent);

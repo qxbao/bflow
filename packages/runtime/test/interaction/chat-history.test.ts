@@ -46,3 +46,19 @@ it('does not advertise chat capability when the current normalized transcript ca
  expect(await registeredChatAvailable({role:'conversation',sessionId:'native',transcriptPath:path,transcriptRoot:path.slice(0,path.lastIndexOf('/'))},'codex','native','conversation')).toBe(false);
  expect(await registeredChatAvailable({role:'conversation',sessionId:'native',transcriptPath:path,transcriptRoot:path.slice(0,path.lastIndexOf('/'))},'agy','native','conversation')).toBe(false);
 });
+it('allows a registered Claude cold start without fabricating transcript history',async()=>{
+ const {registeredChatAvailable,registeredAssistantHistory}=await import('../../src/interaction/chat-history.js');
+ const root=await mkdtemp(join(tmpdir(),'chat-cold-'));roots.push(root);const registration={role:'conversation',sessionId:'native',transcriptPath:join(root,'native.jsonl'),transcriptRoot:root};
+ expect(await registeredChatAvailable(registration,'claude','native','conversation')).toBe(true);
+ await expect(registeredAssistantHistory(registration,'claude','native','conversation')).rejects.toThrow();
+ expect(await registeredChatAvailable({...registration,sessionId:'foreign'},'claude','native','conversation')).toBe(false);
+ expect(await registeredChatAvailable({...registration,role:'qa'},'claude','native','conversation')).toBe(false);
+ expect(await registeredChatAvailable({...registration,transcriptPath:join(root,'other.jsonl')},'claude','native','conversation')).toBe(false);
+ expect(await registeredChatAvailable({...registration,transcriptPath:join(root,'..','native.jsonl')},'claude','native','conversation')).toBe(false);
+ expect(await registeredChatAvailable({...registration,transcriptRoot:'.'},'claude','native','conversation')).toBe(false);
+ await symlink(join(root,'..','missing-target'),registration.transcriptPath);
+ expect(await registeredChatAvailable(registration,'claude','native','conversation')).toBe(false);
+ await rm(registration.transcriptPath);
+ await writeFile(registration.transcriptPath,'not json\n');
+ expect(await registeredChatAvailable(registration,'claude','native','conversation')).toBe(false);
+});

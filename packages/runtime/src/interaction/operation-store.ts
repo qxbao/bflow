@@ -227,6 +227,20 @@ export class WebOperationStore {
       return this.publish(`${id}.running.json`, this.envelope(intent, operation));
     });
   }
+  /** Read-only proof of the immutable dispatch boundary; does not create it. */
+  hasDispatchIntent(principalId: string, commandId: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      if (!await this.prepare(false)) return false;
+      const id = this.id(principalId, commandId), intent = await this.intent(id);
+      if (!intent) return false;
+      const raw = await this.readJson(`${id}.running.json`);
+      if (raw === undefined) return false;
+      const running = this.parse(raw);
+      if (running.payload.operation.state !== "running" || canonicalWebJson(running) !== canonicalWebJson(this.envelope(intent, running.payload.operation)))
+        throw new Error("Invalid web dispatch receipt");
+      return true;
+    });
+  }
   /** Only after the caller observes an authoritative committed effect. Unlike
    * begin(), this grants no dispatch claim and never marks work active. */
   reconcileDispatch(principalId: string, commandId: string): Promise<void> {

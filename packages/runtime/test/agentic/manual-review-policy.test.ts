@@ -1,3 +1,6 @@
+import { createHerdrAdapter } from "@bflow/herdr-adapter";
+import { projectPolicyPhaseRequest } from "../../src/agentic/policy-prompt.js";
+import { AgentRequestSchema, RoleMessageSchema } from "@bflow/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
@@ -36,6 +39,7 @@ import { WorkflowProposalRejected } from "../../src/agentic/workflow-rejection.j
 import { parseBehavioralCommands, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { digest } from "../../src/agentic/journal.js";
 import { projectTaskSpecificationInput } from "../../src/agentic/runtime.js";
+import { compactPolicyReviewDossier } from "../../src/agentic/mcp-output-views.js";
 import type { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -526,6 +530,74 @@ describe("manual-review policy proposal ingress and evidence lifecycle", () => {
     await writeFile(join(f.cwd, "source.cjs"), "module.exports = x => x * 2;\n"); f.commit("implement behavior");
     f.requestPhase(readiness === "ready" ? "green" : "verification"); return f;
   }
+  it("keeps unique review requirements without duplicating prior raw measurement payloads", async () => {
+    const f = await implemented(), strategy = structuredClone(f.strategy);
+    const evidence = strategy.metadata!.tddEvidence as any[];
+    evidence[0].metadata.largeRawOutput = "x".repeat(150000);
+    const wire = RoleMessageSchema.parse({schema_version:2,message_id:"phase-presentation",correlation_id:"corr",run_id:"run-dq-1",sender:{role:"coordinator"},recipient:{role:"qa"},type:"verification.requested",artifact_references:[],occurred_at:"2026-01-01T00:00:00Z",idempotency_key:"phase-presentation",payload:{kind:"conditional_evidence",phase:"green",runId:"run-dq-1",taskId:"dq-structural",specification:f.specification,strategy}});
+    const req = AgentRequestSchema.parse({requestId:"request-present",attemptId:"attempt-present",runId:"run-dq-1",taskId:"dq-structural",role:"qa",target:{transport:"herdr",agentId:"qa",paneId:"p1"},instruction:JSON.stringify(wire),context:wire,inputs:[],attempt:1,retry:{maxAttempts:1,strategy:"fixed",initialDelayMs:0,maxDelayMs:0,jitter:false},timeout:{executionTimeoutMs:1000,onTimeout:"block"},idempotency:{key:"phase-presentation",scope:"agent-request",fingerprint:"digest"},createdAt:"2026-01-01T00:00:00Z"});
+    const presentation = projectPolicyPhaseRequest(req);
+    expect(Buffer.byteLength(presentation.instruction)).toBeLessThan(60000);
+    expect(presentation.context).toEqual(JSON.parse(presentation.instruction));
+    expect(req.context).toEqual(wire);
+    expect(presentation.idempotency).toEqual(req.idempotency);
+    expect(JSON.parse(presentation.instruction).payload.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
+    expect(req.instruction).toContain("largeRawOutput");
+    let promptCalls = 0;
+    const newAdapter = () => createHerdrAdapter({runner:{run:async ({args}:any)=>{
+      const prompt=args[1]==="prompt"; if(prompt){promptCalls++;if(Buffer.byteLength(args[3])>131072)return {exitCode:null,stdout:"",stderr:"",failure:"spawn",started:false,cause:"spawn E2BIG"};}
+      return {exitCode:0,stderr:"",stdout:JSON.stringify({id:"1",result:{type:prompt?"agent_prompted":"agent_info",agent:{agent:"claude",name:"qa",agent_status:"idle",workspace_id:"w1",tab_id:"t1",pane_id:"p1",terminal_id:"term1",revision:1,state_change_seq:2}}})};
+    }}});
+    expect((await newAdapter().send(req)).ok).toBe(false);
+    // Recovery reopens the host after deploying the fix, so the old process idempotency cache is not reused.
+    const adapter = newAdapter();
+    const sent=await adapter.send(presentation);
+    expect(sent, JSON.stringify(sent)).toMatchObject({ok:true,value:{status:"accepted"}});
+    expect(await adapter.send(presentation)).toEqual(sent);
+    expect(promptCalls).toBe(2);
+
+    const result = compactPolicyReviewDossier(f.specification, strategy) as any;
+    expect(JSON.stringify(result).length).toBeLessThan(30000);
+    expect(result.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
+    expect(result.specification.securityConsiderations).toBe(f.specification.securityConsiderations);
+    expect(result.specification.metadata).toEqual(f.specification.metadata);
+    expect(result.strategy.metadata.conditionalTdd.requiredVerificationMethods).toEqual((strategy.metadata!.conditionalTdd as any).requiredVerificationMethods);
+    expect(result.strategy.metadata.tddEvidence).toBeUndefined();
+    expect(result.priorEvidence[0].verificationId).toBe(evidence[0].verificationId);
+    expect(result.priorEvidence[0].artifactReferences).toEqual(evidence[0].evidenceArtifacts);
+    expect(evidence[0].metadata.largeRawOutput).toHaveLength(150000);
+  });
+  it("pages an oversized policy review losslessly before exposing its judgment observation", async () => {
+    const f = await implemented();
+    await writeFile(join(f.cwd, "source.cjs"), "/*" + "漢字λ🙂".repeat(10000) + "*/\nmodule.exports = x => x * 2;\n");
+    f.commit("large committed review"); f.requestPhase("green");
+    const first = await f.host.inspectAlternative(f.binding, input("green")) as any;
+    expect(first.code).toBe("policy_review_paged");
+    expect(first.observationId).toBeUndefined();
+    const pages = [first.page]; let current = first;
+    while (current.nextOffset !== null) {
+      current = await f.host.inspectAlternative(f.binding, { ...input("green"), cursor: first.cursor, offset: current.nextOffset }) as any;
+      expect(Buffer.byteLength(JSON.stringify(current))).toBeLessThan(24000);
+      pages.push(current.page);
+    }
+    const raw = pages.join(""), body = JSON.parse(raw);
+    expect(createHash("sha256").update(raw).digest("hex")).toBe(first.sha256);
+    expect(body.observation.diff).toContain("漢字λ🙂".repeat(10000));
+    expect(body.dossier.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
+    expect(current.observationId).toEqual(expect.any(String));
+    const completed = await f.host.behavioralEvidence(f.binding, { ...input("green"), review: { observationId: current.observationId, criteria } });
+    expect(completed.result.status).toBe("passed");
+  }, 120_000);
+  it.each(["revision", "dirty", "replacement", "expired-lease"])("revalidates %s before serving a captured policy review page", async mode => {
+    const f = await implemented();
+    const request = f.requestPhase("green");
+    const first = await f.host.inspectAlternative(f.binding, { ...input("green"), view: "page" }) as any;
+    if (mode === "revision") { await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>2*x;\n"); f.commit("source advanced"); }
+    if (mode === "dirty") await writeFile(join(f.cwd, "source.cjs"), "module.exports=x=>2*x;\n");
+    if (mode === "replacement") f.binding.session = { ...f.binding.session!, value: "new-native" };
+    if (mode === "expired-lease") request.lease.expiresAt = new Date(Date.now()-1000).toISOString();
+    await expect(f.host.inspectAlternative(f.binding, { ...input("green"), cursor: first.cursor, offset: 0 })).rejects.toThrow(/cursor|review|assignment|lease|request/i);
+  });
   it("completes Red Green Refactor through assigned QA inspection and explicit judgment without a task review gate", async () => {
     const f = await implemented();
     const artifacts = new Set<string>();

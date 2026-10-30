@@ -142,6 +142,7 @@ it("keeps cancelled/resumed actions in Conversation admission without claiming p
   const cancel = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project", kind: "cancel", runId: f.request.runId,
     expectedVersion: { revisionToken: "host-validated-version" }, reason: "No longer needed" });
   expect(await f.gateway.handleStructuredInteraction(cancel, principal(cancel))).toMatchObject({ ok: true, value: { kind: "interaction" } });
+  expect(f.transport.sentRoleMessages.at(-1)?.payload).toMatchObject({ messageId: `web-delegation-${cancel.commandId}`, idempotencyKey: `web-cancel-${cancel.commandId}` });
   expect(f.transport.sentRoleMessages.at(-1)?.payload).toMatchObject({ metadata: { action: "cancel", targetRunId: f.request.runId, cancellationRequest: { requestedBy: "conversation" } } });
   const resume = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project", kind: "resume", runId: f.request.runId,
     actionId: "host-action", expectedVersion: { revisionToken: "host-validated-version" } });

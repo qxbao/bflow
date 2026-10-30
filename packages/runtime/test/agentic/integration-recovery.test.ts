@@ -348,3 +348,23 @@ it("resumes the existing Developer after accepted Red was paused by a stale bloc
   await f.runtime.resumeBlockedRun("run-1", currentPause.pendingAction.actionId, { conversationUserMessageId: "physical-resume" });
   expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.message_id === notice.message.message_id)).toHaveLength(1);
 }, 60_000);
+it.skipIf(process.platform === 'win32')('surfaces an expired writer lease after a repairable phase failure and resumes only by explicit owner authority',async()=>{
+ const f=await fixture({tdd:true});f.ports.roleCapabilities.qa=['verification','testing','repository.read'];f.ports.preflightRoleCapabilities=async()=>{};
+ await f.runtime.proposeWorkflow('run-1',f.spec,f.def);await f.runtime.tick();
+ let state=await f.runtime.inspect() as any;const assignment=state.outbound.find((out:any)=>out.message.type==='task.assignment');
+ const binding=f.panes.bindings.find(item=>item.paneId===assignment.handle.target.paneId)!;const revision=git(assignment.handle.target.worktreePath,'rev-parse','HEAD');
+ const queued=await f.runtime.requestPhaseVerification(binding,'run-1','implement','red',revision) as any;await f.runtime.flushOutbound();
+ state=await f.runtime.inspect() as any;const request=state.outbound.find((out:any)=>out.message.message_id===queued.messageId);const qa=f.panes.bindings.find(item=>item.paneId===request.handle.target.paneId)!;
+ const {FileAgentRegistry}=await import('@bflow/agent-registry');const oldRegistry=f.ports.registry;const release=oldRegistry.releaseLease.bind(oldRegistry);const future=new Date(Date.now()+301000);
+ vi.spyOn(oldRegistry,'releaseLease').mockImplementation(async(input,options)=>{const result=await release(input,options);if(input.leaseId===request.lease.leaseId){f.ports.clock=()=>future;f.ports.registry=new FileAgentRegistry({stateFile:join(f.root,'registry.json'),clock:()=>future});}return result;});
+ await expect(f.runtime.recordPhaseFailure(qa,queued.messageId,'Actual assertion failure',true)).resolves.toBeDefined();
+ const paused=await f.inspect();expect(paused).toMatchObject({status:'escalated',pendingAction:{state:'pending',recovery:'manual',sourceMessageId:queued.messageId,previousStatus:'implementing'}});
+ state=await f.runtime.inspect() as any;expect(state.outbound.find((out:any)=>out.message.message_id===queued.messageId).phaseFailure).toMatchObject({repairable:true,applied:true,leaseRecoveryRequired:true});
+ await expect(f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId)).rejects.toThrow(/explicit owner/);
+ await expect(f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId,{automatic:true})).rejects.toThrow(/explicit owner/);
+ await f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId,{conversationUserMessageId:'physical-owner-resume'});await f.runtime.tick();
+ state=await f.runtime.inspect() as any;const restored=state.outbound.find((out:any)=>out.message.message_id===assignment.message.message_id);
+ expect(restored.handle).toEqual(assignment.handle);expect(restored.lease.fencingToken).toBeGreaterThan(assignment.lease.fencingToken);expect(restored.leaseHistory).toHaveLength(1);
+ expect((await f.inspect()).tasks[0].spec.strategy.metadata?.tddEvidence??[]).toHaveLength(0);
+ await expect(f.runtime.requestPhaseVerification(binding,'run-1','implement','red',revision)).rejects.toThrow(/commit a repair/i);
+});

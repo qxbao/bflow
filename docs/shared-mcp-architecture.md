@@ -7,7 +7,7 @@ Thiết kế chuẩn tắc P24; P27 sở hữu phần triển khai. Định ngh�
 
 Gateway/services và control endpoint đã được nối vào Runtime theo role/session/generation. D-TOOLS-01 bổ sung policy/grant/usage schemas; registration tách service và exact operations, kiểm tra negotiated input/output schema, ledger giữ unknown và response có `structuredContent`. Runtime đã nối resource acquire/renew/release cho GitNexus; browser task actions còn degraded/blocked vì task lease chưa được hỗ trợ.
 
-Context7 hosted dùng chung giữa repository/worktree có registration hợp lệ; local backend giữ workspace partition. Agent gọi tool được policy-mediated qua Runtime, không nhận raw Gateway bearer token cho đường đó. Inter-role messages vẫn qua Herdr.
+DeepWiki hosted dùng chung giữa repository/worktree có registration hợp lệ; local backend giữ workspace partition. Agent gọi tool được policy-mediated qua Runtime, không nhận raw Gateway bearer token cho đường đó. Inter-role messages vẫn qua Herdr.
 
 [Tool integration](tools-sdlc-integration.md), [Gateway README](../packages/mcp-gateway/README.md) và [implementation status](implementation-status.md) phân biệt source/local tests với các hồ sơ probe thật. Chưa đóng full live SDLC hoặc active multi-repo fault campaign; same-UID/multi-host isolation vẫn chưa được chứng nhận. Câu P24 chưa có module chỉ mô tả baseline thiết kế.
 
@@ -131,15 +131,16 @@ timeout do host thực thi. Nỗ lực cancel không chứng minh các mutation 
 Reconcile hoặc quarantine tài nguyên bị ảnh hưởng trước khi gán lại. Không restart browser
 giữa chừng một call rồi nói với client kế tiếp rằng hành động cũ chắc chắn đã thất bại.
 
-## Ví dụ upstream remote: Context7 hosted
+## Ví dụ upstream remote: DeepWiki hosted
 
 Một service `native_remote_mcp` không có process do Bflow sở hữu: mọi agent chia sẻ một upstream, và Gateway là HTTP client
 duy nhất của nó. Được triển khai trong `packages/mcp-gateway/src/http-upstream.ts`; cấu hình bởi `bflow setup`
-(`createContext7RemoteService`) cho `https://mcp.context7.com/mcp`.
+(`createDeepWikiRemoteService`) cho `https://mcp.deepwiki.com/mcp`, endpoint cố định, không xác thực, ba tool `ask_wiki_question`,
+`read_wiki_contents`, `read_wiki_structure` (service này thay Context7 trước đây; cấu hình cũ được migrate có backup).
 
 - **Protocol.** `Accept` liệt kê `application/json` và `text/event-stream` (server hosted trả HTTP 406 nếu không và
   phản hồi bằng SSE kể cả với một message đơn). `MCP-Protocol-Version` đã negotiate được echo lại, `notifications/initialized`
-  được gửi, và `Mcp-Session-Id` do server cấp được giữ và phát lại. Server không cấp (Context7 không cấp) là
+  được gửi, và `Mcp-Session-Id` do server cấp được giữ và phát lại. Server không cấp (DeepWiki không cấp) là
   stateless. Session bị rớt (HTTP 404) được thiết lập lại một lần và request được replay, vì server đã
   từ chối nó trước khi xử lý. Các caller đồng thời chia sẻ một handshake.
 - **Sharing.** Một upstream session phục vụ mọi agent; điều này chỉ hợp lệ vì service stateless và các tool của nó
@@ -150,18 +151,23 @@ duy nhất của nó. Được triển khai trong `packages/mcp-gateway/src/http
   thời gian chờ lâu hơn được báo là `rate_limited` kèm `retryAfterMs` thay vì ngủ qua. Chỉ handshake,
   discovery và các tool mà chính sách của **host** liệt kê là read-only mới được replay. `readOnlyHint` của chính server là
   lời khuyên từ bên bị gọi và không bao giờ được tin cho việc này. Mọi thứ khác chạy một lần; lỗi mơ hồ được báo là
-  `unknown`, không bao giờ replay. Host khai báo hai tool của Context7 là read-only theo endpoint chính xác (`trustedGatewayPolicy`).
+  `unknown`, không bao giờ replay. Host khai báo ba tool của DeepWiki là read-only theo endpoint chính xác (`trustedGatewayPolicy`).
   Không có khai báo đó, Gateway coi mọi tool là có thể ghi và bỏ nguyên nhân lỗi.
 - **Errors** có cấu trúc trong `ContractError.details` (`kind`: `auth_missing`, `auth_rejected`, `rate_limited`, `network`,
   `timeout`, `protocol`, `upstream_http`, `session_lost`, `cancelled`; cộng `status`, `retryAfterMs`, `attempts`). Lỗi ở mức
   tool (`isError`, HTTP 200) được trả về như output của tool; lớp documentation phân loại nó từ văn bản
-  (`library_not_found`, `version_not_found`, `auth_invalid`, `invalid_arguments`).
+  (`library_not_found`, `invalid_arguments`, `rate_limited`).
 - **Metrics** (`perService[id].upstreamHttp`): `request`, `retry`, `rate_limited`, `auth_failure`, `network_error`, `timeout`,
   `protocol_error`, `upstream_error`, `session_started`, `session_reinitialized`. Không ghi payload hay credential.
-- **Credentials.** `authentication.mode: "bearer"` nêu một `secret://` reference mà Gateway resolve từ bộ nhớ. Credential đã
-  cấu hình nhưng không khả dụng sẽ làm request fail trước khi gửi (`auth_missing`); nó không bao giờ bị bỏ qua âm thầm.
+- **Credentials.** DeepWiki không cần credential: định nghĩa dịch vụ luôn là `authentication.mode: "none"`, một khóa legacy của Context7
+  không bao giờ được đọc, chuyển tiếp hay ghi log. Driver vẫn hỗ trợ `bearer` + `secret://` reference cho upstream khác; credential đã
+  cấu hình nhưng không khả dụng sẽ làm request fail trước khi gửi (`auth_missing`).
+- **Tool schema.** Validator của Gateway hỗ trợ `anyOf` có chặn (tối đa 16 nhánh, lồng tối đa 4 cấp): mọi ràng buộc cùng cấp
+  và ít nhất một nhánh phải thỏa. Schema thật của `ask_wiki_question` (`repoName` là string hoặc array<string>) được nhận nguyên vẹn;
+  keyword không được hỗ trợ ở bất kỳ mức lồng nào làm cả danh sách bị từ chối (fail-closed), không bao giờ bị lược bỏ. Ngoại lệ duy nhất là
+  annotation boolean `x-fastmcp-wrap-result` của FastMCP, không mang ràng buộc nào.
 - **Health.** `ready` nghĩa là Gateway đã hoàn tất initialize và `tools/list`. `bflow docs status` / `doctor` còn thực hiện thêm
-  một lời gọi `resolve-library-id` và `query-docs` thật dưới một registration thật, vì key không hợp lệ vẫn trả HTTP 200.
+  một lời gọi `read_wiki_structure` thật dưới một registration thật, vì HTTP 200 không chứng minh tool hoạt động.
 
 ## Ví dụ tài nguyên độc quyền: Chrome
 

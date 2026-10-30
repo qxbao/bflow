@@ -82,7 +82,7 @@ Với role Codex bắt buộc (kể cả role chọn profile ai-isolator), `up` 
 
 CLI đã truyền SDD/TDD/verification/concurrency vào persistent host qua [agentic-host](../../apps/cli/src/agentic-host.ts). Chọn giá trị trong giao miền được host hỗ trợ; range rộng của config parser không chứng minh host nhận mọi giá trị. Thay policy/provider/profile cần down/reconcile rồi up; session đang chạy giữ authority đã pin, không nhận quyền mới ngầm.
 
-## Tools và Context7
+## Tools và DeepWiki
 
 Các toggle dưới đây là optional defaults hiện tại, kể cả khi chưa khai field trong config. Đặt `enabled: false` để tắt; `required: true` chặn nếu grant/readiness thiếu.
 
@@ -103,18 +103,14 @@ environment:
     chrome-devtools-mcp:
       enabled: true
       required: false
-  context7:
+  deepwiki:
     enabled: true
     required: false
-    cache:
-      enabled: false
-      ttlSeconds: 3600
-      allowAuthenticated: false
 ```
 
-RTK có `cliCommandProfiles` tùy chọn cho host-authorized runner; không nhận command string tùy ý. MemPalace chỉ search trong wing đã bind; absence dữ liệu không được giả pass. Browser actions dùng lease độc quyền theo từng attempt (`BrowserResourceTransactions`, TTL tối đa 5 phút, tối đa một lease mỗi attempt, `browser_lease_busy` khi gọi đồng thời; chưa có live Chrome SDLC acceptance). Context7 gửi query ra mạng, cache authenticated cần opt-in.
+RTK có `cliCommandProfiles` tùy chọn cho host-authorized runner; không nhận command string tùy ý. MemPalace chỉ search trong wing đã bind; absence dữ liệu không được giả pass. Browser actions dùng lease độc quyền theo từng attempt (`BrowserResourceTransactions`, TTL tối đa 5 phút, tối đa một lease mỗi attempt, `browser_lease_busy` khi gọi đồng thời; chưa có live Chrome SDLC acceptance). DeepWiki gửi tên repository công khai và câu hỏi ra mạng, không cần API key; endpoint cố định nên config không thể chuyển hướng truy vấn. Khối `context7` của bản cũ (legacy, đã được thay thế) được đọc như `deepwiki` và migrate có backup bằng `bflow init --update`: chỉ `enabled`/`required` được giữ, cache và khóa bị bỏ.
 
-`environment.toolPolicy` là advanced strict v3 policy có identity/scope/digest cùng role/operation/trigger allowlists, thay đường sinh policy từ các toggle. Không tự sửa digest. Legacy `context7.enabled: true` có mặt cùng explicit policy phải khớp exact service/operations/roles/requiredness; conflicting policy bị từ chối. Legacy `requiredTools`/`requiredMcpServices` không có đủ role/operation authority cần migrate. [D-TOOLS-01](../tools-sdlc-integration.md) · [Resolver](../../apps/cli/src/platform-options.ts).
+`environment.toolPolicy` là advanced strict v3 policy có identity/scope/digest cùng role/operation/trigger allowlists, thay đường sinh policy từ các toggle. Không tự sửa digest. `deepwiki.enabled: true` có mặt cùng explicit policy phải khớp exact service/operations/roles/requiredness; conflicting policy bị từ chối. Legacy `requiredTools`/`requiredMcpServices` không có đủ role/operation authority cần migrate. [D-TOOLS-01](../tools-sdlc-integration.md) · [Resolver](../../apps/cli/src/platform-options.ts).
 
 ## Skills
 

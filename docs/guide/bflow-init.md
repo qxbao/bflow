@@ -47,7 +47,7 @@ Quy trình di chuyển cấu hình:
 
 `bflow init --update` (hoặc `-u`) tái tạo YAML/comment và bổ sung default fields trong khi giữ giá trị đã có, đồng thời reconcile identity theo checkout hiện tại. Xem lại diff trước khi commit; không dùng để nhận authority của session cũ ở checkout khác. `--provider` tường minh khi update đổi provider của các role; với Agy, field effort riêng bị bỏ theo schema.
 
-Các defaults mới: Codex, `workspace_auto`, `trustedWorkspace: true`, optional integrated tools/Context7, `regressionScope: affected`, `fastPath.mode: auto`, concurrency 2, verification 3 vòng và startup 300.000 ms. [Config reference](configuration-reference.md) ghi giới hạn mà persistent host thực sự nhận.
+Các defaults mới: Codex, `workspace_auto`, `trustedWorkspace: true`, optional integrated tools/DeepWiki, `regressionScope: affected`, `fastPath.mode: auto`, concurrency 2, verification 3 vòng và startup 300.000 ms. [Config reference](configuration-reference.md) ghi giới hạn mà persistent host thực sự nhận.
 
 Theo cơ chế mặc định, lệnh `init` sẽ bảo lưu nguyên vẹn tệp cấu hình nếu đã tồn tại từ trước. **Tuy nhiên trong phiên bản hiện tại, khi truyền các cờ `--force`, `-f`, `--yes` hoặc `-y`, hệ thống sẽ ghi đè toàn bộ cấu hình về các giá trị mặc định ban đầu** (dù nội dung trợ giúp ở một số tài liệu cũ ghi là luôn bảo lưu). Hành vi ghi đè này đã được kiểm chứng thực tế trong môi trường tạm thời. Tuyệt đối không dùng các cờ này để khôi phục hoặc khắc phục lỗi phiên; hãy chủ động sao lưu và so sánh diff nếu muốn tái tạo lại cấu hình.
 

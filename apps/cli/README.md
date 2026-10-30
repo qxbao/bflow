@@ -88,7 +88,7 @@ dọn repository không còn trên đĩa khi khởi động lại. Chrome dùng 
 `gateway-control.json` trong thư mục state của Gateway. `bflow up` truyền bộ định vị đó
 cho host khi nó tồn tại; setup không thiết lập các kết nối role này.
 
-Context7 hosted và MemPalace do setup tạo dùng chung giữa các repository/worktree trên cùng
+DeepWiki hosted (không cần API key) và MemPalace do setup tạo dùng chung giữa các repository/worktree trên cùng
 máy: chuyển worktree rồi chạy `down`/`up` không cần rebind Gateway. MemPalace giữ một
 backend partition riêng cho mỗi repository. Control endpoint vẫn kiểm tra machine, workspace
 canonical, token và quyền từng role/session. Service GitNexus của một repository chỉ phục vụ
@@ -474,7 +474,7 @@ không chứng minh task/run thành công. Repo mutation receipts ở `.bflow/st
 
 `mcp status` có thể báo `configured: false`/`not_ready` dù machine Gateway đã được setup:
 đó là thiếu live port ở command composition, không phải bằng chứng daemon chưa chạy.
-Dùng `doctor` và machine service status cho platform diagnostics; `docs status` probe Context7.
+Dùng `doctor` và machine service status cho platform diagnostics; `docs status` probe DeepWiki; `docs probe --live` là bước owner ghi bằng chứng live (`mode=live|fixture|skipped`, timestamp, revision).
 Không lặp setup chỉ để làm command này xanh. Verification gate runner cũng cần port tin cậy;
 thiếu runner không được pass. Git locking cần `flock` phù hợp cho Linux/macOS.
 
@@ -488,7 +488,7 @@ thư mục kho riêng khi khởi tạo. Các diagnostic này không phải full 
 
 `bflow up` resolves tool access from the repository's optional `environment.toolPolicy`,
 the machine's approved setup inventory and a fresh Gateway observation. A tool pin or
-installed executable alone never creates repository access. When no explicit policy is supplied, CLI composition derives optional Context7/RTK/GitNexus/
+installed executable alone never creates repository access. When no explicit policy is supplied, CLI composition derives optional DeepWiki/RTK/GitNexus/
 MemPalace/Chrome requirements unless their toggles are disabled. Provider roles retain
 approved workflow skills; tool-backed skills are included only after independent grants
 resolve. Missing optional grants are skipped/degraded with a reason. Explicit `role.skills: []` removes only that role's defaults; repository
@@ -511,10 +511,10 @@ environment:
       workspaceRoot: <canonical-workspace-path>
     digest: <canonical-policy-sha256>
     requirements:
-      - toolId: context7
+      - toolId: deepwiki
         kind: native_remote_mcp
-        serviceId: context7
-        operations: [resolve-library-id, query-docs]
+        serviceId: deepwiki
+        operations: [ask_wiki_question, read_wiki_contents, read_wiki_structure]
         requiredness: optional
         roles: [specifier, architect, planner, developer, reviewer, qa]
         triggers: [external_documentation]
@@ -524,8 +524,9 @@ MCP operation names must match the reviewed machine service definition and its c
 Gateway negotiation. CLI-only grants require the exact managed executable receipt, version
 and digest. Optional unavailable tools are skipped with a degraded reason; required
 unavailable tools stop startup before panes launch. A skill dependency never adds a grant.
-Legacy `environment.context7` remains supported and resolves to the same explicit Context7
-service and operation set. Legacy `requiredTools` and `requiredMcpServices` fail with a
+`environment.deepwiki` resolves to the same explicit DeepWiki service and operation set. A legacy
+`environment.context7` block (legacy, from a previous release) is still read (as `deepwiki`, keeping `enabled` and
+`required`) and is migrated by `bflow init --update` with a timestamped backup; it is idempotent and never carries a key over. Legacy `requiredTools` and `requiredMcpServices` fail with a
 migration message because they do not identify a role and exact operation allowlist.
 
 The private Gateway control registers per-role, per-service Runtime grants separately from

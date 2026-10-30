@@ -1,8 +1,8 @@
-import { resolve, join } from "node:path";
-import { DocsClient, FileDocsCache, DEFAULT_CACHE_POLICY, type CachePolicy, type DocsFailure, type DocsMetricsSnapshot, type LookupSuccess, type SearchSuccess } from "@bflow/docs-retrieval";
+import { resolve } from "node:path";
+import { DocsClient, checkQuestion, checkRepoName, checkVisibility, type DocsFailure, type DocsMetricsSnapshot, type DocsSuccess } from "@bflow/docs-retrieval";
 import { GatewayDocsCaller, discoverAgentAccess, enrollOperatorAccess, resolveHostRepositoryRoot, type DocsAccess } from "./docs-gateway.js";
-import { evaluateContext7Health, type Context7Health } from "./docs-health.js";
-import { readStoredContext7Key } from "./context7-secret.js";
+import { evaluateDeepWikiHealth, type DeepWikiHealth } from "./docs-health.js";
+import { runDeepWikiProbe, type DeepWikiProbeResult } from "./docs-probe.js";
 import { readEnvironmentConfig } from "./environment-config.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import type { CliContext, DocsCommandArgs } from "./types.js";
@@ -19,13 +19,13 @@ export interface DocsCommandDependencies {
 
 export interface DocsCommandOutput {
   readonly docs: true;
-  readonly action: "search" | "lookup" | "status";
+  readonly action: "ask" | "structure" | "contents" | "status" | "probe";
   readonly ok: boolean;
   readonly access: { readonly mode: "agent" | "operator" | "none"; readonly reason?: string | undefined };
   readonly warnings: readonly string[];
-  readonly search?: Omit<SearchSuccess, "ok"> | undefined;
-  readonly lookup?: Omit<LookupSuccess, "ok"> | undefined;
-  readonly health?: Context7Health | undefined;
+  readonly answer?: Omit<DocsSuccess, "ok"> | undefined;
+  readonly health?: DeepWikiHealth | undefined;
+  readonly probe?: DeepWikiProbeResult | undefined;
   readonly failure?: (DocsFailure & { readonly stage?: string | undefined }) | undefined;
   readonly metrics?: DocsMetricsSnapshot | undefined;
 }
@@ -41,28 +41,25 @@ async function machine(): Promise<{ stateDirectory: string; machineId: string }>
 async function grantedRoles(): Promise<readonly string[]> {
   const { loadMachineSkillCatalog } = await import("./skill-catalog.js");
   const catalog = await loadMachineSkillCatalog();
-  return catalog.definitions.filter(definition => definition.skillId === "use-context7").flatMap(definition => [...definition.allowedRoles]);
+  return catalog.definitions.filter(definition => definition.skillId === "use-deepwiki").flatMap(definition => [...definition.allowedRoles]);
 }
 
-/** Resolves machine state, the roles granted Context7 by the approved skill catalog, and evaluates health. Shared with `bflow doctor`. */
-export async function collectContext7Health(input: {
+/** Resolves machine state, the roles granted DeepWiki by the approved skill catalog, and evaluates health. Shared with `bflow doctor`. */
+export async function collectDeepWikiHealth(input: {
   readonly repository: RepositoryIdentity | undefined;
-  readonly config: { readonly environment: { readonly context7?: { enabled?: boolean | undefined; required?: boolean | undefined } | undefined; readonly roles: ReadonlyArray<{ role: string; cli: string }> } } | undefined;
+  readonly config: { readonly environment: { readonly deepwiki?: { enabled?: boolean | undefined; required?: boolean | undefined } | undefined; readonly roles: ReadonlyArray<{ role: string; cli: string }> } } | undefined;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly probe?: boolean;
   readonly role?: string | undefined;
   readonly timeoutMs?: number | undefined;
   readonly deps?: DocsCommandDependencies | undefined;
-}): Promise<Context7Health> {
+}): Promise<DeepWikiHealth> {
   const deps = input.deps ?? {};
   const where = deps.stateDirectory !== undefined && deps.machineId !== undefined ? { stateDirectory: deps.stateDirectory, machineId: deps.machineId } : await machine();
-  const effectiveContext7 = input.config?.environment
-    ? {
-        enabled: input.config.environment.context7?.enabled !== false,
-        required: input.config.environment.context7?.required === true
-      }
+  const effective = input.config?.environment
+    ? { enabled: input.config.environment.deepwiki?.enabled !== false, required: input.config.environment.deepwiki?.required === true }
     : undefined;
-  return evaluateContext7Health({ context7: effectiveContext7, roles: input.config?.environment.roles ?? [],
+  return evaluateDeepWikiHealth({ deepwiki: effective, roles: input.config?.environment.roles ?? [],
     grantedRoles: deps.grantedRoles ?? await grantedRoles().catch(() => []), stateDirectory: where.stateDirectory, machineId: where.machineId,
     repository: input.repository, env: input.env, ...(input.probe !== undefined ? { probe: input.probe } : {}),
     ...(input.role !== undefined ? { role: input.role } : {}), ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
@@ -71,8 +68,16 @@ export async function collectContext7Health(input: {
 
 export async function executeDocsCommand(args: DocsCommandArgs, context?: CliContext, onProgress?: (phase: string) => void): Promise<DocsCommandOutput> {
   const progress = (phase: string) => { try { onProgress?.(phase); } catch { /* observational only */ } };
-  progress("Reading documentation configuration...");
   const deps: DocsCommandDependencies = context?.docs ?? {};
+
+  if (args.action === "probe") {
+    progress("Probing DeepWiki through the Gateway...");
+    const probe = await runDeepWikiProbe({ live: args.live, ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}) });
+    return { docs: true, action: "probe", ok: probe.ok, access: { mode: "none", reason: probe.reason ?? `probe mode ${probe.mode}` }, warnings: [], probe,
+      ...(probe.ok ? {} : { failure: { kind: "unavailable" as const, message: probe.reason ?? "The probe did not succeed.", retryable: false, stage: "probe" } }) };
+  }
+
+  progress("Reading documentation configuration...");
   const cwd = context?.cwd ?? process.cwd();
   const env = deps.env ?? process.env;
   const where = deps.stateDirectory !== undefined && deps.machineId !== undefined ? { stateDirectory: deps.stateDirectory, machineId: deps.machineId } : await machine();
@@ -82,12 +87,21 @@ export async function executeDocsCommand(args: DocsCommandArgs, context?: CliCon
   if (repository) { try { config = await readEnvironmentConfig(repository); } catch { config = undefined; } }
 
   if (args.action === "status") {
-    progress("Checking Context7 Gateway access and health...");
-    const health = await collectContext7Health({ repository, config, env, role: args.role, timeoutMs: args.timeoutMs,
+    progress("Checking DeepWiki Gateway access and health...");
+    const health = await collectDeepWikiHealth({ repository, config, env, role: args.role, timeoutMs: args.timeoutMs,
       deps: { ...deps, stateDirectory: where.stateDirectory, machineId: where.machineId } });
     return { docs: true, action: "status", ok: health.state === "healthy" || health.state === "disabled", access: { mode: health.probe.mode, ...(health.probe.reason ? { reason: health.probe.reason } : {}) },
       warnings: health.checks.filter(check => check.status === "warn").map(check => check.message), health };
   }
+
+  // The repository and its visibility come only from the operator's own arguments. They are checked here, before any Gateway
+  // access is requested, so a refused request touches nothing; the client repeats the same checks.
+  const input = args as { repo?: unknown; publicRepository?: unknown; question?: unknown };
+  const checks = [checkRepoName(input.repo), checkVisibility(input.publicRepository ? "public" : undefined), ...(args.action === "ask" ? [checkQuestion(input.question)] : [])];
+  const refused = checks.find(check => !check.ok);
+  if (refused && !refused.ok)
+    return { docs: true, action: args.action, ok: false, access: { mode: "none", reason: refused.message }, warnings: [],
+      failure: { kind: "invalid_arguments", message: refused.message, retryable: false, stage: "validate" } };
 
   progress("Checking scoped documentation access...");
   const access = await (deps.access ?? (async (): Promise<DocsAccess> => {
@@ -106,29 +120,14 @@ export async function executeDocsCommand(args: DocsCommandArgs, context?: CliCon
   }
   try {
     const caller = new GatewayDocsCaller(access.target, deps.fetchImpl);
-    const settings = config?.environment.context7?.cache;
-    const key = await readStoredContext7Key({ state: where.stateDirectory });
-    const policy: CachePolicy = { ...DEFAULT_CACHE_POLICY, enabled: settings?.enabled === true, ttlSeconds: settings?.ttlSeconds ?? DEFAULT_CACHE_POLICY.ttlSeconds,
-      allowAuthenticated: settings?.allowAuthenticated === true };
-    const client = new DocsClient({ caller, timeoutMs: args.timeoutMs ?? 30_000, authenticated: key.status === "ok",
-      ...(policy.enabled ? { cache: new FileDocsCache({ directory: join(where.stateDirectory, "docs-cache"), maxEntries: policy.maxEntries, maxBytes: policy.maxBytes }) } : {}),
-      cachePolicy: policy });
-    const projectRoot = repository?.root ?? cwd;
+    const client = new DocsClient({ caller, timeoutMs: args.timeoutMs ?? 30_000 });
     const accessInfo = { mode: access.mode } as const;
-    if (args.action === "search") {
-      progress("Searching Context7 libraries...");
-      const result = await client.search({ library: args.library, projectRoot, startDir: cwd, ...(args.query !== undefined ? { query: args.query } : {}), ...(args.version !== undefined ? { version: args.version } : {}) });
-      if (!result.ok) return { docs: true, action: "search", ok: false, access: accessInfo, warnings: [], failure: { ...result.failure, stage: result.stage }, metrics: client.metrics() };
-      const { ok: _ok, ...search } = result;
-      return { docs: true, action: "search", ok: result.selection !== "no_match", access: accessInfo, warnings: result.warnings, search, metrics: client.metrics(),
-        ...(result.selection === "no_match" ? { failure: { kind: "library_not_found", message: `Context7 has no library matching "${args.library}".`, retryable: false, stage: "resolve" } } : {}) };
-    }
-    progress("Looking up Context7 documentation...");
-    const result = await client.lookup({ query: args.query, projectRoot, startDir: cwd, ...(args.library !== undefined ? { library: args.library } : {}),
-      ...(args.libraryId !== undefined ? { libraryId: args.libraryId } : {}), ...(args.language !== undefined ? { language: args.language } : {}),
-      ...(args.version !== undefined ? { version: args.version } : {}), ...(args.noCache ? { noCache: true } : {}) });
-    if (!result.ok) return { docs: true, action: "lookup", ok: false, access: accessInfo, warnings: [], failure: { ...result.failure, stage: result.stage }, metrics: client.metrics() };
-    const { ok: _ok, ...lookup } = result;
-    return { docs: true, action: "lookup", ok: true, access: accessInfo, warnings: result.warnings, lookup, metrics: client.metrics() };
+    progress("Reading DeepWiki documentation...");
+    const target = { repoName: args.repo, visibility: "public" as const };
+    const result = args.action === "ask" ? await client.ask({ ...target, question: args.question })
+      : args.action === "structure" ? await client.structure(target) : await client.contents(target);
+    if (!result.ok) return { docs: true, action: args.action, ok: false, access: accessInfo, warnings: [], failure: { ...result.failure, stage: result.stage }, metrics: client.metrics() };
+    const { ok: _ok, ...answer } = result;
+    return { docs: true, action: args.action, ok: true, access: accessInfo, warnings: [], answer, metrics: client.metrics() };
   } finally { await access.release?.(); }
 }

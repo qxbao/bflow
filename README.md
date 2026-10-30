@@ -23,7 +23,7 @@ Bạn mô tả công việc trong một cuộc hội thoại. Bflow đưa yêu c
 | Phân công nhiều agent | Coordinator lập DAG; Runtime quản lý phụ thuộc, concurrency và quyền thực thi |
 | Kết quả có thể kiểm tra | Đặc tả và tiêu chí nghiệm thu, Conditional TDD, Reviewer/QA độc lập, kiểm tra sau tích hợp |
 | Chọn provider theo vai trò | Claude Code, Codex và Agy qua adapter; model, effort và profile riêng cho từng role |
-| Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho Context7, GitNexus, MemPalace và browser; RTK xử lý output CLI |
+| Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho DeepWiki, GitNexus, MemPalace và browser; RTK xử lý output CLI |
 | Tiếp tục sau gián đoạn | SQLite event log, checkpoint, artifact có checksum và đối soát delivery |
 | Làm việc trên trình duyệt | `bflow web`: UI tiếng Việt cục bộ để quản lý dự án, theo dõi công việc, trả lời quyết định và chat với Conversation |
 
@@ -96,7 +96,7 @@ bflow handover export --run <id> --revision <commit> --out <dir>  # Gói bàn gi
 bflow down                             # Dừng an toàn khi không còn công việc active
 ```
 
-`mcp status` hiện đọc cấu hình nhưng chưa có kết nối kiểm tra health mặc định, nên có thể báo `configured: false` dù Gateway đang chạy. Dùng `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe Context7; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
+`mcp status` hiện đọc cấu hình nhưng chưa có kết nối kiểm tra health mặc định, nên có thể báo `configured: false` dù Gateway đang chạy. Dùng `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe DeepWiki; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
 
 `bflow web` mở UI tiếng Việt trên localhost (ghép nối qua URL dùng một lần; `--port N`, `--no-open`). Form và nút trong web đi qua cùng Conversation/Runtime như khi chat, nên vẫn giữ đủ approval và gate; Ctrl-C chỉ đóng web, phiên dự án tiếp tục chạy. [Web README](apps/web/README.md)
 

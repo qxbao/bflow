@@ -477,6 +477,25 @@ describe.skipIf(process.platform !== "linux")("P30 platform host", () => {
     }
   };
 
+  it.each(["missing", "stale", "mismatched"])("distinguishes a %s manifest session from the published SessionStart receipt", async state => {
+    const f = await fixture(root => platformFor(root));
+    await observeCodexPanes(f.root);
+    for (const [index, role] of codexRoles.entries()) {
+      const token = JSON.parse(await readFile(join(f.directory, role + ".json"), "utf8"));
+      await callHost(token.socketPath, token.token, "provider_started", { paneId: `p${index + 1}`, nativeSessionId: `native-${role}` });
+      await callHost(token.socketPath, token.token, "native_session", { paneId: `p${index + 1}`, sessionId: `native-${role}` });
+    }
+    const manifest = codexManifest(f.root, f.config.sessionId);
+    if (state === "missing") delete manifest.panes[0]!.session;
+    else manifest.panes[0]!.session!.value = "wrong-native-session";
+    if (state === "mismatched") await writeFile(join(f.root, "agents", "p1.json"), JSON.stringify({ name: "conversation-agent", agent_status: "idle",
+      agent_session: { source: "herdr:codex", kind: "id", value: "wrong-native-session" } }));
+    const result = await f.controller.activate(manifest);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.message).toContain(state !== "mismatched"
+      ? "[bflow:native-startup-pending]" : "has no matching native Bflow launch receipt");
+  });
+
   it.each(["herdr", "herdr:herdr", "herdr:claude"])("rejects native source %s for a Herdr-transported Codex pane", async source => {
     const f = await fixture(root => platformFor(root));
     await observeCodexPanes(f.root);

@@ -66,3 +66,14 @@ it('sends a validated message with exact run/session and never auto retries a lo
  expect(JSON.stringify(localStorage)).not.toContain('Nội dung mới');
  fireEvent.click(screen.getByRole('button',{name:'Đối chiếu tin nhắn'}));await screen.findByText(/Đã tìm thấy tin nhắn gốc/);expect(sent).toBe(1);
 });
+it('allows a new message after verified session readiness while first-message history is unavailable',async()=>{
+ localStorage.clear();
+ const fetcher=vi.fn(async(path:string,_init?:RequestInit)=>path.endsWith('/session')
+  ?new Response(JSON.stringify({apiVersion:1,projectId:'p',sessionId:'host',state:'ready',pendingIntakes:[],blockers:[],updatedAt:now}))
+  :new Response(JSON.stringify({apiVersion:1,code:'unavailable',message:'History not created yet',retryable:true,correlationId:'cold'}),{status:503}));
+ vi.stubGlobal('fetch',fetcher);render(open());
+ await screen.findByRole('alert');
+ await vi.waitFor(()=>expect(screen.getByLabelText<HTMLTextAreaElement>('Tin nhắn cho Conversation').disabled).toBe(false));
+ expect(screen.queryByText('Chưa có tin nhắn trong trang lịch sử này.')).toBeNull();
+ expect(fetcher.mock.calls.every(([,init])=>init?.method==='GET')).toBe(true);
+});

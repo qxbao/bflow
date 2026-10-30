@@ -1,3 +1,4 @@
+import { projectPolicyPhaseEnvelope, provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError, prelaunchLeaseIdentity } from "./policy-prompt.js";
 import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-binding.js";
 import { ExecutorLineageSchema, RoleProfilePinSchema, sameRoleProfilePin } from "@bflow/contracts";
 import { assertProfileBinding, assertProfileSnapshotCurrent, assertIndependentProfileExecutor, selectRoleProfile } from "./profile-admission.js";
@@ -143,7 +144,7 @@ export class HerdrOutbox {
         !run || run.cancelled || run.status !== "implementing" || authorization.message.run_id !== run.runId ||
         authorization.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
         payload.taskId !== owner.taskId || payload.implementationAttemptId !== owner.attemptId ||
-        !(authorization.phaseRetirement?.resumeAuthorizedBy || authorization.phaseFailure?.repairable === false && authorization.phaseFailure.applied && authorization.phaseFailure.retryAuthorized === true) || run.nativeDeliveries?.length ||
+        !(authorization.phaseRetirement?.resumeAuthorizedBy || (authorization.phaseFailure?.repairable === false || authorization.phaseFailure?.leaseRecoveryRequired === true) && authorization.phaseFailure!.applied && authorization.phaseFailure!.retryAuthorized === true) || run.nativeDeliveries?.length ||
         run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
         Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)))
@@ -457,13 +458,15 @@ export class HerdrOutbox {
       if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; return; }
       if (!out.lease) {
         await guardWorkDispatch();
+        const identity = prelaunchLeaseIdentity(out);
         const acquired = await this.ports.registry.acquireLease({
-          leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
+          leaseId: identity.leaseId, agentId: pane.agentId, runId: out.message.run_id!,
           taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
-          idempotencyKey: `acquire:${out.message.message_id}`
+          idempotencyKey: identity.idempotencyKey
         });
         if (!acquired.ok) { out.error = acquired.error.message; return; }
         out.lease = AgentLeaseSchema.parse(acquired.value);
+        if (out.prelaunchFailure?.lease && out.lease.fencingToken <= out.prelaunchFailure.lease.fencingToken) throw new Error("Recovered dispatch requires a fresh Registry fence");
         await this.save();
       }
     }
@@ -488,6 +491,8 @@ export class HerdrOutbox {
       wire = RoleMessageSchema.parse({ ...wire, recipient: { role: pane.role, agent_id: pane.agentId, pane_id: pane.paneId },
         payload: { assignment: out.assignment, context: wire.payload } });
     }
+    try { wire = projectPolicyPhaseEnvelope(wire); }
+    catch (error) { out.status = "queued"; out.error = `Prompt presentation blocked before transport: ${String(error)}`; await this.save(); return; }
     if (out.request && (digest(out.request.target) !== digest(target) || digest(out.request.context) !== digest(json(wire)))) {
       out.error = "Pinned request or recipient changed; explicit reconciliation required"; await this.save(); return;
     }
@@ -545,6 +550,22 @@ export class HerdrOutbox {
   async reconcile(messageId: string, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
     const out = this.state.outbound.find(item => item.message.message_id === messageId);
     if (!out?.request || !["sending", "unknown_delivery"].includes(out.status)) throw new Error("No uncertain handoff to reconcile");
+    if (provenPrelaunchPolicyFailure(out, this.state.inbox)) {
+      // Retain exact release arguments before touching Registry, while the original prelaunch proof remains replayable.
+      if (out.lease) {
+        out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({leaseId:out.lease.leaseId,fencingToken:out.lease.fencingToken,
+          expectedVersion:out.lease.version,releasedAt:this.now(),idempotencyKey:`prelaunch-release:${out.request.requestId}:${out.lease.version}`});
+        await this.save();
+        const released = await this.ports.registry.releaseLease(out.leaseRelease);
+        if (!released.ok && !(released.error.code === "conflict" && Date.parse(out.lease.expiresAt) <= Date.parse(this.now()))) throw new PrelaunchRegistryRecoveryError(`${released.error.code}: ${released.error.message}`);
+      }
+      out.prelaunchFailure = { request: out.request, reconciledAt: this.now(),
+        ...(out.executorLineage ? {executorLineage:out.executorLineage} : {}), ...(out.lease ? {lease:out.lease} : {}) };
+      delete out.lease; delete out.leaseRelease; delete out.leaseRenewal; delete out.executorLineage;
+      delete out.request; // No invocation exists: normal dispatch must pin the current recipient after host recovery.
+      out.status = "queued"; out.error = "Reconciled exact oversized Node prelaunch E2BIG; no invocation started";
+      await this.save(); return;
+    }
     const req = out.request;
     const result = AgentReconciliationResultSchema.parse(unwrap(await this.ports.transport.reconcile({
       requestId: req.requestId, attemptId: req.attemptId, runId: req.runId, taskId: req.taskId,

@@ -10,10 +10,10 @@ import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
 import type { RepositoryIdentity } from "./repository.js";
 
-import { CONTEXT7_SERVICE_ID, CONTEXT7_TOOLS } from "./context7-constants.js";
+import { DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS } from "./deepwiki-constants.js";
 
-export const CONTEXT7_SERVICE = CONTEXT7_SERVICE_ID;
-const CONTEXT7_TOOL_NAMES = CONTEXT7_TOOLS;
+export const DEEPWIKI_SERVICE = DEEPWIKI_SERVICE_ID;
+const DEEPWIKI_TOOL_NAMES = DEEPWIKI_TOOLS;
 const LAUNCH_ID_ENV = "BFLOW_LAUNCH_ID";
 const TOKEN_ENV = /^BFLOW_MCP_TOKEN_[A-Z0-9_]{1,50}$/;
 const LAUNCH_ID = /^[A-Za-z0-9_-]{1,200}$/;
@@ -81,7 +81,7 @@ export async function discoverAgentAccess(env: Readonly<Record<string, string | 
       if (typeof entry.envName !== "string" || !TOKEN_ENV.test(entry.envName) || typeof entry.registrationId !== "string") continue;
       const tools = Array.isArray(entry.allowedTools) ? entry.allowedTools : [];
       const token = env[entry.envName];
-      if (token && CONTEXT7_TOOL_NAMES.every(name => tools.includes(name))) return { endpoint: record.endpoint, token, registrationId: entry.registrationId };
+      if (token && DEEPWIKI_TOOL_NAMES.every(name => tools.includes(name))) return { endpoint: record.endpoint, token, registrationId: entry.registrationId };
     }
   }
   return undefined;
@@ -104,7 +104,7 @@ export async function enrollOperatorAccess(options: OperatorAccessOptions): Prom
   const locator = join(options.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const client = await GatewayControlClient.fromLocator(locator);
   if (!client.ok) return { mode: "none", kind: "no_gateway", reason: client.error.message };
-  const readiness = await readGatewayReadiness(options.stateDirectory, CONTEXT7_SERVICE);
+  const readiness = await readGatewayReadiness(options.stateDirectory, DEEPWIKI_SERVICE);
   if (!readiness.endpoint) return { mode: "none", kind: "no_gateway", reason: "The Gateway has not published its endpoint; run 'bflow setup'." };
   const now = (options.now ?? (() => new Date()))();
   const sessionId = `docs-${randomUUID().slice(0, 12)}`;
@@ -112,7 +112,7 @@ export async function enrollOperatorAccess(options: OperatorAccessOptions): Prom
   const scope = { kind: "session" as const, machineId: options.machineId, repositoryId: options.repository.id, workspaceRoot: options.repository.root, sessionId };
   const registration = {
     schemaVersion: 3 as const, registrationId, provider: "claude" as const, role: options.role as MCPClientRegistration["role"], scope,
-    environmentId: "docs-cli", serviceIds: [CONTEXT7_SERVICE], allowedTools: [...CONTEXT7_TOOL_NAMES],
+    environmentId: "docs-cli", serviceIds: [DEEPWIKI_SERVICE], allowedTools: [...DEEPWIKI_TOOL_NAMES],
     connection: { transport: "streamable_http" as const, endpoint: readiness.endpoint, token: `secret://bflow/docs-cli/${registrationId}` },
     configDigest: "0".repeat(64), expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString(), idempotencyKey: `${registrationId}:${randomUUID()}`
   };
@@ -120,13 +120,13 @@ export async function enrollOperatorAccess(options: OperatorAccessOptions): Prom
     schemaVersion: 3,
     grantId: `grant-${registrationId}`,
     policyDigest: "0".repeat(64),
-    toolId: "context7",
+    toolId: "deepwiki",
     kind: "native_remote_mcp",
     requiredness: "optional",
     role: options.role as ResolvedToolGrant["role"],
     scope,
-    serviceId: CONTEXT7_SERVICE,
-    operations: [...CONTEXT7_TOOL_NAMES],
+    serviceId: DEEPWIKI_SERVICE,
+    operations: [...DEEPWIKI_TOOL_NAMES],
     triggers: ["external_documentation"]
   };
   const granted = await client.value.register(registration as MCPClientRegistration, undefined, [grant]);
@@ -172,7 +172,7 @@ export async function readEvent(body: ReadableStream<Uint8Array>, id: number): P
 type RpcOutcome = { readonly ok: true; readonly result: any } | { readonly ok: false; readonly error: { code: string; message: string; retryable?: boolean; details?: unknown } };
 
 /**
- * Calls Context7 through the shared Gateway with one registration's bearer token. One upstream session serves every agent;
+ * Calls DeepWiki through the shared Gateway with one registration's bearer token. One upstream session serves every agent;
  * this client only holds its own Gateway session and never starts a documentation process.
  */
 export class GatewayDocsCaller implements DocsToolCaller {
@@ -224,15 +224,28 @@ export class GatewayDocsCaller implements DocsToolCaller {
     const timeoutMs = options?.timeoutMs ?? 30_000;
     const failed = await this.ensureSession(timeoutMs, options?.signal);
     if (failed && !failed.ok) return { ok: false, error: failed.error };
-    const reply = await this.rpc("tools/call", { name: tool, arguments: args, serviceId: CONTEXT7_SERVICE, timeoutMs }, timeoutMs, options?.signal);
+    const reply = await this.rpc("tools/call", { name: tool, arguments: args, serviceId: DEEPWIKI_SERVICE, timeoutMs }, timeoutMs, options?.signal);
     if (!reply.ok) return { ok: false, error: reply.error };
-    const result = reply.result as { status?: string; output?: unknown } | undefined;
-    const output = result?.output;
-    const text = Array.isArray(output)
-      ? output.map(part => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")).join("")
-      : typeof output === "string" ? output : "";
+    const result = reply.result as { status?: string; output?: unknown; content?: unknown; structuredContent?: unknown; isError?: unknown; error?: unknown } | undefined;
     if (result?.status === "unknown") return { ok: false, error: { code: "unknown_delivery", message: "The outcome of the lookup could not be confirmed.", retryable: false } };
-    return { ok: true, isError: result?.status === "failed", text };
+    const joinParts = (parts: unknown[]): string => parts.map(part => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")).join("");
+    // Supported shapes: string/array output, the MCP envelope {content:[{type:"text",text}], structuredContent:{result}} either
+    // direct or nested under `output` (the Gateway's {status, output:{content, structuredContent}} form).
+    const rawOutput = result?.output;
+    const inner = rawOutput && typeof rawOutput === "object" && !Array.isArray(rawOutput)
+      ? rawOutput as { content?: unknown; structuredContent?: unknown; isError?: unknown; error?: unknown }
+      : undefined;
+    const envelope = inner ?? result;
+    const structured = envelope?.structuredContent;
+    const structuredResult = structured && typeof structured === "object" ? (structured as { result?: unknown }).result : undefined;
+    let text: string | undefined;
+    if (typeof rawOutput === "string") text = rawOutput;
+    else if (Array.isArray(rawOutput)) text = joinParts(rawOutput);
+    else if (Array.isArray(envelope?.content)) text = joinParts(envelope.content);
+    else if (typeof structuredResult === "string") text = structuredResult;
+    if (text === undefined || result?.error !== undefined || inner?.error !== undefined) return { ok: false, error: { code: "corruption", message: "The Gateway sent a documentation result in an unsupported shape.", details: { kind: "unsupported_result" } } };
+    if (text === "" && typeof structuredResult === "string") text = structuredResult;
+    return { ok: true, isError: result?.status === "failed" || result?.isError === true || inner?.isError === true, text };
   }
 
   async listTools(options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<{ ok: true; tools: readonly string[] } | { ok: false; error: { code: string; message: string; details?: unknown } }> {
@@ -242,6 +255,6 @@ export class GatewayDocsCaller implements DocsToolCaller {
     const reply = await this.rpc("tools/list", {}, timeoutMs, options?.signal);
     if (!reply.ok) return { ok: false, error: reply.error };
     const tools = Array.isArray(reply.result?.tools) ? reply.result.tools as Array<{ name?: unknown; serviceId?: unknown }> : [];
-    return { ok: true, tools: tools.filter(tool => tool.serviceId === CONTEXT7_SERVICE && typeof tool.name === "string").map(tool => tool.name as string) };
+    return { ok: true, tools: tools.filter(tool => tool.serviceId === DEEPWIKI_SERVICE && typeof tool.name === "string").map(tool => tool.name as string) };
   }
 }

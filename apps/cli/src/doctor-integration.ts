@@ -1084,17 +1084,17 @@ export async function runDoctorDiagnostics(
     remediation: ""
   });
 
-  // context7: the shared documentation service. Required: failures fail the doctor. Optional: failures are warnings (degraded).
-  if ((config?.environment && config.environment.context7?.enabled !== false) || dependencies?.context7Health !== undefined) {
-    const required = config?.environment?.context7?.required === true;
+  // deepwiki: the shared documentation service. Required: failures fail the doctor. Optional: failures are warnings (degraded).
+  if ((config?.environment && config.environment.deepwiki?.enabled !== false) || dependencies?.deepwikiHealth !== undefined) {
+    const required = config?.environment?.deepwiki?.required === true;
     try {
-      const { collectContext7Health } = await import("./docs-command.js");
-      const health = await (dependencies?.context7Health?.() ?? collectContext7Health({ repository, config: config ?? undefined, env: options.env ?? process.env, probe: true, timeoutMs: 8000 }));
+      const { collectDeepWikiHealth } = await import("./docs-command.js");
+      const health = await (dependencies?.deepwikiHealth?.() ?? collectDeepWikiHealth({ repository, config: config ?? undefined, env: options.env ?? process.env, probe: true, timeoutMs: 8000 }));
       for (const check of health.checks) {
         mcpChecks.push({
-          checkId: `context7-${check.id}`,
+          checkId: `deepwiki-${check.id}`,
           group: "mcp",
-          component: "context7",
+          component: "deepwiki",
           status: check.status === "pass" ? "pass" : check.status === "skipped" ? "skipped" : check.status === "warn" ? "warning" : required ? "fail" : "warning",
           detected_version: null,
           reason: check.message,
@@ -1103,13 +1103,13 @@ export async function runDoctorDiagnostics(
         });
       }
       if (health.state === "degraded") {
-        mcpChecks.push({ checkId: "context7-degraded", group: "mcp", component: "context7", status: "warning", detected_version: null,
-          reason: "Context7 is optional and not healthy: roles run without documentation lookup (degraded mode).",
-          remediation: "Fix the failing Context7 checks above, or set environment.context7.required to refuse to start without it." });
+        mcpChecks.push({ checkId: "deepwiki-degraded", group: "mcp", component: "deepwiki", status: "warning", detected_version: null,
+          reason: "DeepWiki is optional and not healthy: roles run without documentation lookup (degraded mode).",
+          remediation: "Fix the failing DeepWiki checks above, or set environment.deepwiki.required to refuse to start without it." });
       }
     } catch (error) {
-      mcpChecks.push({ checkId: "context7-evaluation", group: "mcp", component: "context7", status: required ? "fail" : "warning", detected_version: null,
-        reason: `Context7 health could not be evaluated: ${error instanceof Error ? error.message : String(error)}`, remediation: "Run 'bflow docs status' for details." });
+      mcpChecks.push({ checkId: "deepwiki-evaluation", group: "mcp", component: "deepwiki", status: required ? "fail" : "warning", detected_version: null,
+        reason: `DeepWiki health could not be evaluated: ${error instanceof Error ? error.message : String(error)}`, remediation: "Run 'bflow docs status' for details." });
     }
   }
 

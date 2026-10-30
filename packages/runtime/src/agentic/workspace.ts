@@ -381,6 +381,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();
+    // An owner reopen may restore a request whose Node process never launched. Unknown remote deliveries remain untouched.
+    await runtime.recoverProvenPrelaunchPolicyDeliveries();
     await options.beforeRecovery?.(runtime);
     conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),

@@ -164,13 +164,13 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
   });
 
   it.each(["codex", "claude"])("refuses a %s Stop while the latest user turn never reached conversation_decide", async provider => {
-    const f = await fixture({ conversation_pending_decision: { messageId: "user-c77c", content: "Tích hợp nốt Context7 đi " + "x".repeat(200), attempt: 1 },
+    const f = await fixture({ conversation_pending_decision: { messageId: "user-c77c", content: "Tích hợp nốt DeepWiki đi " + "x".repeat(200), attempt: 1 },
       conversation_notices: { notices: [decisionNotice], undisplayed: [] } }, provider);
     const result = await f.invoke("Stop", { hook_event_name: "Stop", session_id: "native-1", stop_hook_active: false, last_assistant_message: "Hook chưa cung cấp messageId" });
     expect(result.code).toBe(0);
     const block = JSON.parse(result.stdout);
     expect(block.decision).toBe("block");
-    expect(block.reason).toContain("Tích hợp nốt Context7 đi");
+    expect(block.reason).toContain("Tích hợp nốt DeepWiki đi");
     expect(block.reason).toContain("Call conversation_decide now");
     expect(block.reason).not.toContain("x".repeat(120));
     for (const forbidden of ['{"', "messageId", "message_id", "payload"]) expect(block.reason).not.toContain(forbidden);

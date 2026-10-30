@@ -245,6 +245,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
   };
   return {
     requiresNativeSession: true,
+    rolesNeedPreparation: async () => (await connect()).rolesNeedPreparation?.() ?? false,
     prepareRoles: async options => {
       const result = await prepare(options);
       if (!result.ok) throw new EnvironmentError(result.error);

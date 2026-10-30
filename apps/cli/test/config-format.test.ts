@@ -134,14 +134,9 @@ describe("configuration YAML format", () => {
         mempalace: { enabled: true, required: false },
         "chrome-devtools-mcp": { enabled: true, required: false }
       },
-      context7: {
+      deepwiki: {
         enabled: true,
-        required: false,
-        cache: {
-          enabled: false,
-          ttlSeconds: 3_600,
-          allowAuthenticated: false
-        }
+        required: false
       },
       skills: {
         required: false,

@@ -133,6 +133,14 @@ describe("detectTestRunners", () => {
     expect(JSON.stringify(result.remediation)).not.toContain("verification.json");
   });
 
+  it("prepares only the fixed compiler prefix of a workspace build chain", async () => {
+    const root = await fixture({ ...vitest2Files, "package.json": manifest({ devDependencies: { vitest: "^2.1.8" }, scripts: { build: "tsc -b && pnpm --filter @bflow/web build" } }) });
+    const result = await detectTestRunners(root, { nodeExecutable: process.execPath });
+    if (result.status !== "detected") throw new Error(JSON.stringify(result));
+    expect(result.profiles[0]!.prepare?.args).toEqual(["node_modules/typescript/bin/tsc", "-b"]);
+    expect(result.notes.some(note => note.includes("workspace build omitted"))).toBe(true);
+  });
+
   it("does not run a build script that is not a plain tsc invocation", async () => {
     const root = await fixture({ ...vitest2Files, "package.json": manifest({ devDependencies: { vitest: "^2.1.8" }, scripts: { build: "tsc -b && rm -rf /" } }) });
     const result = await detectTestRunners(root);

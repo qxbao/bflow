@@ -8,11 +8,12 @@ function pending(key:string):string|undefined {
  if(!value||typeof value!=='object'||Object.keys(value).sort().join(',')!=='messageId,version'||!('version' in value)||value.version!==1||!('messageId' in value)||typeof value.messageId!=='string'||!/^[-a-f0-9]{36}$/i.test(value.messageId))throw Error('Invalid chat recovery metadata');
  return value.messageId;
 }
-export function ChatComposer({api,projectId,sessionId,runId,revision,historyReady,refresh}:{api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;historyReady:boolean;refresh:()=>void}){
+export function ChatComposer({api,projectId,sessionId,runId,revision,refresh}:{api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;historyReady:boolean;refresh:()=>void}){
  const key=JSON.stringify(['bflow-chat',projectId,sessionId]);
  const [draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[uncertain,setUncertain]=useState(()=>{try{return !!pending(key);}catch{return true;}});
  const session=useRead(`chat-session:${projectId}:${sessionId}`,()=>api.sessionView(projectId),revision);
- const ready=historyReady&&!session.loading&&!session.error&&session.data?.state==='ready'&&session.data.sessionId===sessionId&&!session.data.blockers.some(b=>b.code==='chat_adapter_unavailable');
+ // Sending is governed by fresh host/session readiness; unavailable first-message history remains an independent read error.
+ const ready=!session.loading&&!session.error&&session.data?.state==='ready'&&session.data.sessionId===sessionId&&!session.data.blockers.some(b=>b.code==='chat_adapter_unavailable');
  async function submit(event:FormEvent){event.preventDefault();if(!ready||busy||uncertain)return;
   setBusy(true);setNotice('');
   try{

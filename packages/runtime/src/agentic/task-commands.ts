@@ -2,6 +2,7 @@ import { QualityGateDefinitionSchema, type QualityGateDefinition, type Specifica
 import { verificationGit } from "./behavioral-runner.js";
 import { bindRunnerProfile, testFilePattern, type BehavioralCommand, type BoundBehavioralCommand, type RunnerDetection, type RunnerProfile } from "./behavioral-runner.js";
 import { PREPARE_TIMEOUT_MS, PROFILE_TIMEOUT_MS, detectTestRunners } from "./runner-detection.js";
+import { detectTypecheck, type TypecheckProfile } from "./typecheck.js";
 
 /**
  * Runtime-detected runner labels. Coordinators reference them in `infrastructure.commands` (command `auto:unit` or
@@ -12,7 +13,8 @@ export const AUTOMATIC_RUNNERS = [
   { id: "auto-integration", command: "auto:integration", method: "integration_test", levels: ["integration", "regression"] }
 ] as const;
 
-export const AUTOMATIC_STATIC_COMMANDS = ["auto:static", "auto:static_analysis"] as const;
+export const AUTOMATIC_STATIC_COMMANDS = ["auto:static", "auto:static_analysis", "auto:typecheck"] as const;
+export function automaticCheckMethod(command: string): "typecheck" | "static_analysis" { return command === "auto:typecheck" ? "typecheck" : "static_analysis"; }
 
 export function isAutomaticStaticCommand(command: string): boolean {
   return (AUTOMATIC_STATIC_COMMANDS as readonly string[]).includes(command);
@@ -61,6 +63,10 @@ export function regressionChecks(profiles: readonly RunnerProfile[]): QualityGat
  * disables automatic detection entirely, so existing owner-configured hosts keep their exact behaviour.
  */
 export class TestRunnerSource {
+  private compiler: TypecheckProfile | undefined;
+  private readonly compilerSnapshots = new Map<string, TypecheckProfile>();
+  get typecheck() { return this.compiler; }
+  typecheckForRevision(revision?: string) { return revision ? this.compilerSnapshots.get(revision) ?? this.compiler : this.compiler; }
   private detection: RunnerDetection | undefined;
   private revision: string | undefined;
   private readonly snapshots = new Map<string, RunnerProfile[]>();
@@ -84,6 +90,8 @@ export class TestRunnerSource {
     if (this.detection?.status !== "detected" || revision !== this.revision) {
       this.detection = await this.detect(this.repositoryRoot!); this.revision = revision;
       if (revision && this.detection.status === "detected") this.snapshots.set(revision, [...this.detection.profiles]);
+      this.compiler = this.detection.status === "detected" ? await detectTypecheck(this.repositoryRoot!, this.detection.profiles) : undefined;
+      if (revision && this.compiler) this.compilerSnapshots.set(revision, this.compiler);
     }
     return this.detection;
   }
@@ -163,6 +171,10 @@ export function describeTestRunners(source: TestRunnerSource) {
   const detection = source.current;
   return {
     testRunners: [
+      ...(source.typecheck ? [{ id: "auto-typecheck", command: "auto:typecheck", method: "typecheck", levels: [] as string[],
+        source: "detected", reporter: "host_compiler", version: source.typecheck.version, projects: source.typecheck.projects,
+        testPathRule: "Independent sandboxed TypeScript build of all detected tsconfig.json projects at the pinned revision; compiler diagnostics fail the check.",
+        testNameRule: "Compiler evidence, not test identities. Select auto:typecheck for typecheck criteria and infrastructure commands." }] : []),
       ...source.owner.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
         ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap", source: "owner" })),
       ...source.profiles.map(profile => ({
@@ -172,7 +184,7 @@ export function describeTestRunners(source: TestRunnerSource) {
       })),
       ...(source.automatic && detection?.status === "detected" ? [{
         id: "auto-static", command: "auto:static", method: "static_analysis", levels: [] as string[], reporter: "host_static", source: "detected",
-        testPathRule: "Host git diff --check plus syntax check of changed JavaScript (node --check) and JSON files; any other changed code file fails this check.",
+        testPathRule: "Host git diff --check plus syntax check of changed JavaScript (node --check), JSON, and TypeScript when its compiler is detected; other changed code fails closed.",
         testNameRule: "Policy static_analysis check; include {\"method\":\"static_analysis\",\"command\":\"auto:static\"} in metadata.conditionalTdd.infrastructure.commands when high-risk or security-sensitive policy requires static_analysis."
       }] : [])
     ],

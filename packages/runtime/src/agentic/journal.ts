@@ -251,6 +251,8 @@ export interface Outbound {
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
+  /** Audit only: exact request proven not invoked before a reopened host rebinds the QA pane. */
+  prelaunchFailure?: { request: AgentRequest; reconciledAt: string; executorLineage?: ExecutorLineage; lease?: AgentLease };
   /** Host-observed terminal turn for this exact pinned specialist execution; never task success. */
   stopObservedAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
@@ -265,7 +267,7 @@ export interface Outbound {
     contextDigest: string; replacementMessageId: string; disposition: "replaced_without_verdict_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
-  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean };
+  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   /** Private outbox position captured before this Coordinator turn is physically dispatched. */
@@ -458,6 +460,14 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (state.version < 7 && (out.roleProfile || out.executorLineage || out.profileAllocationTaskId))
       throw new Error("Profile authority requires private journal v7");
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
+    if (out.prelaunchFailure) {
+      out.prelaunchFailure = { request: AgentRequestSchema.parse(out.prelaunchFailure.request), reconciledAt: IsoDateTimeSchema.parse(out.prelaunchFailure.reconciledAt),
+        ...(out.prelaunchFailure.executorLineage ? {executorLineage:ExecutorLineageSchema.parse(out.prelaunchFailure.executorLineage)} : {}),
+        ...(out.prelaunchFailure.lease ? {lease:AgentLeaseSchema.parse(out.prelaunchFailure.lease)} : {}) };
+      if (out.prelaunchFailure.request.context === undefined || digest(out.prelaunchFailure.request.context) !== digest(out.message) ||
+          out.prelaunchFailure.request.attemptId !== out.attemptId || out.prelaunchFailure.request.taskId !== out.taskId)
+        throw new Error("Invalid prelaunch failure audit binding");
+    }
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
     const profileRun = state.runs.find(run => run.runId === out.message.run_id);
@@ -508,7 +518,8 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (out.phaseFailure) {
       textField(out.phaseFailure.summary);
       if (typeof out.phaseFailure.repairable !== "boolean" || typeof out.phaseFailure.applied !== "boolean" ||
-          out.phaseFailure.retryAuthorized !== undefined && (out.phaseFailure.retryAuthorized !== true || out.phaseFailure.repairable) ||
+          out.phaseFailure.retryAuthorized !== undefined && (out.phaseFailure.retryAuthorized !== true || out.phaseFailure.repairable && !out.phaseFailure.leaseRecoveryRequired) ||
+          out.phaseFailure.leaseRecoveryRequired !== undefined && (out.phaseFailure.leaseRecoveryRequired !== true || !out.phaseFailure.repairable || !out.phaseFailure.applied) ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
         throw new Error("Invalid private policy failure outcome");
     }

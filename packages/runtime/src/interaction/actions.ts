@@ -5,9 +5,11 @@ import {
 } from "@bflow/contracts";
 import {
   digest,
+  isConversationDelivery,
   type JournalState,
   type RunRecord,
 } from "../agentic/journal.js";
+import { unmeasuredPolicyPhaseRequests } from "../agentic/phase-recovery.js";
 export const terminal = (r: RunRecord) =>
   r.cancelled ||
   !!r.supersededBy ||
@@ -73,7 +75,18 @@ export function availableActions(
           : undefined,
     ),
   ];
-  if (r.pendingAction && r.pendingAction.kind !== "coordinator_continuation") {
+  const previousResume = r.resumeReceipts?.find(item => item.actionId === r.pendingAction?.actionId);
+  // Runtime accepts a separately identified explicit resume after its automatic wake, including while queued.
+  const explicitAfterAutomatic = r.pendingAction?.kind === "resume_coordinator" && previousResume !== undefined &&
+    state.outbound.some(out => out.message.message_id === previousResume.messageId && out.message.run_id === r.runId &&
+      out.message.type === "task.status" && out.message.sender.role === "runtime" &&
+      typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
+      out.message.payload.kind === "resume_run" && out.message.payload.actionId === r.pendingAction?.actionId && out.message.payload.automatic === true);
+  const unmeasuredResume = r.pendingAction?.kind === "coordinator_continuation" && r.status === "implementing" &&
+    unmeasuredPolicyPhaseRequests(state, r).length > 0;
+  const resumeUncertain = !!r.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === r.runId &&
+    ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out));
+  if (r.pendingAction && (r.pendingAction.kind !== "coordinator_continuation" || unmeasuredResume)) {
     const a = r.pendingAction;
     const issued = new Set(
       state.outbound
@@ -98,13 +111,13 @@ export function availableActions(
     actions.push(
       action(
         "resume",
-        uncertain
+        resumeUncertain
           ? "delivery_reconciliation_required"
           : Math.max(a.manualResumeAttempts ?? 0, issued) >= 3
             ? "resume_budget_exhausted"
             : gate && !restore
               ? "decision_required"
-              : r.status !== "escalated" || a.state !== "pending"
+              : !explicitAfterAutomatic && ((r.status !== "escalated" && !unmeasuredResume) || a.state !== "pending")
                 ? "action_not_pending"
                 : a.requiredRole
                   ? "capability_revalidation_required"

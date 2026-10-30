@@ -7,17 +7,22 @@ export const NativeDiagnosticFenceAuthoritySchema = z.object({
 }).strict();
 export type NativeDiagnosticFenceAuthority = z.infer<typeof NativeDiagnosticFenceAuthoritySchema>;
 
+/** Singleton specialist roles whose retired pane's blocked report to the Coordinator can be fenced; never Developers, Runtime or Conversation. */
+export const FENCEABLE_SPECIALIST_ROLES: readonly string[] = ["planner", "architect", "specifier", "reviewer", "qa", "tester", "security"];
+
 /** A cancellation tombstone, never an ACK, refusal receipt or task result. Scope is deliberately narrow. */
 export const NativeDiagnosticFenceSchema = NativeDiagnosticFenceAuthoritySchema.extend({
   message: RoleMessageSchema, decidedAt: IsoDateTimeSchema,
   disposition: z.literal("fenced_without_delivery_claim")
 }).strict().superRefine((value, context) => {
   const message = value.message, payload = message.payload;
-  if (message.sender.role !== "coordinator" || message.recipient.role !== "conversation" || message.type !== "task.status" ||
+  const route = message.sender.role === "coordinator" && message.recipient.role === "conversation" ||
+    FENCEABLE_SPECIALIST_ROLES.includes(message.sender.role) && message.recipient.role === "coordinator";
+  if (!route || message.type !== "task.status" ||
       !message.sender.agent_id || !message.sender.pane_id ||
       payload === null || typeof payload !== "object" || Array.isArray(payload) || payload.status !== "blocked" ||
       typeof payload.summary !== "string" || !payload.summary.trim())
-    context.addIssue({ code: "custom", message: "Only a stale blocked Coordinator diagnostic to Conversation can be fenced" });
+    context.addIssue({ code: "custom", message: "Only a stale blocked Coordinator diagnostic to Conversation, or a stale blocked specialist report to the Coordinator, can be fenced" });
 });
 export type NativeDiagnosticFence = z.infer<typeof NativeDiagnosticFenceSchema>;
 

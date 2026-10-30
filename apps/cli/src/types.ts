@@ -119,38 +119,42 @@ export interface SetupCommandArgs extends GlobalCliFlags {
   readonly revokeAllHookTrust?: boolean | undefined;
   readonly dir?: string | undefined;
   readonly catalogDir?: string | undefined;
-  /** Read the Context7 API key from standard input and store it privately; never accepted on the command line. */
-  readonly context7ApiKeyStdin?: boolean | undefined;
-  /** Leave Context7 out of the Gateway configuration. */
-  readonly noContext7?: boolean | undefined;
+  /** Leave DeepWiki out of the Gateway configuration. */
+  readonly noDeepWiki?: boolean | undefined;
 }
 
-/** `bflow docs <search|lookup|status>`: documentation lookups through the shared Gateway's Context7 service. Read-only. */
+/** `bflow docs <ask|structure|contents|status|probe>`: public repository documentation through the shared Gateway's DeepWiki service. Read-only. */
 export interface DocsCommonArgs extends GlobalCliFlags {
   readonly command: "docs";
   /** Role whose Gateway grant an operator-run command acts under. Agents use their own registration and ignore it. */
   readonly role?: string | undefined;
   readonly timeoutMs?: number | undefined;
 }
-export interface DocsSearchArgs extends DocsCommonArgs {
-  readonly action: "search";
-  readonly library: string;
-  readonly query?: string | undefined;
-  readonly version?: string | undefined;
+/** The repository and its visibility come only from the operator's arguments; nothing is inferred from Git remotes. */
+export interface DocsRepositoryArgs extends DocsCommonArgs {
+  readonly repo: string;
+  /** `--public`: the operator declares the repository public. Without it nothing is sent. */
+  readonly publicRepository: boolean;
 }
-export interface DocsLookupArgs extends DocsCommonArgs {
-  readonly action: "lookup";
-  readonly library?: string | undefined;
-  readonly libraryId?: string | undefined;
-  readonly query: string;
-  readonly language?: string | undefined;
-  readonly version?: string | undefined;
-  readonly noCache?: boolean | undefined;
+export interface DocsAskArgs extends DocsRepositoryArgs {
+  readonly action: "ask";
+  readonly question: string;
+}
+export interface DocsStructureArgs extends DocsRepositoryArgs {
+  readonly action: "structure";
+}
+export interface DocsContentsArgs extends DocsRepositoryArgs {
+  readonly action: "contents";
 }
 export interface DocsStatusArgs extends DocsCommonArgs {
   readonly action: "status";
 }
-export type DocsCommandArgs = DocsSearchArgs | DocsLookupArgs | DocsStatusArgs;
+/** Owner-run evidence: `--live` contacts the hosted service; without it the probe is skipped. */
+export interface DocsProbeArgs extends DocsCommonArgs {
+  readonly action: "probe";
+  readonly live: boolean;
+}
+export type DocsCommandArgs = DocsAskArgs | DocsStructureArgs | DocsContentsArgs | DocsStatusArgs | DocsProbeArgs;
 
 export interface SetupCommandOutput {
   readonly mode: "check" | "dry_run" | "apply" | "repair";
@@ -192,8 +196,6 @@ export interface SetupIntegrationOptions {
   readonly isolatedRoot?: string | undefined;
   /** Read-only provider login probe for the doctor; defaults to each provider adapter's own status command. */
   readonly probeProviderLogin?: import("@bflow/machine-setup").ProviderLoginProbe | undefined;
-  /** A Context7 API key supplied by the caller instead of standard input or the environment. */
-  readonly context7ApiKey?: string | undefined;
 }
 
 export interface EnvironmentCommandArgs extends GlobalCliFlags {

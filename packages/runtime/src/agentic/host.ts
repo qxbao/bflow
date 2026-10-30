@@ -1,3 +1,4 @@
+import { encodeNativePluginSelection } from "./native-intent-selection.js";
 import { HostChat } from "../interaction/chat.js";
 import { registeredAssistantHistory, registeredChatAvailable, chatMessageId } from "../interaction/chat-history.js";
 import { ProjectionFeed } from "../interaction/events.js";
@@ -650,7 +651,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         socket.once("error", reject);
         socket.once("close", () => { if (!output.includes("\n")) reject(new Error("Native Herdr action closed before acknowledgement; reconcile before retry")); });
         socket.once("connect", () => socket.write(JSON.stringify({ id: message.message_id, method: "plugin.action.invoke", params: { plugin_id: "bflow.receipts", action_id: "deliver",
-          context: { selected_text: JSON.stringify(message), correlation_id: message.causation_id ?? message.message_id, focused_pane_id: sender.paneId, workspace_id: sender.workspaceId } } }) + "\n"));
+          context: { selected_text: encodeNativePluginSelection(operationId, message), correlation_id: message.causation_id ?? message.message_id, focused_pane_id: sender.paneId, workspace_id: sender.workspaceId } } }) + "\n"));
         socket.on("data", chunk => { output += String(chunk); if (output.length > 1024 * 1024) { socket.destroy(); reject(new Error("Oversized native response")); }
           if (output.includes("\n")) { socket.end(); try { const response = record(JSON.parse(output.split("\n")[0]!)); if (response.error) reject(new Error(JSON.stringify(response.error))); else accept(); } catch (error) { reject(error); } } });
       });
@@ -844,7 +845,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const mismatch = () => new Error(`Pane '${pane.paneId}' has no matching native Bflow launch receipt; preserve it and reconcile provider startup`);
       if (receipt.role !== pane.role || receipt.paneId !== pane.paneId) throw mismatch();
       if (typeof receipt.nativeSessionId === "string") {
-        if (!pane.session || receipt.nativeSessionId !== pane.session.value) throw mismatch();
+        if (!pane.session)
+          throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId}: the manifest has not recorded its SessionStart native session yet.`);
+        if (receipt.nativeSessionId !== pane.session.value) {
+          const actual = record(record(record(JSON.parse(await herdr(["agent", "get", pane.paneId]))).result).agent);
+          const native = actual.agent_session ? record(actual.agent_session) : undefined;
+          const provider = platformRoles.find(option => option.role === pane.role)?.provider ?? pane.agentKind;
+          if (native?.kind === "id" && native.value === receipt.nativeSessionId &&
+              (native.source === provider || native.source === `herdr:${provider}`) && (actual.name ?? actual.agent) === pane.agentId)
+            throw new Error(`[bflow:native-startup-pending] ${pane.role} pane ${pane.paneId}: the manifest still records an earlier native session; wait for the observed SessionStart session.`);
+          throw mismatch();
+        }
         startupPaths.set(pane.role, "hook");
       } else {
         // The bootstrap receipt must name the launch this host prepared for the role (when one is prepared).
@@ -1115,6 +1126,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     });
     // Stops of an earlier host session are not re-judged here: the new Coordinator has had no turn yet, so a missing next action
     // from a previous session is not "no response". Unsettled Stops of this session are reconciled by the normal Stop loop.
+    // Explicit owner startup after receipt replay, before intake: never replay a web mutation.
+    for (const commandId of await workspace.runtime.recoverUnqueuedWebCancellations(webStore))
+      process.stderr.write(`Bflow web cancellation ${commandId}: not enqueued before daemon restart; no command replayed\n`);
     for (const turn of await receipts.recoverAgyNativeTurns()) queueAgyNativePrompt(turn);
     await workspace.runtime.resumeRecoverableRuns();
     manifest = accepted;
@@ -2704,7 +2718,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
   if (["reviewer", "qa", "tester"].includes(role)) tools.push(
     { name: "inspect_review", description: "Capture the exact assigned diff. For QA workflow gates also run the owner-configured tests at that integrated revision and return qaBehavioralObservation; use complete_review afterward, never record_behavioral_verification for this gate. Parameters: messageId, diffOffset?, diffLimit?, integrityOffset? (page test-integrity findings until nextFindingOffset is null)" },
     { name: "complete_review", description: "Return a verdict after inspect_review; parameters: reviewId, messageId, summary, criteria:[{criterionId,passed,summary}], testIntegrityVerdicts?:[{findingId,verdict:equivalent|confirmed_violation,reason,evidence:[{revision,path,line,excerpt}]}] (Reviewer must cover every finding from testIntegrityObservation; confirmed violations require owner exception), findings?:[{code,severity,message,filePath,line,criterionId}], findingVerdicts?:[{findingId,verdict,summary}]" });
-  if (["qa", "tester"].includes(role)) tools.push({ name: "inspect_alternative_verification", description: "Capture exact committed diff and accepted dossier before evaluating criteria; runId,taskId. For policy manual review add phase (green/refactor/verification), then pass observationId and explicit criterion judgments to record_behavioral_verification.review" }, { name: "record_alternative_verification", description: "Capture actual committed documentation diff and independent manual acceptance evidence; parameters: observationId,runId,taskId,criteria:[{criterionId,passed,summary}]" });
+  if (["qa", "tester"].includes(role)) tools.push({ name: "inspect_alternative_verification", description: "Capture exact committed diff and accepted dossier before evaluating criteria; runId,taskId. For policy manual review add phase (green/refactor/verification), large packets are paged: read every nextOffset with the same cursor/runId/taskId/phase, concatenate page strings and parse JSON; the final page supplies observationId. Then pass observationId and explicit criterion judgments to record_behavioral_verification.review" }, { name: "record_alternative_verification", description: "Capture actual committed documentation diff and independent manual acceptance evidence; parameters: observationId,runId,taskId,criteria:[{criterionId,passed,summary}]" });
   if (["qa", "tester"].includes(role)) tools.push({ name: "record_behavioral_verification", description: "Execute an assigned phase using the owner's argv, exact committed tests and real output; runId,taskId,phase. If policy requires manual_review, first inspect_alternative_verification with phase, then supply review:{observationId,criteria:[{criterionId,passed,summary}]} covering every active criterion. Never supply measured test output yourself." });
   const string = { type:"string", minLength:1 }, array = {type:"array",items:string}, object = {type:"object"};
   const strictObject = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
@@ -2767,7 +2781,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     inspect_review:{properties:{messageId:string,diffOffset:{type:"integer",minimum:0},diffLimit:{type:"integer",minimum:1,maximum:65536},integrityOffset:{type:"integer",minimum:0}},required:["messageId"]},
     request_test_integrity_exception:{properties:{reviewId:string,findingId:string,reason:{type:"string",minLength:10,maxLength:1000}},required:["reviewId","findingId","reason"]},
     complete_review:{properties:{reviewId:string,messageId:string,summary:string,testIntegrityVerdicts:{type:"array",items:{type:"object",properties:{findingId:string,verdict:{type:"string",enum:["equivalent","confirmed_violation"]},reason:{type:"string",minLength:10,maxLength:4000},evidence:{type:"array",minItems:1,maxItems:8,items:{type:"object",properties:{revision:{type:"string",pattern:"^[a-f0-9]{40}$"},path:string,line:{type:"integer",minimum:1},excerpt:{type:"string",minLength:1,maxLength:4096}},required:["revision","path","line","excerpt"],additionalProperties:false}}},required:["findingId","verdict","reason","evidence"],additionalProperties:false}},criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}},findingVerdicts:{type:"array",items:{type:"object",properties:{findingId:string,verdict:{type:"string",enum:["confirmed","rejected"]},summary:string},required:["findingId","verdict","summary"],additionalProperties:false}},findings:{type:"array",items:object}},required:["reviewId","messageId","summary","criteria"]},
-    inspect_alternative_verification:{properties:{runId:string,taskId:string,phase:{type:"string",enum:["green","refactor","verification"]}},required:["runId","taskId"]},
+    inspect_alternative_verification:{properties:{runId:string,taskId:string,phase:{type:"string",enum:["green","refactor","verification"]},view:{type:"string",enum:["full","page"]},cursor:{type:"string",pattern:"^[a-f0-9]{64}$"},offset:{type:"integer",minimum:0,maximum:16777216}},required:["runId","taskId"]},
     record_alternative_verification:{properties:{observationId:string,runId:string,taskId:string,criteria:{type:"array",items:{type:"object",properties:{criterionId:string,passed:{type:"boolean"},summary:string},required:["criterionId","passed","summary"],additionalProperties:false}}},required:["observationId","runId","taskId","criteria"]},
     propose_task_handover:{properties:{runId:string,taskId:string,proposal:object},required:["proposal"]},
     read_task_handover:{properties:{runId:string,taskId:string,view:{type:"string",enum:["full","page"]},cursor:{type:"string",pattern:"^[a-f0-9]{64}$"},offset:{type:"integer",minimum:0}},required:[]},

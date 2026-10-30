@@ -31,29 +31,20 @@ export function failure(kind: DocsFailureKind, message: string, extra: Partial<O
   return { kind, message, retryable: RETRYABLE.has(kind), ...extra };
 }
 
-const splitVersions = (value: string) => value.split(",").map(item => item.trim()).filter(Boolean);
-
 /**
  * Classifies the text of a tool result that the server flagged `isError`. The server answers HTTP 200 for all of these,
- * so the text is the only signal. Patterns marked "observed" were captured from the hosted server on 2026-10-19; the
- * rate-limit and quota patterns are NOT observed (the limit could not be provoked) and are matched loosely.
+ * so the text is the only signal. The patterns are loose: DeepWiki's wording for an unindexed repository, a validation
+ * failure or a limit was not exhaustively observed, and anything unrecognised stays a generic upstream error.
  */
 export function classifyToolError(text: string): DocsFailure {
   const trimmed = text.trim();
-  // observed: "Invalid API key. Please check your API key. API keys should start with 'ctx7sk' prefix."
-  if (/invalid api key|unauthori[sz]ed|authentication (failed|required)/i.test(trimmed)) return failure("auth_invalid", "The Context7 API key was rejected.");
-  // observed: `Version "v1.0.0" not found for library "/react/react". Available versions: v19.2.7, v18.2.0`
-  const version = /Version\s+"([^"]+)"\s+not found for library\s+"([^"]+)"(?:\.\s*Available versions:\s*(.+))?/i.exec(trimmed);
-  if (version) return failure("version_not_found", `Version ${version[1]} is not available for ${version[2]}.`,
-    { libraryId: version[2]!, availableVersions: version[3] ? splitVersions(version[3]) : [] });
-  // observed: `Library "/nobody/nothing-xyz" not found. Please check the library ID or your access permissions.`
-  const library = /Library\s+"([^"]+)"\s+not found/i.exec(trimmed);
-  if (library) return failure("library_not_found", `Library ${library[1]} was not found, or the credential has no access to it.`, { libraryId: library[1]! });
-  // observed: "Input validation error: Invalid arguments for tool query-docs: libraryId: Invalid input: ..."
+  // An unindexed or private repository is answered with a "not found" style message; it is not a transport problem.
+  if (/repo(sitory)?\b.*(not found|not indexed|does not exist|no access)|not found.*repo(sitory)?|has not been indexed/i.test(trimmed))
+    return failure("library_not_found", "DeepWiki has no wiki for this repository. It may be private or not yet indexed.");
   if (/input validation error|invalid arguments/i.test(trimmed)) return failure("invalid_arguments", trimmed.slice(0, 300));
-  // not observed
-  if (/rate limit|too many requests|quota (exceeded|reached)|\b429\b/i.test(trimmed)) return failure("rate_limited", "Context7 reported a rate limit or quota.");
-  return failure("upstream_error", trimmed.slice(0, 300) || "Context7 reported an error without details.");
+  if (/rate limit|too many requests|quota (exceeded|reached)|\b429\b/i.test(trimmed)) return failure("rate_limited", "DeepWiki reported a rate limit or quota.");
+  // Unclassified upstream error text is untrusted and may echo request content: report it generically (fail closed).
+  return failure("upstream_error", "DeepWiki reported an error for this request.");
 }
 
 /** A transport or gateway error as `OperationResult` carries it (contract error code plus structured details). */
@@ -72,9 +63,7 @@ export function classifyGatewayError(error: GatewayErrorLike): DocsFailure {
   const retryAfterMs = typeof details["retryAfterMs"] === "number" ? details["retryAfterMs"] : undefined;
   const extra = { ...(status !== undefined ? { status } : {}), ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
   switch (kind) {
-    case "auth_missing": return failure("auth_missing", "The Context7 API key is configured but not available to the Gateway.", extra);
-    case "auth_rejected": return failure("auth_invalid", "Context7 rejected the API key.", extra);
-    case "rate_limited": return failure("rate_limited", "Context7 rate limit reached.", extra);
+    case "rate_limited": return failure("rate_limited", "DeepWiki rate limit reached.", extra);
     case "network": return failure("network", error.message, extra);
     case "timeout": return failure("timeout", error.message, extra);
     case "protocol": return failure("protocol", error.message, extra);

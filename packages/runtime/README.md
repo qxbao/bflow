@@ -1913,3 +1913,49 @@ Conversation instead of sending repair notices to a terminal Developer execution
 This uses existing private observation/receipt storage and adds no public contract or
 database migration. Coverage is source plus local Runtime tests; it does not establish live
 provider/Herdr reviewer judgment quality, dbt results, or warehouse acceptance.
+
+## Automatic TypeScript verification
+
+With automatic runner detection, an installed repository-local TypeScript compiler
+and regular `tsconfig.json` projects provide the `auto:typecheck` planning label.
+The host runs a fixed compiler build over the discovered projects in a temporary,
+revision-pinned checkout using the existing verification sandbox and read-only
+dependency mounts. It does not run a package script supplied by an agent. Compiler
+diagnostics fail the check; timeout, truncated output and launcher failures remain
+infrastructure errors. Compiler checks supplement mapped behavioral acceptance and
+never establish the failing behavioral assertion required for TDD Red.
+
+`auto:static` also parses changed TypeScript files through that compiler, including
+test files outside project includes, without executing emitted code. Missing compiler
+support and other unsupported source types fail closed. Original execution-definition
+pins remain enforced. Successful measurements bind the accepted criterion, revision
+and command and receive the same authenticated host receipts as existing checks.
+Compiler execution is bounded to five minutes and shares the independent phase's
+nine-minute budget with behavioral commands. The planning view reports the compiler
+version and project scope. Owner-only behavioral runner configuration retains its
+existing behavior; this is not general lint or polyglot typechecker support.
+
+Evidence includes local tests with a real compiler, syntax errors outside project
+includes, original-config drift and gate receipt binding. A sandboxed measurement of
+this repository also passed; this does not establish full SDLC live acceptance.
+
+Policy-phase inspection keeps the complete committed diff and all unique accepted
+requirements inline while removing duplicated strategy fields and prior raw measurement
+logs. Prior evidence is referenced by immutable receipt/artifact identity and is still
+authenticated in full before accepting a later phase. Large source diffs can still
+exceed a provider's output budget; this compaction is not arbitrary diff truncation.
+
+An owner may explicitly resume a released, current conditional-evidence request that
+has no measurement or recorded outcome, even when its QA blocker left the run in an
+implementing Coordinator continuation. The web action binds the exact pending action
+version and follows the existing capability preflight, lease/fence, human-gate and
+bounded retry checks. It never reuses an old review verdict or automatically resumes
+an active measurement. Ordinary Coordinator continuations remain unchanged.
+
+Owner startup can settle an interrupted web cancellation as failed when its validated host receipt has a dispatch intent but the complete retained Runtime journal proves the cancellation was never enqueued. This runs after receipt replay and before intake, never replays the cancellation, and leaves accepted-only intents, queued/uncertain deliveries, pending Core writes and unverifiable snapshots unresolved. A failed cancellation is not proof that a process stopped; a new owner cancellation still uses normal stop/lease reconciliation.
+
+Ingress refusals of an exactly admitted, superseded Conversation requirement remain diagnostic-only. They cannot pause a newer requirement revision; current and unrecognized envelopes retain the normal bounded failure/escalation path.
+
+Oversized policy-phase QA inspections are served as lossless UTF-8 JSON pages by `inspect_alternative_verification` (`cursor`, `offset`, optional `view: page`). Follow every `nextOffset` with the same run/task/phase and cursor, concatenate pages and parse JSON; the final page supplies `observationId`. Each continuation rechecks the assigned native verifier, active lease/request, phase and clean pinned source. Cursor state is bounded and ephemeral; a stale cursor requires a fresh inspection. The immutable captured observation and verdict/evidence validators are unchanged, and no protected provider directory is exposed.
+
+Large native Herdr deliveries use a digest-bound reference to the already persisted host intent instead of putting the full envelope into the plugin context environment. The native helper resolves only this repository/session's unknown, non-refused intent, then keeps the existing physical sender checks and signs the original complete RoleMessage. A reference is not permission to retry uncertain delivery; the producer's original reconciliation guards remain in force.

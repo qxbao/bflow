@@ -78,7 +78,7 @@ export function stringifyConfigYaml(value: unknown): string {
       "requiredMcpServices",
       "requiredTools",
       "toolPolicy",
-      "context7",
+      "deepwiki",
       "skills",
       "repositoryId",
       "workspaceRoot",
@@ -236,7 +236,7 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
 
   const toolsBanner = [
     "  # ============================================================================",
-    "  # 4. CẤU HÌNH CÔNG CỤ TÍCH HỢP (INTEGRATED TOOLS, CONTEXT7 & SKILLS)",
+    "  # 4. CẤU HÌNH CÔNG CỤ TÍCH HỢP (INTEGRATED TOOLS, DEEPWIKI & SKILLS)",
     "  # ============================================================================",
     "  # Nguyên tắc mặc định: TẤT CẢ các công cụ tích hợp đều ĐƯỢC PHÉP sử dụng (`enabled: true`, `required: false`)",
     "  # ngay cả khi không khai báo trong file config. Chỉ khi khai báo rõ `enabled: false` thì công cụ mới bị tắt.",
@@ -254,14 +254,11 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     "  tools:"
   ].join("\n");
 
-  const context7Banner = [
-    "  # Dịch vụ tra cứu tài liệu thư viện bên ngoài Context7 (qua Shared MCP Gateway):",
-    "  #   - enabled                  : (boolean: `true` | `false`, mặc định: `true`) Cho phép tra cứu tài liệu qua Context7.",
-    "  #   - required                 : (boolean: `true` | `false`, mặc định: `false`) Bắt buộc Context7 sẵn sàng khi `bflow up`.",
-    "  #   - cache.enabled            : (boolean: `true` | `false`, mặc định: `false`) Bật bộ nhớ đệm tài liệu cục bộ trên đĩa.",
-    "  #   - cache.ttlSeconds         : (integer: `60..604800`, mặc định: `3600`) Thời gian sống của cache (giây).",
-    "  #   - cache.allowAuthenticated : (boolean: `true` | `false`, mặc định: `false`) Cho phép lưu cache kết quả dùng API key riêng.",
-    "  context7:"
+  const deepwikiBanner = [
+    "  # Dịch vụ đọc tài liệu kho mã công khai DeepWiki (qua Shared MCP Gateway, endpoint cố định, không cần API key):",
+    "  #   - enabled  : (boolean: `true` | `false`, mặc định: `true`) Cho phép tra cứu tài liệu qua DeepWiki.",
+    "  #   - required : (boolean: `true` | `false`, mặc định: `false`) Bắt buộc DeepWiki sẵn sàng khi `bflow up`.",
+    "  deepwiki:"
   ].join("\n");
 
   const skillsBanner = [
@@ -305,7 +302,7 @@ export function renderEnvironmentConfigYaml(value: unknown): string {
     .replace(/^  concurrency:\n/m, `${concurrencyBanner}\n`)
     .replace(/^  permissions:\n/m, `${permissionsBanner}\n`)
     .replace(/^  tools:\n/m, `${toolsBanner}\n`)
-    .replace(/^  context7:\n/m, `${context7Banner}\n`)
+    .replace(/^  deepwiki:\n/m, `${deepwikiBanner}\n`)
     .replace(/^  skills:\n/m, `${skillsBanner}\n`)
     .replace(/^  repositoryId:/m, identityBanner)
     .replace(/^projectName:/m, projectBanner);

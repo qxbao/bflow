@@ -13,7 +13,7 @@ import { EnvironmentProviderSchema, isGovernanceRoleConfig, type EnvironmentGove
   type EnvironmentRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { readGatewayRepositoriesState } from "./gateway-repositories.js";
-import { CONTEXT7_SERVICE_ID, CONTEXT7_TOOLS } from "./context7-constants.js";
+import { DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS } from "./deepwiki-constants.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import { loadMachineSkillCatalog, type MachineSkillCatalog } from "./skill-catalog.js";
 
@@ -44,8 +44,8 @@ export interface HostPlatformContext {
 export interface HostPlatformDeps {
   readonly context: HostPlatformContext;
   readonly fileExists?: ((path: string) => boolean) | undefined;
-  /** Whether the Gateway reports Context7 ready right now. Unknown counts as not ready. */
-  readonly context7Ready?: boolean | undefined;
+  /** Whether the Gateway reports DeepWiki ready right now. Unknown counts as not ready. */
+  readonly deepwikiReady?: boolean | undefined;
   /** Receives operator-visible warnings (degraded mode). */
   readonly warn?: ((message: string) => void) | undefined;
   readonly inventoryReason?: ((toolId: string) => string | undefined) | undefined;
@@ -124,7 +124,7 @@ export async function loadHostPlatformContext(input?: EnvironmentCompositionInpu
       parsed.data.tool.kind === requirement.kind && (requirement.serviceId === undefined || parsed.data.serviceId === requirement.serviceId) &&
       requirement.operations.every(operation => parsed.data.tool.operations.includes(operation)));
   }).map(raw => (raw as { serviceId: string }).serviceId));
-  if (input && input.config.environment.context7?.enabled !== false) requestedServices.add(CONTEXT7_SERVICE_ID);
+  if (input && input.config.environment.deepwiki?.enabled !== false) requestedServices.add(DEEPWIKI_SERVICE_ID);
   const serviceReadiness = new Map<string, { status: "ready" | "blocked" | "missing" | "unknown"; discoveredTools: readonly string[]; reason?: string }>();
   for (const serviceId of requestedServices) {
     const observed = await readGatewayReadiness(platform.paths.state, serviceId);
@@ -208,9 +208,9 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     throw new Error(`Legacy environment.requiredMcpServices cannot be safely mapped to role operations; migrate each service to environment.toolPolicy with explicit role and operation allowlists (services: ${environment.requiredMcpServices!.join(", ")}).`);
   const toolPolicy = resolveRepositoryToolPolicy(input, deps.context.machineId);
   const serviceReadiness = new Map(deps.context.serviceReadiness ?? []);
-  if (environment.context7?.enabled !== false && !serviceReadiness.has(CONTEXT7_SERVICE_ID) && deps.context7Ready !== undefined)
-    serviceReadiness.set(CONTEXT7_SERVICE_ID, { status: deps.context7Ready ? "ready" : "blocked",
-      discoveredTools: deps.context7Ready ? [...CONTEXT7_TOOLS] : [] });
+  if (environment.deepwiki?.enabled !== false && !serviceReadiness.has(DEEPWIKI_SERVICE_ID) && deps.deepwikiReady !== undefined)
+    serviceReadiness.set(DEEPWIKI_SERVICE_ID, { status: deps.deepwikiReady ? "ready" : "blocked",
+      discoveredTools: deps.deepwikiReady ? [...DEEPWIKI_TOOLS] : [] });
   const toolContext = { ...deps.context, serviceReadiness };
   const toolGrants = resolveToolGrants(toolPolicy, toolContext, input, deps.warn, deps.inventoryReason, deps.onToolStatus);
   const grantsByRole = new Map<string, ResolvedToolGrant[]>();
@@ -345,27 +345,27 @@ export function resolveRepositoryToolPolicy(input: EnvironmentCompositionInput, 
       throw new Error("environment.toolPolicy repository identity must match this repository");
     const { digest: _digest, ...body } = parsed;
     if (canonicalDigest(body) !== parsed.digest) throw new Error("environment.toolPolicy digest does not match its canonical contents");
-    const legacyContext7Roles = ["specifier", "architect", "planner", "developer", "reviewer", "qa"];
-    if (input.config.environment.context7?.enabled === true) {
-      const requirement = parsed.requirements.find(item => item.toolId === CONTEXT7_SERVICE_ID && item.serviceId === CONTEXT7_SERVICE_ID);
-      if (!requirement || requirement.operations.length !== CONTEXT7_TOOLS.length ||
-          !CONTEXT7_TOOLS.every(operation => requirement.operations.includes(operation)) ||
-          requirement.requiredness !== (input.config.environment.context7.required === true ? "required" : "optional") ||
-          requirement.roles.length !== legacyContext7Roles.length || !legacyContext7Roles.every(role => requirement.roles.includes(role as typeof requirement.roles[number])))
-        throw new Error("Legacy environment.context7 conflicts with environment.toolPolicy; retain its exact service, operation, requiredness and role allowlist or remove the legacy field");
+    const legacyDeepWikiRoles = ["specifier", "architect", "planner", "developer", "reviewer", "qa"];
+    if (input.config.environment.deepwiki?.enabled === true) {
+      const requirement = parsed.requirements.find(item => item.toolId === DEEPWIKI_SERVICE_ID && item.serviceId === DEEPWIKI_SERVICE_ID);
+      if (!requirement || requirement.operations.length !== DEEPWIKI_TOOLS.length ||
+          !DEEPWIKI_TOOLS.every(operation => requirement.operations.includes(operation)) ||
+          requirement.requiredness !== (input.config.environment.deepwiki.required === true ? "required" : "optional") ||
+          requirement.roles.length !== legacyDeepWikiRoles.length || !legacyDeepWikiRoles.every(role => requirement.roles.includes(role as typeof requirement.roles[number])))
+        throw new Error("Legacy environment.deepwiki conflicts with environment.toolPolicy; retain its exact service, operation, requiredness and role allowlist or remove the legacy field");
     }
     return parsed;
   }
   const requirements: RoleToolRequirement[] = [];
-  const context7 = input.config.environment.context7;
-  if (context7?.enabled !== false) {
+  const deepwiki = input.config.environment.deepwiki;
+  if (deepwiki?.enabled !== false) {
     const roles = ["specifier", "architect", "planner", "developer", "reviewer", "qa"] as const;
     requirements.push({
-      toolId: "context7",
+      toolId: "deepwiki",
       kind: "native_remote_mcp",
-      serviceId: CONTEXT7_SERVICE_ID,
-      operations: [...CONTEXT7_TOOLS],
-      requiredness: context7?.required ? "required" : "optional",
+      serviceId: DEEPWIKI_SERVICE_ID,
+      operations: [...DEEPWIKI_TOOLS],
+      requiredness: deepwiki?.required ? "required" : "optional",
       roles: [...roles],
       triggers: ["external_documentation"]
     });
