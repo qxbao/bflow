@@ -47,8 +47,6 @@ import {
   CodexProviderAdapter
 } from "@bflow/agent-providers";
 import { wrapSetupComponents, setupGatewayDiagnostics, type SetupGatewayRemoteRequirement } from "./setup-gateway.js";
-import { context7KeyFingerprint, readKeyFromStream, readStoredContext7Key, validateContext7ApiKey } from "./context7-secret.js";
-import { describeExistingContext7, detectExistingContext7 } from "./context7-detect.js";
 import { formatSetupPreview, readableLabel, SETUP_COMPONENT_LABELS } from "./presentation.js";
 import { createDefaultSetupConfiguration, isolatedProviderHomes } from "./setup-defaults.js";
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
@@ -265,34 +263,16 @@ export async function executeSetupCommand(
     diagnostics.push(...defaults.diagnostics);
   }
 
-  // Context7 is a hosted MCP service shared through the Gateway: nothing to install, one optional API key.
+  // DeepWiki is a hosted MCP service shared through the Gateway: nothing to install and no credential. A leftover Context7 key
+  // (environment variable or file from an earlier release) is neither read nor forwarded; only its presence is mentioned.
   const remoteServices: SetupGatewayRemoteRequirement[] = [];
-  let context7ApiKey: string | undefined;
-  if (!context?.setup?.machineSetup && !context?.setup?.toolInstaller && !args.noContext7 && (platform.os === "linux" || platform.os === "darwin")) {
-    const injected = context?.setup?.context7ApiKey;
-    if (args.context7ApiKeyStdin && injected === undefined && process.stdin.isTTY)
-      throw new Error("--context7-api-key-stdin reads the key from standard input; pipe it in, for example: printf %s \"$KEY\" | bflow setup --apply --context7-api-key-stdin");
-    // A key the caller handed over explicitly (stdin or injection) must be valid. One merely present in the environment is advisory:
-    // a stale value must not abort an unrelated read-only `--check`.
-    const explicit = args.context7ApiKeyStdin ? (injected ?? await readKeyFromStream(process.stdin)) : injected;
-    if (args.context7ApiKeyStdin && (explicit === undefined || explicit.trim() === "")) throw new Error("The Context7 API key read from standard input is empty.");
-    const supplied = explicit ?? process.env.CONTEXT7_API_KEY;
-    if (supplied !== undefined && supplied.trim() !== "") {
-      const validated = validateContext7ApiKey(supplied);
-      if (validated.ok) context7ApiKey = validated.key;
-      else if (explicit !== undefined) throw new Error(validated.reason);
-      else diagnostics.push(`CONTEXT7_API_KEY in the environment is ignored: ${validated.reason}`);
-    }
-    const stored = await readStoredContext7Key(platform.paths);
-    if (stored.status === "unsafe" || stored.status === "invalid") diagnostics.push(`Context7: the stored API key is ignored (${stored.reason}) and Context7 runs anonymously until it is stored again.`);
-    const activeKey = context7ApiKey ?? (stored.status === "ok" ? stored.key : undefined);
-    remoteServices.push({ toolId: "context7", authenticated: activeKey !== undefined, keyFingerprint: activeKey !== undefined ? context7KeyFingerprint(activeKey) : null });
-    diagnostics.push(`Context7 (https://mcp.context7.com/mcp) is shared through the Gateway and sends library names and documentation questions to that service. It runs ${activeKey !== undefined ? "with an API key" : "anonymously with lower rate limits; store a key with --context7-api-key-stdin or CONTEXT7_API_KEY"}. Disable it with --no-context7.`);
-    if (!isolatedRoot) {
-      const host = defaultHostEnvironment();
-      diagnostics.push(...describeExistingContext7(await detectExistingContext7({ homeDirectory: host.homeDir,
-        codexHome: host.env.CODEX_HOME ? resolve(host.env.CODEX_HOME) : join(host.homeDir, ".codex"), runner: { run: (command, options) => runner.run([...command], options) } })));
-    }
+  if (!context?.setup?.machineSetup && !context?.setup?.toolInstaller && !args.noDeepWiki && (platform.os === "linux" || platform.os === "darwin")) {
+    remoteServices.push({ toolId: "deepwiki" });
+    diagnostics.push("DeepWiki (https://mcp.deepwiki.com/mcp) is shared through the Gateway and sends public repository names and documentation questions to that service. It needs no API key. Disable it with --no-deepwiki.");
+    if ((process.env.CONTEXT7_API_KEY ?? "").trim() !== "")
+      diagnostics.push("CONTEXT7_API_KEY in the environment is ignored; DeepWiki needs no API key and the legacy value is never read or forwarded.");
+    if (existsSync(join(platform.paths.state, "secrets", "context7-api-key")))
+      diagnostics.push("A Context7 key file from an earlier release remains in the private state directory; it is ignored and never read. Delete it when it is no longer needed.");
   }
 
   if (launchRequirements.length) {
@@ -343,7 +323,7 @@ export async function executeSetupCommand(
 
   const decorateComponents = (components: readonly SetupComponent[], input: ComponentFactoryInput) => {
     let composed = launchRequirements.length || remoteServices.length ? wrapSetupComponents(components, { ...input, serviceManager, launchRequirements,
-      remoteServices, ...(context7ApiKey !== undefined && (args.mode === "apply" || args.mode === "repair") ? { context7ApiKey } : {}) }) : components;
+      remoteServices }) : components;
     if (profileSetup) composed = [...composed, profileSetup];
     return !onProgress ? composed : composed.map(component => ({ componentId: component.componentId, action: component.action,
       rollback: component.rollback, observe: component.observe.bind(component), desired: component.desired.bind(component),

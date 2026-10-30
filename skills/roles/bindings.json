@@ -20,21 +20,21 @@
       "inspect-repository",
       "requirements-analysis",
       "specification-driven-development",
-      "use-context7"
+      "use-deepwiki"
     ],
     "architect": [
       "using-bflow",
       "architecture-analysis",
       "use-gitnexus",
       "design-review",
-      "use-context7"
+      "use-deepwiki"
     ],
     "planner": [
       "using-bflow",
       "task-decomposition",
       "dependency-planning",
       "conditional-tdd",
-      "use-context7"
+      "use-deepwiki"
     ],
     "developer": [
       "using-bflow",
@@ -45,7 +45,7 @@
       "use-gitnexus",
       "use-git-worktree",
       "run-verification",
-      "use-context7"
+      "use-deepwiki"
     ],
     "reviewer": [
       "using-bflow",
@@ -53,7 +53,7 @@
       "security-review",
       "use-gitnexus",
       "run-verification",
-      "use-context7"
+      "use-deepwiki"
     ],
     "tester": [
       "using-bflow",
@@ -68,7 +68,7 @@
       "run-verification",
       "browser-inspection",
       "analyze-failure",
-      "use-context7"
+      "use-deepwiki"
     ],
     "security": [
       "using-bflow",
@@ -79,25 +79,25 @@
   },
   "conditionalBindings": {
     "specifier": [
-      { "toolId": "context7", "skillId": "use-context7" }
+      { "toolId": "deepwiki", "skillId": "use-deepwiki" }
     ],
     "architect": [
       { "toolId": "gitnexus", "skillId": "use-gitnexus" },
-      { "toolId": "context7", "skillId": "use-context7" }
+      { "toolId": "deepwiki", "skillId": "use-deepwiki" }
     ],
     "planner": [
-      { "toolId": "context7", "skillId": "use-context7" }
+      { "toolId": "deepwiki", "skillId": "use-deepwiki" }
     ],
     "developer": [
       { "toolId": "rtk", "skillId": "use-rtk" },
       { "toolId": "gitnexus", "skillId": "use-gitnexus" },
-      { "toolId": "context7", "skillId": "use-context7" },
+      { "toolId": "deepwiki", "skillId": "use-deepwiki" },
       { "toolId": "mempalace", "skillId": "use-mempalace" }
     ],
     "reviewer": [
       { "toolId": "gitnexus", "skillId": "use-gitnexus" },
       { "toolId": "rtk", "skillId": "use-rtk" },
-      { "toolId": "context7", "skillId": "use-context7" }
+      { "toolId": "deepwiki", "skillId": "use-deepwiki" }
     ],
     "tester": [
       { "toolId": "rtk", "skillId": "use-rtk" },
@@ -106,7 +106,7 @@
     "qa": [
       { "toolId": "rtk", "skillId": "use-rtk" },
       { "toolId": "browser", "skillId": "browser-inspection" },
-      { "toolId": "context7", "skillId": "use-context7" },
+      { "toolId": "deepwiki", "skillId": "use-deepwiki" },
       { "toolId": "mempalace", "skillId": "use-mempalace" }
     ],
     "security": [

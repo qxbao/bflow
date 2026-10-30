@@ -190,7 +190,7 @@ outcome `conflict_detected` cùng các đường dẫn xung đột; việc giả
 ### `bflow mcp status [--service <id>]…`
 
 Đọc `$XDG_CONFIG_HOME/bflow/mcp.json`, kiểm tra các stdio executable được pin (sự hiện diện + digest)
-và, **khi caller inject `HighLevelServices.mcpGateway`**, hỏi Gateway về health backend. Binary mặc định chưa inject port này, nên báo `configured: false`/`not_ready` dù machine daemon có thể đang chạy. Dùng `doctor`, machine service status và `docs status` (Context7) để chẩn đoán; không lặp setup chỉ vì nhãn này. Exit 0 chỉ khi Gateway truy cập được
+và, **khi caller inject `HighLevelServices.mcpGateway`**, hỏi Gateway về health backend. Binary mặc định chưa inject port này, nên báo `configured: false`/`not_ready` dù machine daemon có thể đang chạy. Dùng `doctor`, machine service status và `docs status` (DeepWiki) để chẩn đoán; không lặp setup chỉ vì nhãn này. Exit 0 chỉ khi Gateway truy cập được
 và mọi backend được chọn đều healthy; chưa cấu hình Gateway, config không hợp lệ hoặc backend
 unhealthy thì exit 3; `--service` không xác định thì exit 4.
 

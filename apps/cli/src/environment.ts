@@ -91,8 +91,8 @@ export interface EnvironmentDependencies {
   readonly openIntegration?: (input: EnvironmentCompositionInput) => Promise<EnvironmentIntegration>;
   readonly env?: NodeJS.ProcessEnv;
   readonly mcpState?: McpLifecycleState;
-  /** Test seam for the Context7 health check used by `up` and `doctor`. */
-  readonly context7Health?: () => Promise<import("./docs-health.js").Context7Health>;
+  /** Test seam for the DeepWiki health check used by `up` and `doctor`. */
+  readonly deepwikiHealth?: () => Promise<import("./docs-health.js").DeepWikiHealth>;
   readonly providerOverrides?: Partial<Record<"claude" | "codex" | "agy", ProviderProbeOverride>>;
   readonly toolOverrides?: Record<string, { installed: boolean; version?: string }>;
   readonly skillsOverride?: {
@@ -561,15 +561,15 @@ export class EnvironmentLifecycle {
         }
       }
 
-      // Context7 is a hosted documentation service. When the repository marks it required, `up` refuses to start without a
+      // DeepWiki is a hosted documentation service. When the repository marks it required, `up` refuses to start without a
       // Gateway-confirmed service; when optional, roles start without it and a warning is raised when roles are prepared.
-      const context7 = config.environment.context7;
-      if (context7?.enabled === true && context7.required === true) {
-        const { collectContext7Health } = await import("./docs-command.js");
-        const health = await (this.dependencies.context7Health?.() ?? collectContext7Health({ repository, config, env: this.env, probe: false }));
-        const { requiredContext7Refusal } = await import("./docs-health.js");
-        const refusal = requiredContext7Refusal(health);
-        if (refusal) fail(refusal, { component: "mcp:context7" });
+      const deepwiki = config.environment.deepwiki;
+      if (deepwiki?.enabled === true && deepwiki.required === true) {
+        const { collectDeepWikiHealth } = await import("./docs-command.js");
+        const health = await (this.dependencies.deepwikiHealth?.() ?? collectDeepWikiHealth({ repository, config, env: this.env, probe: false }));
+        const { requiredDeepWikiRefusal } = await import("./docs-health.js");
+        const refusal = requiredDeepWikiRefusal(health);
+        if (refusal) fail(refusal, { component: "mcp:deepwiki" });
       }
 
       // Step 6: validate_skills

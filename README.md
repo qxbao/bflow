@@ -23,7 +23,7 @@ Bạn mô tả công việc trong một cuộc hội thoại. Bflow đưa yêu c
 | Phân công nhiều agent | Coordinator lập DAG; Runtime quản lý phụ thuộc, concurrency và quyền thực thi |
 | Kết quả có thể kiểm tra | Đặc tả và tiêu chí nghiệm thu, Conditional TDD, Reviewer/QA độc lập, kiểm tra sau tích hợp |
 | Chọn provider theo vai trò | Claude Code, Codex và Agy qua adapter; model, effort và profile riêng cho từng role |
-| Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho Context7, GitNexus, MemPalace và browser; RTK xử lý output CLI |
+| Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho DeepWiki, GitNexus, MemPalace và browser; RTK xử lý output CLI |
 | Tiếp tục sau gián đoạn | SQLite event log, checkpoint, artifact có checksum và đối soát delivery |
 
 **Trạng thái:** đã có mã nguồn và kiểm thử tích hợp cục bộ cho Runtime/platform (bao gồm GitNexus và browser MCP resource transactions, regression scope, test-integrity gate, task handovers và read-only telemetry). Các báo cáo probe thật có phạm vi riêng; nghiệm thu đầy đủ SDLC với provider/Chrome thật và chiến dịch lỗi khi đang chạy vẫn còn mở. Xem [trạng thái triển khai](docs/implementation-status.md). Agy hiện chưa dùng được cho vai trò Conversation hoặc chế độ unattended.
@@ -92,7 +92,7 @@ bflow tool status                      # Công cụ đã cài
 bflow down                             # Dừng an toàn khi không còn công việc active
 ```
 
-`mcp status` hiện đọc cấu hình nhưng chưa có kết nối kiểm tra health mặc định, nên có thể báo `configured: false` dù Gateway đang chạy. Dùng `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe Context7; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
+`mcp status` hiện đọc cấu hình nhưng chưa có kết nối kiểm tra health mặc định, nên có thể báo `configured: false` dù Gateway đang chạy. Dùng `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe DeepWiki; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
 
 Nếu cần dừng khi còn công việc, `bflow down --yes` xác nhận việc dừng có checkpoint; Runtime vẫn thực thi shutdown barrier. Với run bị chặn, đọc hướng dẫn trong Conversation trước khi trả lời `tiếp tục việc #2` theo nhãn đang hiển thị. [Khôi phục phiên →](docs/guide/session-recovery.md)
 

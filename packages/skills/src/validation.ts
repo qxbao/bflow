@@ -42,9 +42,11 @@ export const BASELINE_COMMANDS = [
   "approve",
   "resume",
   "cancel",
-  "docs search",
-  "docs lookup",
+  "docs ask",
+  "docs structure",
+  "docs contents",
   "docs status",
+  "docs probe",
 ] as const;
 const MetadataSchema = z
   .object({
@@ -119,7 +121,8 @@ function resources(text: string, from: string, files: BundleFiles): void {
   // Conservatively reject HTML so dynamic/embedded remote resources cannot escape the inventory.
   if (
     /<[A-Za-z][\w+.-]*:[^>]*>/.test(text) ||
-    /\b(?:https?|ftp|file|secret):\/\//.test(text)
+    // The one fixed DeepWiki endpoint may be named as inert text; every other scheme-qualified reference stays rejected.
+    /\b(?:https?|ftp|file|secret):\/\//.test(text.replaceAll(/(?<![\w/.<(\[-])https:\/\/mcp\.deepwiki\.com\/mcp(?![\w/?#%@:-]|\.\w)/g, ""))
   )
     throw new Error(`Unfetched remote resource reference in ${from}`);
   if (/<(?:img|script|iframe|a|link|object|embed|source)\b/i.test(text))

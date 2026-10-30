@@ -106,9 +106,9 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
       const runtime = await loadRuntime();
       const { behavioralCommands, mutationChecks, appChecks } = await readOwnerVerification(input.repository.root, runtime);
       const context = await loadHostPlatformContext(input);
-      const context7Ready = input.config.environment.context7?.enabled !== false
-        ? (await readGatewayReadiness(context.stateDirectory, "context7")).status === "ready" : undefined;
-      const platform = await buildHostPlatformOptions(input, { context, context7Ready,
+      const deepwikiReady = input.config.environment.deepwiki?.enabled !== false
+        ? (await readGatewayReadiness(context.stateDirectory, "deepwiki")).status === "ready" : undefined;
+      const platform = await buildHostPlatformOptions(input, { context, deepwikiReady,
         warn: message => process.stderr.write(`Warning: ${message}\n`) });
       const executionResolution = await loadHostExecutionResolution(input, platform);
       await input.validateExecutionPlan?.(executionResolution.plan);

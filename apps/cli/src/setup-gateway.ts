@@ -16,7 +16,6 @@ import {
   validateRepositoryServiceLaunch,
   type RegisteredRepositoryService
 } from "./gateway-repositories.js";
-import { readStoredContext7Key, writeStoredContext7Key } from "./context7-secret.js";
 import { MachineConfigSchema, McpConfigComponent, ServicesComponent, SetupStateStore, EnvironmentManifestComponent,
   loadMachineConfig, MACHINE_CONFIG_FILE, digest, McpConfigFileSchema, SERVICE_MARKER, ToolInstallDescriptorSchema,
   type MachineConfig, type PlatformProfile, type SetupComponent, type SetupContext, type CommandRunner,
@@ -30,11 +29,8 @@ export interface SetupGatewayLaunchRequirement {
 }
 /** A hosted MCP service reached over HTTPS and shared through the Gateway. No local process, nothing to install. */
 export interface SetupGatewayRemoteRequirement {
-  toolId: "context7";
-  /** True when an API key is available, so the Gateway authenticates with a bearer credential. */
-  authenticated: boolean;
-  /** Digest that changes when the key changes, so a rotated key restarts the Gateway. Never the key. */
-  keyFingerprint: string | null;
+  /** DeepWiki needs no credential, so a requirement carries nothing but the service identity. */
+  toolId: "deepwiki";
 }
 export interface SetupGatewayInput {
   platform: PlatformProfile;
@@ -43,8 +39,6 @@ export interface SetupGatewayInput {
   launchRequirements: readonly SetupGatewayLaunchRequirement[];
   /** Hosted MCP services to configure in addition to the managed local ones. */
   remoteServices?: readonly SetupGatewayRemoteRequirement[] | undefined;
-  /** A key to store for the Gateway; held only for the duration of apply and never written to the plan. */
-  context7ApiKey?: string | undefined;
   runner: CommandRunner;
   serviceManager: ServiceManager;
   repositoryRoot?: string;
@@ -105,8 +99,10 @@ const requiredOperations = {
   mempalace: ["mempalace_search"]
 };
 const ApprovalSchema = z.object({ policyVersion: z.literal(2), repositorySelected: z.boolean(), browserExecutable: z.string().nullable(),
-  remoteServices: z.array(z.object({ toolId: z.literal("context7"), authenticated: z.boolean(),
-    keyFingerprint: z.string().regex(/^[a-f0-9]{16}$/).nullable() }).strict()).default([]),
+  // A Gateway approved by an earlier release names the retired Context7 service. It is still readable so setup can recognise
+  // it as stale and replace it; it is never launched, and its key fingerprint is never used.
+  remoteServices: z.array(z.union([z.object({ toolId: z.literal("deepwiki") }).strict(),
+    z.object({ toolId: z.literal("context7"), authenticated: z.boolean(), keyFingerprint: z.string().nullable() }).strict()])).default([]),
   requirements: z.array(z.object({ toolId: z.enum(["gitnexus", "chrome-devtools-mcp", "mempalace"]), executable: z.string(),
     args: z.array(z.string()), requirements: z.array(z.string()), version: z.string().min(1), pin: ToolInstallDescriptorSchema }).strict()) }).strict();
 const GatewayConfigSchema = z.object({
@@ -236,8 +232,8 @@ async function validateLaunches(saved: z.infer<typeof GatewayConfigSchema>) {
     if (digest(definition) !== digest(expectedDefinition)) throw new Error(`Managed ${item.toolId} service policy changed`);
   }
   for (const remote of saved.approval.remoteServices) {
-    const expected = tools.createContext7RemoteService({ authenticated: remote.authenticated,
-      operation: { ...saved.operation, scope: { kind: "machine", machineId } } });
+    if (remote.toolId !== "deepwiki") throw new Error("The Gateway was approved for the retired Context7 service; rerun 'bflow setup' to replace it with DeepWiki");
+    const expected = tools.createDeepWikiRemoteService({ operation: { ...saved.operation, scope: { kind: "machine", machineId } } });
     const definition = saved.services.find(candidate => saved.generatedIds.includes(candidate.serviceId) && candidate.tool.toolId === remote.toolId);
     if (!definition || digest(definition) !== digest(expected)) throw new Error(`Remote ${remote.toolId} service differs from its approved definition`);
   }
@@ -268,8 +264,8 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
   const priorOwnedIds = new Set((priorConfiguration?.generatedIds ?? []).filter(id =>
     config.mcpServices.some(current => current.serviceId === id && priorConfiguration!.services.some(previous => previous.serviceId === id && digest(previous) === digest(current)))));
   const operatorServices = config.mcpServices.filter(item => !priorOwnedIds.has(item.serviceId));
-  const remoteServices = (input.remoteServices ?? []).map(item => ({ toolId: item.toolId, authenticated: item.authenticated,
-    keyFingerprint: item.authenticated ? item.keyFingerprint : null }));
+  // Only the service identity is kept: whatever else a caller supplies (a key, a fingerprint) never reaches the approval or the plan.
+  const remoteServices = (input.remoteServices ?? []).map(item => item.toolId === "deepwiki" ? { toolId: item.toolId } : { ...item });
   const approval = ApprovalSchema.parse({ policyVersion: 2, repositorySelected: false,
     browserExecutable: approvedBrowser(platform), requirements, remoteServices });
   const desiredDigest = digest({ setupPolicyVersion: 2, machineId: platform.machineId, repositoryRoot: "",
@@ -407,9 +403,8 @@ export function wrapSetupComponents(components: readonly SetupComponent[], input
           generated.push(definition);
         }
         for (const remote of remoteServices) {
-          if (remote.authenticated && input.context7ApiKey !== undefined) await writeStoredContext7Key(platform.paths, input.context7ApiKey);
-          const definition = tools.createContext7RemoteService({ authenticated: remote.authenticated,
-            operation: { ...operation, scope: { kind: "machine", machineId: platform.machineId } } });
+          if (remote.toolId !== "deepwiki") throw new Error("Context7 is retired; DeepWiki is the only hosted documentation service setup configures");
+          const definition = tools.createDeepWikiRemoteService({ operation: { ...operation, scope: { kind: "machine", machineId: platform.machineId } } });
           if (config.mcpServices.some(existing => existing.serviceId === definition.serviceId && digest(existing) !== digest(definition) &&
             (!prior?.generatedIds.includes(existing.serviceId) || !prior.services.some(old => old.serviceId === existing.serviceId && digest(old) === digest(existing)))))
             throw new Error(`MCP service ${definition.serviceId} already has an operator definition; preserve it and reconcile explicitly`);
@@ -522,14 +517,8 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
     requireResolvedToolGrants: (registration: { registrationId: string }) => runtimeGrants.has(registration.registrationId),
     toolGrantResolver: (registration: { registrationId: string }) => runtimeGrants.get(registration.registrationId)
   });
-  // The Context7 key reaches the Gateway only through its in-memory secret store, from a private file or the environment.
-  if (configured.approval?.remoteServices.some(item => item.authenticated)) {
-    const stored = await readStoredContext7Key(configured.paths);
-    const environmentKey = process.env.CONTEXT7_API_KEY?.trim();
-    const key = stored.status === "ok" ? stored.key : environmentKey;
-    if (key) gateway.secretStore.setSecret(tools.CONTEXT7_API_KEY_SECRET_REF, key);
-    else process.stderr.write(`Context7 is configured with an API key but none is available (${stored.status === "ok" ? "key missing" : stored.status}); it will report an authentication problem.\n`);
-  }
+  // DeepWiki needs no credential: the Gateway's secret store is never given a documentation key, and a leftover Context7 key
+  // file or environment variable is neither read nor forwarded.
   const server = new module.StreamableHttpGatewayServer({ gateway, host: "127.0.0.1", port: 0 });
   const store = new SetupStateStore(configured.paths, { uid: process.getuid?.() ?? null, now: () => new Date() });
   const machineObservations: MCPServiceObservation[] = [];
@@ -695,15 +684,15 @@ export async function startSetupGatewayRuntime(configPath: string, expectedDesir
       endpoint,
       services: configured.services,
       grantMap: runtimeGrants,
-      // Every repository may use the approved hosted Context7 service and MemPalace, whose default policy keeps one
+      // Every repository may use the approved hosted DeepWiki service and MemPalace, whose default policy keeps one
       // backend partition per repository. Browser profiles stay unshared, and operator services are never shared implicitly.
       machineSharedServiceIds: configured.services.filter(service =>
         configured.generatedIds.includes(service.serviceId) && service.scope.kind === "machine" && service.scope.machineId === machineId &&
-        ((service.tool.toolId === "context7" && service.serviceId === tools.CONTEXT7_SERVICE_ID && service.connection.kind === "native_remote_mcp" &&
-          service.connection.endpoint === tools.CONTEXT7_MCP_ENDPOINT && service.connection.ownership === "external" &&
+        ((service.tool.toolId === "deepwiki" && service.serviceId === tools.DEEPWIKI_SERVICE_ID && service.connection.kind === "native_remote_mcp" &&
+          service.connection.endpoint === tools.DEEPWIKI_MCP_ENDPOINT && service.connection.ownership === "external" &&
           service.tool.resource.sharing === "concurrent" &&
-          service.tool.operations.every(operation => tools.CONTEXT7_TOOLS.includes(operation)) &&
-          service.tool.operations.length === tools.CONTEXT7_TOOLS.length) ||
+          service.tool.operations.every(operation => tools.DEEPWIKI_TOOLS.includes(operation)) &&
+          service.tool.operations.length === tools.DEEPWIKI_TOOLS.length) ||
         (service.tool.toolId === "mempalace" && service.connection.ownership === "bflow" && service.tool.resource.sharing === "concurrent")))
         .map(service => service.serviceId),
       onRegisterRepositoryService: async ({ service, operation: repoOp, rawEntry }): Promise<OperationResult<MCPServiceObservation>> => {
