@@ -329,6 +329,55 @@ describe("A-Z acceptance: an implementing run stays recoverable", () => {
     expect((await f.state()).outbound.some(out => out.message.type === "conversation.clarification")).toBe(true);
   }, 60_000);
 
+  it.each([
+    ["a retryable infrastructure failure", { code: "transport_unavailable" as const, retryable: true as const,
+      message: "Error: EISDIR: illegal operation on a directory, read", details: { stage: "prepare_launch", errno: "EISDIR" } }, "auto_resume"],
+    ["a deliberate refusal", { code: "validation" as const, retryable: false as const,
+      message: "Error: Platform has no prepared generation; run bflow up again" }, "manual"]
+  ])("pauses Developer allocation after %s with the matching recovery", async (_name, error, recovery) => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    f.panes.allocateDeveloper = async () => ({ ok: false as const, error }) as never;
+    await f.runtime.tick();
+    expect(await f.record()).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending", recovery } });
+  }, 60_000);
+
+  it("heals a transient infrastructure allocation failure with no user action once the backoff elapses", async () => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const allocate = f.panes.allocateDeveloper.bind(f.panes);
+    f.panes.allocateDeveloper = async () => ({ ok: false as const, error: { code: "transport_unavailable" as const, retryable: true as const,
+      message: "Error: EISDIR: illegal operation on a directory, read", details: { stage: "prepare_launch", errno: "EISDIR" } } }) as never;
+    await f.runtime.tick();
+    expect((await f.record()).pendingAction).toMatchObject({ recovery: "auto_resume", state: "pending" });
+    f.advance(5 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 }); // still inside the backoff window
+    f.panes.allocateDeveloper = allocate; // the fault cleared
+    f.advance(31 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
+    await f.runtime.tick();
+    expect((await f.record()).status).toBe("implementing");
+    expect((await f.state()).outbound.some(out => out.message.type === "task.assignment" && out.message.recipient.role === "developer")).toBe(true);
+  }, 90_000);
+
+  it("stops healing a persistent allocation fault after the automatic budget and leaves the decision to the user", async () => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    let attempts = 0;
+    f.panes.allocateDeveloper = async () => { attempts += 1; return { ok: false as const, error: { code: "transport_unavailable" as const, retryable: true as const,
+      message: "Error: EISDIR: illegal operation on a directory, read" } } as never; };
+    await f.runtime.tick();
+    for (let round = 0; round < 6; round++) { f.advance(130 * SECOND); await f.runtime.resumeRecoverableRuns(); await f.runtime.tick(); }
+    const blocked = await f.record();
+    expect(blocked).toMatchObject({ status: "escalated", pendingAction: { recovery: "manual", state: "pending" } });
+    const afterBudget = attempts;
+    f.advance(600 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+    await f.runtime.tick();
+    expect(attempts).toBe(afterBudget); // no further automatic attempts
+    expect(afterBudget).toBeLessThanOrEqual(5);
+  }, 120_000);
+
   it("records a resumable action when Developer allocation fails and retries it after an explicit resume", async () => {
     const f = await fixture(); await delegate(f);
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
