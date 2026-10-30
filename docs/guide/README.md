@@ -9,6 +9,7 @@ Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin
 | [Khởi tạo dự án (`bflow init`)](bflow-init.md) | Cấu trúc tệp config.yml có chú thích, lập chỉ mục/đăng ký GitNexus (`--check`, `--remove`, `--no-gitnexus`), định danh Git, chuyển đổi phiên bản và cờ ghi đè |
 | [Khởi động dịch vụ (`bflow up`)](bflow-up.md) | Quản lý phiên có tên (named session), các vai trò thường trực, điều kiện sẵn sàng và các giới hạn khi khởi động host |
 | [Gắn kết phiên (`bflow attach`)](bflow-attach.md) | Cơ chế gắn kết trực tiếp vào pane của Conversation Agent |
+| [UI web cục bộ (`bflow web`)](../../apps/web/README.md) | Quản lý dự án, theo dõi công việc, trả lời quyết định và chat trên trình duyệt tại `127.0.0.1:4317` |
 | [Cập nhật trong Conversation](conversation-updates.md) | Thẻ tiếng Việt, mã `#n`/`Việc #k`, lựa chọn, chi tiết và Log |
 | [Khôi phục sự cố sau Ctrl+C](troubleshooting.md) | Cơ chế khoá kernel (kernel lock), lệnh `recover --yes`, hộp thoại khởi động native và nhãn định danh pane |
 | [Hạ dịch vụ (`bflow down`)](bflow-down.md) | Rào chắn an toàn (barrier), điểm kiểm tra (checkpoint) và các giới hạn khi dừng hệ thống |

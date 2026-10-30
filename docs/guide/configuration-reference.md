@@ -21,7 +21,7 @@ P19 mặc định lưu dưới `.bflow/state/agentic/`; manifest pane dưới `.
 
 ## Roles, model, effort và profile
 
-`environment.roles` gồm các record `{role, cli, required?, model?, effort?, profile-name?, permissionMode?, fallbackCli?, requiredEnv?, skills?, unsupportedFlags?}`. `cli` thường là `claude`, `codex`, `agy`; custom unsupported CLI bị preflight chặn. Conversation và Coordinator là required; Developer là template cấp phát động, không là permanent pane. Provider mặc định khi init là **Codex**.
+`environment.roles` gồm các record `{role, cli, required?, model?, effort?, profile-name?, permissionMode?, fallbackCli?, requiredEnv?, skills?, unsupportedFlags?, specialistProfile?, failover?}`. `cli` thường là `claude`, `codex`, `agy`; custom unsupported CLI bị preflight chặn. Conversation và Coordinator là required; Developer là template cấp phát động, không là permanent pane; `sos` là role cứu hộ tùy chọn, xem [BFLOWSOS](#agent-cứu-hộ-bflowsos). Provider mặc định khi init là **Codex**.
 
 ```yaml
 environment:
@@ -42,6 +42,18 @@ environment:
 
 Đây là **fragment** để merge vào config được init; giữ các role/policy/identity khác. Profile ở role ưu tiên provider default, phải tồn tại và được đăng nhập trước. Không tự tạo profile/fallback account. Agy Conversation chưa hỗ trợ trusted human input; giữ Conversation trên Claude/Codex.
 
+### Specialist profiles (RP-01)
+
+`environment.specialistProfiles` liệt kê tối đa 128 định nghĩa `{path, pin: {profileId, version, digest}}`; cặp `profileId@version` phải duy nhất. Role specialist (không phải `conversation`/`coordinator`) có thể chọn `specialistProfile` là một pin trong catalog. Coordinator đọc catalog bằng `read_role_profiles` và ghim `roleProfile` trên task; Runtime kiểm tra định nghĩa bất biến, base role, capability, scope, skills và grant trước khi cấp phát. Profile không đổi provider của role và nhãn profile không thay kiểm tra Reviewer độc lập. [Runtime reference](../../packages/runtime/README.md#custom-specialist-profiles-rp-01).
+
+### Provider failover có phê duyệt
+
+`failover` trên một role là policy strict version 3: `role` (phải trùng role chứa nó), `policyVersion`, `candidates` (tối đa 16 ứng viên exact `{provider, model, profile}`, không trùng), `maxSwitches`, `maxRetries` (tổng ≤ 16) và `cooldownMs`. Role khai `failover` phải có `model` và `profile-name` tường minh. Không khai chain thì không có failover tự động; `fallbackCli` chỉ xử lý binary thiếu khi startup, không chuyển task đang chạy. Runtime chỉ nhận failure có cấu trúc từ adapter tin cậy (không đọc text trong pane), chứng minh execution cũ đã dừng trước khi chuyển và báo notice có hành động trong Conversation khi chain cạn. Run có specialist profile không failover. [Decision](../provider-failover-decision.md) · [Contract](../../packages/contracts/src/provider-failover.ts).
+
+### Agent cứu hộ `BFLOWSOS`
+
+Role tùy chọn `sos` nhận `cli`, `model`, `effort`, `profile-name`, `fallbackCli`; không nhận `specialistProfile` hoặc `failover`. `init` sinh role này với `required: false`; nó không là pane cố định, không tham gia startup readiness, pack resolution hay skill checks. Khi người dùng gõ **chính xác** `BFLOWSOS` trong pane Conversation, host xử lý lượt đó như lệnh vật lý (không qua `conversation_decide`), spawn agent trong tab Herdr "SOS" với **quyền provider đầy đủ và không có PreToolUse guard**, kèm ngữ cảnh hiện trường dưới `<host dir>/sos/` (snapshot Runtime, danh sách pane, lệnh herdr dựng sẵn, đường dẫn log). Kết quả ghi vào task activity là `sos_agent_spawned`. Chỉ dùng khi người vận hành cần can thiệp thủ công.
+
 Model/effort bỏ trống dùng default provider; effort Claude: `low|medium|high|xhigh|max`, Codex: `minimal|low|medium|high|xhigh`; Agy đặt effort trong tên model và từ chối field `effort`. Khả năng thực tế vẫn cần provider capability/model access probe. [Provider reference](../../packages/agent-providers/README.md).
 
 ## Policy và ngân sách
@@ -53,6 +65,7 @@ Model/effort bỏ trống dùng default provider; effort Claude: `low|medium|hig
 | `environment.tdd.policy` | `conditional` | Required/recommended/not_applicable theo spec/strategy |
 | `environment.verification.maxIterations` | `3` | Config schema nhận 1–100; **persistent host chỉ nhận 1–10**, không tự clamp |
 | `environment.verification.onExhausted` | `require_human` | Hết lượt phải escalate |
+| `environment.verification.reviewTimeoutMs` | `900000` | 60000–3600000 ms; thời gian tối đa chờ một phiên Reviewer/QA độc lập. Host gia hạn lease của review đã nhận trước khi hết hạn và phát một progress note khi chờ tới 80% timeout |
 | `environment.verification.regressionScope` | `affected` | `affected` \| `full` \| `mapped_only` (host.json cũ thiếu trường này mặc định `mapped_only`); điều khiển cổng hồi quy tự động `host-regression-<profile.id>` cho JS/TS runner |
 | `environment.fastPath.mode` | `auto` | `auto` \| `off` (host.json cũ mặc định `off`); bật fast-path cho thay đổi `trivial` đơn tác vụ ([ADR 0004](../adr/0004-fast-path-review-waiver.md)), nhưng bị hạ cấp dưới bộ cổng mặc định có `host-test-integrity` |
 | `environment.concurrency.maxConcurrency` | `2` | Config schema nhận 1–64; **host capacity/policy chỉ nhận 1–32** |
@@ -61,9 +74,11 @@ Model/effort bỏ trống dùng default provider; effort Claude: `low|medium|hig
 | `environment.allowProviderFallback` | `false` | Không tự đổi provider để làm readiness pass |
 | `environment.permissions.mode` | `workspace_auto` | `restricted`, `workspace_auto`, `unattended_isolated`; có role override |
 | `environment.permissions.isolation` | `provider_policy` | Unattended cần verified full-provider OS sandbox/container |
-| `environment.permissions.trustedWorkspace` | `true` | `false` chặn startup; `true` với required Claude có thể ghi project trust vào config Claude của môi trường gọi lệnh, xem bên dưới |
+| `environment.permissions.trustedWorkspace` | `true` | `false` chặn startup; `true` với required Claude/Codex có thể ghi project trust vào config của provider trong môi trường gọi lệnh, xem bên dưới |
 
 Khi `trustedWorkspace: true` và có role Claude bắt buộc, CLI `up` gọi [ensureClaudeWorkspaceTrust](../../apps/cli/src/claude-trust.ts) trước launch: chỉ đặt `projects[<canonical-root>].hasTrustDialogAccepted = true` trong `$CLAUDE_CONFIG_DIR/.claude.json`, hoặc `~/.claude.json` khi không có override. Đây là cập nhật per-project trust trong file cấu hình người dùng của **môi trường gọi CLI**, không phải chỉ ghi scoped launch settings; không thay global hook/MCP/permission policy. Không suy trust này là OS sandbox hoặc bỏ human gate.
+
+Với role Codex bắt buộc (kể cả role chọn profile ai-isolator), `up` nối bảng `[projects."<root>"]` trust vào `config.toml` của Codex home mà role đó dùng: không viết lại file, không ghi đè quyết định có sẵn (kể cả `untrusted`), bỏ qua file không parse được hoặc home không tồn tại. Private Codex home của Bflow ghi trust riêng cho workspace root và cwd của role. Cả Claude lẫn Codex trust chỉ được ghi trong composition Runtime mặc định, không ghi từ composition tùy chỉnh/test.
 
 CLI đã truyền SDD/TDD/verification/concurrency vào persistent host qua [agentic-host](../../apps/cli/src/agentic-host.ts). Chọn giá trị trong giao miền được host hỗ trợ; range rộng của config parser không chứng minh host nhận mọi giá trị. Thay policy/provider/profile cần down/reconcile rồi up; session đang chạy giữ authority đã pin, không nhận quyền mới ngầm.
 
