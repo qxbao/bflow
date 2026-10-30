@@ -47,6 +47,35 @@ describe("stateful Runtime explorer primitives", () => {
     expect(replay.violation).toBeUndefined();
   });
 
+  it("replays a duplicate result through Core ingress twice", async () => {
+    const replay = await replayTrace({ seed: 20, campaign: "delivery", operations: [
+      { kind: "create_task" }, { kind: "dispatch" }, { kind: "receive_result" }
+    ], faults: ["duplicate_result"] });
+    expect(replay.activatedFaults).toContain("duplicate_result");
+    expect(replay.observations.filter(item => item === "foreign-result.rejected")).toHaveLength(2);
+    expect(replay.violation).toBeUndefined();
+  });
+
+  it("activates pane loss only after replacement is observed by watchdog", async () => {
+    const replay = await replayTrace({ seed: 19, campaign: "lifecycle", operations: [
+      { kind: "create_task" }, { kind: "restart" }, { kind: "watchdog" }, { kind: "replace_pane" }, { kind: "watchdog" }
+    ], faults: ["pane_missing"] });
+    expect(replay.activatedFaults).toEqual(["pane_missing"]);
+    expect(replay.observations.some(item => item.startsWith("watchdog:"))).toBe(true);
+  });
+
+  it("counts only faults that reach their controlled production boundary", async () => {
+    const noOp = await replayTrace({ seed: 17, campaign: "lifecycle", operations: [
+      { kind: "create_task" }, { kind: "advance_clock", milliseconds: 1 }
+    ], faults: ["ack_delayed", "runtime_crash"] });
+    expect(noOp.activatedFaults).toEqual([]);
+    const delayed = await replayTrace({ seed: 18, campaign: "delivery", operations: [
+      { kind: "create_task" }, { kind: "dispatch" }
+    ], faults: ["ack_delayed"] });
+    expect(delayed.observations).toContain("delivery.accepted");
+    expect(delayed.activatedFaults).toContain("ack_delayed");
+  });
+
   it("does not attribute a pre-dispatch watchdog action to a later uncertain delivery", async () => {
     const replay = await replayTrace({ seed: 1788510122, campaign: "lifecycle", operations: [
       { kind: "create_task" }, { kind: "restart" }, { kind: "watchdog" }, { kind: "dispatch" }

@@ -178,6 +178,7 @@ interface SequenceState {
   paneReplaced: boolean;
   restartCount: number;
   resultRejected: number;
+  duplicateResultAttempts: number;
   leaseRenewals: number;
   staleLeaseRejections: number;
   watchdogActions: number;
@@ -191,20 +192,20 @@ function signature(snapshot: WorkflowRunSnapshot | null, state: SequenceState): 
   return JSON.stringify({ run: snapshot?.status ?? "absent", version: snapshot?.version ?? -1,
     tasks: snapshot?.tasks.map(task => [task.taskId, task.status, task.attemptId, task.agentExecution?.executionId ?? null]),
     delivery: [state.dispatched, state.accepted, state.unknown], leaseExpired: state.leaseExpired, paneReplaced: state.paneReplaced,
-    restartCount: state.restartCount, resultRejected: state.resultRejected, leaseRenewals: state.leaseRenewals,
-    staleLeaseRejections: state.staleLeaseRejections, watchdogActions: state.watchdogActions });
+    restartCount: state.restartCount, resultRejected: state.resultRejected, duplicateResultAttempts: state.duplicateResultAttempts,
+    leaseRenewals: state.leaseRenewals, staleLeaseRejections: state.staleLeaseRejections, watchdogActions: state.watchdogActions });
 }
 
-async function prepareHarness(outcome: DeliveryOutcome, now: () => Date): Promise<{ harness: TestHarness; service: ConcreteRuntimeService; definition: WorkflowDefinition; state: SequenceState }> {
+async function prepareHarness(outcome: DeliveryOutcome, now: () => Date, delayedAcknowledgement = false): Promise<{ harness: TestHarness; service: ConcreteRuntimeService; definition: WorkflowDefinition; state: SequenceState }> {
   const harness = await createTestHarness(now);
   const definition = createSampleWorkflowDefinition({ requiresApproval: false });
   const service = createRuntimeService({ ...harness.ports, clock: now });
   const state: SequenceState = { created: false, dispatched: false, accepted: false, unknown: false, leaseExpired: false,
-    paneReplaced: false, restartCount: 0, resultRejected: 0, leaseRenewals: 0, staleLeaseRejections: 0, watchdogActions: 0, sentBeforeRecovery: 0, sentAfterRecovery: 0, outcome };
-  if (outcome !== "accepted") {
-    harness.transport.customSendHandler = request => outcome === "unknown_delivery" || outcome === "bound" || outcome === "not_delivered"
+    paneReplaced: false, restartCount: 0, resultRejected: 0, duplicateResultAttempts: 0, leaseRenewals: 0, staleLeaseRejections: 0, watchdogActions: 0, sentBeforeRecovery: 0, sentAfterRecovery: 0, outcome };
+  if (outcome !== "accepted" || delayedAcknowledgement) {
+    harness.transport.customSendHandler = request => outcome === "unknown_delivery" || outcome === "bound" || outcome === "not_delivered" || delayedAcknowledgement
       ? unknown(request) : accepted(request);
-    harness.transport.customReconcileHandler = request => reconciliation(request, outcome);
+    harness.transport.customReconcileHandler = request => reconciliation(request, outcome === "accepted" ? "bound" : outcome);
   }
   return { harness, service, definition, state };
 }
@@ -292,7 +293,7 @@ async function applyOperation(
         artifactProposals: [], retryable: false, startedAt: task.agentExecution.acceptedAt, completedAt: context.now().toISOString()
       } });
     if (result.ok) throw new Error("foreign result mutated Core");
-    state.resultRejected++; observations.push("foreign-result.rejected");
+    state.resultRejected++; state.duplicateResultAttempts++; observations.push("foreign-result.rejected");
     return;
   }
   if (operation.kind === "watchdog") {
@@ -314,7 +315,7 @@ async function executeTrace(trace: ExplorationTrace, wallClockDeadline: number):
   const offset = { value: 0 };
   const now = () => new Date(base + offset.value);
   const outcome: DeliveryOutcome = trace.faults.includes("ack_lost") ? ["bound", "not_delivered", "unknown_delivery"][trace.seed % 3]! : "accepted";
-  const context = { ...(await prepareHarness(outcome, now)), now, offset, runId: `explore-${trace.campaign}-${trace.seed}` };
+  const context = { ...(await prepareHarness(outcome, now, trace.faults.includes("ack_delayed"))), now, offset, runId: `explore-${trace.campaign}-${trace.seed}` };
   const observations: string[] = [], signatures: string[] = [], activatedFaults = new Set<string>();
   let violation: InvariantViolation | undefined;
   try {
@@ -322,12 +323,13 @@ async function executeTrace(trace: ExplorationTrace, wallClockDeadline: number):
       if (Date.now() > wallClockDeadline) throw new Error("exploration wall-clock budget exceeded");
       const watchdogActionsBefore = context.state.watchdogActions;
       await applyOperation(operation, context, observations);
-      if (operation.kind === "dispatch" && trace.faults.includes("ack_lost")) activatedFaults.add("ack_lost");
-      if (operation.kind === "restart" && trace.faults.includes("runtime_crash")) activatedFaults.add("runtime_crash");
-      if (operation.kind === "expire_lease" && trace.faults.includes("lease_expired")) activatedFaults.add("lease_expired");
-      if (operation.kind === "replace_pane" && trace.faults.includes("pane_missing")) activatedFaults.add("pane_missing");
-      if (operation.kind === "receive_result" && trace.faults.includes("duplicate_result")) activatedFaults.add("duplicate_result");
-      if (operation.kind === "advance_clock" && trace.faults.includes("ack_delayed")) activatedFaults.add("ack_delayed");
+      if (operation.kind === "receive_result" && trace.faults.includes("duplicate_result")) await applyOperation(operation, context, observations);
+      if (operation.kind === "dispatch" && trace.faults.includes("ack_lost") && observations.at(-1) === "delivery.unknown") activatedFaults.add("ack_lost");
+      if (operation.kind === "dispatch" && trace.faults.includes("ack_delayed") && observations.at(-1) === "delivery.accepted") activatedFaults.add("ack_delayed");
+      if (operation.kind === "restart" && trace.faults.includes("runtime_crash") && observations.at(-1)?.startsWith("restart.reconciled:")) activatedFaults.add("runtime_crash");
+      if (operation.kind === "expire_lease" && trace.faults.includes("lease_expired") && context.state.accepted) activatedFaults.add("lease_expired");
+      if (operation.kind === "receive_result" && trace.faults.includes("duplicate_result") && context.state.duplicateResultAttempts >= 2) activatedFaults.add("duplicate_result");
+      if (operation.kind === "watchdog" && context.state.paneReplaced && trace.faults.includes("pane_missing") && observations.at(-1)?.startsWith("watchdog:")) activatedFaults.add("pane_missing");
       const snap = await snapshotOf(context.harness, context.runId);
       signatures.push(signature(snap, context.state));
       if (context.state.sentAfterRecovery > 0 && context.state.outcome !== "not_delivered") {

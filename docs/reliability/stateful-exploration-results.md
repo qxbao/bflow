@@ -41,7 +41,7 @@ No AI model or provider token is called by the explorer. All generated state is 
 ## Final campaign run
 
 Final JSON evidence: `/tmp/bflow-stateful-exploration/report-final.json`  
-Final campaign wall-clock duration: 84.09 seconds  
+Final campaign wall-clock duration: 81.33 seconds  
 Provider/model tokens: **0**  
 Sequences: **300** total (**100 per campaign**)  
 Transitions: **7,200** total (**2,400 per campaign**)  
@@ -56,8 +56,8 @@ Regression fixtures: **0** (no confirmed failure existed to preserve)
 | Campaign | Seed | Sequences | Transitions | State signatures | Transition combinations | Activated fault types | Violations | Duration |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Delivery / acknowledgment / restart | `54033` (`0xd311`) | 100 | 2,400 | 781 | 30 | 4 | 0 | 21.45s |
-| Lease / fencing / handoff authority | `125534` (`0x1ea5e`) | 100 | 2,400 | 687 | 90 | 6 | 0 | 29.30s |
-| Lifecycle / watchdog / recovery | `51966` (`0xcafe`) | 100 | 2,400 | 476 | 72 | 4 | 0 | 26.87s |
+| Lease / fencing / handoff authority | `125534` (`0x1ea5e`) | 100 | 2,400 | 687 | 90 | 5 | 0 | 28.10s |
+| Lifecycle / watchdog / recovery | `51966` (`0xcafe`) | 100 | 2,400 | 476 | 72 | 4 | 0 | 26.55s |
 
 Activated fault types are counted only when the generated operation reached the corresponding controlled boundary. Selected fault labels are retained in traces; they are not treated as evidence merely because a random sequence named them.
 
@@ -76,7 +76,7 @@ The existing targeted task-notice suite separately covers borrowed parent lease 
 
 ## Trace minimization and discarded harness finding
 
-The minimizer is covered by a deterministic unit test and removes unnecessary operations and faults while preserving a supplied replay predicate. During initial execution, the explorer checker produced a false L8 counterexample:
+The minimizer is covered by a deterministic unit test and removes unnecessary operations and faults while preserving a supplied replay predicate. Final review also added boundary-accounting regressions: unused fault labels are not counted, delayed acknowledgement reaches the real unknown-to-bound path, pane loss requires replacement plus watchdog observation, and duplicate-result injection performs two Core ingress attempts. During initial execution, the explorer checker produced a false L8 counterexample:
 
 ```text
 create_task → restart → watchdog → dispatch (ack_lost)
@@ -118,5 +118,5 @@ The final opt-in campaign command passed: one test passed, six ordinary explorer
 ## Commit hashes
 
 - Exploration baseline before this change: `120d7dc0dac6c83f6ce0ac9e943c69452bf920b4`.
-- Stateful explorer implementation commit: `936dac346054f0b90002a32ad0c6e7a18cc1c0da`.
-- This final report revision is committed immediately after the implementation; its exact commit is recorded in the final handoff.
+- Initial explorer implementation commit: `936dac346054f0b90002a32ad0c6e7a18cc1c0da`.
+- Final review corrections and report commit: recorded in the final handoff after commit creation.
