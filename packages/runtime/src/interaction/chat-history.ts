@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, realpath } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { open, realpath, lstat } from 'node:fs/promises';
+import { isAbsolute, join, dirname, basename, resolve } from 'node:path';
 import { z } from 'zod';
 import { WebChatMessageSchema, WEB_LIMITS, type WebChatMessage } from '@bflow/contracts';
 /** Stable provider-native IDs, never text/time or terminal snapshots. */
@@ -54,5 +54,15 @@ export async function registeredAssistantHistory(registration:unknown,provider:s
 }
 
 export async function registeredChatAvailable(registration:unknown,provider:string,nativeSessionId:string,sessionId:string):Promise<boolean>{
- try{await registeredAssistantHistory(registration,provider,nativeSessionId,sessionId);return true;}catch{return false;}
+ try{await registeredAssistantHistory(registration,provider,nativeSessionId,sessionId);return true;}catch(error){
+  // SessionStart may register a verified Claude launch before its first transcript is created. This grants no history or approval.
+  if(provider!=='claude'||(error as NodeJS.ErrnoException).code!=='ENOENT')return false;
+  try{
+   const r=z.object({role:z.literal('conversation'),sessionId:z.string(),transcriptRoot:z.string(),transcriptPath:z.string()}).passthrough().parse(registration);
+   if(r.sessionId!==nativeSessionId||!isAbsolute(r.transcriptRoot)||!isAbsolute(r.transcriptPath)||basename(r.transcriptPath)!==`${nativeSessionId}.jsonl`)return false;
+   try {await lstat(r.transcriptPath);return false;}catch(missing){if((missing as NodeJS.ErrnoException).code!=='ENOENT')return false;}
+   const root=await realpath(r.transcriptRoot),parent=await realpath(dirname(r.transcriptPath));
+   return (parent===root||parent.startsWith(root+'/'))&&resolve(r.transcriptPath)===join(parent,basename(r.transcriptPath));
+  }catch{return false;}
+ }
 }
