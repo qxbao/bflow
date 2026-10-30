@@ -1,4 +1,4 @@
-import { projectPolicyPhaseRequest, provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError, prelaunchLeaseIdentity } from "./policy-prompt.js";
+import { projectPolicyPhaseEnvelope, provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError, prelaunchLeaseIdentity } from "./policy-prompt.js";
 import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-binding.js";
 import { ExecutorLineageSchema, RoleProfilePinSchema, sameRoleProfilePin } from "@bflow/contracts";
 import { assertProfileBinding, assertProfileSnapshotCurrent, assertIndependentProfileExecutor, selectRoleProfile } from "./profile-admission.js";
@@ -491,6 +491,8 @@ export class HerdrOutbox {
       wire = RoleMessageSchema.parse({ ...wire, recipient: { role: pane.role, agent_id: pane.agentId, pane_id: pane.paneId },
         payload: { assignment: out.assignment, context: wire.payload } });
     }
+    try { wire = projectPolicyPhaseEnvelope(wire); }
+    catch (error) { out.status = "queued"; out.error = `Prompt presentation blocked before transport: ${String(error)}`; await this.save(); return; }
     if (out.request && (digest(out.request.target) !== digest(target) || digest(out.request.context) !== digest(json(wire)))) {
       out.error = "Pinned request or recipient changed; explicit reconciliation required"; await this.save(); return;
     }
@@ -505,9 +507,6 @@ export class HerdrOutbox {
       out.coordinatorResponseBaseline ??= this.state.outbound.length;
     await guardWorkDispatch();
     if (pane.role === "developer" && !out.parentAssignmentId) await this.ports.pinDeveloperDispatch?.(out.request, pane);
-    let presentedRequest;
-    try { presentedRequest = projectPolicyPhaseRequest(out.request); }
-    catch (error) { out.status = "queued"; out.error = `Prompt presentation blocked before transport: ${String(error)}`; await this.save(); return; }
     out.status = "sending";
     await this.save(); // write-ahead intent; a crash/lost acknowledgement forbids resend
     if (out.parentAssignmentId) {
@@ -528,7 +527,7 @@ export class HerdrOutbox {
     try { await guardWorkDispatch(); }
     catch (error) { if (error instanceof ExecutionPlanDriftError || error instanceof RoleCapabilityPreflightError) { out.status = "queued"; await this.save(); } throw error; }
     try {
-      const value = unwrap(await this.ports.transport.send(presentedRequest));
+      const value = unwrap(await this.ports.transport.send(out.request));
       const receipt = AgentSubmissionReceiptSchema.parse(value);
       if (receipt.requestId !== out.request.requestId || receipt.attemptId !== out.attemptId || receipt.runId !== out.request.runId || receipt.taskId !== out.taskId)
         throw new Error("Transport receipt ownership mismatch");

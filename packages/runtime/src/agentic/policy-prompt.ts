@@ -2,20 +2,27 @@ import { AgentRequestSchema, RoleMessageSchema, type AgentRequest } from '@bflow
 import { compactPolicyReviewDossier } from './mcp-output-views.js';
 import { digest, record, type Outbound, type JournalState } from './journal.js';
 
-/** Presentation only: immutable request context and host evidence remain authoritative. */
+/** Keep the complete envelope in outbox/receipts; a newly pinned transport request carries exactly this bounded presentation. */
+export function projectPolicyPhaseEnvelope(input: unknown) {
+ const message=RoleMessageSchema.parse(input);
+ if(Buffer.byteLength(JSON.stringify(message),'utf8')<=60000||message.type!=='verification.requested')return message;
+ if(!message.payload||typeof message.payload!=='object'||Array.isArray(message.payload))return message;
+ const payload=record(message.payload);if(payload.kind!=='conditional_evidence')return message;
+ const compact=record(compactPolicyReviewDossier(payload.specification as never,payload.strategy as never));
+ const projected=RoleMessageSchema.parse({...message,payload:{...payload,specification:compact.specification,strategy:compact.strategy,priorEvidence:compact.priorEvidence,presentation:compact.presentation}});
+ if(Buffer.byteLength(JSON.stringify(projected),'utf8')>60000)throw Error('Policy prompt exceeds bounded transport presentation; inspect the host dossier');
+ return projected;
+}
+/** Only used while creating a new request; never changes an already pinned request. */
 export function projectPolicyPhaseRequest(input: AgentRequest): AgentRequest {
  const request=AgentRequestSchema.parse(input);
  if(Buffer.byteLength(request.instruction,'utf8')<=60000)return request;
  const context=RoleMessageSchema.safeParse(request.context);
  if(!context.success||context.data.type!=='verification.requested'||record(context.data.payload).kind!=='conditional_evidence')return request;
- const message=RoleMessageSchema.parse(JSON.parse(request.instruction)),payload=record(message.payload);
+ const message=RoleMessageSchema.parse(JSON.parse(request.instruction));
  if(digest(request.context)!==digest(message))throw Error('Policy prompt differs from pinned request context');
- const compact=record(compactPolicyReviewDossier(payload.specification as never,payload.strategy as never));
- const projected=RoleMessageSchema.parse({...message,payload:{...payload,specification:compact.specification,strategy:compact.strategy,priorEvidence:compact.priorEvidence,
-  presentation:compact.presentation}});
- const instruction=JSON.stringify(projected);
- if(Buffer.byteLength(instruction,'utf8')>60000)throw Error('Policy prompt exceeds bounded transport presentation; inspect the host dossier');
- return AgentRequestSchema.parse({...request,instruction});
+ const projected=projectPolicyPhaseEnvelope(message);
+ return AgentRequestSchema.parse({...request,instruction:JSON.stringify(projected),context:projected});
 }
 
 /** Node's exact spawn E2BIG is a pre-exec failure, not a timeout or a remote observation.

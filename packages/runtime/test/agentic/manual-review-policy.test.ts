@@ -538,7 +538,8 @@ describe("manual-review policy proposal ingress and evidence lifecycle", () => {
     const req = AgentRequestSchema.parse({requestId:"request-present",attemptId:"attempt-present",runId:"run-dq-1",taskId:"dq-structural",role:"qa",target:{transport:"herdr",agentId:"qa",paneId:"p1"},instruction:JSON.stringify(wire),context:wire,inputs:[],attempt:1,retry:{maxAttempts:1,strategy:"fixed",initialDelayMs:0,maxDelayMs:0,jitter:false},timeout:{executionTimeoutMs:1000,onTimeout:"block"},idempotency:{key:"phase-presentation",scope:"agent-request",fingerprint:"digest"},createdAt:"2026-01-01T00:00:00Z"});
     const presentation = projectPolicyPhaseRequest(req);
     expect(Buffer.byteLength(presentation.instruction)).toBeLessThan(60000);
-    expect(presentation.context).toEqual(req.context);
+    expect(presentation.context).toEqual(JSON.parse(presentation.instruction));
+    expect(req.context).toEqual(wire);
     expect(presentation.idempotency).toEqual(req.idempotency);
     expect(JSON.parse(presentation.instruction).payload.specification.acceptanceCriteria).toEqual(f.specification.acceptanceCriteria);
     expect(req.instruction).toContain("largeRawOutput");
