@@ -40,7 +40,7 @@ No AI model or provider token is called by the explorer. All generated state is 
 
 ## Final campaign run
 
-Final JSON evidence: `/tmp/bflow-stateful-exploration/report-final.json`  
+Final JSON evidence: `/tmp/bflow-stateful-exploration/report-reviewed-final.json`  
 Final campaign wall-clock duration: 81.33 seconds  
 Provider/model tokens: **0**  
 Sequences: **300** total (**100 per campaign**)  
@@ -100,8 +100,9 @@ pnpm exec vitest run \
   packages/runtime/test/scenarios/06-restart-recovery.test.ts \
   packages/runtime/test/agentic/host-watchdog-lifecycle.test.ts \
   packages/runtime/test/agentic/notice-watchdog.test.ts \
+  packages/runtime/test/agentic/task-notices.test.ts \
   --reporter=dot
-→ 5 files passed; 38 tests passed; 1 opt-in campaign test skipped
+→ 6 files passed; 65 tests passed; 1 opt-in campaign test skipped
 ```
 
 The final opt-in campaign command passed: one test passed, six ordinary explorer tests skipped by the `-t` selector, with the report written to `/tmp/bflow-stateful-exploration/report-final.json`.
@@ -120,4 +121,4 @@ The final opt-in campaign command passed: one test passed, six ordinary explorer
 - Exploration baseline before this change: `120d7dc0dac6c83f6ce0ac9e943c69452bf920b4`.
 - Initial explorer implementation commit: `936dac346054f0b90002a32ad0c6e7a18cc1c0da`.
 - Final review source corrections: `8a99d28645a155f769be7d356da73f41d09ab5e9`.
-- Final report lineage pin: `4d59fb8` (superseded by the final documentation-only commit below).
+- Final report lineage pin: `c316a715b41869d9989f7f82a20650c58275b82d` (superseded by this final documentation-only correction).
