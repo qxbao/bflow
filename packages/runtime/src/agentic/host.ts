@@ -108,6 +108,21 @@ import {
   type RoleToolReachability, type ToolReachabilityRecord
 } from "./tool-reachability.js";
 
+/**
+ * The watchdog reads the activated SessionManifest to scope runs and panes.
+ * During progressive activation the workspace can exist before that manifest
+ * has been installed; treating that interval as a normal watchdog pass would
+ * turn a recoverable lifecycle race into an uncaught host error.
+ */
+export function shouldRunWatchdog(input: {
+  workspace: boolean;
+  manifest: boolean;
+  quiesced: boolean;
+  closing: boolean;
+}): boolean {
+  return input.workspace && input.manifest && !input.quiesced && !input.closing;
+}
+
 /** Builds the binding-aware CLI runner resolver shared by Developer feedback and independent verification. */
 export function createHostRtkUsageResolver(
   configuration: Pick<HostConfiguration, "platform" | "sessionId" | "repositoryPath">,
@@ -2561,6 +2576,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   // runs that are not working. Actions run one at a time outside the journal lock; each Runtime report is its own transaction.
   const watchdogReported = new Set<string>();
   const runWatchdog = async () => {
+    if (!shouldRunWatchdog({ workspace: workspace !== undefined, manifest: manifest !== undefined, quiesced, closing })) return;
     const host = requireWorkspace(), now = Date.now();
     // Bounded automatic resume pass: `auto_resume` blockers (no-next-action stops, Coordinator blockers, verification
     // delivery/storage escalations) after backoff, and `capability_repair` once the current role session proves the capability.
@@ -2636,7 +2652,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   };
   let watchdogRunning = false;
   const watchdogTimer = setInterval(() => {
-    if (!workspace || quiesced || closing || watchdogRunning) return;
+    if (!shouldRunWatchdog({ workspace: workspace !== undefined, manifest: manifest !== undefined, quiesced, closing }) || watchdogRunning) return;
     watchdogRunning = true;
     void reconcileRuntimeDeliveries()
       .catch(error => { process.stderr.write(`Bflow delivery reconcile: ${redactString(String(error))}\n`); })
