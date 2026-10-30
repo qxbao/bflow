@@ -17,6 +17,9 @@
 - **Codex hooks:** hooks chưa được duyệt chặn launch. Snapshot review dùng `bflow setup --codex-hooks --plan/--apply`; non-interactive cần đúng digest. Operator có chính sách trust-all riêng, xem [security guide](guide/security-approval.md); setup thông thường không tự duyệt hook.
 - **Same UID (`RR-13` / `PV3-09`):** scoped tokens, native tool guard và private files không cô lập tiến trình thù địch chạy cùng UID. Toàn bộ provider OS sandbox/container là yêu cầu riêng của unattended; sandbox kiểm thử không thay thế được.
 - **Claude workspace trust:** config mới đặt `trustedWorkspace: true`; `up` với required Claude có thể ghi project trust trong `$CLAUDE_CONFIG_DIR/.claude.json` hoặc `~/.claude.json` của môi trường gọi CLI. Không mô tả toàn bộ startup là không ghi provider config; xem [config reference](guide/configuration-reference.md#policy-và-ngân-sách).
+- **Codex workspace trust:** với `trustedWorkspace: true`, `up` có thể nối bảng `[projects."<root>"]` vào `config.toml` của Codex home mà role bắt buộc dùng (profile ai-isolator hoặc account), không ghi đè quyết định có sẵn. Chỉ ghi trong composition Runtime mặc định.
+- **Provider failover:** chỉ chạy khi role khai chain đã duyệt và adapter tin cậy báo failure có cấu trúc; source + controlled-adapter tests, chưa có live provider failover. Run có specialist profile không failover; `fallbackCli` không chuyển task đang chạy.
+- **`BFLOWSOS`:** agent cứu hộ chạy với quyền provider đầy đủ và không có PreToolUse guard; không thuộc governance/independence của workflow, chỉ dùng khi người vận hành giám sát.
 - **Restart:** registration/generation mất authority phải bị retire/revoke và xác minh lại, không dùng receipt cũ để giả activated health. Unknown delivery vẫn cần reconciliation trước resend.
 
 ## Tools, skills và Gateway
@@ -42,6 +45,11 @@
 | RTK | Compression có thể passthrough hoặc degraded; raw status/output vẫn là evidence. Không hứa tỷ lệ giảm token từ test formatter hoặc chạy lại command để lấy output |
 | Skills | Bundle pins là instruction, không là permission. Tool skill thiếu grant bị skip/block theo requiredness. Startup không hỗ trợ custom `catalogDir`/`bindingsPath`; không sửa bundle đã publish mà giữ version/digest |
 | Legacy required lists | `requiredTools`/`requiredMcpServices` thiếu role/operation allowlist cần migration; không tự cấp mọi operation |
+
+## Local web và các extension chưa nối host
+
+- **Local web (`bflow web`):** chỉ lắng nghe `127.0.0.1`; session hết hạn sau 12 giờ, mất khi server restart; registry tối đa 100 dự án; thay đổi cấu hình áp dụng sau khi khởi động lại phiên. Chưa có endpoint nội dung notice, timeline lịch sử đầy đủ hay pane output; chat chỉ hỗ trợ Conversation trên Claude/Codex. Live probe W09 có phạm vi hẹp; AC03–AC07/AC11 và full SDLC qua web còn `not_run`. Xem [Web README](../apps/web/README.md#known-frozen-interface-limits--integrator-proposals) và [W09](../tests/acceptance/local-web/W09-HANDOFF.md).
+- **BA-only, QA-only, data verification:** là library/extension có local tests với role giả lập; chưa nối host/Herdr/Conversation/CLI và chưa có cấu hình daemon. Không quảng bá là luồng người dùng.
 
 ## Platform, workspace và runners
 
