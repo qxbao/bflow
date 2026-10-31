@@ -59,6 +59,7 @@ function assertEveryControlHasWorkingHelper(container: HTMLElement) {
     const tooltip = screen.getByRole('tooltip');
     expect(tooltip.textContent?.trim().length ?? 0).toBeGreaterThan(15);
     expect(tooltip.getAttribute('style'), `Inline style breaks CSP on tooltip for ${controlDesc}`).toBeNull();
+    expect(tooltip.className).toContain('pointer-events-none');
     fireEvent.mouseLeave(helper!.parentElement ?? helper!);
   }
 }
@@ -286,12 +287,33 @@ describe('FieldHelp (?) component & 100% control coverage', () => {
     assertEveryControlHasWorkingHelper(view.container);
     cleanup();
 
-    // 11. ChatComposer
+    // 11. ChatComposer & ChatPage (/projects/:id/chat/:runId)
     view = render(
       <MemoryRouter>
-        <ChatComposer api={api} projectId="p" sessionId="host-session" runId="run" revision={0} historyReady refresh={() => {}} />
+        <ChatComposer
+          api={api}
+          projectId="p"
+          sessionId="host-session"
+          runId="run"
+          ready
+          sessionFresh
+          refresh={() => {}}
+          onPending={() => {}}
+        />
       </MemoryRouter>,
     );
+    assertEveryControlHasWorkingHelper(view.container);
+    cleanup();
+
+    installApi({
+      '/api/v1/projects/p/sessions/host-session/messages': { apiVersion: 1, items: [] },
+    });
+    view = render(
+      <MemoryRouter initialEntries={['/projects/p/chat/run']}>
+        <App api={api} />
+      </MemoryRouter>,
+    );
+    await screen.findByLabelText('Tin nhắn cho Conversation');
     assertEveryControlHasWorkingHelper(view.container);
     cleanup();
 

@@ -226,9 +226,10 @@ describe('Round 2 Slice 4 — Web UI recovery & state-isolation hardening', () =
         projectId="p"
         sessionId="sess-old"
         runId="r-1"
-        revision={0}
-        historyReady
+        ready
+        sessionFresh
         refresh={() => {}}
+        onPending={() => {}}
       />
     );
     expect(await screen.findByRole('button', { name: 'Đối chiếu tin nhắn' })).toBeTruthy();
@@ -240,9 +241,10 @@ describe('Round 2 Slice 4 — Web UI recovery & state-isolation hardening', () =
         projectId="p"
         sessionId="sess-new"
         runId="r-1"
-        revision={1}
-        historyReady
+        ready
+        sessionFresh
         refresh={() => {}}
+        onPending={() => {}}
       />
     );
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Đối chiếu tin nhắn' })).toBeNull());
