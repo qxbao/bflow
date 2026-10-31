@@ -1475,15 +1475,7 @@ export class RolePaneManager {
         return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
       }
 
-      const topoRole = resolveTopologyRole(selector);
-      const binding = manifest.panes.find(
-        (p) =>
-          p.bindingId === selector ||
-          p.paneId === selector ||
-          p.agentId === selector ||
-          p.role === selector ||
-          (topoRole !== null && (p.metadata?.["topologyRole"] === topoRole || p.role === topoRole))
-      );
+      const binding = this.#selectRoleBinding(manifest.panes, selector);
 
       if (!binding) {
         return notFoundError(`Role binding not found for selector '${selector}'`);
@@ -2439,7 +2431,7 @@ export class RolePaneManager {
         if (closed.exitCode !== 0 || closed.failure) {
           // The pane may already be gone (an interrupted release, or a stale pane the operator closed). Only an observed absence completes it.
           const probe = await this.#runHerdr(["pane", "get", binding.paneId], options);
-          if (probe.exitCode === 0 && !probe.failure) return toCommandError(closed, "Failed to close specialist pane");
+          if (mapCommandFailure(probe)?.code !== "not_found") return toCommandError(closed, "Failed to close specialist pane");
         } else parseOkResponse(closed);
         const saved = await this.#store.save({ ...releasing.value, panes: releasing.value.panes.filter(pane => pane.bindingId !== binding.bindingId),
           updatedAt: this.#clock().toISOString() }, options);
@@ -2501,12 +2493,17 @@ export class RolePaneManager {
             panes: manifest.panes.filter(pane => pane.bindingId !== existingTaskDeveloper.bindingId) }, options);
           if (!pruned.ok) return pruned;
           manifest = pruned.value;
-        }
-      }
-      if (existingTaskDeveloper && manifest.panes.includes(existingTaskDeveloper) && existingTaskDeveloper.worktreePath === request.worktreePath) {
-        const health = await this.inspectRoleHealth(existingTaskDeveloper.bindingId, options);
-        if (health.ok && (health.value.status === "ready" || health.value.status === "working")) {
-          return ok(existingTaskDeveloper);
+        } else if (existingTaskDeveloper.worktreePath === request.worktreePath) {
+          if (health.ok && (health.value.status === "ready" || health.value.status === "working")) {
+            return ok(existingTaskDeveloper);
+          }
+          return conflictError(
+            `Developer '${existingTaskDeveloper.agentId}' for task '${request.taskId}' is currently ${health.ok ? health.value.status : "unhealthy"} in pane '${existingTaskDeveloper.paneId}'`
+          );
+        } else {
+          return conflictError(
+            `Active developer '${existingTaskDeveloper.agentId}' for task '${request.taskId}' is bound to worktree '${existingTaskDeveloper.worktreePath}' instead of '${request.worktreePath}'`
+          );
         }
       }
 
@@ -2599,8 +2596,8 @@ export class RolePaneManager {
           const splitReleased = () => this.#herdrCreate<HerdrPaneInfo>(
             {
               method: "pane.split",
-              params: { target_pane_id: releasedCandidate.paneId, direction: "right" },
-              args: ["pane", "split", releasedCandidate.paneId, "--direction", "right"]
+              params: { target_pane_id: releasedCandidate.paneId, direction: "right", cwd: request.worktreePath, focus: false },
+              args: ["pane", "split", releasedCandidate.paneId, "--direction", "right", "--cwd", request.worktreePath, "--no-focus"]
             },
             developerEnv,
             parsePaneInfoResult,
@@ -2616,8 +2613,8 @@ export class RolePaneManager {
             if (split.ok) {
               targetPane = split.value;
               oldPaneToClose = releasedCandidate.paneId;
-              if (releasedEnvMismatch) {
-                // The same agent name cannot start while the old pane still owns it; the released pane carries another launch's env.
+              if (releasedEnvMismatch && liveAgent?.name === effectiveAgentName) {
+                // The same agent name cannot start while the old pane still owns it.
                 await this.#closePane(oldPaneToClose, options);
                 oldPaneClosedEarly = true;
               }
@@ -2713,9 +2710,29 @@ export class RolePaneManager {
             const saveResult = await this.#store.save(validatedManifest.data, options);
             if (!saveResult.ok) return saveResult;
             return ok(startResult.value);
-          } else if (oldPaneToClose !== null) {
-            await this.#closePane(targetPane.paneId, options);
+          } else {
+            if (oldPaneToClose !== null) {
+              if (!oldPaneClosedEarly) {
+                await this.#closePane(targetPane.paneId, options);
+              } else {
+                const probeTarget = await this.#runHerdr(["pane", "get", targetPane.paneId], options);
+                const nextPanes = probeTarget.exitCode === 0 && !probeTarget.failure
+                  ? manifest.panes.map((p) => (p.bindingId === releasedCandidate.bindingId ? { ...p, paneId: targetPane.paneId } : p))
+                  : manifest.panes.filter((p) => p.bindingId !== releasedCandidate.bindingId);
+                const repaired = await this.#store.save(
+                  { ...manifest, panes: nextPanes, updatedAt: this.#clock().toISOString() },
+                  options
+                );
+                if (!repaired.ok) return repaired;
+              }
+            }
+            return startResult;
           }
+        } else if (mapCommandFailure(paneOutcome)?.code === "not_found") {
+          manifest = {
+            ...manifest,
+            panes: manifest.panes.filter((p) => p.bindingId !== releasedCandidate.bindingId)
+          };
         }
       }
 
@@ -2841,6 +2858,13 @@ export class RolePaneManager {
     request: DeveloperReleaseRequest,
     options?: OperationOptions
   ): Promise<OperationResult<DeveloperReleaseOutcome>> {
+    return this.#serializeAllocation(() => this.#releaseDeveloper(request, options));
+  }
+
+  async #releaseDeveloper(
+    request: DeveloperReleaseRequest,
+    options?: OperationOptions
+  ): Promise<OperationResult<DeveloperReleaseOutcome>> {
     try {
       if (!request || typeof request !== "object") {
         return validationError("DeveloperReleaseRequest must be an object");
@@ -2853,13 +2877,14 @@ export class RolePaneManager {
         return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
       }
 
-      const binding = manifest.panes.find(
-        (p) =>
-          p.role === "developer" &&
-          ((request.taskId !== undefined && p.metadata?.["taskId"] === request.taskId) ||
-            (request.agentId !== undefined && p.agentId === request.agentId) ||
-            (request.paneId !== undefined && p.paneId === request.paneId))
-      );
+      const matchesReleaseTarget = (p: PaneBinding): boolean =>
+        p.role === "developer" &&
+        ((request.taskId !== undefined && p.metadata?.["taskId"] === request.taskId) ||
+          (request.agentId !== undefined && p.agentId === request.agentId) ||
+          (request.paneId !== undefined && p.paneId === request.paneId));
+      const binding =
+        manifest.panes.find((p) => matchesReleaseTarget(p) && p.metadata?.["allocationStatus"] !== "released") ??
+        manifest.panes.find(matchesReleaseTarget);
 
       if (!binding) {
         return notFoundError("Developer binding not found for release request");
@@ -2889,18 +2914,34 @@ export class RolePaneManager {
       if (request.removeWorktree === true) {
         const removeOutcome = await this.#runHerdr(["worktree", "remove", "--workspace", binding.workspaceId], options);
         if (removeOutcome.exitCode !== 0 || removeOutcome.failure) {
-          return toCommandError(removeOutcome, `Failed to remove worktree for workspace '${binding.workspaceId}'`);
+          if (inspected.value.exists) {
+            return toCommandError(removeOutcome, `Failed to remove worktree for workspace '${binding.workspaceId}'`);
+          }
+          const wsProbe = await this.#runHerdr(["workspace", "list"], options);
+          if (
+            wsProbe.exitCode !== 0 ||
+            wsProbe.failure ||
+            parseWorkspaceListResult(wsProbe).some((ws) => ws.workspaceId === binding.workspaceId)
+          ) {
+            return toCommandError(removeOutcome, `Failed to remove worktree for workspace '${binding.workspaceId}'`);
+          }
+        } else {
+          parseWorktreeRemovedResult(removeOutcome);
         }
-        parseWorktreeRemovedResult(removeOutcome);
         worktreeRemoved = true;
         paneClosed = true;
         updatedPanes = manifest.panes.filter((p) => p.bindingId !== binding.bindingId);
       } else if (request.closePane === true || this.#config.reuseIdleDeveloperPanes === false) {
         const closeOutcome = await this.#runHerdr(["pane", "close", binding.paneId], options);
         if (closeOutcome.exitCode !== 0 || closeOutcome.failure) {
-          return toCommandError(closeOutcome, `Failed to close pane '${binding.paneId}'`);
+          // Observed absence (`not_found` from `pane get`) proves the stale/crashed pane is already gone.
+          const paneProbe = await this.#runHerdr(["pane", "get", binding.paneId], options);
+          if (mapCommandFailure(paneProbe)?.code !== "not_found") {
+            return toCommandError(closeOutcome, `Failed to close pane '${binding.paneId}'`);
+          }
+        } else {
+          parseOkResponse(closeOutcome);
         }
-        parseOkResponse(closeOutcome);
         paneClosed = true;
         updatedPanes = manifest.panes.filter((p) => p.bindingId !== binding.bindingId);
       } else {
@@ -3070,6 +3111,24 @@ export class RolePaneManager {
     }
   }
 
+  #selectRoleBinding(
+    panes: readonly PaneBinding[],
+    selector: RoleSelector | string
+  ): PaneBinding | undefined {
+    const exact = panes.find(
+      (p) => p.bindingId === selector || p.paneId === selector || p.agentId === selector
+    );
+    if (exact) return exact;
+    const topoRole = resolveTopologyRole(selector);
+    const matchesRole = (p: PaneBinding): boolean =>
+      p.role === selector ||
+      (topoRole !== null && (p.metadata?.["topologyRole"] === topoRole || p.role === topoRole));
+    return (
+      panes.find((p) => matchesRole(p) && p.metadata?.["allocationStatus"] !== "released") ??
+      panes.find(matchesRole)
+    );
+  }
+
   async getRoleBinding(
     selector: RoleSelector | string,
     options?: OperationOptions
@@ -3082,16 +3141,7 @@ export class RolePaneManager {
         return ok(null);
       }
 
-      const topoRole = resolveTopologyRole(selector);
-      const binding =
-        manifest.panes.find(
-          (p) =>
-            p.bindingId === selector ||
-            p.paneId === selector ||
-            p.agentId === selector ||
-            p.role === selector ||
-            (topoRole !== null && (p.metadata?.["topologyRole"] === topoRole || p.role === topoRole))
-        ) ?? null;
+      const binding = this.#selectRoleBinding(manifest.panes, selector) ?? null;
 
       return ok(binding);
     } catch (err) {

@@ -204,7 +204,26 @@ export class BrowserResourceTransactions {
       const handle = await open(temporary, "wx", 0o600);
       try { await handle.writeFile(JSON.stringify(LedgerSchema.parse(ledger))); await handle.sync(); } finally { await handle.close(); }
       await rename(temporary, path);
-      const parent = await open(directory, "r"); try { await parent.sync(); } finally { await parent.close(); }
+      const parent = await open(directory, "r");
+      try {
+        await parent.sync();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (
+          code !== "EINVAL" &&
+          code !== "ENOSYS" &&
+          code !== "ENOTSUP" &&
+          code !== "EOPNOTSUPP" &&
+          code !== "EROFS" &&
+          code !== "EPERM" &&
+          code !== "EISDIR" &&
+          code !== "EBADF"
+        ) {
+          throw error;
+        }
+      } finally {
+        await parent.close();
+      }
     } finally { await rm(temporary, { force: true }); }
   }
 }
