@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { readDarwinProcessRssBytes } from "./process-memory.js";
@@ -40,6 +41,31 @@ export function defaultIsPidAlive(pid: number): boolean {
   } catch (e: any) {
     return e?.code === "EPERM";
   }
+}
+
+const FSYNC_TOLERATED_ERRNOS = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EROFS"]);
+
+function isProcessGroupAlive(pgid: number): boolean {
+  if (pgid <= 0 || process.platform === "win32") return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (e: any) {
+    return e?.code === "EPERM";
+  }
+}
+
+async function isLoopbackPortAvailable(host: string, port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", () => {
+      resolve(false);
+    });
+    server.listen({ host, port, exclusive: true }, () => {
+      server.close(() => resolve(true));
+    });
+  });
 }
 
 /**
@@ -197,20 +223,56 @@ export class DefaultBrowserLauncher implements BrowserLauncher {
         disposeBrowserContext: async () => {},
         stop: async () => {
           alive = false;
-          try {
-            child.kill("SIGTERM");
-            const killTimer = setTimeout(() => {
-              if (child.exitCode === null && child.signalCode === null) {
-                try {
-                  child.kill("SIGKILL");
-                } catch {
-                  // ignore
-                }
+          const sendSignal = (sig: NodeJS.Signals) => {
+            if (process.platform !== "win32") {
+              try {
+                process.kill(-pid, sig);
+                return;
+              } catch {
+                // fall back to direct child signal
               }
-            }, 250);
-            killTimer.unref?.();
-          } catch {
-            // ignore
+            }
+            try {
+              child.kill(sig);
+            } catch {
+              // ignore
+            }
+          };
+
+          const waitForExit = (timeoutMs: number) =>
+            new Promise<void>((resolve) => {
+              if (child.exitCode !== null || child.signalCode !== null) {
+                resolve();
+                return;
+              }
+              const timer = setTimeout(() => {
+                child.removeListener("exit", onExit);
+                resolve();
+              }, timeoutMs);
+              timer.unref?.();
+              const onExit = () => {
+                clearTimeout(timer);
+                resolve();
+              };
+              child.once("exit", onExit);
+            });
+
+          sendSignal("SIGTERM");
+          await waitForExit(150);
+
+          if (child.exitCode === null && child.signalCode === null) {
+            sendSignal("SIGKILL");
+            await waitForExit(150);
+          } else if (isProcessGroupAlive(pid)) {
+            sendSignal("SIGKILL");
+          }
+
+          if (process.platform !== "win32") {
+            const reapDeadline = Date.now() + 200;
+            while (isProcessGroupAlive(pid) && Date.now() < reapDeadline) {
+              sendSignal("SIGKILL");
+              await new Promise((r) => setTimeout(r, 10));
+            }
           }
         },
         onCrash: (listener) => {
@@ -251,6 +313,8 @@ export interface DedicatedBrowserRuntimeOptions {
   readonly env?: Readonly<Record<string, string | undefined>> | undefined;
   readonly isPidAlive?: ((pid: number) => boolean) | undefined;
   readonly supportsBrowserContexts?: boolean | undefined;
+  readonly startupProbeTimeoutMs?: number | undefined;
+  readonly startupProbeIntervalMs?: number | undefined;
 }
 
 interface ManagedSession {
@@ -298,8 +362,11 @@ export class DedicatedBrowserRuntime {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly isPidAlive: (pid: number) => boolean;
   readonly supportsBrowserContextsOption: boolean;
+  readonly startupProbeTimeoutMs: number;
+  readonly startupProbeIntervalMs: number;
 
   private nextDebuggingPort: number;
+  private readonly reservedDebuggingPorts = new Set<number>();
   private readonly instances = new Map<string, ManagedBrowserInstance>();
   private readonly inFlightLaunches = new Map<string, Promise<OperationResult<ManagedBrowserInstance>>>();
   private readonly sessions = new Map<string, ManagedSession>();
@@ -341,10 +408,47 @@ export class DedicatedBrowserRuntime {
     this.repositoryRoots = options?.repositoryRoots ?? [];
     this.isPidAlive = options?.isPidAlive ?? defaultIsPidAlive;
     this.supportsBrowserContextsOption = options?.supportsBrowserContexts ?? true;
+    this.startupProbeTimeoutMs = Math.max(0, options?.startupProbeTimeoutMs ?? 300);
+    this.startupProbeIntervalMs = Math.max(5, options?.startupProbeIntervalMs ?? 25);
   }
 
-  private allocateDebuggingPort(): number {
-    return this.nextDebuggingPort++;
+  private async allocateDebuggingPort(): Promise<number> {
+    for (let attempt = 0; attempt < 256; attempt++) {
+      const candidate = this.nextDebuggingPort;
+      this.nextDebuggingPort = candidate >= 65_535 ? 10_000 : candidate + 1;
+      if (this.reservedDebuggingPorts.has(candidate)) {
+        continue;
+      }
+      if (await isLoopbackPortAvailable(this.debuggingHost, candidate)) {
+        this.reservedDebuggingPorts.add(candidate);
+        return candidate;
+      }
+    }
+    const fallback = this.nextDebuggingPort;
+    this.nextDebuggingPort = fallback >= 65_535 ? 10_000 : fallback + 1;
+    this.reservedDebuggingPorts.add(fallback);
+    return fallback;
+  }
+
+  private async waitForDebuggingEndpoint(handle: BrowserProcessHandle): Promise<boolean> {
+    if (await handle.probeDebuggingEndpoint()) {
+      return true;
+    }
+    if (this.startupProbeTimeoutMs <= 0) {
+      return false;
+    }
+    const deadline = Date.now() + this.startupProbeTimeoutMs;
+    while (handle.isAlive() && Date.now() < deadline) {
+      const sleepMs = Math.max(1, Math.min(this.startupProbeIntervalMs, deadline - Date.now()));
+      await new Promise((resolve) => setTimeout(resolve, sleepMs));
+      if (!handle.isAlive()) {
+        return false;
+      }
+      if (await handle.probeDebuggingEndpoint()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private async safeUnlink(filePath: string): Promise<void> {
@@ -377,10 +481,24 @@ export class DedicatedBrowserRuntime {
       profileDir,
       `.bflow-profile.lock.tmp.${process.pid}.${Date.now()}.${randomUUID()}`
     );
+    let fh: fs.FileHandle | undefined;
     try {
-      await fs.writeFile(tempPath, content, { encoding: "utf8", mode: 0o600 });
+      fh = await fs.open(tempPath, "w", 0o600);
+      await fh.writeFile(content, { encoding: "utf8" });
+      try {
+        await fh.sync();
+      } catch (syncErr: any) {
+        if (!FSYNC_TOLERATED_ERRNOS.has(syncErr?.code)) {
+          throw syncErr;
+        }
+      }
+      await fh.close();
+      fh = undefined;
       await fs.rename(tempPath, path.join(profileDir, ".bflow-profile.lock"));
     } catch (error) {
+      if (fh) {
+        await fh.close().catch(() => undefined);
+      }
       await this.safeUnlink(tempPath);
       throw error;
     }
@@ -547,7 +665,7 @@ export class DedicatedBrowserRuntime {
       });
     }
 
-    const port = this.allocateDebuggingPort();
+    const port = await this.allocateDebuggingPort();
     const extraArgs = [
       `--user-data-dir=${profileDir}`,
       `--remote-debugging-address=127.0.0.1`,
@@ -570,13 +688,15 @@ export class DedicatedBrowserRuntime {
       extraArgs
     });
     if (!launchRes.ok) {
+      this.reservedDebuggingPorts.delete(port);
       return err(launchRes.error);
     }
 
     const handle = launchRes.value;
-    const epOk = await handle.probeDebuggingEndpoint();
+    const epOk = await this.waitForDebuggingEndpoint(handle);
     if (!epOk) {
       await handle.stop("debugging_endpoint_inaccessible");
+      this.reservedDebuggingPorts.delete(port);
       await this.removeProfileLock(profileDir);
       return err({
         code: "transport_unavailable",
@@ -645,6 +765,7 @@ export class DedicatedBrowserRuntime {
     } catch {
       // ignore
     }
+    this.reservedDebuggingPorts.delete(instance.handle.debuggingPort);
     await this.removeProfileLock(instance.profileDir);
     for (const [key, inst] of Array.from(this.instances.entries())) {
       if (inst.instanceId === instance.instanceId) {
@@ -841,7 +962,8 @@ export class DedicatedBrowserRuntime {
       });
     }
 
-    const port = this.allocateDebuggingPort();
+    this.reservedDebuggingPorts.delete(instance.handle.debuggingPort);
+    const port = await this.allocateDebuggingPort();
     const extraArgs = [
       `--user-data-dir=${instance.profileDir}`,
       `--remote-debugging-address=127.0.0.1`,
@@ -864,13 +986,15 @@ export class DedicatedBrowserRuntime {
       extraArgs
     });
     if (!launchRes.ok) {
+      this.reservedDebuggingPorts.delete(port);
       return err(launchRes.error);
     }
 
     const handle = launchRes.value;
-    const epOk = await handle.probeDebuggingEndpoint();
+    const epOk = await this.waitForDebuggingEndpoint(handle);
     if (!epOk) {
       await handle.stop("debugging_endpoint_inaccessible");
+      this.reservedDebuggingPorts.delete(port);
       await this.removeProfileLock(instance.profileDir);
       return err({
         code: "transport_unavailable",

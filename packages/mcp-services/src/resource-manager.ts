@@ -29,6 +29,7 @@ export interface BackendResourceManagerOptions {
   readonly maxProcessCount?: number | undefined;
   readonly maxTotalMemoryBytes?: number | undefined;
   readonly now?: (() => Date) | undefined;
+  readonly isClientAlive?: ((clientId: string) => boolean) | undefined;
 }
 
 interface PartitionState {
@@ -42,6 +43,7 @@ interface PartitionState {
   startupMode: BackendStartupMode;
   ownership: "bflow" | "external";
   readonly activeClientIds: Set<string>;
+  readonly clientLeaseExpiresAt: Map<string, number>;
   readonly attachedScopes: Set<string>;
   activeCallCount: number;
   hasUncertainCalls: boolean;
@@ -63,6 +65,7 @@ export class BackendResourceManager implements MCPServiceManager {
   private readonly maxProcessCount: number;
   private readonly maxTotalMemoryBytes: number;
   private readonly now: () => Date;
+  private readonly isClientAlive?: ((clientId: string) => boolean) | undefined;
 
   private activeProcessCount = 0;
   private peakMemoryRssBytes = 0;
@@ -86,12 +89,14 @@ export class BackendResourceManager implements MCPServiceManager {
       this.maxProcessCount = extraOptions?.maxProcessCount ?? 8;
       this.maxTotalMemoryBytes = extraOptions?.maxTotalMemoryBytes ?? 2 * 1024 * 1024 * 1024;
       this.now = extraOptions?.now ?? (() => new Date());
+      this.isClientAlive = extraOptions?.isClientAlive;
     } else {
       const opts = factoryOrOptions as BackendResourceManagerOptions;
       this.driverFactory = opts.driverFactory;
       this.maxProcessCount = opts.maxProcessCount ?? 8;
       this.maxTotalMemoryBytes = opts.maxTotalMemoryBytes ?? 2 * 1024 * 1024 * 1024;
       this.now = opts.now ?? (() => new Date());
+      this.isClientAlive = opts.isClientAlive;
     }
   }
 
@@ -125,6 +130,7 @@ export class BackendResourceManager implements MCPServiceManager {
       idleTimeoutMs: options?.idleTimeoutMs ?? validDef.idleTimeoutMs,
       maxMemoryBytes: options?.maxMemoryBytes ?? 512 * 1024 * 1024,
       maxConcurrentClients: options?.maxConcurrentClients,
+      clientLeaseTtlMs: options?.clientLeaseTtlMs,
       isolateByRepository: options?.isolateByRepository
     };
 
@@ -170,6 +176,7 @@ export class BackendResourceManager implements MCPServiceManager {
             startupMode: "lazy",
             ownership: reg.definition.connection.ownership,
             activeClientIds: new Set(),
+            clientLeaseExpiresAt: new Map(),
             attachedScopes: new Set([this.formatScopeKey(scope)]),
             activeCallCount: 0,
             hasUncertainCalls: false,
@@ -244,6 +251,7 @@ export class BackendResourceManager implements MCPServiceManager {
         startupMode: reg.options.startupMode ?? "lazy",
         ownership: service.connection.ownership,
         activeClientIds: new Set(),
+        clientLeaseExpiresAt: new Map(),
         attachedScopes: new Set([this.formatScopeKey(operation.scope)]),
         activeCallCount: 0,
         hasUncertainCalls: false,
@@ -400,6 +408,7 @@ export class BackendResourceManager implements MCPServiceManager {
     const partition = this.partitions.get(partitionKey);
 
     if (partition) {
+      this.evictStaleClients(partition);
       return ok(this.createObservation(partition));
     }
 
@@ -461,6 +470,7 @@ export class BackendResourceManager implements MCPServiceManager {
       }));
     }
 
+    this.evictStaleClients(partition);
     if (partition.activeClientIds.size > 0) {
       return ok(this.createObservation(partition, { diagnosticCode: "retained_active_clients" }));
     }
@@ -509,7 +519,8 @@ export class BackendResourceManager implements MCPServiceManager {
   async attachClient(
     serviceId: string,
     clientId: string,
-    operation: ScopedOperation
+    operation: ScopedOperation,
+    attachOptions?: { readonly leaseTtlMs?: number | undefined }
   ): Promise<OperationResult<MCPServiceObservation>> {
     const reg = this.registeredBackends.get(serviceId);
     if (!reg) {
@@ -532,6 +543,7 @@ export class BackendResourceManager implements MCPServiceManager {
         startupMode: reg.options.startupMode ?? "lazy",
         ownership: reg.definition.connection.ownership,
         activeClientIds: new Set(),
+        clientLeaseExpiresAt: new Map(),
         attachedScopes: new Set([this.formatScopeKey(operation.scope)]),
         activeCallCount: 0,
         hasUncertainCalls: false,
@@ -545,6 +557,8 @@ export class BackendResourceManager implements MCPServiceManager {
         discoveredTools: []
       };
       this.partitions.set(partitionKey, partition);
+    } else {
+      this.evictStaleClients(partition);
     }
 
     if (
@@ -564,20 +578,29 @@ export class BackendResourceManager implements MCPServiceManager {
       });
     }
 
+    const effectiveTtlMs = attachOptions?.leaseTtlMs ?? reg.options.clientLeaseTtlMs;
     partition.activeClientIds.add(clientId);
+    if (effectiveTtlMs !== undefined && Number.isFinite(effectiveTtlMs) && effectiveTtlMs > 0) {
+      partition.clientLeaseExpiresAt.set(clientId, this.now().getTime() + effectiveTtlMs);
+    } else {
+      partition.clientLeaseExpiresAt.delete(clientId);
+    }
     partition.idleSince = null;
 
     const ensureRes = await this.ensure(reg.definition, operation);
     if (!ensureRes.ok) {
       partition.activeClientIds.delete(clientId);
+      partition.clientLeaseExpiresAt.delete(clientId);
       return ensureRes;
     }
 
+    this.evictStaleClients(partition);
     if (
       reg.options.maxConcurrentClients !== undefined &&
       partition.activeClientIds.size > reg.options.maxConcurrentClients
     ) {
       partition.activeClientIds.delete(clientId);
+      partition.clientLeaseExpiresAt.delete(clientId);
       return err({
         code: "conflict",
         retryable: true,
@@ -626,6 +649,8 @@ export class BackendResourceManager implements MCPServiceManager {
     }
 
     partition.activeClientIds.delete(clientId);
+    partition.clientLeaseExpiresAt.delete(clientId);
+    this.evictStaleClients(partition);
     if (
       partition.activeClientIds.size === 0 &&
       partition.activeCallCount === 0 &&
@@ -738,6 +763,7 @@ export class BackendResourceManager implements MCPServiceManager {
         continue;
       }
 
+      this.evictStaleClients(partition, currentTime);
       if (partition.activeClientIds.size > 0) {
         swept.push(this.createObservation(partition, { diagnosticCode: "retained_active_clients" }));
         continue;
@@ -925,9 +951,38 @@ export class BackendResourceManager implements MCPServiceManager {
     return total;
   }
 
+  private evictStaleClients(partition: PartitionState, currentTimeMs = this.now().getTime()): void {
+    if (partition.activeClientIds.size === 0) {
+      return;
+    }
+    let evictedAny = false;
+    for (const clientId of Array.from(partition.activeClientIds)) {
+      const expiresAt = partition.clientLeaseExpiresAt.get(clientId);
+      const expired = expiresAt !== undefined && expiresAt <= currentTimeMs;
+      const dead = this.isClientAlive !== undefined && !this.isClientAlive(clientId);
+      if (expired || dead) {
+        partition.activeClientIds.delete(clientId);
+        partition.clientLeaseExpiresAt.delete(clientId);
+        evictedAny = true;
+      }
+    }
+    if (
+      evictedAny &&
+      partition.status === "ready" &&
+      partition.activeClientIds.size === 0 &&
+      partition.activeCallCount === 0 &&
+      !partition.hasUncertainCalls &&
+      partition.idleSince === null
+    ) {
+      partition.idleSince = new Date(currentTimeMs).toISOString();
+    }
+  }
+
   private async evictIdleBackendsUnderPressure(): Promise<number> {
     let evicted = 0;
+    const currentTimeMs = this.now().getTime();
     for (const p of this.partitions.values()) {
+      this.evictStaleClients(p, currentTimeMs);
       if (
         p.status === "ready" &&
         p.ownership === "bflow" &&
@@ -970,6 +1025,8 @@ export class BackendResourceManager implements MCPServiceManager {
     }
     partition.status = "stopped";
     partition.diagnosticCode = `crashed_${reason}`;
+    partition.activeCallCount = 0;
+    partition.idleSince = null;
     partition.memoryRssBytes = 0;
     partition.restartCount++;
     if (partition.crashListenerDisposer) {

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { access, mkdir, open as openFile, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   BFLOW_SERVICE_MARKER,
@@ -100,7 +101,68 @@ function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void 
   };
 }
 
+export interface SafeOSCommandRunnerOptions {
+  readonly defaultTimeoutMs?: number | undefined;
+  readonly platform?: SupportedOSPlatform | undefined;
+  readonly uid?: number | undefined;
+  readonly userRuntimeRootDir?: string | undefined;
+  readonly baseEnv?: Readonly<Record<string, string | undefined>> | undefined;
+}
+
+const DEFAULT_OS_COMMAND_TIMEOUT_MS = 15_000;
+const FSYNC_TOLERATED_ERRNOS = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EROFS"]);
+
 export class SafeOSCommandRunner implements OSCommandRunner {
+  private readonly defaultTimeoutMs: number;
+  private readonly platform?: SupportedOSPlatform | undefined;
+  private readonly uid?: number | undefined;
+  private readonly userRuntimeRootDir: string;
+  private readonly baseEnv?: Readonly<Record<string, string | undefined>> | undefined;
+
+  constructor(options?: SafeOSCommandRunnerOptions) {
+    this.defaultTimeoutMs = options?.defaultTimeoutMs ?? DEFAULT_OS_COMMAND_TIMEOUT_MS;
+    this.platform = options?.platform;
+    this.uid = options?.uid;
+    this.userRuntimeRootDir = options?.userRuntimeRootDir ?? "/run/user";
+    this.baseEnv = options?.baseEnv;
+  }
+
+  private resolveSpawnEnv(
+    file: string,
+    args: readonly string[],
+    overrideEnv?: Readonly<Record<string, string>>
+  ): NodeJS.ProcessEnv {
+    const merged: Record<string, string | undefined> = {
+      ...(this.baseEnv ?? process.env),
+      ...(overrideEnv ?? {})
+    };
+    const effectivePlatform = this.platform ?? process.platform;
+    const baseBin = path.basename(file);
+    const needsUserBus =
+      effectivePlatform === "linux" &&
+      (baseBin === "systemctl" || baseBin === "journalctl" || args.includes("--user"));
+
+    if (needsUserBus) {
+      const effectiveUid =
+        this.uid ?? (typeof process.getuid === "function" ? process.getuid() : undefined);
+      if (effectiveUid !== undefined) {
+        const candidateRuntimeDir = path.join(this.userRuntimeRootDir, String(effectiveUid));
+        if (!merged.XDG_RUNTIME_DIR && existsSync(candidateRuntimeDir)) {
+          merged.XDG_RUNTIME_DIR = candidateRuntimeDir;
+        }
+        const xdgDir = merged.XDG_RUNTIME_DIR;
+        if (!merged.DBUS_SESSION_BUS_ADDRESS && xdgDir) {
+          const busSocket = path.join(xdgDir, "bus");
+          if (existsSync(busSocket)) {
+            merged.DBUS_SESSION_BUS_ADDRESS = `unix:path=${busSocket}`;
+          }
+        }
+      }
+    }
+
+    return merged;
+  }
+
   run(
     argv: readonly string[],
     options?: {
@@ -140,6 +202,7 @@ export class SafeOSCommandRunner implements OSCommandRunner {
       };
 
       const [file, ...args] = argv as [string, ...string[]];
+      const spawnEnv = this.resolveSpawnEnv(file, args, options?.env);
       let child: ReturnType<typeof spawn> | undefined;
       try {
         child = spawn(file, args, {
@@ -148,7 +211,7 @@ export class SafeOSCommandRunner implements OSCommandRunner {
           windowsHide: true,
           detached: process.platform !== "win32",
           stdio: ["ignore", "pipe", "pipe"],
-          env: options?.env ? { ...process.env, ...options.env } : process.env
+          env: spawnEnv
         });
       } catch (e: any) {
         spawnError = `${e?.code ?? "ERROR"}: ${e?.message ?? String(e)}`;
@@ -188,7 +251,8 @@ export class SafeOSCommandRunner implements OSCommandRunner {
         finish(code ?? observedExitCode ?? (timedOut ? 124 : 1));
       });
 
-      if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+      const effectiveTimeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs;
+      if (effectiveTimeoutMs !== undefined && Number.isFinite(effectiveTimeoutMs) && effectiveTimeoutMs > 0) {
         cancelTimer = scheduleSafeTimeout(() => {
           timedOut = true;
           if (process.platform !== "win32" && child?.pid !== undefined) {
@@ -207,7 +271,7 @@ export class SafeOSCommandRunner implements OSCommandRunner {
             finish(124);
           }, 300);
           graceTimer.unref?.();
-        }, options.timeoutMs);
+        }, effectiveTimeoutMs);
       }
     });
   }
@@ -236,10 +300,24 @@ export async function writeFileAtomic(
   mode = 0o644
 ): Promise<void> {
   const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${randomUUID()}`;
+  let fh: Awaited<ReturnType<typeof openFile>> | undefined;
   try {
-    await writeFile(tmpPath, content, { mode, encoding: "utf8" });
+    fh = await openFile(tmpPath, "w", mode);
+    await fh.writeFile(content, { encoding: "utf8" });
+    try {
+      await fh.sync();
+    } catch (syncErr: any) {
+      if (!FSYNC_TOLERATED_ERRNOS.has(syncErr?.code)) {
+        throw syncErr;
+      }
+    }
+    await fh.close();
+    fh = undefined;
     await rename(tmpPath, filePath);
   } catch (error) {
+    if (fh) {
+      await fh.close().catch(() => undefined);
+    }
     try {
       await unlink(tmpPath);
     } catch {
@@ -283,6 +361,7 @@ export interface BflowOSServiceManagerOptions {
   readonly uid?: number | undefined;
   readonly env?: Readonly<Record<string, string | undefined>> | undefined;
   readonly runner?: OSCommandRunner | undefined;
+  readonly commandTimeoutMs?: number | undefined;
   readonly windowsVerified?: boolean | undefined;
   readonly healthProbe?: ((url: string, timeoutMs: number) => Promise<boolean>) | undefined;
   readonly now?: (() => Date) | undefined;
@@ -322,7 +401,14 @@ export class BflowOSServiceManager implements OSServiceManagerPort {
       options?.uid ??
       (typeof process.getuid === "function" ? process.getuid() : 1000);
     this.env = options?.env ?? process.env;
-    this.runner = options?.runner ?? new SafeOSCommandRunner();
+    this.runner =
+      options?.runner ??
+      new SafeOSCommandRunner({
+        defaultTimeoutMs: options?.commandTimeoutMs ?? DEFAULT_OS_COMMAND_TIMEOUT_MS,
+        platform: this.platform,
+        uid: this.uid,
+        baseEnv: this.env
+      });
     this.windowsVerified = options?.windowsVerified ?? false;
     this.healthProbe = options?.healthProbe ?? defaultHealthProbe;
     this.now = options?.now ?? (() => new Date());
@@ -740,6 +826,9 @@ export class BflowOSServiceManager implements OSServiceManagerPort {
     let pid: number | undefined;
     let restartCount = this.restartCounts.get(serviceId) ?? 0;
 
+    let diagnosticCodeOverride: string | undefined;
+    let diagnosticsOverride: string[] | undefined;
+
     if (this.platform === "linux") {
       const activeRes = await this.runner.run(["systemctl", "--user", "is-active", `bflow-${serviceId}.service`]);
       const enabledRes = await this.runner.run(["systemctl", "--user", "is-enabled", `bflow-${serviceId}.service`]);
@@ -758,6 +847,28 @@ export class BflowOSServiceManager implements OSServiceManagerPort {
       else if (activeText === "failed") state = "failed";
       else if (activeText === "inactive" || activeRes.exitCode === 3 || activeRes.exitCode === 4) state = "stopped";
       else state = "unknown";
+
+      if (activeRes.timedOut || enabledRes.timedOut || showRes.timedOut) {
+        if (state === "unknown") {
+          diagnosticCodeOverride = "service_command_timeout";
+          diagnosticsOverride = ["Timed out querying systemd --user service status"];
+        }
+      } else if (state === "unknown") {
+        const combinedStderr = [activeRes.stderr, enabledRes.stderr, showRes.stderr]
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(" | ");
+        if (
+          /Failed to connect to (?:user scope )?bus|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|No medium found/i.test(
+            combinedStderr
+          )
+        ) {
+          diagnosticCodeOverride = "systemd_user_bus_unavailable";
+          diagnosticsOverride = [
+            `systemd --user D-Bus session bus unavailable (check XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS or loginctl enable-linger): ${combinedStderr}`
+          ];
+        }
+      }
 
       enabledOnLogin = enabledRes.stdout.trim().toLowerCase() === "enabled";
 
@@ -780,7 +891,11 @@ export class BflowOSServiceManager implements OSServiceManagerPort {
       restartCount = Math.max(restartCount, systemdRestarts);
     } else if (this.platform === "darwin") {
       const printRes = await this.runner.run(["launchctl", "print", `gui/${this.uid}/dev.bflow.${serviceId}`]);
-      if (printRes.exitCode === 0) {
+      if (printRes.timedOut) {
+        state = "unknown";
+        diagnosticCodeOverride = "service_command_timeout";
+        diagnosticsOverride = ["Timed out querying launchd service status"];
+      } else if (printRes.exitCode === 0) {
         const pidMatch = printRes.stdout.match(/pid\s*=\s*(\d+)/i);
         if (pidMatch && pidMatch[1]) {
           const parsedPid = parseInt(pidMatch[1], 10);
@@ -811,7 +926,11 @@ export class BflowOSServiceManager implements OSServiceManagerPort {
         "LIST",
         "/V"
       ]);
-      if (queryRes.exitCode === 0) {
+      if (queryRes.timedOut) {
+        state = "unknown";
+        diagnosticCodeOverride = "service_command_timeout";
+        diagnosticsOverride = ["Timed out querying Windows Scheduled Task status"];
+      } else if (queryRes.exitCode === 0) {
         const statusMatch = queryRes.stdout.match(/Status:\s*([^\r\n]+)/i);
         const statusText = (statusMatch?.[1] ?? "").trim().toLowerCase();
         if (statusText === "running") state = "running";
@@ -840,8 +959,8 @@ export class BflowOSServiceManager implements OSServiceManagerPort {
       unitDigest,
       restartCount,
       observedAt: this.now().toISOString(),
-      diagnosticCode: `service_${state}`,
-      diagnostics: [`Service is ${state}`]
+      diagnosticCode: diagnosticCodeOverride ?? `service_${state}`,
+      diagnostics: diagnosticsOverride ?? [`Service is ${state}`]
     });
   }
 

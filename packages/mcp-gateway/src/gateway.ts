@@ -95,6 +95,8 @@ export class BflowSharedMCPGateway {
   private readonly resourceStates = new Map<string, ResourceState>();
   private readonly callLedger = new Map<string, RecordedCallLedgerEntry>();
   private readonly concurrencyQueues = new Map<string, ConcurrencySlot>();
+  private readonly activeRegistrationCalls = new Map<string, Set<AbortController>>();
+  private readonly sessionDisconnectListeners = new Set<(sessionId: string) => void>();
 
   constructor(options?: BflowSharedMCPGatewayOptions) {
     this.registry = options?.registry ?? options?.serviceManager?.registry ?? new MCPServiceRegistry();
@@ -313,6 +315,31 @@ export class BflowSharedMCPGateway {
     return this.sessions.get(sessionId);
   }
 
+  onSessionDisconnect(listener: (sessionId: string) => void): () => void {
+    this.sessionDisconnectListeners.add(listener);
+    return () => {
+      this.sessionDisconnectListeners.delete(listener);
+    };
+  }
+
+  private trackRegistrationCall(registrationId: string, controller: AbortController): () => void {
+    let set = this.activeRegistrationCalls.get(registrationId);
+    if (!set) {
+      set = new Set<AbortController>();
+      this.activeRegistrationCalls.set(registrationId, set);
+    }
+    set.add(controller);
+    return () => {
+      const current = this.activeRegistrationCalls.get(registrationId);
+      if (current) {
+        current.delete(controller);
+        if (current.size === 0) {
+          this.activeRegistrationCalls.delete(registrationId);
+        }
+      }
+    };
+  }
+
   disconnectSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (session) {
@@ -338,6 +365,13 @@ export class BflowSharedMCPGateway {
         diagnosticCode: "disconnected",
         message: "Client session disconnected"
       });
+    }
+    for (const listener of this.sessionDisconnectListeners) {
+      try {
+        listener(sessionId);
+      } catch {
+        // ignore listener errors
+      }
     }
   }
 
@@ -571,6 +605,14 @@ export class BflowSharedMCPGateway {
     }
 
     this.secretStore.revokeClientToken(registrationId);
+
+    const activeCalls = this.activeRegistrationCalls.get(registrationId);
+    if (activeCalls) {
+      for (const ctrl of [...activeCalls]) {
+        ctrl.abort(new Error("Client registration revoked"));
+      }
+      this.activeRegistrationCalls.delete(registrationId);
+    }
 
     for (const [sessionId, session] of this.sessions.entries()) {
       if (session.registrationId === registrationId) {
@@ -1257,203 +1299,317 @@ export class BflowSharedMCPGateway {
       }
     }
 
-    const ensureRes = await this.serviceManager.ensure(
-      entry.definition,
-      {
-        schemaVersion: 3,
-        scope: reg.scope,
-        idempotencyKey: request.idempotencyKey
-      },
-      { ...options, clientId: reg.registrationId }
-    );
-    if (!ensureRes.ok) return ensureRes;
-    if (ensureRes.value.status !== "ready") {
-      return err({
-        code: "transport_unavailable",
-        retryable: true,
-        message: `Service is not ready (status: ${ensureRes.value.status})`,
-        details: { diagnosticCode: ensureRes.value.diagnosticCode }
-      });
-    }
-
-    this.serviceManager.attachClient(partitionKey, reg.registrationId, entry);
-
-    const driver = this.serviceManager.getDriver(partitionKey);
-    if (!driver || !driver.isAlive()) {
-      return err({
-        code: "transport_unavailable",
-        retryable: true,
-        message: "Driver is not available or alive"
-      });
-    }
-
-    const currentPartition = this.serviceManager.getPartitionState(partitionKey);
-    const negotiatedDefinition = currentPartition?.toolDefinitions?.find((tool) => tool.name === request.tool);
-    const strictSchema = grant !== undefined;
-    const definition = negotiatedDefinition ?? (!strictSchema ? fallbackToolDefinition(request.tool) : undefined);
-    if (this.durableCallLedger && currentPartition) {
-      const schemaDigest = computePayloadFingerprint({
-        tools: [...(currentPartition.toolDefinitions ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
-        defaultedInputSchemaTools: [...(currentPartition.defaultedInputSchemaTools ?? [])].sort()
-      });
-      if (!this.durableCallLedger.pinServiceSchema({ serviceId: request.serviceId, revision: entry.definition.revision,
-        serviceConfigDigest: entry.configDigest, schemaDigest })) {
-        currentPartition.status = "blocked";
-        currentPartition.diagnosticCode = "tool_schema_drift";
-        return err({ code: "validation", retryable: false, message: "Negotiated tool schema drifted without a service revision change" });
-      }
-    }
-    if (!definition || (strictSchema && currentPartition?.defaultedInputSchemaTools?.includes(request.tool)) ||
-        !validateJsonSchema(request.input, definition.inputSchema)) {
-      return err({ code: "validation", retryable: false, message: "Tool input does not match the currently discovered upstream schema" });
-    }
-
-    const maxConcurrency =
-      entry.definition.tool.resource.sharing === "concurrent"
-        ? entry.policy.concurrencyModel === "serialized"
-          ? 1
-          : entry.definition.tool.resource.maxConcurrency
-        : 1;
-    const maxQueueSize = entry.policy.maxQueueSize ?? 32;
-
-    const queueTimeoutMs = options?.timeoutMs ?? entry.policy.callTimeoutMs ?? 60_000;
-    const slotRes = await this.acquireConcurrencySlot(
-      request.serviceId,
-      partitionKey,
-      maxConcurrency,
-      maxQueueSize,
-      options?.signal,
-      queueTimeoutMs
-    );
-    if (!slotRes.ok) return slotRes;
-    const releaseSlot = slotRes.value;
-
-    if (isExclusive && resState) {
-      const activeLease = resState.activeLease;
-      const nowMs = this.now().getTime();
-      if (
-        resState.quarantinedByCallId ||
-        !activeLease ||
-        activeLease.leaseId !== request.resourceLease?.leaseId ||
-        activeLease.fencingToken !== resState.currentFence ||
-        Date.parse(activeLease.expiresAt) <= nowMs
-      ) {
-        releaseSlot();
-        return err({
-          code: "conflict",
-          retryable: true,
-          message: "Resource lease expired or superseded while queued",
-          details: { diagnosticCode: "stale_lease_at_dispatch" }
-        });
-      }
-    }
-
-    if (options?.signal?.aborted) {
-      releaseSlot();
-      return err({
-        code: "cancelled",
-        retryable: false,
-        message: "Tool call cancelled before upstream dispatch"
-      });
-    }
-
-    const isReadOnly = entry.policy.readOnlyTools?.includes(request.tool) ?? false;
-    const mutating = !isReadOnly;
-    const requestId = `req-${randomUUID()}`;
-    const fingerprint = computePayloadFingerprint(request);
-
-    const initialResult: MCPToolCallResult = {
-      schemaVersion: 3,
-      callId: request.callId,
-      status: "unknown",
-      output: null,
-      observedAt: this.now().toISOString()
-    };
-
-    const ledgerEntry: RecordedCallLedgerEntry = {
-      call: request,
-      requestId,
-      sessionId: reg.scope.sessionId,
-      partitionKey,
-      instanceId: driver.instanceId,
-      fingerprint,
-      mutating,
-      dispatchedToUpstream: true,
-      result: initialResult
-    };
-    this.durableCallLedger?.recordIntent(request);
-    this.callLedger.set(request.callId, ledgerEntry);
-
-    this.metrics.recordCallStart(request.serviceId);
-    const startTime = Date.now();
-
-    const callTimeoutMs = options?.timeoutMs ?? entry.policy.callTimeoutMs ?? 60_000;
-    const abortCtrl = new AbortController();
-    let timedOut = false;
-    const cancelTimeoutTimer = scheduleSafeTimeout(() => {
-      timedOut = true;
-      abortCtrl.abort(new Error("Call timeout"));
-    }, callTimeoutMs);
-
-    const onParentAbort = () => {
-      abortCtrl.abort(options?.signal?.reason ?? new Error("Aborted"));
+    const regAbortCtrl = new AbortController();
+    const onCallerAbort = () => {
+      regAbortCtrl.abort(options?.signal?.reason ?? new Error("Aborted"));
     };
     if (options?.signal) {
-      options.signal.addEventListener("abort", onParentAbort, { once: true });
+      if (options.signal.aborted) {
+        onCallerAbort();
+      } else {
+        options.signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
     }
+    const untrackRegCall = this.trackRegistrationCall(reg.registrationId, regAbortCtrl);
+    let releaseSlot: (() => void) | undefined;
 
     try {
-      const upstreamInput: MCPUpstreamToolCallInput = {
-        sessionId: reg.scope.sessionId,
-        clientId: reg.registrationId,
-        requestId,
-        callId: request.callId,
-        tool: request.tool,
-        arguments: request.input,
-        ...(request.resourceLease?.fencingToken !== undefined
-          ? { fencingToken: request.resourceLease.fencingToken }
-          : {}),
-        ...(request.resourceLease?.resourceKey !== undefined
-          ? { resourceKey: request.resourceLease.resourceKey }
-          : {}),
-        signal: abortCtrl.signal,
-        timeoutMs: callTimeoutMs
-      };
-
-      const upstreamRes = await driver.callTool(upstreamInput);
-
-      cancelTimeoutTimer();
-      if (options?.signal) {
-        options.signal.removeEventListener("abort", onParentAbort);
+      const ensureRes = await this.serviceManager.ensure(
+        entry.definition,
+        {
+          schemaVersion: 3,
+          scope: reg.scope,
+          idempotencyKey: request.idempotencyKey
+        },
+        { ...options, signal: regAbortCtrl.signal, clientId: reg.registrationId }
+      );
+      if (!ensureRes.ok) return ensureRes;
+      if (ensureRes.value.status !== "ready") {
+        return err({
+          code: "transport_unavailable",
+          retryable: true,
+          message: `Service is not ready (status: ${ensureRes.value.status})`,
+          details: { diagnosticCode: ensureRes.value.diagnosticCode }
+        });
       }
 
-      const durationMs = Date.now() - startTime;
+      this.serviceManager.attachClient(partitionKey, reg.registrationId, entry);
 
-      if (!upstreamRes.ok) {
-        if (driver.cancelRequest) {
-          await driver.cancelRequest(requestId, "tool_call_failed").catch(() => {});
+      const driver = this.serviceManager.getDriver(partitionKey);
+      if (!driver || !driver.isAlive()) {
+        return err({
+          code: "transport_unavailable",
+          retryable: true,
+          message: "Driver is not available or alive"
+        });
+      }
+
+      const currentPartition = this.serviceManager.getPartitionState(partitionKey);
+      const negotiatedDefinition = currentPartition?.toolDefinitions?.find((tool) => tool.name === request.tool);
+      const strictSchema = grant !== undefined;
+      const definition = negotiatedDefinition ?? (!strictSchema ? fallbackToolDefinition(request.tool) : undefined);
+      if (this.durableCallLedger && currentPartition) {
+        const schemaDigest = computePayloadFingerprint({
+          tools: [...(currentPartition.toolDefinitions ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
+          defaultedInputSchemaTools: [...(currentPartition.defaultedInputSchemaTools ?? [])].sort()
+        });
+        if (!this.durableCallLedger.pinServiceSchema({ serviceId: request.serviceId, revision: entry.definition.revision,
+          serviceConfigDigest: entry.configDigest, schemaDigest })) {
+          currentPartition.status = "blocked";
+          currentPartition.diagnosticCode = "tool_schema_drift";
+          return err({ code: "validation", retryable: false, message: "Negotiated tool schema drifted without a service revision change" });
+        }
+      }
+      if (!definition || (strictSchema && currentPartition?.defaultedInputSchemaTools?.includes(request.tool)) ||
+          !validateJsonSchema(request.input, definition.inputSchema)) {
+        return err({ code: "validation", retryable: false, message: "Tool input does not match the currently discovered upstream schema" });
+      }
+
+      const maxConcurrency =
+        entry.definition.tool.resource.sharing === "concurrent"
+          ? entry.policy.concurrencyModel === "serialized"
+            ? 1
+            : entry.definition.tool.resource.maxConcurrency
+          : 1;
+      const maxQueueSize = entry.policy.maxQueueSize ?? 32;
+
+      const queueTimeoutMs = options?.timeoutMs ?? entry.policy.callTimeoutMs ?? 60_000;
+      const slotRes = await this.acquireConcurrencySlot(
+        request.serviceId,
+        partitionKey,
+        maxConcurrency,
+        maxQueueSize,
+        regAbortCtrl.signal,
+        queueTimeoutMs
+      );
+      if (!slotRes.ok) return slotRes;
+      releaseSlot = slotRes.value;
+
+      if (isExclusive && resState) {
+        const activeLease = resState.activeLease;
+        const nowMs = this.now().getTime();
+        if (
+          resState.quarantinedByCallId ||
+          !activeLease ||
+          activeLease.leaseId !== request.resourceLease?.leaseId ||
+          activeLease.fencingToken !== resState.currentFence ||
+          !(Date.parse(activeLease.expiresAt) > nowMs)
+        ) {
+          return err({
+            code: "conflict",
+            retryable: true,
+            message: "Resource lease expired or superseded while queued",
+            details: { diagnosticCode: "stale_lease_at_dispatch" }
+          });
+        }
+      }
+
+      if (regAbortCtrl.signal.aborted) {
+        return err({
+          code: "cancelled",
+          retryable: false,
+          message: "Tool call cancelled before upstream dispatch"
+        });
+      }
+
+      const isReadOnly = entry.policy.readOnlyTools?.includes(request.tool) ?? false;
+      const mutating = !isReadOnly;
+      const requestId = `req-${randomUUID()}`;
+      const fingerprint = computePayloadFingerprint(request);
+
+      const initialResult: MCPToolCallResult = {
+        schemaVersion: 3,
+        callId: request.callId,
+        status: "unknown",
+        output: null,
+        observedAt: this.now().toISOString()
+      };
+
+      const ledgerEntry: RecordedCallLedgerEntry = {
+        call: request,
+        requestId,
+        sessionId: reg.scope.sessionId,
+        partitionKey,
+        instanceId: driver.instanceId,
+        fingerprint,
+        mutating,
+        dispatchedToUpstream: true,
+        result: initialResult
+      };
+      this.durableCallLedger?.recordIntent(request);
+      this.callLedger.set(request.callId, ledgerEntry);
+
+      this.metrics.recordCallStart(request.serviceId);
+      const startTime = Date.now();
+
+      const callTimeoutMs = options?.timeoutMs ?? entry.policy.callTimeoutMs ?? 60_000;
+      const abortCtrl = new AbortController();
+      let timedOut = false;
+      const cancelTimeoutTimer = scheduleSafeTimeout(() => {
+        timedOut = true;
+        abortCtrl.abort(new Error("Call timeout"));
+      }, callTimeoutMs);
+
+      const onParentAbort = () => {
+        abortCtrl.abort(regAbortCtrl.signal.reason ?? new Error("Aborted"));
+      };
+      if (regAbortCtrl.signal.aborted) {
+        onParentAbort();
+      } else {
+        regAbortCtrl.signal.addEventListener("abort", onParentAbort, { once: true });
+      }
+
+      try {
+        const upstreamInput: MCPUpstreamToolCallInput = {
+          sessionId: reg.scope.sessionId,
+          clientId: reg.registrationId,
+          requestId,
+          callId: request.callId,
+          tool: request.tool,
+          arguments: request.input,
+          ...(request.resourceLease?.fencingToken !== undefined
+            ? { fencingToken: request.resourceLease.fencingToken }
+            : {}),
+          ...(request.resourceLease?.resourceKey !== undefined
+            ? { resourceKey: request.resourceLease.resourceKey }
+            : {}),
+          signal: abortCtrl.signal,
+          timeoutMs: callTimeoutMs
+        };
+
+        const upstreamRes = await driver.callTool(upstreamInput);
+
+        cancelTimeoutTimer();
+        regAbortCtrl.signal.removeEventListener("abort", onParentAbort);
+
+        const durationMs = Date.now() - startTime;
+
+        if (!upstreamRes.ok) {
+          if (driver.cancelRequest) {
+            await driver.cancelRequest(requestId, "tool_call_failed").catch(() => {});
+          }
+
+          const diagCode = (upstreamRes.error.details as Record<string, unknown> | undefined)
+            ?.diagnosticCode;
+          if (diagCode === "interactive_prompt_blocked") {
+            this.metrics.recordCallEnd(request.serviceId, "failed", durationMs);
+            this.recordAudit({
+              action: "interactive.blocked",
+              registrationId: reg.registrationId,
+              serviceId: request.serviceId,
+              callId: request.callId,
+              status: "blocked",
+              diagnosticCode: "interactive_prompt_blocked",
+              message: upstreamRes.error.message
+            });
+            return upstreamRes;
+          }
+
+          if (mutating) {
+            if (timedOut || upstreamRes.error.code === "timeout") {
+              this.metrics.recordMutatingTimeoutOrCancel("timeout", request.serviceId);
+            } else if (regAbortCtrl.signal.aborted || upstreamRes.error.code === "cancelled") {
+              this.metrics.recordMutatingTimeoutOrCancel("cancelled", request.serviceId);
+            }
+            this.metrics.recordCallEnd(request.serviceId, "unknown", durationMs);
+            const uncertainResult: MCPToolCallResult = MCPToolCallResultSchema.parse({
+              schemaVersion: 3,
+              callId: request.callId,
+              status: "unknown",
+              output: {
+                diagnosticCode: "uncertain_mutating_outcome",
+                message:
+                  "Mutating tool call outcome is unknown after failure; reconcile before retry"
+              },
+              observedAt: this.now().toISOString()
+            });
+            ledgerEntry.result = uncertainResult;
+            this.durableCallLedger?.recordResult(request.callId, uncertainResult);
+            if (isExclusive && resState) {
+              resState.quarantinedByCallId = request.callId;
+            }
+            this.recordAudit({
+              action: "tool.call",
+              registrationId: reg.registrationId,
+              serviceId: request.serviceId,
+              callId: request.callId,
+              status: "unknown",
+              diagnosticCode: "uncertain_mutating_outcome",
+              message: "Mutating tool call outcome unknown after upstream failure"
+            });
+            const res = ok(uncertainResult);
+            this.recordIdempotency(request.idempotencyKey, request, res);
+            return res;
+          } else {
+            this.metrics.recordCallEnd(request.serviceId, "failed", durationMs);
+            return upstreamRes;
+          }
         }
 
-        const diagCode = (upstreamRes.error.details as Record<string, unknown> | undefined)
-          ?.diagnosticCode;
-        if (diagCode === "interactive_prompt_blocked") {
-          this.metrics.recordCallEnd(request.serviceId, "failed", durationMs);
-          this.recordAudit({
-            action: "interactive.blocked",
-            registrationId: reg.registrationId,
-            serviceId: request.serviceId,
-            callId: request.callId,
-            status: "blocked",
-            diagnosticCode: "interactive_prompt_blocked",
-            message: upstreamRes.error.message
-          });
-          return upstreamRes;
+        const outputSchema = negotiatedDefinition?.outputSchema;
+        let resolvedStructuredContent = upstreamRes.value.structuredContent;
+        if (!upstreamRes.value.isError && outputSchema !== undefined && resolvedStructuredContent === undefined) {
+          resolvedStructuredContent = trySynthesizeStructuredContent(upstreamRes.value.content, outputSchema);
+        }
+        const invalidStructuredOutput = !upstreamRes.value.isError && outputSchema !== undefined &&
+          (resolvedStructuredContent === undefined || !validateJsonSchema(resolvedStructuredContent, outputSchema));
+        if (invalidStructuredOutput) {
+          const invalidResult: MCPToolCallResult = MCPToolCallResultSchema.parse({ schemaVersion: 3, callId: request.callId,
+            status: mutating ? "unknown" : "failed",
+            output: { diagnosticCode: "upstream_output_schema_invalid", message: "Upstream structuredContent did not match its advertised output schema" },
+            observedAt: this.now().toISOString() });
+          const status = invalidResult.status;
+          this.metrics.recordCallEnd(request.serviceId, status, durationMs);
+          ledgerEntry.result = invalidResult;
+          this.durableCallLedger?.recordResult(request.callId, invalidResult);
+          if (mutating && isExclusive && resState) resState.quarantinedByCallId = request.callId;
+          this.recordAudit({ action: "tool.call", registrationId: reg.registrationId, serviceId: request.serviceId,
+            callId: request.callId, status: status === "unknown" ? "unknown" : "failed",
+            diagnosticCode: "upstream_output_schema_invalid", message: "Upstream output schema validation failed" });
+          const res = ok(invalidResult);
+          this.recordIdempotency(request.idempotencyKey, request, res);
+          return res;
+        }
+
+        const outcomeStatus = upstreamRes.value.isError ? "failed" : "completed";
+        this.metrics.recordCallEnd(request.serviceId, outcomeStatus, durationMs);
+
+        const callResult: MCPToolCallResult = MCPToolCallResultSchema.parse({
+          schemaVersion: 3,
+          callId: request.callId,
+          status: outcomeStatus,
+          output: preserveStructuredToolOutput(upstreamRes.value.content, resolvedStructuredContent),
+          observedAt: this.now().toISOString()
+        });
+
+        ledgerEntry.result = callResult;
+        this.durableCallLedger?.recordResult(request.callId, callResult);
+        this.recordAudit({
+          action: "tool.call",
+          registrationId: reg.registrationId,
+          serviceId: request.serviceId,
+          callId: request.callId,
+          status: outcomeStatus === "completed" ? "succeeded" : "failed",
+          diagnosticCode: outcomeStatus,
+          message: `Tool call ${outcomeStatus}`
+        });
+
+        const res = ok(callResult);
+        this.recordIdempotency(request.idempotencyKey, request, res);
+        return res;
+      } catch (e) {
+        cancelTimeoutTimer();
+        regAbortCtrl.signal.removeEventListener("abort", onParentAbort);
+
+        const durationMs = Date.now() - startTime;
+        if (driver.cancelRequest) {
+          await driver.cancelRequest(requestId, "timeout_or_abort").catch(() => {});
         }
 
         if (mutating) {
-          if (timedOut || upstreamRes.error.code === "timeout") {
+          if (timedOut) {
             this.metrics.recordMutatingTimeoutOrCancel("timeout", request.serviceId);
-          } else if (options?.signal?.aborted || upstreamRes.error.code === "cancelled") {
+          } else if (regAbortCtrl.signal.aborted) {
             this.metrics.recordMutatingTimeoutOrCancel("cancelled", request.serviceId);
           }
           this.metrics.recordCallEnd(request.serviceId, "unknown", durationMs);
@@ -1464,7 +1620,7 @@ export class BflowSharedMCPGateway {
             output: {
               diagnosticCode: "uncertain_mutating_outcome",
               message:
-                "Mutating tool call outcome is unknown after failure; reconcile before retry"
+                "Mutating tool call outcome is unknown after timeout/crash; reconcile before retry"
             },
             observedAt: this.now().toISOString()
           });
@@ -1480,141 +1636,43 @@ export class BflowSharedMCPGateway {
             callId: request.callId,
             status: "unknown",
             diagnosticCode: "uncertain_mutating_outcome",
-            message: "Mutating tool call outcome unknown after upstream failure"
+            message: "Mutating tool call outcome unknown after exception"
           });
           const res = ok(uncertainResult);
           this.recordIdempotency(request.idempotencyKey, request, res);
           return res;
         } else {
+          if (timedOut) {
+            this.metrics.recordCallEnd(request.serviceId, "timeout", durationMs);
+            return err({
+              code: "timeout",
+              retryable: true,
+              retrySafety: "observation_only",
+              message: "Read-only tool call timed out"
+            });
+          }
+          if (regAbortCtrl.signal.aborted) {
+            this.metrics.recordCallEnd(request.serviceId, "cancelled", durationMs);
+            return err({
+              code: "cancelled",
+              retryable: false,
+              message: "Read-only tool call was cancelled"
+            });
+          }
           this.metrics.recordCallEnd(request.serviceId, "failed", durationMs);
-          return upstreamRes;
-        }
-      }
-
-      const outputSchema = negotiatedDefinition?.outputSchema;
-      let resolvedStructuredContent = upstreamRes.value.structuredContent;
-      if (!upstreamRes.value.isError && outputSchema !== undefined && resolvedStructuredContent === undefined) {
-        resolvedStructuredContent = trySynthesizeStructuredContent(upstreamRes.value.content, outputSchema);
-      }
-      const invalidStructuredOutput = !upstreamRes.value.isError && outputSchema !== undefined &&
-        (resolvedStructuredContent === undefined || !validateJsonSchema(resolvedStructuredContent, outputSchema));
-      if (invalidStructuredOutput) {
-        const invalidResult: MCPToolCallResult = MCPToolCallResultSchema.parse({ schemaVersion: 3, callId: request.callId,
-          status: mutating ? "unknown" : "failed",
-          output: { diagnosticCode: "upstream_output_schema_invalid", message: "Upstream structuredContent did not match its advertised output schema" },
-          observedAt: this.now().toISOString() });
-        const status = invalidResult.status;
-        this.metrics.recordCallEnd(request.serviceId, status, durationMs);
-        ledgerEntry.result = invalidResult;
-        this.durableCallLedger?.recordResult(request.callId, invalidResult);
-        if (mutating && isExclusive && resState) resState.quarantinedByCallId = request.callId;
-        this.recordAudit({ action: "tool.call", registrationId: reg.registrationId, serviceId: request.serviceId,
-          callId: request.callId, status: status === "unknown" ? "unknown" : "failed",
-          diagnosticCode: "upstream_output_schema_invalid", message: "Upstream output schema validation failed" });
-        const res = ok(invalidResult);
-        this.recordIdempotency(request.idempotencyKey, request, res);
-        return res;
-      }
-
-      const outcomeStatus = upstreamRes.value.isError ? "failed" : "completed";
-      this.metrics.recordCallEnd(request.serviceId, outcomeStatus, durationMs);
-
-      const callResult: MCPToolCallResult = MCPToolCallResultSchema.parse({
-        schemaVersion: 3,
-        callId: request.callId,
-        status: outcomeStatus,
-        output: preserveStructuredToolOutput(upstreamRes.value.content, resolvedStructuredContent),
-        observedAt: this.now().toISOString()
-      });
-
-      ledgerEntry.result = callResult;
-      this.durableCallLedger?.recordResult(request.callId, callResult);
-      this.recordAudit({
-        action: "tool.call",
-        registrationId: reg.registrationId,
-        serviceId: request.serviceId,
-        callId: request.callId,
-        status: outcomeStatus === "completed" ? "succeeded" : "failed",
-        diagnosticCode: outcomeStatus,
-        message: `Tool call ${outcomeStatus}`
-      });
-
-      const res = ok(callResult);
-      this.recordIdempotency(request.idempotencyKey, request, res);
-      return res;
-    } catch (e) {
-      cancelTimeoutTimer();
-      if (options?.signal) {
-        options.signal.removeEventListener("abort", onParentAbort);
-      }
-
-      const durationMs = Date.now() - startTime;
-      if (driver.cancelRequest) {
-        await driver.cancelRequest(requestId, "timeout_or_abort").catch(() => {});
-      }
-
-      if (mutating) {
-        if (timedOut) {
-          this.metrics.recordMutatingTimeoutOrCancel("timeout", request.serviceId);
-        } else if (options?.signal?.aborted) {
-          this.metrics.recordMutatingTimeoutOrCancel("cancelled", request.serviceId);
-        }
-        this.metrics.recordCallEnd(request.serviceId, "unknown", durationMs);
-        const uncertainResult: MCPToolCallResult = MCPToolCallResultSchema.parse({
-          schemaVersion: 3,
-          callId: request.callId,
-          status: "unknown",
-          output: {
-            diagnosticCode: "uncertain_mutating_outcome",
-            message:
-              "Mutating tool call outcome is unknown after timeout/crash; reconcile before retry"
-          },
-          observedAt: this.now().toISOString()
-        });
-        ledgerEntry.result = uncertainResult;
-        this.durableCallLedger?.recordResult(request.callId, uncertainResult);
-        if (isExclusive && resState) {
-          resState.quarantinedByCallId = request.callId;
-        }
-        this.recordAudit({
-          action: "tool.call",
-          registrationId: reg.registrationId,
-          serviceId: request.serviceId,
-          callId: request.callId,
-          status: "unknown",
-          diagnosticCode: "uncertain_mutating_outcome",
-          message: "Mutating tool call outcome unknown after exception"
-        });
-        const res = ok(uncertainResult);
-        this.recordIdempotency(request.idempotencyKey, request, res);
-        return res;
-      } else {
-        if (timedOut) {
-          this.metrics.recordCallEnd(request.serviceId, "timeout", durationMs);
           return err({
-            code: "timeout",
+            code: "transport_unavailable",
             retryable: true,
-            retrySafety: "observation_only",
-            message: "Read-only tool call timed out"
+            message: e instanceof Error ? e.message : String(e)
           });
         }
-        if (options?.signal?.aborted) {
-          this.metrics.recordCallEnd(request.serviceId, "cancelled", durationMs);
-          return err({
-            code: "cancelled",
-            retryable: false,
-            message: "Read-only tool call was cancelled"
-          });
-        }
-        this.metrics.recordCallEnd(request.serviceId, "failed", durationMs);
-        return err({
-          code: "transport_unavailable",
-          retryable: true,
-          message: e instanceof Error ? e.message : String(e)
-        });
       }
     } finally {
-      releaseSlot();
+      releaseSlot?.();
+      if (options?.signal) {
+        options.signal.removeEventListener("abort", onCallerAbort);
+      }
+      untrackRegCall();
     }
   }
 
@@ -1669,7 +1727,7 @@ export class BflowSharedMCPGateway {
     }
 
     const driver = this.serviceManager.getDriver(ledger.partitionKey);
-    if (driver?.reconcileRequest) {
+    if (driver?.reconcileRequest && driver.instanceId === ledger.instanceId) {
       const rec = await driver.reconcileRequest(request.callId, ledger.requestId);
       if (rec.status === "completed" || rec.status === "failed") {
         const outputSchema = this.serviceManager.getPartitionState(ledger.partitionKey)?.toolDefinitions?.find(tool => tool.name === request.tool)?.outputSchema;

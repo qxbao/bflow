@@ -25,25 +25,29 @@ export interface HerdrCommandRunner {
 
 const PRE_EXEC_INVALID_ARG_CODES = new Set(["E2BIG", "ENAMETOOLONG", "EINVAL"]);
 const PIPE_DRAIN_GRACE_MS = 50;
+const ACTIVE_EXIT_DRAIN_IDLE_MS = 80;
+const MAX_POST_EXIT_DRAIN_MS = 1_000;
 
 export function validArguments(args: readonly string[]): boolean {
   return Array.isArray(args) && args.every((arg) => typeof arg === "string" && !arg.includes("\0"));
 }
 
 function classifyPreExecError(error: unknown): { failure: "invalid_arguments" | "spawn"; cause: string } {
-  const code = typeof (error as NodeJS.ErrnoException)?.code === "string"
+  const rawCode = typeof (error as NodeJS.ErrnoException)?.code === "string"
     ? (error as NodeJS.ErrnoException).code!
     : undefined;
-  if (code && PRE_EXEC_INVALID_ARG_CODES.has(code)) {
+  const safeCode = rawCode && /^[A-Z0-9_]{1,32}$/.test(rawCode) ? rawCode : undefined;
+  if (safeCode && PRE_EXEC_INVALID_ARG_CODES.has(safeCode)) {
     return {
       failure: "invalid_arguments",
-      cause: `Herdr CLI arguments rejected before execution (${code})`
+      cause: `Herdr CLI arguments rejected before execution (${safeCode})`
     };
   }
   const name = error instanceof Error ? error.name : "";
+  const suffix = safeCode ? ` (${safeCode})` : "";
   return {
     failure: "spawn",
-    cause: name === "Error" ? "Herdr process unavailable" : "Herdr process failed"
+    cause: `${name === "Error" ? "Herdr process unavailable" : "Herdr process failed"}${suffix}`
   };
 }
 
@@ -74,7 +78,7 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
             stderr: "",
             failure: classified.failure,
             started: false,
-            cause: classified.failure === "invalid_arguments" ? classified.cause : "Herdr process could not launch"
+            cause: classified.cause
           });
           return;
         }
@@ -92,6 +96,8 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
         let failure: CommandOutcome["failure"];
         let cause: string | undefined;
         let settled = false;
+        let exited = false;
+        let exitAt = 0;
         let observedExitCode: number | null = null;
         let cancelTimeout: (() => void) | undefined;
         let drainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -121,12 +127,17 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
           });
         };
 
-        const armDrainFallback = () => {
-          if (settled || drainTimer !== undefined) return;
+        const armDrainFallback = (graceMs = PIPE_DRAIN_GRACE_MS, refresh = false) => {
+          if (settled) return;
+          if (drainTimer !== undefined) {
+            if (!refresh) return;
+            clearTimeout(drainTimer);
+            drainTimer = undefined;
+          }
           drainTimer = setTimeout(() => {
             drainTimer = undefined;
             finish(observedExitCode);
-          }, PIPE_DRAIN_GRACE_MS);
+          }, graceMs);
           drainTimer.unref?.();
         };
 
@@ -137,7 +148,7 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
           } catch {
             // child may have already exited
           }
-          armDrainFallback();
+          armDrainFallback(PIPE_DRAIN_GRACE_MS);
         };
 
         const onAbort = () => stop("aborted");
@@ -156,8 +167,16 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
           }
           if (which === "stdout") stdout += stdoutDecoder.write(chunk);
           else stderr += stderrDecoder.write(chunk);
+          if (exited && !failure) {
+            const remainingCap = MAX_POST_EXIT_DRAIN_MS - (Date.now() - exitAt);
+            if (remainingCap > 0) {
+              armDrainFallback(Math.min(ACTIVE_EXIT_DRAIN_IDLE_MS, remainingCap), true);
+            }
+          }
         };
 
+        child.stdout?.on("error", () => {});
+        child.stderr?.on("error", () => {});
         child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
         child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
         child.on("error", (error: Error) => {
@@ -169,12 +188,14 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
             failure ??= "spawn";
             cause = error.name === "Error" ? "Herdr process unavailable" : "Herdr process failed";
           }
-          armDrainFallback();
+          armDrainFallback(PIPE_DRAIN_GRACE_MS);
         });
         child.once("exit", (exitCode) => {
           observedExitCode = exitCode;
+          exited = true;
+          exitAt = Date.now();
           // If a background grandchild inherited stdout/stderr pipes, "close" may never fire; bound the drain wait.
-          armDrainFallback();
+          armDrainFallback(failure ? PIPE_DRAIN_GRACE_MS : ACTIVE_EXIT_DRAIN_IDLE_MS);
         });
         child.on("close", (exitCode) => {
           finish(exitCode ?? observedExitCode);

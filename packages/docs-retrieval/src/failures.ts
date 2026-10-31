@@ -43,6 +43,8 @@ export function classifyToolError(text: string): DocsFailure {
     return failure("library_not_found", "DeepWiki has no wiki for this repository. It may be private or not yet indexed.");
   if (/input validation error|invalid arguments/i.test(trimmed)) return failure("invalid_arguments", trimmed.slice(0, 300));
   if (/rate limit|too many requests|quota (exceeded|reached)|\b429\b/i.test(trimmed)) return failure("rate_limited", "DeepWiki reported a rate limit or quota.");
+  if (/\b(?:502|503|504)\b|bad gateway|service (?:temporarily )?unavailable|gateway time-?out|cloudflare/i.test(trimmed))
+    return failure("unavailable", "DeepWiki is temporarily unavailable.");
   // Unclassified upstream error text is untrusted and may echo request content: report it generically (fail closed).
   return failure("upstream_error", "DeepWiki reported an error for this request.");
 }
@@ -74,6 +76,7 @@ export function classifyGatewayError(error: GatewayErrorLike): DocsFailure {
     default: break;
   }
   if (error.code === "timeout") return failure("timeout", error.message);
+  if (error.code === "cancelled") return failure("unavailable", "The request was cancelled.", extra);
   if (error.code === "not_found") return failure("unavailable", error.message);
   if (error.code === "validation" && /not (granted|allowed|authori[sz]ed|offered)|registration|bearer token|permission/i.test(error.message))
     return failure("permission_denied", error.message);

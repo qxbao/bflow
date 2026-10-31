@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open as openFile, readFile, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface CachePolicy {
@@ -42,9 +42,18 @@ export interface DocsCache {
   stats(): CacheStats;
 }
 
+const FSYNC_TOLERATED_ERRNOS = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EROFS"]);
+const STALE_TMP_MAX_AGE_MS = 30_000;
+
+function normalizeLibraryId(libraryId: string): string {
+  return libraryId.trim().toLowerCase();
+}
+
 /** The query text is hashed into the key and never stored, so the cache holds public documentation and nothing the user typed. */
 export function cacheKey(parts: CacheKeyParts): string {
-  return createHash("sha256").update(JSON.stringify([parts.libraryId, parts.version, parts.query.trim(), parts.language])).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify([normalizeLibraryId(parts.libraryId), parts.version, parts.query.trim(), parts.language]))
+    .digest("hex");
 }
 
 /** Whether a response may be cached for the current credential mode. Counts a skip in the stats of the caller. */
@@ -66,11 +75,20 @@ export class MemoryDocsCache implements DocsCache {
     const key = cacheKey(parts);
     const entry = this.entries.get(key);
     if (!entry) { this.counters.misses++; return null; }
-    if (Date.parse(entry.expiresAt) <= this.now()) { this.entries.delete(key); this.counters.expired++; this.counters.misses++; return null; }
+    const expiresMs = Date.parse(entry.expiresAt);
+    if (!Number.isFinite(expiresMs) || expiresMs <= this.now()) {
+      this.entries.delete(key);
+      this.counters.expired++;
+      this.counters.misses++;
+      return null;
+    }
     this.counters.hits++;
     return entry;
   }
   async set(parts: CacheKeyParts, content: string, ttlSeconds: number): Promise<void> {
+    if (typeof content !== "string" || content.trim().length === 0 || !Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+      return;
+    }
     const key = cacheKey(parts);
     const max = this.options.maxEntries ?? 500;
     if (this.entries.has(key)) {
@@ -83,13 +101,19 @@ export class MemoryDocsCache implements DocsCache {
       this.counters.evictions++;
     }
     const now = this.now();
-    this.entries.set(key, { libraryId: parts.libraryId, version: parts.version, language: parts.language, content,
+    this.entries.set(key, { libraryId: parts.libraryId.trim(), version: parts.version, language: parts.language, content,
       storedAt: new Date(now).toISOString(), expiresAt: new Date(now + ttlSeconds * 1000).toISOString() });
     this.counters.writes++;
   }
   async invalidate(filter?: { libraryId?: string }): Promise<number> {
     let removed = 0;
-    for (const [key, entry] of this.entries) if (!filter?.libraryId || entry.libraryId === filter.libraryId) { this.entries.delete(key); removed++; }
+    const targetLib = filter?.libraryId ? normalizeLibraryId(filter.libraryId) : undefined;
+    for (const [key, entry] of this.entries) {
+      if (!targetLib || normalizeLibraryId(entry.libraryId) === targetLib) {
+        this.entries.delete(key);
+        removed++;
+      }
+    }
     return removed;
   }
   stats(): CacheStats { return { ...this.counters }; }
@@ -113,8 +137,17 @@ export class FileDocsCache implements DocsCache {
       const info = await lstat(file);
       if (!info.isFile() || info.isSymbolicLink()) throw new Error("not a regular file");
       const entry = JSON.parse(await readFile(file, "utf8")) as Partial<CacheEntry> & { schemaVersion?: number };
-      if (entry.schemaVersion !== 1 || typeof entry.content !== "string" || typeof entry.expiresAt !== "string" || typeof entry.libraryId !== "string") throw new Error("invalid entry");
-      if (Date.parse(entry.expiresAt) <= this.now()) { await rm(file, { force: true }); this.counters.expired++; this.counters.misses++; return null; }
+      if (entry.schemaVersion !== 1 || typeof entry.content !== "string" || entry.content.trim().length === 0 || typeof entry.expiresAt !== "string" || typeof entry.libraryId !== "string") {
+        await rm(file, { force: true }).catch(() => undefined);
+        throw new Error("invalid entry");
+      }
+      const expiresMs = Date.parse(entry.expiresAt);
+      if (!Number.isFinite(expiresMs) || expiresMs <= this.now()) {
+        await rm(file, { force: true });
+        this.counters.expired++;
+        this.counters.misses++;
+        return null;
+      }
       this.counters.hits++;
       return { libraryId: entry.libraryId, version: entry.version ?? null, language: entry.language ?? null, content: entry.content,
         storedAt: String(entry.storedAt ?? ""), expiresAt: entry.expiresAt };
@@ -125,16 +158,33 @@ export class FileDocsCache implements DocsCache {
   }
 
   async set(parts: CacheKeyParts, content: string, ttlSeconds: number): Promise<void> {
+    if (typeof content !== "string" || content.trim().length === 0 || !Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+      return;
+    }
     await this.ensure();
     const now = this.now();
-    const body = JSON.stringify({ schemaVersion: 1, libraryId: parts.libraryId, version: parts.version, language: parts.language, content,
+    const body = JSON.stringify({ schemaVersion: 1, libraryId: parts.libraryId.trim(), version: parts.version, language: parts.language, content,
       storedAt: new Date(now).toISOString(), expiresAt: new Date(now + ttlSeconds * 1000).toISOString() });
     const target = this.path(cacheKey(parts));
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    let fh: Awaited<ReturnType<typeof openFile>> | undefined;
     try {
-      await writeFile(temporary, body, { mode: 0o600 });
+      fh = await openFile(temporary, "w", 0o600);
+      await fh.writeFile(body, { encoding: "utf8" });
+      try {
+        await fh.sync();
+      } catch (syncErr: any) {
+        if (!FSYNC_TOLERATED_ERRNOS.has(syncErr?.code)) {
+          throw syncErr;
+        }
+      }
+      await fh.close();
+      fh = undefined;
       await rename(temporary, target);
     } catch (error) {
+      if (fh) {
+        await fh.close().catch(() => undefined);
+      }
       await rm(temporary, { force: true }).catch(() => undefined);
       throw error;
     }
@@ -146,10 +196,19 @@ export class FileDocsCache implements DocsCache {
     const maxEntries = this.options.maxEntries ?? 500;
     const maxBytes = this.options.maxBytes ?? 16 * 1024 * 1024;
     const files: Array<{ file: string; mtime: number; size: number }> = [];
+    const refNow = Math.max(this.now(), Date.now());
     for (const name of await readdir(this.options.directory).catch(() => [] as string[])) {
+      const fullPath = join(this.options.directory, name);
+      if (name.endsWith(".tmp")) {
+        const tmpInfo = await lstat(fullPath).catch(() => null);
+        if (tmpInfo?.isFile() && !tmpInfo.isSymbolicLink() && refNow - tmpInfo.mtimeMs > STALE_TMP_MAX_AGE_MS) {
+          await rm(fullPath, { force: true }).catch(() => undefined);
+        }
+        continue;
+      }
       if (!name.endsWith(".json")) continue;
-      const info = await lstat(join(this.options.directory, name)).catch(() => null);
-      if (info?.isFile() && !info.isSymbolicLink()) files.push({ file: join(this.options.directory, name), mtime: info.mtimeMs, size: info.size });
+      const info = await lstat(fullPath).catch(() => null);
+      if (info?.isFile() && !info.isSymbolicLink()) files.push({ file: fullPath, mtime: info.mtimeMs, size: info.size });
     }
     files.sort((a, b) => a.mtime - b.mtime);
     let total = files.reduce((sum, item) => sum + item.size, 0);
@@ -163,11 +222,15 @@ export class FileDocsCache implements DocsCache {
 
   async invalidate(filter?: { libraryId?: string }): Promise<number> {
     let removed = 0;
+    const targetLib = filter?.libraryId ? normalizeLibraryId(filter.libraryId) : undefined;
     for (const name of await readdir(this.options.directory).catch(() => [] as string[])) {
       if (!name.endsWith(".json")) continue;
       const file = join(this.options.directory, name);
-      if (filter?.libraryId) {
-        try { if ((JSON.parse(await readFile(file, "utf8")) as { libraryId?: string }).libraryId !== filter.libraryId) continue; } catch { /* remove unreadable entries too */ }
+      if (targetLib) {
+        try {
+          const parsedLib = (JSON.parse(await readFile(file, "utf8")) as { libraryId?: string }).libraryId;
+          if (typeof parsedLib === "string" && normalizeLibraryId(parsedLib) !== targetLib) continue;
+        } catch { /* remove unreadable entries too */ }
       }
       await rm(file, { force: true });
       removed++;

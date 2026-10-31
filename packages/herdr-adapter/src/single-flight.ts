@@ -49,13 +49,18 @@ export class SingleFlight<T> {
           (outcome) => safeCloneResult(outcome),
           (error) => safeInvokeHandler(() => onError(error), "Single-flight error handler failed")
         );
-      entry = { fingerprint, result };
-      this.#entries.set(key, entry);
+      const createdEntry = { fingerprint, result };
+      entry = createdEntry;
+      this.#entries.set(key, createdEntry);
       // A definite pre-side-effect failure can be retried with the same payload.
       // Its identity remains reserved; uncertainty retains the original outcome.
       void result.then((outcome) => {
-        if (!outcome.ok && outcome.error.code !== "unknown_delivery" && this.#entries.get(key) === entry) {
-          this.#entries.delete(key);
+        if (this.#entries.get(key) === createdEntry) {
+          if (!outcome.ok && outcome.error.code !== "unknown_delivery") {
+            this.#entries.delete(key);
+          } else {
+            createdEntry.result = Promise.resolve(outcome);
+          }
         }
       });
     }
@@ -65,11 +70,15 @@ export class SingleFlight<T> {
     return new Promise<OperationResult<T>>((resolve) => {
       let settled = false;
       let cancelTimer: (() => void) | undefined;
+      const cleanupObserver = () => {
+        cancelTimer?.();
+        cancelTimer = undefined;
+        observer.options.signal?.removeEventListener("abort", interrupt);
+      };
       const finish = (outcome: OperationResult<T>) => {
         if (settled) return;
         settled = true;
-        cancelTimer?.();
-        observer.options.signal?.removeEventListener("abort", interrupt);
+        cleanupObserver();
         resolve(safeCloneResult(outcome));
       };
       const interrupt = () =>
@@ -83,7 +92,26 @@ export class SingleFlight<T> {
         cancelTimer = scheduleSafeTimeout(interrupt, remaining);
       }
       void entry.result.then(
-        finish,
+        (outcome) => {
+          if (
+            !settled &&
+            !outcome.ok &&
+            (outcome.error.code === "cancelled" || outcome.error.code === "timeout") &&
+            !observer.options.signal?.aborted
+          ) {
+            const nowRemaining =
+              observer.options.deadline === undefined
+                ? Infinity
+                : Date.parse(observer.options.deadline) - observer.clock().getTime();
+            if (nowRemaining > 0) {
+              settled = true;
+              cleanupObserver();
+              resolve(this.execute(key, fingerprint, action, onError, observer));
+              return;
+            }
+          }
+          finish(outcome);
+        },
         (error) => finish(safeInvokeHandler(() => onError(error), "Single-flight error handler failed"))
       );
     });

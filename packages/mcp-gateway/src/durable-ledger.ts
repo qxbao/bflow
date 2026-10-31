@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, truncateSync, writeSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { canonicalReceiptJson, MCPToolCallSchema, type MCPToolCall, type MCPToolCallResult } from "@bflow/contracts";
@@ -22,6 +22,19 @@ const LedgerLineSchema = z.discriminatedUnion("phase", [
 type CallIdentity = z.infer<typeof CallIdentitySchema>;
 interface StoredCall { call: CallIdentity; status: "intent" | "completed" | "failed" | "unknown"; outputDigest?: string; resultSeen: boolean }
 interface ServiceSchemaPin { revision: number; serviceConfigDigest: string; schemaDigest: string }
+
+const FSYNC_TOLERATED_ERRNOS = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EROFS"]);
+
+function fsyncTolerant(fd: number): void {
+  try {
+    fsyncSync(fd);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (!code || !FSYNC_TOLERATED_ERRNOS.has(code)) {
+      throw error;
+    }
+  }
+}
 
 /** Private, owner-only fsynced journal. Payloads are represented only by a digest. */
 export class DurableGatewayCallLedger {
@@ -123,19 +136,36 @@ export class DurableGatewayCallLedger {
     this.#loadedLineCount = 0;
   }
 
-  #applyLines(contents: string, baseLineCount: number): void {
-    if (contents.length === 0) return;
+  #applyLines(contents: string, baseLineCount: number): { validBytes: number; truncatedTail: boolean } {
+    if (contents.length === 0) return { validBytes: 0, truncatedTail: false };
     const rawLines = contents.split("\n");
     const hasTrailingNewline = rawLines[rawLines.length - 1] === "";
     const consumedCount = hasTrailingNewline ? rawLines.length - 1 : rawLines.length;
     for (let index = 0; index < consumedCount; index++) {
       const line = rawLines[index]!;
       if (!line) continue;
+      const isUnterminatedTail = !hasTrailingNewline && index === consumedCount - 1;
       const lineNo = baseLineCount + index + 1;
       let raw: unknown;
-      try { raw = JSON.parse(line); } catch { throw new Error(`Gateway call ledger is corrupt at line ${lineNo}`); }
+      try {
+        raw = JSON.parse(line);
+      } catch {
+        if (isUnterminatedTail) {
+          const validPrefix = rawLines.slice(0, index).map((item) => `${item}\n`).join("");
+          this.#loadedLineCount = baseLineCount + index;
+          return { validBytes: Buffer.byteLength(validPrefix, "utf8"), truncatedTail: true };
+        }
+        throw new Error(`Gateway call ledger is corrupt at line ${lineNo}`);
+      }
       const parsed = LedgerLineSchema.safeParse(raw);
-      if (!parsed.success) throw new Error(`Gateway call ledger is invalid at line ${lineNo}`);
+      if (!parsed.success) {
+        if (isUnterminatedTail) {
+          const validPrefix = rawLines.slice(0, index).map((item) => `${item}\n`).join("");
+          this.#loadedLineCount = baseLineCount + index;
+          return { validBytes: Buffer.byteLength(validPrefix, "utf8"), truncatedTail: true };
+        }
+        throw new Error(`Gateway call ledger is invalid at line ${lineNo}`);
+      }
       if (parsed.data.phase === "intent") {
         const identity = parsed.data.call;
         if (this.#entries.has(identity.callId)) throw new Error(`Gateway call ledger has duplicate intent at line ${lineNo}`);
@@ -162,6 +192,17 @@ export class DurableGatewayCallLedger {
       }
     }
     this.#loadedLineCount = baseLineCount + consumedCount;
+    return { validBytes: Buffer.byteLength(contents, "utf8"), truncatedTail: false };
+  }
+
+  #repairTruncatedTail(validSize: number): void {
+    truncateSync(this.path, validSize);
+    const wfd = openSync(this.path, constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      fsyncTolerant(wfd);
+    } finally {
+      closeSync(wfd);
+    }
   }
 
   #syncFromDisk(): void {
@@ -174,6 +215,7 @@ export class DurableGatewayCallLedger {
       }
       throw error;
     }
+    let repairSize: number | undefined;
     try {
       const stat = fstatSync(fd);
       if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_LEDGER_BYTES || (stat.mode & 0o077) !== 0 ||
@@ -192,17 +234,32 @@ export class DurableGatewayCallLedger {
           if (bytesRead === 0) break;
           readOffset += bytesRead;
         }
-        this.#applyLines(buf.subarray(0, readOffset).toString("utf8"), this.#loadedLineCount);
-        this.#loadedSize += readOffset;
+        const applied = this.#applyLines(buf.subarray(0, readOffset).toString("utf8"), this.#loadedLineCount);
+        if (applied.truncatedTail) {
+          repairSize = this.#loadedSize + applied.validBytes;
+          this.#loadedSize = repairSize;
+        } else {
+          this.#loadedSize += readOffset;
+        }
         return;
       }
       this.#resetMemoryState();
       const contents = readFileSync(fd, "utf8");
-      this.#applyLines(contents, 0);
+      const applied = this.#applyLines(contents, 0);
       this.#loadedDev = stat.dev;
       this.#loadedIno = stat.ino;
-      this.#loadedSize = stat.size;
-    } finally { closeSync(fd); }
+      if (applied.truncatedTail) {
+        repairSize = applied.validBytes;
+        this.#loadedSize = repairSize;
+      } else {
+        this.#loadedSize = stat.size;
+      }
+    } finally {
+      closeSync(fd);
+      if (repairSize !== undefined) {
+        this.#repairTruncatedTail(repairSize);
+      }
+    }
   }
 
   #withLock<T>(action: () => T): T {
@@ -238,7 +295,7 @@ export class DurableGatewayCallLedger {
       }
       let offset = 0;
       while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
-      fsyncSync(fd);
+      fsyncTolerant(fd);
       if (
         (this.#loadedDev === undefined && stat.size === 0) ||
         (this.#loadedDev === stat.dev && this.#loadedIno === stat.ino && this.#loadedSize === stat.size)
