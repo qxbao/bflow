@@ -44,14 +44,13 @@ it('UX-07: a form still tracking an earlier operation says so and only starts ov
  fireEvent.click(screen.getByRole('button',{name:'Soạn yêu cầu mới từ nội dung này'}));
  await waitFor(()=>expect(localStorage.getItem(key)).toBeNull());expect(posts).toHaveLength(0);
 });
-it('UX-12: defaults to this run plus shared messages, with the full session one click away',async()=>{
+it('UX-12: shows this run plus shared messages and never another run',async()=>{
  const base={apiVersion:1,sessionId:'s',sender:'user',createdAt:now,delivery:'delivered',source:'web'};
  const items=[{...base,messageId:'11111111-1111-4111-8111-111111111111',runId:'run',content:'Tin của công việc'},{...base,messageId:'22222222-2222-4222-8222-222222222222',runId:'other',content:'Tin công việc khác'},{...base,messageId:'33333333-3333-4333-8333-333333333333',content:'Tin chung'}];
  vi.stubGlobal('fetch',async(path:string)=>Response.json(path.endsWith('/session')?{apiVersion:1,projectId:'p',state:'ready',sessionId:'s',pendingIntakes:[],blockers:[],updatedAt:now}:{apiVersion:1,items}));
  render(<MemoryRouter><ChatHistory api={new ApiClient()} projectId="p" sessionId="s" runId="run" revision={0}/></MemoryRouter>);
  expect(await screen.findByText('Tin của công việc')).toBeTruthy();expect(screen.getByText('Tin chung')).toBeTruthy();expect(screen.queryByText('Tin công việc khác')).toBeNull();
  expect(screen.getAllByText(/chưa có nghĩa đã được xử lý/).length).toBeGreaterThan(0);
- fireEvent.click(screen.getByRole('button',{name:'Toàn phiên'}));expect(await screen.findByText('Tin công việc khác')).toBeTruthy();
 });
 it('UX-14: one cause across several reads is one notice with one retry',()=>{
  const error=new ApiError('unavailable'),retry=vi.fn();

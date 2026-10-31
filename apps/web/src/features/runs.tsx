@@ -12,7 +12,6 @@ import { EmptyState } from '../components/EmptyState';
 import { DecisionReview } from './decisions';
 import { ClarificationForm } from './clarifications';
 import { RunActions } from './run-actions';
-import { ChatHistory } from './chat';
 import { Pagination } from '../components/Pagination';
 import { LoadingState } from '../components/LoadingState';
 import { useCursorPagination } from './pagination';
@@ -64,7 +63,7 @@ export function RunView({api,id,runId,revision,refresh}:{api:ApiClient;id:string
     <section className="mt-0 border border-line bg-surface p-3.5 sm:p-4"><h2 className="m-0 mb-2 text-base">Thao tác công việc</h2>{run.blockers.length===0 && run.clarifications.length===0 && <p className="my-1 text-xs text-muted">Chưa ghi nhận điểm chặn nào.</p>}<RunActions api={api} id={id} run={run} fresh={!result.loading && !result.error} refreshing={result.loading && !result.error}/>{run.availableActions.filter(action=>!action.enabled && action.kind==='answer_decision' && !isBenignDisabledReason(action.disabledReason)).map(action=><p key={action.actionId} className="my-2 border-l-3 border-warning pl-2.5 text-xs text-muted">{reason(action.disabledReason)}</p>)}</section>
     </div></div>
 
-    <ChatHistory api={api} projectId={id} sessionId={run.sessionId} runId={run.runId} revision={revision}/>
+    <section><h2>Trò chuyện</h2><Link to={`/projects/${encodeURIComponent(id)}/chat/${encodeURIComponent(run.runId)}`}>Mở trò chuyện của công việc →</Link></section>
 
     <details className="my-3"><summary>Chi tiết kỹ thuật & chẩn đoán thực thi</summary><div className="mt-2 grid gap-3 border border-line bg-surface p-3.5 text-sm sm:grid-cols-3"><div><span className="mb-1 block font-data text-xs font-semibold uppercase tracking-widest text-muted">Giai đoạn nghiệp vụ</span><StatusBadge value={run.sdlcStatus}/></div><div><span className="mb-1 block font-data text-xs font-semibold uppercase tracking-widest text-muted">Bộ máy thực thi</span>{run.coreStatus?<StatusBadge value={run.coreStatus}/>:<StatusBadge value="unknown"/>}</div><div><span className="mb-1 block font-data text-xs font-semibold uppercase tracking-widest text-muted">Tiến trình nền (chẩn đoán)</span>{run.transportSummary.states.length?run.transportSummary.states.map((state,index)=><StatusBadge key={index} value={state}/>):<span className="text-xs text-muted">Chưa có quan sát</span>}<small className="mt-1 block text-xs text-muted">Quan sát {ago(run.transportSummary.observedAt)}. Chỉ dùng để chẩn đoán kết nối; kết thúc lượt không xác nhận công việc hoàn thành.</small></div></div><dl className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2"><div><dt className="mt-1">Mã đối chiếu công việc</dt><dd className="font-mono [overflow-wrap:anywhere]">{run.runId}</dd></div><div><dt className="mt-1">Cập nhật bản đọc</dt><dd><time dateTime={run.updatedAt}>{new Date(run.updatedAt).toLocaleString('vi')}</time></dd></div></dl></details>
   </>}</>;
