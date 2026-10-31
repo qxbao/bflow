@@ -6,6 +6,9 @@ shows a pairing error; there is no production mock mode, proxy or security bypas
 Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 `@bflow/web/assets` remains the separate Node asset resolver.
 
+- Step-by-step end-user guide (Vietnamese with screenshots): [`docs/guide/web-manual.md`](../../docs/guide/web-manual.md)
+- UX/CLS stabilization & live single-provider Web SDLC evidence (`run-web-c72842ea-a325-4305-833e-760d560e095b`): [`docs/reliability/web-ux-stabilization.md`](../../docs/reliability/web-ux-stabilization.md)
+
 ## Screen and state mapping
 
 | Screen | Components / data | States |
@@ -268,5 +271,6 @@ Source plus local tests; not live acceptance. Behaviour added on top of the froz
 - Chat defaults to the latest messages of this run plus session-wide ones, reading at most 20 pages; "Toàn phiên" keeps the paged history.
 - Operations settled over ten minutes ago and unrelated to the open run move to a collapsed history.
 - Each acceptance criterion carries its own verification method; the default applies only until changed.
+- Background refreshes render a zero-height screen-reader status (`CLS = 0.00000`) while keeping visible panels, focus and drafts mounted; settled operations recorded in local storage automatically unlock action slots on reload/reread, SSE cursors deduplicate delivered events, and `Settings` provides a 1-click bulk Provider/Model bar across all configured roles plus plain-Vietnamese readiness/decision disclosures and route-aligned timeouts (`40s`/`50s`).
 
 Not implementable without an additive contract decision (`WebRunView`/`WebTransportSummary` are strict): per-task Red/Green/Refactor phase and owner (UX-05), QA progress (UX-20), role per transport state (UX-16), notice feed grouping (UX-11), checked model catalog (UX-25) and provider onboarding by role with a pane link (UX-26).
