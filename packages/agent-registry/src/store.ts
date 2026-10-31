@@ -15,6 +15,17 @@ export interface RegistryState {
   lastNow: string;
 }
 
+const UNSUPPORTED_DIR_FSYNC_CODES = new Set([
+  "EINVAL",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "ENOSYS",
+  "EPERM",
+  "EACCES",
+  "EBADF",
+  "EROFS"
+]);
+
 const dictionary = <T>(): Record<string, T> => Object.create(null) as Record<string, T>;
 const initialState = (): RegistryState => ({ schemaVersion: 1, configurations: dictionary(), leases: dictionary(), nextFencing: dictionary(), receipts: dictionary(), lastNow: "1970-01-01T00:00:00.000Z" });
 
@@ -118,12 +129,24 @@ export class FileRegistryStore {
           if (!committed) await unlink(temporary).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
         }
         const directory = await open(dirname(this.stateFile), "r");
-        try { await directory.sync(); } finally { await directory.close(); }
+        try {
+          await directory.sync();
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code;
+          if (!code || !UNSUPPORTED_DIR_FSYNC_CODES.has(code)) throw error;
+        } finally {
+          await directory.close();
+        }
       }
       return result;
     } finally {
-      await lock.close();
-      await unlink(lockFile);
+      try {
+        await lock.close();
+      } finally {
+        await unlink(lockFile).catch((error: NodeJS.ErrnoException) => {
+          if (error?.code !== "ENOENT") throw error;
+        });
+      }
     }
   }
 }

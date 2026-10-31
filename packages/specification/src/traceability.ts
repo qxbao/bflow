@@ -18,13 +18,16 @@ export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unkn
   const mappings = policyDetails(spec).traceability;
   const criteriaIds = new Set(spec.acceptanceCriteria.map(c => c.id));
 
+  const rawMetadata = typeof specInput === "object" && specInput !== null && "metadata" in specInput
+    ? (specInput as Record<string, unknown>).metadata
+    : undefined;
+  const rawSdd = typeof rawMetadata === "object" && rawMetadata !== null && "sdd" in rawMetadata
+    ? (rawMetadata as Record<string, unknown>).sdd
+    : undefined;
   const hasExplicitSddTraceability =
-    typeof specInput === "object" &&
-    specInput !== null &&
-    "metadata" in specInput &&
-    typeof (specInput as Record<string, unknown>).metadata === "object" &&
-    (specInput as Record<string, unknown>).metadata !== null &&
-    "sdd" in ((specInput as Record<string, unknown>).metadata as Record<string, unknown>);
+    typeof rawSdd === "object" &&
+    rawSdd !== null &&
+    Array.isArray((rawSdd as Record<string, unknown>).traceability);
 
   let parsedWorkflow: ReturnType<typeof WorkflowDefinitionSchema.parse> | undefined;
   if (workflowInput !== undefined) {
@@ -32,7 +35,7 @@ export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unkn
   }
 
   const unknownCriterionIds = parsedWorkflow !== undefined
-    ? [...new Set(parsedWorkflow.tasks.flatMap(t => t.acceptanceCriteria ?? []).filter(cId => !criteriaIds.has(cId)))].sort()
+    ? [...new Set(parsedWorkflow.tasks.flatMap(t => (t.acceptanceCriteria ?? []).map(cId => cId.trim())).filter(cId => !criteriaIds.has(cId)))].sort()
     : [];
 
   const criterionToTasks: Record<string, readonly string[]> = {};
@@ -48,7 +51,7 @@ export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unkn
     } else {
       if (parsedWorkflow) {
         const workflowTaskIds = parsedWorkflow.tasks
-          .filter(t => t.acceptanceCriteria?.includes(criterion.id))
+          .filter(t => (t.acceptanceCriteria ?? []).some(cId => cId.trim() === criterion.id))
           .map(t => t.id)
           .sort();
         if (workflowTaskIds.length > 0) {
@@ -173,10 +176,20 @@ export function detectSpecChanges(previousInput: unknown, nextInput: unknown, wo
   const unchangedCriterionIds = [...before.keys()].filter(id => after.has(id) && canonicalJson(before.get(id)) === canonicalJson(after.get(id)));
 
   const omit = (input: typeof previous) => {
-    const { version: _version, updatedAt: _updated, status: _status, approvedBy: _approver,
-      artifactRef: _ref, acceptanceCriteria: _criteria, ...rest } = input;
+    const {
+      version: _version,
+      updatedAt: _updated,
+      status: _status,
+      approvedBy: _approver,
+      artifactRef: _ref,
+      acceptanceCriteria: _criteria,
+      traceabilityTaskIds: _traceabilityTaskIds,
+      testStrategy: _testStrategy,
+      tddDecision: _tddDecision,
+      ...rest
+    } = input;
     const details = policyDetails(input);
-    const { revisionReason: _reason, ...requirements } = details;
+    const { revisionReason: _reason, traceability: _traceability, ...requirements } = details;
     return { ...rest, metadata: { ...rest.metadata, sdd: requirements } };
   };
   const globalRequirementsChanged = canonicalJson(omit(previous)) !== canonicalJson(omit(next));
@@ -235,10 +248,14 @@ function globToRegExp(pattern: string): RegExp {
   const normalized = pattern.replace(/^\.\//, "").replace(/^\//, "");
   const regexStr = normalized
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\/\*\*\//g, "{{GLOB_SLASH_DOUBLE_STAR_SLASH}}")
+    .replace(/^\*\*\//, "{{GLOB_LEADING_DOUBLE_STAR_SLASH}}")
     .replace(/\*\*/g, "{{GLOB_DOUBLE_STAR}}")
     .replace(/\*/g, "[^/]*")
-    .replace(/\{\{GLOB_DOUBLE_STAR\}\}/g, ".*")
-    .replace(/\?/g, "[^/]");
+    .replace(/\?/g, "[^/]")
+    .replace(/\{\{GLOB_SLASH_DOUBLE_STAR_SLASH\}\}/g, "(?:/.+)?/")
+    .replace(/\{\{GLOB_LEADING_DOUBLE_STAR_SLASH\}\}/g, "(?:.+/)?")
+    .replace(/\{\{GLOB_DOUBLE_STAR\}\}/g, ".*");
   return new RegExp(`^${regexStr}$`);
 }
 
@@ -265,7 +282,7 @@ function pathMatchesPattern(pattern: string, filePath: string): boolean {
 
   if (normPattern.endsWith("/")) {
     if (normPath.startsWith(normPattern)) return true;
-  } else if (!/[*?]/.test(normPattern) && !/\.[a-z0-9]+$/i.test(normPattern)) {
+  } else if (!/[*?]/.test(normPattern) && !/[^/]+\.[a-z0-9]+$/i.test(normPattern)) {
     if (normPath.startsWith(`${normPattern}/`)) return true;
   }
 
