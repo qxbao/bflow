@@ -963,7 +963,9 @@ describe("Slice 8.4: MCP role tools on escalated/paused runs, RoleMessage feedba
     }
 
     const coordinatorPrompt = await readFile(join(repoRoot, "agents/coordinator/system-prompt.md"), "utf8");
-    expect(coordinatorPrompt).toContain("task.blocked");
+    // The prompt must steer to the valid type; naming invented types is forbidden by agent-behavior-policies.
+    expect(coordinatorPrompt).toContain('type: "task.status"');
+    expect(coordinatorPrompt).not.toContain("task.blocked");
   });
 
   it("resolves read_task_handover to the active accepted assignment when a prior released assignment shares the same Developer pane", async () => {
