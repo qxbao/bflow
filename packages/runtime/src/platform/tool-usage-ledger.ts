@@ -193,8 +193,27 @@ export class FileToolUsageLedger {
     const serialized = JSON.stringify(state);
     if (Buffer.byteLength(serialized) > MAX_LEDGER_BYTES) throw new Error("Tool usage ledger exceeds its size limit");
     const file = await open(temporary, "wx", 0o600);
-    try { await file.writeFile(serialized, "utf8"); await file.sync(); }
-    finally { await file.close(); }
+    try {
+      await file.writeFile(serialized, "utf8");
+      try {
+        await file.sync();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (
+          code !== "EINVAL" &&
+          code !== "ENOSYS" &&
+          code !== "ENOTSUP" &&
+          code !== "EOPNOTSUPP" &&
+          code !== "EROFS" &&
+          code !== "EPERM" &&
+          code !== "EACCES"
+        ) {
+          throw error;
+        }
+      }
+    } finally {
+      await file.close();
+    }
     try {
       await chmod(temporary, 0o600);
       await rename(temporary, this.path);
@@ -210,6 +229,7 @@ export class FileToolUsageLedger {
           code !== "EOPNOTSUPP" &&
           code !== "EROFS" &&
           code !== "EPERM" &&
+          code !== "EACCES" &&
           code !== "EISDIR" &&
           code !== "EBADF"
         ) {

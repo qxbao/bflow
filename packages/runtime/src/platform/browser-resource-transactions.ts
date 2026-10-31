@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema, MCPClientRegistrationSchema, MCPResourceLeaseSchema,
@@ -172,7 +173,16 @@ export class BrowserResourceTransactions {
     const info = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
     if (!info) return { schemaVersion: 3, transactions: [] };
     if (!info.isFile() || info.isSymbolicLink()) reject("Refusing non-regular browser resource ledger");
-    const ledger = LedgerSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let rawLedgerText: string;
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()) reject("Refusing non-regular browser resource ledger");
+      rawLedgerText = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+    const ledger = LedgerSchema.parse(JSON.parse(rawLedgerText));
     const ids = ledger.transactions.map(entry => [entry.id, entry.registrationId, entry.serviceId].join(":"));
     const callIds = ledger.transactions.flatMap(entry => entry.calls.map(call => call.callId));
     if (new Set(ids).size !== ids.length || new Set(callIds).size !== callIds.length) reject("Duplicate browser transaction or call identity");
@@ -202,7 +212,27 @@ export class BrowserResourceTransactions {
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
       const handle = await open(temporary, "wx", 0o600);
-      try { await handle.writeFile(JSON.stringify(LedgerSchema.parse(ledger))); await handle.sync(); } finally { await handle.close(); }
+      try {
+        await handle.writeFile(JSON.stringify(LedgerSchema.parse(ledger)));
+        try {
+          await handle.sync();
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (
+            code !== "EINVAL" &&
+            code !== "ENOSYS" &&
+            code !== "ENOTSUP" &&
+            code !== "EOPNOTSUPP" &&
+            code !== "EROFS" &&
+            code !== "EPERM" &&
+            code !== "EACCES"
+          ) {
+            throw error;
+          }
+        }
+      } finally {
+        await handle.close();
+      }
       await rename(temporary, path);
       const parent = await open(directory, "r");
       try {
@@ -216,6 +246,7 @@ export class BrowserResourceTransactions {
           code !== "EOPNOTSUPP" &&
           code !== "EROFS" &&
           code !== "EPERM" &&
+          code !== "EACCES" &&
           code !== "EISDIR" &&
           code !== "EBADF"
         ) {

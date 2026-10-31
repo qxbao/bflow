@@ -155,24 +155,39 @@ export function readFrontmatter(text: string): Frontmatter {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
   if (!match) return { fields: {}, body: text, raw: null };
   const fields: Record<string, string | string[]> = {};
+  const setOwnField = (key: string, value: string | string[]): void => {
+    Object.defineProperty(fields, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
+  };
+  const getOwnField = (key: string): string | string[] | undefined =>
+    Object.hasOwn(fields, key) ? fields[key] : undefined;
   let current: string | null = null;
   for (const line of match[1]!.split(/\r?\n/)) {
     const pair = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
     if (pair) {
       current = pair[1]!;
       const value = pair[2]!.trim();
-      fields[current] = value.replace(/^(["'])(.*)\1$/, "$2");
+      setOwnField(current, value.replace(/^(["'])(.*)\1$/, "$2"));
       continue;
     }
     const item = /^\s+-\s*(.*)$/.exec(line);
     if (item && current) {
-      const existing = fields[current];
-      const list = Array.isArray(existing) ? existing : existing ? [existing] : [];
+      const existing = getOwnField(current);
+      const list = Array.isArray(existing) ? [...existing] : existing ? [existing] : [];
       list.push(item[1]!.trim().replace(/^(["'])(.*)\1$/, "$2"));
-      fields[current] = list;
+      setOwnField(current, list);
     } else if (line.trim() && current) {
-      const existing = fields[current];
-      fields[current] = Array.isArray(existing) ? [...existing, line.trim()] : `${existing ?? ""}${existing ? " " : ""}${line.trim()}`;
+      const existing = getOwnField(current);
+      setOwnField(
+        current,
+        Array.isArray(existing)
+          ? [...existing, line.trim()]
+          : `${existing ?? ""}${existing ? " " : ""}${line.trim()}`
+      );
     }
   }
   return { fields, body: text.slice(match[0].length), raw: match[1]! };

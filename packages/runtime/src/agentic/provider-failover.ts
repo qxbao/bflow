@@ -135,7 +135,8 @@ export class TaskProviderFailover {
     }
     if (!await this.safe(run, entry)) return;
     if (entry.phase === "stopped") {
-      const bound = unwrap(await this.ports.panes.getRoleBinding(source.selector));
+      const bindingSelector = source.selector === "developer" ? entry.sourceBinding.agentId : source.selector;
+      const bound = unwrap(await this.ports.panes.getRoleBinding(bindingSelector));
       if (bound && (bound.agentId !== entry.sourceBinding.agentId || bound.paneId !== entry.sourceBinding.paneId || digest(bound.session) !== digest(entry.sourceBinding.session))) {
         this.hold(run, entry, "source_binding_changed", true); return;
       }

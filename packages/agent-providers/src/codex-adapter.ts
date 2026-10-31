@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -58,12 +58,38 @@ async function probeFileSnapshot(paths: readonly string[], required: ReadonlySet
   } catch { return undefined; }
 }
 
+function tomlString(value: string): string {
+  return JSON.stringify(value).replace(/\x7f/g, "\\u007f");
+}
+
 function tomlValue(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(tomlValue).join(",")}]`;
+  if (typeof value === "string") return tomlString(value);
+  if (Array.isArray(value)) return `[${value.map(item => tomlValue(item ?? null)).join(",")}]`;
   if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${tomlValue(item)}`).join(",")}}`;
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => `${tomlString(key)}=${tomlValue(item)}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+async function readBoundedRegularUtf8(path: string, maxBytes = 4 * 1024 * 1024): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      const err = new Error(`Path '${path}' is not a regular file`) as NodeJS.ErrnoException;
+      err.code = "EISDIR";
+      throw err;
+    }
+    if (info.size > maxBytes) {
+      throw new Error(`File '${path}' exceeds ${maxBytes}-byte limit`);
+    }
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -345,7 +371,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
   /** `[mcp_servers.<name>]` table names of the user's Codex config.toml (missing file = none). */
   private async configTableNames(home: string): Promise<{ readonly names: string[]; readonly error?: string }> {
     try {
-      return { names: parseCodexConfigMcpServerNames(await readFile(join(home, "config.toml"), "utf8")) };
+      return { names: parseCodexConfigMcpServerNames(await readBoundedRegularUtf8(join(home, "config.toml"))) };
     } catch (err) {
       if (isNotFound(err)) return { names: [] };
       return { names: [], error: `config.toml unreadable: ${err instanceof Error ? err.message : String(err)}` };
@@ -390,7 +416,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     }
 
     try {
-      const text = await readFile(join(home, "config.toml"), "utf8");
+      const text = await readBoundedRegularUtf8(join(home, "config.toml"));
       return { names: parseCodexConfigMcpServerNames(text) };
     } catch (err) {
       if (isNotFound(err)) return { names: [] };
@@ -403,7 +429,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
 
   private async unpinnedEnabledPlugins(home: string): Promise<string[]> {
     try {
-      const text = await readFile(join(home, "config.toml"), "utf8");
+      const text = await readBoundedRegularUtf8(join(home, "config.toml"));
       return parseCodexEnabledPlugins(text);
     } catch {
       return [];
@@ -661,7 +687,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     ];
 
     try {
-      const mcpContent = await readFile(configFiles.mcpConfigFile, "utf8");
+      const mcpContent = await readBoundedRegularUtf8(configFiles.mcpConfigFile);
       const mcpParsed = JSON.parse(mcpContent) as { mcpServers?: Record<string, unknown> };
       if (mcpParsed.mcpServers && Object.keys(mcpParsed.mcpServers).length > 0) {
         // `--ask-for-approval never` auto-rejects every MCP call Codex would prompt for ("MCP tool call
@@ -671,15 +697,21 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           [name, { ...withForwardedMcpEnv(server as Record<string, unknown>), default_tools_approval_mode: "approve" }]));
         argv.push("-c", `mcp_servers=${tomlValue(approved)}`);
       }
-    } catch {
-      // Ignore reading error if missing
+    } catch (err) {
+      if (!isNotFound(err)) {
+        return {
+          argv: [],
+          unsupportedCode: "unreadable_launch_config",
+          unsupportedMessage: `Codex MCP launch configuration is unreadable: ${err instanceof Error ? err.message : String(err)}`
+        };
+      }
     }
 
     // Disables must follow the Bflow mcp_servers= table override (verified: an earlier override is reset by it).
     argv.push(...inherited.argv);
 
     try {
-      const settingsContent = await readFile(configFiles.settingsFile, "utf8");
+      const settingsContent = await readBoundedRegularUtf8(configFiles.settingsFile);
       const settingsParsed = JSON.parse(settingsContent) as { hooks?: Record<string, unknown> };
       if (settingsParsed.hooks && Object.keys(settingsParsed.hooks).length > 0) {
         if (
@@ -700,8 +732,14 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           `hooks=${tomlValue(settingsParsed.hooks)}`
         );
       }
-    } catch {
-      // Ignore reading error if missing
+    } catch (err) {
+      if (!isNotFound(err)) {
+        return {
+          argv: [],
+          unsupportedCode: "unreadable_launch_config",
+          unsupportedMessage: `Codex launch settings configuration is unreadable: ${err instanceof Error ? err.message : String(err)}`
+        };
+      }
     }
 
     if (this.options.model) {

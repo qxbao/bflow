@@ -145,14 +145,21 @@ export class FileLaunchJournal implements LaunchJournalPort {
     await this.queue;
     let text: string;
     try {
-      const handle = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const handle = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
+        const info = await handle.stat();
+        if (!info.isFile()) {
+          throw new LaunchJournalCorruptionError("launch journal path is not a regular file");
+        }
         text = await handle.readFile("utf8");
       } finally {
         await handle.close();
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if ((error as NodeJS.ErrnoException).code === "ELOOP" || (error as NodeJS.ErrnoException).code === "EISDIR") {
+        throw new LaunchJournalCorruptionError("launch journal path is not a regular file");
+      }
       throw error;
     }
     if (text.length === 0) return [];
@@ -199,7 +206,22 @@ export class FileLaunchJournal implements LaunchJournalPort {
       }
       const created = info.size === 0;
       await handle.writeFile(line, "utf8");
-      await handle.sync();
+      try {
+        await handle.sync();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (
+          code !== "EINVAL" &&
+          code !== "ENOSYS" &&
+          code !== "ENOTSUP" &&
+          code !== "EOPNOTSUPP" &&
+          code !== "EROFS" &&
+          code !== "EPERM" &&
+          code !== "EACCES"
+        ) {
+          throw error;
+        }
+      }
       if (created) await this.syncDirectory();
     } finally {
       await handle.close();
@@ -239,6 +261,7 @@ export class FileLaunchJournal implements LaunchJournalPort {
         code !== "EOPNOTSUPP" &&
         code !== "EROFS" &&
         code !== "EPERM" &&
+        code !== "EACCES" &&
         code !== "EISDIR" &&
         code !== "EBADF"
       ) {

@@ -64,6 +64,7 @@ export function createProviderExecutionProbeCoalescer(options: {
   };
   return {
     async probe(request, operation) {
+      const startedAt = performance.now();
       const signal = operation?.signal;
       if (signal?.aborted) return interrupted("aborted");
       const timeoutMs = Math.min(request.invocation.timeoutMs ?? 75_000, operation?.timeoutMs ?? Infinity,
@@ -141,14 +142,23 @@ export function createProviderExecutionProbeCoalescer(options: {
           completed.delete(key);
           // A failed or expired shared observation is never the follower's own proof. This is a new
           // readiness ping, not a replay of a workflow mutation. It remains inside the waiter's budget.
+          const remainingMs = Math.min(
+            request.invocation.timeoutMs ?? 75_000,
+            timeoutMs - (performance.now() - startedAt)
+          );
+          if (!(remainingMs > 0) || waiter.signal.aborted) {
+            return interrupted(waiter.signal.aborted && signal?.aborted ? "aborted" : "timeout");
+          }
           const ownOutcome = await options.runner.run({ ...request.invocation, signal: waiter.signal,
-            timeoutMs: request.invocation.timeoutMs ?? 75_000 });
+            timeoutMs: Math.max(1, Math.floor(remainingMs)) });
           const completedAt = performance.now();
           if (!await isCurrent()) { completed.delete(key); return changedContext(); }
           if (!waiter.signal.aborted) remember(key, ownOutcome, completedAt);
           return { ...ownOutcome };
         };
-        return await Promise.race([observation(), cancellation]);
+        const pendingObservation = observation();
+        pendingObservation.catch(() => undefined);
+        return await Promise.race([pendingObservation, cancellation]);
       } finally {
         if (timer !== undefined) clearTimeout(timer);
         if (stop !== undefined) signal?.removeEventListener("abort", stop);

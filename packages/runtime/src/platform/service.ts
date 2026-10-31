@@ -1,7 +1,7 @@
 import type { GatewayToolOperationOptions } from "./browser-resource-transactions.js";
 import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import {
   AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema, ROLE_PROFILE_FEATURE,
   canonicalReceiptJson,
@@ -1222,23 +1222,30 @@ async function sanitizeLaunchPathForProvider(
   let hasShadowingNonRegular = false;
   let targetReachableOnEffectivePath = false;
   const kept: string[] = [];
+  const cwdsToCheck = [...new Set([process.cwd(), profile.environment.cwd])];
 
   for (const segment of segments) {
     const dir = segment.length === 0 ? "." : segment;
-    const candidate = join(dir, providerCommand);
-    try {
-      const resolved = await realpath(candidate);
-      const info = await stat(resolved);
-      if (!info.isFile()) {
-        hasShadowingNonRegular = true;
-        continue;
+    const baseDirs = isAbsolute(dir) ? [dir] : cwdsToCheck.map(base => resolve(base, dir));
+    let shadowedByNonRegular = false;
+    for (const baseDir of baseDirs) {
+      const candidate = join(baseDir, providerCommand);
+      try {
+        const resolved = await realpath(candidate);
+        const info = await stat(resolved);
+        if (!info.isFile()) {
+          hasShadowingNonRegular = true;
+          shadowedByNonRegular = true;
+          break;
+        }
+        if (allowedTargets.has(resolved) || allowedTargets.has(candidate)) {
+          targetReachableOnEffectivePath = true;
+        }
+      } catch {
+        // Missing or broken entry in this segment: retain segment unchanged.
       }
-      if (allowedTargets.has(resolved) || allowedTargets.has(candidate)) {
-        targetReachableOnEffectivePath = true;
-      }
-    } catch {
-      // Missing or broken entry in this segment: retain segment unchanged.
     }
+    if (shadowedByNonRegular) continue;
     kept.push(segment);
   }
 
