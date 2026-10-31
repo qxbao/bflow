@@ -4,10 +4,14 @@ import type { JsonValue } from "@bflow/contracts";
 import { digest, json, record } from "./journal.js";
 
 const MAX_BYTES = 16 * 1024 * 1024;
+const emptyOrNullToUndefined = (value: unknown) =>
+  value === null || (typeof value === "string" && value.trim() === "") ? undefined : value;
+const nullToUndefined = (value: unknown) => (value === null ? undefined : value);
 export const PolicyReviewPageInputSchema = z.object({
   runId: z.string().min(1), taskId: z.string().min(1), phase: z.enum(["green", "refactor", "verification"]),
-  view: z.enum(["full", "page"]).optional(), cursor: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  offset: z.number().int().nonnegative().max(MAX_BYTES).optional()
+  view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "page"]).optional()),
+  cursor: z.preprocess(emptyOrNullToUndefined, z.string().regex(/^[a-f0-9]{64}$/).optional()),
+  offset: z.preprocess(nullToUndefined, z.number().int().nonnegative().max(MAX_BYTES).optional())
 }).strict();
 export interface PolicyReviewPageScope { binding: string; runId: string; taskId: string; phase: string; stamp: string }
 interface Packet { scope: string; body: Buffer; sha256: string; observationId: string; pageBytes: number; readThrough: number }

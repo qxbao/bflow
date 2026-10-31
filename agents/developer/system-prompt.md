@@ -119,3 +119,4 @@ Every Developer task completion and handoff to Coordinator must emit a structure
 
 - Never dump `ALL_TOOLS` or enumerate the full MCP tool catalog; inspect only the 1-3 tool schemas needed for your current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)`.
 - Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `read_task_log({ runId, taskId, view: "compact", cursor })` with `nextCursor`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` to inspect repository policy files without redundant full-file reads.
+- Omit optional MCP tool and `RoleMessage` properties when unused instead of passing `null` or `""`. When calling `propose_task_handover`, always copy the exact current `binding` returned by `read_task_handover` (or the rejection receipt) after your latest Git commit so `binding.revision` matches `HEAD`.

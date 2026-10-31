@@ -47,7 +47,14 @@ async function syncDirectory(path: string): Promise<void> {
 }
 async function writeDurable(path: string, bytes: Buffer): Promise<void> {
   const handle = await open(path, "wx", 0o644);
-  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+  try {
+    await handle.writeFile(bytes);
+    try { await handle.sync(); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+    }
+  } finally { await handle.close(); }
 }
 const absent = async (path: string) => {
   try { await lstat(path); return false; }
@@ -246,9 +253,18 @@ export async function verifyHandoverPackage(directory: string): Promise<Handover
     if (!links) continue;
     const text = bytes.toString("utf8");
     if (path === "index.html" && /<script|<[^>]*\s(?:src|on[a-z]+)\s*=/i.test(text)) problems.push("index.html contains active content");
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+
     for (const match of text.matchAll(links)) {
       const link = match[1] ?? "";
-      if (!link.startsWith("#") && !expected.has(link)) problems.push(`Link outside the package in ${path}: ${link.slice(0, 120)}`);
+      if (!link.startsWith("#") && !expected.has(link)) problems.push(`Link outside the package in ${path}: ${sliceUtf16(link, 120)}`);
     }
   }
   return { valid: problems.length === 0, status: manifest.status, runId: manifest.snapshot.runId, snapshotId: manifest.snapshot.snapshotId, problems };

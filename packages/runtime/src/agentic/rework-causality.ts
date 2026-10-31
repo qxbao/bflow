@@ -1,16 +1,35 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, IsoDateTimeSchema, JsonValueSchema,
   OperationResultSchema, QualityFindingSchema, type ArtifactReference, type ArtifactStore,
-  type QualityFinding, type QualityGateResult, type VerificationCycle, type VerificationResult
+  type JsonValue, type QualityFinding, type QualityGateResult, type VerificationCycle, type VerificationResult
 } from "@bflow/contracts";
-import { digest, json, textField } from "./journal.js";
 import { runtimeGitDirectoryFlags } from "./patch-paths.js";
+
+function json(value: unknown): JsonValue {
+  return JsonValueSchema.parse(JSON.parse(JSON.stringify(value)));
+}
+function digest(value: unknown): string {
+  const canonical = (v: unknown): string =>
+    Array.isArray(v)
+      ? `[${v.map(canonical)}]`
+      : v !== null && typeof v === "object"
+        ? `{${Object.entries(v)
+            .filter(([, x]) => x !== undefined)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)}}`
+        : JSON.stringify(v) ?? "null";
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+function textField(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("Expected nonempty string");
+  return value;
+}
 
 const execute = promisify(execFile);
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -68,6 +87,13 @@ export const ReworkAssignmentContextSchema = z.object({
 export type ReworkAssignmentContext = z.infer<typeof ReworkAssignmentContextSchema>;
 
 function normalizeSourceLocationInput(value: unknown): unknown {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const out: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+    if (out.startLine === null) delete out.startLine;
+    if (out.endLine === null) delete out.endLine;
+    if (out.symbol === null || (typeof out.symbol === "string" && out.symbol.trim() === "")) delete out.symbol;
+    return out;
+  }
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   const lineMatch = /^(.+?):(\d+)(?:-(\d+))?$/.exec(trimmed);
@@ -610,7 +636,7 @@ export async function validateAndStoreReworkResolution(options: {
       }
       const absolute = resolve(worktreePath, loc.path);
       try {
-        const info = await stat(absolute);
+        const info = await lstat(absolute);
         if (!info.isFile()) {
           throw new Error(`Rework finding '${assigned.findingId}' sourceLocation '${loc.path}' is not a regular file`);
         }
@@ -623,10 +649,13 @@ export async function validateAndStoreReworkResolution(options: {
           }
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
           if (input.disposition !== "addressed" || !worktreeState.changedPaths.includes(loc.path)) {
             throw new Error(`Rework finding '${assigned.findingId}' sourceLocation '${loc.path}' does not exist in worktree`);
           }
+        } else if (code === "ENOTDIR" || code === "EISDIR") {
+          throw new Error(`Rework finding '${assigned.findingId}' sourceLocation '${loc.path}' is not a regular file`);
         } else {
           throw error;
         }

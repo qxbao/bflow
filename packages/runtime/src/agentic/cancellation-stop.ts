@@ -30,3 +30,37 @@ export function ownsCancellationPane(handle: AgentExecutionHandle, binding: Pane
     !!binding.session && !!target.session && binding.session.source === target.session.source &&
     binding.session.kind === target.session.kind && binding.session.value === target.session.value;
 }
+
+/**
+ * Fail-closed check for a read-only/non-writer specialist pane when Herdr wait reports `not_found`.
+ * Confirms absence when the pane is missing from the manifest, `inspectRoleHealth` reports `not_found`,
+ * `paneExists === false`, or the specialist CLI process exited leaving the pane at a bare disconnected shell
+ * (`status: "not_ready"`, `transportState: "disconnected"`, `readyForPrompt: false`, `occupantMatches: false`).
+ * Never confirms `agent_replaced` or active/unknown occupants.
+ */
+export function isSpecialistHealthConfirmedAbsent(
+  targetPaneId: string,
+  health:
+    | {
+        ok: true;
+        value: {
+          status?: string;
+          transportState?: string;
+          readyForPrompt: boolean;
+          occupantMatches: boolean;
+          paneExists?: boolean;
+          paneId: string;
+        };
+      }
+    | { ok: false; error: { code: string } }
+): boolean {
+  if (!health.ok) return health.error.code === "not_found";
+  if (health.value.paneId !== targetPaneId) return false;
+  if (health.value.paneExists === false) return true;
+  return (
+    health.value.status === "not_ready" &&
+    health.value.transportState === "disconnected" &&
+    health.value.readyForPrompt === false &&
+    health.value.occupantMatches === false
+  );
+}

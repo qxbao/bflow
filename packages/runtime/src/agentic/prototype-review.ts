@@ -1,10 +1,31 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   ApprovalDecisionSchema, ApprovalRequestSchema, ApprovalStatusSchema, ArtifactReferenceSchema, IsoDateTimeSchema,
   type ApprovalDecision, type ApprovalRequest, type WorkflowDefinition
 } from "@bflow/contracts";
-import { digest } from "./journal.js";
 import { isSensitiveKey } from "../resilience/redaction.js";
+
+function digest(value: unknown): string {
+  const canonical = (v: unknown): string =>
+    Array.isArray(v)
+      ? `[${v.map(canonical)}]`
+      : v !== null && typeof v === "object"
+        ? `{${Object.entries(v)
+            .filter(([, x]) => x !== undefined)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)}}`
+        : JSON.stringify(v) ?? "null";
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
 
 /**
  * Optional prototype review branch, held as private Runtime state on the run (never a public contract and never a second
@@ -249,7 +270,7 @@ export function admitPrototypeVersion(record: PrototypeRecord, input: { runId: s
     approvalId: `prototype-${digest([input.runId, record.requirementRevision, scope.digest, version, entry.manifestDigest]).slice(0, 32)}`,
     runId: input.runId, ...(input.sessionId ? { sessionId: input.sessionId } : {}), status: "pending",
     target: { type: "task", taskId: PROTOTYPE_TASK }, revision: version, generation: scope.version,
-    requestedBy: "coordinator", requestedAt: input.now, reason: reason.slice(0, 4000),
+    requestedBy: "coordinator", requestedAt: input.now, reason: sliceUtf16(reason, 4000),
     evidence: [entry.manifest, ...entry.files.map(file => file.artifact)], idempotencyKey: `prototype-approval:${input.runId}:r${record.requirementRevision}:v${version}`,
     metadata: { kind: "prototype_review", prototypeVersion: version, scopeVersion: scope.version, scopeDigest: scope.digest, manifestDigest: entry.manifestDigest,
       reviewFlows, carriedFlows, criteria: scope.scope.criteria.map(criterion => criterion.id), disposition,
@@ -292,7 +313,7 @@ export function settlePrototypeDecision(record: PrototypeRecord, entry: Prototyp
     // Feedback never edits accepted requirements. Only an explicit marker classifies it as a specification revision proposal,
     // which the Coordinator must turn into a scope revision or a requirement change through Conversation.
     const kind = decision.metadata?.feedbackKind === "specification_revision" ? "specification_revision_proposal" : "prototype_revision";
-    record.feedback.push({ approvalId: decision.approvalId, version: entry.version, kind, reason: decision.reason!.slice(0, 2000),
+    record.feedback.push({ approvalId: decision.approvalId, version: entry.version, kind, reason: sliceUtf16(decision.reason!, 2000),
       decidedBy: decision.decidedBy, decidedAt: decision.decidedAt, artifacts: decision.feedbackArtifacts });
     record.status = record.revisionsRequested > scope.scope.maxRevisions ? "escalated" : "revision_requested";
   }

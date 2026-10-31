@@ -1113,6 +1113,8 @@ export class QaWorkflowRuntime {
       try { await handle.writeFile(content, "utf8"); } finally { await handle.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const existingStat = await lstat(absolute).catch(() => undefined);
+      if (!existingStat?.isFile()) throw new QaScopeDenied("write_out_of_scope", `Refusing to overwrite existing non-file workspace path: ${path}`);
       if (sha256(await readFile(absolute)) !== sha256(content)) throw new QaScopeDenied("write_out_of_scope", `Refusing to overwrite existing workspace file: ${path}`);
     }
   }

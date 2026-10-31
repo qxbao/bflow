@@ -26,11 +26,18 @@ export function compactPolicyReviewDossier(specification: Specification, strateg
     presentation: "Duplicate strategy/policy inputs are in specification. Prior raw measurement payloads remain in immutable host receipts and are authenticated again before a phase is accepted. No verification requirement is omitted." });
 }
 
+const emptyOrNullToUndefined = (value: unknown) =>
+  value === null || (typeof value === "string" && value.trim() === "") ? undefined : value;
+const nullToUndefined = (value: unknown) => (value === null ? undefined : value);
+
 export const PlanningReferenceInputSchema = z
   .object({
-    section: z.enum(["specification", "test_strategy", "workflow", "all"]),
-    view: z.enum(["full", "compact", "schema_only"]).optional(),
-    includeRunners: z.boolean().optional()
+    section: z.preprocess(
+      value => (value === null || value === undefined || (typeof value === "string" && value.trim() === "") ? "all" : value),
+      z.enum(["specification", "test_strategy", "workflow", "all"])
+    ),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "compact", "schema_only"]).optional()),
+    includeRunners: z.preprocess(nullToUndefined, z.boolean().optional())
   })
   .strict();
 
@@ -358,10 +365,10 @@ export async function planningReferenceView(
 
 export const InspectInputSchema = z
   .object({
-    runId: z.string().min(1).optional(),
-    view: z.enum(["full", "summary", "status", "tasks", "blockers"]).optional(),
-    taskId: z.string().min(1).optional(),
-    cursor: z.string().min(1).max(128).optional()
+    runId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "status", "tasks", "blockers"]).optional()),
+    taskId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+    cursor: z.preprocess(emptyOrNullToUndefined, z.string().min(1).max(128).optional())
   })
   .strict();
 
@@ -722,9 +729,9 @@ export function summarizeInspectState(stateInput: unknown, rawQuery: InspectInpu
 
 export const AssignmentContextInputSchema = z
   .object({
-    view: z.enum(["full", "compact", "active_only"]).optional(),
-    surveyView: z.enum(["full", "summary", "anchors_only"]).optional(),
-    includeReleased: z.boolean().optional(),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "compact", "active_only"]).optional()),
+    surveyView: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "anchors_only"]).optional()),
+    includeReleased: z.preprocess(nullToUndefined, z.boolean().optional()),
     paths: z.unknown().optional()
   })
   .strict();
@@ -1041,10 +1048,13 @@ export function compactAssignmentContext(
 
 export const ReadProjectPolicyInputSchema = z
   .object({
-    filePath: z.string().min(1).max(512).optional(),
-    view: z.enum(["full", "toc", "section", "digests"]).optional(),
-    heading: z.string().min(1).max(200).optional(),
-    knownDigests: z.record(z.string().min(1).max(512), z.string().regex(/^[a-f0-9]{64}$/)).optional()
+    filePath: z.preprocess(emptyOrNullToUndefined, z.string().min(1).max(512).optional()),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "toc", "section", "digests"]).optional()),
+    heading: z.preprocess(emptyOrNullToUndefined, z.string().min(1).max(200).optional()),
+    knownDigests: z.preprocess(
+      nullToUndefined,
+      z.record(z.string().min(1).max(512), z.string().regex(/^[a-f0-9]{64}$/)).optional()
+    )
   })
   .strict()
   .superRefine((value, ctx) => {
