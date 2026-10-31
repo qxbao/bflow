@@ -209,14 +209,17 @@ export async function recoverWorkflowRun(
             occurredAt: clock().toISOString()
           }, options);
 
-          if (recordRes.ok && recordRes.value.emittedEvents.length > 0) {
-            await ports.runStore.appendEvents({
-              runId,
-              expectedVersion: currentSnapshot.version,
-              expectedLastSequence: currentSnapshot.lastEventSequence,
-              events: recordRes.value.emittedEvents,
-              idempotencyKey: `recon-events-restart:${handle.requestId}`
-            }, options);
+          if (recordRes.ok) {
+            if (recordRes.value.emittedEvents.length > 0) {
+              const appendRes = await ports.runStore.appendEvents({
+                runId,
+                expectedVersion: currentSnapshot.version,
+                expectedLastSequence: currentSnapshot.lastEventSequence,
+                events: recordRes.value.emittedEvents,
+                idempotencyKey: `recon-events-restart:${handle.requestId}`
+              }, options);
+              if (!appendRes.ok) return appendRes;
+            }
             currentSnapshot = recordRes.value.snapshot;
           }
         }

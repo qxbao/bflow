@@ -66,7 +66,7 @@ export type WatchdogAction =
 /** Notice message identity of a user decision, as Runtime emits it (buildDecisionRequestMessage). */
 export function decisionMessageId(approvalId: string): string { return `decision-${approvalId}`; }
 
-const NOT_WORKING = new Set(["idle", "done", "unknown"]);
+const NOT_WORKING = new Set(["idle", "done", "unknown", "disconnected", "cancelled", "blocked"]);
 
 /** Actions for the current facts. Terminal runs and displayed decisions produce nothing. */
 export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {
