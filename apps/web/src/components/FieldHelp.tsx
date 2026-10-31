@@ -60,8 +60,8 @@ export function FieldHelp({ label, help, example }: FieldHelpProps) {
   }, [open]);
 
   const positionClass = placement.mobile
-    ? 'fixed right-3 bottom-3 left-3 z-50 block'
-    : `absolute z-50 block w-72 max-w-[calc(100vw-2rem)] ${placement.horizontal === 'right' ? 'right-0' : 'left-0'} ${placement.vertical === 'above' ? 'bottom-full pb-1.5' : 'top-full pt-1.5'}`;
+    ? 'pointer-events-none fixed right-3 bottom-3 left-3 z-50 block'
+    : `pointer-events-none absolute z-50 block w-72 max-w-[calc(100vw-2rem)] ${placement.horizontal === 'right' ? 'right-0' : 'left-0'} ${placement.vertical === 'above' ? 'bottom-full pb-1.5' : 'top-full pt-1.5'}`;
 
   return (
     <span

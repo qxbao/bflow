@@ -21,15 +21,17 @@ test('unavailable chat cannot submit or retry and direct decision remains usable
  const posts:string[]=[];page.on('request',request=>{if(request.method()==='POST')posts.push(new URL(request.url()).pathname);});
  await page.goto(pairing);await page.getByLabel('Đường dẫn Git tuyệt đối').fill(repository);await page.getByRole('button',{name:'Đăng ký dự án'}).click();
  await page.getByRole('link',{name:/books.*Xem dự án/}).click();
- await page.goto(page.url()+'/runs/run');
- const chat=page.getByRole('region',{name:'Trò chuyện cùng phiên'});
+ await page.goto(page.url()+'/chat/run');
+ const chat=page.getByRole('region',{name:'Trò chuyện của công việc'});
  await expect(chat.getByRole('alert')).toBeVisible();await expect(chat.getByRole('button',{name:'Gửi tin nhắn'})).toBeDisabled();
  await expect(chat.getByText(/Trò chuyện qua web chưa sẵn sàng/)).toBeVisible();
  await chat.getByRole('button',{name:'Đọc lại lịch sử'}).click();await expect(chat.getByRole('alert')).toBeVisible();
+ await page.getByRole('link',{name:'Xem công việc →'}).click();
  await page.getByRole('button',{name:'Tên sách',exact:true}).click();await page.getByRole('button',{name:'Gửi câu trả lời'}).click();
  await page.getByRole('button',{name:'Xem xét gói'}).click();await expect(page.getByRole('button',{name:'Duyệt gói'})).toBeEnabled();
  await page.getByRole('button',{name:'Duyệt gói'}).click();await expect(page.getByRole('button',{name:'Tiếp tục',exact:true})).toBeEnabled();
  expect(posts.filter(path=>path.endsWith('/messages'))).toHaveLength(0);
+ await page.getByRole('link',{name:'Mở trò chuyện của công việc →'}).click();
  await page.reload();await expect(chat.getByRole('button',{name:'Gửi tin nhắn'})).toBeDisabled();
  for(const width of [1440,1280,768]){await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}
  await chat.scrollIntoViewIfNeeded();await page.screenshot({path:'dist/test-results/chat-unavailable.png',fullPage:true});
