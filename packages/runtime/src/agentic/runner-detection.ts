@@ -9,6 +9,8 @@ import {
 import { isAbsolute, join } from "node:path";
 import type { RunnerAdapter } from "./runner-adapter.js";
 import type { RunnerDetection, RunnerProfile } from "./behavioral-runner.js";
+import { warmNpmDependencies } from "./dependency-warming.js";
+import { detectRunnerCatalog } from "./runner-catalog.js";
 
 /** Narrow filesystem port so detection can run against fixtures or fakes. Only read operations are used. */
 export interface DetectionFs {
@@ -294,7 +296,6 @@ export async function detectTestRunners(
     let javascript = await detect(repositoryRoot, options.nodeExecutable ?? process.execPath, fs);
     if (!options.fs && javascript.status === "unsupported") {
       // Only a Runtime-owned, lock-verified public npm cache can be created automatically. Other ecosystems remain offline.
-      const { warmNpmDependencies } = await import("./dependency-warming.js");
       const warmed = await warmNpmDependencies(repositoryRoot);
       if (warmed.status === "ready") {
         warmedDependencySources.add(warmed.dependencySource);
@@ -304,7 +305,6 @@ export async function detectTestRunners(
       }
     }
     if (options.fs) return javascript;
-    const { detectRunnerCatalog } = await import("./runner-catalog.js");
     return await detectRunnerCatalog(repositoryRoot, javascript, options.adapters, javascriptDependencySource);
   } catch (error) {
     return unsupported(`Phát hiện runner thất bại / Test runner detection failed: ${errorMessage(error)}`);

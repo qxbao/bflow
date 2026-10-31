@@ -9,6 +9,7 @@ import type {
 import type { CancellationStopProof, NamespaceExitProof } from "./cancellation-stop.js";
 import type { ExecutionResolutionReader } from "./execution-binding.js";
 import type { NativeDiagnosticFenceAuthority } from "./native-diagnostic-fence.js";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -207,7 +208,8 @@ export async function loadAgenticPolicies(options: AgenticCompositionOptions): P
         if (typeof revision !== "string" || !/^[a-fA-F0-9]{7,40}$/.test(revision)) {
           throw new Error(`Invalid Git revision for tree lookup: ${String(revision)}`);
         }
-        const { stdout } = await execFileAsync("git", ["rev-parse", "--verify", `${revision}^{tree}`], {
+        const dirFlags = await runtimeGitDirectoryFlags(options.repositoryPath);
+        const { stdout } = await execFileAsync("git", [...dirFlags, "rev-parse", "--verify", `${revision}^{tree}`], {
           cwd: options.repositoryPath,
           encoding: "utf8"
         });

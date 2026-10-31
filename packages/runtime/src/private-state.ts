@@ -141,7 +141,13 @@ function pinLocation(locator: string, repository: string, repositoryHash: string
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   } finally { fs.unlinkSync(temporary); }
   const directory = fs.openSync(resolve(locator, ".."), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
-  try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+  try {
+    try { fs.fsyncSync(directory); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+    }
+  } finally { fs.closeSync(directory); }
 }
 
 /**

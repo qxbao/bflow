@@ -6,7 +6,7 @@ import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type JsonValue, type QualityGateDefinition } from "@bflow/contracts";
-import type { QualityCommandOutcome } from "@bflow/quality-gates";
+import { createQualityCommandRunner, type QualityCommandOutcome } from "@bflow/quality-gates";
 import { json, record, textField } from "./journal.js";
 import { BehavioralIdentityMismatch, BehavioralIdentityRepair, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
 import { parseVitestJson } from "./vitest-json.js";
@@ -395,8 +395,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     const invocation = command.adapter?.bind({ testNames: command.testNames, testPaths: command.testPaths }, reportDirectory);
     if (invocation?.reportPaths?.length && (await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory)).length) throw new Error("Behavioral report must not exist before execution");
     const projectCwd = command.adapter && command.adapter.projectDirectory !== "." ? join(checkout, command.adapter.projectDirectory) : checkout;
-    const module = await import("@bflow/quality-gates");
-    const runner = module.createQualityCommandRunner();
+    const runner = createQualityCommandRunner();
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: "/tmp/bflow-home", TMPDIR: "/tmp", ...(command.adapter?.environment ?? {}) };
     // Seatbelt cannot mount a tmpfs, so the sandboxed process writes only to a dedicated scratch sibling of the checkout.
     if (process.platform === "darwin") { const scratch = join(temporary, "tmp"); await mkdir(scratch, { mode: 0o700 }); env["TMPDIR"] = scratch; env["HOME"] = scratch; }

@@ -2543,7 +2543,9 @@ export class AgenticWorkflowRuntime {
     run.status = "escalated";
     const recovery = rejection ? "manual" : "auto_resume";
     run.pendingAction = { actionId, kind: "resume_coordinator", owner: "coordinator",
-      reason: reason.slice(0, 2000), sourceMessageId, createdAt: prior?.createdAt ?? this.now(), state: "pending", previousStatus,
+      reason: reason.slice(0, 2000), sourceMessageId,
+      createdAt: prior?.kind === "resume_coordinator" && prior.actionId === actionId ? prior.createdAt : this.now(),
+      state: "pending", previousStatus,
       resumeAttempts: prior?.resumeAttempts ?? 0, ...(prior?.lastResumedAt === undefined ? {} : { lastResumedAt: prior.lastResumedAt }),
       ...inheritedManualResume(run), recovery };
     const messageId = `coordinator-no-next-action-${digest([run.runId, run.pendingAction.actionId])}`;
@@ -3962,6 +3964,30 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         ? "Runtime stored the rejected phase outcome and controls bounded Developer repair. This is not missing execution output, valid Red or implementation authorization. Do not report a new missing-evidence blocker; reconcile this exact request if needed."
         : "Runtime stored an infrastructure blocker, not accepted policy evidence. Reconcile this exact outcome before an explicit resume; never resend uncertain work." });
   }
+  /** Heartbeat lease renewal while the host actively executes an independent policy-phase measurement (`behavioralEvidence`). */
+  async renewPolicyMeasurementLease(bindingInput: PaneBinding, requestId: string): Promise<void> {
+    const binding = PaneBindingSchema.parse(bindingInput);
+    await this.transaction(async (state, _save, _core, outbox) => {
+      const request = state.outbound.find(item => item.message.message_id === textField(requestId));
+      if (!request?.handle || request.status !== "accepted" || request.phaseRetirement || request.phaseFailure ||
+          request.cancelRequested || request.leaseRelease || request.message.type !== "verification.requested" ||
+          request.handle.target.paneId !== binding.paneId || request.handle.target.agentId !== binding.agentId ||
+          digest(request.handle.target.session) !== digest(binding.session) || record(request.message.payload).kind !== "conditional_evidence")
+        return;
+      const run = state.runs.find(item => item.runId === request.message.run_id);
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status)) return;
+      await outbox.renew(request);
+      const payload = record(request.message.payload);
+      const task = run.tasks.find(item => item.taskId === payload.taskId);
+      const parent = task && !task.writerReleased && task.result === undefined
+        ? state.outbound.find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
+            item.taskId === task.taskId && item.status === "accepted" && !item.cancelRequested && !item.leaseRelease &&
+            (payload.implementationAttemptId === undefined || item.handle?.attemptId === payload.implementationAttemptId) &&
+            item.lease !== undefined && Date.parse(item.lease.expiresAt) > Date.parse(this.now()))
+        : undefined;
+      if (parent) await outbox.renew(parent);
+    });
+  }
   /** Actual host measurements can fail without becoming successful P16 evidence.
    * Preserve the request outcome, bound repairs, and resume only its owning task. */
   async recordPhaseFailure(bindingInput: PaneBinding, requestId: string, summary: string, repairable: boolean, evidence?: ArtifactReference): Promise<JsonValue> {
@@ -4029,7 +4055,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         this.progress(state, outbox, run, run.error);
       } else {
         const parent = state.outbound.find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
-          item.taskId === task.taskId && item.status === "accepted" && item.handle?.attemptId === payload.implementationAttemptId);
+          item.taskId === task.taskId && item.status === "accepted" &&
+          (payload.implementationAttemptId === undefined || item.handle?.attemptId === payload.implementationAttemptId));
         if (parent?.lease && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now()) && !parent.cancelRequested && !parent.leaseRelease) {
           request.phaseFailure!.leaseRecoveryRequired = true;
           const previousStatus = run.status;
@@ -5345,7 +5372,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (!executions.some(out => out.cancelRequested && out.status === "released" && out.handle?.executionId === executionId)) throw new Error(`Execution ${executionId} has no stop evidence`);
       await confirm(executionId);
     }
-    if ((await core.snapshot(run.runId)).tasks.some(item => item.status === "cancelling" && item.agentExecution === undefined)) await confirm(undefined);
+    const after = await core.snapshot(run.runId);
+    if (after.status === "cancelling" && !after.tasks.some(item => item.status === "cancelling" && item.agentExecution !== undefined)) await confirm(undefined);
   }
   /**
    * Host-reported Stop of a specialist turn. A role that still owes an answer (an accepted assignment, delegation, or verification request with no
