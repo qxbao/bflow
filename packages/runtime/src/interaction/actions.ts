@@ -70,9 +70,12 @@ export function availableActions(
       "revise_request",
       Number(r.delegation.metadata?.followUp ?? 1) >= 6
         ? "follow_up_budget_exhausted"
-        : uncertain
-          ? "delivery_reconciliation_required"
-          : undefined,
+        : r.coreCreated
+          // Mirrors Runtime admission: tasks already in Core cannot be re-planned in place.
+          ? "core_execution_started"
+          : uncertain
+            ? "delivery_reconciliation_required"
+            : undefined,
     ),
   ];
   const previousResume = r.resumeReceipts?.find(item => item.actionId === r.pendingAction?.actionId);

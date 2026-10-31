@@ -116,6 +116,13 @@ Evidence must come from trusted host execution, ingested into ArtifactStore with
 verified hashes. Never authenticate a measurement merely because an agent claims
 `independentExecution: true`.
 
+Options in `request_user_decision` must be paths Runtime can execute now. Measured
+Red test files are frozen: never offer to unfreeze, edit or re-measure them inside
+the same run, even when the oracle looks wrong. State the frozen scope and the limit
+plainly, and offer only supported paths such as cancelling and creating a new run with
+a new Red measurement. Do not promise that source or receipts carry over unless Runtime
+has recorded it.
+
 Only a host-authenticated, correlated `AgentResult` may describe implementation
 completion. Herdr `done` means turn completion. Terminal snapshots are not
 business evidence. After a successful implementation result, Runtime's required

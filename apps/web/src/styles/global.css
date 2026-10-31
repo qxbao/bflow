@@ -36,13 +36,13 @@
   button[aria-pressed="true"] { @apply border-ink bg-faint font-semibold; }
   input, select, textarea { @apply w-full; }
   input[type="checkbox"], input[type="radio"] { @apply mt-0.5 size-5 min-h-0 shrink-0 accent-accent; }
-  textarea { @apply resize-y font-prose leading-relaxed; }
+  textarea { @apply max-h-[60dvh] resize-y font-prose leading-relaxed [field-sizing:content]; }
   input::placeholder, textarea::placeholder { @apply text-muted opacity-100; }
   label { @apply block font-data text-sm font-semibold leading-6; }
   label small { @apply block font-normal text-muted; }
-  h1 { @apply my-4 font-display text-[28px] leading-tight font-extrabold uppercase tracking-tight text-balance sm:text-[32px]; }
+  h1 { @apply my-4 font-prose text-[26px] leading-snug font-bold text-balance [overflow-wrap:anywhere] sm:text-[30px]; }
   h1 em { @apply not-italic text-accent; }
-  h2 { @apply mb-3 font-display text-xl leading-tight font-bold; }
+  h2 { @apply mb-3 font-prose text-lg leading-snug font-semibold; }
   h3 { @apply mb-2 font-prose text-base leading-snug font-semibold; }
   p { @apply my-3 max-w-prose; }
   section { @apply my-5; }

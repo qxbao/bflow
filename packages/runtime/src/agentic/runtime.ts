@@ -5193,6 +5193,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || run.status === "awaiting_approval") continue;
         // Waiting on a user decision it asked for through Runtime is a legitimate idle turn, not a missing answer.
         if (Object.values(run.userDecisions ?? {}).some(item => item.role === role && item.status === "pending")) continue;
+        // Likewise yielding while QA measures this task's conditional phase; a measurement that stalls is still caught by the run watchdog.
+        if (role === "developer" && unmeasuredPolicyPhaseRequests(state, run).some(item => record(item.message.payload).taskId === out.taskId)) continue;
         if (!this.outboundOwesResult(state, run, out) || run.nativeDeliveries?.length) continue;
         const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
         const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;

@@ -17,12 +17,14 @@ const failureGuidance:Record<WebApiError['code'],{reason:string;remedy:string}>=
   unavailable:{reason:'Dịch vụ dự án hiện chưa sẵn sàng.',remedy:'Kiểm tra kết nối và điều kiện phiên trong Cài đặt dự án, rồi đọc lại thao tác trước khi tiếp tục.'},
   reconciliation_required:{reason:'Dịch vụ chưa xác định được kết quả thao tác.',remedy:'Chỉ đọc lại thao tác để đối chiếu; chưa gửi lại hoặc bắt đầu thao tác mới.'},
 };
+const steps=[['sent','Đã gửi'],['accepted','Đã tiếp nhận'],['applied','Đã áp dụng']] as const;
+function reached(state:string|undefined){return state==='applied'?3:state==='accepted'||state==='running'?2:1;}
 export function OperationStatus({observation,projectId}:{observation:Observation;projectId:string}) {
   const op=observation.operation,result=op?.result;
   const code=WebApiErrorCodeSchema.safeParse(op?.error?.code??(observation.error instanceof ApiError?observation.error.code:undefined));
   const guidance=code.success?failureGuidance[code.data]:undefined;
   const uncertain=!op || op.state==='reconciliation_required';
-  return <div role="status" aria-live="polite"><h3>{operationLabels[observation.record.kind]}{observation.record.outcome?`: ${outcomeLabels[observation.record.outcome]}`:''}</h3><p>{op?labels[op.state]:'Mất phản hồi hoặc chưa tìm được thao tác. Đọc lại để đối chiếu; không tự gửi lại.'}</p>
+  return <div role="status" aria-live="polite"><h3>{operationLabels[observation.record.kind]}{observation.record.outcome?`: ${outcomeLabels[observation.record.outcome]}`:''}</h3><ol aria-label="Các mốc thao tác" className="my-2 flex list-none flex-wrap gap-x-3 p-0 font-data text-xs">{steps.map(([key,text],index)=><li key={key} className={index<reached(op?.state)?'font-semibold text-ink':'text-muted'}>{index<reached(op?.state)?'✓ ':'○ '}{text}</li>)}</ol><p>{op?labels[op.state]:observation.error instanceof ApiError && observation.error.code==='not_found'?'Yêu cầu đã rời trình duyệt nhưng dịch vụ chưa ghi nhận biên nhận. Mất phản hồi hoặc chưa tìm được thao tác. Đọc lại để đối chiếu; không tự gửi lại.':'Mất phản hồi hoặc chưa tìm được thao tác. Đọc lại để đối chiếu; không tự gửi lại.'}</p>
     {op?.owner==='local_lifecycle' && op.error?.message && op.error.message.split('\n').filter(line=>line.trim()).slice(0,20).map((line,i)=><p key={i} className="font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">{line}</p>)}
     {guidance && (op?.state==='failed' || uncertain) && <><p>{guidance.reason}</p><p>{uncertain?'Chỉ đọc lại thao tác để đối chiếu; chưa gửi lại hoặc bắt đầu thao tác mới.':guidance.remedy}</p>{uncertain && code.success && ['session_required','forbidden','unavailable'].includes(code.data) && <p>{guidance.remedy}</p>}</>}
     {observation.record.kind==='cancel' && <p>{op?.state==='applied'?'Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.':op?.state==='running'?'Đang xử lý yêu cầu hủy; chưa xác nhận đã dừng.':'Yêu cầu hủy chưa xác nhận tiến trình đã dừng.'}</p>}

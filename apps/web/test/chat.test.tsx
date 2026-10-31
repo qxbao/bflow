@@ -40,7 +40,8 @@ it('discards old session results when a new native session replaces it',async()=
 });
 it('loads exact encoded history cursors without resending a message',async()=>{
  const fetcher=response({apiVersion:1,items:[message],nextCursor:'page:2'});render(open());await screen.findByText(message.content);
- fireEvent.click(screen.getByRole('button',{name:'Trang tin nhắn tiếp theo'}));
+ fireEvent.click(screen.getByRole('button',{name:'Toàn phiên'}));
+ fireEvent.click(await screen.findByRole('button',{name:'Trang tin nhắn tiếp theo'}));
  await vi.waitFor(()=>expect(fetcher.mock.calls.some(([path])=>path.endsWith('?cursor=page%3A2'))).toBe(true));
 });
 
