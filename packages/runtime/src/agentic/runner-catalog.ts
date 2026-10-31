@@ -24,8 +24,9 @@ export async function runnerInventory(root: string): Promise<string[]> {
   }
   return files.sort();
 }
-export const runnerAdapters: readonly RunnerAdapter[] = [javascriptAdapter, ...nativeAdapters, ...managedAdapters, declaredRunnerAdapter];
-export async function detectRunnerCatalog(root: string, javascript: RunnerDetection, adapters: readonly RunnerAdapter[] = runnerAdapters, javascriptDependencySource?: string): Promise<RunnerDetection> {
+// Resolved lazily: runner-detection <-> runner-catalog <-> javascript-adapter import each other, so module-load evaluation would see an undefined adapter.
+export const runnerAdapters = (): readonly RunnerAdapter[] => [javascriptAdapter, ...nativeAdapters, ...managedAdapters, declaredRunnerAdapter];
+export async function detectRunnerCatalog(root: string, javascript: RunnerDetection, adapters: readonly RunnerAdapter[] = runnerAdapters(), javascriptDependencySource?: string): Promise<RunnerDetection> {
   root = await realpath(root);
   const context: AdapterContext = { root, files: await runnerInventory(root), ...(javascriptDependencySource ? { dependencySource: javascriptDependencySource } : {}) };
   const profiles: RunnerProfile[] = javascript.status === "detected" ? [...javascript.profiles] : [];
