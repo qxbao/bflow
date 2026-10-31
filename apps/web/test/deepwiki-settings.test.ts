@@ -35,7 +35,7 @@ describe("DeepWiki integration", () => {
     mount(client);
     await waitFor(() => expect(screen.queryByRole("group", { name: DEEPWIKI_TITLE })).not.toBeNull());
     const group = await deepwikiGroup();
-    const enabled = group.getByRole("checkbox", { name: /^enabled/ }) as HTMLInputElement;
+    const enabled = group.getByRole("checkbox", { name: /^Kích hoạt/ }) as HTMLInputElement;
     const required = group.getByRole("checkbox", { name: /^required/ }) as HTMLInputElement;
     expect([enabled.checked, required.checked]).toEqual([true, false]);
     // DeepWiki needs no key and keeps no cache setting, so the form offers nothing beyond the two switches.
@@ -53,7 +53,7 @@ describe("DeepWiki integration", () => {
       values: expect.objectContaining({ environment: expect.objectContaining({ deepwiki: { enabled: false, required: true } }) }) }));
     expect(await screen.findByText(/Đã lưu cấu hình/)).toBeTruthy();
     const saved = await deepwikiGroup();
-    expect((saved.getByRole("checkbox", { name: /^enabled/ }) as HTMLInputElement).checked).toBe(false);
+    expect((saved.getByRole("checkbox", { name: /^Kích hoạt/ }) as HTMLInputElement).checked).toBe(false);
     expect((saved.getByRole("checkbox", { name: /^required/ }) as HTMLInputElement).checked).toBe(true);
   });
 
@@ -93,7 +93,7 @@ describe("DeepWiki integration", () => {
     let attempts = 0;
     const flaky = fakeApi({ configuration: async () => { if (attempts++ === 0) throw new Error("network down"); return configuration(); } });
     mount(flaky.client);
-    expect((await screen.findByRole("alert")).textContent).toMatch(/Chưa đọc được cấu hình/);
+    expect((await screen.findByRole("alert")).textContent).toMatch(/Chưa có tệp cấu hình/);
     fireEvent.click(screen.getByRole("button", { name: "Đọc lại cấu hình" }));
     await waitFor(() => expect(screen.queryByRole("group", { name: DEEPWIKI_TITLE })).not.toBeNull());
   });
