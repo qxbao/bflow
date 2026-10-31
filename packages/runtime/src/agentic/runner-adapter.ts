@@ -36,3 +36,23 @@ export interface RunnerAdapter {
   id: string;
   detect(context: AdapterContext): Promise<AdapterDetection>;
 }
+
+/** Node flags a `node [flags] --test` script may carry; anything else is not forwarded and is not detected. */
+const NODE_TEST_FLAG = /^(--experimental-strip-types|--disable-warning=[A-Za-z][A-Za-z0-9_]*)$/;
+
+/**
+ * Returns the allowlisted node flags that precede `--test` in a script containing `node [flags] --test`, or undefined
+ * when the script has no such invocation. Only the first `node` invocation in the script is considered.
+ */
+export function parseNodeTestFlags(script: string): string[] | undefined {
+  const tokens = script.trim().split(/\s+/);
+  const start = tokens.indexOf("node");
+  if (start === -1) return undefined;
+  const flags: string[] = [];
+  for (const token of tokens.slice(start + 1)) {
+    if (token === "--test") return flags;
+    if (!NODE_TEST_FLAG.test(token)) return undefined;
+    flags.push(token);
+  }
+  return undefined;
+}

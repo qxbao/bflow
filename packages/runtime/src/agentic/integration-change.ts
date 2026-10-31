@@ -5,8 +5,12 @@ import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { unwrap } from "./outbox.js";
 
 async function gitRead(cwd: string, args: string[]): Promise<string> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
-  const dirFlags = await runtimeGitDirectoryFlags(cwd);
+  const env = {
+    ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null"
+  };
+  const dirFlags = await runtimeGitDirectoryFlags(cwd, { resetSafeDirectory: true });
   return new Promise((accept, reject) => {
     const child = spawn("git", [...dirFlags, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = []; let length = 0, settled = false;

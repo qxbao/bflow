@@ -27,23 +27,29 @@ const configuration = [
   "-c", "diff.renames=false"
 ];
 
+function trimSafeDir(dir: string): string {
+  return dir.length > 1 ? dir.replace(/\/+$/, "") : dir;
+}
+
 /**
  * Resolves exact `safe.directory` entries for `cwd`, its enclosing worktree root, and any linked `.git` / common
  * repository directories (without ever emitting wildcard `*`), and disables `core.fileMode` when the filesystem
  * forces executable bits on non-executable Git metadata (e.g. FUSE/NTFS `fuseblk`).
  */
 export async function gitDirectoryFlags(cwd: string): Promise<string[]> {
-  const canonicalCwd = await realpath(cwd).catch(() => resolve(cwd));
-  const safeDirs = new Set<string>([canonicalCwd]);
+  const resolvedCwd = trimSafeDir(resolve(cwd));
+  const canonicalCwd = trimSafeDir(await realpath(cwd).catch(() => resolvedCwd));
+  const safeDirs = new Set<string>([resolvedCwd, canonicalCwd]);
   let forceFileModeFalse = false;
   let current = canonicalCwd;
   for (;;) {
     const dotGit = join(current, ".git");
     const dotGitStat = await lstat(dotGit).catch(() => undefined);
     if (dotGitStat) {
-      safeDirs.add(current);
+      safeDirs.add(trimSafeDir(current));
       if (dotGitStat.isDirectory()) {
-        const gitDir = await realpath(dotGit).catch(() => dotGit);
+        const gitDir = trimSafeDir(await realpath(dotGit).catch(() => dotGit));
+        safeDirs.add(trimSafeDir(dotGit));
         safeDirs.add(gitDir);
         const headStat = await lstat(join(gitDir, "HEAD")).catch(() => undefined);
         forceFileModeFalse = Boolean(headStat?.isFile() && (headStat.mode & 0o111) !== 0);
@@ -52,19 +58,40 @@ export async function gitDirectoryFlags(cwd: string): Promise<string[]> {
         const raw = await readFile(dotGit, "utf8").catch(() => "");
         const match = /^gitdir:\s*([^\r\n]+)/.exec(raw);
         if (match) {
-          const rawGitDir = resolve(current, match[1]!.trim());
-          const gitDir = await realpath(rawGitDir).catch(() => rawGitDir);
+          const rawGitDir = trimSafeDir(resolve(current, match[1]!.trim()));
+          const gitDir = trimSafeDir(await realpath(rawGitDir).catch(() => rawGitDir));
+          safeDirs.add(rawGitDir);
           safeDirs.add(gitDir);
+          const gitDirHead = await lstat(join(gitDir, "HEAD")).catch(() => undefined);
+          if (gitDirHead?.isFile() && (gitDirHead.mode & 0o111) !== 0) {
+            forceFileModeFalse = true;
+          }
           const commonRel = (await readFile(join(gitDir, "commondir"), "utf8").catch(() => "")).trim();
+          const rawCommonDir = commonRel ? trimSafeDir(resolve(gitDir, commonRel)) : gitDir;
           const commonDir = commonRel
-            ? await realpath(resolve(gitDir, commonRel)).catch(() => resolve(gitDir, commonRel))
+            ? trimSafeDir(await realpath(rawCommonDir).catch(() => rawCommonDir))
             : gitDir;
+          safeDirs.add(rawCommonDir);
           safeDirs.add(commonDir);
+          const commonHead = await lstat(join(commonDir, "HEAD")).catch(() => undefined);
+          if (commonHead?.isFile() && (commonHead.mode & 0o111) !== 0) {
+            forceFileModeFalse = true;
+          }
+          if (basename(rawCommonDir) === ".git") {
+            safeDirs.add(trimSafeDir(dirname(rawCommonDir)));
+          }
           if (basename(commonDir) === ".git") {
-            safeDirs.add(dirname(commonDir));
+            safeDirs.add(trimSafeDir(dirname(commonDir)));
           }
         }
       }
+      break;
+    }
+    const bareHead = await lstat(join(current, "HEAD")).catch(() => undefined);
+    const bareObjects = bareHead?.isFile() ? await lstat(join(current, "objects")).catch(() => undefined) : undefined;
+    if (bareHead?.isFile() && bareObjects?.isDirectory()) {
+      safeDirs.add(trimSafeDir(current));
+      forceFileModeFalse = (bareHead.mode & 0o111) !== 0;
       break;
     }
     const parent = dirname(current);

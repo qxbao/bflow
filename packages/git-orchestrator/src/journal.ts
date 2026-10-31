@@ -38,7 +38,17 @@ export async function readState(directory: string, repository: string): Promise<
   return state;
 }
 
-const BENIGN_DIR_SYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EBADF", "EROFS"]);
+const BENIGN_FILE_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EROFS"]);
+const BENIGN_DIR_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EBADF", "EROFS"]);
+
+export async function syncFileHandle(handle: { sync: () => Promise<void> }): Promise<void> {
+  try {
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_FILE_SYNC_CODES.has(code)) throw error;
+  }
+}
 
 export async function syncDirectory(
   directory: string,
@@ -60,7 +70,7 @@ export async function writeState(directory: string, state: State): Promise<void>
   const handle = await open(temporary, "wx", 0o600);
   try {
     await handle.writeFile(JSON.stringify(StateSchema.parse(state), null, 2) + "\n");
-    await handle.sync();
+    await syncFileHandle(handle);
   } finally { await handle.close(); }
   try {
     await rename(temporary, join(directory, "state.json"));

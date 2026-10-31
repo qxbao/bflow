@@ -1,21 +1,18 @@
 import { isAbsolute, relative } from "node:path";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
 import { digest, record, textField } from "./journal.js";
-import { BehavioralIdentityMismatch, NodeTapTestCodeFailure } from "./node-tap.js";
+import {
+  BehavioralIdentityMismatch,
+  isRecognizedAssertionMessage,
+  matchesExpectedIdentity,
+  NodeTapTestCodeFailure,
+  resolveExpectedIdentities,
+  type ObservedIdentityLeaf
+} from "./node-tap.js";
 
 /** Complete, identity-matched Vitest run whose test bodies failed without assertion evidence: a bounded test repair, as for TAP. */
 export class VitestTestCodeFailure extends NodeTapTestCodeFailure {
   readonly protocol = "vitest_json" as const;
-}
-
-function isVitestAssertionFailure(message: string): boolean {
-  if (/^(?:AssertionError|VitestAssertionError|JestAssertionError|JestExtendError|ChaiError|ExpectError|AssertionFailedError|TestingLibraryElementError|HtmlElementTypeError)(?:\s*\[ERR_ASSERTION\])?:/.test(message)) {
-    return true;
-  }
-  if (/^Error:\s*expect\(/.test(message)) return true;
-  if (/^Error:\s*promise (?:resolved|rejected)\b[\s\S]*?\binstead of (?:rejecting|resolving)\b/.test(message)) return true;
-  if (/^Error:/.test(message) && /\n\s*at (?:Proxy\.expectWrapper\b|_Assertion\.__VITEST_(?:REJECTS|RESOLVES)__\b)/.test(message)) return true;
-  return false;
 }
 
 /** Private codec for the actual Vitest 2.1 JSON reporter, with the trusted runtime companion.
@@ -38,11 +35,11 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
   if (snapshot.failure !== false || snapshot.didUpdate !== false) throw new Error("Snapshot failures or updates cannot prove an immutable behavioral observation");
   if (!Array.isArray(report.testResults) || !report.testResults.length) throw new Error("Missing Vitest file results");
   const suites = new Map<string, { executed: boolean; failed: boolean }>(), files = new Set<string>();
-  const results: { name: string; passed: boolean }[] = [];
-  let observedPassed = 0, observedFailed = 0, filteredSkipped = 0, filteredTodo = 0;
-  const codeFailures: string[] = [];
+  const executedLeaves: Array<ObservedIdentityLeaf & { passed: boolean; codeFailure: boolean }> = [];
+  const skippedLeaves: ObservedIdentityLeaf[] = [];
+  let observedPassed = 0, observedFailed = 0, filteredSkipped = 0, filteredTodo = 0, filteredPending = 0;
   const allowedFileStatuses = nameSelection ? ["passed", "failed", "pending", "skipped"] : ["passed", "failed"];
-  const allowedLeafStatuses = nameSelection ? ["passed", "failed", "skipped", "todo"] : ["passed", "failed"];
+  const allowedLeafStatuses = nameSelection ? ["passed", "failed", "skipped", "todo", "pending"] : ["passed", "failed"];
   for (const input of report.testResults) {
     const file = record(input), name = textField(file.name), path = relative(outcome.cwd, name);
     if (!isAbsolute(name) || path.startsWith("../") || path === ".." || isAbsolute(path) || files.has(name) || file.message !== "" ||
@@ -59,13 +56,17 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
       if (isFailed ? !leaf.failureMessages.length : leaf.failureMessages.length !== 0) throw new Error("Vitest failure is infrastructure or unrelated, not an assertion regression");
       // A test body that throws something other than an assertion (for example calling still-absent code) is a test defect,
       // reported only after the whole run is proven complete and identity-matched.
-      if (isFailed && leaf.failureMessages.some(message => !isVitestAssertionFailure(message))) codeFailures.push(fullName);
+      const codeFailure = isFailed && leaf.failureMessages.some(message => !isRecognizedAssertionMessage(message));
       const ancestorTitles = leaf.ancestorTitles.map(value => textField(value));
       const ancestors = [fileKey, ...ancestorTitles.map((_value, index) => digest([name, ...ancestorTitles.slice(0, index + 1)]))];
-      if (leaf.status === "skipped" || leaf.status === "todo") {
+      const leafIdentity: ObservedIdentityLeaf = { ancestors: ancestorTitles, title, rawName: fullName };
+      if (leaf.status === "skipped" || leaf.status === "todo" || leaf.status === "pending") {
         if (expectedNames.includes(fullName)) throw new Error("Selected Vitest test was skipped");
+        skippedLeaves.push(leafIdentity);
         for (const key of ancestors) if (!suites.has(key)) suites.set(key, { executed: false, failed: false });
-        if (leaf.status === "skipped") filteredSkipped++; else filteredTodo++;
+        if (leaf.status === "skipped") filteredSkipped++;
+        else if (leaf.status === "todo") filteredTodo++;
+        else filteredPending++;
         continue;
       }
       for (const key of ancestors) {
@@ -75,7 +76,7 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
       fileExecuted = true;
       fileFailed ||= isFailed;
       isFailed ? observedFailed++ : observedPassed++;
-      results.push({ name: fullName, passed: !isFailed });
+      executedLeaves.push({ ...leafIdentity, passed: !isFailed, codeFailure });
     }
     if (fileExecuted) {
       if (file.status !== (fileFailed ? "failed" : "passed")) throw new Error("Vitest suite infrastructure failure contradicts leaf results");
@@ -83,17 +84,33 @@ export function parseVitestJson(outcome: QualityCommandOutcome, expectedNames: r
       throw new Error("Vitest suite infrastructure failure contradicts leaf results");
     }
   }
-  const names = results.map(result => result.name);
+  for (const expectedName of expectedNames) {
+    if (!executedLeaves.some(leaf => matchesExpectedIdentity(leaf, expectedName)) &&
+        skippedLeaves.some(leaf => matchesExpectedIdentity(leaf, expectedName))) {
+      throw new Error("Selected Vitest test was skipped");
+    }
+  }
   const failedSuites = [...suites.values()].filter(suite => suite.failed).length;
   const executedPassedSuites = [...suites.values()].filter(suite => suite.executed && !suite.failed).length;
-  if (new Set(names).size !== names.length || digest([...names].sort()) !== digest([...expectedNames].sort())) throw new BehavioralIdentityMismatch(expectedNames, names);
-  const filtered = filteredSkipped + filteredTodo;
+  const resolved = resolveExpectedIdentities(executedLeaves, expectedNames);
+  if (!resolved.matched) {
+    throw new BehavioralIdentityMismatch(expectedNames, executedLeaves.map(leaf => leaf.rawName));
+  }
+  if (!executedLeaves.length) throw new Error("Zero, skipped, todo or incomplete Vitest tests cannot prove behavior");
+  const names = resolved.canonicalNames;
+  const results = executedLeaves.map((leaf, index) => ({ name: names[index]!, passed: leaf.passed }));
+  const codeFailures = executedLeaves.flatMap((leaf, index) => (leaf.codeFailure ? [names[index]!] : []));
+  const filtered = filteredSkipped + filteredTodo + filteredPending;
   const totalSuites = counter("numTotalTestSuites"), passedSuites = counter("numPassedTestSuites"), reportedFailedSuites = counter("numFailedTestSuites");
   const suiteCountersValid = nameSelection
     ? reportedFailedSuites === failedSuites && totalSuites >= suites.size && passedSuites >= executedPassedSuites && totalSuites === passedSuites + reportedFailedSuites + pendingSuites
     : totalSuites === suites.size && reportedFailedSuites === failedSuites && passedSuites === suites.size - failedSuites && pendingSuites === 0;
   const testCountersValid = nameSelection
-    ? tests === results.length + filtered && filteredSkipped === pendingTests && todoTests >= filteredTodo && todoTests <= filtered
+    ? tests === results.length + filtered &&
+      pendingTests >= filteredSkipped &&
+      pendingTests <= filteredSkipped + filteredPending &&
+      todoTests >= filteredTodo &&
+      todoTests <= filtered + pendingSuites
     : tests === results.length && pendingTests === 0 && todoTests === 0;
   if (!testCountersValid || passed !== observedPassed || failed !== observedFailed || !suiteCountersValid ||
       report.success !== (failed === 0) || (failed === 0 ? outcome.exitCode !== 0 : outcome.exitCode !== 1)) throw new Error("Vitest counters, leaf results or process exit code contradict one another");

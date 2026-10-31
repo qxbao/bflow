@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type JsonValue, type QualityGateDefinition } from "@bflow/contracts";
 import { createQualityCommandRunner, type QualityCommandOutcome } from "@bflow/quality-gates";
 import { json, record, textField } from "./journal.js";
-import { BehavioralIdentityMismatch, BehavioralIdentityRepair, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
-import { parseVitestJson } from "./vitest-json.js";
+import { BehavioralIdentityMismatch, BehavioralIdentityRepair, buildRunnerNamePattern, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
+import { parseVitestJson, VitestTestCodeFailure } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
 import type { AdapterRunner } from "./runner-adapter.js";
 import { parseRunnerResult } from "./runner-results.js";
@@ -119,7 +119,7 @@ export function bindRunnerProfile(profile: RunnerProfile, identities: { testName
   assertExecutionBounds(profile.timeoutMs, profile.maxOutputBytes);
   if (profile.prepare !== undefined) assertExecutionBounds(profile.prepare.timeoutMs, undefined);
   profile.adapter?.bind({ testNames, testPaths }, "/tmp/bflow-profile-validation");
-  const filter = "^(?:" + testNames.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")$";
+  const filter = buildRunnerNamePattern(testNames, profile.reporter === "vitest_json" ? "vitest" : "node");
   const selectedArgs = profile.adapter ? [...args] : [...args, ...(profile.reporter === "vitest_json" ? [`--testNamePattern=${filter}`] : args.includes("--test") ? [`--test-name-pattern=${filter}`] : []), ...testPaths];
   return {
     id: profile.id, command: profile.command, executable: profile.executable, args: selectedArgs,
@@ -512,10 +512,14 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
   let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
   try {
     parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes, command.testPaths)
-      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined, command.testPaths);
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.testNames.length > 0)
+      : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.args.some(arg => arg.startsWith("--test-name-pattern")), command.testPaths);
   } catch (error) {
     if (error instanceof NodeTapTestCodeFailure) {
-      if (rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+      if (rtkResult) {
+        if (error instanceof VitestTestCodeFailure) throw new VitestTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+        throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+      }
       throw error;
     }
     if (error instanceof BehavioralIdentityMismatch)

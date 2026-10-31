@@ -1,8 +1,7 @@
 import { readFile, realpath, lstat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AdapterContext, AdapterDetection, AdapterRunner, RunnerAdapter } from "./runner-adapter.js";
-import { parseNodeTestFlags } from "./runner-detection.js";
-const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+import { buildRunnerNamePattern } from "./node-tap.js";
+import { parseNodeTestFlags, type AdapterContext, type AdapterDetection, type AdapterRunner, type RunnerAdapter } from "./runner-adapter.js";
 /** Installed runner metadata is read only; runner code executes only inside measurement. */
 export const javascriptAdapter: RunnerAdapter = {
   id: "javascript",
@@ -22,7 +21,7 @@ export const javascriptAdapter: RunnerAdapter = {
       const nodeFlags = typeof pkg.scripts?.test === "string" ? parseNodeTestFlags(pkg.scripts.test) : undefined;
       if (nodeFlags !== undefined) {
         runners.push({ ...base, adapterId: "node", version: process.version, format: "node_tap", nameRule: "node --test test title only",
-          bind(identities) { return { args: [...nodeFlags, "--test", "--test-reporter=tap", "--test-name-pattern=^(?:" + identities.testNames.map(escape).join("|") + ")$", ...selectedFiles(identities.testPaths)] }; } });
+          bind(identities) { return { args: [...nodeFlags, "--test", "--test-reporter=tap", "--test-name-pattern=" + buildRunnerNamePattern(identities.testNames, "node"), ...selectedFiles(identities.testPaths)] }; } });
       }
       for (const [id, entry, format] of [["vitest", "vitest/vitest.mjs", "vitest_json"], ["jest", "jest/bin/jest.js", "jest_json"], ["mocha", "mocha/bin/mocha.js", "mocha_json"]] as const) {
         if (!deps[id]) continue;
@@ -37,7 +36,8 @@ export const javascriptAdapter: RunnerAdapter = {
           runners.push({ ...base, adapterId: id, version: installed.version, format,
             nameRule: `${id} full test title: suite titles and test name joined by one space`,
             bind(identities, reports) {
-              const files = selectedFiles(identities.testPaths), pattern = "^(?:" + identities.testNames.map(escape).join("|") + ")$";
+              const files = selectedFiles(identities.testPaths);
+              const pattern = buildRunnerNamePattern(identities.testNames, id === "vitest" ? "vitest" : "suite_full");
               if (id === "vitest") return { args: ["node_modules/" + entry, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", "--testNamePattern=" + pattern, ...files] };
               if (id === "jest") return { args: ["node_modules/" + entry, "--runInBand", "--no-cache", "--json", "--outputFile=" + join(reports, "jest.json"), "--testNamePattern=" + pattern, "--runTestsByPath", ...files], reportPaths: [join(reports, "jest.json")] };
               return { args: ["node_modules/" + entry, "--reporter=json", "--grep=" + pattern, ...files] };

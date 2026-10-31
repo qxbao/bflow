@@ -1,6 +1,11 @@
 /** Trusted, digest-pinned bootstrap. Written to a private launch directory; never interpolates provider arguments or bearer env. */
-export const PROCESS_SCOPE_SUPERVISOR = String.raw`import os,sys,json,time,hashlib,hmac,signal,subprocess,select,datetime
+export const PROCESS_SCOPE_SUPERVISOR = String.raw`import os,sys,json,time,hashlib,hmac,signal,subprocess,select,datetime,errno
 
+BENIGN_FSYNC={errno.EINVAL,errno.ENOSYS,errno.ENOTSUP,errno.EOPNOTSUPP,errno.EROFS,errno.EPERM,errno.EACCES,errno.EBADF}
+def fsync_safe(fd):
+    try: os.fsync(fd)
+    except OSError as err:
+        if err.errno not in BENIGN_FSYNC: raise
 def canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 def digest(value): return hashlib.sha256(canonical(value)).hexdigest()
 def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
@@ -19,14 +24,14 @@ def write_once(path,payload):
     value={'payload':payload,'signature':hmac.new(bytes.fromhex(cfg['secret']),canonical(payload),hashlib.sha256).hexdigest()}
     temporary=path+'.'+str(os.getpid())+'.tmp'
     fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-    try: os.write(fd,canonical(value)); os.fsync(fd)
+    try: os.write(fd,canonical(value)); fsync_safe(fd)
     finally: os.close(fd)
     try:
         try: os.link(temporary,path)
         except FileExistsError: return signed(path)
     finally: os.unlink(temporary)
     directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-    try: os.fsync(directory)
+    try: fsync_safe(directory)
     finally: os.close(directory)
     return payload
 def identity(pid):
@@ -91,9 +96,9 @@ elif mode=='stop':
     close_receipt(witness)
 elif mode=='launch':
     if os.path.exists(root+'/sealed.json'): raise RuntimeError('Process-scope admission is sealed')
-    admitted=os.open(root+'/started',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); os.fsync(admitted); os.close(admitted)
+    admitted=os.open(root+'/started',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600); fsync_safe(admitted); os.close(admitted)
     admission_directory=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-    try: os.fsync(admission_directory)
+    try: fsync_safe(admission_directory)
     finally: os.close(admission_directory)
     target_valid()
     # Keep the inherited PTY and foreground process group. Only the provider handles terminal Ctrl-C.
