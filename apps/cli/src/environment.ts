@@ -23,6 +23,7 @@ import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
 import { withLifecycleLock } from "./lifecycle-lock.js";
 import { runDoctorDiagnostics } from "./doctor-integration.js";
+import { observeAuthoritativeRuntime } from "./runtime-observation.js";
 
 /** CLI composition seam. The provider owns P13 bootstrap/reconciliation and Runtime checkpoint persistence. */
 export interface EnvironmentIntegration {
@@ -1216,6 +1217,23 @@ export class EnvironmentLifecycle {
       } catch (error) { issues.push(String(error)); } finally { await integration.close?.(); }
       else issues.push("P13 manager unavailable; pane/agent state is the last persisted observation");
     }
+    if (server === "running" && manifest !== null) {
+      for (const pane of manifest.panes) {
+        if (pane.transportState === "disconnected" || pane.transportState === "blocked") {
+          issues.push(
+            `Pane '${pane.paneId}' for role '${pane.role}' is ${pane.transportState}. Inspect with 'bflow doctor' or reconcile active runs.`
+          );
+        }
+      }
+    }
+    const runtimeObs = await observeAuthoritativeRuntime({
+      repositoryRoot: repository.root,
+      sessionName: repository.sessionName,
+      server,
+      manifest,
+      injectedRuntime: this.dependencies.integration?.runtime
+    });
+    for (const issue of runtimeObs.issues) issues.push(issue);
     return { workspaceRoot: repository.root, sessionName: repository.sessionName, server, configuration: "valid", manifest, liveObservation, issues };
   }
   async doctor(deep = false): Promise<EnvironmentDoctorReport> {

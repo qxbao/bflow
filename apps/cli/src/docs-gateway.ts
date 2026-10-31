@@ -145,18 +145,37 @@ export async function readEvent(body: ReadableStream<Uint8Array>, id: number): P
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let pendingCr = false;
+  const appendNormalized = (chunk: string, final: boolean): void => {
+    let text = pendingCr ? `\r${chunk}` : chunk;
+    pendingCr = false;
+    if (!final && text.endsWith("\r")) {
+      pendingCr = true;
+      text = text.slice(0, -1);
+    }
+    if (text) buffer += text.replace(/\r\n|\r/g, "\n");
+  };
+  const matchMessage = (parsed: unknown): unknown => {
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of items) {
+      if (!item || typeof item !== "object") continue;
+      const message = item as { id?: unknown; result?: unknown; error?: unknown };
+      if (message.id === id && (message.result !== undefined || message.error !== undefined)) return message;
+    }
+    return undefined;
+  };
   const parse = (event: string): unknown => {
     const data = event.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).replace(/^ /, "")).join("\n");
     if (!data) return undefined;
     try {
-      const message = JSON.parse(data) as { id?: unknown; result?: unknown; error?: unknown };
-      return message && message.id === id && (message.result !== undefined || message.error !== undefined) ? message : undefined;
+      return matchMessage(JSON.parse(data));
     } catch { return undefined; }
   };
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (value) buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      if (value) appendNormalized(decoder.decode(value, { stream: true }), false);
+      if (done) appendNormalized(decoder.decode(), true);
       if (buffer.length > 8 * 1024 * 1024) throw new Error("Response exceeded the size limit");
       let boundary: number;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
@@ -204,6 +223,10 @@ export class GatewayDocsCaller implements DocsToolCaller {
     let message: any;
     try {
       message = (response.headers.get("content-type") ?? "").includes("text/event-stream") && response.body ? await readEvent(response.body, id) : await response.json();
+      if (Array.isArray(message)) {
+        message = message.find((item: unknown) => item && typeof item === "object" && (item as { id?: unknown }).id === id &&
+          ((item as { result?: unknown }).result !== undefined || (item as { error?: unknown }).error !== undefined));
+      }
     } catch { return { ok: false, error: { code: "corruption", message: "The Gateway sent an unreadable response." } }; }
     if (!response.ok || !message) return { ok: false, error: { code: "transport_unavailable", retryable: true, message: `The Gateway answered HTTP ${response.status}.`, details: { kind: "upstream_http", status: response.status } } };
     if (message.error) {
@@ -229,22 +252,32 @@ export class GatewayDocsCaller implements DocsToolCaller {
     const result = reply.result as { status?: string; output?: unknown; content?: unknown; structuredContent?: unknown; isError?: unknown; error?: unknown } | undefined;
     if (result?.status === "unknown") return { ok: false, error: { code: "unknown_delivery", message: "The outcome of the lookup could not be confirmed.", retryable: false } };
     const joinParts = (parts: unknown[]): string => parts.map(part => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")).join("");
-    // Supported shapes: string/array output, the MCP envelope {content:[{type:"text",text}], structuredContent:{result}} either
+    const extractStructuredText = (value: unknown): string | undefined => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+      const record = value as Record<string, unknown>;
+      for (const key of ["result", "text", "answer", "markdown", "content"]) {
+        if (typeof record[key] === "string") return record[key] as string;
+      }
+      return Object.keys(record).length > 0 ? JSON.stringify(record) : undefined;
+    };
+    // Supported shapes: string/array output, the MCP envelope {content:[{type:"text",text}], structuredContent:{...}} either
     // direct or nested under `output` (the Gateway's {status, output:{content, structuredContent}} form).
     const rawOutput = result?.output;
     const inner = rawOutput && typeof rawOutput === "object" && !Array.isArray(rawOutput)
       ? rawOutput as { content?: unknown; structuredContent?: unknown; isError?: unknown; error?: unknown }
       : undefined;
     const envelope = inner ?? result;
-    const structured = envelope?.structuredContent;
-    const structuredResult = structured && typeof structured === "object" ? (structured as { result?: unknown }).result : undefined;
+    if (envelope?.content !== undefined && !Array.isArray(envelope.content)) {
+      return { ok: false, error: { code: "corruption", message: "The Gateway sent a documentation result in an unsupported shape.", details: { kind: "unsupported_result" } } };
+    }
+    const structuredText = extractStructuredText(envelope?.structuredContent);
     let text: string | undefined;
     if (typeof rawOutput === "string") text = rawOutput;
     else if (Array.isArray(rawOutput)) text = joinParts(rawOutput);
     else if (Array.isArray(envelope?.content)) text = joinParts(envelope.content);
-    else if (typeof structuredResult === "string") text = structuredResult;
+    else if (structuredText !== undefined) text = structuredText;
     if (text === undefined || result?.error !== undefined || inner?.error !== undefined) return { ok: false, error: { code: "corruption", message: "The Gateway sent a documentation result in an unsupported shape.", details: { kind: "unsupported_result" } } };
-    if (text === "" && typeof structuredResult === "string") text = structuredResult;
+    if (text === "" && structuredText !== undefined) text = structuredText;
     return { ok: true, isError: result?.status === "failed" || result?.isError === true || inner?.isError === true, text };
   }
 

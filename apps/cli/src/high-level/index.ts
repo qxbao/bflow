@@ -1,10 +1,10 @@
 import { identifyRepository } from "../repository.js";
 import { readEnvironmentConfig } from "../environment-config.js";
 import { existsSync } from "node:fs";
-import { chmod, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import type { ContractError, RuntimeService } from "@bflow/contracts";
-import type { SetupContext } from "@bflow/machine-setup";
+import { chmod, lstat, mkdir, readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { MCPServiceObservationSchema, type ContractError, type MCPServiceObservation, type RuntimeService } from "@bflow/contracts";
+import { digest, type PlatformProfile, type SetupContext } from "@bflow/machine-setup";
 import { SUPPORTED_CLI_COMMANDS } from "../command-reference.js";
 import { loadMachineSkillCatalog } from "../skill-catalog.js";
 import { composeCliRuntime } from "../runtime.js";
@@ -152,6 +152,131 @@ function withDefaultSkillsPort(services: HighLevelServices, cwd: string): HighLe
   };
 }
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    return true;
+  }
+}
+
+async function readBoundedRegularJson(filePath: string): Promise<unknown> {
+  const info = await lstat(filePath);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 2_000_000) {
+    throw new Error(`Not a bounded regular setup file: ${filePath}`);
+  }
+  return JSON.parse(await readFile(filePath, "utf8"));
+}
+
+function createMachineSetupMcpGatewayPort(
+  platform: PlatformProfile,
+  clock: () => Date
+): NonNullable<HighLevelServices["mcpGateway"]> {
+  return {
+    async status(opts) {
+      const configFile = join(platform.paths.config, "setup-gateway.json");
+      const rawCfg = (await readBoundedRegularJson(configFile)) as Record<string, unknown> | null;
+      if (
+        !rawCfg ||
+        typeof rawCfg !== "object" ||
+        rawCfg.schemaVersion !== 3 ||
+        typeof rawCfg.definitionDigest !== "string" ||
+        !Array.isArray(rawCfg.services) ||
+        typeof rawCfg.receiptPath !== "string"
+      ) {
+        throw new Error(`Invalid machine-setup Gateway configuration at ${configFile}`);
+      }
+      if (rawCfg.definitionDigest !== digest(rawCfg.services)) {
+        throw new Error(`Gateway configuration digest mismatch at ${configFile}`);
+      }
+      const expectedReceiptPath = join(platform.paths.state, "setup-gateway-ready.json");
+      if (resolve(rawCfg.receiptPath) !== resolve(expectedReceiptPath)) {
+        throw new Error(`Gateway readiness receipt path '${rawCfg.receiptPath}' does not match owned state directory`);
+      }
+
+      let rawReady: Record<string, unknown> | null;
+      try {
+        rawReady = (await readBoundedRegularJson(expectedReceiptPath)) as Record<string, unknown> | null;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new Error(`Shared MCP Gateway readiness receipt not found at ${expectedReceiptPath}`);
+        }
+        throw error;
+      }
+      if (
+        !rawReady ||
+        typeof rawReady !== "object" ||
+        rawReady.schemaVersion !== 3 ||
+        rawReady.definitionDigest !== rawCfg.definitionDigest ||
+        typeof rawReady.pid !== "number" ||
+        !Number.isSafeInteger(rawReady.pid) ||
+        rawReady.pid <= 1 ||
+        typeof rawReady.endpoint !== "string" ||
+        typeof rawReady.observedAt !== "string" ||
+        !Array.isArray(rawReady.observations)
+      ) {
+        throw new Error(`Invalid or stale Shared MCP Gateway readiness receipt at ${expectedReceiptPath}`);
+      }
+      const observedAtMs = Date.parse(rawReady.observedAt);
+      const ageMs = clock().getTime() - observedAtMs;
+      if (!Number.isFinite(observedAtMs) || ageMs > 60_000 || ageMs < -5_000) {
+        throw new Error(`Shared MCP Gateway readiness receipt at ${expectedReceiptPath} is stale`);
+      }
+      if (!processIsAlive(rawReady.pid)) {
+        throw new Error(`Shared MCP Gateway daemon (pid ${rawReady.pid}) is not running`);
+      }
+
+      const endpointUrl = new URL(rawReady.endpoint);
+      if (endpointUrl.protocol !== "http:" || endpointUrl.hostname !== "127.0.0.1") {
+        throw new Error(`Refusing non-loopback Shared MCP Gateway endpoint '${rawReady.endpoint}'`);
+      }
+      const healthUrl = new URL("/health", endpointUrl);
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(3_000),
+        ...(opts?.signal !== undefined ? [opts.signal] : [])
+      ]);
+      const response = await fetch(healthUrl, { method: "GET", redirect: "error", signal });
+      await response.body?.cancel().catch(() => undefined);
+
+      const observations: MCPServiceObservation[] = rawReady.observations.map((item) =>
+        MCPServiceObservationSchema.parse(item)
+      );
+      const backends = observations.map((obs) => {
+        const state: "healthy" | "degraded" | "unavailable" | "unknown" =
+          obs.status === "ready"
+            ? "healthy"
+            : obs.status === "starting"
+              ? "degraded"
+              : obs.status === "blocked" || obs.status === "stopped"
+                ? "unavailable"
+                : "unknown";
+        const detail =
+          obs.status === "ready"
+            ? `Gateway verified (${obs.discoveredTools.length} tool(s))`
+            : `Gateway observed status '${obs.status}' (${obs.diagnosticCode})`;
+        return { serviceId: obs.serviceId, state, detail };
+      });
+      return { reachable: true, backends };
+    }
+  };
+}
+
+async function withDefaultMcpGateway(
+  services: HighLevelServices,
+  clock: () => Date
+): Promise<HighLevelServices> {
+  if (services.mcpGateway !== undefined) return services;
+  const platform = await services.machine.platform();
+  const configFile = join(platform.paths.config, "setup-gateway.json");
+  if (!existsSync(configFile)) return services;
+  return {
+    ...services,
+    mcpGateway: createMachineSetupMcpGatewayPort(platform, clock)
+  };
+}
+
 function withDefaultRuntime(services: HighLevelServices): HighLevelServices {
   if (services.openRuntime !== undefined) return services;
   return {
@@ -216,7 +341,14 @@ export async function runHighLevelCli(argv: readonly string[], options: HighLeve
     const parsed = parseCommandArgs(entry.spec, rest.slice(entry.spec.words.length));
     if (parsed.help) return help(getHighLevelHelp(name), entry.spec.words.join(" "));
     identity = newCommandIdentity(parsed.correlationId ?? process.env.BFLOW_CORRELATION_ID);
-    const baseServices = options.services ?? withDefaultSkillsPort(await createDefaultHighLevelServices(), options.cwd ?? process.cwd());
+    const defaultServices = options.services === undefined
+      ? withDefaultSkillsPort(await createDefaultHighLevelServices(), options.cwd ?? process.cwd())
+      : undefined;
+    const baseServices = options.services ?? (
+      name === "mcp.status"
+        ? await withDefaultMcpGateway(defaultServices!, clock)
+        : defaultServices!
+    );
     const services = withDefaultRuntime(baseServices);
     const progress = emitProgress ? (step: string) => {
       renderer.event(step);

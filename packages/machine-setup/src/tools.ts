@@ -328,7 +328,7 @@ export async function probeTools(
     const dirs = (p: PlatformProfile): string[] => {
       const join = p.os === "win32" ? path.win32.join : path.posix.join;
       const managed = join(p.paths.data, "tools", entry.toolId);
-      return [managed, join(managed, "node_modules", ".bin"),
+      return [managed, join(managed, "bin"), join(managed, "node_modules", ".bin"),
         ...(options.knownInstallDirs ? options.knownInstallDirs(p) : entry.knownInstallDirs(p))];
     };
     out.push(await probeOne(entry, platform, runner, options.required.has(entry.toolId), dirs));

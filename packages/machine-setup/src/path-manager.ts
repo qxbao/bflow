@@ -76,11 +76,22 @@ export class PathComponent implements SetupComponent {
     add(managed);
     for (const o of options.observations) {
       const d = o.pathMissingDir;
-      if (d !== null && d !== managed && !onPath.has(d)) add(d);
+      if (d !== null && d !== managed && !onPath.has(d) && !this.isForbiddenManagedToolsDir(d)) add(d);
     }
     this.dirs = out;
     this.managed = managed;
     this.fresh = out.slice(1);
+  }
+
+  /** Rejects non-executable plugin/asset directories under <data>/tools that could shadow provider CLIs. */
+  private isForbiddenManagedToolsDir(d: string): boolean {
+    const normalized = d.replace(/\\/g, "/").replace(/\/+$/, "");
+    const toolsRoot = path.posix.join(this.platform.paths.data.replace(/\\/g, "/"), "tools").replace(/\/+$/, "");
+    if (normalized === toolsRoot) return true;
+    if (normalized === `${toolsRoot}/superpowers` || normalized.startsWith(`${toolsRoot}/superpowers/`)) return true;
+    if (normalized === `${toolsRoot}/mempalace`) return true;
+    if (normalized === `${toolsRoot}/claude-mem` || normalized.startsWith(`${toolsRoot}/claude-mem/`)) return true;
+    return false;
   }
 
   /** Desired directories in block order. */
@@ -100,7 +111,7 @@ export class PathComponent implements SetupComponent {
         const b = parsed.blocks[0]!;
         for (const l of parsed.lines.slice(b.start + 1, b.end)) {
           const d = dirOf(re, l);
-          if (d !== null && this.dirError(d) === null && !out.includes(d)) out.push(d);
+          if (d !== null && this.dirError(d) === null && !this.isForbiddenManagedToolsDir(d) && !out.includes(d)) out.push(d);
         }
       }
     }
