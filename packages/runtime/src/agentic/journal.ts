@@ -680,7 +680,13 @@ export class AgenticJournal {
           try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }
           await rename(path, statePath);
           const dir = await open(this.directory, "r");
-          try { await dir.sync(); } finally { await dir.close(); }
+          try {
+            try { await dir.sync(); }
+            catch (error) {
+              const code = (error as NodeJS.ErrnoException | undefined)?.code;
+              if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+            }
+          } finally { await dir.close(); }
         } finally { await rm(path, { force: true }); }
         this.validatedSnapshot = { bytes: Buffer.from(serialized, "utf8"), value: normalized };
         baseline = normalized; durableBytes = this.validatedSnapshot.bytes;

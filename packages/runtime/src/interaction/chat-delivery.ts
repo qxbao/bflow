@@ -30,6 +30,6 @@ export class ChatDeliveryStore {
  async write(input:ChatRecord){await this.prepare();const body=ChatRecordSchema.parse(input),bytes=canonicalWebJson({body,checksum:createHash('sha256').update(canonicalWebJson(body)).digest('hex')});
   if(Buffer.byteLength(bytes)>262144)throw Error('Chat storage quota');const temp=join(this.directory,randomUUID()+'.tmp'),file=await open(temp,'wx',0o600);
   try{await file.writeFile(bytes);await file.sync();}finally{await file.close();}
-  try{await rename(temp,join(this.directory,this.filename(body.input.messageId)));const dir=await open(this.directory,'r');try{await dir.sync();}finally{await dir.close();}}finally{await rm(temp,{force:true});}
+  try{await rename(temp,join(this.directory,this.filename(body.input.messageId)));const dir=await open(this.directory,'r');try{try{await dir.sync();}catch(error){const code=(error as NodeJS.ErrnoException|undefined)?.code;if(!code||!['EINVAL','ENOTSUP','EOPNOTSUPP','ENOSYS','EPERM','EACCES','EBADF','EISDIR','EROFS'].includes(code))throw error;}}finally{await dir.close();}}finally{await rm(temp,{force:true});}
  }
 }

@@ -248,7 +248,13 @@ export class TaskLogPane {
     try { await handle.writeFile(JSON.stringify(receipt)); await handle.sync(); } finally { await handle.close(); }
     await rename(temp, this.receiptPath); await chmod(this.receiptPath, 0o600);
     const directoryHandle = await open(dirname(this.receiptPath), constants.O_RDONLY | constants.O_DIRECTORY);
-    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+    try {
+      try { await directoryHandle.sync(); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EPERM', 'EACCES', 'EBADF', 'EISDIR', 'EROFS'].includes(code)) throw error;
+      }
+    } finally { await directoryHandle.close(); }
   }
 
   private async removeReceipt(): Promise<void> { try { await unlink(this.receiptPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
