@@ -1,4 +1,59 @@
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
+
+/**
+ * Resolves exact `safe.directory` entries for `cwd`, its enclosing worktree root, and any linked `.git` / common
+ * repository directories (never wildcard `*`), and disables `core.fileMode` when the filesystem forces executable
+ * bits on non-executable Git metadata (e.g. FUSE/NTFS `fuseblk`).
+ */
+export async function runtimeGitDirectoryFlags(
+  cwd: string,
+  options: { readonly resetSafeDirectory?: boolean } = {}
+): Promise<string[]> {
+  const canonicalCwd = await realpath(cwd).catch(() => resolve(cwd));
+  const safeDirs = new Set<string>([canonicalCwd]);
+  let forceFileModeFalse = false;
+  let current = canonicalCwd;
+  for (;;) {
+    const dotGit = join(current, ".git");
+    const dotGitStat = await lstat(dotGit).catch(() => undefined);
+    if (dotGitStat) {
+      safeDirs.add(current);
+      if (dotGitStat.isDirectory()) {
+        const gitDir = await realpath(dotGit).catch(() => dotGit);
+        safeDirs.add(gitDir);
+        const headStat = await lstat(join(gitDir, "HEAD")).catch(() => undefined);
+        forceFileModeFalse = Boolean(headStat?.isFile() && (headStat.mode & 0o111) !== 0);
+      } else if (dotGitStat.isFile()) {
+        forceFileModeFalse = (dotGitStat.mode & 0o111) !== 0;
+        const raw = await readFile(dotGit, "utf8").catch(() => "");
+        const match = /^gitdir:\s*([^\r\n]+)/.exec(raw);
+        if (match) {
+          const rawGitDir = resolve(current, match[1]!.trim());
+          const gitDir = await realpath(rawGitDir).catch(() => rawGitDir);
+          safeDirs.add(gitDir);
+          const commonRel = (await readFile(join(gitDir, "commondir"), "utf8").catch(() => "")).trim();
+          const commonDir = commonRel
+            ? await realpath(resolve(gitDir, commonRel)).catch(() => resolve(gitDir, commonRel))
+            : gitDir;
+          safeDirs.add(commonDir);
+          if (basename(commonDir) === ".git") {
+            safeDirs.add(dirname(commonDir));
+          }
+        }
+      }
+      break;
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  const flags: string[] = options.resetSafeDirectory ? ["-c", "safe.directory="] : [];
+  for (const dir of safeDirs) flags.push("-c", `safe.directory=${dir}`);
+  if (forceFileModeFalse) flags.push("-c", "core.fileMode=false");
+  return flags;
+}
 
 const PatchInput = z.union([z.string(), z.object({ input: z.string() }).strict(), z.object({ patch: z.string() }).strict(),
   z.object({ command: z.string() }).strict()]);

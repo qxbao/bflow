@@ -48,7 +48,7 @@ import { lastAssistantText, mustShowSection, noticeDisplayed, noticePriority, re
 import { callHost } from "./host-protocol.js";
 import { effectiveFastPathMode, effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
-import { digest, json, record, textField } from "./journal.js";
+import { AgenticJournal, digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS } from "./runtime.js";
@@ -86,7 +86,7 @@ export function preserveBuiltinRolePrompt(original: string, trustedHostInstructi
   if (!original.trim()) throw new Error("Original role prompt is required");
   return `${original}\n\n${trustedHostInstructions}`;
 }
-import { inspectNativeDelivery, NativeAckGrace, nativeAckGraceMs, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
+import { inspectNativeDelivery, NativeAckGrace, nativeAckGraceMs, nativeMessageFingerprint, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
 import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import {
@@ -373,6 +373,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let preparation: Promise<unknown> | undefined;
   let activation: Promise<unknown> | undefined;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined, inboundError: string | undefined;
+  let watchdogTask: Promise<void> | undefined, chatPump: Promise<void> | undefined;
   let schedulerTimerAlive = false, schedulerLastTickAt: string | undefined;
   const assignmentSurvey = new AssignmentSurvey(configuration.repositoryPath);
   const activityLog = TaskActivityLog.open(join(configuration.directory, "../../agentic/task-activity.jsonl"));
@@ -654,6 +655,19 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await finalizeCompletedToolActionDisposition(message, sender);
         return json({ delivered: true, messageId: previous.message.message_id });
       }
+      if (workspace) {
+        const inspection = await inspectNativeDelivery(receipts, operationId, await workspace.runtime.nativeDeliveryInbox());
+        if (inspection.delivery === "applied") {
+          await receipts.recordNativeAcknowledgement(previous.message);
+          await workspace.runtime.reconcileNativeDelivery(previous.message.message_id);
+          await finalizeCompletedToolActionDisposition(message, sender);
+          return json({ delivered: true, messageId: previous.message.message_id });
+        }
+        if (inspection.delivery === "rejected_after_admission") {
+          const reason = (await workspace.runtime.inboundRejection(previous.message.message_id)) ?? "Native message was rejected after admission";
+          throw new AdmissionRejectedError(reason);
+        }
+      }
       throw new Error("Native delivery is uncertain; reconcile the original operation before retrying");
     }
     if (!await receipts.recordNativeIntent(operationId, message)) throw new Error("Native delivery already started; reconcile before retrying");
@@ -672,7 +686,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       });
       // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend. A refusal by Runtime
       // arrives through the same ingress, so it is checked on a slower cadence than the acknowledgement itself.
-      const deadline = Date.now() + 15_000;
+      const deadline = Date.now() + 35_000;
       let refusalCheckAt = 0;
       while (Date.now() < deadline) {
         if (deliveredMessageIds.has(message.message_id)) {
@@ -1777,6 +1791,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (requests[0]!.status !== "accepted") throw new Error("Policy verifier lease released without applied evidence; reconcile the original request");
       if (activePolicyMeasurements.has(source.message_id)) throw new Error("Policy measurement is already in flight; reconcile it before retry");
       activePolicyMeasurements.add(source.message_id);
+      let renewInFlight: Promise<void> = Promise.resolve();
+      const triggerRenew = () => {
+        renewInFlight = renewInFlight.then(async () => {
+          await host.runtime.renewPolicyMeasurementLease(binding, source.message_id).catch(() => undefined);
+        });
+        return renewInFlight;
+      };
+      await triggerRenew();
+      const heartbeat = setInterval(() => { void triggerRenew(); }, 60_000);
+      heartbeat.unref?.();
       try {
       let completed: Awaited<ReturnType<HostVerification["behavioralEvidence"]>>;
       try {
@@ -1784,15 +1808,19 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (record(completed.result.metadata?.conditionalTdd).sourceRevision !== record(source.payload).sourceRevision)
           throw new Error("Policy phase source changed after the request; reconcile before accepting evidence");
       } catch (error) {
+        clearInterval(heartbeat);
+        await renewInFlight;
         const failed = await host.runtime.recordPhaseFailure(binding, source.message_id, redactString(String(error)), error instanceof HostBehavioralFailure,
           error instanceof HostBehavioralFailure ? error.evidence : undefined);
         return error instanceof HostBehavioralFailure && error.rtkOutputs.length
           ? json({ phaseFailure: failed, rtkOutputs: error.rtkOutputs }) : failed;
       }
+      clearInterval(heartbeat);
+      await renewInFlight;
       const delivered = await nativeDeliver(envelope(source, "verification.result", completed.result, completed.result.evidenceArtifacts), `behavioral:${completed.result.verificationId}`);
       const rtkOutputs = completed.rtkOutputs ?? [];
       return rtkOutputs.length ? json({ delivered, rtkOutputs }) : delivered;
-      } finally { activePolicyMeasurements.delete(source.message_id); }
+      } finally { clearInterval(heartbeat); activePolicyMeasurements.delete(source.message_id); }
     }
     if (name === "inspect_alternative_verification") return verification.inspectAlternative(binding, parameters);
     if (name === "complete_review") {
@@ -2312,8 +2340,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
               if (page.items.some(item => !["succeeded", "failed", "cancelled"].includes(item.snapshot.status))) throw new Error("Persisted Core run requires activation/recovery before safe shutdown");
               cursor = page.nextCursor;
             } while (cursor);
-            const journalModule = await import("./journal.js");
-            const journal = new journalModule.AgenticJournal(resolve(configuration.directory, "../../agentic/journal"), configuration.repositoryPath);
+            const journal = new AgenticJournal(resolve(configuration.directory, "../../agentic/journal"), configuration.repositoryPath);
             await journal.exclusive(async state => {
               if (state.pendingCore.length || state.pendingVerifications.length || state.runs.some(run => !["completed", "cancelled", "failed"].includes(run.status)))
                 throw new Error("Persisted agentic work requires activation/reconciliation before safe shutdown");
@@ -2325,6 +2352,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
         await workspace.runtime.quiesce();
         if (scheduler) await Promise.race([scheduler, new Promise((_, reject) => setTimeout(() => reject(new Error("Outstanding verification has not drained; preserve the live session and retry shutdown after reconciliation")), 15_000))]);
+        await watchdogTask?.catch(() => undefined);
+        await chatPump?.catch(() => undefined);
         await requireWorkspace().tools.drain(); await userQueue;
         if (physicalPrompts.length || pumping) throw new Error("Inbound transport receipts are still draining; preserve session and retry shutdown");
         await taskLogPane.close();
@@ -2379,15 +2408,19 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const message = incoming.message;
     const binding = await principal(incoming.role, incoming.paneId);
     if (binding.session?.value !== incoming.nativeSessionId) throw new Error("Queued provider prompt native session changed");
-    await requireWorkspace().runtime.validateProviderDelivery(message, binding);
+    const runtime = requireWorkspace().runtime;
+    await runtime.validateProviderDelivery(message, binding);
     // A Runtime-originated notice (e.g. specialist_result_ready) is already the exact outbox delivery just validated; it has no pane to re-sign.
-    if (message.sender.role === "runtime") return;
-    const current = SessionManifestSchema.parse(unwrap(await requireWorkspace().runtime.ports.panes.getManifest()));
+    // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
+    if (message.sender.role === "runtime" || !["coordinator", "runtime", "conversation"].includes(message.recipient.role)) return;
+    if (deliveredMessageIds.has(message.message_id)) return;
+    const inbox = await runtime.nativeDeliveryInbox();
+    if (inbox.some(row => row.status === "applied" && row.message.message_id === message.message_id &&
+        nativeMessageFingerprint(row.message) === nativeMessageFingerprint(message))) return;
+    const current = SessionManifestSchema.parse(unwrap(await runtime.ports.panes.getManifest()));
     const sender = current.panes.find(pane => pane.role === message.sender.role && (!message.sender.pane_id || pane.paneId === message.sender.pane_id));
     if (!sender) throw new Error("Transport sender binding unavailable");
-    // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
-    if (["coordinator", "runtime", "conversation"].includes(message.recipient.role))
-      await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
+    await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
   };
   /**
    * Settles one Coordinator Stop receipt. A pane that can no longer be matched is unrecoverable: Conversation gets the
@@ -2528,7 +2561,6 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
     }
   };
-  let chatPump:Promise<void>|undefined;
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
     if(!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
@@ -2650,15 +2682,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: id }));
     }
   };
-  let watchdogRunning = false;
   const watchdogTimer = setInterval(() => {
-    if (!shouldRunWatchdog({ workspace: workspace !== undefined, manifest: manifest !== undefined, quiesced, closing }) || watchdogRunning) return;
-    watchdogRunning = true;
-    void reconcileRuntimeDeliveries()
+    if (!shouldRunWatchdog({ workspace: workspace !== undefined, manifest: manifest !== undefined, quiesced, closing }) || watchdogTask) return;
+    const task = reconcileRuntimeDeliveries()
       .catch(error => { process.stderr.write(`Bflow delivery reconcile: ${redactString(String(error))}\n`); })
       .then(() => runWatchdog())
       .catch(error => { process.stderr.write(`Bflow watchdog: ${redactString(String(error))}\n`); })
-      .finally(() => { watchdogRunning = false; });
+      .finally(() => { if (watchdogTask === task) watchdogTask = undefined; });
+    watchdogTask = task;
   }, 15_000);
   watchdogTimer.unref();
   const close = async () => {
@@ -2671,7 +2702,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       await rm(runner, { force: true }).catch(() => undefined);
     }
     if (useShortHook) await rm(shortHookDir, { recursive: true, force: true });
-    if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
+    if (workspace) { await workspace.runtime.quiesce(); await scheduler?.catch(() => undefined); await watchdogTask?.catch(() => undefined); await chatPump?.catch(() => undefined); await workspace.close(); }
     await preparation?.catch(() => undefined);
     await disposeDetectedDependencies();
     queryStore?.close();
@@ -2708,7 +2739,7 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
   if (role === "conversation") tools.push({ name: "resume_run", description: "Ask Runtime to resume an existing blocked run only after a real explicit user resume request. Parameters: runId, messageId? (the host binds your latest trusted user turn); Runtime preserves all approval/cancellation/delivery guards." });
   if (role === "conversation") tools.push({ name: "read_role_pane", description: "Read-only snapshot of another role's recent terminal output (redacted, untrusted) to explain a stalled or blocked run; never evidence of success or approval. Parameters: role, paneId? (required when several panes share a role), lines? (1-200, default 60)." });
   if (role === "conversation") tools.push({ name: "read_updates", description: "Read pending Runtime updates rendered in plain Vietnamese for the user, or pass { ref: \"#n\", detail: true } (or \"Việc #k\") when the user asks \"xem chi tiết #n\" to read redacted technical details for that notice (summarize in plain Vietnamese first; only quote raw text when explicitly requested). Display-only: never grants authority to approve, resume, or decide. Parameters: { ref?, detail? }." });
-  if (role === "conversation") tools.push({ name: "conversation_decide", description: "Call this first on every ordinary user turn. Applies your structured intent/clarification decision to the latest trusted user turn (messageId is optional; when given it must be the hook's messageId). Never supplies human approval. The user never sees tool inputs or results: after this call, write the complete directReply (or clarifying questions) in your own reply text, verbatim, never only a summary of it. Parameters: decision (workflow_request/clarify/conversation_only/status_query/cancellation_request), messageId?." });
+  if (role === "conversation") tools.push({ name: "conversation_decide", description: "Call this first on every ordinary user turn. Applies your structured intent/clarification decision to the latest trusted user turn (messageId is optional; when given it must be the hook's messageId). Never supplies human approval. The user never sees tool inputs or results: after this call, write the complete directReply (or clarifying questions) in your own reply text, verbatim, never only a summary of it. targetRunId and cancellation runId/runIds accept exact run IDs or \"Việc #k\" aliases. Parameters: decision (workflow_request/clarify/conversation_only/status_query/cancellation_request), messageId?." });
   if (role !== "conversation") tools.push({ name: "log_task_step", description: "Record one brief observable progress step for your authenticated run/task; specialists must supply taskId and Coordinator may omit it. Parameters: runId, taskId?, action. No private reasoning or secrets." });
   if (role !== "conversation") tools.push({ name: USER_DECISION_TOOL, description: "Ask the user a decision through Runtime and Conversation, then end your turn; parameters: runId, taskId, question, options?, context?, expiresInMinutes?" });
   if (role === "coordinator") tools.push(...COORDINATOR_TOOLS,
@@ -2751,8 +2782,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
   }, ["title", "objective", "kind", "sddLevel", "priority", "scopeDefined", "isLargeTask", "affectedPaths", "isRequirementChange"]);
   const chatDecision = { oneOf: [
     strictObject({ intent: { const: "conversation_only", type: "string" }, directReply: string }, ["intent", "directReply"]),
-    strictObject({ intent: { const: "clarify", type: "string" }, clarifyingQuestions: { type: "array", items: string, minItems: 1, maxItems: 3 },
-      requirementDraft: draft, targetCorrelationId: string }, ["intent", "clarifyingQuestions"]),
+    strictObject({ intent: { const: "clarify", type: "string" }, clarifyingQuestions: { type: "array", items: string, minItems: 1, maxItems: 8 },
+      requirementDraft: draft, ...targets }, ["intent", "clarifyingQuestions"]),
     strictObject({ intent: { const: "workflow_request", type: "string" }, requirementDraft: draft, ...targets }, ["intent", "requirementDraft"]),
     strictObject({ intent: { const: "status_query", type: "string" }, ...targets }, ["intent"]),
     strictObject({ intent: { const: "cancellation_request", type: "string" }, cancellationInput: { oneOf: [
@@ -2922,7 +2953,10 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
         continue;
       }
       if (request.method === "ping") { reply({}); continue; }
-      if (request.method !== "tools/call") throw new Error("Unsupported MCP method");
+      if (request.method !== "tools/call") {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } }) + "\n");
+        continue;
+      }
       const params = record(request.params); if (!availableTools(configuration.role, configuration.provider).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
       const measured = ["record_behavioral_verification", "check_work", "inspect_review", "complete_review", "record_alternative_verification", "submit_implementation"].includes(String(params.name));
       const paneId = process.env.HERDR_PANE_ID;

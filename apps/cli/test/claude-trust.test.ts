@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { claudeConfigFile, ensureClaudeWorkspaceTrust } from "../src/claude-trust.js";
+import { claudeConfigFile, claudeConfigFiles, ensureClaudeWorkspaceTrust } from "../src/claude-trust.js";
 
 let dir: string;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "bflow-claude-trust-")); });
@@ -33,7 +33,12 @@ it("never overwrites a file it cannot parse", async () => {
   expect(await readFile(file, "utf8")).toBe("{not json");
 });
 
-it("honours CLAUDE_CONFIG_DIR", () => {
+it("honours CLAUDE_CONFIG_DIR and includes ~/.claude/.claude.json when ~/.claude exists", async () => {
   expect(claudeConfigFile({ CLAUDE_CONFIG_DIR: "/c" }, "/h")).toBe("/c/.claude.json");
   expect(claudeConfigFile({}, "/h")).toBe("/h/.claude.json");
+  await mkdir(join(dir, ".claude"), { recursive: true });
+  const files = await claudeConfigFiles({ ORCA_CLAUDE_CONFIG_DIR: join(dir, ".orca-claude") }, dir);
+  expect(files).toContain(join(dir, ".claude.json"));
+  expect(files).toContain(join(dir, ".claude", ".claude.json"));
+  expect(files).toContain(join(dir, ".orca-claude", ".claude.json"));
 });

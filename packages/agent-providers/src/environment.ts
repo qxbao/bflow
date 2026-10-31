@@ -20,9 +20,9 @@ const DANGEROUS_ENV_KEYS = new Set([
   "BHOME"
 ]);
 
-/** Session-local lifecycle policy; provider self-updates must not race launch/activation digest checks. */
+/** Session-local lifecycle policy; provider self-updates must not race launch/activation digest checks, and multi-pane stdio MCP startup must not trip Claude's 30s default handshake timeout under cold concurrent boot. */
 export function providerSessionEnvironment(provider: AgentEnvironment["provider"]): Readonly<Record<string, string>> {
-  return provider === "claude" ? { DISABLE_AUTOUPDATER: "1" } : {};
+  return provider === "claude" ? { DISABLE_AUTOUPDATER: "1", MCP_TIMEOUT: "120000" } : {};
 }
 
 const SECRET_KEY_PATTERN = /(?:TOKEN|SECRET|API_KEY|PASSWORD|CREDENTIAL|PRIVATE_KEY)/i;

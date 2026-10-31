@@ -18,6 +18,9 @@ export const CONVERSATION_DELIVERY_MAX_ATTEMPTS = 5;
 export const DISPATCH_FAILURE_NOTICE_ATTEMPTS = 5;
 /** Backoff between consecutive capability preflight failures of one unsent message; the next failure after these marks it failed. */
 export const PREFLIGHT_RETRY_DELAYS_MS: readonly number[] = [0, 2_000, 8_000, 30_000];
+/** Backoff between consecutive execution-plan drift checks of one unsent message while keeping it queued for drift remediation. */
+export const EXECUTION_DRIFT_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000, 30_000];
+const DEFERRED_CONTROL_NOTICE_KINDS = new Set(["policy_phase_outcome", "user_decision_answer"]);
 
 export function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -66,7 +69,32 @@ export class HerdrOutbox {
     const parsed = RoleMessageSchema.parse(message);
     const candidate: Outbound = { message: parsed, status: "queued", selector: parentAssignment.selector,
       taskId: parentAssignment.taskId, attemptId: parentAssignment.attemptId, capabilities: [], parentAssignmentId: parentAssignment.message.message_id };
-    const parent = this.noticeParent(candidate);
+    let parent: Outbound;
+    try {
+      parent = this.noticeParent(candidate);
+    } catch (error) {
+      const kind = String(record(parsed.payload).kind ?? "");
+      if (!DEFERRED_CONTROL_NOTICE_KINDS.has(kind) ||
+          parentAssignment.parentAssignmentId !== undefined || parentAssignment.message.type !== "task.assignment" ||
+          !parentAssignment.assignment || !parentAssignment.request || !parentAssignment.handle || !parentAssignment.lease ||
+          parsed.run_id !== parentAssignment.message.run_id)
+        throw error;
+      if (parsed.type !== "task.status" || parsed.sender.role !== "coordinator" || parsed.recipient.role !== "developer" ||
+          parsed.recipient.agent_id && parsed.recipient.agent_id !== parentAssignment.handle.target.agentId ||
+          parsed.recipient.pane_id && parsed.recipient.pane_id !== parentAssignment.handle.target.paneId)
+        throw new Error("Task notice must address the assigned Developer");
+      const existing = this.state.outbound.find(item => item.message.message_id === parsed.message_id || item.message.idempotency_key === parsed.idempotency_key);
+      if (existing && existing.parentAssignmentId !== candidate.parentAssignmentId) throw new Error("Conflicting task notice parent");
+      const out = this.enqueue(parsed, candidate.selector, candidate.taskId, candidate.attemptId);
+      if (parentAssignment.roleProfile) out.roleProfile = parentAssignment.roleProfile;
+      out.parentAssignmentId = parentAssignment.message.message_id;
+      out.lease = parentAssignment.lease;
+      if (!out.request && !out.handle && out.status === "queued") {
+        out.status = "cancelled";
+        out.error = String(error);
+      }
+      return out;
+    }
     if (parsed.type !== "task.status" || parsed.sender.role !== "coordinator" || parsed.recipient.role !== "developer" ||
         parsed.recipient.agent_id && parsed.recipient.agent_id !== parent.handle!.target.agentId ||
         parsed.recipient.pane_id && parsed.recipient.pane_id !== parent.handle!.target.paneId)
@@ -252,6 +280,9 @@ export class HerdrOutbox {
           const delay = PREFLIGHT_RETRY_DELAYS_MS[out.deliveryAttempts - 1];
           if (delay === undefined) { out.status = "failed"; delete out.nextAttemptAt; }
           else out.nextAttemptAt = new Date(Date.parse(this.now()) + delay).toISOString();
+        } else if (error instanceof ExecutionPlanDriftError) {
+          const delay = EXECUTION_DRIFT_RETRY_DELAYS_MS[Math.min(out.deliveryAttempts - 1, EXECUTION_DRIFT_RETRY_DELAYS_MS.length - 1)]!;
+          out.nextAttemptAt = new Date(Date.parse(this.now()) + delay).toISOString();
         }
         await this.save();
       }
@@ -300,12 +331,22 @@ export class HerdrOutbox {
         }
         return;
       }
+      const isPolicyPhase = out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence";
+      const stoppedWithoutOutcome = isPolicyPhase && this.state.outbound.some(item =>
+        item.message.run_id === out.message.run_id &&
+        item.message.type === "task.status" &&
+        record(item.message.payload).kind === "specialist_no_response" &&
+        record(item.message.payload).sourceMessageId === out.message.message_id &&
+        record(item.message.payload).stoppedExecutionId === out.handle!.executionId);
+      const canReleaseOnPromptReady = !isPolicyPhase || stoppedWithoutOutcome ||
+        Date.parse(this.now()) - Date.parse(out.handle.acceptedAt) >= 45_000;
       const health = await this.ports.panes.inspectRoleHealth(out.selector);
-      if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
+      if (canReleaseOnPromptReady && health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
         await this.release(out); // transport capacity only; never task-success evidence
       else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId &&
-          (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000))
-        await this.renew(out); // a bounded host measurement may outlive one lease period
+          (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
+        try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); } // a bounded host measurement may outlive one lease period
+      }
       return;
     }
     if (out.status !== "queued") return;

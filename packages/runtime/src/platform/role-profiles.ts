@@ -218,7 +218,25 @@ export async function persistRoleProfileSnapshot(identity: PlatformSessionIdenti
   const stored = await loadRoleProfileSnapshot(identity, snapshot.pin);
   if (canonicalReceiptJson(stored) !== canonicalReceiptJson(snapshot)) throw new Error("role profile snapshot conflicts with existing immutable proof");
   const parent = await open(directory, "r");
-  try { await parent.sync(); } finally { await parent.close(); }
+  try {
+    await parent.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (
+      code !== "EINVAL" &&
+      code !== "ENOSYS" &&
+      code !== "ENOTSUP" &&
+      code !== "EOPNOTSUPP" &&
+      code !== "EROFS" &&
+      code !== "EPERM" &&
+      code !== "EISDIR" &&
+      code !== "EBADF"
+    ) {
+      throw error;
+    }
+  } finally {
+    await parent.close();
+  }
   return file;
 }
 

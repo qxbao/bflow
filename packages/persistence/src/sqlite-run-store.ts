@@ -53,22 +53,32 @@ export class SqliteRunStore implements RunStore {
   private transaction<T>(budget: Budget, work: () => T): T {
     budget.check();
     this.db.exec(`PRAGMA busy_timeout=${budget.remaining(this.busy)}`);
-    try { this.db.exec("BEGIN IMMEDIATE"); }
-    catch (error) { budget.check(); throw error; }
     try {
-      budget.check();
-      const result = work();
-      budget.check();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      try { this.db.exec("BEGIN IMMEDIATE"); }
+      catch (error) { budget.check(); throw error; }
+      try {
+        budget.check();
+        const result = work();
+        budget.check();
+        this.db.exec("COMMIT");
+        return result;
+      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    } finally {
+      if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+    }
   }
   private read<T>(options: OperationOptions | undefined, work: () => T): OperationResult<T> {
     return this.execute(options, (budget) => {
-      // All rows making up a public response come from one consistent SQLite read snapshot.
-      this.db.exec("BEGIN DEFERRED");
-      try { const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
-      catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      budget.check();
+      this.db.exec(`PRAGMA busy_timeout=${budget.remaining(this.busy)}`);
+      try {
+        // All rows making up a public response come from one consistent SQLite read snapshot.
+        this.db.exec("BEGIN DEFERRED");
+        try { const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
+        catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      } finally {
+        if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+      }
     });
   }
   private run(runId: string): StoredRun | null {
@@ -121,16 +131,22 @@ export class SqliteRunStore implements RunStore {
   async find(input: RunQuery, options?: OperationOptions): Promise<OperationResult<Page<StoredRun>>> {
     return this.read(options, () => {
       const query = parse(RunQuerySchema, input);
-      const { cursor: requestCursor, limit = 100, ...filters } = query;
+      const normalizedStatus = query.status !== undefined
+        ? [...new Set(query.status)].sort()
+        : undefined;
+      const { cursor: requestCursor, limit = 100, status: _rawStatus, ...restFilters } = query;
+      const filters = normalizedStatus !== undefined
+        ? { ...restFilters, status: normalizedStatus }
+        : restFilters;
       const scope = `runs:${fingerprint(filters)}`;
       const after = position(requestCursor, scope);
       if (after !== undefined && typeof after !== "string") fail("validation", "Invalid run cursor");
       const clauses = ["run_id > ?"];
       const values: SQLInputValue[] = [after ?? ""];
       if (query.workflowId !== undefined) { clauses.push("workflow_id=?"); values.push(query.workflowId); }
-      if (query.status !== undefined) {
-        if (!query.status.length) return { items: [] };
-        clauses.push(`status IN (${query.status.map(() => "?").join(",")})`); values.push(...query.status);
+      if (normalizedStatus !== undefined) {
+        if (!normalizedStatus.length) return { items: [] };
+        clauses.push(`status IN (${normalizedStatus.map(() => "?").join(",")})`); values.push(...normalizedStatus);
       }
       if (query.createdAfter !== undefined) { clauses.push("created_at > ?"); values.push(Date.parse(query.createdAfter)); }
       if (query.createdBefore !== undefined) { clauses.push("created_at < ?"); values.push(Date.parse(query.createdBefore)); }

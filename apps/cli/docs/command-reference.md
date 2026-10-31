@@ -190,7 +190,7 @@ outcome `conflict_detected` cùng các đường dẫn xung đột; việc giả
 ### `bflow mcp status [--service <id>]…`
 
 Đọc `$XDG_CONFIG_HOME/bflow/mcp.json`, kiểm tra các stdio executable được pin (sự hiện diện + digest)
-và, **khi caller inject `HighLevelServices.mcpGateway`**, hỏi Gateway về health backend. Binary mặc định chưa inject port này, nên báo `configured: false`/`not_ready` dù machine daemon có thể đang chạy. Dùng `doctor`, machine service status và `docs status` (DeepWiki) để chẩn đoán; không lặp setup chỉ vì nhãn này. Exit 0 chỉ khi Gateway truy cập được
+và hỏi Gateway về health backend thông qua `HighLevelServices.mcpGateway` được caller inject hoặc qua adapter mặc định cấp máy (`withDefaultMcpGateway`: đọc `setup-gateway.json`, xác minh `definitionDigest`, `setup-gateway-ready.json` thuộc owner với độ tươi ≤ 60 giây, PID còn sống và loopback `http://127.0.0.1:<port>/health`). Khi máy chưa cấu hình Gateway qua `bflow setup` hoặc daemon đã dừng, lệnh báo `configured: false`/`not_ready`. Dùng thêm `doctor` và `docs status` (DeepWiki) để chẩn đoán platform đầy đủ. Exit 0 chỉ khi Gateway truy cập được
 và mọi backend được chọn đều healthy; chưa cấu hình Gateway, config không hợp lệ hoặc backend
 unhealthy thì exit 3; `--service` không xác định thì exit 4.
 
@@ -260,7 +260,7 @@ bflow git prepare run-1 --yes --json                                   # → req
 ## Tích hợp và giới hạn hiện tại
 
 - Dispatch, leases/fencing, Herdr và phê duyệt vẫn thuộc Runtime/Coordinator. Lệnh trả assignment/request/pending messages; thành công command không đóng workflow.
-- Machine setup và Runtime platform đã nối Gateway/control, nhưng **standalone binary `mcp status` chưa có live Gateway port mặc định**. `skills sync` có default synchronizer thật; không đánh đồng tình trạng hai port này.
+- Machine setup, Runtime platform và standalone `mcp status` đều đối chiếu Gateway cấp máy (standalone `mcp status` tự nối `setup-gateway.json` khi daemon sẵn sàng và tươi ≤ 60 giây; báo `configured: false` nếu chưa chạy `bflow setup`). `skills sync` cũng có default synchronizer thật.
 - Binary hiện chưa nhận `skills list`/`skills sync --list`; preview qua `skills sync --dry-run`. `agent check` dùng standalone environment, có thể chạy model probe; không chứng minh config-selected profile/model ready.
 - `task implement` vẫn quan sát legacy RuntimeService store theo cấu hình repo; P19 host status và decisions đi qua lifecycle/Conversation, không dùng CLI run-ID query để giả kết quả của host.
 - `verify` cần independent gate runner được host inject (`HighLevelServices.gates`); thiếu runner là blocked.

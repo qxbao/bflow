@@ -1,6 +1,7 @@
 import { useState, type FormEvent, type KeyboardEvent } from 'react';
 import { WebHttpContracts, WEB_LIMITS, type WebChatMessage } from '@bflow/contracts/web';
-import { ApiClient, ApiError, projectPath } from '../../api/client';
+import { ApiClient, ApiError, explain, projectPath } from '../../api/client';
+const DEFINITIVE_PRE_ADMISSION_CODES=new Set(['invalid_request','forbidden','session_required','not_found','stale_version','operation_not_allowed','payload_too_large']);
 /** Held in memory only, for the bubble shown before history contains this message ID. */
 export type PendingMessage={messageId:string;content:string;delivery:WebChatMessage['delivery']|'sending'};
 function pending(key:string):string|undefined {
@@ -25,7 +26,15 @@ export function ChatComposer({api,projectId,sessionId,runId,ready,sessionFresh,r
     // Only an ID survives a failed HTTP ACK. Message content/credentials never enter localStorage.
     localStorage.setItem(key,JSON.stringify({version:1,messageId:input.messageId}));setUncertain(true);
     setSending(true);onPending({messageId:input.messageId,content:input.content,delivery:'sending'});
-    const message=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`,WebHttpContracts.sendMessage.response,'POST',input);
+    let message;
+    try{
+     message=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`,WebHttpContracts.sendMessage.response,'POST',input,40000);
+    }catch(error){
+     if(error instanceof ApiError && DEFINITIVE_PRE_ADMISSION_CODES.has(error.code)){
+      localStorage.removeItem(key);setUncertain(false);onPending(undefined);setNotice(explain(error));return;
+     }
+     throw error;
+    }
     if(message.messageId!==input.messageId||message.sessionId!==sessionId||message.runId!==runId||message.sender!=='user'||message.source!=='web'||message.content!==input.content)throw new ApiError('invalid_response');
     localStorage.removeItem(key);setUncertain(false);setDraft('');onPending({messageId:input.messageId,content:input.content,delivery:message.delivery});setNotice('');refresh();
    });
@@ -40,7 +49,7 @@ export function ChatComposer({api,projectId,sessionId,runId,ready,sessionFresh,r
     let cursor:string|undefined;const seen=new Set<string>();
     for(let page=0;page<102;page++){
      const suffix=cursor?`?${new URLSearchParams({cursor})}`:'';
-     const history=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages${suffix}`,WebHttpContracts.messages.response);
+     const history=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages${suffix}`,WebHttpContracts.messages.response,'GET',undefined,40000);
      if(history.items.some(m=>m.sessionId!==sessionId))throw Error('Foreign history');
      const message=history.items.find(m=>m.messageId===id&&m.sender==='user'&&m.source==='web');
      if(message){localStorage.removeItem(key);setUncertain(false);setDraft('');setNotice('Đã tìm thấy tin nhắn gốc. Không gửi lại tin này.');refresh();return;}
@@ -59,7 +68,7 @@ export function ChatComposer({api,projectId,sessionId,runId,ready,sessionFresh,r
   {notice&&<p role="status" className="mt-0 mb-2 text-sm">{notice}</p>}
   <div className="flex items-end gap-2">
    <label htmlFor="chat-draft" className="sr-only">Tin nhắn cho Conversation</label>
-   <textarea id="chat-draft" value={sending?'':draft} onChange={e=>setDraft(e.target.value)} onKeyDown={keyDown} readOnly={busy} disabled={!ready||(uncertain&&!busy)} aria-describedby={!ready?'chat-unavailable':undefined} rows={1} placeholder="Nhập tin nhắn…" className="max-h-40 min-h-11 resize-none rounded-2xl px-4 lg:min-h-9"/>
+   <textarea id="chat-draft" value={sending?'':draft} onChange={e=>setDraft(e.target.value)} onKeyDown={keyDown} readOnly={busy} disabled={!ready||(uncertain&&!busy)} aria-describedby={!ready?'chat-unavailable':undefined} rows={1} placeholder={ready?'Nhập tin nhắn…':'Trò chuyện trực tiếp chưa bật trong phiên này'} className="max-h-40 min-h-11 resize-none rounded-2xl px-4 lg:min-h-9"/>
    <button type="submit" aria-label="Gửi tin nhắn" disabled={!canSend} className="shrink-0 rounded-full border-steel bg-steel px-4 text-surface hover:bg-ink">{busy?'Đang gửi…':'Gửi'}</button>
   </div>
   <div className="mt-1 flex flex-wrap items-center justify-between gap-2"><span className="hidden font-data text-xs text-muted lg:inline">Enter để gửi · Shift+Enter để xuống dòng</span>{uncertain&&<button type="button" disabled={busy} onClick={()=>void reconcile()}>Đối chiếu tin nhắn</button>}</div>

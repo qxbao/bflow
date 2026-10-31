@@ -117,10 +117,15 @@ export class FileToolCapabilityRegistry {
     finally { await handle.close(); }
     try {
       await rename(temporary, this.#file);
-      const directory = await open(dirname(this.#file), "r");
-      try { await directory.sync(); } finally { await directory.close(); }
     }
     catch (error) { await rm(temporary, { force: true }); throw error; }
+    try {
+      const directory = await open(dirname(this.#file), "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+    } catch (error) {
+      const errno = (error as NodeJS.ErrnoException).code;
+      if (!errno || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EBADF", "EISDIR"].includes(errno)) throw error;
+    }
   }
   async #locked<T>(action: (entries: z.infer<typeof registryFileSchema>["entries"]) => Promise<T>): Promise<T> {
     await mkdir(dirname(this.#file), { recursive: true, mode: 0o700 });

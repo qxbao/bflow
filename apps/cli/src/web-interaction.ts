@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { IdentifierSchema, type OperationResult } from '@bflow/contracts';
-import { WebCommandSchema, WebProjectSchema, WebOperationResponseSchema, type WebOperation, type UserInteractionClient, type WebProject } from '@bflow/contracts/web';
+import { WebCommandSchema, WebProjectSchema, WebOperationResponseSchema, WebProjectSessionResultSchema, type WebOperation, type UserInteractionClient, type WebProject } from '@bflow/contracts/web';
 import { canonicalWebJson, webCommandFingerprint, WebPrincipalSchema, WebAuthenticatedContextSchema,
   WebOperationIndexRecordSchema, WebIssuerRegistrationSchema, WebIssuerCredentialSchema,
   type WebAuthenticatedContext, type WebOperationIndexRecord } from '@bflow/contracts/web-host';
@@ -18,6 +18,20 @@ interface InteractionDependencies {
 }
 const unavailable = (): OperationResult<WebOperation> => ({ok:false,error:{code:'transport_unavailable',retryable:true,
   message:'Host interaction unavailable; observe the same operation ID. No command was resent.'}});
+const IPC_PROBE_TIMEOUT_Symbol = Symbol('ipc-probe-timeout');
+async function withProbeTimeout<T>(work: () => Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(IPC_PROBE_TIMEOUT_Symbol), ms);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 /** Private signer closure. Only authenticated Local Server composition constructs this port. */
 export function createWebInteractionServices(context: InteractionComposition, dependencies: InteractionDependencies = {}) {
   IdentifierSchema.parse(context.principalId);
@@ -57,10 +71,29 @@ export function createWebInteractionServices(context: InteractionComposition, de
       const hostSessionId=await session(project);
       let client:UserInteractionClient;
       // Register the available channel before action projection. This never ensures a host;
-      // missing hosts stay readable as unavailable through the read-only client.
-      try{client=await authorizedClient(project,hostSessionId,browser);}
+      // missing/frozen hosts stay readable as unavailable through the read-only client.
+      try{client=await withProbeTimeout(()=>authorizedClient(project,hostSessionId,browser),1500);}
       catch{client=await openClient({repositoryPath:project.canonicalPath,sessionId:hostSessionId});}
       return {...client,
+        async readProjectSession(id){
+          if(id!==projectId)return client.readProjectSession(id);
+          try{return await withProbeTimeout(()=>client.readProjectSession(id),2000);}
+          catch(error){
+            if(error!==IPC_PROBE_TIMEOUT_Symbol)throw error;
+            return WebProjectSessionResultSchema.parse({
+              ok:true,
+              value:{
+                apiVersion:1,
+                projectId,
+                sessionId:hostSessionId,
+                state:'unavailable',
+                pendingIntakes:[],
+                blockers:[{code:'host_unavailable',message:'Start the session explicitly to connect.'}],
+                updatedAt:new Date().toISOString()
+              }
+            });
+          }
+        },
         async execute(input){
           let command;
           try {command=WebCommandSchema.parse(input);if(command.projectId!==projectId)throw new Error();}

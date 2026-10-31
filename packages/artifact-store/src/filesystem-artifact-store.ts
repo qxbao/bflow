@@ -50,24 +50,33 @@ export class FilesystemArtifactStore implements ArtifactStore {
   private transaction<T>(budget: Budget, work: () => T): T {
     budget.check();
     this.db.exec(`PRAGMA busy_timeout=${budget.remaining(this.busy)}`);
-    try { this.db.exec("BEGIN IMMEDIATE"); }
-    catch (error) { budget.check(); throw error; }
-    try { budget.check(); const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
-    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    try {
+      try { this.db.exec("BEGIN IMMEDIATE"); }
+      catch (error) { budget.check(); throw error; }
+      try { budget.check(); const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
+      catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    } finally {
+      if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+    }
   }
   private observation<T>(options: OperationOptions | undefined, work: () => T): Promise<OperationResult<T>> {
     return this.execute(options, async (budget) => {
       budget.check(true);
-      this.db.exec("BEGIN DEFERRED");
-      let value: T;
+      this.db.exec(`PRAGMA busy_timeout=${budget.remaining(this.busy)}`);
       try {
-        value = work();
+        this.db.exec("BEGIN DEFERRED");
+        let value: T;
+        try {
+          value = work();
+          budget.check(true);
+          this.db.exec("COMMIT");
+        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        // Read-only COMMIT has no business mutation; do not apply this post-check to put/delete.
         budget.check(true);
-        this.db.exec("COMMIT");
-      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-      // Read-only COMMIT has no business mutation; do not apply this post-check to put/delete.
-      budget.check(true);
-      return value;
+        return value;
+      } finally {
+        if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+      }
     }, true);
   }
   private record(id: string, includeDeleted = false): { reference: ArtifactReference; blob: string; deleted: boolean } | null {
@@ -91,6 +100,7 @@ export class FilesystemArtifactStore implements ArtifactStore {
       while (true) {
         budget.check();
         const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
+        budget.check();
         if (bytesRead === 0) break;
         size += bytesRead;
         if (reference.sizeBytes === undefined || size > reference.sizeBytes) fail("corruption", "Cached artifact exceeds catalog size");
@@ -213,9 +223,9 @@ export class FilesystemArtifactStore implements ArtifactStore {
     let created = false;
     try {
       if (this.closed) fail("validation", "Store is closed");
-      const budget = new Budget(options, this.clock);
+      const budget = new Budget(options, this.clock, true);
       const reference = parse(ArtifactReferenceSchema, input);
-      await this.root.check(); budget.check();
+      await this.root.check(); budget.check(true);
       const record = this.record(reference.artifactId) ?? fail("not_found", "Artifact does not exist");
       if (fingerprint(reference) !== fingerprint(record.reference)) fail("validation", "Reference does not match trusted catalog");
       source = await this.root.open(record.blob);
@@ -226,10 +236,13 @@ export class FilesystemArtifactStore implements ArtifactStore {
       while (true) {
         budget.check(true);
         const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
+        budget.check(true);
         if (!bytesRead) break;
         if (record.reference.sizeBytes === undefined || size + bytesRead > record.reference.sizeBytes) fail("corruption", "Stored artifact exceeds catalog size");
         hash.update(buffer.subarray(0, bytesRead));
-        await snapshot.writeFile(buffer.subarray(0, bytesRead)); size += bytesRead;
+        await snapshot.writeFile(buffer.subarray(0, bytesRead));
+        budget.check(true);
+        size += bytesRead;
       }
       if (hash.digest("hex") !== reference.checksum.value.toLowerCase() || size !== record.reference.sizeBytes) fail("corruption", "Stored artifact integrity mismatch");
       // Yield only after a private snapshot is completely verified. No bytes from a corrupt blob escape.
@@ -240,6 +253,7 @@ export class FilesystemArtifactStore implements ArtifactStore {
         const read = await snapshot.read(bytes, 0, bytes.length, offset);
         if (read.bytesRead !== bytes.length) fail("corruption", "Verified read snapshot changed");
         offset += read.bytesRead;
+        budget.check(true);
         yield { ok: true, value: bytes };
       }
       if (size === 0) { budget.check(true); yield { ok: true, value: new Uint8Array() }; }

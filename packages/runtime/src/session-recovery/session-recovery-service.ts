@@ -29,6 +29,7 @@ import {
 import { recoverWorkflowRun, type RecoveryPorts } from "../recovery.js";
 import type { JournalState, Outbound } from "../agentic/journal.js";
 import { digest } from "../agentic/journal.js";
+import { runtimeGitDirectoryFlags } from "../agentic/patch-paths.js";
 import type { PanePolicy, TaskWorktree } from "../agentic/ports.js";
 import type { StructuredLogger } from "../resilience/structured-logger.js";
 import type { ObservabilityTracker } from "../observability/metrics.js";
@@ -47,7 +48,8 @@ async function execGit(cwd: string, args: readonly string[]): Promise<string> {
       env[key] = value;
     }
   }
-  const { stdout } = await execFileAsync("git", [...args], { cwd, env });
+  const dirFlags = await runtimeGitDirectoryFlags(cwd);
+  const { stdout } = await execFileAsync("git", [...dirFlags, ...args], { cwd, env });
   return stdout;
 }
 

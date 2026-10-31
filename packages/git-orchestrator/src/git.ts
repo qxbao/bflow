@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { GitChangedFileSchema, type GitChangedFile } from "@bflow/contracts";
 import { repositoryLock } from "./lock-context.js";
 import { GitOrchestrationError } from "./model.js";
@@ -27,6 +27,56 @@ const configuration = [
   "-c", "diff.renames=false"
 ];
 
+/**
+ * Resolves exact `safe.directory` entries for `cwd`, its enclosing worktree root, and any linked `.git` / common
+ * repository directories (without ever emitting wildcard `*`), and disables `core.fileMode` when the filesystem
+ * forces executable bits on non-executable Git metadata (e.g. FUSE/NTFS `fuseblk`).
+ */
+export async function gitDirectoryFlags(cwd: string): Promise<string[]> {
+  const canonicalCwd = await realpath(cwd).catch(() => resolve(cwd));
+  const safeDirs = new Set<string>([canonicalCwd]);
+  let forceFileModeFalse = false;
+  let current = canonicalCwd;
+  for (;;) {
+    const dotGit = join(current, ".git");
+    const dotGitStat = await lstat(dotGit).catch(() => undefined);
+    if (dotGitStat) {
+      safeDirs.add(current);
+      if (dotGitStat.isDirectory()) {
+        const gitDir = await realpath(dotGit).catch(() => dotGit);
+        safeDirs.add(gitDir);
+        const headStat = await lstat(join(gitDir, "HEAD")).catch(() => undefined);
+        forceFileModeFalse = Boolean(headStat?.isFile() && (headStat.mode & 0o111) !== 0);
+      } else if (dotGitStat.isFile()) {
+        forceFileModeFalse = (dotGitStat.mode & 0o111) !== 0;
+        const raw = await readFile(dotGit, "utf8").catch(() => "");
+        const match = /^gitdir:\s*([^\r\n]+)/.exec(raw);
+        if (match) {
+          const rawGitDir = resolve(current, match[1]!.trim());
+          const gitDir = await realpath(rawGitDir).catch(() => rawGitDir);
+          safeDirs.add(gitDir);
+          const commonRel = (await readFile(join(gitDir, "commondir"), "utf8").catch(() => "")).trim();
+          const commonDir = commonRel
+            ? await realpath(resolve(gitDir, commonRel)).catch(() => resolve(gitDir, commonRel))
+            : gitDir;
+          safeDirs.add(commonDir);
+          if (basename(commonDir) === ".git") {
+            safeDirs.add(dirname(commonDir));
+          }
+        }
+      }
+      break;
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  const flags: string[] = [];
+  for (const dir of safeDirs) flags.push("-c", `safe.directory=${dir}`);
+  if (forceFileModeFalse) flags.push("-c", "core.fileMode=false");
+  return flags;
+}
+
 /** Execute literal Git arguments. Output remains untrimmed for patches and NUL records. */
 export async function git(cwd: string, args: readonly string[]): Promise<string> {
   const env: NodeJS.ProcessEnv = { ...process.env };
@@ -37,15 +87,30 @@ export async function git(cwd: string, args: readonly string[]): Promise<string>
   env.GIT_TERMINAL_PROMPT = "0";
   env.GIT_PAGER = "cat";
   env.LC_ALL = "C";
+  const dirFlags = await gitDirectoryFlags(cwd);
   return new Promise((accept, reject) => {
     const lockDescriptor = repositoryLock.getStore();
-    const child = spawn("git", [...configuration, ...args], {
+    const child = spawn("git", [...dirFlags, ...configuration, ...args], {
       cwd, env, windowsHide: true,
       stdio: lockDescriptor === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe", lockDescriptor]
     });
     const outputChunks: Buffer[] = [], diagnosticChunks: Buffer[] = [];
-    let outputSize = 0, diagnosticSize = 0, stopped = false;
-    const stop = () => { stopped = true; child.kill("SIGKILL"); };
+    let outputSize = 0, diagnosticSize = 0, stopped = false, settled = false;
+    let forceCloseTimer: NodeJS.Timeout | undefined;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      child.kill("SIGKILL");
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      forceCloseTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const stderr = Buffer.concat(diagnosticChunks).toString("utf8");
+        reject(new GitError(`Git ${args[0] ?? "command"} failed: ${stderr.trim() || "timeout/output limit"}`, null, "", stderr));
+      }, 100);
+      forceCloseTimer.unref();
+    };
     const timer = setTimeout(stop, 60_000);
     child.stdout!.on("data", (chunk: Buffer) => {
       outputSize += chunk.length;
@@ -57,9 +122,18 @@ export async function git(cwd: string, args: readonly string[]): Promise<string>
       if (diagnosticSize > 64 * 1024 * 1024) stop();
       else diagnosticChunks.push(chunk);
     });
-    child.once("error", error => { clearTimeout(timer); reject(error); });
+    child.once("error", error => {
+      clearTimeout(timer);
+      if (forceCloseTimer) clearTimeout(forceCloseTimer);
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
     child.once("close", (code, signal) => {
       clearTimeout(timer);
+      if (forceCloseTimer) clearTimeout(forceCloseTimer);
+      if (settled) return;
+      settled = true;
       const stderr = Buffer.concat(diagnosticChunks).toString("utf8");
       let stdout: string;
       try { stdout = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(outputChunks)); }

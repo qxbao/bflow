@@ -276,41 +276,46 @@ export class BackendResourceManager implements MCPServiceManager {
       return await partition.startingPromise;
     }
 
-    if (partition.ownership === "bflow") {
-      if (
-        this.activeProcessCount >= this.maxProcessCount ||
-        this.getTotalMemoryRssBytes() >= this.maxTotalMemoryBytes
-      ) {
-        await this.evictIdleBackendsUnderPressure();
-      }
-
-      if (this.activeProcessCount >= this.maxProcessCount) {
-        this.processLimitRejections++;
-        return err({
-          code: "transport_unavailable",
-          retryable: true,
-          message: "Maximum backend process limit reached",
-          details: { diagnosticCode: "process_limit_exceeded" }
-        });
-      }
-
-      if (this.getTotalMemoryRssBytes() >= this.maxTotalMemoryBytes) {
-        return err({
-          code: "transport_unavailable",
-          retryable: true,
-          message: "Maximum memory limit reached",
-          details: { diagnosticCode: "memory_limit_exceeded" }
-        });
-      }
-    }
-
     partition.status = "starting";
     partition.diagnosticCode = "starting";
-    const generation = partition.startGeneration + 1;
-    partition.startGeneration = generation;
 
     const startPromise = (async (): Promise<OperationResult<MCPServiceObservation>> => {
       try {
+        if (partition.ownership === "bflow") {
+          if (
+            this.activeProcessCount >= this.maxProcessCount ||
+            this.getTotalMemoryRssBytes() >= this.maxTotalMemoryBytes
+          ) {
+            await this.evictIdleBackendsUnderPressure();
+          }
+
+          if (this.activeProcessCount >= this.maxProcessCount) {
+            this.processLimitRejections++;
+            partition.status = "stopped";
+            partition.diagnosticCode = "process_limit_exceeded";
+            return err({
+              code: "transport_unavailable",
+              retryable: true,
+              message: "Maximum backend process limit reached",
+              details: { diagnosticCode: "process_limit_exceeded" }
+            });
+          }
+
+          if (this.getTotalMemoryRssBytes() >= this.maxTotalMemoryBytes) {
+            partition.status = "stopped";
+            partition.diagnosticCode = "memory_limit_exceeded";
+            return err({
+              code: "transport_unavailable",
+              retryable: true,
+              message: "Maximum memory limit reached",
+              details: { diagnosticCode: "memory_limit_exceeded" }
+            });
+          }
+        }
+
+        const generation = partition.startGeneration + 1;
+        partition.startGeneration = generation;
+
         const driverRes = await this.driverFactory.createDriver(service, partitionKey, generation);
         if (!driverRes.ok) {
           partition.status = "stopped";

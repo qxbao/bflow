@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -73,6 +73,33 @@ export function validateNoRootCommand(argv: readonly string[]): OperationResult<
   return ok(undefined);
 }
 
+const MAX_TIMEOUT_SLICE_MS = 2_147_483_647;
+
+function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void {
+  let cancelled = false;
+  let remaining = Math.max(1, Math.ceil(delayMs));
+  let timer: NodeJS.Timeout | undefined;
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_TIMEOUT_SLICE_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (cancelled) return;
+      if (remaining > 0) arm();
+      else callback();
+    }, slice);
+  };
+  arm();
+  return () => {
+    cancelled = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+}
+
 export class SafeOSCommandRunner implements OSCommandRunner {
   run(
     argv: readonly string[],
@@ -93,14 +120,17 @@ export class SafeOSCommandRunner implements OSCommandRunner {
       let stdout = "";
       let stderr = "";
       let spawnError = "";
-      let timer: NodeJS.Timeout | undefined;
+      let observedExitCode: number | null = null;
+      let cancelTimer: (() => void) | undefined;
       let graceTimer: NodeJS.Timeout | undefined;
 
       const finish = (exitCode: number) => {
         if (settled) return;
         settled = true;
-        if (timer) clearTimeout(timer);
+        cancelTimer?.();
         if (graceTimer) clearTimeout(graceTimer);
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
         resolve({
           exitCode,
           stdout,
@@ -110,23 +140,30 @@ export class SafeOSCommandRunner implements OSCommandRunner {
       };
 
       const [file, ...args] = argv as [string, ...string[]];
-      const child = spawn(file, args, {
-        shell: false,
-        cwd: options?.cwd,
-        windowsHide: true,
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-        env: options?.env ? { ...process.env, ...options.env } : process.env
-      });
+      let child: ReturnType<typeof spawn> | undefined;
+      try {
+        child = spawn(file, args, {
+          shell: false,
+          cwd: options?.cwd,
+          windowsHide: true,
+          detached: process.platform !== "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: options?.env ? { ...process.env, ...options.env } : process.env
+        });
+      } catch (e: any) {
+        spawnError = `${e?.code ?? "ERROR"}: ${e?.message ?? String(e)}`;
+        finish(127);
+        return;
+      }
 
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.setEncoding("utf8");
 
-      child.stdout.on("data", (chunk: string) => {
+      child.stdout?.on("data", (chunk: string) => {
         if (stdout.length < 2 * 1024 * 1024) stdout += chunk;
       });
 
-      child.stderr.on("data", (chunk: string) => {
+      child.stderr?.on("data", (chunk: string) => {
         if (stderr.length < 2 * 1024 * 1024) stderr += chunk;
       });
 
@@ -135,27 +172,41 @@ export class SafeOSCommandRunner implements OSCommandRunner {
         finish(127);
       });
 
-      child.on("close", (code) => {
-        finish(code ?? (timedOut ? 124 : 1));
+      child.once("exit", (code) => {
+        observedExitCode = code;
+        if (!settled && !graceTimer) {
+          graceTimer = setTimeout(() => {
+            child?.stdout?.destroy();
+            child?.stderr?.destroy();
+            finish(code ?? (timedOut ? 124 : 1));
+          }, 50);
+          graceTimer.unref?.();
+        }
       });
 
-      if (options?.timeoutMs !== undefined && options.timeoutMs > 0) {
-        timer = setTimeout(() => {
+      child.on("close", (code) => {
+        finish(code ?? observedExitCode ?? (timedOut ? 124 : 1));
+      });
+
+      if (options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+        cancelTimer = scheduleSafeTimeout(() => {
           timedOut = true;
-          if (process.platform !== "win32" && child.pid !== undefined) {
+          if (process.platform !== "win32" && child?.pid !== undefined) {
             try {
               process.kill(-child.pid, "SIGKILL");
             } catch {
-              child.kill("SIGKILL");
+              child?.kill("SIGKILL");
             }
           } else {
-            child.kill("SIGKILL");
+            child?.kill("SIGKILL");
           }
+          if (graceTimer) clearTimeout(graceTimer);
           graceTimer = setTimeout(() => {
-            child.stdout.destroy();
-            child.stderr.destroy();
+            child?.stdout?.destroy();
+            child?.stderr?.destroy();
             finish(124);
           }, 300);
+          graceTimer.unref?.();
         }, options.timeoutMs);
       }
     });
@@ -184,7 +235,7 @@ export async function writeFileAtomic(
   content: string,
   mode = 0o644
 ): Promise<void> {
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${randomUUID()}`;
   try {
     await writeFile(tmpPath, content, { mode, encoding: "utf8" });
     await rename(tmpPath, filePath);
@@ -211,14 +262,18 @@ export async function defaultHealthProbe(url: string, timeoutMs: number): Promis
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const cancelTimer =
+    Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? scheduleSafeTimeout(() => controller.abort(), timeoutMs)
+      : undefined;
   try {
     const res = await fetch(url, { signal: controller.signal });
+    await res.body?.cancel().catch(() => undefined);
     return res.ok;
   } catch {
     return false;
   } finally {
-    clearTimeout(timer);
+    cancelTimer?.();
   }
 }
 

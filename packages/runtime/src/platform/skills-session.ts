@@ -259,6 +259,20 @@ async function persistRecord(
   const directory = await open(dirname(file), "r");
   try {
     await directory.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (
+      code !== "EINVAL" &&
+      code !== "ENOSYS" &&
+      code !== "ENOTSUP" &&
+      code !== "EOPNOTSUPP" &&
+      code !== "EROFS" &&
+      code !== "EPERM" &&
+      code !== "EISDIR" &&
+      code !== "EBADF"
+    ) {
+      throw error;
+    }
   } finally {
     await directory.close();
   }

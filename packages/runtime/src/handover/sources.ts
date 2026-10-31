@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 import type { ArtifactReference, ArtifactStore } from "@bflow/contracts";
+import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { findPrivateRuntimeStateDirectory } from "../private-state.js";
 import { publicExecutionRun } from "../agentic/execution-binding.js";
 import { digest, parseAgenticJournalState, type RunRecord } from "../agentic/journal.js";
@@ -76,8 +77,7 @@ export function openHandoverSources(options: { repositoryPath: string; journalPa
   let store: Promise<(ArtifactStore & { close(): void }) | undefined> | undefined;
   const openStore = (storeId: string) => store ??= (async () => {
     if (!await privateStore(resolve(options.artifactRoot))) return undefined;
-    const module = await import("@bflow/artifact-store");
-    const opened = await module.openFilesystemArtifactStore({ root: resolve(options.artifactRoot), storeId });
+    const opened = await openFilesystemArtifactStore({ root: resolve(options.artifactRoot), storeId });
     return opened.ok ? opened.value as unknown as ArtifactStore & { close(): void } : undefined;
   })();
   let storeId: string | undefined;

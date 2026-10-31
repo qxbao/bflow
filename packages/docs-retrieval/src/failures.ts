@@ -63,6 +63,8 @@ export function classifyGatewayError(error: GatewayErrorLike): DocsFailure {
   const retryAfterMs = typeof details["retryAfterMs"] === "number" ? details["retryAfterMs"] : undefined;
   const extra = { ...(status !== undefined ? { status } : {}), ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
   switch (kind) {
+    case "auth_missing": return failure("auth_missing", error.message, extra);
+    case "auth_rejected": return failure("auth_invalid", error.message, extra);
     case "rate_limited": return failure("rate_limited", "DeepWiki rate limit reached.", extra);
     case "network": return failure("network", error.message, extra);
     case "timeout": return failure("timeout", error.message, extra);

@@ -1,4 +1,28 @@
 import type { ContractError, OperationOptions, OperationResult } from "@bflow/contracts";
+import { scheduleSafeTimeout } from "./operation-budget.js";
+
+function fallbackFailure<T>(message: string): OperationResult<T> {
+  return {
+    ok: false,
+    error: { code: "corruption", retryable: false, message }
+  };
+}
+
+function safeCloneResult<T>(outcome: OperationResult<T>): OperationResult<T> {
+  try {
+    return structuredClone(outcome);
+  } catch {
+    return fallbackFailure("Operation outcome could not be cloned safely");
+  }
+}
+
+function safeInvokeHandler<T>(fn: () => OperationResult<T>, fallbackMessage: string): OperationResult<T> {
+  try {
+    return safeCloneResult(fn());
+  } catch {
+    return fallbackFailure(fallbackMessage);
+  }
+}
 
 /** Instance-local reservation. No external work starts until the key is installed. */
 export class SingleFlight<T> {
@@ -19,7 +43,12 @@ export class SingleFlight<T> {
     const joining = entry !== undefined;
     if (entry === undefined) {
       this.#fingerprints.set(key, fingerprint);
-      const result = Promise.resolve().then(action).catch(onError).then((outcome) => structuredClone(outcome));
+      const result = Promise.resolve()
+        .then(action)
+        .then(
+          (outcome) => safeCloneResult(outcome),
+          (error) => safeInvokeHandler(() => onError(error), "Single-flight error handler failed")
+        );
       entry = { fingerprint, result };
       this.#entries.set(key, entry);
       // A definite pre-side-effect failure can be retried with the same payload.
@@ -28,29 +57,35 @@ export class SingleFlight<T> {
         if (!outcome.ok && outcome.error.code !== "unknown_delivery" && this.#entries.get(key) === entry) {
           this.#entries.delete(key);
         }
-      }, () => { if (this.#entries.get(key) === entry) this.#entries.delete(key); });
+      });
     }
-    if (!joining || observer === undefined) return structuredClone(await entry.result);
+    if (!joining || observer === undefined) return safeCloneResult(await entry.result);
     // Cancelling a duplicate caller's wait must not cancel the shared command or
     // overwrite its receipt. A possible mutation remains uncertain to that caller.
     return new Promise<OperationResult<T>>((resolve) => {
       let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancelTimer: (() => void) | undefined;
       const finish = (outcome: OperationResult<T>) => {
         if (settled) return;
         settled = true;
-        if (timer !== undefined) clearTimeout(timer);
+        cancelTimer?.();
         observer.options.signal?.removeEventListener("abort", interrupt);
-        resolve(structuredClone(outcome));
+        resolve(safeCloneResult(outcome));
       };
-      const interrupt = () => finish(observer.interrupted());
+      const interrupt = () =>
+        finish(safeInvokeHandler(() => observer.interrupted(), "Single-flight interruption handler failed"));
       observer.options.signal?.addEventListener("abort", interrupt, { once: true });
       if (observer.options.signal?.aborted) interrupt();
       const remaining = observer.options.deadline === undefined ? Infinity
         : Date.parse(observer.options.deadline) - observer.clock().getTime();
       if (remaining <= 0) interrupt();
-      else if (Number.isFinite(remaining) && !settled) timer = setTimeout(interrupt, Math.min(remaining, 2_147_483_647));
-      void entry.result.then(finish, error => finish(onError(error)));
+      else if (Number.isFinite(remaining) && !settled) {
+        cancelTimer = scheduleSafeTimeout(interrupt, remaining);
+      }
+      void entry.result.then(
+        finish,
+        (error) => finish(safeInvokeHandler(() => onError(error), "Single-flight error handler failed"))
+      );
     });
   }
 }

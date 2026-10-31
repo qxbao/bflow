@@ -606,10 +606,18 @@ function parseSpec(value: SpecRecord): void {
   if (value.decision) value.decision = ApprovalDecisionSchema.parse(value.decision);
 }
 /** Linux flock + fsync/rename. A crashed process releases its lock; stale PID files are never stolen. */
+export const JOURNAL_LOCK_WAIT_MS = 5_000;
+export const JOURNAL_LOCK_SPAWN_TIMEOUT_MS = 15_000;
 export class AgenticJournal {
   readonly directory: string;
+  private readonly lockWaitMs: number;
+  private readonly spawnTimeoutMs: number;
   private validatedSnapshot?: { bytes: Buffer; value: JournalState };
-  constructor(directory: string, readonly repository: string) { this.directory = resolve(directory); }
+  constructor(directory: string, readonly repository: string, options: { lockWaitMs?: number; spawnTimeoutMs?: number } = {}) {
+    this.directory = resolve(directory);
+    this.lockWaitMs = options.lockWaitMs ?? JOURNAL_LOCK_WAIT_MS;
+    this.spawnTimeoutMs = options.spawnTimeoutMs ?? JOURNAL_LOCK_SPAWN_TIMEOUT_MS;
+  }
   private static readonly queues = new Map<string, Promise<unknown>>();
   async exclusive<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
     const previous = AgenticJournal.queues.get(this.directory) ?? Promise.resolve();
@@ -618,16 +626,29 @@ export class AgenticJournal {
     try { return await next; }
     finally { if (AgenticJournal.queues.get(this.directory) === next) AgenticJournal.queues.delete(this.directory); }
   }
+  private async acquireFlock(fd: number): Promise<void> {
+    const deadline = Date.now() + Math.max(0, this.lockWaitMs);
+    let backoffMs = 15;
+    while (true) {
+      const acquired = await new Promise<boolean>((accept, reject) => {
+        const child = spawn("flock", ["--nonblock", "3"], { stdio: ["ignore", "ignore", "ignore", fd] });
+        const timer = setTimeout(() => { child.kill(); reject(new Error("Journal lock timeout")); }, this.spawnTimeoutMs);
+        child.once("error", e => { clearTimeout(timer); reject(e); });
+        child.once("close", code => { clearTimeout(timer); accept(code === 0); });
+      });
+      if (acquired) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Agentic runtime busy");
+      const jitter = Math.floor(Math.random() * Math.max(5, Math.floor(backoffMs * 0.35)));
+      await new Promise(resolve => setTimeout(resolve, Math.min(remaining, backoffMs + jitter)));
+      backoffMs = Math.min(250, backoffMs * 2);
+    }
+  }
   private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const lock = await open(join(this.directory, "lock"), "a+", 0o600);
     try {
-      await new Promise<void>((accept, reject) => {
-        const child = spawn("flock", ["--nonblock", "3"], { stdio: ["ignore", "ignore", "ignore", lock.fd] });
-        const timer = setTimeout(() => { child.kill(); reject(new Error("Journal lock timeout")); }, 5000);
-        child.once("error", e => { clearTimeout(timer); reject(e); });
-        child.once("close", code => { clearTimeout(timer); code === 0 ? accept() : reject(new Error("Agentic runtime busy")); });
-      });
+      await this.acquireFlock(lock.fd);
       let state: JournalState, baseline: JournalState | undefined, durableBytes: Buffer | undefined;
       const statePath = join(this.directory, "state.json");
       try {
@@ -654,12 +675,18 @@ export class AgenticJournal {
         parseAgenticJournalState(state, this.repository);
         const serialized = JSON.stringify(state), normalized = parseAgenticJournalState(JSON.parse(serialized), this.repository);
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
-        const file = await open(path, "wx", 0o600);
-        try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }
         try {
+          const file = await open(path, "wx", 0o600);
+          try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }
           await rename(path, statePath);
           const dir = await open(this.directory, "r");
-          try { await dir.sync(); } finally { await dir.close(); }
+          try {
+            try { await dir.sync(); }
+            catch (error) {
+              const code = (error as NodeJS.ErrnoException | undefined)?.code;
+              if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+            }
+          } finally { await dir.close(); }
         } finally { await rm(path, { force: true }); }
         this.validatedSnapshot = { bytes: Buffer.from(serialized, "utf8"), value: normalized };
         baseline = normalized; durableBytes = this.validatedSnapshot.bytes;

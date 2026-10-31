@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./quiet-sqlite-warning.js";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";

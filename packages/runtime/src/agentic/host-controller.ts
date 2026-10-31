@@ -22,6 +22,7 @@ import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
 import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
+import { CancellationReconciliationReportSchema, type CancellationReconciliationReport } from "./cancellation-stop.js";
 import type { RegressionScope } from "./regression-changes.js";
 
 const HOST_STARTUP_TIMEOUT_MS = 120_000;
@@ -422,7 +423,7 @@ export async function readExistingAgenticTelemetry(options: { repositoryPath: st
 
 const RECONCILE_CANCELLATION_TIMEOUT_MS = 600_000;
 /** Explicit operator mutation, connect-only. Never bootstraps a daemon, changes platform configuration or resumes work. */
-export async function reconcileExistingAgenticCancellation(options: { repositoryPath: string; sessionId: string; runId: string }): Promise<import("./cancellation-stop.js").CancellationReconciliationReport> {
+export async function reconcileExistingAgenticCancellation(options: { repositoryPath: string; sessionId: string; runId: string }): Promise<CancellationReconciliationReport> {
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Invalid host session ID");
   const repositoryPath = await realpath(options.repositoryPath);
   const stateDirectory = findPrivateRuntimeStateDirectory(repositoryPath);
@@ -431,7 +432,6 @@ export async function reconcileExistingAgenticCancellation(options: { repository
   const configuration = await readHostConfiguration(join(directory, "host.json"));
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
     throw new Error("Foreign host configuration");
-  const { CancellationReconciliationReportSchema } = await import("./cancellation-stop.js");
   const report = CancellationReconciliationReportSchema.parse(await callHost(configuration.socketPath, configuration.token,
     // Bounded per-execution stops run under the journal lock; a client timeout does not mean the host stopped applying them.
     "reconcile_cancellation", { runId: textField(options.runId) }, RECONCILE_CANCELLATION_TIMEOUT_MS));

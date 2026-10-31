@@ -33,10 +33,27 @@ function string(value: unknown, field: string): string {
 
 export function parseHerdrResponse(outcome: CommandOutcome): Record<string, unknown> {
   let value: unknown;
-  try {
-    value = JSON.parse(outcome.exitCode === 0 ? outcome.stdout : outcome.stderr);
-  } catch {
-    throw new HerdrProtocolError("Herdr returned malformed JSON", "malformed");
+  if (outcome.exitCode === 0) {
+    try {
+      value = JSON.parse(outcome.stdout);
+    } catch {
+      throw new HerdrProtocolError("Herdr returned malformed JSON", "malformed");
+    }
+  } else {
+    let parsed = false;
+    for (const source of [outcome.stderr, outcome.stdout]) {
+      if (!source || !source.trim()) continue;
+      try {
+        value = JSON.parse(source);
+        parsed = true;
+        break;
+      } catch {
+        // Fallback to stdout when structured CLI JSON errors are emitted on stdout
+      }
+    }
+    if (!parsed) {
+      throw new HerdrProtocolError("Herdr returned malformed JSON", "malformed");
+    }
   }
   const envelope = record(value);
   if (outcome.exitCode !== 0) {

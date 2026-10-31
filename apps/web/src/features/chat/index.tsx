@@ -13,8 +13,8 @@ const delivery:Record<Delivery,{label:string;icon:string;tone:string}>={
   unknown_delivery:{label:'Chưa rõ đã gửi',icon:'?',tone:'text-warning'},failed:{label:'Gửi thất bại',icon:'!',tone:'text-danger'},
 };
 const deliveryNote:Partial<Record<Delivery,string>>={
-  accepted:'Máy chủ đã nhận tin; chưa chuyển tới Conversation.',queued:'Tin đang chờ tới lượt chuyển tới Conversation.',
-  delivered:'Đã tới Conversation; chưa có nghĩa đã được xử lý hay công việc đã hoàn thành.',
+  accepted:'Máy chủ đã nhận tin; chưa chuyển tới trợ lý hội thoại.',queued:'Tin đang chờ tới lượt chuyển xử lý.',
+  delivered:'Đã chuyển tới trợ lý hội thoại; chưa có nghĩa đã được xử lý hay công việc đã hoàn thành.',
 };
 const PAGE_MESSAGES=30,MAX_PAGES=20,REPLY_WINDOW_MS=5*60*1000,REPLY_POLL_MS=5000;
 /** Newest first needs the tail: the API pages oldest to newest, so walk forward within a bound. */
@@ -49,7 +49,7 @@ function RunThread({api,projectId,sessionId,runId,revision,title}:{
   const refresh=()=>setReload(value=>value+1);
   const readPage=async(at?:string)=>{
     const query=at?`?${new URLSearchParams({cursor:at})}`:'';
-    const page=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages${query}`,WebHttpContracts.messages.response);
+    const page=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages${query}`,WebHttpContracts.messages.response,'GET',undefined,40000);
     const ids=new Set<string>();
     for(const message of page.items){
       if(message.sessionId!==sessionId || ids.has(message.messageId))throw new ApiError('invalid_response');
@@ -59,7 +59,9 @@ function RunThread({api,projectId,sessionId,runId,revision,title}:{
   };
   const result=useRead(JSON.stringify(['chat',projectId,sessionId]),()=>readAll(readPage),revision+reload);
   const session=useRead(`chat-session:${projectId}:${sessionId}`,()=>api.sessionView(projectId),revision);
-  const ready=!session.error&&session.data?.state==='ready'&&session.data.sessionId===sessionId&&!session.data.blockers.some(b=>b.code==='chat_adapter_unavailable');
+  // Cold 503 history stays independent of sending; a non-retryable adapter rejection disables it.
+  const historyRejected=result.error instanceof ApiError && ['invalid_request','operation_not_allowed','invalid_response'].includes(result.error.code);
+  const ready=!historyRejected&&!session.error&&session.data?.state==='ready'&&session.data.sessionId===sessionId&&!session.data.blockers.some(b=>b.code==='chat_adapter_unavailable');
   // Replies carry no runId yet, so unassigned session messages stay; only other runs' messages are hidden.
   const relevant=(result.data?.items??[]).filter(message=>message.runId===runId || message.runId===undefined);
   const shown=relevant.slice(-limit),last=relevant.at(-1);
@@ -89,7 +91,7 @@ function RunThread({api,projectId,sessionId,runId,revision,title}:{
     </header>
     <div ref={log} role="log" aria-label="Tin nhắn" aria-busy={result.loading} tabIndex={0} onScroll={event=>{const e=event.currentTarget;pinned.current=e.scrollHeight-e.scrollTop-e.clientHeight<80;}} className="min-h-0 grow overflow-y-auto bg-canvas px-4 py-3">
       {!result.data&&<LoadingState loading={result.loading} initial label="Đang đọc lịch sử trò chuyện…"/>}
-      {Boolean(result.error) && <p role="alert">Chưa đọc được lịch sử đã xác minh. {result.data?'Bản lịch sử bên dưới đã cũ. ':''}Đọc lại lịch sử hoặc kiểm tra phiên dự án.</p>}
+      {Boolean(result.error) && <p role="alert" className="my-2 border-l-3 border-warning pl-3 text-sm">Chưa đọc được lịch sử đã xác minh. {result.data?'Bản lịch sử bên dưới đã cũ. ':''}Đọc lại lịch sử hoặc kiểm tra phiên dự án.</p>}
       {result.data && !result.data.complete && <p className="text-center text-xs text-muted">Phiên quá dài nên chỉ đọc được phần đầu; tin mới nhất có thể chưa hiện.</p>}
       {relevant.length>shown.length && <div className="text-center"><button onClick={()=>{const e=log.current;if(e)anchor.current=e.scrollHeight-e.scrollTop;setLimit(value=>value+PAGE_MESSAGES);}}>Xem {Math.min(PAGE_MESSAGES,relevant.length-shown.length)} tin cũ hơn</button></div>}
       {result.data && !shown.length && !optimistic && <p className="mx-auto text-center text-sm text-muted">Chưa có tin nhắn trong công việc này.</p>}

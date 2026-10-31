@@ -37,7 +37,13 @@ export function manifestFiles(files: readonly PackageFile[]): HandoverManifest["
 
 async function syncDirectory(path: string): Promise<void> {
   const handle = await open(path, "r");
-  try { await handle.sync(); } finally { await handle.close(); }
+  try {
+    try { await handle.sync(); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+    }
+  } finally { await handle.close(); }
 }
 async function writeDurable(path: string, bytes: Buffer): Promise<void> {
   const handle = await open(path, "wx", 0o644);

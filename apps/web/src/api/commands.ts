@@ -4,7 +4,7 @@ export type InteractionBody = WebCommand extends infer C ? C extends WebCommand 
 export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop';force?:boolean};
 export async function execute(api:ApiClient, command:WebCommand) {
   const parsed=WebCommandSchema.parse(command);
-  const value=await api.request(`${projectPath(parsed.projectId)}/commands`,WebHttpContracts.command.response,'POST',parsed);
+  const value=await api.request(`${projectPath(parsed.projectId)}/commands`,WebHttpContracts.command.response,'POST',parsed,40000);
   return check(value,parsed.projectId,parsed.commandId,parsed.kind);
 }
 function check(value:WebOperation,project:string,id:string,kind?:string) {
@@ -12,7 +12,7 @@ function check(value:WebOperation,project:string,id:string,kind?:string) {
   return value;
 }
 export async function readOperation(api:ApiClient,project:string,id:string) {
-  return check(await api.request(`${projectPath(project)}/operations/${encodeURIComponent(id)}`,WebHttpContracts.operation.response),project,id);
+  return check(await api.request(`${projectPath(project)}/operations/${encodeURIComponent(id)}`,WebHttpContracts.operation.response,'GET',undefined,40000),project,id);
 }
 export async function fingerprint(body:CommandBody) {
   const canonical=(value:unknown):unknown=>Array.isArray(value)?value.map(canonical):value && typeof value==='object'?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,canonical(item)])):value;
@@ -22,7 +22,7 @@ export async function fingerprint(body:CommandBody) {
 export async function executeLifecycle(api:ApiClient,project:string,id:string,kind:'session_start'|'session_stop',force=false){
   const route=kind==='session_start'?WebHttpContracts.startSession:WebHttpContracts.stopSession;
   const body=route.body.parse({apiVersion:1,operationId:id,...(kind==='session_stop'?{confirmed:true,...(force?{force:true}:{})}:{})});
-  const value=await api.request(`${projectPath(project)}/session/${kind==='session_start'?'start':'stop'}`,route.response,'POST',body);
+  const value=await api.request(`${projectPath(project)}/session/${kind==='session_start'?'start':'stop'}`,route.response,'POST',body,15000);
   return check(value,project,id,kind);
 }
 

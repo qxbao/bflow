@@ -99,22 +99,12 @@ export class DefaultBrowserLauncher implements BrowserLauncher {
         detached: process.platform !== "win32"
       });
 
-      if (!child.pid) {
-        return err({
-          code: "transport_unavailable",
-          retryable: true,
-          message: "Failed to spawn Chrome process: no PID returned",
-          details: { diagnosticCode: "spawn_failed" }
-        });
-      }
-
-      const pid = child.pid;
       let alive = true;
+      let spawnFailure: Error | undefined;
       const crashListeners = new Set<(reason: string) => void>();
 
-      child.on("exit", (code, signal) => {
+      const notifyCrash = (reason: string) => {
         alive = false;
-        const reason = `Chrome process exited with code ${code ?? signal ?? "unknown"}`;
         for (const listener of crashListeners) {
           try {
             listener(reason);
@@ -122,6 +112,47 @@ export class DefaultBrowserLauncher implements BrowserLauncher {
             // ignore
           }
         }
+      };
+
+      // Always attach an error listener immediately so async ENOENT/EACCES never throws uncaughtException.
+      child.on("error", (error: Error) => {
+        spawnFailure ??= error;
+        notifyCrash(`Chrome process error: ${error.message}`);
+      });
+
+      await new Promise<void>((resolve) => {
+        if (spawnFailure) {
+          resolve();
+          return;
+        }
+        const onSpawn = () => {
+          child.removeListener("error", onPreSpawnError);
+          resolve();
+        };
+        const onPreSpawnError = (error: Error) => {
+          spawnFailure ??= error;
+          child.removeListener("spawn", onSpawn);
+          resolve();
+        };
+        child.once("spawn", onSpawn);
+        child.once("error", onPreSpawnError);
+      });
+
+      if (spawnFailure || !child.pid) {
+        return err({
+          code: "transport_unavailable",
+          retryable: true,
+          message: spawnFailure
+            ? `Failed to spawn Chrome process: ${spawnFailure.message}`
+            : "Failed to spawn Chrome process: no PID returned",
+          details: { diagnosticCode: "spawn_failed" }
+        });
+      }
+
+      const pid = child.pid;
+
+      child.on("exit", (code, signal) => {
+        notifyCrash(`Chrome process exited with code ${code ?? signal ?? "unknown"}`);
       });
 
       const handle: BrowserProcessHandle = {
@@ -168,6 +199,16 @@ export class DefaultBrowserLauncher implements BrowserLauncher {
           alive = false;
           try {
             child.kill("SIGTERM");
+            const killTimer = setTimeout(() => {
+              if (child.exitCode === null && child.signalCode === null) {
+                try {
+                  child.kill("SIGKILL");
+                } catch {
+                  // ignore
+                }
+              }
+            }, 250);
+            killTimer.unref?.();
           } catch {
             // ignore
           }
@@ -260,6 +301,7 @@ export class DedicatedBrowserRuntime {
 
   private nextDebuggingPort: number;
   private readonly instances = new Map<string, ManagedBrowserInstance>();
+  private readonly inFlightLaunches = new Map<string, Promise<OperationResult<ManagedBrowserInstance>>>();
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly pages = new Map<string, BrowserPageState>();
   private readonly contextCookies = new Map<string, Record<string, string>>();
@@ -333,10 +375,15 @@ export class DedicatedBrowserRuntime {
     const content = JSON.stringify(metadata, null, 2);
     const tempPath = path.join(
       profileDir,
-      `.bflow-profile.lock.tmp.${process.pid}.${Date.now()}`
+      `.bflow-profile.lock.tmp.${process.pid}.${Date.now()}.${randomUUID()}`
     );
-    await fs.writeFile(tempPath, content, { encoding: "utf8", mode: 0o600 });
-    await fs.rename(tempPath, path.join(profileDir, ".bflow-profile.lock"));
+    try {
+      await fs.writeFile(tempPath, content, { encoding: "utf8", mode: 0o600 });
+      await fs.rename(tempPath, path.join(profileDir, ".bflow-profile.lock"));
+    } catch (error) {
+      await this.safeUnlink(tempPath);
+      throw error;
+    }
   }
 
   private async checkProfileLock(profileDir: string): Promise<OperationResult<void>> {
@@ -432,6 +479,30 @@ export class DedicatedBrowserRuntime {
   }
 
   private async launchInstance(
+    scope: TrustScope,
+    partitionSuffix?: string
+  ): Promise<OperationResult<ManagedBrowserInstance>> {
+    const scopeKey = scopeToKey(scope);
+    const mapKey = partitionSuffix ? `${scopeKey}:${partitionSuffix}` : scopeKey;
+    const existing = this.instances.get(mapKey);
+    if (existing && !existing.crashed && existing.handle.isAlive()) {
+      return ok(existing);
+    }
+    const inFlight = this.inFlightLaunches.get(mapKey);
+    if (inFlight) {
+      return await inFlight;
+    }
+
+    const launchPromise = this.launchInstanceInternal(scope, partitionSuffix).finally(() => {
+      if (this.inFlightLaunches.get(mapKey) === launchPromise) {
+        this.inFlightLaunches.delete(mapKey);
+      }
+    });
+    this.inFlightLaunches.set(mapKey, launchPromise);
+    return await launchPromise;
+  }
+
+  private async launchInstanceInternal(
     scope: TrustScope,
     partitionSuffix?: string
   ): Promise<OperationResult<ManagedBrowserInstance>> {

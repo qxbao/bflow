@@ -125,27 +125,30 @@ export const VerificationMethodSchema = z.enum([
 ]);
 export type VerificationMethod = z.infer<typeof VerificationMethodSchema>;
 
+const nullToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(value => (value === null ? undefined : value), schema.optional());
+
 export const ExtractedRequirementDraftSchema = z
   .object({
     title: z.string().min(1),
     objective: z.string().min(1),
     kind: z.enum(["feature", "bugfix", "refactor", "spike"]),
     sddLevel: SddPolicyLevelSchema,
-    priority: z.enum(["low", "normal", "high", "critical"]),
-    scopeDefined: z.boolean(),
-    isLargeTask: z.boolean(),
-    affectedPaths: z.array(z.string()),
+    priority: z.preprocess(value => (value === null ? undefined : value), z.enum(["low", "normal", "high", "critical"]).default("normal")),
+    scopeDefined: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
+    isLargeTask: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
+    affectedPaths: z.preprocess(value => (value === null ? undefined : value), z.array(z.string()).default([])),
     /** Legacy form; omitted when `acceptanceCriteria` states each criterion with its method. */
-    acceptanceCriteriaDescriptions: z.array(z.string()).default([]),
+    acceptanceCriteriaDescriptions: z.preprocess(value => (value === null ? undefined : value), z.array(z.string()).default([])),
     /** Legacy methods: one per criterion (by index) or a single method for every criterion. */
-    verificationMethods: z.array(VerificationMethodSchema).optional(),
+    verificationMethods: nullToUndefined(z.array(VerificationMethodSchema)),
     /** Each criterion with its own explicit verification method. */
-    acceptanceCriteria: z.array(z.object({ description: z.string(), verificationMethod: VerificationMethodSchema }).strict()).optional(),
-    isRequirementChange: z.boolean(),
-    codeChangesAuthorized: z.boolean().optional(),
-    targetRunId: IdentifierSchema.optional(),
-    targetCorrelationId: IdentifierSchema.optional(),
-    investigationTasks: z.array(z.object({ objective: z.string().min(1), affectedPaths: z.array(z.string()), codeChangesAuthorized: z.literal(false) }).strict()).optional()
+    acceptanceCriteria: nullToUndefined(z.array(z.object({ description: z.string(), verificationMethod: VerificationMethodSchema }).strict())),
+    isRequirementChange: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
+    codeChangesAuthorized: nullToUndefined(z.boolean()),
+    targetRunId: nullToUndefined(IdentifierSchema),
+    targetCorrelationId: nullToUndefined(IdentifierSchema),
+    investigationTasks: nullToUndefined(z.array(z.object({ objective: z.string().min(1), affectedPaths: z.array(z.string()), codeChangesAuthorized: z.literal(false) }).strict()))
   })
   .strict();
 
@@ -169,22 +172,24 @@ export interface ExtractedRequirementDraft {
 }
 
 export const ChatCancellationInputSchema = z.union([
-  z.object({ runId: IdentifierSchema, taskId: IdentifierSchema.optional(), reason: z.string().trim().min(1).optional() }).strict(),
+  z.object({ runId: IdentifierSchema, taskId: nullToUndefined(IdentifierSchema), reason: nullToUndefined(z.string().trim().min(1)) }).strict(),
   z.object({ runIds: z.array(IdentifierSchema).min(1).refine(ids => new Set(ids).size === ids.length, "Duplicate cancellation run IDs"),
-    reason: z.string().trim().min(1).optional() }).strict(),
-  z.object({ scope: z.literal("session_existing"), reason: z.string().trim().min(1).optional() }).strict()
+    reason: nullToUndefined(z.string().trim().min(1)) }).strict(),
+  z.object({ scope: z.literal("session_existing"), reason: nullToUndefined(z.string().trim().min(1)) }).strict()
 ]);
 
 /** Private Chat/host intake protocol. Governance approvals are deliberately absent. */
 export const ChatDecisionSchema = z.discriminatedUnion("intent", [
   z.object({ intent: z.literal("conversation_only"), directReply: z.string().trim().min(1) }).strict(),
-  z.object({ intent: z.literal("clarify"), clarifyingQuestions: z.array(z.string().trim().min(1)).min(1).max(3),
-    requirementDraft: ExtractedRequirementDraftSchema.optional(), targetCorrelationId: IdentifierSchema.optional() }).strict(),
+  z.object({ intent: z.literal("clarify"), clarifyingQuestions: z.array(z.string().trim().min(1)).min(1).max(8),
+    requirementDraft: nullToUndefined(ExtractedRequirementDraftSchema),
+    targetCorrelationId: nullToUndefined(IdentifierSchema),
+    targetRunId: nullToUndefined(IdentifierSchema) }).strict(),
   z.object({ intent: z.literal("workflow_request"), requirementDraft: ExtractedRequirementDraftSchema,
-    targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
-  z.object({ intent: z.literal("status_query"), targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
+    targetCorrelationId: nullToUndefined(IdentifierSchema), targetRunId: nullToUndefined(IdentifierSchema) }).strict(),
+  z.object({ intent: z.literal("status_query"), targetCorrelationId: nullToUndefined(IdentifierSchema), targetRunId: nullToUndefined(IdentifierSchema) }).strict(),
   z.object({ intent: z.literal("cancellation_request"), cancellationInput: ChatCancellationInputSchema,
-    targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict()
+    targetCorrelationId: nullToUndefined(IdentifierSchema), targetRunId: nullToUndefined(IdentifierSchema) }).strict()
 ]);
 
 export type ChatDecision = z.infer<typeof ChatDecisionSchema>;
@@ -204,6 +209,7 @@ export interface ExtractedCancellationInput {
   readonly runId?: string;
   readonly taskId?: string;
   readonly reason?: string;
+  readonly closeSessionClarifications?: boolean;
 }
 
 export interface IntentClassificationResult {
@@ -219,6 +225,7 @@ export interface IntentClassificationResult {
   readonly cancellationInput?: ExtractedCancellationInput;
   readonly targetCorrelationId?: string;
   readonly targetRunId?: string;
+  readonly resolvedClarificationCorrelationId?: string;
 }
 
 export const PendingClarificationContextSchema = z

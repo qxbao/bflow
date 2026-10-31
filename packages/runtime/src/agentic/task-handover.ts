@@ -6,6 +6,7 @@ import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { digest } from "./journal.js";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { ReworkSourceLocationSchema } from "./rework-causality.js";
 
 export const HANDOVER_BYTES = 16 * 1024;
@@ -106,7 +107,13 @@ export class TaskHandoverStore {
       try { await file.writeFile(JSON.stringify(parsed.envelope)); await file.sync(); } finally { await file.close(); }
       await rename(temp, path);
       const directory = await open(this.directory, "r");
-      try { await directory.sync(); } finally { await directory.close(); }
+      try {
+        try { await directory.sync(); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+        }
+      } finally { await directory.close(); }
     } finally { await rm(temp, { force: true }); }
   }
 }
@@ -114,7 +121,8 @@ export class TaskHandoverStore {
 /** Read-only host observation, never a revision supplied by the model. */
 export async function handoverRevision(worktree: string): Promise<string> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
-  const { stdout } = await promisify(execFile)("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "rev-parse", "--verify", "HEAD"],
+  const dirFlags = await runtimeGitDirectoryFlags(worktree);
+  const { stdout } = await promisify(execFile)("git", [...dirFlags, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "rev-parse", "--verify", "HEAD"],
     { cwd: worktree, env, timeout: 10_000, maxBuffer: 4096 });
   return z.string().regex(/^[a-f0-9]{40}$/).parse(stdout.trim());
 }

@@ -23,9 +23,9 @@ export function contractError(error: ContractError): HttpError {
 export function unwrap<T>(result: OperationResult<T>): T { if (!result.ok) throw contractError(result.error); return result.value; }
 
 /** Bounds waiting only. The underlying operation may continue; never infer non-delivery. */
-export async function observeWithinDeadline<T>(call:()=>Promise<T>):Promise<T> {
+export async function observeWithinDeadline<T>(call:()=>Promise<T>, deadlineMs = 5000):Promise<T> {
   let timer:ReturnType<typeof setTimeout> | undefined;
   try {return await Promise.race([Promise.resolve().then(call),new Promise<never>((_resolve,reject)=>{
-    timer=setTimeout(()=>reject(new HttpError('unavailable')),5000);
+    timer=setTimeout(()=>reject(new HttpError('unavailable')),deadlineMs);
   })]);} finally {if(timer)clearTimeout(timer);}
 }

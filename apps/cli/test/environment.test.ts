@@ -1179,6 +1179,6 @@ describe("environment command parsing and session context", () => {
   });
   it("removes inherited socket, remote and caller pane context", () => {
     expect(namedSessionEnvironment("repo-session", { PATH: "/bin", HERDR_SOCKET: "/wrong", HERDR_PANE_ID: "other", HERDR_SESSION: "other", HERDR_ENV: "1", HERDR_CONFIG_PATH: "/explicit/config" }))
-      .toEqual({ PATH: "/bin", DISABLE_AUTOUPDATER: "1", HERDR_CONFIG_PATH: "/explicit/config", HERDR_SESSION: "repo-session" });
+      .toEqual({ PATH: "/bin", DISABLE_AUTOUPDATER: "1", MCP_TIMEOUT: "120000", HERDR_CONFIG_PATH: "/explicit/config", HERDR_SESSION: "repo-session" });
   });
 });

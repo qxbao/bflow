@@ -82,11 +82,40 @@ class UpstreamFailure extends Error {
   }
 }
 
+const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
+
+function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void {
+  if (!Number.isFinite(delayMs)) return () => {};
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let remaining = Math.max(0, Math.ceil(delayMs));
+
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_SAFE_TIMEOUT_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      if (cancelled) return;
+      if (remaining > 0) {
+        arm();
+      } else {
+        callback();
+      }
+    }, slice);
+  };
+
+  arm();
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
 const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise(resolve => {
     if (signal?.aborted) { resolve(); return; }
-    const timer = setTimeout(done, ms);
-    function done() { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); }
+    const cancelTimer = scheduleSafeTimeout(done, ms);
+    function done() { cancelTimer(); signal?.removeEventListener("abort", done); resolve(); }
     signal?.addEventListener("abort", done, { once: true });
   });
 
@@ -99,6 +128,106 @@ export function parseRetryAfter(value: string | null, nowMs: number): number | u
   return Number.isNaN(date) ? undefined : Math.max(0, date - nowMs);
 }
 
+function matchRpcResponse(candidate: unknown, id: string | number): RpcResponse | null {
+  if (Array.isArray(candidate)) {
+    for (const item of candidate) {
+      const matched = matchRpcResponse(item, id);
+      if (matched) return matched;
+    }
+    return null;
+  }
+  if (typeof candidate !== "object" || candidate === null) return null;
+  const message = candidate as RpcResponse;
+  if (
+    message.id !== undefined &&
+    message.id !== null &&
+    String(message.id) === String(id) &&
+    (message.result !== undefined || message.error !== undefined)
+  ) {
+    return message;
+  }
+  return null;
+}
+
+function normalizeSseChunk(text: string, state: { pendingCr: boolean }, flush = false): string {
+  let chunk = text;
+  if (state.pendingCr) {
+    if (chunk.startsWith("\n")) {
+      chunk = chunk.slice(1);
+    }
+    chunk = "\n" + chunk;
+    state.pendingCr = false;
+  }
+  if (!flush && chunk.endsWith("\r")) {
+    state.pendingCr = true;
+    chunk = chunk.slice(0, -1);
+  }
+  return chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function parseSseEventBlock(event: string, id: string | number): RpcResponse | null {
+  const dataLines: string[] = [];
+  for (const line of event.split("\n")) {
+    if (line.startsWith(":")) continue;
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).replace(/^ /, ""));
+    } else if (line === "data") {
+      dataLines.push("");
+    }
+  }
+  if (dataLines.length === 0) return null;
+  const data = dataLines.join("\n");
+  if (!data.trim()) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  return matchRpcResponse(parsed, id);
+}
+
+function parseSseText(text: string, id: string | number): RpcResponse | null {
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  let buffer = normalized;
+  let boundary: number;
+  while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+    const event = buffer.slice(0, boundary);
+    buffer = buffer.slice(boundary + 2);
+    const matched = parseSseEventBlock(event, id);
+    if (matched) return matched;
+  }
+  if (buffer.trim().length > 0) {
+    return parseSseEventBlock(buffer, id);
+  }
+  return null;
+}
+
+async function readResponseTextBounded(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("Response exceeded the size limit");
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let received = 0;
+  let output = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) throw new Error("Response exceeded the size limit");
+      output += decoder.decode(value, { stream: true });
+    }
+    output += decoder.decode();
+    return output;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+}
+
 /**
  * Reads the JSON-RPC message with the given id from a `text/event-stream` body. Other events (pings,
  * notifications, server requests) are ignored. The stream is cancelled once the answer is found.
@@ -106,6 +235,7 @@ export function parseRetryAfter(value: string | null, nowMs: number): number | u
 export async function readSseResponse(body: ReadableStream<Uint8Array>, id: string | number, maxBytes: number): Promise<RpcResponse | null> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  const crState = { pendingCr: false };
   let buffer = "";
   let received = 0;
   try {
@@ -114,18 +244,25 @@ export async function readSseResponse(body: ReadableStream<Uint8Array>, id: stri
       if (done) break;
       received += value.byteLength;
       if (received > maxBytes) throw new Error("Response exceeded the size limit");
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      buffer += normalizeSseChunk(decoder.decode(value, { stream: true }), crState, false);
       let boundary: number;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
         const event = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
-        const data = event.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).replace(/^ /, "")).join("\n");
-        if (!data) continue;
-        let message: RpcResponse;
-        try { message = JSON.parse(data) as RpcResponse; } catch { continue; }
-        if (message && message.id !== undefined && message.id !== null && String(message.id) === String(id)
-          && (message.result !== undefined || message.error !== undefined)) return message;
+        const matched = parseSseEventBlock(event, id);
+        if (matched) return matched;
       }
+    }
+    buffer += normalizeSseChunk(decoder.decode(), crState, true);
+    let boundary: number;
+    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+      const event = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const matched = parseSseEventBlock(event, id);
+      if (matched) return matched;
+    }
+    if (buffer.trim().length > 0) {
+      return parseSseEventBlock(buffer, id);
     }
     return null;
   } finally {
@@ -165,6 +302,7 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
   private initialized = false;
   private handshake: Promise<void> | undefined;
   private readonly inFlight = new Map<string, AbortController>();
+  private readonly toolWireAliases = new Map<string, string>();
   private nextId = 1;
 
   constructor(
@@ -292,7 +430,7 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
     const trackKey = requestId === undefined ? undefined : String(requestId);
     if (trackKey) this.inFlight.set(trackKey, controller);
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(new Error("Timeout")); }, Math.max(1, remainingMs));
+    const cancelTimer = scheduleSafeTimeout(() => { timedOut = true; controller.abort(new Error("Timeout")); }, Math.max(1, remainingMs));
     const onAbort = () => controller.abort(spec.signal?.reason ?? new Error("Aborted"));
     spec.signal?.addEventListener("abort", onAbort, { once: true });
     try {
@@ -338,16 +476,29 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
       }
       const issued = response.headers.get("mcp-session-id");
       if (issued && issued !== this.sessionId) { this.sessionId = issued; this.count("session_started"); }
-      if (spec.expectBody === false) { await response.body?.cancel().catch(() => undefined); return null; }
+      if (spec.expectBody === false || status === 202 || status === 204) { await response.body?.cancel().catch(() => undefined); return null; }
       const type = (response.headers.get("content-type") ?? "").toLowerCase();
       try {
         if (type.includes("text/event-stream")) {
           if (!response.body) throw new Error("empty event stream");
           return await readSseResponse(response.body, requestId ?? "", this.maxResponseBytes);
         }
-        const text = await response.text();
-        if (text.length > this.maxResponseBytes) throw new Error("Response exceeded the size limit");
-        return text.trim() ? JSON.parse(text) as RpcResponse : null;
+        const text = await readResponseTextBounded(response, this.maxResponseBytes);
+        const trimmed = text.trim();
+        if (!trimmed) return null;
+        try {
+          const parsed: unknown = JSON.parse(trimmed);
+          if (Array.isArray(parsed)) {
+            return matchRpcResponse(parsed, requestId ?? "");
+          }
+          return parsed as RpcResponse;
+        } catch (jsonErr) {
+          if (/^(?:event:|data:|id:|retry:|:)/m.test(trimmed)) {
+            const sseDecoded = parseSseText(trimmed, requestId ?? "");
+            if (sseDecoded) return sseDecoded;
+          }
+          throw jsonErr;
+        }
       } catch (error) {
         if (timedOut) throw new UpstreamFailure("timeout", "Upstream response timed out", { attempts: attempt, retryable: true });
         if (spec.signal?.aborted) throw this.abortFailure(spec.signal, attempt);
@@ -355,7 +506,7 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
           { attempts: attempt, retryable: false });
       }
     } finally {
-      clearTimeout(timer);
+      cancelTimer();
       spec.signal?.removeEventListener("abort", onAbort);
       if (trackKey) this.inFlight.delete(trackKey);
     }
@@ -467,6 +618,29 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
     return listed.ok ? ok(listed.value.definitions.map(definition => definition.name)) : err(listed.error);
   }
 
+  private applyToolCompatibilityAliases(list: MCPUpstreamToolList): MCPUpstreamToolList {
+    const expectsAskWiki = this.entry.definition.tool.operations.includes("ask_wiki_question");
+    const hasAskWiki = list.definitions.some(definition => definition.name === "ask_wiki_question");
+    const hasLegacyAsk = list.definitions.some(definition => definition.name === "ask_question");
+
+    if (expectsAskWiki && !hasAskWiki && hasLegacyAsk) {
+      this.toolWireAliases.set("ask_wiki_question", "ask_question");
+      return {
+        definitions: list.definitions.map(definition =>
+          definition.name === "ask_question" ? { ...definition, name: "ask_wiki_question" } : definition
+        ),
+        defaultedInputSchemaTools: list.defaultedInputSchemaTools.map(name =>
+          name === "ask_question" ? "ask_wiki_question" : name
+        )
+      };
+    }
+
+    if (hasAskWiki) {
+      this.toolWireAliases.delete("ask_wiki_question");
+    }
+    return list;
+  }
+
   async listToolDefinitions(_sessionId: string, options?: OperationOptions): Promise<OperationResult<MCPUpstreamToolList>> {
     const timeoutMs = options?.timeoutMs ?? this.entry.definition.healthTimeoutMs;
     try {
@@ -477,7 +651,9 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
       if (response.error) {
         return err({ code: "validation", retryable: false, message: `Upstream tools/list failed: ${String(response.error.message ?? "error")}`, details: { kind: "protocol" } });
       }
-      return normalizeUpstreamToolList(response.result);
+      const normalized = normalizeUpstreamToolList(response.result);
+      if (!normalized.ok) return normalized;
+      return ok(this.applyToolCompatibilityAliases(normalized.value));
     } catch (error) {
       return this.fail(error);
     }
@@ -494,9 +670,10 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
 
   async callTool(input: MCPUpstreamToolCallInput): Promise<OperationResult<MCPUpstreamToolCallOutput>> {
     const timeoutMs = input.timeoutMs ?? this.entry.policy.callTimeoutMs ?? 60_000;
+    const wireToolName = this.toolWireAliases.get(input.tool) ?? input.tool;
     try {
       const response = await this.send({ idempotent: this.isReplayable(input.tool), timeoutMs, signal: input.signal,
-        body: { jsonrpc: "2.0", id: input.requestId, method: "tools/call", params: { name: input.tool, arguments: input.arguments } } });
+        body: { jsonrpc: "2.0", id: input.requestId, method: "tools/call", params: { name: wireToolName, arguments: input.arguments } } });
       if (!response) return err({ code: "corruption", retryable: false, message: "Upstream tools/call returned no response", details: { kind: "protocol" } });
       if (response.error) return ok({ isError: true, content: response.error.message ?? (response.error as never) });
       return ok({ isError: Boolean(response.result?.isError), content: response.result?.content ?? response.result ?? null,
