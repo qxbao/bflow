@@ -19,6 +19,7 @@ import {
 import type { StructuredLogger } from "../resilience/structured-logger.js";
 import type { ObservabilityTracker } from "../observability/metrics.js";
 import { redactString, isSensitiveKey } from "../resilience/redaction.js";
+import { runtimeGitDirectoryFlags } from "../agentic/patch-paths.js";
 
 // --- Types & Interfaces ---
 
@@ -531,8 +532,9 @@ async function identifyRepository(repositoryRoot: string): Promise<SurveyReposit
     GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", PAGER: "cat", GIT_NO_REPLACE_OBJECTS: "1"
   };
+  const dirFlags = await runtimeGitDirectoryFlags(realRoot, { resetSafeDirectory: true });
   const git = async (args: string[]): Promise<string> => {
-    const { stdout } = await executeFile("git", ["-C", realRoot, "-c", "safe.directory=", "-c", `safe.directory=${realRoot}`,
+    const { stdout } = await executeFile("git", ["-C", realRoot, ...dirFlags,
       "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.hooksPath=/dev/null",
       "-c", "core.pager=cat", "-c", "diff.external=", ...args], {
       env, encoding: "utf8", timeout: 3000, maxBuffer: 1024 * 1024

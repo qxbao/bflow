@@ -94,7 +94,13 @@ export class WebOperationStore {
         return false;
       }
       const directory = await open(this.directory, "r");
-      try { await directory.sync(); } finally { await directory.close(); }
+      try {
+        try { await directory.sync(); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+        }
+      } finally { await directory.close(); }
       return true;
     } finally { await rm(temp, { force: true }); }
   }

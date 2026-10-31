@@ -13,6 +13,7 @@ import {
 } from '../planning/index.js';
 import { findPrivateRuntimeStateDirectory } from '../private-state.js';
 import { parseAgenticJournalState, type RunRecord } from './journal.js';
+import { runtimeGitDirectoryFlags } from './patch-paths.js';
 
 /** Private file-watch evidence; it never enters public plan fingerprints or diagnostics. */
 export interface ExecutionResolutionReader {
@@ -75,8 +76,9 @@ export async function readExecutionRepositorySnapshot(repositoryPath: string): P
   const environment: NodeJS.ProcessEnv = { ...process.env };
   for (const name of Object.keys(environment)) if (name.startsWith('GIT_')) delete environment[name];
   environment.GIT_OPTIONAL_LOCKS = '0';
+  const dirFlags = await runtimeGitDirectoryFlags(root);
   const git = async (args: string[]): Promise<string> => (await executeGit('git', [
-    '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
+    ...dirFlags, '--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false',
     '-c', 'core.hooksPath=/dev/null', ...args
   ], { cwd: root, env: environment, encoding: 'utf8', maxBuffer: MAX_GIT_SNAPSHOT_BYTES, timeout: 10_000 })).stdout;
   try {
