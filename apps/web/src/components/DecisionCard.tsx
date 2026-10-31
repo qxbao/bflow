@@ -7,6 +7,7 @@ const questionLabels:Record<string,string>={
   'Specification acceptance':'Phê duyệt đặc tả công việc',
   'Approve delivery of independently verified integrated changes':'Phê duyệt bàn giao kết quả đã kiểm chứng độc lập',
 };
+export function decisionQuestionLabel(question:string):string{return questionLabels[question]??question;}
 function Readable({value,depth=0}:{value:unknown;depth?:number}) {
   if(typeof value==='boolean')return <span>{value?'Có':'Không'}</span>;
   if(value===null || typeof value!=='object')return <span className="[overflow-wrap:anywhere]">{String(value)}</span>;
@@ -42,7 +43,7 @@ export function DecisionCard({decision,api,projectId,headingLevel=3}:{decision:W
   const collapseSettled=decision.status!=='pending' && decision.evidence.length>2;
   const visiblePending=decision.status==='pending' && decision.evidence.length>3?decision.evidence.slice(0,3):decision.evidence;
   const extraPending=decision.status==='pending' && decision.evidence.length>3?decision.evidence.slice(3):[];
-  return <article className="panel min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">{packageLabel(decision)} · Phiên bản {decision.expectedVersion.revision}</div><StatusBadge value={decision.status}/></div><Heading className="mt-1 mb-1.5">{questionLabels[decision.question]??decision.question}</Heading>
+  return <article className="panel min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">{packageLabel(decision)} · Phiên bản {decision.expectedVersion.revision}</div><StatusBadge value={decision.status}/></div><Heading className="mt-1 mb-1.5">{decisionQuestionLabel(decision.question)}</Heading>
     {decision.expiresAt && <p className="my-1 text-sm">Hạn xem xét: {new Date(decision.expiresAt).toLocaleString('vi')}</p>}
     {decision.options.length>0 && <ul>{decision.options.map(option=><li key={option}>{option}</li>)}</ul>}
     {decision.status==='pending' && <p className="my-1.5 text-sm text-muted">Đọc tài liệu và đối chiếu phiên bản trước khi quyết định.</p>}

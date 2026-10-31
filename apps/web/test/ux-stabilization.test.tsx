@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { WebProjectSchema } from '@bflow/contracts/web';
 import { ApiClient } from '../src/api/client';
-import { DecisionCard } from '../src/components/DecisionCard';
+import { DecisionCard, decisionQuestionLabel } from '../src/components/DecisionCard';
 import { LoadingState } from '../src/components/LoadingState';
 import { Settings } from '../src/features/settings';
 import { ProjectConfiguration } from '../src/features/project-configuration';
@@ -171,5 +171,7 @@ describe('Web UX stabilization & functional regression guards', () => {
     const settledDelivery = { ...pendingDelivery, status: 'approved' as const };
     render(<DecisionCard decision={settledDelivery} api={new ApiClient()} projectId="p" />);
     expect(screen.getByText('Tài liệu kiểm chứng đính kèm (6)').tagName).toBe('SUMMARY');
+    expect(decisionQuestionLabel('Specification acceptance')).toBe('Phê duyệt đặc tả công việc');
+    expect(decisionQuestionLabel('Custom question')).toBe('Custom question');
   });
 });
