@@ -81,8 +81,9 @@ export async function executeDocsCommand(args: DocsCommandArgs, context?: CliCon
   const cwd = context?.cwd ?? process.cwd();
   const env = deps.env ?? process.env;
   const where = deps.stateDirectory !== undefined && deps.machineId !== undefined ? { stateDirectory: deps.stateDirectory, machineId: deps.machineId } : await machine();
+  const hostRoot = await resolveHostRepositoryRoot(cwd);
   let repository: RepositoryIdentity | undefined;
-  try { repository = await identifyRepository(cwd); } catch { repository = undefined; }
+  try { repository = await identifyRepository(hostRoot ?? cwd); } catch { repository = undefined; }
   let config: Awaited<ReturnType<typeof readEnvironmentConfig>> | undefined;
   if (repository) { try { config = await readEnvironmentConfig(repository); } catch { config = undefined; } }
 

@@ -15,6 +15,7 @@ import {
   type CommandReport,
   type CommandStep
 } from "./envelope.js";
+import { fsyncTolerant, reclaimStaleLockFile } from "../fs-resilience.js";
 
 const StoredReportSchema = z
   .object({
@@ -63,14 +64,10 @@ export function requestDigest(value: JsonValue): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
 
-function processAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
-}
-
 async function writeAtomic(path: string, content: string): Promise<void> {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
-  try { await handle.writeFile(content); await handle.sync(); } finally { await handle.close(); }
+  try { await handle.writeFile(content); await fsyncTolerant(handle); } finally { await handle.close(); }
   await rename(temporary, path);
 }
 
@@ -139,7 +136,7 @@ export class CommandJournal {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const handle = await open(lock, "wx", 0o600);
-        try { await handle.writeFile(body); await handle.sync(); } finally { await handle.close(); }
+        try { await handle.writeFile(body); await fsyncTolerant(handle); } finally { await handle.close(); }
         return async () => {
           try {
             const current = LockSchema.safeParse(JSON.parse(await readFile(lock, "utf8")));
@@ -151,13 +148,11 @@ export class CommandJournal {
       }
       let holder: z.infer<typeof LockSchema> | undefined;
       try { holder = LockSchema.parse(JSON.parse(await readFile(lock, "utf8"))); } catch { holder = undefined; }
-      // A lock that cannot be read may be mid-write by a live owner; treat it as busy.
-      if (holder === undefined || holder.host !== hostname() || processAlive(holder.pid))
-        throw new HighLevelError(conflictError(`Another invocation is running for idempotency key '${key}'`,
-          { reason: "busy", ...(holder !== undefined ? { holderPid: holder.pid } : {}) }));
-      // Only one process can move a stale lock aside; the loser retries and observes the new owner.
-      const stale = `${lock}.stale-${randomUUID()}`;
-      try { await rename(lock, stale); await unlink(stale); } catch { /* Another process recovered it. */ }
+      if (attempt === 0 && (await reclaimStaleLockFile(lock, { checkHost: true }))) {
+        continue;
+      }
+      throw new HighLevelError(conflictError(`Another invocation is running for idempotency key '${key}'`,
+        { reason: "busy", ...(holder !== undefined ? { holderPid: holder.pid } : {}) }));
     }
     throw new HighLevelError(conflictError(`Another invocation is running for idempotency key '${key}'`, { reason: "busy" }));
   }

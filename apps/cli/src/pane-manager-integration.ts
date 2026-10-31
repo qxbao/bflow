@@ -11,7 +11,7 @@ import {
 } from "@bflow/pane-manager";
 import type { HostPrepareResponse } from "@bflow/runtime";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
-import { EnvironmentError } from "./environment.js";
+import { EnvironmentError } from "./environment-error.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
 import { RoleStartupChecks } from "./role-startup-checks.js";

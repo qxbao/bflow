@@ -9,6 +9,7 @@ import type {
 } from "@bflow/contracts";
 import { PermissionProfileSchema } from "@bflow/contracts";
 import { isHumanApprover } from "@bflow/runtime";
+import { fsyncTolerant, reclaimStaleLockFile } from "./fs-resilience.js";
 import type {
   HighLevelCommandName,
   HighLevelStepRecord
@@ -87,20 +88,36 @@ export async function withCommandLock<T>(
   await mkdir(locksDir, { recursive: true });
 
   let fileHandle;
-  try {
-    fileHandle = await open(lockPath, "wx", 0o600);
-  } catch (error: any) {
-    if (error?.code === "EEXIST") {
-      return {
-        ok: false,
-        error: {
-          code: "conflict",
-          retryable: true,
-          message: `Concurrent command invocation in progress for scope '${scopeKey}'.`
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fileHandle = await open(lockPath, "wx", 0o600);
+      break;
+    } catch (error: any) {
+      if (error?.code === "EEXIST") {
+        if (attempt === 0 && (await reclaimStaleLockFile(lockPath, { checkHost: false }))) {
+          continue;
         }
-      };
+        return {
+          ok: false,
+          error: {
+            code: "conflict",
+            retryable: true,
+            message: `Concurrent command invocation in progress for scope '${scopeKey}'.`
+          }
+        };
+      }
+      throw error;
     }
-    throw error;
+  }
+  if (!fileHandle) {
+    return {
+      ok: false,
+      error: {
+        code: "conflict",
+        retryable: true,
+        message: `Concurrent command invocation in progress for scope '${scopeKey}'.`
+      }
+    };
   }
 
   ACTIVE_PROCESS_LOCKS.add(lockPath);
@@ -112,6 +129,7 @@ export async function withCommandLock<T>(
         scopeKey
       })
     );
+    await fsyncTolerant(fileHandle);
     return await fn();
   } finally {
     ACTIVE_PROCESS_LOCKS.delete(lockPath);
@@ -159,9 +177,18 @@ export class CommandOperationLedger {
     const path = this.receiptPath(command, idempotencyKey);
     try {
       const data = await readFile(path, "utf8");
-      return JSON.parse(data) as StoredCommandReceipt;
+      const parsed: unknown = JSON.parse(data);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      return parsed as StoredCommandReceipt;
     } catch (error: any) {
-      if (error?.code === "ENOENT") return null;
+      if (
+        error?.code === "ENOENT" ||
+        error?.code === "EISDIR" ||
+        error?.code === "ENOTDIR" ||
+        error instanceof SyntaxError
+      ) {
+        return null;
+      }
       throw error;
     }
   }

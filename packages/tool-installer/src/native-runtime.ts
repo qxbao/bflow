@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { z } from "zod";
 import type { OperationOptions } from "@bflow/contracts";
-import type { ManagedToolPin, ToolHost } from "./installer.js";
+import type { ToolHost } from "./host.js";
+import type { ManagedToolPin } from "./installer.js";
 import { atomicJson, existingPrivateDirectory, extractPinnedArchive, privateDirectory, readRegular, sha256, treeDigest, withFileLock } from "./files.js";
 
 export type NativeProvider = "claude" | "codex" | "agy";

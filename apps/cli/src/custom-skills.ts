@@ -19,6 +19,7 @@ import type {
 import { SUPPORTED_CLI_COMMANDS } from "./command-reference.js";
 import { renderEnvironmentConfigYaml } from "./config-format.js";
 import { ENVIRONMENT_CONFIG_PATH, isGovernanceRoleConfig, readEnvironmentConfig, type EnvironmentConfig } from "./environment-config.js";
+import { fsyncTolerant, reclaimStaleLockFile } from "./fs-resilience.js";
 import type { RepositoryIdentity } from "./repository.js";
 import { loadMachineSkillCatalog } from "./skill-catalog.js";
 
@@ -74,6 +75,8 @@ async function exists(path: string): Promise<boolean> {
 /** Loads custom bundles from the catalog without requiring pins; missing or empty catalogs yield none. */
 export async function readCustomCatalog(root: string): Promise<{ directory: string; definition: SkillDefinition; files: Record<string, string> }[]> {
   if (!(await exists(root))) return [];
+  const rootStat = await lstat(root);
+  if (!rootStat.isDirectory()) return [];
   const skills = await skillsModule();
   const entries = await readdir(root);
   if (!entries.length) return [];
@@ -224,7 +227,13 @@ export interface SkillApprovalPlan {
 
 async function stagedVersions(paths: CustomSkillPaths, skillId: string): Promise<string[]> {
   const root = join(paths.importsRoot, skillId);
-  return (await exists(root)) ? (await readdir(root)).sort() : [];
+  if (!(await exists(root))) return [];
+  const info = await lstat(root);
+  if (!info.isDirectory()) return [];
+  return (await readdir(root, { withFileTypes: true }))
+    .filter(entry => entry.isDirectory())
+    .map(entry => entry.name)
+    .sort();
 }
 
 /** Read-only: validates the exact reviewed digest, dependencies, roles/providers and scope that approval would grant. */
@@ -286,14 +295,26 @@ async function mutateApprovals(stateDirectory: string, mutate: (receipts: SkillA
   const path = join(stateDirectory, SKILL_APPROVALS_FILE);
   const lockPath = `${path}.lock`;
   let lock;
-  try {
-    lock = await open(lockPath, "wx", 0o600);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST")
-      throw Object.assign(new Error(`Skill approvals are locked by another writer (${lockPath}); confirm it stopped before removing the lock`), { code: "busy" });
-    throw error;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      lock = await open(lockPath, "wx", 0o600);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        if (attempt === 0 && (await reclaimStaleLockFile(lockPath, { checkHost: false }))) {
+          continue;
+        }
+        throw Object.assign(new Error(`Skill approvals are locked by another writer (${lockPath}); confirm it stopped before removing the lock`), { code: "busy" });
+      }
+      throw error;
+    }
+  }
+  if (!lock) {
+    throw Object.assign(new Error(`Skill approvals are locked by another writer (${lockPath}); confirm it stopped before removing the lock`), { code: "busy" });
   }
   try {
+    await lock.writeFile(`${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })}\n`, "utf8");
+    await fsyncTolerant(lock);
     let receipts: SkillApprovalReceipt[] = [];
     if (await exists(path)) {
       const file = await lstat(path);
@@ -310,7 +331,7 @@ async function mutateApprovals(stateDirectory: string, mutate: (receipts: SkillA
     const handle = await open(temporary, "wx", 0o600);
     try {
       await handle.writeFile(`${JSON.stringify(next, null, 2)}\n`, "utf8");
-      await handle.sync();
+      await fsyncTolerant(handle);
     } finally {
       await handle.close();
     }
@@ -404,6 +425,8 @@ export async function applySkillDisable(repository: RepositoryIdentity, config: 
 export async function listSkillApprovals(stateDirectory: string): Promise<SkillApprovalReceipt[]> {
   const path = join(stateDirectory, SKILL_APPROVALS_FILE);
   if (!(await exists(path))) return [];
+  const info = await lstat(path);
+  if (!info.isFile()) throw new Error(`${path} must be a private regular file`);
   const handle = await open(path, "r");
   try {
     return SkillApprovalStoreSchema.parse(JSON.parse(await handle.readFile("utf8"))).receipts;
@@ -466,12 +489,12 @@ export async function customSkillStatus(repository: RepositoryIdentity, config: 
       status: !bound ? "disabled" : usable ? "ready" : "not_ready", pin: pinState, bound, installed: installed.has(definition.digest), approvals });
   }
   const pending = [];
-  if (await exists(paths.importsRoot))
-    for (const skillId of (await readdir(paths.importsRoot)).sort())
-      for (const version of await stagedVersions(paths, skillId)) {
-        const files = await skills.readBundle(join(paths.importsRoot, skillId, version, "bundle")).catch(() => undefined);
+  if ((await exists(paths.importsRoot)) && (await lstat(paths.importsRoot)).isDirectory())
+    for (const skillEntry of (await readdir(paths.importsRoot, { withFileTypes: true })).filter(e => e.isDirectory()).sort((a, b) => a.name.localeCompare(b.name)))
+      for (const version of await stagedVersions(paths, skillEntry.name)) {
+        const files = await skills.readBundle(join(paths.importsRoot, skillEntry.name, version, "bundle")).catch(() => undefined);
         const digest = files ? skills.bundleDigest(files) : null;
-        if (!catalog.some(entry => entry.definition.digest === digest)) pending.push({ skillId, version, digest });
+        if (!catalog.some(entry => entry.definition.digest === digest)) pending.push({ skillId: skillEntry.name, version, digest });
       }
   const privateState = runtime.findPrivateRuntimeStateDirectory(repository.root);
   const platformState = privateState === undefined ? undefined : join(privateState, "platform", repository.sessionName);

@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import {
   ContractErrorSchema, CreateCheckpointCommandSchema,
   PaneBindingSchema, WorkflowRunSnapshotSchema, RecoveryCheckpointSchema, SessionManifestSchema, WorkflowAggregateCheckpointStateSchema,
-  type ContractError, type CreateCheckpointCommand, type EnvironmentDoctorReport,
+  type CreateCheckpointCommand, type EnvironmentDoctorReport,
   type OperationOptions, type OperationResult, type RecoveryCheckpoint, type RuntimeService,
   type SessionLifecycleManager, type SessionManifest, type PaneBinding, type ExecutionPlanInput
 } from "@bflow/contracts";
@@ -24,6 +24,10 @@ import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
 import { withLifecycleLock } from "./lifecycle-lock.js";
 import { runDoctorDiagnostics } from "./doctor-integration.js";
 import { observeAuthoritativeRuntime } from "./runtime-observation.js";
+import { EnvironmentError } from "./environment-error.js";
+import { fsyncTolerant } from "./fs-resilience.js";
+import { gitSafeDirectoryFlags } from "./git-safe-directory.js";
+export { EnvironmentError };
 
 /** CLI composition seam. The provider owns P13 bootstrap/reconciliation and Runtime checkpoint persistence. */
 export interface EnvironmentIntegration {
@@ -115,9 +119,6 @@ export interface EnvironmentStatus {
   readonly issues: readonly string[];
 }
 
-export class EnvironmentError extends Error {
-  constructor(readonly contractError: ContractError) { super(contractError.message); }
-}
 // Startup failures raised before any session/pane side effect. Callers that keep their own
 // operation receipts (Local Web) may settle these as definitive failures instead of uncertain.
 const unchangedStartupFailures = new WeakSet<object>();
@@ -225,7 +226,7 @@ export class EnvironmentLifecycle {
     const target = this.statePath(repository, name);
     const temp = `${target}.${randomUUID()}.tmp`;
     const file = await open(temp, "wx", 0o600);
-    try { await file.writeFile(JSON.stringify(value, null, 2) + "\n"); await file.sync(); }
+    try { await file.writeFile(JSON.stringify(value, null, 2) + "\n"); await fsyncTolerant(file); }
     finally { await file.close(); }
     try { await rename(temp, target); } finally { await rm(temp, { force: true }); }
   }
@@ -297,10 +298,15 @@ export class EnvironmentLifecycle {
     // Interfaces are checked structurally here; all exchanged payloads are parsed at each call below.
     return integration as EnvironmentIntegration;
   }
-  private async command(repository: RepositoryIdentity, binary: string, args: readonly string[], deadline?: Deadline) {
+  private async command(repository: RepositoryIdentity, binary: string, args: readonly string[], deadline?: Deadline, cwdOverride?: string) {
     const env = namedSessionEnvironment(repository.sessionName);
-    if (binary === "git") for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
-    const result = await this.runner.run({ executable: binary, args, cwd: repository.root,
+    const targetCwd = cwdOverride ?? repository.root;
+    let effectiveArgs = args;
+    if (binary === "git") {
+      for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+      effectiveArgs = [...gitSafeDirectoryFlags(targetCwd), ...args];
+    }
+    const result = await this.runner.run({ executable: binary, args: effectiveArgs, cwd: targetCwd,
       env, ...(deadline ? { signal: deadline.options().signal } : {}), timeoutMs: Math.min(5000, deadline?.remaining() ?? 5000) });
     if (result.exitCode !== 0) fail(`${binary} ${args.join(" ")} failed: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
     return result.stdout;
@@ -1144,11 +1150,40 @@ export class EnvironmentLifecycle {
         };
         await collectActiveRuns();
         const changes = await this.command(repository, "git", ["status", "--porcelain=v1", "--untracked-files=normal"], deadline);
+        const dirtyWorktrees: string[] = [];
+        const managedWorktreesDir = resolve(repository.root, ".bflow/state/worktrees");
+        if (existsSync(managedWorktreesDir)) {
+          try {
+            for (const entry of readdirSync(managedWorktreesDir, { withFileTypes: true })) {
+              if (!entry.isDirectory()) continue;
+              const wtPath = join(managedWorktreesDir, entry.name);
+              if (!existsSync(join(wtPath, ".git"))) continue;
+              const wtChanges = await this.command(
+                repository,
+                "git",
+                ["status", "--porcelain=v1", "--untracked-files=normal"],
+                deadline,
+                wtPath
+              );
+              if (wtChanges.trim()) dirtyWorktrees.push(entry.name);
+            }
+          } catch {
+            // Observational fallback; do not block down on unreadable directory metadata
+          }
+        }
+        const hasUncommittedChanges = Boolean(changes.trim()) || dirtyWorktrees.length > 0;
         const busy = manifest.panes.some((p) => ["working", "starting", "accepted", "unknown", "disconnected", "blocked"].includes(p.transportState));
         // --yes confirms an orderly checkpointed stop; it cannot accept losing an unverified Developer attempt. Only --force can.
         const writerBlocker = force ? undefined : unverifiedWriterBlocker(unverifiedWriters(activeSnapshots));
         if (writerBlocker) fail(writerBlocker);
-        if ((changes.trim() || activeRuns.size || busy) && !confirmed) fail(`Unsafe shutdown: ${activeRuns.size} active runs${changes.trim() ? ", uncommitted changes" : ""}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
+        if ((hasUncommittedChanges || activeRuns.size || busy) && !confirmed) {
+          const dirtySuffix = dirtyWorktrees.length > 0
+            ? `, uncommitted changes in Developer worktree(s) (${dirtyWorktrees.join(", ")})`
+            : changes.trim()
+              ? ", uncommitted changes"
+              : "";
+          fail(`Unsafe shutdown: ${activeRuns.size} active runs${dirtySuffix}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
+        }
         if (activeRuns.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
         if (!integration.quiesce) fail("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
         await this.writeIntent(repository, "stopping");

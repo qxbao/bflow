@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { DEEPWIKI_PROBE_REPO, DocsClient } from "@bflow/docs-retrieval";
 import { GatewayDocsCaller } from "./docs-gateway.js";
 import { DEEPWIKI_ENDPOINT, DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS } from "./deepwiki-constants.js";
+import { gitSafeDirectoryFlags, sanitizedGitEnv } from "./git-safe-directory.js";
 
 /**
  * Evidence from one owner-run probe of DeepWiki through Bflow's own Gateway.
@@ -34,7 +36,13 @@ export interface DeepWikiProbeOptions {
 
 function checkoutRevision(): Promise<string> {
   return new Promise(done => {
-    execFile("git", ["rev-parse", "HEAD"], { cwd: new URL(".", import.meta.url).pathname, timeout: 5000 }, (error, stdout) => done(error ? "unknown" : stdout.trim() || "unknown"));
+    const cwd = fileURLToPath(new URL(".", import.meta.url));
+    execFile(
+      "git",
+      [...gitSafeDirectoryFlags(cwd), "rev-parse", "HEAD"],
+      { cwd, env: sanitizedGitEnv(), timeout: 5000 },
+      (error, stdout) => done(error ? "unknown" : stdout.trim() || "unknown")
+    );
   });
 }
 

@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { join, resolve } from "node:path";
@@ -11,6 +12,7 @@ import {
   type SessionManifest
 } from "@bflow/contracts";
 import { findPrivateRuntimeStateDirectory } from "@bflow/runtime";
+import { gitSafeDirectoryFlags, sanitizedGitEnv } from "./git-safe-directory.js";
 
 // Vite 5's built-in list predates node:sqlite; load Node's native module directly.
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -34,10 +36,18 @@ export interface RuntimeObservationCheck {
   readonly remediation: string;
 }
 
+export interface ObservedManagedWorktree {
+  readonly name: string;
+  readonly path: string;
+  readonly dirty: boolean;
+}
+
 export interface AuthoritativeRuntimeObservation {
   readonly activeRuns: readonly AuthoritativeActiveRun[];
+  readonly managedWorktrees: readonly ObservedManagedWorktree[];
   readonly issues: readonly string[];
   readonly activeRunsCheck: RuntimeObservationCheck;
+  readonly managedWorktreesCheck: RuntimeObservationCheck;
   readonly hostBuildCheck: {
     readonly status: "pass" | "warning";
     readonly reason: string;
@@ -354,14 +364,18 @@ export async function observeAuthoritativeRuntime(input: {
         : "";
 
     if (input.server === "stopped" && runs.length > 0) {
-      const msg = `Session is stopped while authoritative RunStore still has ${runs.length} unfinished run(s): ${runSummary}. Run 'bflow up' to resume or 'bflow status <run-id>' to inspect.${reconcileHint}`;
+      const stoppedCancelHint =
+        cancelling.length > 0
+          ? ` Run 'bflow up' to start the Runtime host and reconcile stuck cancellation (then 'bflow cancel ${cancelling[0]!.runId} --reconcile' if still cancelling).`
+          : "";
+      const msg = `Session is stopped while authoritative RunStore still has ${runs.length} unfinished run(s): ${runSummary}. Run 'bflow up' to resume or 'bflow status <run-id>' to inspect.${stoppedCancelHint}`;
       issues.push(msg);
       activeRunsCheck = {
         status: "warning",
         reason: msg,
         remediation:
           cancelling.length > 0
-            ? `Run 'bflow cancel ${cancelling[0]!.runId} --reconcile' or 'bflow up'.`
+            ? `Run 'bflow up' to start the Runtime host and reconcile cancellation, then 'bflow cancel ${cancelling[0]!.runId} --reconcile' if needed.`
             : "Run 'bflow up' to resume active workflows or inspect them with 'bflow status <run-id>'."
       };
     } else if (input.manifest !== null && !sameProjection) {
@@ -402,10 +416,82 @@ export async function observeAuthoritativeRuntime(input: {
     issues.push(hostSkew.issue);
   }
 
+  const managedWorktrees: ObservedManagedWorktree[] = [];
+  const worktreesDir = resolve(input.repositoryRoot, ".bflow", "state", "worktrees");
+  try {
+    if (existsSync(worktreesDir) && lstatSync(worktreesDir).isDirectory()) {
+      const cleanEnv = sanitizedGitEnv();
+      for (const entry of readdirSync(worktreesDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory()) continue;
+        const wtPath = join(worktreesDir, entry.name);
+        if (!existsSync(join(wtPath, ".git"))) continue;
+        let dirty = false;
+        try {
+          const out = execFileSync(
+            "git",
+            [
+              ...gitSafeDirectoryFlags(wtPath),
+              "--no-optional-locks",
+              "-c",
+              "core.fsmonitor=false",
+              "status",
+              "--porcelain=v1",
+              "--untracked-files=normal"
+            ],
+            {
+              cwd: wtPath,
+              env: cleanEnv,
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "pipe"],
+              timeout: 5000
+            }
+          );
+          dirty = out.trim().length > 0;
+        } catch {
+          dirty = false;
+        }
+        managedWorktrees.push({ name: entry.name, path: wtPath, dirty });
+      }
+    }
+  } catch {
+    // Observational fallback only
+  }
+
+  const dirtyManaged = managedWorktrees.filter((wt) => wt.dirty);
+  const manifestHasRuns = (input.manifest?.activeRunIds.length ?? 0) > 0;
+  const orphanedManaged = managedWorktrees.length > 0 && (input.server === "stopped" || (!manifestHasRuns && mergedRuns.size === 0));
+  let managedWorktreesCheck: RuntimeObservationCheck;
+  if (dirtyManaged.length > 0 || orphanedManaged) {
+    const summary = managedWorktrees
+      .map((wt) => `${wt.name}${wt.dirty ? " [dirty]" : " [clean]"}`)
+      .join(", ");
+    const msg =
+      dirtyManaged.length > 0
+        ? `Managed Developer worktree(s) have uncommitted dirty changes under .bflow/state/worktrees: ${summary}. Preserve worktrees and inspect before cleanup.`
+        : `Lingering managed Developer worktree(s) remain under .bflow/state/worktrees while no active runs are running: ${summary}.`;
+    issues.push(msg);
+    managedWorktreesCheck = {
+      status: "warning",
+      reason: msg,
+      remediation: "Inspect managed Developer worktrees under .bflow/state/worktrees; never force-delete dirty worktrees."
+    };
+  } else {
+    managedWorktreesCheck = {
+      status: "pass",
+      reason:
+        managedWorktrees.length === 0
+          ? "No lingering managed Developer worktrees."
+          : `${managedWorktrees.length} clean managed Developer worktree(s) bound to active workflow(s).`,
+      remediation: ""
+    };
+  }
+
   return {
     activeRuns: [...mergedRuns.values()],
+    managedWorktrees,
     issues,
     activeRunsCheck,
+    managedWorktreesCheck,
     hostBuildCheck: {
       status: hostSkew.status,
       reason: hostSkew.reason,

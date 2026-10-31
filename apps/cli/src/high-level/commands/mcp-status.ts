@@ -46,7 +46,9 @@ export const mcpStatus: HighLevelHandler = async (args, ctx) => {
     const config = await log.check("read-mcp-config", async () => {
       let text: string;
       try { text = await readFile(file, "utf8"); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" as const, services: [] as MCPServiceDefinition[] };
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return { state: "absent" as const, services: [] as MCPServiceDefinition[] };
+        if (code === "EISDIR" || code === "ENOTDIR") return { state: "invalid" as const, reason: "path is not a regular file", services: [] as MCPServiceDefinition[] };
         throw error;
       }
       let raw: unknown;

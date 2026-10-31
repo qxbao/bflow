@@ -17,6 +17,7 @@ import { readPreviewFile } from './preview-files.js';
 import { readGatewayReadiness } from './gateway-readiness.js';
 import { readGatewayRepositoriesState } from './gateway-repositories.js';
 import { specialistProfilePath } from './specialist-profiles.js';
+import { resolveHostRepositoryRoot } from './docs-gateway.js';
 export const EXECUTION_RESOLVER_VERSION = 'cli-platform-1';
 /** Reads desired configuration and existing observations. No readiness inspector or mutable store is opened. */
 export async function loadExecutionResolution(original: EnvironmentCompositionInput, actualPlatform?: AgenticHostPlatformOptions): Promise<ExecutionPlanInput> {
@@ -276,10 +277,18 @@ function intakePolicyExplanations(ownerGates: boolean, approvalRequired: boolean
     ];
 }
 export async function loadExecutionPreview(cwd: string, runId?: string) {
-    const repository = await identifyRepository(cwd);
-    // Validate regular-file config before the existing schema/identity reader.
-    await readPreviewFile(join(repository.root, '.bflow/config.yml'));
-    const config = await readEnvironmentConfig(repository);
+    let repository = await identifyRepository(cwd);
+    let config: Awaited<ReturnType<typeof readEnvironmentConfig>>;
+    try {
+        await readPreviewFile(join(repository.root, '.bflow/config.yml'));
+        config = await readEnvironmentConfig(repository);
+    } catch (firstError) {
+        const hostRoot = await resolveHostRepositoryRoot(cwd);
+        if (!hostRoot || hostRoot === repository.root) throw firstError;
+        repository = await identifyRepository(hostRoot);
+        await readPreviewFile(join(repository.root, '.bflow/config.yml'));
+        config = await readEnvironmentConfig(repository);
+    }
     const current = await loadExecutionResolution({ repository, config, env: process.env });
     if (runId) {
         const runtime = await import('@bflow/runtime');

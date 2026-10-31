@@ -701,6 +701,8 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
+import { fsyncTolerant } from "./fs-resilience.js";
+
 /** Atomic replace: temp file (0600) → fsync → rename. */
 async function writeLocator(path: string, locator: GatewayControlLocator): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
@@ -708,7 +710,7 @@ async function writeLocator(path: string, locator: GatewayControlLocator): Promi
     const handle = await open(temporary, "wx", 0o600);
     try {
       await handle.writeFile(`${JSON.stringify(locator)}\n`);
-      await handle.sync();
+      await fsyncTolerant(handle);
     } finally {
       await handle.close();
     }
