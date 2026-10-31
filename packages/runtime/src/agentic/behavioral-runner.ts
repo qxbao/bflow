@@ -168,18 +168,23 @@ export function behavioralChecks(commands: readonly BehavioralCommand[]): Qualit
 /** Launcher failures (bubblewrap or sandbox-exec) are infrastructure errors, never test results. */
 const SANDBOX_ERROR = /^(?:bwrap|sandbox-exec):/;
 const execute = promisify(execFile);
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
+export { runtimeGitDirectoryFlags } from "./patch-paths.js";
+
 /**
  * `input` feeds stdin (for `hash-object --stdin`); `indexFile` points GIT_INDEX_FILE at a private scratch index so
  * callers can build trees without touching the repository's own index. Both are applied after the sanitized env.
  */
 export async function verificationGit(cwd: string, args: string[], extra: { readonly input?: string; readonly indexFile?: string } = {}): Promise<string> {
   // The host passes the verified session root (or the new canonical detached checkout on recursive calls).
-  // Git's global/system config is deliberately omitted, so trust only this exact root for this process.
+  // Git's global/system config is deliberately omitted, so trust only this exact root/worktree metadata for this process.
   const canonicalCwd = await realpath(cwd);
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   const options = { cwd: canonicalCwd, env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 };
-  const fixed = ["-c", "safe.directory=", "-c", `safe.directory=${canonicalCwd}`,
-    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "submodule.recurse=false"];
+  const fixed = [
+    ...(await runtimeGitDirectoryFlags(canonicalCwd, { resetSafeDirectory: true })),
+    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "submodule.recurse=false"
+  ];
   // Git checkout/status can run smudge/clean/process filters before the test sandbox exists.
   // Disable every effective filter, including config includes and worktree scopes; global/system config is excluded above.
   let keys = "";
