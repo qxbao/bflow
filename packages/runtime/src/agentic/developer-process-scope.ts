@@ -32,7 +32,16 @@ async function privateJSON(path: string): Promise<unknown> {
 async function optionalPrivateJSON(path: string): Promise<unknown> {
   return privateJSON(path).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
 }
-const BENIGN_DIR_SYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EBADF", "EROFS"]);
+const BENIGN_FILE_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EROFS"]);
+const BENIGN_DIR_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EBADF", "EROFS"]);
+export async function syncFileHandle(file: { sync: () => Promise<void> }): Promise<void> {
+  try {
+    await file.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_FILE_SYNC_CODES.has(code)) throw error;
+  }
+}
 export async function syncDirectory(
   dirPath: string,
   openDirectory: (path: string, flags: string) => Promise<{ sync: () => Promise<void>; close: () => Promise<void> }> = open
@@ -50,13 +59,13 @@ export async function syncDirectory(
 async function writeRecord(path: string, value: unknown): Promise<void> {
   const temporary = path + "." + randomUUID() + ".tmp";
   const file = await open(temporary, "wx", 0o600);
-  try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
+  try { await file.writeFile(JSON.stringify(value)); await syncFileHandle(file); } finally { await file.close(); }
   await rename(temporary, path); await syncDirectory(dirname(path));
 }
 async function writeImmutable(path: string, value: unknown): Promise<void> {
   const temporary = path + "." + randomUUID() + ".tmp";
   const bytes = JSON.stringify(value), file = await open(temporary, "wx", 0o600);
-  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+  try { await file.writeFile(bytes); await syncFileHandle(file); } finally { await file.close(); }
   try {
     try { await link(temporary, path); }
     catch (error) {
@@ -324,6 +333,6 @@ export class DeveloperProcessScopes {
 
 }
 async function writeFilePrivate(path: string, content: string, mode: number): Promise<void> {
-  const file = await open(path, "wx", mode); try { await file.writeFile(content); await file.sync(); } finally { await file.close(); }
+  const file = await open(path, "wx", mode); try { await file.writeFile(content); await syncFileHandle(file); } finally { await file.close(); }
   await chmod(path, mode);
 }

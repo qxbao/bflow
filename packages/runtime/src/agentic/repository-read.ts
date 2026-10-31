@@ -14,7 +14,7 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_DIRECTORY_SCAN = 500;
 const MAX_DIRECTORY_CURSOR = 1_000_000;
 const MAX_GIT_OUTPUT = 128 * 1024;
-const MAX_GIT_TIMEOUT_MS = 2_000;
+const MAX_GIT_TIMEOUT_MS = 15_000;
 
 const relativePath = z.string().min(1).max(2048).refine(path =>
   !path.includes("\0") && !path.includes("\\") && !isAbsolute(path) && path.split("/").every(segment => segment !== "" && segment !== "." && segment !== ".."),

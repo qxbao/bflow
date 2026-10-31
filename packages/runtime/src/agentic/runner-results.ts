@@ -1,11 +1,18 @@
+import { stripVTControlCharacters } from "node:util";
 import type { QualityCommandOutcome } from "@bflow/quality-gates";
-import { parseNodeTap } from "./node-tap.js";
+import {
+  isRecognizedAssertionMessage,
+  matchesExpectedIdentity,
+  parseNodeTap,
+  resolveExpectedIdentities,
+  type ObservedIdentityLeaf
+} from "./node-tap.js";
 import { parseVitestJson } from "./vitest-json.js";
 import type { ResultFormat } from "./runner-adapter.js";
 
-interface TestResult { name: string; passed: boolean }
+interface TestResult { name: string; passed: boolean; ancestors?: readonly string[]; title?: string }
 export interface ParsedRunnerResult {
-  testNames: string[]; testResults: TestResult[]; tests: number; passed: number; failed: number; targetFailure: boolean;
+  testNames: string[]; testResults: { name: string; passed: boolean }[]; tests: number; passed: number; failed: number; targetFailure: boolean;
 }
 function invalid(reason: string): never { throw new Error(`Behavioral result rejected: ${reason}`); }
 function object(input: unknown): Record<string, unknown> {
@@ -18,15 +25,23 @@ function number(input: unknown): number { if (!Number.isSafeInteger(input) || Nu
 function logText(input: unknown): string { if (typeof input !== "string" || input.includes("\0")) invalid("invalid log text"); return input; }
 function json(input: string): unknown { try { return JSON.parse(input); } catch { return invalid("incomplete JSON"); } }
 function finish(results: TestResult[], outcome: QualityCommandOutcome, expected: readonly string[], failureExitCodes: readonly number[] = [1]): ParsedRunnerResult {
-  const names = results.map(test => test.name), observed = [...names].sort(), mapped = [...expected].sort();
-  if (!results.length || new Set(names).size !== names.length || new Set(expected).size !== expected.length || observed.length !== mapped.length || observed.some((name, index) => name !== mapped[index])) invalid("zero, duplicate or mismatched test identities");
-  const passed = results.filter(result => result.passed).length, failed = results.length - passed;
+  const leaves: ObservedIdentityLeaf[] = results.map(test => ({
+    ancestors: test.ancestors ?? [],
+    title: test.title ?? test.name,
+    rawName: test.name
+  }));
+  const resolved = resolveExpectedIdentities(leaves, expected);
+  if (!results.length || !resolved.matched) invalid("zero, duplicate or mismatched test identities");
+  const names = resolved.canonicalNames;
+  const canonicalResults = results.map((result, index) => ({ name: names[index]!, passed: result.passed }));
+  const passed = canonicalResults.filter(result => result.passed).length, failed = canonicalResults.length - passed;
   if (failed ? !failureExitCodes.includes(outcome.exitCode!) : outcome.exitCode !== 0) invalid("process exit contradicts test results");
-  return { testNames: names, testResults: results, tests: results.length, passed, failed, targetFailure: failed > 0 };
+  return { testNames: names, testResults: canonicalResults, tests: canonicalResults.length, passed, failed, targetFailure: failed > 0 };
 }
 // Whitelist assertion exception families. Arbitrary <failure> and arbitrary panic are never Red evidence.
-function assertion(input: string): boolean {
-  return /(?:^|[\s:.(\\])(?:AssertionError|VitestAssertionError|JestAssertionError|JestExtendError|ChaiError|ExpectError|TestingLibraryElementError|HtmlElementTypeError|AssertionFailedError|AssertFailedException|AssertionException|ComparisonFailure|MultipleFailuresError|ExpectationFailedException|ExpectationNotMetError|AssertError|AssertException|Minitest::Assertion|Xunit\.Sdk\.[A-Za-z]*Exception|Microsoft\.VisualStudio\.TestTools\.UnitTesting\.AssertFailedException)(?:$|[\s:.)\[])/.test(input) || /(?:^|\n)\s*(?:E\s+)?(?:assert\s+|AssertionError:|Failed: DID NOT RAISE\b|XCTAssert\w* failed:|Assertion [^\n]+ failed\.|Assert\.[A-Za-z]+\(\) Failure:)/.test(input);
+function assertion(rawInput: string): boolean {
+  const input = stripVTControlCharacters(rawInput);
+  return isRecognizedAssertionMessage(input) || /(?:^|[\s:.(\\])(?:AssertionError|VitestAssertionError|JestAssertionError|JestExtendError|ChaiError|ExpectError|ExpectationError|MatcherError|TestingLibraryElementError|HtmlElementTypeError|AssertionFailedError|AssertFailedException|AssertionException|ComparisonFailure|MultipleFailuresError|ExpectationFailedException|ExpectationNotMetError|AssertError|AssertException|Minitest::Assertion|Xunit\.Sdk\.[A-Za-z]*Exception|Microsoft\.VisualStudio\.TestTools\.UnitTesting\.AssertFailedException)(?:$|[\s:.)\[])/.test(input) || /(?:^|\n)\s*(?:E\s+)?(?:assert\s+|AssertionError:|Failed: DID NOT RAISE\b|XCTAssert\w* failed:|Assertion [^\n]+ failed\.|Assert\.[A-Za-z]+\(\) Failure:)/.test(input);
 }
 
 interface XmlNode { name: string; attrs: Record<string, string>; children: XmlNode[]; text: string }
@@ -224,7 +239,7 @@ function trxResults(reports: readonly string[]): TestResult[] {
   });
 }
 function jestResults(input: string, selected: readonly string[]): TestResult[] {
-  const report = object(json(input)), results: TestResult[] = [];
+  const report = object(json(input)), results: TestResult[] = [], skippedLeaves: ObservedIdentityLeaf[] = [];
   const tests = number(report.numTotalTests), passed = number(report.numPassedTests), failed = number(report.numFailedTests);
   const pendingSuitesCount = number(report.numPendingTestSuites);
   if (number(report.numTodoTests) || number(report.numRuntimeErrorTestSuites) || report.wasInterrupted !== false || report.success !== (failed === 0)) invalid("Jest skipped, interrupted or runtime errors");
@@ -234,12 +249,17 @@ function jestResults(input: string, selected: readonly string[]): TestResult[] {
     if (!leaves.length || !["passed", "failed", "pending"].includes(String(suite.status)) || suite.testExecError !== undefined) invalid("Jest suite infrastructure error");
     for (const leaf of leaves) {
       const test = object(leaf), failed = test.status === "failed", messages = array(test.failureMessages);
-      if (!["passed", "failed", "pending"].includes(String(test.status)) || messages.some(value => typeof value !== "string") || (failed ? !messages.length || messages.some(message => !assertion(String(message)) && !/^Error: expect\(/.test(String(message))) : messages.length > 0)) invalid("Jest skipped or non-assertion failure");
+      if (!["passed", "failed", "pending"].includes(String(test.status)) || messages.some(value => typeof value !== "string") || (failed ? !messages.length || messages.some(message => !assertion(String(message))) : messages.length > 0)) invalid("Jest skipped or non-assertion failure");
       const ancestors = array(test.ancestorTitles).map(text), title = text(test.title), fullName = text(test.fullName);
       if ([...ancestors, title].join(" ") !== fullName) invalid("Jest fullName contradicts titles");
-      if (test.status === "pending") { if (selected.includes(fullName)) invalid("Selected Jest test skipped"); filtered++; continue; }
+      if (test.status === "pending") {
+        if (selected.includes(fullName)) invalid("Selected Jest test skipped");
+        skippedLeaves.push({ ancestors, title, rawName: fullName });
+        filtered++;
+        continue;
+      }
       suiteExecuted = true;
-      results.push({ name: fullName, passed: !failed }); suiteFailed ||= failed;
+      results.push({ name: fullName, passed: !failed, ancestors, title }); suiteFailed ||= failed;
     }
     if (suiteExecuted) {
       if (suite.status !== (suiteFailed ? "failed" : "passed") || !suiteFailed && suite.message !== "") invalid("Jest suite status contradiction");
@@ -247,6 +267,12 @@ function jestResults(input: string, selected: readonly string[]): TestResult[] {
     } else {
       if (!["pending", "passed"].includes(String(suite.status)) || suite.message !== "") invalid("Jest suite status contradiction");
       if (suite.status === "pending") pendingSuites++;
+    }
+  }
+  for (const expectedName of selected) {
+    if (!results.some(leaf => matchesExpectedIdentity({ ancestors: leaf.ancestors ?? [], title: leaf.title ?? leaf.name, rawName: leaf.name }, expectedName)) &&
+        skippedLeaves.some(leaf => matchesExpectedIdentity(leaf, expectedName))) {
+      invalid("Selected Jest test skipped");
     }
   }
   if (pendingSuitesCount !== pendingSuites || tests !== results.length + filtered || number(report.numPendingTests) !== filtered || passed !== results.filter(test => test.passed).length || failed !== results.length - passed || number(report.numTotalTestSuites) !== suites.length || number(report.numPassedTestSuites) !== suites.length - failedSuites - pendingSuites || number(report.numFailedTestSuites) !== failedSuites) invalid("Jest counters contradict results");
@@ -264,7 +290,9 @@ function mochaResults(input: string): TestResult[] {
   for (const raw of tests) {
     const item = object(raw), name = text(item.fullTitle), passed = observed.get(name), error = object(item.err);
     if (passed === undefined || (passed ? Object.keys(error).length > 0 : !assertion(`${error.name ?? ""}\n${error.message ?? ""}\n${error.stack ?? ""}`))) invalid("Mocha tests contradict failures/passes");
-    results.push({ name, passed });
+    const leafTitle = typeof item.title === "string" && item.title.trim() && !item.title.includes("\0") ? item.title : undefined;
+    const prefix = leafTitle && name.endsWith(` ${leafTitle}`) ? name.slice(0, -(leafTitle.length + 1)) : undefined;
+    results.push({ name, passed, ...(prefix && leafTitle ? { ancestors: [prefix], title: leafTitle } : {}) });
   }
   return results;
 }

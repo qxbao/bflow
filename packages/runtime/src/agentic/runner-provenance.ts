@@ -10,8 +10,12 @@ const execute = promisify(execFile);
 /** Files controlling runner execution are authority, just like test blobs. Never re-read task branch scripts as commands. */
 export const runnerDefinitionPattern = /(^|\/)(?:.*\.(?:gradle(?:\.kts)?|props|targets|cmake|mk|make)|\.gitattributes|\.gitmodules|\.lfsconfig|build\.rs|sitecustomize\.py|usercustomize\.py|Makefile|GNUmakefile|justfile|Justfile|Taskfile\.ya?ml|package\.json|composer\.json|Gemfile|Gemfile\.lock|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.properties|pyproject\.toml|pytest\.ini|tox\.ini|noxfile\.py|conftest\.py|setup\.cfg|setup\.py|Pipfile(?:\.lock)?|uv\.lock|poetry\.lock|requirements[^/]*\.txt|CMakeLists\.txt|CTestTestfile\.cmake|Directory\.[^/]+|global\.json|nuget\.config|.*\.(?:csproj|fsproj|vbproj|sln)|(?:vitest|vite|jest|mocha|phpunit|rspec)[^/]*|\.rspec|\.mocharc[^/]*|\.npmrc|\.yarnrc[^/]*|.*lock.*|tsconfig[^/]*|CMakePresets\.json)$|(^|\/)(?:\.github\/workflows|\.cargo|\.mvn|gradle|buildSrc|scripts|test|tests|__tests__|spec)\//i;
 async function blobs(cwd: string, revision: string, extra: readonly string[] = []): Promise<Record<string, string>> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-  const baseGitFlags = [...(await runtimeGitDirectoryFlags(cwd)), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+  const env = {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null"
+  };
+  const baseGitFlags = [...(await runtimeGitDirectoryFlags(cwd, { resetSafeDirectory: true })), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
   const result = await execute("git", [...baseGitFlags, "ls-tree", "-r", "-z", revision], { cwd, env, timeout: 30_000, maxBuffer: 4_194_304 });
   const found: Record<string, string> = {}, tracked: Record<string, string> = {};
   for (const entry of result.stdout.split("\0")) {

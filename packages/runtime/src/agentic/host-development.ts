@@ -40,6 +40,16 @@ const workspaceReadSchema = z.object({ path: z.string().min(1).max(4096), runId:
 const workspaceWriteSchema = workspaceReadSchema.extend({ content: z.string().max(FILE_BYTES), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }).strict();
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const utf8 = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+const BENIGN_FILE_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EROFS", "EPERM", "EACCES"]);
+
+export async function syncFileHandle(handle: Pick<FileHandle, "sync">): Promise<void> {
+  try {
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_FILE_SYNC_CODES.has(code)) throw error;
+  }
+}
 
 /** Developer mutations remain inside the current leased task, accepted scope,
  * and TDD phase. Git commits are structured host operations, never shell input. */
@@ -279,7 +289,7 @@ export class HostDevelopment {
           written += bytesWritten;
         }
         await handle.truncate(bytes.length);
-        await handle.sync();
+        await syncFileHandle(handle);
         return json({ path, written: true, created: creating, bytes: bytes.length, sha256: sha256(bytes) });
       } finally { await handle.close(); }
       });
@@ -376,14 +386,28 @@ export class HostDevelopment {
       if (line[1] !== " " || line.slice(0, 2).includes("U") || ["AA", "DD"].includes(line.slice(0, 2)))
         throw new Error(`Path '${path}' is outside the conflicted files: ${resolution.conflictPaths.join(", ")}`);
     }
+    const indexOrUntracked = new Set(
+      (await this.git(cwd, ["ls-files", "--cached", "--others", "--unmerged", "-z"])).split("\0").filter(Boolean)
+    );
+    const pathsToStage: string[] = [];
     for (const path of resolution.conflictPaths) {
       const local = await this.relativePath(cwd, path);
+      let existsOnDisk = true;
       let content: string | undefined;
       try { content = await readFile(resolve(cwd, local), "utf8"); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") existsOnDisk = false;
+        else if (code !== "EISDIR") throw error;
+      }
       if (content !== undefined && /^(<{7}|={7}|>{7}|\|{7})( |$)/m.test(content)) throw new Error(`Conflict markers remain in '${path}'`);
+      if (existsOnDisk || indexOrUntracked.has(path) || [...indexOrUntracked].some(entry => entry.startsWith(`${path}/`))) {
+        pathsToStage.push(path);
+      }
     }
-    await this.git(cwd, ["add", "--all", "--", ...resolution.conflictPaths]);
+    if (pathsToStage.length > 0) {
+      await this.git(cwd, ["add", "--all", "--", ...pathsToStage]);
+    }
     if ((await this.git(cwd, ["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").some(Boolean))
       throw new Error("Unmerged paths remain; resolve every conflicted file before committing");
     await this.git(cwd, ["commit", "-m", message]);
