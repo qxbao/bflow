@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import { ContractErrorSchema, IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPResourceLeaseSchema,
@@ -48,7 +49,19 @@ export class GatewayControlClient implements GatewayControlPort {
       const uid = process.getuid?.();
       if (uid !== undefined && info.uid !== uid) return fail("validation", "Gateway control locator must be owned by the current user");
       if (info.size > MAX_LOCATOR_BYTES) return fail("validation", "Gateway control locator is too large");
-      const locator = parseLocator(JSON.parse(await readFile(path, "utf8")));
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      let rawText: string;
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile()) return fail("validation", "Gateway control locator must be a regular file");
+        if ((opened.mode & 0o077) !== 0) return fail("validation", "Gateway control locator must not be readable by group or others");
+        if (uid !== undefined && opened.uid !== uid) return fail("validation", "Gateway control locator must be owned by the current user");
+        if (opened.size > MAX_LOCATOR_BYTES) return fail("validation", "Gateway control locator is too large");
+        rawText = await handle.readFile("utf8");
+      } finally {
+        await handle.close();
+      }
+      const locator = parseLocator(JSON.parse(rawText));
       if (!locator) return fail("corruption", "Gateway control locator is malformed");
       return ok(new GatewayControlClient(locator));
     } catch (error) {

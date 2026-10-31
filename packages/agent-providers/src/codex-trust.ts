@@ -10,6 +10,48 @@ const LOCK_RETRY_LIMIT = 80;
 const CAS_RETRY_LIMIT = 6;
 const STALE_LOCK_MS = 10_000;
 const DEAD_PID_GRACE_MS = 500;
+const BENIGN_FILE_SYNC_CODES = new Set([
+  "EINVAL",
+  "ENOSYS",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "EROFS",
+  "EPERM",
+  "EACCES"
+]);
+const BENIGN_DIR_SYNC_CODES = new Set([...BENIGN_FILE_SYNC_CODES, "EISDIR", "EBADF"]);
+
+function tomlBasicString(value: string): string {
+  return JSON.stringify(value).replace(/\x7f/g, "\\u007f");
+}
+
+async function safeFileSync(handle: { sync: () => Promise<void> }): Promise<void> {
+  try {
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_FILE_SYNC_CODES.has(code)) throw error;
+  }
+}
+
+async function safeDirectorySync(dirPath: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(dirPath, constants.O_RDONLY);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code && BENIGN_DIR_SYNC_CODES.has(code)) return;
+    throw error;
+  }
+  try {
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_DIR_SYNC_CODES.has(code)) throw error;
+  } finally {
+    await handle.close();
+  }
+}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -43,9 +85,15 @@ async function tryBreakStaleLock(lockPath: string): Promise<boolean> {
       return true;
     }
     if (ageMs > DEAD_PID_GRACE_MS) {
-      const handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const handle = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       let raw = "";
-      try { raw = await handle.readFile("utf8"); } finally { await handle.close(); }
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile() || opened.size > 4096) return false;
+        raw = await handle.readFile("utf8");
+      } finally {
+        await handle.close();
+      }
       const pid = Number.parseInt(raw.trim(), 10);
       if (Number.isSafeInteger(pid) && pid > 0 && !isProcessAlive(pid)) {
         await rm(lockPath, { force: true });
@@ -99,9 +147,15 @@ async function readCurrentConfig(configFile: string): Promise<
     const info = await lstat(configFile);
     if (!info.isFile() || info.size > 4 * 1024 * 1024) return { kind: "invalid" };
     const mode = info.mode & 0o777;
-    const handle = await open(configFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(configFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let text = "";
-    try { text = await handle.readFile("utf8"); } finally { await handle.close(); }
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size > 4 * 1024 * 1024) return { kind: "invalid" };
+      text = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
     return { kind: "present", text, digest: sha256(text), mode };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
@@ -144,8 +198,8 @@ export async function ensureCodexWorkspaceTrust(workspaceRoot: string, configFil
         return record(current)?.["trust_level"] === "trusted" ? "already_trusted" : "skipped";
       }
 
-      // JSON string escaping is a valid TOML basic string for a path key.
-      const next = `${text}${text.length && !text.endsWith("\n") ? "\n" : ""}${text.length ? "\n" : ""}[projects.${JSON.stringify(workspaceRoot)}]\ntrust_level = "trusted"\n`;
+      // Escape DEL (U+007F) in addition to JSON escapes so any valid POSIX path forms a legal TOML 1.0 basic string.
+      const next = `${text}${text.length && !text.endsWith("\n") ? "\n" : ""}${text.length ? "\n" : ""}[projects.${tomlBasicString(workspaceRoot)}]\ntrust_level = "trusted"\n`;
       try {
         const check = record(record(parse(next) as Record<string, unknown>)?.["projects"])?.[workspaceRoot];
         if (record(check)?.["trust_level"] !== "trusted") return "skipped";
@@ -162,7 +216,7 @@ export async function ensureCodexWorkspaceTrust(workspaceRoot: string, configFil
         );
         try {
           await handle.writeFile(next, "utf8");
-          await handle.sync();
+          await safeFileSync(handle);
         } finally {
           await handle.close();
         }
@@ -180,6 +234,7 @@ export async function ensureCodexWorkspaceTrust(workspaceRoot: string, configFil
         }
 
         await rename(temporary, configFile);
+        await safeDirectorySync(dirname(configFile));
         return "trusted";
       } catch {
         await rm(temporary, { force: true });

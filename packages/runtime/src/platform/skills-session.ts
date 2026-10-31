@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, parse, sep } from "node:path";
 import {
   AgentProviderIdSchema,
@@ -243,7 +244,22 @@ async function persistRecord(
   const handle = await open(temp, "wx", 0o600);
   try {
     await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8");
-    await handle.sync();
+    try {
+      await handle.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (
+        code !== "EINVAL" &&
+        code !== "ENOSYS" &&
+        code !== "ENOTSUP" &&
+        code !== "EOPNOTSUPP" &&
+        code !== "EROFS" &&
+        code !== "EPERM" &&
+        code !== "EACCES"
+      ) {
+        throw error;
+      }
+    }
   } catch (error) {
     await handle.close();
     await rm(temp, { force: true });
@@ -268,6 +284,7 @@ async function persistRecord(
       code !== "EOPNOTSUPP" &&
       code !== "EROFS" &&
       code !== "EPERM" &&
+      code !== "EACCES" &&
       code !== "EISDIR" &&
       code !== "EBADF"
     ) {
@@ -306,8 +323,20 @@ async function lstatOrNull(path: string) {
 async function readRecordFile(file: string): Promise<OperationResult<string | null>> {
   const stats = await lstatOrNull(file);
   if (stats === null) return ok(null);
-  if (!stats.isFile()) return fail("corruption", "skill record is not a regular file");
-  return ok(await readFile(file, "utf8"));
+  if (stats.isSymbolicLink() || !stats.isFile()) return fail("corruption", "skill record is not a regular file");
+  try {
+    const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()) return fail("corruption", "skill record is not a regular file");
+      return ok(await handle.readFile("utf8"));
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (isNotFound(error)) return ok(null);
+    return fail("corruption", "skill record is not a regular file");
+  }
 }
 
 function parseRecord(text: string): OperationResult<PersistedRoleSkills> {
