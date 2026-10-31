@@ -39,6 +39,9 @@ export function resolveChatDecision(
 
   if (decision.intent === "workflow_request") {
     const draft = normalizedDraft!;
+    if (!draft.title.trim() || !draft.objective.trim()) {
+      return invalid("A workflow decision requires a non-empty title and objective");
+    }
     const criteria = resolveDraftCriteria(draft);
     if (!criteria.ok) return invalid(criteria.error.message);
     if (!draft.scopeDefined || criteria.value.length === 0 ||
@@ -160,9 +163,20 @@ export function resolveChatDecision(
   } else if (decision.intent === "status_query" && (targetRunId || targetCorrelationId)) {
     const workflow = targetCorrelationId ? context.workflows[targetCorrelationId] :
       Object.values(context.workflows).find(item => item.runId === targetRunId);
-    if (!workflow || (targetRunId && targetRunId !== workflow.runId)) return invalid("Unknown status-query workflow");
-    targetCorrelationId = workflow.correlationId;
-    targetRunId = workflow.runId;
+    if (workflow && (!targetRunId || targetRunId === workflow.runId)) {
+      targetCorrelationId = workflow.correlationId;
+      targetRunId = workflow.runId;
+    } else if (targetRunId) {
+      const runtimeTarget = context.runtimeCancellationTargets?.[targetRunId];
+      if (!runtimeTarget || runtimeTarget.delegation.sessionId !== context.session.sessionId ||
+          (targetCorrelationId && runtimeTarget.delegation.correlationId !== targetCorrelationId)) {
+        return invalid("Unknown status-query workflow");
+      }
+      targetCorrelationId = runtimeTarget.delegation.correlationId;
+      targetRunId = runtimeTarget.runId;
+    } else {
+      return invalid("Unknown status-query workflow");
+    }
   }
 
   return { ok: true, value: {

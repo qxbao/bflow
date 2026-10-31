@@ -18,12 +18,23 @@ function parseDraft(raw:string|null):Draft|undefined{
   }catch{/* ignore malformed draft */}
   return undefined;
 }
+const readDraft=(primaryKey:string,fallbackKey:string):Draft=>parseDraft(sessionStorage.getItem(primaryKey))??parseDraft(sessionStorage.getItem(fallbackKey))??empty;
 export function RequestForm({api,id,sessionId,enabled,runId,action}:{api:ApiClient;id:string;sessionId:string;enabled:boolean;runId?:string;action?:WebAction}) {
   const slot=runId?`revise:${runId}`:'create',key=`bflow:web:draft:${encodeURIComponent(id)}:${slot}`,legacyKey=`bflow:web:draft:${encodeURIComponent(id)}:${encodeURIComponent(sessionId)}:${slot}`,uid=useId();
-  const [draft,setDraft]=useState<Draft>(()=>parseDraft(sessionStorage.getItem(key))??parseDraft(sessionStorage.getItem(legacyKey))??empty);
+  const [draft,setDraft]=useState<Draft>(()=>readDraft(key,legacyKey));
+  const loadedKey=useRef(key);
   const [errors,setErrors]=useState<Record<string,string>>({}),[message,setMessage]=useState('');const summary=useRef<HTMLDivElement>(null);
   const commands=useCommands(slot);
-  useEffect(()=>{try{sessionStorage.setItem(key,JSON.stringify(draft));}catch{setMessage('Không lưu được bản nháp trong trình duyệt.');}},[key,draft]);
+  useEffect(()=>{
+    if(loadedKey.current!==key){
+      loadedKey.current=key;
+      setDraft(readDraft(key,legacyKey));
+      setErrors({});
+      setMessage('');
+      return;
+    }
+    try{sessionStorage.setItem(key,JSON.stringify(draft));}catch{setMessage('Không lưu được bản nháp trong trình duyệt.');}
+  },[key,legacyKey,draft]);
   useEffect(()=>{if(Object.keys(errors).length)summary.current?.focus();},[errors]);
   function field(key:'title'|'objective'|'criteria'|'constraints'){return {id:uid+key,value:draft[key],onChange:(e:{target:{value:string}})=>setDraft(prev=>({...prev,[key]:e.target.value})), 'aria-invalid':Boolean(errors[key]),'aria-describedby':errors[key]?uid+key+'-error':undefined};}
   async function submit(event:FormEvent){event.preventDefault();if(commands.busy)return;

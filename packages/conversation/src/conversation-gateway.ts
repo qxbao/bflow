@@ -1212,7 +1212,8 @@ export class ConversationGateway {
         case "status_query": {
           const statusSummary = formatStatusSummaryForUser(
             this.snapshot!,
-            classification.targetCorrelationId ?? input.correlationId
+            classification.targetCorrelationId ?? input.correlationId,
+            classification.targetRunId ?? input.runId
           );
 
           const userMsg: ConversationMessage = {
@@ -1731,17 +1732,24 @@ export class ConversationGateway {
       runtimeCancellationTargets[run.runId] = RuntimeCancellationTargetSchema.parse(run);
       const status = run.cancelled ? "cancelled" : run.status;
       const runtimeRevision = z.number().int().nonnegative().catch(1).parse(delegation.metadata?.revision);
-      // A queued newer requirement can precede Runtime ingress. Preserve its identity as a pair;
-      // when Runtime is newer, adopt its revision together with the delegation id for exact-turn recovery.
-      const pendingNewer = previous?.runId === run.runId && previous.revision > runtimeRevision;
-      const requirement = pendingNewer ? previous : delegation;
-      workflows[correlationId] = { ...previous, correlationId, sessionId: this.config.sessionId, delegationId: requirement.delegationId,
-        specificationId: requirement.specificationId, runId: run.runId, title: requirement.title, objective: requirement.objective,
-        kind: previous?.kind ?? "feature", sddLevel: requirement.sddLevel, priority: requirement.priority,
-        acceptanceCriteria: requirement.acceptanceCriteria, revision: pendingNewer ? previous.revision : runtimeRevision, generation: previous?.generation ?? 0,
-        activeApprovalIds: previous?.activeApprovalIds ?? [], progressHistory: previous?.progressHistory ?? [],
-        sdlcStatus: status, completedVerified: previous?.runId === run.runId && previous.completedVerified === true && status === "completed",
-        createdAt: previous?.createdAt ?? delegation.requestedAt, updatedAt: now };
+      const keepActiveSibling =
+        previous !== undefined &&
+        previous.runId !== run.runId &&
+        !isTerminalRunStatus(previous.sdlcStatus) &&
+        isTerminalRunStatus(status);
+      if (!keepActiveSibling) {
+        // A queued newer requirement can precede Runtime ingress. Preserve its identity as a pair;
+        // when Runtime is newer, adopt its revision together with the delegation id for exact-turn recovery.
+        const pendingNewer = previous?.runId === run.runId && previous.revision > runtimeRevision;
+        const requirement = pendingNewer ? previous : delegation;
+        workflows[correlationId] = { ...previous, correlationId, sessionId: this.config.sessionId, delegationId: requirement.delegationId,
+          specificationId: requirement.specificationId, runId: run.runId, title: requirement.title, objective: requirement.objective,
+          kind: previous?.kind ?? "feature", sddLevel: requirement.sddLevel, priority: requirement.priority,
+          acceptanceCriteria: requirement.acceptanceCriteria, revision: pendingNewer ? previous.revision : runtimeRevision, generation: previous?.generation ?? 0,
+          activeApprovalIds: previous?.activeApprovalIds ?? [], progressHistory: previous?.progressHistory ?? [],
+          sdlcStatus: status, completedVerified: previous?.runId === run.runId && previous.completedVerified === true && status === "completed",
+          createdAt: previous?.createdAt ?? delegation.requestedAt, updatedAt: now };
+      }
       runMap[run.runId] = correlationId;
       if (isTerminalRunStatus(status)) terminal.add(run.runId);
       updated.push(run.runId);

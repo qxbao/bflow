@@ -84,7 +84,14 @@ export class WebOperationStore {
     const temp = join(this.directory, `pending-${randomUUID()}.tmp`);
     const file = await open(temp, "wx", 0o600);
     try {
-      try { await file.writeFile(canonicalWebJson(receipt)); await file.sync(); }
+      try {
+        await file.writeFile(canonicalWebJson(receipt));
+        try { await file.sync(); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+        }
+      }
       finally { await file.close(); }
       try { await link(temp, join(this.directory, name)); }
       catch (error) {

@@ -24,10 +24,15 @@ export async function privateStateIsFree(directory:string):Promise<boolean>{
   try{const info=await file.stat();if(!info.isFile()||info.nlink!==1)throw new Error('Unsafe server lock');return await exclusiveLock(file);}
   finally{await file.close();}
 }
+const IGNORED_FSYNC_CODES=['EINVAL','ENOTSUP','EOPNOTSUPP','ENOSYS','EPERM','EACCES','EBADF','EISDIR','EROFS'];
+async function syncHandleSafe(handle:FileHandle):Promise<void>{
+  try{await handle.sync();}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
+}
 async function syncDirectorySafe(directory:string):Promise<void>{
   let handle:FileHandle|undefined;
-  try{handle=await open(directory,constants.O_RDONLY);await handle.sync();}
-  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!['EINVAL','ENOTSUP','EPERM','EACCES','EBADF','EISDIR','EROFS'].includes(code))throw error;}
+  try{handle=await open(directory,constants.O_RDONLY);await syncHandleSafe(handle);}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
   finally{await handle?.close().catch(()=>{});}
 }
 /** Local POSIX private files. Fails closed on foreign/symlink state; no same-UID or power-loss claim. */
@@ -63,9 +68,9 @@ export class PrivateState {
   }
   async write(name:string,value:unknown):Promise<void> {
     const temporary=join(this.directory,`.tmp-${randomUUID()}`);
-    const file=await open(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
-    try {await file.writeFile(JSON.stringify(value));await file.sync();await file.close();await rename(temporary,join(this.directory,name));await syncDirectorySafe(this.directory);}
-    finally{await file.close();await unlink(temporary).catch(()=>{});}
+    let file:FileHandle|undefined=await open(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
+    try {await file.writeFile(JSON.stringify(value));await syncHandleSafe(file);await file.close();file=undefined;await rename(temporary,join(this.directory,name));await syncDirectorySafe(this.directory);}
+    finally{await file?.close().catch(()=>{});await unlink(temporary).catch(()=>{});}
   }
   async names():Promise<string[]> {return readdir(this.directory);}
   // Keep the lock inode: unlinking a locked file would let a racing owner lock a different inode.

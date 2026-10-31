@@ -457,15 +457,47 @@ export function formatCoordinatorMessageForUser(params: {
  */
 export function formatStatusSummaryForUser(
   context: ConversationContextSnapshot,
-  targetCorrelationId?: string | undefined
+  targetCorrelationId?: string | undefined,
+  targetRunId?: string | undefined
 ): string {
   const lines: string[] = [];
 
-  // Target specific workflow if correlationId is provided
-  if (targetCorrelationId) {
-    const wf = context.workflows[targetCorrelationId];
+  // Target specific workflow if correlationId or runId is provided
+  if (targetCorrelationId || targetRunId) {
+    let wf = targetCorrelationId ? context.workflows[targetCorrelationId] : undefined;
+    if (targetRunId && (!wf || wf.runId !== targetRunId)) {
+      const byRun = Object.values(context.workflows).find(item => item.runId === targetRunId);
+      if (byRun) {
+        wf = byRun;
+      } else {
+        const rt = context.runtimeCancellationTargets?.[targetRunId];
+        if (rt && rt.delegation.sessionId === context.session.sessionId) {
+          wf = {
+            correlationId: rt.delegation.correlationId,
+            sessionId: rt.delegation.sessionId,
+            delegationId: rt.delegation.delegationId,
+            specificationId: rt.delegation.specificationId,
+            runId: rt.runId,
+            title: rt.delegation.title,
+            objective: rt.delegation.objective,
+            kind: "feature",
+            sddLevel: rt.delegation.sddLevel,
+            priority: rt.delegation.priority,
+            acceptanceCriteria: rt.delegation.acceptanceCriteria,
+            revision: 1,
+            generation: 0,
+            activeApprovalIds: [],
+            progressHistory: [],
+            sdlcStatus: rt.cancelled ? "cancelled" : rt.status,
+            completedVerified: false,
+            createdAt: rt.delegation.requestedAt,
+            updatedAt: rt.delegation.requestedAt
+          };
+        }
+      }
+    }
     if (!wf) {
-      return `Không tìm thấy thông tin tiến độ cho mã tương quan: ${targetCorrelationId}`;
+      return `Không tìm thấy thông tin tiến độ cho mã tương quan: ${targetCorrelationId ?? targetRunId}`;
     }
 
     lines.push(`📊 **BÁO CÁO TIẾN ĐỘ QUY TRÌNH [${wf.runId}]**`);

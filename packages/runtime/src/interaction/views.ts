@@ -30,8 +30,15 @@ export interface ReadSources {
   pendingClarifications?: import("@bflow/conversation").ConversationContextSnapshot["pendingClarifications"] | undefined;
   redact?: (text: string) => string;
 }
+function sliceUtf16Safe(text: string, max: number): string {
+  if (max <= 0) return "";
+  if (text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
 const safe = (s: ReadSources, text: string, max = 16000) =>
-  (s.redact?.(text) ?? text).slice(0, max) || "[redacted]";
+  sliceUtf16Safe(s.redact?.(text) ?? text, max) || "[redacted]";
 export function projectDecision(
   s: ReadSources,
   r: RunRecord,
@@ -454,14 +461,14 @@ export async function hostInteractionQuery(
         intakeId: p.correlationId,
         sessionId,
         correlationId: p.correlationId,
-        title: redact(p.draft.title ?? "Yêu cầu cần làm rõ").slice(0, 200),
+        title: sliceUtf16Safe(redact(p.draft.title ?? "Yêu cầu cần làm rõ"), 200),
         status: "clarifying" as const,
         clarifications: p.unresolvedQuestions
           .slice(0, 100)
           .map((question, index) => ({
             questionId:
               "question-" + digest([p.correlationId, index, question]),
-            question: redact(question).slice(0, 16000),
+            question: sliceUtf16Safe(redact(question), 16000),
             options: [],
             expectedVersion: { revisionToken: digest(p) },
           })),

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { WebHttpContracts, WEB_LIMITS } from '@bflow/contracts/web';
 import { ApiClient, ApiError, explain, projectPath } from '../../api/client';
 import { FieldLabel } from '../../components/FieldHelp';
@@ -13,6 +13,7 @@ function pending(key:string):string|undefined {
 export function ChatComposer({api,projectId,sessionId,runId,revision,historyRejected=false,refresh}:{api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;historyReady:boolean;historyRejected?:boolean;refresh:()=>void}){
  const key=JSON.stringify(['bflow-chat',projectId,sessionId]);
  const [draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[uncertain,setUncertain]=useState(()=>{try{return !!pending(key);}catch{return true;}});
+ useEffect(()=>{setNotice('');try{setUncertain(!!pending(key));}catch{setUncertain(true);}},[key]);
  const session=useRead(`chat-session:${projectId}:${sessionId}`,()=>api.sessionView(projectId),revision);
  // Sending is governed by fresh host/session readiness; cold 503 history stays independent, while non-retryable adapter rejection disables send.
  const ready=!historyRejected&&!session.loading&&!session.error&&session.data?.state==='ready'&&session.data.sessionId===sessionId&&!session.data.blockers.some(b=>b.code==='chat_adapter_unavailable');

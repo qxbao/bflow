@@ -173,20 +173,47 @@ export async function createAgenticConversationHost(options: {
   // Runtime journal is authoritative for status, including cancellation. This is local projection reconciliation,
   // never a fabricated Herdr receipt or a human decision; the Gateway validates the exported nested contracts.
   let runtimeRunIds: string[] = [];
+  let runtimeRunMeta = new Map<string, { status: string; cancelled: boolean; coreCreated: boolean; hasNativeDeliveries: boolean; supersededBy?: string }>();
   let projectionWarnings: string[] = [];
-  const syncAliases = async () => {
-    if (!options.noticeAliases) return;
-    const aliases = await options.noticeAliases().catch(() => undefined);
-    if (aliases) gateway.syncNoticeAliases(aliases);
-  };
   const reconcileRuns = async () => {
-    await syncAliases();
+    const baseAliases = options.noticeAliases ? await options.noticeAliases().catch(() => undefined) : undefined;
     const state = record(await runtime.inspect());
     if (!Array.isArray(state.runs)) throw new Error("Runtime returned invalid run status snapshot");
+    const nextMeta = new Map<string, { status: string; cancelled: boolean; coreCreated: boolean; hasNativeDeliveries: boolean; supersededBy?: string }>();
     const entries = state.runs.map(input => {
       const run = record(input), delegation = DelegationRequestSchema.parse(run.delegation);
+      const runId = String(run.runId ?? delegation.runId ?? "");
+      nextMeta.set(runId, {
+        status: String(run.status ?? "intake"),
+        cancelled: run.cancelled === true,
+        coreCreated: run.coreCreated === true,
+        hasNativeDeliveries: Array.isArray(run.nativeDeliveries) && run.nativeDeliveries.length > 0,
+        ...(typeof run.supersededBy === "string" && run.supersededBy.length > 0 ? { supersededBy: run.supersededBy } : {})
+      });
       return { runId: run.runId, delegation, status: run.status, cancelled: run.cancelled };
     }).filter(run => run.delegation.sessionId === manifest.conversationSessionId);
+    runtimeRunMeta = nextMeta;
+    const runShortIds: Record<string, string> = { ...(baseAliases?.runShortIds ?? {}) };
+    const aliasedRuns = new Set(Object.values(runShortIds));
+    let nextIndex =
+      Math.max(
+        0,
+        ...Object.keys(runShortIds).map(key => Number(/^việc\s*#([1-9]\d*)$/iu.exec(key)?.[1] ?? 0))
+      ) + 1;
+    for (const entry of entries) {
+      const id = String(entry.runId ?? entry.delegation.runId ?? "");
+      if (!id || aliasedRuns.has(id)) continue;
+      while (runShortIds[`việc #${nextIndex}`] !== undefined) nextIndex++;
+      runShortIds[`việc #${nextIndex}`] = id;
+      aliasedRuns.add(id);
+      nextIndex++;
+    }
+    if (options.noticeAliases || Object.keys(runShortIds).length > 0) {
+      gateway.syncNoticeAliases({
+        approvalShortIds: baseAliases?.approvalShortIds ?? {},
+        runShortIds
+      });
+    }
     const result = await gateway.reconcileRuntimeRuns(entries);
     if (!result.ok) throw new Error(result.error.message);
     projectionWarnings = result.value.rejected.map((reason: string) => `Runtime projection could not be reconciled: ${reason}`);
@@ -259,7 +286,10 @@ export async function createAgenticConversationHost(options: {
         const context = gateway.getContextSnapshot();
         return json({ session: context.session, pendingClarifications: context.pendingClarifications,
           pendingApprovals: context.pendingApprovals, approvalWarnings: [...turnWarnings, ...approvalWarnings, ...projectionWarnings], workflows: context.workflows,
-          runIdToCorrelationId: context.runIdToCorrelationId, agentBusy: context.agentBusy, runtimeStatus: runtimeStatus(),
+          runIdToCorrelationId: context.runIdToCorrelationId,
+          ...(context.approvalShortIds && Object.keys(context.approvalShortIds).length ? { approvalShortIds: context.approvalShortIds } : {}),
+          ...(context.runShortIds && Object.keys(context.runShortIds).length ? { runShortIds: context.runShortIds } : {}),
+          agentBusy: context.agentBusy, runtimeStatus: runtimeStatus(),
           messages: context.messages.slice(-20).map((input: unknown) => {
             const { metadata: _metadata, ...message } = ConversationMessageSchema.parse(input); return message;
           }) });
@@ -269,8 +299,25 @@ export async function createAgenticConversationHost(options: {
     validateDecision(input) {
       return exclusive(async () => {
         await reconcileRuns();
-        const result = module.resolveChatDecision(module.ChatDecisionSchema.parse(input), gateway.getContextSnapshot());
+        const parsed = module.ChatDecisionSchema.parse(input);
+        const result = module.resolveChatDecision(parsed, gateway.getContextSnapshot());
         if (!result.ok) throw new Error(result.error.message);
+        const resolved = result.value;
+        if (resolved.intent === "workflow_request" && resolved.requirementDraft?.isRequirementChange && resolved.targetRunId) {
+          const meta = runtimeRunMeta.get(resolved.targetRunId);
+          if (meta?.hasNativeDeliveries) {
+            throw new Error("Unknown native delivery must be reconciled before changing this run's requirements.");
+          }
+          if (meta?.cancelled || ["completed", "failed", "cancelled"].includes(meta?.status ?? "")) {
+            throw new Error(`Run ${resolved.targetRunId} is ${meta?.cancelled ? "cancelled" : meta?.status}; requirement revisions are not accepted.`);
+          }
+          if (meta?.supersededBy) {
+            throw new Error(`Run ${resolved.targetRunId} was already superseded by ${meta.supersededBy}; revise ${meta.supersededBy} or start a new run.`);
+          }
+          if (meta?.coreCreated) {
+            throw new Error(`Run ${resolved.targetRunId} is already executing tasks in Core; cancel it and start a new run instead of revising in place.`);
+          }
+        }
       });
     },
     handleTrustedApproval(input) {

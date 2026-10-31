@@ -49,24 +49,30 @@ async function readReceipt(directory:string,projectId:string,id:string):Promise<
   if(value.projectId!==projectId || value.operationId!==id || value.owner!=='local_lifecycle')throw new Error('Foreign lifecycle receipt');
   return value;
 }
+const IGNORED_FSYNC_CODES=['EINVAL','ENOTSUP','EOPNOTSUPP','ENOSYS','EPERM','EACCES','EBADF','EISDIR','EROFS'];
+async function syncHandleSafe(handle:{sync():Promise<void>}){
+  try{await handle.sync();}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
+}
 async function syncDirectory(directory:string){
   let handle;
-  try{handle=await open(directory,'r');await handle.sync();}
-  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!['EINVAL','ENOTSUP','EPERM','EACCES','EBADF','EISDIR','EROFS'].includes(code))throw error;}
+  try{handle=await open(directory,'r');await syncHandleSafe(handle);}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
   finally{await handle?.close().catch(()=>{});}
 }
 async function reserveReceipt(directory:string,operation:WebOperation):Promise<boolean>{
   await receiptRoot(directory,true);let handle;
   try{handle=await open(receiptPath(directory,operation.projectId,operation.operationId),constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);}
   catch(error){if((error as NodeJS.ErrnoException).code==='EEXIST')return false;throw error;}
-  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await handle.sync();}finally{await handle.close();}
+  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await syncHandleSafe(handle);}finally{await handle.close();}
   await syncDirectory(directory);return true;
 }
 async function settleReceipt(directory:string,operation:WebOperation){
-  const temp=join(directory,'pending-'+randomUUID()+'.tmp'),handle=await open(temp,'wx',0o600);
-  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await handle.sync();await handle.close();
+  const temp=join(directory,'pending-'+randomUUID()+'.tmp');
+  let handle:Awaited<ReturnType<typeof open>>|undefined=await open(temp,'wx',0o600);
+  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await syncHandleSafe(handle);await handle.close();handle=undefined;
     await rename(temp,receiptPath(directory,operation.projectId,operation.operationId));await syncDirectory(directory);
-  }finally{await handle.close();await unlink(temp).catch(()=>{});}
+  }finally{await handle?.close().catch(()=>{});await unlink(temp).catch(()=>{});}
 }
 
 /** Local, owner-generated diagnostics only (no credentials): control characters removed and bounded. */
