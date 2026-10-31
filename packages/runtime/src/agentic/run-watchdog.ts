@@ -50,6 +50,8 @@ export interface WatchdogInput {
   runs: readonly RunFacts[];
   notices: readonly NoticeFact[];
   panes: readonly PaneFact[];
+  /** Runs with an in-flight host-owned verification/sandbox check (treated as runtimeWork for stall suppression). */
+  activeVerificationRunIds?: readonly string[];
   options?: Partial<WatchdogOptions>;
 }
 
@@ -72,6 +74,7 @@ const NOT_WORKING = new Set(["idle", "done", "unknown", "disconnected", "cancell
 export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {
   const options: WatchdogOptions = { ...DEFAULT_WATCHDOG_OPTIONS, ...input.options };
   const notices = new Map(input.notices.map(notice => [notice.messageId, notice]));
+  const activeVerifications = new Set(input.activeVerificationRunIds ?? []);
   const actions: WatchdogAction[] = [];
   for (const run of input.runs) {
     if (!run.live) continue;
@@ -89,7 +92,7 @@ export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {
     }
     // A pending human gate, handoff or question is waiting, not stalled. Inspect only this run's accepted holders;
     // an unrelated busy pane in the same session cannot hide a dead run.
-    if (run.awaitingHuman || run.activeHandoff || run.runtimeWork || run.pendingDecisions.length > 0) continue;
+    if (run.awaitingHuman || run.activeHandoff || run.runtimeWork || activeVerifications.has(run.runId) || run.pendingDecisions.length > 0) continue;
     const acceptedPanes = run.acceptedPanes ?? [];
     if (acceptedPanes.length > 0) {
       if (acceptedPanes.some(holder => input.panes.some(pane => pane.role === holder.role && pane.paneId === holder.paneId && !NOT_WORKING.has(pane.status)))) continue;

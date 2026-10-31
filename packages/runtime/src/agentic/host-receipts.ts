@@ -371,7 +371,14 @@ export class HostReceiptJournal {
     const envelope = this.validate({ ...value, checksum: digest(value) }, kind, id);
     await this.prepare();
     const path = join(this.directory, `pending-${randomUUID()}.tmp`), file = await open(path, "wx", 0o600);
-    try { await file.writeFile(JSON.stringify(envelope)); await file.sync(); } finally { await file.close(); }
+    try {
+      await file.writeFile(JSON.stringify(envelope));
+      try { await file.sync(); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"].includes(code)) throw error;
+      }
+    } finally { await file.close(); }
     let created = true;
     try {
       try { await link(path, join(this.directory, this.filename(kind, id))); }

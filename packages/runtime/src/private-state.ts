@@ -129,11 +129,19 @@ function readPinnedLocation(locator: string, repository: string, repositoryHash:
   preserveLegacyAuthority(local, relocated);
   return external;
 }
+const IGNORED_REGULAR_FSYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"]);
+function syncRegularFd(fd: number): void {
+  try { fs.fsyncSync(fd); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !IGNORED_REGULAR_FSYNC_CODES.has(code)) throw error;
+  }
+}
 function pinLocation(locator: string, repository: string, repositoryHash: string, external: string): void {
   const temporary = `${locator}.${randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, "wx", 0o600);
   try {
-    try { fs.writeFileSync(fd, JSON.stringify({ schemaVersion: 1, repositoryPath: repository, repositoryHash, directory: external })); fs.fsyncSync(fd); }
+    try { fs.writeFileSync(fd, JSON.stringify({ schemaVersion: 1, repositoryPath: repository, repositoryHash, directory: external })); syncRegularFd(fd); }
     finally { fs.closeSync(fd); }
     // Hard-link publication is atomic and exclusive: another process cannot see
     // partial JSON or replace an existing location. Verified with NTFS/FUSE.

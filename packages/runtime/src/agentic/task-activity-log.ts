@@ -96,7 +96,14 @@ export class TaskActivityLog {
       const temporary = `${this.path}.${randomUUID()}.tmp`;
       try {
         const file = await open(temporary, "wx", 0o600);
-        try { await file.writeFile(body); await file.sync(); } finally { await file.close(); }
+        try {
+          await file.writeFile(body);
+          try { await file.sync(); }
+          catch (error) {
+            const code = (error as NodeJS.ErrnoException | undefined)?.code;
+            if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"].includes(code)) throw error;
+          }
+        } finally { await file.close(); }
         await rename(temporary, this.path);
       } finally { await rm(temporary, { force: true }); }
       return true;

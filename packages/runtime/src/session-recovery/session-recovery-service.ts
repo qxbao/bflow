@@ -1027,7 +1027,11 @@ export class SessionRecoveryService {
     const file = await open(temp, "wx", 0o600);
     try {
       await file.writeFile(JSON.stringify(receipt, null, 2) + "\n");
-      await file.sync();
+      try { await file.sync(); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"].includes(code)) throw error;
+      }
     } finally {
       await file.close();
     }
