@@ -199,7 +199,25 @@ export class FileToolUsageLedger {
       await chmod(temporary, 0o600);
       await rename(temporary, this.path);
       const dir = await open(directory, "r");
-      try { await dir.sync(); } finally { await dir.close(); }
+      try {
+        await dir.sync();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (
+          code !== "EINVAL" &&
+          code !== "ENOSYS" &&
+          code !== "ENOTSUP" &&
+          code !== "EOPNOTSUPP" &&
+          code !== "EROFS" &&
+          code !== "EPERM" &&
+          code !== "EISDIR" &&
+          code !== "EBADF"
+        ) {
+          throw error;
+        }
+      } finally {
+        await dir.close();
+      }
     } finally { await rm(temporary, { force: true }); }
   }
 

@@ -563,6 +563,20 @@ async function readApprovalStore(storePath: string): Promise<z.infer<typeof Appr
   return parsed.data;
 }
 
+function isIgnorableDirectorySyncError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return (
+    code === "EINVAL" ||
+    code === "ENOSYS" ||
+    code === "ENOTSUP" ||
+    code === "EOPNOTSUPP" ||
+    code === "EROFS" ||
+    code === "EPERM" ||
+    code === "EISDIR" ||
+    code === "EBADF"
+  );
+}
+
 async function writePrivateStore(storePath: string, value: unknown): Promise<void> {
   const parent = dirname(storePath);
   await ensurePrivateStoreParent(storePath, true);
@@ -575,7 +589,7 @@ async function writePrivateStore(storePath: string, value: unknown): Promise<voi
     await rename(tempPath, storePath);
     renamed = true;
     const dir = await open(parent, constants.O_RDONLY);
-    try { await dir.sync(); } finally { await dir.close(); }
+    try { await dir.sync(); } catch (error) { if (!isIgnorableDirectorySyncError(error)) throw error; } finally { await dir.close(); }
   } finally { if (!renamed) await unlink(tempPath).catch(() => undefined); }
 }
 

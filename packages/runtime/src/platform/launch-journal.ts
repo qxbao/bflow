@@ -230,6 +230,20 @@ export class FileLaunchJournal implements LaunchJournalPort {
     const handle = await open(dirname(this.path), constants.O_RDONLY);
     try {
       await handle.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (
+        code !== "EINVAL" &&
+        code !== "ENOSYS" &&
+        code !== "ENOTSUP" &&
+        code !== "EOPNOTSUPP" &&
+        code !== "EROFS" &&
+        code !== "EPERM" &&
+        code !== "EISDIR" &&
+        code !== "EBADF"
+      ) {
+        throw error;
+      }
     } finally {
       await handle.close();
     }
