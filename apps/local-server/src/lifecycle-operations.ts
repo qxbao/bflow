@@ -62,7 +62,7 @@ export class Operations {
     const hostSessionId=IdentifierSchema.parse(this.resolveHostSession?await observeWithinDeadline(()=>this.resolveHostSession!(command.projectId)):session.sessionId);
     const record=await this.reserve(command.projectId,command.commandId,command.kind,fingerprint,authorize,hostSessionId);
     try{
-      const result=WebOperationResponseSchema.parse(await observeWithinDeadline(()=>client.execute(command)));
+      const result=WebOperationResponseSchema.parse(await observeWithinDeadline(()=>client.execute(command),35000));
       if(!result.ok){if(['validation','conflict','not_found','unsupported_version'].includes(result.error.code))return await this.update(record,{...record.operation,state:'failed',error:publicError(new HttpError(contractError(result.error).code,command.commandId)),updatedAt:now()});return await this.uncertain(record);}
       return await this.update(record,result.value);
     }catch{return this.uncertain(record);}
@@ -72,7 +72,7 @@ export class Operations {
     try{
       let raw:unknown;
       if(record.index.owner==='local_lifecycle')raw=await observeWithinDeadline(()=>this.workspace.reconcileSessionOperation(record.operation));
-      else if(this.historical)raw=await observeWithinDeadline(()=>this.historical!(record.index));
+      else if(this.historical)raw=await observeWithinDeadline(()=>this.historical!(record.index),35000);
       else {
         if(!context)throw new HttpError('unavailable');
         const client=await observeWithinDeadline(()=>this.interaction(record.index.projectId,context));
@@ -80,7 +80,7 @@ export class Operations {
         // The frozen client cannot authenticate a historical session in its operation DTO.
         // Fail closed rather than accepting another host's plausible same-ID receipt.
         if(session.projectId!==record.index.projectId || session.sessionId!==record.index.hostSessionId)return await this.uncertain(record);
-        raw=await observeWithinDeadline(()=>client.readOperation(record.index.projectId,record.index.receiptId));
+        raw=await observeWithinDeadline(()=>client.readOperation(record.index.projectId,record.index.receiptId),35000);
       }
       const result=WebOperationResponseSchema.parse(raw);
       if(!result.ok)return await this.uncertain(record);

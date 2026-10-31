@@ -580,7 +580,7 @@ describe("P30 dynamic Developer launches end to end", () => {
     // (HOME and CLAUDE_CONFIG_DIR) that transcript registration validates, never a token or registration.
     const home = process.env["HOME"] ?? homedir();
     expect(launch.env).toEqual({
-      DISABLE_AUTOUPDATER: "1", HOME: home,
+      DISABLE_AUTOUPDATER: "1", MCP_TIMEOUT: "120000", HOME: home,
       CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] ?? join(home, ".claude")
     });
 

@@ -12,6 +12,32 @@ export function claudeConfigFile(env: NodeJS.ProcessEnv, home: string = homedir(
 }
 
 /**
+ * Resolves all candidate Claude Code config files that an interactive pane shell may consult for this account/profile:
+ * - primary `claudeConfigFile(env, home)`
+ * - `$ORCA_CLAUDE_CONFIG_DIR/.claude.json` when an Orca host shell exports `CLAUDE_CONFIG_DIR` inside interactive zsh panes
+ * - `<home>/.claude/.claude.json` when that directory/file already exists (Claude Code 2.x config-dir layout)
+ */
+export async function claudeConfigFiles(env: NodeJS.ProcessEnv, home: string = homedir()): Promise<string[]> {
+  const candidates = new Set<string>([claudeConfigFile(env, home)]);
+  const orcaDir = env.ORCA_CLAUDE_CONFIG_DIR?.trim();
+  if (orcaDir) candidates.add(join(orcaDir, ".claude.json"));
+  if (!env.CLAUDE_CONFIG_DIR?.trim()) {
+    const dotClaudeDir = join(home, ".claude");
+    const dotClaudeJson = join(dotClaudeDir, ".claude.json");
+    try {
+      if ((await stat(dotClaudeJson)).isFile()) candidates.add(dotClaudeJson);
+    } catch {
+      try {
+        if ((await stat(dotClaudeDir)).isDirectory()) candidates.add(dotClaudeJson);
+      } catch {
+        // Leave default ~/.claude.json only when ~/.claude does not exist.
+      }
+    }
+  }
+  return [...candidates];
+}
+
+/**
  * Records the trust-dialog acceptance Claude Code would otherwise ask for in each pane. Callers must have an explicit
  * repository opt-in (`environment.permissions.trustedWorkspace: true`). Only `projects[<root>].hasTrustDialogAccepted`
  * is touched; an unreadable or unparseable file is left alone (the dialog then simply appears) and the write is atomic.

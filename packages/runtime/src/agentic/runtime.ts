@@ -5186,7 +5186,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         // Retain physical Stop independently of delivery reconciliation; host may settle this Stop receipt now.
         // A later retry still requires released capacity, no uncertain deliveries, and an unanswered assignment.
         if (run && !run.cancelled && (!TERMINAL_RUN_STATUSES.includes(run.status) || resumablyPaused(run)) &&
-            out.message.type === "delegation.request" && this.outboundOwesResult(state, run, out) &&
+            out.message.type === "delegation.request" &&
+            this.outboundOwesResult(state, run, out) &&
             !Object.values(run.userDecisions ?? {}).some(item => item.role === role && item.status === "pending") && out.stopObservedAt === undefined) {
           out.stopObservedAt = observedAt; changed = true;
         }
@@ -5194,7 +5195,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         // Waiting on a user decision it asked for through Runtime is a legitimate idle turn, not a missing answer.
         if (Object.values(run.userDecisions ?? {}).some(item => item.role === role && item.status === "pending")) continue;
         // Likewise yielding while QA measures this task's conditional phase; a measurement that stalls is still caught by the run watchdog.
-        if (role === "developer" && unmeasuredPolicyPhaseRequests(state, run).some(item => record(item.message.payload).taskId === out.taskId)) continue;
+        const activePolicyPhaseForTask = role === "developer" && state.outbound.some(item =>
+          item.message.run_id === run.runId && item.message.type === "verification.requested" &&
+          record(item.message.payload).kind === "conditional_evidence" && record(item.message.payload).taskId === out.taskId &&
+          ["queued", "sending", "accepted"].includes(item.status) && !item.phaseFailure && !item.phaseRetirement &&
+          !item.error?.startsWith("policy_phase_failed:") &&
+          !state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected"));
+        if (role === "developer" && (activePolicyPhaseForTask || unmeasuredPolicyPhaseRequests(state, run).some(item => record(item.message.payload).taskId === out.taskId))) continue;
         if (!this.outboundOwesResult(state, run, out) || run.nativeDeliveries?.length) continue;
         const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
         const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;

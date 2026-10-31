@@ -148,7 +148,7 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
           const missing = (failure as NodeJS.ErrnoException).code === 'ENOENT';
           return WebProjectInspectionResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId, ready: false,
             checks: [{ id: 'repository-config', state: 'failed', message: missing
-              ? 'Kho mã chưa có .bflow/config.yml. Dùng Khởi tạo / sửa GitNexus bên trên rồi kiểm tra lại.'
+              ? 'Kho mã chưa có .bflow/config.yml. Dùng Khởi tạo / sửa GitNexus bên dưới (hoặc chạy bflow init) rồi kiểm tra lại.'
               : `Cấu hình .bflow/config.yml không hợp lệ: ${String(failure instanceof Error ? failure.message : failure).slice(0, 1000)}` }],
             observedAt: new Date().toISOString() } });
         }

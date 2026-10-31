@@ -61,7 +61,7 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       if(!id)throw new HttpError('not_found');
       await ctx.registry.get(id);
       if(name==='unregisterProject'){await ctx.serialize(async()=>{ctx.sessions.authenticate(req);if(ctx.operations.workspace.projectMutationStatus){const value=unwrap(WebProjectMutationStatusResultSchema.parse(await ctx.operations.workspace.projectMutationStatus(id)));if(value.projectId!==id)throw new HttpError('unavailable');if(value.initializationPending)throw new HttpError('operation_conflict');}return ctx.registry.unregister(id);});respond(undefined,204);return;}
-      if(name==='operation'){respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);},authentication));return;}
+      if(name==='operation'){res.setTimeout(40000);respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);},authentication));return;}
       await ctx.registry.require(id);
       if(name==='configuration' || name==='saveConfiguration'){
         const workspace=ctx.operations.workspace;
@@ -85,12 +85,14 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         respond(await ctx.operations.lifecycle(id,b.operationId,name==='startSession'?'session_start':'session_stop',input,()=>{ctx.sessions.authenticate(req);}),202);return;
       }
       if(name==='inspectSession'){
-        const value=unwrap(WebProjectInspectionResultSchema.parse(await observeWithinDeadline(()=>ctx.operations.workspace.inspectProject(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+        res.setTimeout(55000);
+        const value=unwrap(WebProjectInspectionResultSchema.parse(await observeWithinDeadline(()=>ctx.operations.workspace.inspectProject(id),45000)));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
       }
       if(name==='preview'){
-        const value=unwrap(WebProjectPreviewResultSchema.parse(await observeWithinDeadline(()=>ctx.operations.workspace.preview(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+        res.setTimeout(25000);
+        const value=unwrap(WebProjectPreviewResultSchema.parse(await observeWithinDeadline(()=>ctx.operations.workspace.preview(id),15000)));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
       }
-      if(name==='command'){const command=WebHttpContracts.command.body.parse(input);if(command.projectId!==id)throw new HttpError('forbidden');respond(await ctx.operations.command(command,()=>{ctx.sessions.authenticate(req);},authentication),202);return;}
+      if(name==='command'){res.setTimeout(40000);const command=WebHttpContracts.command.body.parse(input);if(command.projectId!==id)throw new HttpError('forbidden');respond(await ctx.operations.command(command,()=>{ctx.sessions.authenticate(req);},authentication),202);return;}
       const client=await observeWithinDeadline(()=>ctx.interaction(id,authentication));
       if(name==='projectSession'){const value=unwrap(WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>client.readProjectSession(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;}
       if(name==='runs'){respond(unwrap(WebRunPageResultSchema.parse(await observeWithinDeadline(()=>client.listRuns(id,WebHttpContracts.runs.query.parse(query))))));return;}
@@ -107,18 +109,21 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         await artifactResponse(req,res,value,params.artifactId!,()=>{ctx.sessions.authenticate(req);});return;
       }
       if(name==='noticeDisplayed'){
-        const value=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.acknowledgeNotice(id,params.noticeId!));});
+        res.setTimeout(40000);
+        const value=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.acknowledgeNotice(id,params.noticeId!),35000);});
         const displayed=unwrap(WebNoticeDisplayedResultSchema.parse(value));if(displayed.noticeId!==params.noticeId)throw new HttpError('unavailable');respond(displayed);return;
       }
       if(name==='messages'){
+        res.setTimeout(40000);
         const q=WebHttpContracts.messages.query.parse(parsedQuery);
-        const value=unwrap(WebChatPageResultSchema.parse(await observeWithinDeadline(()=>client.listMessages(id,params.sessionId!,q.cursor))));
+        const value=unwrap(WebChatPageResultSchema.parse(await observeWithinDeadline(()=>client.listMessages(id,params.sessionId!,q.cursor),35000)));
         if(value.items.some(message=>message.sessionId!==params.sessionId))throw new HttpError('unavailable');respond(value);return;
       }
       if(name==='sendMessage'){
+        res.setTimeout(40000);
         const b=WebHttpContracts.sendMessage.body.parse(input);
         if(b.projectId!==id||b.sessionId!==params.sessionId)throw new HttpError('forbidden');
-        const value=unwrap(WebChatMessageResultSchema.parse(await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.sendMessage(b));})));
+        const value=unwrap(WebChatMessageResultSchema.parse(await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.sendMessage(b),35000);})));
         if(value.messageId!==b.messageId||value.sessionId!==b.sessionId)throw new HttpError('unavailable');respond(value,202);return;
       }
       throw new HttpError('operation_not_allowed');

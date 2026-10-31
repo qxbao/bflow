@@ -29,6 +29,13 @@ export function subscribeEvents(projectId:string,changed:(event:WebEvent)=>void,
     current.addEventListener('open',()=>{if(!stopped && source===current)state('connected');});
     current.addEventListener('error',()=>{if(!stopped && source===current)retry();});
   };
+  const onOffline=()=>{if(!stopped)state('offline');};
+  const onOnline=()=>{
+    if(stopped)return;
+    if(source && (source as {readyState?:number}).readyState===1){state('connected');return;}
+    clearTimeout(timer);timer=undefined;attempt=0;source?.close();state('reconnecting');connect();
+  };
+  if(typeof window!=='undefined'){window.addEventListener('offline',onOffline);window.addEventListener('online',onOnline);}
   state('connecting');connect();
-  return()=>{stopped=true;clearTimeout(timer);source?.close();};
+  return()=>{stopped=true;clearTimeout(timer);source?.close();if(typeof window!=='undefined'){window.removeEventListener('offline',onOffline);window.removeEventListener('online',onOnline);}};
 }

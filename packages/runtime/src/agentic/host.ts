@@ -2922,7 +2922,10 @@ export async function runRoleMcp(configuration: RoleConfiguration, roleConfigPat
         continue;
       }
       if (request.method === "ping") { reply({}); continue; }
-      if (request.method !== "tools/call") throw new Error("Unsupported MCP method");
+      if (request.method !== "tools/call") {
+        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: "Method not found" } }) + "\n");
+        continue;
+      }
       const params = record(request.params); if (!availableTools(configuration.role, configuration.provider).some(tool => tool.name === params.name)) throw new Error("Tool is unavailable for this role");
       const measured = ["record_behavioral_verification", "check_work", "inspect_review", "complete_review", "record_alternative_verification", "submit_implementation"].includes(String(params.name));
       const paneId = process.env.HERDR_PANE_ID;
