@@ -1,5 +1,5 @@
 import { LoadingState } from '../components/LoadingState';
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { WebConfigValue, WebProjectConfiguration } from '@bflow/contracts/web';
 import { ApiClient, explain } from '../api/client';
 import { FieldHelp, FieldLabel } from '../components/FieldHelp';
@@ -126,18 +126,31 @@ function Roles({value,onChange}:{value:WebConfigValue[];onChange:(v:WebConfigVal
 export function ProjectConfiguration({api,id,revision,disabled=false,onDirtyChange,onRevisionChange}:{api:ApiClient;id:string;revision:number;disabled?:boolean;onDirtyChange?:(dirty:boolean)=>void;onRevisionChange?:(revision:string)=>void}){
  const [saved,setSaved]=useState<WebProjectConfiguration>(),[values,setValues]=useState<Record<string,WebConfigValue>>({}),[yaml,setYaml]=useState(''),[mode,setMode]=useState<'form'|'yaml'>('form'),[error,setError]=useState<unknown>(),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[editorRevision,setEditorRevision]=useState(0),[invalidDraft,setInvalidDraft]=useState(false);
  const [loadedId,setLoadedId]=useState(id);
+ const activeId=useRef(id);activeId.current=id;
+ const reqGen=useRef(0),mounted=useRef(true);
+ useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
  const dirty=invalidDraft || Boolean(saved && (mode==='yaml'?yaml!==saved.yaml:JSON.stringify(values)!==JSON.stringify(saved.values)));
  useEffect(()=>{onDirtyChange?.(dirty);return()=>onDirtyChange?.(false);},[dirty,onDirtyChange]);
  useEffect(()=>{onRevisionChange?.(saved?.revision??'');},[saved?.revision,onRevisionChange]);
  const assign=(config:WebProjectConfiguration)=>{setSaved(config);setValues(config.values);setYaml(config.yaml);setEditorRevision(value=>value+1);setInvalidDraft(false);};
- async function load(isActive:()=>boolean=()=>true){setBusy(true);setError(undefined);try{const next=await api.configuration(id);if(isActive())assign(next);}catch(e){if(isActive())setError(e);}finally{if(isActive())setBusy(false);}}
+ async function load(targetId=id){
+  const gen=++reqGen.current;
+  const current=()=>mounted.current && activeId.current===targetId && reqGen.current===gen;
+  setBusy(true);setError(undefined);
+  try{const next=await api.configuration(targetId);if(current())assign(next);}catch(e){if(current())setError(e);}finally{if(current())setBusy(false);}
+ }
  useEffect(()=>{
-  let active=true;
   if(loadedId!==id){setLoadedId(id);setSaved(undefined);setValues({});setYaml('');setMessage('');setInvalidDraft(false);}
-  void load(()=>active);
-  return()=>{active=false;};
+  void load(id);
+  return()=>{reqGen.current+=1;};
  },[api,id,revision]);
- async function save(event:FormEvent){event.preventDefault();if(!saved)return;setBusy(true);setError(undefined);setMessage('');try{assign(await api.saveConfiguration(id,{apiVersion:1,expectedRevision:saved.revision,...(mode==='yaml'?{yaml}:{values})}));setMessage('Đã lưu cấu hình. Các thay đổi áp dụng khi khởi động lại phiên.');}catch(e){setError(e);}finally{setBusy(false);}}
+ async function save(event:FormEvent){
+  event.preventDefault();if(!saved)return;
+  const targetId=id,gen=++reqGen.current;
+  const current=()=>mounted.current && activeId.current===targetId && reqGen.current===gen;
+  setBusy(true);setError(undefined);setMessage('');
+  try{const next=await api.saveConfiguration(targetId,{apiVersion:1,expectedRevision:saved.revision,...(mode==='yaml'?{yaml}:{values})});if(current()){assign(next);setMessage('Đã lưu cấu hình. Các thay đổi áp dụng khi khởi động lại phiên.');}}catch(e){if(current())setError(e);}finally{if(current())setBusy(false);}
+ }
  const env=values.environment && typeof values.environment==='object' && !Array.isArray(values.environment)?values.environment:{};
  const setEnv=(key:string,value:WebConfigValue)=>setValues({...values,environment:{...env,[key]:value}});
  const envEntries=Object.entries({...{requiredMcpServices:[],requiredTools:[]},...env}).filter(([key])=>!['roles','repositoryId','workspaceRoot','sessionName'].includes(key));

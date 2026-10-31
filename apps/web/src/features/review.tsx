@@ -1,5 +1,6 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
+import type { WebRunView } from '@bflow/contracts/web';
 import { ApiClient } from '../api/client';
 import { useRead } from './data';
 import { DecisionReview, type DecisionDraft } from './decisions';
@@ -20,7 +21,10 @@ export function Review({api,id,revision,refresh}:{api:ApiClient;id:string;revisi
   const pagination=localPage(filtered,query.get('page'),10);
   const dirty=pagination.items.some(item=>{const draft=drafts[JSON.stringify([item.runId,item.decisionId])];return Boolean(draft?.review && (draft.reason || draft.option));});
   const runIds=[...new Set(pagination.items.map(item=>item.runId))];
+  const cachedRuns=useRef(new Map<string,{runId:string;value:WebRunView|undefined;error:unknown}>()),cachedProject=useRef(id);
+  if(cachedProject.current!==id){cachedProject.current=id;cachedRuns.current.clear();}
   const runs=useRead(JSON.stringify(['review-runs',id,runIds]),()=>Promise.all(runIds.map(async runId=>{try{return {runId,value:await api.run(id,runId),error:undefined};}catch(error){return {runId,value:undefined,error};}})),revision);
+  useEffect(()=>{if(!runs.data)return;for(const item of runs.data)cachedRuns.current.set(item.runId,item);},[runs.data]);
   const change=useCallback((next:URLSearchParams)=>{if(dirty)setPending(next);else setQuery(next);},[dirty,setQuery]);
   function page(value:number){const next=new URLSearchParams(query);next.set('page',String(value));change(next);}
   return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Hộp xem xét</div><h1>Cần bạn quyết định</h1>
@@ -31,7 +35,7 @@ export function Review({api,id,revision,refresh}:{api:ApiClient;id:string;revisi
     {Boolean(runs.error) && pagination.items.length>0 && <ErrorState stale={Boolean(runs.data)} error={runs.error} retry={refresh}/>}
     {pending && <ActionConfirmation title="Rời nội dung quyết định chưa gửi?" onBack={()=>setPending(undefined)}><p>Lý do hoặc phương án đang nhập sẽ bị bỏ khi chuyển trang hoặc bộ lọc.</p><button onClick={()=>{setDrafts(old=>Object.fromEntries(Object.entries(old).filter(([key])=>!pagination.items.some(item=>key===JSON.stringify([item.runId,item.decisionId])))));setDraftEpoch(value=>value+1);setQuery(pending);setPending(undefined);}}>Bỏ nội dung và tiếp tục</button></ActionConfirmation>}
     {result.data && (pagination.items.length?<div>{pagination.items.map(decision=>{
-      const observation=runs.data?.find(item=>item.runId===decision.runId),run=observation?.value;
+      const observation=runs.data?.find(item=>item.runId===decision.runId)??(runs.loading?cachedRuns.current.get(decision.runId):undefined),run=observation?.value;
       const key=JSON.stringify([decision.runId,decision.decisionId]);
       return <section key={`${decision.runId}:${decision.decisionId}:${draftEpoch}`} className="mb-5"><>{Boolean(observation?.error) && <ErrorState error={observation?.error} retry={refresh}/>}<DecisionReview draft={drafts[key]} onDraftChange={next=>setDrafts(old=>{const previous=old[key];return previous?.review===next.review && previous?.reason===next.reason && previous?.option===next.option?old:{...old,[key]:next};})} api={api} id={id} decision={decision} actions={run?.availableActions??[]} fresh={!result.loading && !result.error && !runs.loading && !runs.error && !observation?.error && run?.currentRunId===decision.runId} refreshing={(result.loading || runs.loading) && !result.error && !runs.error && !observation?.error && run?.currentRunId===decision.runId} refresh={refresh}/></><Link className="mt-2 inline-block text-sm" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(decision.runId)}`}>Xem ngữ cảnh công việc →</Link></section>;
     })}</div>:<EmptyState title={status?'Không có gói phù hợp':'Không có quyết định đang chờ'}><p>{status?'Thử trạng thái khác để xem các gói trong bản đọc hiện có.':'Các gói cần xem xét sẽ được cập nhật khi phiên dự án công bố.'}</p></EmptyState>)}

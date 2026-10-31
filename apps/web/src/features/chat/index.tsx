@@ -69,11 +69,12 @@ function RunThread({api,projectId,sessionId,runId,revision,title}:{
   // Inferred, not a provider signal: Conversation holds a delivered message and has not answered yet.
   const composing=unsettled&&last?.delivery==='delivered'&&ready&&!result.error;
   const optimistic=pending&&!relevant.some(message=>message.messageId===pending.messageId)?pending:undefined;
+  const shouldPoll=unsettled || Boolean(optimistic && optimistic.delivery!=='failed');
   useEffect(()=>{
-    if(!unsettled)return;
+    if(!shouldPoll)return;
     const poll=setInterval(()=>{setClock(Date.now());setReload(value=>value+1);},REPLY_POLL_MS);
     return()=>clearInterval(poll);
-  },[unsettled]);
+  },[shouldPoll]);
   const log=useRef<HTMLDivElement>(null),pinned=useRef(true),anchor=useRef<number|undefined>(undefined);
   // Follows new messages only while the reader is at the bottom, and keeps position when older ones load.
   useLayoutEffect(()=>{
@@ -115,6 +116,6 @@ function RunThread({api,projectId,sessionId,runId,revision,title}:{
       </ol>
       {composing&&<div role="status" className="mt-2 inline-flex items-center gap-2 rounded-2xl rounded-bl-sm bg-faint px-3 py-2 font-data text-xs text-muted"><span aria-hidden="true" className="flex gap-1">{['','[animation-delay:150ms]','[animation-delay:300ms]'].map((delay,index)=><span key={index} className={`size-1.5 animate-bounce rounded-full bg-muted ${delay}`.trim()}/>)}</span>Đang soạn tin</div>}
     </div>
-    <ChatComposer api={api} projectId={projectId} sessionId={sessionId} runId={runId} ready={ready} sessionFresh={!session.loading} refresh={refresh} onPending={value=>{if(value)pinned.current=true;setPending(value);}}/>
+    <ChatComposer api={api} projectId={projectId} sessionId={sessionId} runId={runId} ready={ready} sessionFresh={Boolean(session.data && !session.error)} refresh={refresh} onPending={value=>{if(value)pinned.current=true;setPending(value);}}/>
   </section>;
 }

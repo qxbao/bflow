@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { WebDecision, WebEvidenceReference } from '@bflow/contracts/web';
 import { ApiClient, ApiError, projectPath, explain } from '../api/client';
 import { StatusBadge } from './StatusBadge';
@@ -82,17 +82,23 @@ function parseObject(text:string):object|undefined{try{const value:unknown=JSON.
 function packageLabel(decision:WebDecision){
   if(decision.kind==='user_decision')return 'Quyết định của bạn';
   if(decision.decisionId.startsWith('design-'))return 'Thiết kế công việc';
+  if(decision.decisionId.startsWith('prototype-'))return 'Bản mẫu (Prototype)';
   if(decision.decisionId.startsWith('task-approval-'))return 'Kết quả nhiệm vụ';
   if(decision.decisionId.startsWith('delivery-'))return 'Bàn giao';
   return decision.expectedVersion.target.type==='run'?'Gói của công việc':'Gói xem xét';
 }
 export function Evidence({api,projectId,evidence}:{api:ApiClient;projectId:string;evidence:WebEvidenceReference}) {
   const [text,setText]=useState<string>(); const [error,setError]=useState<unknown>(); const [loading,setLoading]=useState(false);
+  const reqGen=useRef(0),identity=`${projectId}:${evidence.artifactId}:${evidence.checksum?.value??''}`,lastIdentity=useRef(identity);
+  useEffect(()=>{
+    if(lastIdentity.current!==identity){lastIdentity.current=identity;reqGen.current+=1;setText(undefined);setError(undefined);setLoading(false);}
+  },[identity]);
+  useEffect(()=>()=>{reqGen.current+=1;},[]);
   return <section className="evidence my-2.5 min-w-0 border-t border-line pt-2.5 text-sm">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="m-0">Tài liệu kiểm chứng · {evidence.mediaType}{evidence.sizeBytes!==undefined?` · ${new Intl.NumberFormat('vi').format(evidence.sizeBytes)} byte`:''}</p>
       <div className="flex flex-wrap items-center gap-2">
-        <button disabled={loading} onClick={async()=>{setLoading(true);setError(undefined);try{setText(await api.artifact(projectId,evidence.artifactId));}catch(e){setError(e);}finally{setLoading(false);}}}>{loading?'Đang tải…':'Đọc nội dung an toàn'}</button>
+        <button disabled={loading} onClick={async()=>{const gen=++reqGen.current;setLoading(true);setError(undefined);try{const loaded=await api.artifact(projectId,evidence.artifactId);if(reqGen.current===gen)setText(loaded);}catch(e){if(reqGen.current===gen)setError(e);}finally{if(reqGen.current===gen)setLoading(false);}}}>{loading?'Đang tải…':'Đọc nội dung an toàn'}</button>
         <a download href={`${projectPath(projectId)}/artifacts/${encodeURIComponent(evidence.artifactId)}`}>Tải tài liệu</a>
       </div>
     </div>

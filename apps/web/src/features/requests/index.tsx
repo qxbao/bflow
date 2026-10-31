@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 import { WebCommandSchema, type WebAction } from '@bflow/contracts/web';
-import { ApiClient, explain } from '../../api/client';
+import { ApiClient, ApiError, explain } from '../../api/client';
 import { FieldHelp, FieldLabel } from '../../components/FieldHelp';
 import { useCommands } from '../operations';
 import type { CommandBody } from '../../api/commands';
@@ -19,7 +19,7 @@ function parseDraft(raw:string|null):Draft|undefined{
   return undefined;
 }
 const readDraft=(primaryKey:string,fallbackKey:string):Draft=>parseDraft(sessionStorage.getItem(primaryKey))??parseDraft(sessionStorage.getItem(fallbackKey))??empty;
-export function RequestForm({api,id,sessionId,enabled,runId,action}:{api:ApiClient;id:string;sessionId:string;enabled:boolean;runId?:string;action?:WebAction}) {
+export function RequestForm({api,id,sessionId,enabled,runId,action,refresh}:{api:ApiClient;id:string;sessionId:string;enabled:boolean;runId?:string|undefined;action?:WebAction|undefined;refresh?:(()=>void)|undefined}) {
   const slot=runId?`revise:${runId}`:'create',key=`bflow:web:draft:${encodeURIComponent(id)}:${slot}`,legacyKey=`bflow:web:draft:${encodeURIComponent(id)}:${encodeURIComponent(sessionId)}:${slot}`,uid=useId();
   const [draft,setDraft]=useState<Draft>(()=>readDraft(key,legacyKey));
   const loadedKey=useRef(key);
@@ -41,15 +41,23 @@ export function RequestForm({api,id,sessionId,enabled,runId,action}:{api:ApiClie
     if(!enabled || !commands.online){setMessage('Yêu cầu chưa được gửi: phiên hoặc kết nối chưa sẵn sàng. Bản nháp vẫn được giữ.');return;}
     if(commands.tracked){setMessage('Chưa tạo yêu cầu mới: biểu mẫu vẫn đang theo dõi thao tác trước.');return;}
     const requirements={objective:draft.objective.trim(),acceptanceCriteria:lines(draft.criteria).map(description=>({description,verificationMethod:draft.methods[description]??draft.verificationMethod})),constraints:draft.constraints.split('\n').filter(x=>x.trim()).map(x=>x.trim())};
-    const body:CommandBody=runId && action?{kind:'revise_request',runId,expectedVersion:{revisionToken:action.expectedVersion.revisionToken},...requirements}:{kind:'create_request',title:draft.title.trim(),requestKind:draft.requestKind,...requirements};
+    let body:CommandBody=runId && action?{kind:'revise_request',runId,expectedVersion:{revisionToken:action.expectedVersion.revisionToken},...requirements}:{kind:'create_request',title:draft.title.trim(),requestKind:draft.requestKind,...requirements};
     const parsed=WebCommandSchema.safeParse({...body,apiVersion:1,projectId:id,commandId:crypto.randomUUID()});
     if(!parsed.success){const next:Record<string,string>={};for(const issue of parsed.error.issues){const key=issue.path[0]==='acceptanceCriteria'?'criteria':String(issue.path[0]);next[key]='Vui lòng nhập nội dung hợp lệ trong giới hạn cho phép.';}setErrors(next);return;}
     setErrors({});try{
       // Fresh readiness is observation; admission/authority stays on the host.
-      if(!runId && (await api.sessionView(id)).state!=='ready')throw new Error('Phiên dự án chưa sẵn sàng.');
-      if(runId){const fresh=await api.run(id,runId);if(!fresh.availableActions.some(a=>a.kind==='revise_request' && a.enabled && a.actionId===action?.actionId && a.expectedVersion.revisionToken===action.expectedVersion.revisionToken))throw new Error('Yêu cầu đã đổi. Đọc lại công việc trước khi chỉnh sửa.');}
+      if(!runId && (await api.sessionView(id)).state!=='ready'){refresh?.();throw new Error('Phiên dự án chưa sẵn sàng.');}
+      if(runId){
+        const fresh=await api.run(id,runId);
+        const liveAction=fresh.currentRunId===runId?fresh.availableActions.find(a=>a.kind==='revise_request' && a.enabled && a.actionId===action?.actionId):undefined;
+        if(!liveAction){refresh?.();throw new Error('Yêu cầu đã đổi. Đọc lại công việc trước khi chỉnh sửa.');}
+        body={kind:'revise_request',runId,expectedVersion:{revisionToken:liveAction.expectedVersion.revisionToken},...requirements};
+      }
       await commands.submit(body);setMessage('Đã gửi hoặc đang đối chiếu yêu cầu. Theo dõi thao tác bên dưới.');
-    }catch(e){setMessage(e instanceof Error && !('code' in e)?e.message:explain(e));}
+    }catch(e){
+      if(e instanceof ApiError && e.code==='stale_version')refresh?.();
+      setMessage(e instanceof Error && !('code' in e)?e.message:explain(e));
+    }
   }
   const criteriaLines=lines(draft.criteria);
   return <section className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="mb-2 flex flex-wrap items-baseline justify-between gap-2"><h2 className="m-0 text-base">{runId?'Chỉnh yêu cầu':'Tạo công việc'}</h2><span className="text-xs text-muted">Bản nháp tự lưu trên trình duyệt này</span></div>
@@ -73,7 +81,7 @@ export function RequestForm({api,id,sessionId,enabled,runId,action}:{api:ApiClie
 
       {commands.tracked && <div role="status" className="my-2.5 border border-line border-l-3 border-l-accent bg-canvas p-3 text-sm"><p className="my-1">Biểu mẫu đang theo dõi thao tác trước{commands.tracked.operation?.state==='failed'?' (không được áp dụng)':commands.tracked.operation?.state==='applied'?' (đã áp dụng)':' (chưa có kết quả cuối)'}. Bấm gửi lúc này không tạo yêu cầu mới.</p>{commands.tracked.operation && ['applied','failed'].includes(commands.tracked.operation.state)?<div className="mt-2 flex flex-wrap items-center gap-3">{commands.tracked.operation.result?.kind==='interaction' && <Link className="font-data text-xs font-semibold text-ink" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(commands.tracked.operation.result.currentRunId)}`}>Mở công việc vừa tạo →</Link>}<button type="button" onClick={()=>{setMessage('');void commands.startNew();}}>Soạn yêu cầu mới từ nội dung này</button></div>:<p className="my-1 text-xs text-muted">Đọc lại thao tác ở mục “Thao tác đã gửi”; chỉ tạo yêu cầu mới sau khi biết kết quả.</p>}</div>}
 
-      <div className="mt-3 flex flex-wrap items-center gap-3"><button className="min-w-36 border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface" disabled={!enabled || commands.busy || !commands.online || Boolean(commands.tracked)}>{commands.busy?'Đang gửi…':runId?'Gửi chỉnh sửa':'Tạo công việc'}</button>{!enabled && <span className="text-xs text-muted">Khởi động phiên dự án phía trên để bật gửi yêu cầu. Bản nháp vẫn được giữ.</span>}</div>
+      <div className="mt-3 flex flex-wrap items-center gap-3"><button className="min-w-36 border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface" disabled={!enabled || commands.busy || !commands.online || Boolean(commands.tracked)}>{commands.busy?'Đang gửi…':runId?'Gửi chỉnh sửa':'Tạo công việc'}</button>{!enabled && <span className="text-xs text-muted">{runId?'Công việc hiện không còn cho phép chỉnh sửa yêu cầu tại chỗ. Bản nháp vẫn được giữ.':'Khởi động phiên dự án phía trên để bật gửi yêu cầu. Bản nháp vẫn được giữ.'}</span>}</div>
       {message && <p role="status" className="my-2 text-sm">{message}</p>}
     </form></section>;
 }
