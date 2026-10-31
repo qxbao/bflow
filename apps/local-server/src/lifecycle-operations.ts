@@ -35,7 +35,7 @@ export class Operations {
     if(final(record.operation) && canonicalWebJson(value)!==canonicalWebJson(record.operation))throw new Error('Final operation changed');
     await this.index.save({...record,operation:value});return value;
   }
-  private async uncertain(record:IndexedOperation):Promise<WebOperation>{try{return await this.update(record,{...record.operation,state:'reconciliation_required',updatedAt:now()});}catch{throw new HttpError('reconciliation_required',record.index.commandId);}}
+  private async uncertain(record:IndexedOperation):Promise<WebOperation>{if(record.operation.state==='reconciliation_required')return record.operation;try{return await this.update(record,{...record.operation,state:'reconciliation_required',updatedAt:now()});}catch{throw new HttpError('reconciliation_required',record.index.commandId);}}
   private async deliverLifecycle(projectId:string,id:string,kind:'session_start'|'session_stop',body:unknown,authorize:()=>void):Promise<WebOperation>{
     const fingerprint=createHash('sha256').update(canonicalWebJson({projectId,kind,body})).digest('hex');
     const old=await this.index.read(projectId,id);

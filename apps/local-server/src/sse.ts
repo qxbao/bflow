@@ -26,12 +26,13 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
   const expiry=setTimeout(()=>res.destroy(),Math.max(0,Math.min(2147483647,expiresAt-Date.now())));
   let heartbeat:ReturnType<typeof setInterval>|undefined;
   const write=async(text:string)=>{
-    if(stopped || res.destroyed)return;
+    if(stopped || res.destroyed || res.writableEnded)return;
     if(res.write(text))return;
     await new Promise<void>((resolve,reject)=>{
-      const clear=()=>{res.off('drain',drain);res.off('close',done);res.off('error',error);};
-      const drain=()=>{clear();resolve();},done=()=>{clear();stop();resolve();},error=(e:Error)=>{clear();reject(e);};
-      res.once('drain',drain);res.once('close',done);res.once('error',error);
+      const clear=()=>{res.off('drain',drain);res.off('close',done);res.off('error',error);req.off('aborted',done);};
+      const drain=()=>{clear();resolve();},done=()=>{clear();stop();resolve();},error=(e:Error)=>{clear();stop();reject(e);};
+      res.once('drain',drain);res.once('close',done);res.once('error',error);req.once('aborted',done);
+      if(stopped || res.destroyed || res.writableEnded)done();
     });
   };
   try {
@@ -53,7 +54,7 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
     res.statusCode=200;res.setHeader('Content-Type','text/event-stream; charset=utf-8');res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Accel-Buffering','no');res.setTimeout(0);res.flushHeaders();
     heartbeat=setInterval(()=>{
-      try{authenticate();if(!stopped && res.writableLength===0)res.write(': heartbeat\n\n');}catch{res.destroy();}
+      try{authenticate();if(!stopped && !res.destroyed && !res.writableEnded && res.writableLength===0)res.write(': heartbeat\n\n');}catch{res.destroy();}
     },WEB_LIMITS.heartbeatSeconds*1000);
     const produce=(async()=>{
       try {while(!stopped){const next=carried?await carried:await readNext();carried=undefined;if(!next || stopped)break;
@@ -64,10 +65,11 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
       }}catch{res.destroy();stop();}
     })();
     while(!stopped){const event=queue.shift();if(!event){await new Promise<void>(resolve=>{wake=resolve;if(stopped)resolve();});continue;}
-      await write(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      const payload=JSON.stringify(event).replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');
+      await write(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${payload}\n\n`);
     }
     await produce;
-    if(!res.destroyed)res.end();
+    if(!res.destroyed && !res.writableEnded)res.end();
     return {maxQueued};
   } finally {
     stop();clearTimeout(expiry);if(heartbeat)clearInterval(heartbeat);res.off('close',close);req.off('aborted',close);

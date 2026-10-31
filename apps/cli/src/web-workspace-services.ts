@@ -49,7 +49,12 @@ async function readReceipt(directory:string,projectId:string,id:string):Promise<
   if(value.projectId!==projectId || value.operationId!==id || value.owner!=='local_lifecycle')throw new Error('Foreign lifecycle receipt');
   return value;
 }
-async function syncDirectory(directory:string){const handle=await open(directory,'r');try{await handle.sync();}finally{await handle.close();}}
+async function syncDirectory(directory:string){
+  let handle;
+  try{handle=await open(directory,'r');await handle.sync();}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!['EINVAL','ENOTSUP','EPERM','EACCES','EBADF','EISDIR','EROFS'].includes(code))throw error;}
+  finally{await handle?.close().catch(()=>{});}
+}
 async function reserveReceipt(directory:string,operation:WebOperation):Promise<boolean>{
   await receiptRoot(directory,true);let handle;
   try{handle=await open(receiptPath(directory,operation.projectId,operation.operationId),constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);}

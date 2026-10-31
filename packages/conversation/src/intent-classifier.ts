@@ -45,10 +45,26 @@ const LEADING_APPROVAL_ID_REGEX =
   /^\s*([A-Za-z][A-Za-z0-9]*-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{3,})\s*[:：]\s*(?:\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|từ chối|không duyệt|cần sửa|(?:đề xuất\s+)?(?:đổi|thay đổi|sửa)\s+yêu cầu)/iu;
 
 /**
- * A leading short card alias `#1: ...` or `#2 1` addressing a numbered card.
+ * A leading short card alias `#1: ...`, `#1 - ...`, or `#2 1` addressing a numbered card.
  */
 const LEADING_SHORT_ID_REGEX =
-  /^\s*(#[1-9]\d*)(?:\s*[:：)]\s*(?=\S)|(?:\s*[:：,-]\s*|\s+)(?=\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|từ chối|không đồng ý|không duyệt|cần sửa|chọn|lựa chọn|option|choose))/iu;
+  /^\s*(#[1-9]\d*)(?:\s*[:：)]\s*(?=\S)|(?:\s*[:：.,—–-]\s*|\s+)(?=\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|từ chối|không đồng ý|không duyệt|bác bỏ|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi|(?:đề xuất\s+)?(?:đổi|thay đổi|sửa)\s+yêu cầu|chọn|lựa chọn|option|choose))/iu;
+
+function matchShortIdPrefix(text: string, context: ConversationContextSnapshot): string | undefined {
+  const direct = LEADING_SHORT_ID_REGEX.exec(text)?.[1];
+  if (direct !== undefined) return direct;
+  const candidate = /^\s*(#[1-9]\d*)(?:[\s:：,.)—–-]+)([\s\S]+)$/iu.exec(text);
+  if (!candidate) return undefined;
+  const shortToken = candidate[1]!.toLowerCase();
+  const mappedId = context.approvalShortIds?.[shortToken];
+  const pendingReq = mappedId ? context.pendingApprovals[mappedId] : undefined;
+  if (!pendingReq || !isUserDecisionRequest(pendingReq)) return undefined;
+  const remainder = normalizeForMatching(candidate[2]!).replace(/^[\s:：,.)—–-]+|[\s:,.!?—–-]+$/gu, "");
+  const matchesOption = (optionLabelsOf(pendingReq) ?? []).some(
+    label => normalizeForMatching(label).replace(/[.!?]+$/u, "") === remainder
+  );
+  return matchesOption ? candidate[1]! : undefined;
+}
 
 /**
  * The approval a reply names. Ids the session knows (pending, decided or closed) match exactly whatever their
@@ -59,7 +75,7 @@ const LEADING_SHORT_ID_REGEX =
 const SPECIFICATION_REVISION_REGEX = /^(?:đề xuất\s+)?(?:đổi|thay đổi|sửa)\s+yêu cầu(?!\p{L})/iu;
 
 export function namedApprovalId(text: string, context: ConversationContextSnapshot): string | undefined {
-  const shortMatch = LEADING_SHORT_ID_REGEX.exec(text)?.[1];
+  const shortMatch = matchShortIdPrefix(text, context)?.toLowerCase();
   if (shortMatch !== undefined) {
     return context.approvalShortIds?.[shortMatch] ?? shortMatch;
   }
@@ -75,13 +91,13 @@ export function namedApprovalId(text: string, context: ConversationContextSnapsh
 /** The reply with the named approval id (or leading `#n` short alias) and its separator removed. */
 function withoutApprovalId(text: string, approvalId: string | undefined): string {
   const trimmed = text.trim();
-  if (approvalId === undefined) return trimmed.replace(/^[\s:：,-]+|[\s:,.!?-]+$/gu, "");
+  if (approvalId === undefined) return trimmed.replace(/^[\s:：,—–-]+|[\s:,.!?—–-]+$/gu, "");
   if (trimmed.includes(approvalId)) {
-    return trimmed.replace(approvalId, "").replace(/^[\s:：),-]+|[\s:,.!?-]+$/gu, "");
+    return trimmed.replace(approvalId, "").replace(/^[\s:：,.)—–-]+|[\s:,.!?—–-]+$/gu, "");
   }
-  const shortPrefix = LEADING_SHORT_ID_REGEX.exec(trimmed)?.[1];
-  const stripped = shortPrefix !== undefined ? trimmed.slice(trimmed.indexOf(shortPrefix) + shortPrefix.length) : trimmed;
-  return stripped.replace(/^[\s:：),-]+|[\s:,.!?-]+$/gu, "");
+  const shortPrefix = /^(#[1-9]\d*)(?=[\s:：,.)—–-]|$)/u.exec(trimmed)?.[1];
+  const stripped = shortPrefix !== undefined ? trimmed.slice(shortPrefix.length) : trimmed;
+  return stripped.replace(/^[\s:：,.)—–-]+|[\s:,.!?—–-]+$/gu, "");
 }
 
 /** `1` approves; `2 <reason>` rejects. A design/task approval notice numbers its choices this way. */
@@ -868,7 +884,7 @@ export function classifyTrustedApprovalReply(
   const namedRequest = namedId ? context.pendingApprovals[namedId] : undefined;
   // Never let an unrecognized id fall back to a different pending approval.
   if (namedId && !namedRequest) return undefined;
-  const shortPrefix = LEADING_SHORT_ID_REGEX.exec(sanitized)?.[1]?.toLowerCase();
+  const shortPrefix = matchShortIdPrefix(sanitized, context)?.toLowerCase();
   const normalizedId = namedId?.toLowerCase();
   const matchedPrefix = shortPrefix !== undefined && content.startsWith(shortPrefix)
     ? shortPrefix
@@ -878,7 +894,7 @@ export function classifyTrustedApprovalReply(
   const namesPendingRequest = matchedPrefix !== undefined;
   const endsWithPendingRequest = normalizedId !== undefined && content.endsWith(normalizedId);
   const reply = (matchedPrefix !== undefined ? content.slice(matchedPrefix.length) :
-    endsWithPendingRequest ? content.slice(0, -normalizedId!.length) : content).replace(/^[\s:：,-]+|[\s:,.!?-]+$/gu, "");
+    endsWithPendingRequest ? content.slice(0, -normalizedId!.length) : content).replace(/^[\s:：,.)—–-]+|[\s:,.!?—–-]+$/gu, "");
 
   // Exact Vietnamese gate labels carry authority for that gate only. Runtime-generated ids
   // distinguish design, task and delivery approvals even though each can target a whole run.
@@ -935,6 +951,17 @@ export function explainUnrecordedApprovalReply(
   if (lines.length > 1 && named.size > 0) {
     return `Tin nhắn nhiều dòng có phản hồi cho ${[...named].join(", ")} nên CHƯA ghi nhận quyết định nào. ${syntax}`;
   }
+  const bareShortMatch = /^#[1-9]\d*$/u.exec(text)?.[0];
+  const bareMappedId = bareShortMatch !== undefined ? context.approvalShortIds?.[bareShortMatch] : undefined;
+  const bareTargetId = bareMappedId && context.pendingApprovals[bareMappedId]
+    ? bareMappedId
+    : context.pendingApprovals[text]
+    ? text
+    : undefined;
+  if (bareTargetId !== undefined) {
+    const label = bareShortMatch !== undefined ? `${bareShortMatch} (${bareTargetId})` : bareTargetId;
+    return `Phản hồi chỉ nêu mã ${label} mà chưa kèm lựa chọn hoặc quyết định nên CHƯA được ghi nhận. ${syntax}`;
+  }
   const namedId = namedApprovalId(text, context);
   const reply = normalizeForMatching(withoutApprovalId(text, namedId));
   const decisionShaped = NUMBERED_APPROVAL_CHOICE_REGEX.test(reply) || /^\d+$/u.test(reply) ||
@@ -945,8 +972,20 @@ export function explainUnrecordedApprovalReply(
   }
   const targetId = namedId ?? pending[0]!;
   const target = context.pendingApprovals[targetId];
-  if (target !== undefined && !isUserDecisionRequest(target) && /^(?:2|reject(?:ed)?|từ chối|không duyệt)$/iu.test(reply)) {
-    return `Từ chối ${targetId} cần kèm lý do nên CHƯA được ghi nhận: \`${targetId}: reject <lý do>\` hoặc \`2 <lý do>\`.`;
+  if (target !== undefined && isUserDecisionRequest(target) && /^\d+$/u.test(reply)) {
+    const choice = Number(reply);
+    const options = optionLabelsOf(target) ?? [];
+    if (options.length > 0 && (choice < 1 || choice > options.length)) {
+      return `Lựa chọn số \`${reply}\` nằm ngoài danh sách phương án (1..${options.length}) của ${targetId} nên CHƯA được ghi nhận. ${syntax}`;
+    }
+  }
+  if (target !== undefined && !isUserDecisionRequest(target)) {
+    if (/^(?:2|reject(?:ed)?|từ chối|không duyệt)$/iu.test(reply)) {
+      return `Từ chối ${targetId} cần kèm lý do nên CHƯA được ghi nhận: \`${targetId}: reject <lý do>\` hoặc \`2 <lý do>\`.`;
+    }
+    if (/^\d+$/u.test(reply) && reply !== "1" && reply !== "2") {
+      return `Lựa chọn số \`${reply}\` không hợp lệ cho ${targetId} (chỉ \`1\` để duyệt hoặc \`2 <lý do>\` để từ chối) nên CHƯA được ghi nhận.`;
+    }
   }
   return undefined;
 }

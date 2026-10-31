@@ -32,7 +32,7 @@ export function Operations({api,id,refresh,children}:{api:ApiClient;id:string;re
       let records;try{records=store.records();}catch(e){if(active)setError(e instanceof Error?e.message:'Cần đối chiếu thao tác.');return;}
       const values=await Promise.all(records.map(record=>store.observe(record)));
       if(!active)return;setObservations(values);
-      for(const value of values){const signature=JSON.stringify(value.operation);if(value.operation && signatures.current.get(value.record.commandId)!==signature){signatures.current.set(value.record.commandId,signature);refreshRef.current();}}
+      for(const value of values){const op=value.operation;const signature=op?JSON.stringify([op.state,op.result??null,op.error?.code??null,op.error?.message??null]):'';if(op && signatures.current.get(value.record.commandId)!==signature){signatures.current.set(value.record.commandId,signature);refreshRef.current();}}
       if(values.some(v=>!v.operation || !['applied','failed'].includes(v.operation.state)))timer=setTimeout(()=>void read(),3000);
     };
     if(online)void read();return()=>{active=false;clearTimeout(timer);};

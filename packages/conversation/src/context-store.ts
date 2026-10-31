@@ -249,6 +249,23 @@ export class FileConversationContextStore implements ConversationContextStore {
     return { ok: true, value: validation.value };
   }
 
+  private readonly writeQueues = new Map<string, Promise<unknown>>();
+
+  private async syncDirectorySafe(dirPath: string): Promise<void> {
+    let dirHandle: fs.FileHandle | undefined;
+    try {
+      dirHandle = await fs.open(dirPath, "r");
+      await dirHandle.sync();
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code ?? "";
+      if (!["EINVAL", "ENOTSUP", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) {
+        throw err;
+      }
+    } finally {
+      await dirHandle?.close().catch(() => {});
+    }
+  }
+
   async save(snapshot: ConversationContextSnapshot): Promise<OperationResult<ConversationContextSnapshot>> {
     const validation = validateSnapshot(snapshot);
     if (!validation.ok) {
@@ -261,35 +278,45 @@ export class FileConversationContextStore implements ConversationContextStore {
       return pathResult;
     }
     const targetFilePath = pathResult.value;
+    const validatedValue = deepClone(validation.value);
+    const serialized = JSON.stringify(validatedValue, null, 2);
 
-    const tmpFilePath = path.join(
-      this.storageDir,
-      `${sessionId}.context.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
-    );
-
-    const serialized = JSON.stringify(validation.value, null, 2);
-
-    try {
-      await fs.mkdir(this.storageDir, { recursive: true });
-      await fs.writeFile(tmpFilePath, serialized, "utf8");
-      await fs.rename(tmpFilePath, targetFilePath);
-    } catch (err: unknown) {
+    const previous = this.writeQueues.get(sessionId) ?? Promise.resolve();
+    const run = previous.catch(() => {}).then(async (): Promise<OperationResult<ConversationContextSnapshot>> => {
+      const tmpFilePath = path.join(
+        this.storageDir,
+        `${sessionId}.context.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+      );
+      let handle: fs.FileHandle | undefined;
       try {
-        await fs.unlink(tmpFilePath).catch(() => {});
-      } catch {
-        // ignore cleanup error
-      }
-      return {
-        ok: false,
-        error: {
-          code: "transport_unavailable",
-          retryable: true,
-          message: `Failed to save conversation context atomically: ${String(err)}`
+        await fs.mkdir(this.storageDir, { recursive: true });
+        handle = await fs.open(tmpFilePath, "wx", 0o600);
+        await handle.writeFile(serialized, "utf8");
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        await fs.rename(tmpFilePath, targetFilePath);
+        await this.syncDirectorySafe(this.storageDir);
+      } catch (err: unknown) {
+        await handle?.close().catch(() => {});
+        try {
+          await fs.unlink(tmpFilePath).catch(() => {});
+        } catch {
+          // ignore cleanup error
         }
-      };
-    }
-
-    return { ok: true, value: deepClone(validation.value) };
+        return {
+          ok: false,
+          error: {
+            code: "transport_unavailable",
+            retryable: true,
+            message: `Failed to save conversation context atomically: ${String(err)}`
+          }
+        };
+      }
+      return { ok: true, value: deepClone(validatedValue) };
+    });
+    this.writeQueues.set(sessionId, run);
+    return run;
   }
 
   async delete(sessionId: string): Promise<OperationResult<boolean>> {
