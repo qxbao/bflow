@@ -31,36 +31,107 @@ function string(value: unknown, field: string): string {
   return value;
 }
 
-export function parseHerdrResponse(outcome: CommandOutcome): Record<string, unknown> {
-  let value: unknown;
-  if (outcome.exitCode === 0) {
-    try {
-      value = JSON.parse(outcome.stdout);
-    } catch {
-      throw new HerdrProtocolError("Herdr returned malformed JSON", "malformed");
+function tryParseJsonEnvelope(source: string): Record<string, unknown> | null {
+  const trimmed = source.trim();
+  if (!trimmed) return null;
+  try {
+    const direct = JSON.parse(trimmed);
+    if (direct !== null && typeof direct === "object" && !Array.isArray(direct)) {
+      return direct as Record<string, unknown>;
     }
-  } else {
-    let parsed = false;
-    for (const source of [outcome.stderr, outcome.stdout]) {
-      if (!source || !source.trim()) continue;
+  } catch {
+    // Fall through to single-envelope line extraction when CLI diagnostics surround JSON
+  }
+  const lines = trimmed.split(/\r?\n/);
+  if (lines.length <= 1) return null;
+  const candidates: Record<string, unknown>[] = [];
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith("{")) {
       try {
-        value = JSON.parse(source);
-        parsed = true;
-        break;
+        const parsed = JSON.parse(line);
+        if (
+          parsed !== null &&
+          typeof parsed === "object" &&
+          !Array.isArray(parsed) &&
+          ("result" in parsed || "error" in parsed)
+        ) {
+          candidates.push(parsed as Record<string, unknown>);
+          continue;
+        }
       } catch {
-        // Fallback to stdout when structured CLI JSON errors are emitted on stdout
+        return null;
       }
+      return null;
     }
-    if (!parsed) {
+  }
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+function summarizePlainCliDiagnostic(stderr: string, stdout: string): string | null {
+  for (const raw of [stderr, stdout]) {
+    const trimmed = raw?.trim();
+    if (!trimmed) continue;
+    const firstLine = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    if (firstLine) {
+      return firstLine.length > 300 ? `${firstLine.slice(0, 297)}...` : firstLine;
+    }
+  }
+  return null;
+}
+
+function classifyPlainTextCliError(stderr: string, stdout: string): HerdrProtocolError | null {
+  const summary = summarizePlainCliDiagnostic(stderr, stdout);
+  if (!summary) return null;
+  const combined = `${stderr}\n${stdout}`;
+  if (
+    /\b(?:agent\s+target|target|pane|agent|session|workspace|tab|terminal)\b[^\r\n]*?\b(?:not\s+found|does\s+not\s+exist|no\s+longer\s+exists)\b/i.test(combined) ||
+    /\b(?:unknown|invalid|no\s+such)\s+(?:agent\s+target|target|pane|agent|session|workspace|tab|terminal)\b/i.test(combined) ||
+    /\bagent\b[^\r\n]*?\bnot\s+running\b/i.test(combined)
+  ) {
+    return new HerdrProtocolError(summary, "remote", "target_not_found");
+  }
+  if (/\bagent\b[^\r\n]*?\b(?:is\s+blocked|not\s+ready)\b/i.test(combined)) {
+    return new HerdrProtocolError(summary, "remote", "agent_not_ready");
+  }
+  if (/\b(?:timed?\s+out|deadline\s+exceeded)\b/i.test(combined)) {
+    return new HerdrProtocolError(summary, "remote", "timeout");
+  }
+  if (
+    /\b(?:ECONNREFUSED|ECONNRESET|EPIPE|ENOENT|EACCES|daemon|socket|server\s+unavailable|connection\s+(?:refused|failed|closed|reset)|failed\s+to\s+connect)\b/i.test(
+      combined
+    )
+  ) {
+    return new HerdrProtocolError(summary, "remote", "server_unavailable");
+  }
+  return null;
+}
+
+export function parseHerdrResponse(outcome: CommandOutcome): Record<string, unknown> {
+  if (outcome.exitCode === 0) {
+    const envelope = tryParseJsonEnvelope(outcome.stdout);
+    if (!envelope) {
       throw new HerdrProtocolError("Herdr returned malformed JSON", "malformed");
     }
+    return record(envelope.result);
   }
-  const envelope = record(value);
-  if (outcome.exitCode !== 0) {
-    const error = record(envelope.error);
-    throw new HerdrProtocolError(string(error.message, "error.message"), "remote", string(error.code, "error.code"));
+  let envelope: Record<string, unknown> | null = null;
+  for (const source of [outcome.stderr, outcome.stdout]) {
+    if (!source || !source.trim()) continue;
+    envelope = tryParseJsonEnvelope(source);
+    if (envelope) break;
   }
-  return record(envelope.result);
+  if (!envelope) {
+    const plainError = classifyPlainTextCliError(outcome.stderr, outcome.stdout);
+    if (plainError) throw plainError;
+    throw new HerdrProtocolError("Herdr returned malformed JSON", "malformed");
+  }
+  const error = record(envelope.error);
+  throw new HerdrProtocolError(string(error.message, "error.message"), "remote", string(error.code, "error.code"));
 }
 
 export function parseAgentInfo(value: unknown): HerdrAgentInfo {

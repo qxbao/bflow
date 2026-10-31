@@ -8,8 +8,11 @@ const MAX_DATE_EPOCH_MS = 8.64e15;
  * Chains bounded slices until the full delay has elapsed and returns an idempotent cancel function.
  */
 export function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void {
+  if (delayMs === Number.POSITIVE_INFINITY) {
+    return () => {};
+  }
   let cancelled = false;
-  let remaining = Math.max(1, Math.ceil(delayMs));
+  let remaining = Number.isFinite(delayMs) ? Math.max(1, Math.ceil(delayMs)) : 1;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const arm = () => {

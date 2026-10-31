@@ -286,6 +286,8 @@ export class AgyStdioHttpGatewayBridge {
     const controller = new AbortController();
     this.calls.set(localKey, controller);
     this.remoteCalls.set(localKey, remoteId);
+    const timeoutSignal = createBoundedTimeoutSignal(this.timeoutMs);
+    const requestSignal = AbortSignal.any([this.lifecycle.signal, controller.signal, timeoutSignal.signal]);
     try {
       this.lifecycle.signal.throwIfAborted();
       const response = await this.fetchImpl(this.options.endpoint, {
@@ -293,9 +295,9 @@ export class AgyStdioHttpGatewayBridge {
         body: JSON.stringify({ jsonrpc: "2.0", id: remoteId, method: "tools/call", params: {
           name: params.name, arguments: args, serviceId, callId, idempotencyKey: `agy-${randomUUID()}`, timeoutMs: this.timeoutMs
         } }),
-        signal: AbortSignal.any([this.lifecycle.signal, controller.signal, AbortSignal.timeout(this.timeoutMs)])
+        signal: requestSignal
       });
-      const raw: unknown = await readJsonBounded(response);
+      const raw: unknown = await readJsonBounded(response, requestSignal);
       if (!response.ok || !isRecord(raw) || raw.jsonrpc !== "2.0" || raw.id !== remoteId || raw.error !== undefined) {
         await this.write(toolError(id, `Gateway tool call failed (HTTP ${response.status})`));
         return;
@@ -318,6 +320,7 @@ export class AgyStdioHttpGatewayBridge {
     } catch {
       await this.write(toolError(id, "Gateway tool call failed or was cancelled; outcome may be unknown. Do not retry a mutation."));
     } finally {
+      timeoutSignal.cleanup();
       this.calls.delete(localKey);
       this.remoteCalls.delete(localKey);
     }
@@ -326,17 +329,23 @@ export class AgyStdioHttpGatewayBridge {
   private async gatewayRequest(request: JsonRpcRequest, signal?: AbortSignal, notification = false): Promise<GatewayResponse> {
     this.lifecycle.signal.throwIfAborted();
     const remoteId = request.id === undefined ? undefined : this.remoteId(request.id);
-    const response = await this.fetchImpl(this.options.endpoint, {
-      method: "POST", redirect: "error", headers: this.headers(),
-      body: JSON.stringify({ jsonrpc: "2.0", ...(remoteId === undefined ? {} : { id: remoteId }), method: request.method,
-        ...(request.params ? { params: request.params } : {}) }),
-      signal: AbortSignal.any([this.lifecycle.signal, signal ?? new AbortController().signal, AbortSignal.timeout(this.timeoutMs)])
-    });
-    if (request.method === "initialize") this.gatewaySessionId = response.headers.get("mcp-session-id") ?? undefined;
-    if (notification && (response.status === 202 || response.ok)) return {};
-    const raw: unknown = await readJsonBounded(response);
-    if (!response.ok || !isRecord(raw) || raw.jsonrpc !== "2.0" || raw.id !== remoteId) return { error: { message: "Gateway request failed" } };
-    return raw;
+    const timeoutSignal = createBoundedTimeoutSignal(this.timeoutMs);
+    const requestSignal = AbortSignal.any([this.lifecycle.signal, signal ?? new AbortController().signal, timeoutSignal.signal]);
+    try {
+      const response = await this.fetchImpl(this.options.endpoint, {
+        method: "POST", redirect: "error", headers: this.headers(),
+        body: JSON.stringify({ jsonrpc: "2.0", ...(remoteId === undefined ? {} : { id: remoteId }), method: request.method,
+          ...(request.params ? { params: request.params } : {}) }),
+        signal: requestSignal
+      });
+      if (request.method === "initialize") this.gatewaySessionId = response.headers.get("mcp-session-id") ?? undefined;
+      if (notification && (response.status === 202 || response.ok)) return {};
+      const raw: unknown = await readJsonBounded(response, requestSignal);
+      if (!response.ok || !isRecord(raw) || raw.jsonrpc !== "2.0" || raw.id !== remoteId) return { error: { message: "Gateway request failed" } };
+      return raw;
+    } finally {
+      timeoutSignal.cleanup();
+    }
   }
 
   private async notifyGatewayCancellation(remoteId: string): Promise<void> {
@@ -438,14 +447,83 @@ function toolContent(output: unknown): Array<{ type: string; text?: string; [key
   return [{ type: "text", text: JSON.stringify(output) ?? "null" }];
 }
 
-async function readJsonBounded(response: Response): Promise<unknown> {
+const MAX_SAFE_TIMER_SLICE_MS = 2_147_483_647;
+
+function createBoundedTimeoutSignal(timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  if (!Number.isFinite(timeoutMs)) {
+    return { signal: controller.signal, cleanup: () => {} };
+  }
+  if (timeoutMs <= 0) {
+    controller.abort(new Error("Gateway request timed out"));
+    return { signal: controller.signal, cleanup: () => {} };
+  }
+  let cancelled = false;
+  let remaining = Math.ceil(timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_SAFE_TIMER_SLICE_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (cancelled) return;
+      if (remaining > 0) {
+        arm();
+      } else {
+        controller.abort(new Error("Gateway request timed out"));
+      }
+    }, slice);
+    timer.unref?.();
+  };
+  arm();
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    }
+  };
+}
+
+async function readJsonBounded(response: Response, signal?: AbortSignal): Promise<unknown> {
   if (!response.body) return undefined;
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      if (signal) {
+        const toAbortError = () =>
+          signal.reason instanceof Error ? signal.reason : new Error("Gateway response aborted");
+        if (signal.aborted) {
+          await reader.cancel(signal.reason).catch(() => undefined);
+          throw toAbortError();
+        }
+        let onAbort: (() => void) | undefined;
+        const abortPromise = new Promise<never>((_, reject) => {
+          onAbort = () => {
+            reject(toAbortError());
+            void reader.cancel(signal.reason).catch(() => undefined);
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        try {
+          readResult = await Promise.race([abortPromise, reader.read()]);
+          if (signal.aborted) {
+            throw toAbortError();
+          }
+        } finally {
+          if (onAbort) signal.removeEventListener("abort", onAbort);
+        }
+      } else {
+        readResult = await reader.read();
+      }
+      const { done, value } = readResult;
       if (done) break;
       size += value.byteLength;
       if (size > MAX_BODY_BYTES) {

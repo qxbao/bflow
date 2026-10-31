@@ -203,7 +203,41 @@ function parseSseText(text: string, id: string | number): RpcResponse | null {
   return null;
 }
 
-async function readResponseTextBounded(response: Response, maxBytes: number): Promise<string> {
+async function readReaderWithSignal<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  signal?: AbortSignal
+): Promise<ReadableStreamReadResult<T>> {
+  if (!signal) return reader.read();
+  const toAbortError = () =>
+    signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason ?? "Aborted"));
+  if (signal.aborted) {
+    await reader.cancel(signal.reason).catch(() => undefined);
+    throw toAbortError();
+  }
+  let onAbort: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(toAbortError());
+      void reader.cancel(signal.reason).catch(() => undefined);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const chunk = await Promise.race([abortPromise, reader.read()]);
+    if (signal.aborted) {
+      throw toAbortError();
+    }
+    return chunk;
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function readResponseTextBounded(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<string> {
   if (!response.body) {
     const text = await response.text();
     if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("Response exceeded the size limit");
@@ -215,7 +249,7 @@ async function readResponseTextBounded(response: Response, maxBytes: number): Pr
   let output = "";
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readReaderWithSignal(reader, signal);
       if (done) break;
       received += value.byteLength;
       if (received > maxBytes) throw new Error("Response exceeded the size limit");
@@ -232,7 +266,12 @@ async function readResponseTextBounded(response: Response, maxBytes: number): Pr
  * Reads the JSON-RPC message with the given id from a `text/event-stream` body. Other events (pings,
  * notifications, server requests) are ignored. The stream is cancelled once the answer is found.
  */
-export async function readSseResponse(body: ReadableStream<Uint8Array>, id: string | number, maxBytes: number): Promise<RpcResponse | null> {
+export async function readSseResponse(
+  body: ReadableStream<Uint8Array>,
+  id: string | number,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<RpcResponse | null> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const crState = { pendingCr: false };
@@ -240,7 +279,7 @@ export async function readSseResponse(body: ReadableStream<Uint8Array>, id: stri
   let received = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readReaderWithSignal(reader, signal);
       if (done) break;
       received += value.byteLength;
       if (received > maxBytes) throw new Error("Response exceeded the size limit");
@@ -481,9 +520,9 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
       try {
         if (type.includes("text/event-stream")) {
           if (!response.body) throw new Error("empty event stream");
-          return await readSseResponse(response.body, requestId ?? "", this.maxResponseBytes);
+          return await readSseResponse(response.body, requestId ?? "", this.maxResponseBytes, controller.signal);
         }
-        const text = await readResponseTextBounded(response, this.maxResponseBytes);
+        const text = await readResponseTextBounded(response, this.maxResponseBytes, controller.signal);
         const trimmed = text.trim();
         if (!trimmed) return null;
         try {
@@ -501,7 +540,7 @@ export class HttpUpstreamDriverInstance implements MCPUpstreamDriverInstance {
         }
       } catch (error) {
         if (timedOut) throw new UpstreamFailure("timeout", "Upstream response timed out", { attempts: attempt, retryable: true });
-        if (spec.signal?.aborted) throw this.abortFailure(spec.signal, attempt);
+        if (spec.signal?.aborted || controller.signal.aborted) throw this.abortFailure(spec.signal, attempt);
         throw new UpstreamFailure("protocol", `Upstream sent an unreadable response: ${error instanceof Error ? error.message : "error"}`,
           { attempts: attempt, retryable: false });
       }

@@ -53,6 +53,35 @@ function parseInput<T>(schema: { safeParse(value: unknown): { success: true; dat
   return parsed.success ? ok(parsed.data) : fail(validation(parsed.error.message));
 }
 
+const REMOTE_NOT_FOUND_CODES = new Set([
+  "not_found",
+  "invalid_target",
+  "target_not_found",
+  "agent_not_found",
+  "pane_not_found",
+  "session_not_found",
+  "workspace_not_found",
+  "tab_not_found",
+  "terminal_not_found",
+  "agent_not_running"
+]);
+
+function isRemoteNotFoundError(remote: HerdrProtocolError): boolean {
+  if (remote.code !== undefined) {
+    if (REMOTE_NOT_FOUND_CODES.has(remote.code)) return true;
+    if (
+      remote.code.endsWith("_not_found") &&
+      remote.code !== "command_not_found" &&
+      remote.code !== "method_not_found"
+    ) {
+      return true;
+    }
+  }
+  return /\b(?:agent\s+target|target|pane|agent|session|workspace|tab|terminal)\b[^\r\n]*?\b(?:not\s+found|does\s+not\s+exist|no\s+longer\s+exists)\b/i.test(
+    remote.message
+  );
+}
+
 function mapFailure(outcome: CommandOutcome): ContractError | null {
   if (outcome.failure === "invalid_arguments") return validation(outcome.cause ?? "CLI arguments must be strings without NUL characters");
   if (outcome.failure === "runner") return { code: "corruption", retryable: false, message: "Herdr runner failed unexpectedly" };
@@ -65,7 +94,7 @@ function mapFailure(outcome: CommandOutcome): ContractError | null {
   if (remote.kind === "malformed") return { code: "corruption", retryable: false, message: remote.message };
   if (remote.code === "agent_blocked" || remote.code === "agent_not_ready") return conflict("Herdr agent is blocked or not ready");
   if (remote.code === "timeout") return { code: "timeout", retryable: true, retrySafety: "observation_only", message: remote.message };
-  if (remote.code === "invalid_target" || remote.code === "agent_not_found" || remote.code === "pane_not_found" || remote.code === "agent_not_running") return { code: "not_found", retryable: false, message: remote.message };
+  if (isRemoteNotFoundError(remote)) return { code: "not_found", retryable: false, message: remote.message };
   if (remote.code === "unsupported_version") return { code: "unsupported_version", retryable: false, supportedVersions: [22], receivedVersion: 0, message: remote.message };
   return unavailable(`Herdr ${remote.code ?? "error"}: ${remote.message}`);
 }
@@ -373,7 +402,7 @@ export class HerdrCliTransport implements AgentTransport {
     const outcome = await this.#run(["agent", "send-keys", handle.target.paneId!, "ctrl+c"], options);
     const error = mapFailure(outcome);
     let result: OperationResult<CancellationResult>;
-    if (error) result = outcome.started === false ? fail(error) : fail({ code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: `Cancellation command outcome is uncertain: ${error.message}` });
+    if (error) result = (outcome.started === false || error.code === "not_found") ? fail(error) : fail({ code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: `Cancellation command outcome is uncertain: ${error.message}` });
     else {
       try {
         if (parseHerdrResponse(outcome).type !== "ok") throw new HerdrProtocolError("Unexpected cancellation acknowledgement", "malformed");

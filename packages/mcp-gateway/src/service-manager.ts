@@ -88,6 +88,7 @@ export interface ManagedPartitionState {
   diagnosticCode: string;
   startGeneration: number;
   inFlightEnsure?: Promise<OperationResult<MCPServiceObservation>> | undefined;
+  inFlightEnsureAbort?: AbortController | undefined;
 }
 
 export interface DefaultMCPServiceManagerOptions {
@@ -477,9 +478,41 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
           this.metrics.recordProcessStart(service.serviceId, driver.instanceId, driver.pid);
         }
 
-        const initRes = await driver.initialize({
-          timeoutMs: service.healthTimeoutMs
-        });
+        const initAbortCtrl = new AbortController();
+        capturedState.inFlightEnsureAbort = initAbortCtrl;
+        const boundedHealthMs = Math.min(2_147_483_647, Math.max(1, service.healthTimeoutMs));
+        let healthTimer: ReturnType<typeof setTimeout> | undefined;
+        let initRes: Awaited<ReturnType<MCPUpstreamDriverInstance["initialize"]>>;
+        try {
+          initRes = await Promise.race([
+            driver.initialize({
+              timeoutMs: service.healthTimeoutMs,
+              signal: initAbortCtrl.signal
+            }),
+            new Promise<Awaited<ReturnType<MCPUpstreamDriverInstance["initialize"]>>>((resolve) => {
+              const onInitAbort = () => {
+                resolve(
+                  err({
+                    code: "timeout",
+                    retryable: true,
+                    retrySafety: "observation_only",
+                    message: `Service '${service.serviceId}' health initialization timed out or was stopped`
+                  })
+                );
+              };
+              initAbortCtrl.signal.addEventListener("abort", onInitAbort, { once: true });
+              healthTimer = setTimeout(() => {
+                initAbortCtrl.abort(new Error("Service health initialization timed out"));
+              }, boundedHealthMs);
+              healthTimer.unref?.();
+            })
+          ]);
+        } finally {
+          if (healthTimer !== undefined) clearTimeout(healthTimer);
+          if (capturedState.inFlightEnsureAbort === initAbortCtrl) {
+            capturedState.inFlightEnsureAbort = undefined;
+          }
+        }
 
         if (!initRes.ok) {
           if (capturedEntry.definition.connection.ownership === "bflow") {
@@ -736,6 +769,8 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
     }
 
     if (entry.definition.connection.ownership === "bflow") {
+      state.inFlightEnsureAbort?.abort(new Error("Service stopped"));
+      state.inFlightEnsureAbort = undefined;
       if (state.driver?.isAlive()) {
         await state.driver.stop("stopped");
         this.metrics.recordProcessStop(serviceId, state.instanceId);

@@ -62,6 +62,38 @@ export interface ProbeCheck {
 
 const LEGACY_ASK_TOOL_ALIAS = "ask_question";
 const MCP_ENVELOPE_KEYS = new Set(["content", "structuredContent", "isError", "_meta"]);
+const MAX_TIMEOUT_SLICE_MS = 2_147_483_647;
+
+function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void {
+  if (!Number.isFinite(delayMs)) return () => {};
+  let cancelled = false;
+  let remaining = Math.max(1, Math.ceil(delayMs));
+  let timer: NodeJS.Timeout | undefined;
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_TIMEOUT_SLICE_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (cancelled) return;
+      if (remaining > 0) arm();
+      else callback();
+    }, slice);
+    timer.unref?.();
+  };
+  arm();
+  return () => {
+    cancelled = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+}
+
+function looksLikeHtmlErrorPage(text: string): boolean {
+  return /^\s*(?:<!doctype\s+html\b|<html[\s>])/i.test(text);
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -180,6 +212,32 @@ function decodeEnvelopeRecord(
     return { unwrapped: true, isError: flaggedError, text: "" };
   }
 
+  // 4. Plain JSON error payload: { error: { code?, message? } | string } without content/result/answer
+  if (
+    "error" in record &&
+    record.error !== undefined &&
+    record.error !== null &&
+    !("result" in record) &&
+    !("content" in record) &&
+    !("answer" in record)
+  ) {
+    let errMsg: string;
+    if (typeof record.error === "string") {
+      errMsg = record.error;
+    } else if (isPlainRecord(record.error)) {
+      const codePrefix =
+        typeof record.error.code === "number" || typeof record.error.code === "string"
+          ? `${String(record.error.code)} `
+          : "";
+      const msgPart =
+        typeof record.error.message === "string" ? record.error.message : JSON.stringify(record.error);
+      errMsg = `${codePrefix}${msgPart}`.trim();
+    } else {
+      errMsg = JSON.stringify(record.error);
+    }
+    return { unwrapped: true, isError: true, text: errMsg };
+  }
+
   return undefined;
 }
 
@@ -242,17 +300,71 @@ export class DocsClient {
     return { repoName: resolved.repoName };
   }
 
+  private async invokeWithDeadline<T>(
+    signal: AbortSignal | undefined,
+    invoke: (combinedSignal: AbortSignal) => Promise<T>,
+    onAbort: (error: GatewayErrorLike) => T
+  ): Promise<T> {
+    if (signal?.aborted) {
+      return onAbort({ code: "cancelled", message: "The request was cancelled.", details: { kind: "cancelled" } });
+    }
+    const controller = new AbortController();
+    let cancelTimer: (() => void) | undefined;
+    let onCallerAbort: (() => void) | undefined;
+    const abortOutcome = new Promise<T>((resolve) => {
+      if (signal) {
+        onCallerAbort = () => {
+          controller.abort(signal.reason ?? new Error("Docs request cancelled"));
+          resolve(onAbort({ code: "cancelled", message: "The request was cancelled.", details: { kind: "cancelled" } }));
+        };
+        signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+      if (Number.isFinite(this.timeoutMs) && this.timeoutMs > 0) {
+        cancelTimer = scheduleSafeTimeout(() => {
+          controller.abort(new Error(`Docs request timed out after ${this.timeoutMs}ms`));
+          resolve(
+            onAbort({
+              code: "timeout",
+              message: `DeepWiki request timed out after ${this.timeoutMs}ms.`,
+              details: { kind: "timeout" }
+            })
+          );
+        }, this.timeoutMs);
+      }
+    });
+
+    try {
+      return await Promise.race([invoke(controller.signal), abortOutcome]);
+    } finally {
+      cancelTimer?.();
+      if (signal && onCallerAbort) {
+        signal.removeEventListener("abort", onCallerAbort);
+      }
+    }
+  }
+
   private async run(tool: DocsTool, args: Record<string, unknown>, repoName: string, signal?: AbortSignal): Promise<{ content: string } | DocsFailureResult> {
     this.toolCalls++;
-    let outcome = await this.caller.callTool(tool, args, { timeoutMs: this.timeoutMs, ...(signal ? { signal } : {}) });
+    let outcome = await this.invokeWithDeadline(
+      signal,
+      (combinedSignal) => this.caller.callTool(tool, args, { timeoutMs: this.timeoutMs, signal: combinedSignal }),
+      (error): ToolCallOutcome => ({ ok: false, error })
+    );
     if (tool === "ask_wiki_question" && isUnknownAskWikiToolFailure(outcome)) {
       this.askToolWireName = LEGACY_ASK_TOOL_ALIAS as DocsTool;
       this.toolCalls++;
-      outcome = await this.caller.callTool(this.askToolWireName, args, { timeoutMs: this.timeoutMs, ...(signal ? { signal } : {}) });
+      outcome = await this.invokeWithDeadline(
+        signal,
+        (combinedSignal) =>
+          this.caller.callTool(this.askToolWireName, args, { timeoutMs: this.timeoutMs, signal: combinedSignal }),
+        (error): ToolCallOutcome => ({ ok: false, error })
+      );
     }
     if (!outcome.ok) return this.fail("query", classifyGatewayError(outcome.error));
     const decoded = decodeEnvelopeValue(outcome.text);
-    if (outcome.isError || decoded.isError) return this.fail("query", classifyToolError(decoded.text));
+    if (outcome.isError || decoded.isError || looksLikeHtmlErrorPage(decoded.text)) {
+      return this.fail("query", classifyToolError(decoded.text));
+    }
     if (!decoded.text.trim()) return this.fail("query", failure("no_documentation", `DeepWiki returned no documentation for ${repoName}.`));
     return { content: decoded.text };
   }
@@ -309,7 +421,13 @@ export class DocsClient {
     };
     let discoveryOk = true;
     if (this.caller.listTools) {
-      const { value, latencyMs } = await timed(() => this.caller.listTools!({ timeoutMs: this.timeoutMs, ...(signal ? { signal } : {}) }));
+      const { value, latencyMs } = await timed(() =>
+        this.invokeWithDeadline(
+          signal,
+          (combinedSignal) => this.caller.listTools!({ timeoutMs: this.timeoutMs, signal: combinedSignal }),
+          (error) => ({ ok: false as const, error })
+        )
+      );
       if (!value.ok) { discoveryOk = false; checks.push({ name: "discovery", status: "failed", latencyMs, failure: classifyGatewayError(value.error) }); }
       else {
         if (!value.tools.includes("ask_wiki_question") && value.tools.includes(LEGACY_ASK_TOOL_ALIAS)) {

@@ -120,6 +120,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     { readonly clientRequestId: string; readonly callId?: string | undefined }
   >();
   private readonly crashListeners = new Set<(reason: string) => void>();
+  private readonly activeWriteCancels = new Set<(err: Error) => void>();
 
   constructor(options: StdioToHttpBridgeOptions) {
     this.instanceId = options.instanceId;
@@ -173,7 +174,30 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       }
     });
 
+    (this.stdin as NodeJS.EventEmitter).on?.("error", () => {
+      // Prevent unhandled 'error' (e.g. async EPIPE after child exit); per-write listeners handle active writes
+    });
+
     this.stdout.on("end", () => {
+      const flushed = this.stdoutDecoder.end();
+      if (flushed) {
+        this.incomingBuffer += flushed;
+        this.incomingBufferBytes += Buffer.byteLength(flushed, "utf8");
+      }
+      if (this.incomingBuffer.length > 0) {
+        const trailingLines = this.incomingBuffer.split("\n");
+        this.incomingBuffer = "";
+        this.incomingBufferBytes = 0;
+        for (const rawLine of trailingLines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
+            this.triggerCrash("frame_size_exceeded");
+            return;
+          }
+          this.handleInboundLine(line);
+        }
+      }
       if (this.alive) {
         this.triggerCrash("stdout_closed");
       }
@@ -189,6 +213,9 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       stderr.on("data", () => {
         // Collect stderr silently or consume stream to avoid process blocking
       });
+      (stderr as NodeJS.EventEmitter).on?.("error", () => {
+        // Ignore broken stderr pipe errors
+      });
     }
   }
 
@@ -197,6 +224,10 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     try {
       parsed = JSON.parse(line);
     } catch (parseError) {
+      if (!line.startsWith("{")) {
+        // Ignore non-JSON diagnostic/startup banner lines emitted by tools on stdout
+        return;
+      }
       this.triggerCrash(`malformed_json_frame: ${String(parseError)}`);
       return;
     }
@@ -306,12 +337,16 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       let finished = false;
       let onDrain: (() => void) | undefined;
       let onError: ((err: Error) => void) | undefined;
+      let onClose: (() => void) | undefined;
+      const cancelWrite = (err: Error) => cleanupAndFinish(err);
 
       const cleanupAndFinish = (err?: Error) => {
         if (finished) return;
         finished = true;
+        this.activeWriteCancels.delete(cancelWrite);
         if (onDrain) (this.stdin as any).removeListener?.("drain", onDrain);
         if (onError) (this.stdin as any).removeListener?.("error", onError);
+        if (onClose) (this.stdin as any).removeListener?.("close", onClose);
         this.pendingWrites = Math.max(0, this.pendingWrites - 1);
         if (err) {
           reject(err);
@@ -320,19 +355,29 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
         }
       };
 
-      const flushed = this.stdin.write(line + "\n", "utf8", (error) => {
-        if (error) {
-          cleanupAndFinish(error);
-        } else {
-          cleanupAndFinish();
-        }
-      });
+      this.activeWriteCancels.add(cancelWrite);
 
-      if (!flushed) {
+      let flushed = true;
+      try {
+        flushed = this.stdin.write(line + "\n", "utf8", (error) => {
+          if (error) {
+            cleanupAndFinish(error);
+          } else {
+            cleanupAndFinish();
+          }
+        });
+      } catch (syncWriteErr) {
+        cleanupAndFinish(syncWriteErr instanceof Error ? syncWriteErr : new Error(String(syncWriteErr)));
+        return;
+      }
+
+      if (!flushed && !finished) {
         onDrain = () => cleanupAndFinish();
         onError = (err: Error) => cleanupAndFinish(err);
+        onClose = () => cleanupAndFinish(new Error("Stdio bridge stdin closed"));
         (this.stdin as any).once?.("drain", onDrain);
         (this.stdin as any).once?.("error", onError);
+        (this.stdin as any).once?.("close", onClose);
       }
     });
   }
@@ -789,6 +834,11 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     }
     this.alive = false;
 
+    for (const cancelWrite of [...this.activeWriteCancels]) {
+      cancelWrite(new Error(`Upstream stdio process crashed: ${reason}`));
+    }
+    this.activeWriteCancels.clear();
+
     const crashError: ContractError = {
       code: "transport_unavailable",
       retryable: true,
@@ -827,6 +877,11 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       return;
     }
     this.alive = false;
+
+    for (const cancelWrite of [...this.activeWriteCancels]) {
+      cancelWrite(new Error(`Upstream stdio driver stopped: ${reason ?? "stopped by host"}`));
+    }
+    this.activeWriteCancels.clear();
 
     const stopError: ContractError = {
       code: "transport_unavailable",
