@@ -25,6 +25,7 @@ import { selectRegressionTests } from "./regression-selection.js";
 import { pinRunnerDefinitions } from "./runner-provenance.js";
 import type { RegressionScope } from "./host-controller.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
+import { normalizeSpecificationOptionals, normalizeWorkflowDefinitionOptionals } from "./assessment-input.js";
 import { BehavioralIdentityRepair, NodeTapTestCodeFailure } from "./node-tap.js";
 import { VitestTestCodeFailure } from "./vitest-json.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
@@ -112,6 +113,11 @@ export class HostBehavioralFailure extends Error {
   constructor(message: string, readonly evidence: import("@bflow/contracts").ArtifactReference,
     readonly rtkOutputs: readonly JsonValue[] = []) { super(message); }
 }
+const includesTestIdentity = (names: readonly string[], target: string): boolean => {
+  const normalizedTarget = target.normalize("NFC");
+  return names.some(item => item.normalize("NFC") === normalizedTarget);
+};
+
 export class HostVerification {
   private readonly gateReceipts = new Map<string, string>();
   private readonly gateRecords = new Map<string, QualityGateResult>();
@@ -396,8 +402,8 @@ export class HostVerification {
    * rejections: `no_test_runner_detected` is reported to the user; the other codes are Coordinator-fixable and silent.
    */
   assertSupported(input: unknown, strategyInput?: unknown, definitionInput?: unknown) {
-    const parsedSpec = SpecificationSchema.parse(input);
-    if (definitionInput !== undefined) WorkflowDefinitionSchema.parse(definitionInput);
+    const parsedSpec = SpecificationSchema.parse(normalizeSpecificationOptionals(input));
+    if (definitionInput !== undefined) WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
     const parsedStrategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
     // Real-app criteria are verified by their own gate; the runner rules below apply to the remaining criteria only.
     const split = parsedStrategy ? splitAppCriteria(parsedSpec, parsedStrategy, this.appSuites) : undefined;
@@ -432,7 +438,7 @@ export class HostVerification {
     if (strategy !== undefined) {
       for (const criterion of automated) {
         const mapping = strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id);
-        if (!mapping?.testNames.length || !this.runners.owner.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
+        if (!mapping?.testNames.length || !this.runners.owner.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => includesTestIdentity(command.testNames, name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
       }
       for (const command of strategy.targetCommands) if (!this.runners.owner.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
@@ -483,7 +489,7 @@ export class HostVerification {
       }
       const bound = commands.some(cmd => {
         if (cmd.method !== criterion.verificationMethod) return false;
-        return mapping.testNames.every(name => cmd.testNames.includes(name));
+        return mapping.testNames.every(name => includesTestIdentity(cmd.testNames, name));
       });
       if (!bound) {
         throw new WorkflowProposalRejected({
@@ -1061,7 +1067,7 @@ export class HostVerification {
         if (context.definition.id !== id) throw new Error("Behavioral check does not match owner configuration");
         const command = await resolveCommand(context);
         if (config.command !== command.command || config.method !== command.method ||
-            !Array.isArray(config.testNames) || config.testNames.some(name => !command.testNames.includes(String(name)))) throw new Error("Behavioral check does not match owner configuration");
+            !Array.isArray(config.testNames) || config.testNames.some(name => !includesTestIdentity(command.testNames, String(name)))) throw new Error("Behavioral check does not match owner configuration");
         const measured = await measureBehavior(command, textField(input.sourceWorktreePath), textField(input.sourceRevision));
         const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
           status: measured.failed ? "failed" : "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
@@ -1218,7 +1224,7 @@ export class HostVerification {
       ...(staticAnalyses.length ? { staticAnalyses } : {}), verifiedBy: binding.agentId });
     for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
     const observations: Array<{ method: string; criterionId: string; evidenceArtifactId: string; command?: string; exitCode?: number; summary: string }> = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
-      strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
+      strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => includesTestIdentity(item.testNames, name)))
       .map(criterion => ({ method: item.method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` })));
     // Commands without a primary criterion still produce evidence for the strategy's required methods/commands.
     for (const item of measured) if (!observations.some(observation => observation.command === item.command)) observations.push({ method: item.method, criterionId: allCriteria[0]!.id,
@@ -1447,7 +1453,16 @@ export class HostVerification {
       findingId: args.findingId, reason: args.reason, evidence: observation.evidence });
   }
   async completeReview(binding: PaneBinding, input: unknown) {
-    const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
+    const rawArgs = record(input);
+    const args: Record<string, unknown> = {
+      ...rawArgs,
+      messageId: rawArgs.messageId === null || (typeof rawArgs.messageId === "string" && rawArgs.messageId.trim() === "")
+        ? undefined : rawArgs.messageId,
+      testIntegrityVerdicts: rawArgs.testIntegrityVerdicts === null ? undefined : rawArgs.testIntegrityVerdicts,
+      findingVerdicts: rawArgs.findingVerdicts === null ? undefined : rawArgs.findingVerdicts,
+      findings: rawArgs.findings === null ? undefined : rawArgs.findings
+    };
+    const id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
     const pending = stored ? { binding: stored.binding, sourceMessageId: stored.sourceMessageId, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
     if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) {
       // Guidance never selects an observation or submits a judgment on the caller's behalf.

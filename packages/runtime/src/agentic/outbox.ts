@@ -218,7 +218,10 @@ export class HerdrOutbox {
       for (const child of this.state.outbound) if (child.parentAssignmentId === owner.message.message_id) child.lease = owner.lease;
       await this.save();
     }
-    if (!owner.leaseReacquisition && Date.parse(owner.lease.expiresAt) > Date.parse(this.now())) { await this.renew(owner); return; }
+    if (!owner.leaseReacquisition && Date.parse(owner.lease.expiresAt) > Date.parse(this.now())) {
+      try { await this.renew(owner); return; }
+      catch (error) { if (!isPermanentTaskNoticeAuthorityError(error)) throw error; }
+    }
     if ((owner.leaseHistory?.length ?? 0) >= 3) throw new Error("Task lease continuation limit exhausted");
     owner.leaseReacquisition ??= AcquireAgentLeaseRequestSchema.parse({
       leaseId: `lease-${digest([owner.message.message_id, owner.lease.leaseId, owner.lease.fencingToken])}`,
@@ -384,7 +387,14 @@ export class HerdrOutbox {
     }
     if (out.error === "Policy continuation waits for active implementing state and all human/delivery gates") delete out.error;
     if (out.parentAssignmentId) {
-      try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }
+      try { this.noticeParent(out); } catch (error) {
+        const formatted = formatTaskNoticeAuthorityError(error);
+        out.status = "cancelled";
+        if (!out.handle && formatted.includes("parent lease is expired")) delete out.request;
+        out.error = formatted;
+        await this.save();
+        return;
+      }
     }
     const run = this.state.runs.find(item => item.runId === out.message.run_id);
     if (run?.nativeDeliveries?.length && ["delegation.request", "task.assignment", "verification.requested"].includes(out.message.type)) {
@@ -532,8 +542,12 @@ export class HerdrOutbox {
     // Registry is authoritative: renewal detects stale/released fencing tokens and optimistic versions.
     try { await this.renew(out); } catch (error) {
       if (!out.parentAssignmentId) throw error;
-      if (isPermanentTaskNoticeAuthorityError(error)) out.status = "cancelled";
-      out.error = formatTaskNoticeAuthorityError(error); await this.save(); return;
+      const formatted = formatTaskNoticeAuthorityError(error);
+      if (isPermanentTaskNoticeAuthorityError(error)) {
+        out.status = "cancelled";
+        if (!out.handle && formatted.includes("parent lease is expired")) delete out.request;
+      }
+      out.error = formatted; await this.save(); return;
     }
     if (!out.lease) throw new Error("Dispatch has no lease");
     if (out.lease.agentId !== pane.agentId || Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Stale dispatch lease");

@@ -182,12 +182,27 @@ export interface ExtractedRequirementDraft {
   readonly targetCorrelationId?: string | undefined;
 }
 
-export const ChatCancellationInputSchema = z.union([
-  z.object({ runId: IdentifierSchema, taskId: blankToUndefined(IdentifierSchema), reason: blankToUndefined(z.string().trim().min(1)) }).strict(),
-  z.object({ runIds: z.array(IdentifierSchema).min(1).refine(ids => new Set(ids).size === ids.length, "Duplicate cancellation run IDs"),
-    reason: blankToUndefined(z.string().trim().min(1)) }).strict(),
-  z.object({ scope: z.literal("session_existing"), reason: blankToUndefined(z.string().trim().min(1)) }).strict()
-]);
+function normalizeFlatCancellationInput(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const cleaned: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  for (const key of ["runId", "taskId", "runIds", "scope", "reason"]) {
+    const val = cleaned[key];
+    if (val === null || (typeof val === "string" && val.trim().length === 0)) {
+      delete cleaned[key];
+    }
+  }
+  return cleaned;
+}
+
+export const ChatCancellationInputSchema = z.preprocess(
+  normalizeFlatCancellationInput,
+  z.union([
+    z.object({ runId: IdentifierSchema, taskId: blankToUndefined(IdentifierSchema), reason: blankToUndefined(z.string().trim().min(1)) }).strict(),
+    z.object({ runIds: z.array(IdentifierSchema).min(1).refine(ids => new Set(ids).size === ids.length, "Duplicate cancellation run IDs"),
+      reason: blankToUndefined(z.string().trim().min(1)) }).strict(),
+    z.object({ scope: z.literal("session_existing"), reason: blankToUndefined(z.string().trim().min(1)) }).strict()
+  ])
+);
 
 const FLAT_CHAT_DECISION_SIBLING_KEYS = new Set([
   "directReply",

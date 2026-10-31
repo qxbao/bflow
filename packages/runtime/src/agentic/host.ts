@@ -79,7 +79,7 @@ import { TaskActivityLog } from "./task-activity-log.js";
 import { newSosAgentName, spawnSosAgent } from "./sos-agent.js";
 import { isBflowSosCommand } from "./native-diagnostic-fence.js";
 import { TaskLogPane } from "./task-log-pane.js";
-import { assessmentFailureSummary } from "./assessment-input.js";
+import { assessmentFailureSummary, normalizeSpecificationOptionals, normalizeWorkflowDefinitionOptionals } from "./assessment-input.js";
 import { assessmentSpecificationToolSchema, nativeRoleMessageToolSchema, parseNativeRoleMessage, roleReplyGuidance, specificationToolSchema, roleProfilePinToolSchema } from "./role-tool-schema.js";
 import { selectRoleProfile } from "./profile-admission.js";
 export function preserveBuiltinRolePrompt(original: string, trustedHostInstructions: string): string {
@@ -1539,9 +1539,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "read_pinned_instructions") {
       if (!["coordinator", "developer", "specifier", "architect", "planner", "reviewer", "qa", "tester", "security"].includes(role))
         throw new Error("This role has no investigation policy context");
-      const skillId = parameters.skillId === undefined ? undefined : textField(parameters.skillId);
-      const offset = parameters.offset === undefined ? 0 : Number(parameters.offset);
-      const requestedLimit = parameters.limit === undefined ? 8192 : Number(parameters.limit);
+      const skillId = parameters.skillId === undefined || parameters.skillId === null ||
+        (typeof parameters.skillId === "string" && parameters.skillId.trim() === "")
+          ? undefined : textField(parameters.skillId);
+      const offset = parameters.offset === undefined || parameters.offset === null || parameters.offset === "" ? 0 : Number(parameters.offset);
+      const requestedLimit = parameters.limit === undefined || parameters.limit === null || parameters.limit === "" ? 8192 : Number(parameters.limit);
       const launchId = typeof binding.metadata?.["launchId"] === "string" ? binding.metadata["launchId"] : undefined;
       return json(await readPinnedInstructionReply({ role, ...(skillId === undefined ? {} : { skillId }), offset, requestedLimit,
         isAgy: providerForRole(role) === "agy", fallbackInstructions: launch[role]?.systemPrompt ?? "", hasPlatform: platformSession !== undefined,
@@ -1550,7 +1552,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "resume_run") {
       const runId = textField(parameters.runId);
       if (role === "conversation") {
-        const resumeTurn = await receipts.authorizedConversationResumeTurn(binding, parameters.messageId === undefined ? undefined : textField(parameters.messageId), runId);
+        const msgId = parameters.messageId === undefined || parameters.messageId === null ||
+          (typeof parameters.messageId === "string" && parameters.messageId.trim() === "")
+            ? undefined : textField(parameters.messageId);
+        const resumeTurn = await receipts.authorizedConversationResumeTurn(binding, msgId, runId);
         const run = record(await host.runtime.inspect(runId));
         if (DelegationRequestSchema.parse(run.delegation).sessionId !== manifest!.conversationSessionId)
           throw new Error("Resume request belongs to another Conversation session");
@@ -1560,6 +1565,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return host.runtime.resumeBlockedRun(runId, textField(action.actionId), { conversationUserMessageId: resumeTurn.messageId });
       }
       if (role !== "coordinator") throw new Error("Only Coordinator or an authenticated Conversation resume request may resume a blocked run");
+      if (parameters.actionId === undefined || parameters.actionId === null ||
+          (typeof parameters.actionId === "string" && parameters.actionId.trim() === "")) {
+        const run = record(await host.runtime.inspect(runId));
+        const action = run.pendingAction !== undefined && run.pendingAction !== null ? record(run.pendingAction) : undefined;
+        return host.runtime.resumeBlockedRun(runId, action?.actionId !== undefined ? textField(action.actionId) : "");
+      }
       return host.runtime.resumeBlockedRun(runId, textField(parameters.actionId));
     }
     if (name === "read_project_policy") {
@@ -1876,7 +1887,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       // Lazily retries an unsupported detection, so dependencies installed since the host started are picked up without a restart.
       await testRunners.refresh();
-      const spec = record(parameters.specification), configuredMethods = verification.configuredMethods();
+      const spec = record(normalizeSpecificationOptionals(parameters.specification)), configuredMethods = verification.configuredMethods();
+      const normalizedDefinition = parameters.definition !== undefined ? normalizeWorkflowDefinitionOptionals(parameters.definition) : undefined;
       const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
       const currentRun = runId !== undefined ? await host.runtime.inspect(runId).then(record).catch(() => undefined) : undefined;
       const delegatedSddLevel = currentRun && typeof record(currentRun.delegation).sddLevel === "string" ? String(record(currentRun.delegation).sddLevel) : undefined;
@@ -1888,14 +1900,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (delegatedSddLevel === "full" && spec.level !== "full") {
             throw new Error("Planning weakens the delegated full SDD specification level; keep specification.level='full' and the full SDD assessment");
           }
-          if (parameters.definition !== undefined) WorkflowDefinitionSchema.parse(parameters.definition);
+          if (normalizedDefinition !== undefined) WorkflowDefinitionSchema.parse(normalizedDefinition);
           strategy = host.runtime.ports.policies.strategy.resolve(spec);
         } });
         guardWorkflowProposal({ phase: "policy", specification: spec, configuredMethods, check: () => {
           if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
         } });
         guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
-          verification.assertSupported(spec, strategy, parameters.definition) });
+          verification.assertSupported(spec, strategy, normalizedDefinition) });
       } catch (error) {
         // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
         // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.

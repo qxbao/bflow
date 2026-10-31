@@ -395,19 +395,20 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
     throw new Error("Zero, nested, skipped or incomplete tests cannot prove behavior");
   }
 
-  const skipSuffix = " # SKIP test name does not match pattern";
-  const filtered = nameSelection
-    ? allLeaves.filter(leaf => {
-        if (!leaf.ok || !leaf.title.endsWith(skipSuffix)) return false;
-        const strippedTitle = leaf.title.slice(0, -skipSuffix.length);
-        const candidate: ObservedIdentityLeaf = {
-          ancestors: leaf.ancestors,
-          title: strippedTitle,
-          rawName: leaf.ancestors.length > 0 ? [...leaf.ancestors, strippedTitle].join(" > ") : strippedTitle
-        };
-        return !expectedNames.some(expected => matchesExpectedIdentity(candidate, expected));
-      })
-    : [];
+  const skipDirectiveRe = / # SKIP(?: .*)?$/i;
+  const todoDirectiveRe = / # TODO(?: .*)?$/i;
+  const isUnselectedDirectiveLeaf = (leaf: TapLeafEntry, directiveRe: RegExp): boolean => {
+    if (!leaf.ok || !directiveRe.test(leaf.title)) return false;
+    const strippedTitle = leaf.title.replace(directiveRe, "");
+    const candidate: ObservedIdentityLeaf = {
+      ancestors: leaf.ancestors,
+      title: strippedTitle,
+      rawName: leaf.ancestors.length > 0 ? [...leaf.ancestors, strippedTitle].join(" > ") : strippedTitle
+    };
+    return !expectedNames.some(expected => matchesExpectedIdentity(candidate, expected));
+  };
+  const filteredSkipped = nameSelection ? allLeaves.filter(leaf => isUnselectedDirectiveLeaf(leaf, skipDirectiveRe)) : [];
+  const filteredTodo = nameSelection ? allLeaves.filter(leaf => isUnselectedDirectiveLeaf(leaf, todoDirectiveRe)) : [];
   // Node 22 reports a selected file without any matching test as a passing top-level test named after the file. Only an
   // exact selected path qualifies; a failing file entry (for example a load error) remains a failure.
   const isSelectedFilePlaceholder = (leaf: TapLeafEntry): boolean => {
@@ -416,9 +417,9 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
     return (selectedPaths.includes(leaf.title) || selectedPaths.includes(normalizedPath)) && !expectedNames.includes(leaf.title);
   };
   const unmatchedFiles = nameSelection ? allLeaves.filter(isSelectedFilePlaceholder) : [];
-  const results = allLeaves.filter(leaf => !filtered.includes(leaf) && !unmatchedFiles.includes(leaf));
+  const results = allLeaves.filter(leaf => !filteredSkipped.includes(leaf) && !filteredTodo.includes(leaf) && !unmatchedFiles.includes(leaf));
   const tests = results.length, passed = reportedPass - unmatchedFiles.length, failed = reportedFail;
-  if (!tests || cancelled || skipped !== filtered.length || todo || total !== allLeaves.length || passed + failed !== tests) {
+  if (!tests || cancelled || skipped !== filteredSkipped.length || todo !== filteredTodo.length || total !== allLeaves.length || passed + failed !== tests) {
     throw new Error("Zero, nested, skipped or incomplete tests cannot prove behavior");
   }
   const resolved = resolveExpectedIdentities(results, expectedNames);

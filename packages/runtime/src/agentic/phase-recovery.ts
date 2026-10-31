@@ -10,17 +10,30 @@ export function unmeasuredPolicyPhaseRequests(state: JournalState, run: RunRecor
           !terminalWithoutMeasurement || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
       if (state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected")) return false;
       const task = run.tasks.find(entry => entry.taskId === payload.taskId);
-      if (!task || task.writerReleased || task.result) return false;
+      if (!task || task.verificationPending || task.cycle !== undefined) return false;
       const receipts = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
-      const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : receipts.length === 0 ? "verification" : undefined;
-      if (payload.phase !== expected) return false;
+      if (task.spec.strategy.tddDecision.mode === "required") {
+        if (task.writerReleased || task.result) return false;
+        const expected = ["red", "green", "refactor"][receipts.length];
+        if (payload.phase !== expected) return false;
+      } else {
+        if (receipts.length > 0) return false;
+        if (task.result !== undefined && task.result.status !== "succeeded") return false;
+        if (!task.result && !task.writerReleased) {
+          if (payload.phase !== "verification") return false;
+        } else if (payload.phase !== "verification" && payload.phase !== undefined) {
+          return false;
+        }
+      }
       const itemTime = Date.parse(item.message.occurred_at ?? "");
       // Only the newest request for this phase and attempt; an earlier one was already superseded.
       return !state.outbound.some((other, otherIndex) => {
         if (other === item || other.message.run_id !== run.runId || other.message.type !== "verification.requested") return false;
         const otherPayload = record(other.message.payload);
-        if (otherPayload.taskId !== payload.taskId || otherPayload.phase !== payload.phase ||
-            otherPayload.implementationAttemptId !== payload.implementationAttemptId) return false;
+        if (otherPayload.kind !== "conditional_evidence" ||
+            otherPayload.taskId !== payload.taskId ||
+            (otherPayload.phase ?? undefined) !== (payload.phase ?? undefined) ||
+            (otherPayload.implementationAttemptId ?? undefined) !== (payload.implementationAttemptId ?? undefined)) return false;
         const otherTime = Date.parse(other.message.occurred_at ?? "");
         if (Number.isFinite(otherTime) && Number.isFinite(itemTime) && otherTime !== itemTime) return otherTime > itemTime;
         const otherRaw = other.message.occurred_at ?? "", itemRaw = item.message.occurred_at ?? "";

@@ -2752,20 +2752,25 @@ export class RolePaneManager {
             if (oldPaneToClose !== null && !oldPaneClosedEarly) {
               await this.#closePane(oldPaneToClose, options);
             }
+            const latestReuseSave = await this.#store.load(this.#config.sessionId, options);
+            const baseReuseManifest = latestReuseSave.ok && latestReuseSave.value ? latestReuseSave.value : manifest;
             const updatedPanes = oldPaneToClose !== null
               ? [
-                  ...manifest.panes.filter(
-                    (p) => p.paneId !== oldPaneToClose && p.bindingId !== releasedCandidate.bindingId
+                  ...baseReuseManifest.panes.filter(
+                    (p) =>
+                      p.paneId !== oldPaneToClose &&
+                      p.paneId !== startResult.value.paneId &&
+                      p.bindingId !== releasedCandidate.bindingId
                   ),
                   startResult.value
                 ]
-              : manifest.panes.map((p) =>
+              : baseReuseManifest.panes.map((p) =>
                   p.bindingId === releasedCandidate.bindingId || p.paneId === startResult.value.paneId
                     ? startResult.value
                     : p
                 );
             const updatedManifest: SessionManifest = {
-              ...manifest,
+              ...baseReuseManifest,
               panes: updatedPanes,
               updatedAt: this.#clock().toISOString()
             };
@@ -2919,7 +2924,7 @@ export class RolePaneManager {
       const latestForSave = await this.#store.load(this.#config.sessionId, options);
       const baseManifest = latestForSave.ok && latestForSave.value ? latestForSave.value : manifest;
       const updatedPanes = [
-        ...manifest.panes.filter((p) => p.paneId !== startResult.value.paneId),
+        ...baseManifest.panes.filter((p) => p.paneId !== startResult.value.paneId),
         startResult.value
       ];
       const updatedManifest: SessionManifest = {
@@ -3202,9 +3207,11 @@ export class RolePaneManager {
     panes: readonly PaneBinding[],
     selector: RoleSelector | string
   ): PaneBinding | undefined {
-    const exact = panes.find(
-      (p) => p.bindingId === selector || p.paneId === selector || p.agentId === selector
-    );
+    const matchesExact = (p: PaneBinding): boolean =>
+      p.bindingId === selector || p.paneId === selector || p.agentId === selector;
+    const exact =
+      panes.find((p) => matchesExact(p) && p.metadata?.["allocationStatus"] !== "released") ??
+      panes.find(matchesExact);
     if (exact) return exact;
     const topoRole = resolveTopologyRole(selector);
     const matchesRole = (p: PaneBinding): boolean =>

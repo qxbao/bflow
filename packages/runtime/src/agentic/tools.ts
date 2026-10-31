@@ -85,7 +85,17 @@ export class CoordinatorTools {
       case "tick_status": return JsonValueSchema.parse({ running: !!this.pendingTick, error: this.tickError ?? null });
       case "reconcile_delivery": return this.runtime.reconcileDelivery(textField(args.messageId));
       case "retry_verification": return this.runtime.retryVerification(textField(args.runId));
-      case "resume_run": return this.runtime.resumeBlockedRun(textField(args.runId), textField(args.actionId));
+      case "resume_run": {
+        const runId = textField(args.runId);
+        if (args.actionId === undefined || args.actionId === null || (typeof args.actionId === "string" && args.actionId.trim() === "")) {
+          const inspected = record(await this.runtime.inspect(runId));
+          const pending = inspected.pendingAction !== null && typeof inspected.pendingAction === "object"
+            ? record(inspected.pendingAction)
+            : undefined;
+          return this.runtime.resumeBlockedRun(runId, pending?.actionId !== undefined ? textField(pending.actionId) : "");
+        }
+        return this.runtime.resumeBlockedRun(runId, textField(args.actionId));
+      }
       case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId), textField(args.taskId));
       case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId), textField(args.taskKey), textField(args.resolutionCommitHash));
       case "cancel": return this.runtime.cancel(textField(args.runId), textField(args.reason));

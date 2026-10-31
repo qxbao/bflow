@@ -6,10 +6,17 @@ const WORK_ALIAS_REGEX = /^việc\s*#([1-9]\d*)(?:\s*[:—–-].*)?$/iu;
 
 function resolveWorkRunAlias(raw: string | undefined, context: ConversationContextSnapshot): string | undefined {
   if (raw === undefined) return undefined;
-  const trimmed = raw.trim();
+  const trimmed = raw.normalize("NFC").trim();
   const match = WORK_ALIAS_REGEX.exec(trimmed);
   if (!match) return trimmed;
-  return context.runShortIds?.[`việc #${match[1]}`] ?? trimmed;
+  const canonicalAlias = `việc #${match[1]}`.normalize("NFC");
+  if (context.runShortIds?.[canonicalAlias]) return context.runShortIds[canonicalAlias];
+  if (context.runShortIds) {
+    for (const [alias, id] of Object.entries(context.runShortIds)) {
+      if (alias.normalize("NFC").trim().toLowerCase() === canonicalAlias) return id;
+    }
+  }
+  return trimmed;
 }
 
 /** Validate state references and completeness, without interpreting natural-language intent. */

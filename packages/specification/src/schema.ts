@@ -7,8 +7,7 @@ import {
 } from "@bflow/contracts";
 import type { OperationResult, Specification } from "@bflow/contracts";
 import { z } from "zod";
-import { canonicalJson } from "./content.js";
-import { ChangeAssessmentSchema, classifyChange } from "./classification.js";
+import { canonicalJson, ChangeAssessmentSchema, classifyChange } from "./classification.js";
 import type { ChangeAssessment } from "./classification.js";
 
 const Text = z.string().trim().min(1);

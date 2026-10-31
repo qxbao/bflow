@@ -49,7 +49,12 @@ import type { RunFacts } from "./run-watchdog.js";
 import { withRecoveredHerdrReceipt } from "./herdr-ingress.js";
 import { nativeMessageFingerprint, NativeRejectionSchema } from "./native-delivery-status.js";
 import { describeValidationError, INVALID_ROLE_MESSAGE_LIMIT, isMessageContentFailure } from "./role-message-feedback.js";
-import { AssessmentSpecificationSchema, assessmentErrorAt } from "./assessment-input.js";
+import {
+  AssessmentSpecificationSchema,
+  assessmentErrorAt,
+  normalizeSpecificationOptionals,
+  normalizeWorkflowDefinitionOptionals
+} from "./assessment-input.js";
 import { NativeDiagnosticFenceAuthoritySchema, NativeDiagnosticFenceSchema } from "./native-diagnostic-fence.js";
 import { requirementRevisionGuidance } from "./requirement-revision-guidance.js";
 import {
@@ -1114,6 +1119,11 @@ export class AgenticWorkflowRuntime {
     await this.transaction(async (state, save, core, outbox) => {
       await this.drainCancellationControls(state, save, core, outbox);
       await outbox.flush((out, handle) => this.bind(state, core, out, handle));
+      const queuedBefore = new Set(state.outbound.filter(out => out.status === "queued").map(out => out.message.message_id));
+      await this.recoverPhaseFailures(state, save, outbox);
+      if (state.outbound.some(out => out.status === "queued" && !queuedBefore.has(out.message.message_id))) {
+        await outbox.flush((out, handle) => this.bind(state, core, out, handle));
+      }
       this.surfaceOutboundFailures(state, outbox);
       this.surfaceCapabilityPreflightFailures(state, outbox);
       await save();
@@ -2712,8 +2722,8 @@ export class AgenticWorkflowRuntime {
 
   async proposeWorkflow(runId: string, specificationInput: unknown, definitionInput: unknown, maxIterations = 3): Promise<JsonValue> {
     if (this.quiesced) throw new Error("Runtime is quiesced");
-    const draft = SpecificationSchema.parse(specificationInput);
-    const originalProposal = WorkflowDefinitionSchema.parse(definitionInput);
+    const draft = SpecificationSchema.parse(normalizeSpecificationOptionals(specificationInput));
+    const originalProposal = WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
     const proposalProfiles = [...new Map(originalProposal.tasks.flatMap(task => {
       const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
       const profile = selectRoleProfile(this.ports.roleProfiles, task.role, pin,
@@ -2753,10 +2763,10 @@ export class AgenticWorkflowRuntime {
       }
       if (draft.runId !== runId || draft.specId !== run.delegation.specificationId || draft.sessionId !== run.delegation.sessionId || draft.status !== "draft")
         throw new Error("Specification does not match delegation");
-      // Intake criteria cannot be weakened by a planning shortcut.
+      // Intake criteria cannot be weakened by a planning shortcut (canonically equivalent NFC/NFD Vietnamese descriptions match).
       for (const criterion of run.delegation.acceptanceCriteria) {
         const accepted = draft.acceptanceCriteria.find(item => item.id === criterion.id);
-        if (!accepted || accepted.description !== criterion.description || accepted.verificationMethod !== criterion.verificationMethod || criterion.required && !accepted.required)
+        if (!accepted || accepted.description.trim().normalize("NFC") !== criterion.description.trim().normalize("NFC") || accepted.verificationMethod !== criterion.verificationMethod || criterion.required && !accepted.required)
           throw new Error("Planning weakens the delegated acceptance criteria");
       }
       if (run.delegation.sddLevel === "full" && draft.level !== "full")
@@ -4114,6 +4124,37 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       request.phaseFailure!.applied = true;
       await save();
     }
+    // If a queued phase-notice was cancelled by HerdrOutbox because the parent writer lease expired in Registry
+    // before delivery, escalate immediately for explicit owner writer-lease recovery.
+    for (const request of state.outbound.filter(item => item.phaseFailure?.applied && !item.phaseFailure.retryAuthorized && !item.phaseFailure.leaseRecoveryRequired)) {
+      const run = state.runs.find(item => item.runId === request.message.run_id);
+      if (!run || run.cancelled || run.status !== "implementing") continue;
+      const payload = record(request.message.payload);
+      const task = run.tasks.find(item => item.taskId === payload.taskId);
+      if (!task || task.writerReleased || typeof payload.phase !== "string") continue;
+      const id = `phase-notice-${digest([run.runId, task.taskId, payload.phase, request.message.message_id])}`;
+      const notice = state.outbound.find(item => item.message.message_id === id);
+      if (notice?.status === "cancelled" && !notice.request && !notice.handle && notice.error?.includes("parent lease is expired")) {
+        request.phaseFailure!.leaseRecoveryRequired = true;
+        const previousStatus = run.status;
+        run.status = "escalated";
+        run.error = `Policy repair blocked by expired writer lease: ${request.phaseFailure!.summary}`;
+        run.pendingAction = {
+          actionId: `next-${digest([run.runId, request.message.message_id])}`,
+          kind: "resume_coordinator",
+          owner: "coordinator",
+          sourceMessageId: request.message.message_id,
+          reason: run.error,
+          createdAt: this.now(),
+          state: "pending",
+          previousStatus,
+          ...inheritedManualResume(run),
+          recovery: "manual"
+        };
+        this.progress(state, outbox, run, run.error);
+        await save();
+      }
+    }
     // Older resumes authorized the retry but woke only Coordinator, which cannot invoke
     // Developer-only phase tools. Recover the missing handoff from that durable authority.
     if (this.quiesced) return;
@@ -4127,7 +4168,53 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) ||
           Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) continue;
       const task = run.tasks.find(item => item.taskId === payload.taskId);
-      if (!task || task.writerReleased) continue;
+      if (!task) continue;
+      if (task.writerReleased || task.result !== undefined) {
+        if (this.ports.automaticAlternativeEvidence && task.result?.status === "succeeded" && task.spec.strategy.tddDecision.mode !== "required") {
+          let evidenceComplete = false;
+          try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); evidenceComplete = true; } catch { /* Independent evidence still required. */ }
+          if (!evidenceComplete && !state.outbound.some(item => item.message.run_id === run.runId &&
+              item.message.type === "verification.requested" && record(item.message.payload).kind === "conditional_evidence" &&
+              record(item.message.payload).taskId === task.taskId && !item.phaseFailure && !item.phaseRetirement && item.status !== "cancelled")) {
+            const retryIndex = state.outbound.filter(item => item.message.run_id === run.runId &&
+              item.message.type === "verification.requested" && record(item.message.payload).kind === "conditional_evidence" &&
+              record(item.message.payload).taskId === task.taskId).length;
+            const retryRequestId = `alternative-retry-${digest([run.runId, task.taskId, request.message.message_id, String(retryIndex)])}`;
+            const behavioral = task.spec.strategy.targetCommands.length > 0;
+            const change = behavioral && task.worktrees.at(-1)
+              ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key))
+              : undefined;
+            const recipient = await this.profileEvidenceRecipient(run, "qa", retryRequestId, ["testing"]);
+            const evidenceOut = outbox.enqueue(RoleMessageSchema.parse({
+              schema_version: 2,
+              message_id: retryRequestId,
+              correlation_id: run.delegation.correlationId,
+              causation_id: request.message.message_id,
+              run_id: run.runId,
+              sender: { role: "coordinator" },
+              recipient: { role: "qa" },
+              type: "verification.requested",
+              payload: json({
+                kind: "conditional_evidence",
+                runId: run.runId,
+                taskId: task.taskId,
+                ...(change ? { phase: "verification", sourceRevision: change.headCommitHash, implementationAttemptId: task.result.attemptId } : {}),
+                instruction: behavioral
+                  ? "For this verification phase, inspect_alternative_verification with phase when policy requires manual_review, judge every criterion independently, then record_behavioral_verification with the inspected review observation and criteria. Never supply measured output or invent a judgment."
+                  : "Inspect the exact committed diff with inspect_alternative_verification, evaluate the accepted criteria independently, then record_alternative_verification. Do not invent evidence.",
+                specification: task.spec.specification,
+                strategy: task.spec.strategy
+              }),
+              artifact_references: [],
+              occurred_at: this.now(),
+              idempotency_key: retryRequestId
+            }), recipient.selector, `evidence-${task.taskId}`, `evidence-${task.result.attemptId}`, ["testing"]);
+            Object.assign(evidenceOut, recipient);
+            await save();
+          }
+        }
+        continue;
+      }
       const rawReceipts = task.spec.strategy.metadata?.tddEvidence ?? [];
       if (!Array.isArray(rawReceipts)) throw new Error("Corrupt policy measurement history");
       const receipts = rawReceipts.map(item => VerificationResultSchema.parse(item));
@@ -4222,9 +4309,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         .flatMap(mapping => mapping.testNames)
         // Real-app identities belong only to their owner gate (boundRunnerIdentities); an automatic runner never receives them.
         .filter(name => parseAppCheckIdentity(name) === undefined) : config.testNames;
+      const hasTestIdentity = (list: unknown, target: string): boolean => {
+        const canonical = target.trim().normalize("NFC");
+        return Array.isArray(list) && list.some(candidate => typeof candidate === "string" && candidate.trim().normalize("NFC") === canonical);
+      };
       const criteria = dossier.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived" &&
         (config.kind === "review" || criterion.verificationMethod === config.method && dossier.strategy.criterionMappings.some(mapping =>
-          mapping.criterionId === criterion.id && mapping.testNames.length && mapping.testNames.every(name => Array.isArray(names) && names.includes(name)))));
+          mapping.criterionId === criterion.id && mapping.testNames.length && mapping.testNames.every(name => hasTestIdentity(names, name)))));
       if (methodBound && criteria.length === 0) return [];
       return [{ ...check, configuration: json({ ...config, criterionIds: criteria.map(criterion => criterion.id),
         testNames: config.kind === "review" ? dossier.strategy.criterionMappings.filter(mapping => criteria.some(criterion => criterion.id === mapping.criterionId)).flatMap(mapping => mapping.testNames) : names }) }];

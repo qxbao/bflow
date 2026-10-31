@@ -162,8 +162,12 @@ export class VerificationEngine {
         obs.specFingerprint !== plan.specFingerprint || obs.scope !== plan.scope || obs.method !== config.method ||
         obs.role !== config.role || plan.implementerIds.includes(obs.executorId)) throw new Error("Uncorrelated or non-independent observation");
     const ids = obs.criteria.map(c => c.criterionId);
+    const hasObservedTestName = (target: string): boolean => {
+      const canonical = target.trim().normalize("NFC");
+      return obs.testNames.some(candidate => candidate.trim().normalize("NFC") === canonical);
+    };
     if (new Set(ids).size !== ids.length || digest([...ids].sort()) !== digest([...config.criterionIds].sort()) ||
-        config.testNames.some(name => !obs.testNames.includes(name))) throw new Error("Missing or conflicting criterion/test evidence");
+        config.testNames.some(name => !hasObservedTestName(name))) throw new Error("Missing or conflicting criterion/test evidence");
     if (config.kind === "deterministic" && (obs.command !== config.command || obs.exitCode === undefined))
       throw new Error("Automated evidence requires exact command and integer exit code");
     if (config.measuresCoverage && plan.strategy.coverageThresholdPercent !== undefined && obs.coveragePercent === undefined)
