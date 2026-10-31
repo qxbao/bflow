@@ -15,16 +15,17 @@ function Field({name,path,value,onChange,disabled=false}:{name:string;path:strin
  return <div className="my-3 [&_small]:mb-1 [&_small]:block"><label htmlFor={id}>{name} (JSON)</label><textarea id={id} rows={Math.min(12,draft.split('\n').length+1)} disabled={disabled} value={draft} aria-invalid={Boolean(error)} onChange={e=>{setDraft(e.target.value);try{const next=JSON.parse(e.target.value) as WebConfigValue;e.target.setCustomValidity('');onChange(next);setError('');}catch{e.target.setCustomValidity('JSON chưa hợp lệ.');setError('JSON chưa hợp lệ. Hoàn tất trước khi lưu.');}}}/>{error && <p role="alert">{error}</p>}</div>;
 }
 function Roles({value,onChange}:{value:WebConfigValue[];onChange:(v:WebConfigValue[])=>void}){
- return <div className="grid items-start gap-x-4 xl:grid-cols-2">{value.map((item,index)=>{
+ const models=[...new Set(value.flatMap(item=>item && typeof item==='object' && !Array.isArray(item) && typeof item.model==='string' && item.model?[item.model]:[]))];
+ return <><p className="text-sm text-muted">Gợi ý model lấy từ các vai trò khác trong cấu hình này. Model và provider chỉ được kiểm tra khi khởi động phiên, chưa kiểm tra lúc lưu.</p><datalist id="config-role-models">{models.map(model=><option key={model} value={model}/>)}</datalist><div className="grid items-start gap-x-4 xl:grid-cols-2">{value.map((item,index)=>{
   if(!item || typeof item!=='object' || Array.isArray(item))return null;
   const update=(key:string,next:string)=>{const role={...item};if(next)role[key]=next;else delete role[key];onChange(value.map((v,i)=>i===index?role:v));};
   return <fieldset className="my-3 min-w-0 border border-line p-3" key={index}><legend>{String(item.role)}</legend><div className="grid gap-3 sm:grid-cols-2">
    <label>Provider ({String(item.role)})<select value={String(item.cli??'claude')} onChange={e=>update('cli',e.target.value)}>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select></label>
-   <label>Model ({String(item.role)})<input value={String(item.model??'')} placeholder="Mặc định của provider" onChange={e=>update('model',e.target.value)}/></label>
+   <label>Model ({String(item.role)})<input list="config-role-models" value={String(item.model??'')} placeholder="Mặc định của provider" onChange={e=>update('model',e.target.value)}/></label>
    <label>Profile ({String(item.role)})<input value={String(item['profile-name']??'')} placeholder="Profile mặc định" onChange={e=>update('profile-name',e.target.value)}/></label>
    <label>Effort ({String(item.role)})<select value={String(item.effort??'')} onChange={e=>update('effort',e.target.value)}><option value="">Mặc định</option>{choices.effort!.map(effort=><option key={effort}>{effort}</option>)}</select></label>
   </div><details><summary>Thiết lập khác cho {String(item.role)}</summary>{Object.entries(item).filter(([key])=>!['role','cli','model','profile-name','effort'].includes(key)).map(([key,v])=><Field key={key} name={key} path={`environment.roles.${index}.${key}`} value={v} onChange={next=>onChange(value.map((v,i)=>i===index?{...item,[key]:next}:v))}/>)}</details></fieldset>;
- })}</div>;
+ })}</div></>;
 }
 export function ProjectConfiguration({api,id,revision,disabled=false,onDirtyChange,onRevisionChange}:{api:ApiClient;id:string;revision:number;disabled?:boolean;onDirtyChange?:(dirty:boolean)=>void;onRevisionChange?:(revision:string)=>void}){
  const [saved,setSaved]=useState<WebProjectConfiguration>(),[values,setValues]=useState<Record<string,WebConfigValue>>({}),[yaml,setYaml]=useState(''),[mode,setMode]=useState<'form'|'yaml'>('form'),[error,setError]=useState<unknown>(),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[editorRevision,setEditorRevision]=useState(0),[invalidDraft,setInvalidDraft]=useState(false);

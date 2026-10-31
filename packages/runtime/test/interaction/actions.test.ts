@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { projectRun } from "../../src/interaction/views.js";
+import { availableActions } from "../../src/interaction/actions.js";
 import { run, state, pending, at } from "./fixtures.js";
 function view(r = run(), ready = true) {
   return projectRun(
@@ -109,4 +110,9 @@ it.each([true, false])("offers a distinct owner resume after automatic=%s wake w
   expect(resume().enabled).toBe(automatic);
   r.pendingAction!.manualResumeAttempts = 3;
   expect(resume()).toMatchObject({ enabled: false, disabledReason: "resume_budget_exhausted" });
+});
+it("disables requirement revision once tasks are in Core, matching Runtime admission", () => {
+  const revise = (r: ReturnType<typeof run>) => availableActions(r, state([r]), [], true, true, false).find((a) => a.kind === "revise_request")!;
+  expect(revise(run("r", { status: "implementing" })).enabled).toBe(true);
+  expect(revise(run("r", { status: "implementing", coreCreated: true }))).toMatchObject({ enabled: false, disabledReason: "core_execution_started" });
 });
