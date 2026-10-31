@@ -13,7 +13,7 @@ export const ChangeAssessmentSchema = z.object({
   architectureImpact: z.boolean(),
   migrationRequired: z.boolean(),
   risk: RiskLevelSchema,
-  unresolvedQuestions: z.array(z.string().trim().min(1)).default([])
+  unresolvedQuestions: z.preprocess(v => v === null ? undefined : v, z.array(z.string().trim().min(1)).default([]))
 }).strict();
 
 export type ChangeAssessment = z.infer<typeof ChangeAssessmentSchema>;
@@ -55,7 +55,10 @@ export function classifyChange(input: unknown, affectedPaths: readonly string[] 
     reasons.push("persistent data schema impact");
   }
   if (change.architectureImpact) reasons.push("architecture impact");
-  const normalizedModules = change.modules.map(m => m.replace(/[/\\]+$/, "") || m);
+  const normalizedModules = change.modules.map(m => {
+    const clean = m.trim().normalize("NFC").replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/+/g, "/").replace(/\/+$/, "");
+    return clean || m.trim().normalize("NFC");
+  });
   if (new Set(normalizedModules).size > 1) reasons.push("multiple modules affected");
   if (change.migrationRequired) reasons.push("migration required");
   if (change.risk === "high" || change.risk === "critical") reasons.push("high declared risk");

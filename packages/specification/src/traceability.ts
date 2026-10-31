@@ -16,7 +16,7 @@ export interface TraceabilityMatrix {
 export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unknown): TraceabilityMatrix {
   const spec = parseContractOrP15Specification(specInput);
   const mappings = policyDetails(spec).traceability;
-  const criteriaIds = new Set(spec.acceptanceCriteria.map(c => c.id));
+  const criteriaIds = new Set(spec.acceptanceCriteria.map(c => c.id.normalize("NFC")));
 
   const rawMetadata = typeof specInput === "object" && specInput !== null && "metadata" in specInput
     ? (specInput as Record<string, unknown>).metadata
@@ -35,12 +35,13 @@ export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unkn
   }
 
   const unknownCriterionIds = parsedWorkflow !== undefined
-    ? [...new Set(parsedWorkflow.tasks.flatMap(t => (t.acceptanceCriteria ?? []).map(cId => cId.trim())).filter(cId => !criteriaIds.has(cId)))].sort()
+    ? [...new Set(parsedWorkflow.tasks.flatMap(t => (t.acceptanceCriteria ?? []).map(cId => cId.trim().normalize("NFC"))).filter(cId => !criteriaIds.has(cId)))].sort()
     : [];
 
   const criterionToTasks: Record<string, readonly string[]> = {};
   for (const criterion of spec.acceptanceCriteria) {
-    const specMapping = mappings.find(m => m.criterionId === criterion.id);
+    const normalizedCriterionId = criterion.id.normalize("NFC");
+    const specMapping = mappings.find(m => m.criterionId.normalize("NFC") === normalizedCriterionId);
 
     if (hasExplicitSddTraceability) {
       if (specMapping && specMapping.taskIds.length > 0) {
@@ -51,7 +52,7 @@ export function buildTraceabilityMatrix(specInput: unknown, workflowInput?: unkn
     } else {
       if (parsedWorkflow) {
         const workflowTaskIds = parsedWorkflow.tasks
-          .filter(t => (t.acceptanceCriteria ?? []).some(cId => cId.trim() === criterion.id))
+          .filter(t => (t.acceptanceCriteria ?? []).some(cId => cId.trim().normalize("NFC") === normalizedCriterionId))
           .map(t => t.id)
           .sort();
         if (workflowTaskIds.length > 0) {
@@ -129,10 +130,14 @@ export function validateTraceability(input: unknown, workflowInput: unknown): vo
     throw new Error(`Workflow tasks reference unknown acceptance criteria: ${matrix.unknownCriterionIds.join(", ")}`);
   }
   if (matrix.orphanCriterionIds.length > 0) {
-    throw new Error("Every acceptance criterion must map to a task");
+    throw new Error(`Every acceptance criterion must map to a task (orphan criteria: ${matrix.orphanCriterionIds.join(", ")})`);
   }
   if (matrix.unknownMappedTaskIds.length > 0 || matrix.unmappedWorkflowTaskIds.length > 0) {
-    throw new Error("Workflow tasks must exactly match specification traceability");
+    const details = [
+      matrix.unmappedWorkflowTaskIds.length > 0 ? `unmapped workflow tasks: ${matrix.unmappedWorkflowTaskIds.join(", ")}` : "",
+      matrix.unknownMappedTaskIds.length > 0 ? `unknown mapped tasks: ${matrix.unknownMappedTaskIds.join(", ")}` : ""
+    ].filter(Boolean).join("; ");
+    throw new Error(`Workflow tasks must exactly match specification traceability (${details})`);
   }
 }
 
@@ -260,17 +265,21 @@ function globToRegExp(pattern: string): RegExp {
 }
 
 function pathMatchesPattern(pattern: string, filePath: string): boolean {
-  if (
-    filePath.startsWith("/") ||
-    filePath.startsWith("\\") ||
-    filePath.split(/[/\\]/).includes("..") ||
-    filePath.split(/[/\\]/).includes(".")
-  ) {
+  const normalizedInput = filePath.normalize("NFC").replace(/\\/g, "/");
+  if (normalizedInput.startsWith("/")) {
+    return false;
+  }
+  const normPath = normalizedInput.replace(/^(?:\.\/)+/, "");
+  const segments = normPath.split("/");
+  if (!normPath || segments.includes("..") || segments.includes(".")) {
     return false;
   }
 
-  const normPattern = pattern.replace(/^\.\//, "").replace(/^\//, "");
-  const normPath = filePath;
+  const normPattern = pattern
+    .normalize("NFC")
+    .replace(/\\/g, "/")
+    .replace(/^(?:\.\/)+/, "")
+    .replace(/^\//, "");
 
   if (normPattern === normPath) return true;
   if (normPattern === "**" || normPattern === "*") return true;

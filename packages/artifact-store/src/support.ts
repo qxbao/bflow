@@ -20,7 +20,7 @@ function canonical(value: unknown): unknown {
 export function fingerprint(value: unknown): string { return digest(JSON.stringify(canonical(value))); }
 export function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 export function storedJson(payload: unknown, checksum: unknown): unknown {
-  if (typeof payload !== "string" || digest(payload) !== checksum) fail("corruption", "Artifact catalog checksum mismatch");
+  if (typeof payload !== "string" || typeof checksum !== "string" || digest(payload) !== checksum) fail("corruption", "Artifact catalog checksum mismatch");
   try { return JSON.parse(payload); } catch { return fail("corruption", "Artifact catalog is not JSON"); }
 }
 export function failure<T>(error: unknown): OperationResult<T> {

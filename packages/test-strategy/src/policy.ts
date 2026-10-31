@@ -8,8 +8,10 @@ const levelFor: Partial<Record<VerificationMethod, TestLevel>> = {
 };
 const unique = <T>(values: T[]): T[] => [...new Set(values)];
 const testFilePattern = /(^|\/)(__tests__|__fixtures__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$/i;
+const normalizeRepoPath = (path: string) => path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
 
 export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], paths: string[], specRisk: RiskLevel = "low") {
+  const normalizedPaths = paths.map(normalizeRepoPath);
   const surfaces = new Set([...a.changeImpact.surfaces, a.taskType]);
   const has = (...names: Assessment["taskType"][]) => names.some(name => surfaces.has(name));
   const regression = has("bugfix") || criteria.some(c => c.category === "regression");
@@ -22,7 +24,7 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
   // Their presence alone does not create missing behavior for a meaningful Red.
   const executableTarget = executableCriterion && (a.changeImpact.behaviorChanged ||
     a.changeImpact.deterministic || a.changeImpact.regressionReproducible);
-  const mislabeledDocs = a.taskType === "documentation" && paths.some(path => !/\.(md|mdx|txt|rst|adoc)$/i.test(path));
+  const mislabeledDocs = a.taskType === "documentation" && normalizedPaths.some(path => !/\.(md|mdx|txt|rst|adoc)$/i.test(path));
   const behavior = a.changeImpact.behaviorChanged || logic || api || executableTarget || mislabeledDocs;
   const elevated = a.changeImpact.securitySensitive || a.changeImpact.dataMigration || criteria.some(c => c.category === "security");
   const risk = riskOrder[Math.max(riskOrder.indexOf(specRisk), riskOrder.indexOf(a.riskClassification), elevated ? 2 : 0)]!;
@@ -54,7 +56,7 @@ export function evaluatePolicy(a: Assessment, criteria: AcceptanceCriterion[], p
   // Characterization: only test files change, so the current production code is the target and tests must already pass.
   // Bug/regression reproductions still need a failing Red. Domain logic may not be not_applicable (contract rule), so its
   // characterization is recommended instead: no mandatory Red, the same pass-on-current-code evidence.
-  const testOnly = paths.length > 0 && paths.every(path => testFilePattern.test(path)) && !regression;
+  const testOnly = normalizedPaths.length > 0 && normalizedPaths.every(path => testFilePattern.test(path)) && !regression;
   const characterization = testOnly && !logic, logicCharacterization = testOnly && logic;
   let mode: TddMode;
   let reason: string;

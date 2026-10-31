@@ -52,5 +52,8 @@ export function migrate(db: DatabaseSync): void {
       }
     }
     db.exec("COMMIT");
-  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch { /* already auto-rolled back */ }
+    throw error;
+  }
 }
