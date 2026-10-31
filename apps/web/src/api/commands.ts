@@ -29,10 +29,11 @@ export async function executeLifecycle(api:ApiClient,project:string,id:string,ki
 export type DecisionOutcome='approved'|'rejected'|'changes_requested';
 /** `outcome` is non-sensitive display metadata for decisions; never a body, reason or authority. */
 export type RecordEntry={slot:string;scope:string;commandId:string;fingerprint:string;kind:CommandBody['kind'];outcome?:DecisionOutcome};
-export type Observation={record:RecordEntry;operation?:WebOperation;uncertain?:boolean;error?:unknown};
+export type Observation={record:RecordEntry;operation?:WebOperation;submitting?:boolean;uncertain?:boolean;error?:unknown};
 /** Recovery metadata only. This is never authority or a persisted command body. */
 export class CommandStore {
   private busy=new Set<string>();
+  private inFlight=new Set<string>();
   constructor(readonly api:ApiClient,readonly projectId:string,readonly scope:string,readonly changed:()=>void=()=>{}){}
   get projectPrefix(){return `bflow:web:operations:${encodeURIComponent(this.projectId)}:`;}
   get prefix(){return this.projectPrefix+encodeURIComponent(this.scope)+':';}
@@ -45,6 +46,7 @@ export class CommandStore {
     }return records;
   }
   async observe(record:RecordEntry):Promise<Observation>{
+    if(this.inFlight.has(record.commandId))return {record,submitting:true};
     try{const operation=await readOperation(this.api,this.projectId,record.commandId);if(operation.operationKind!==record.kind)throw new ApiError('invalid_response');return {record,operation};}
     catch(error){return {record,uncertain:true,error};}
   }
@@ -61,15 +63,17 @@ export class CommandStore {
         return this.observe(existing);
       }
       const record:RecordEntry={slot,scope:this.scope,commandId:crypto.randomUUID(),fingerprint:digest,kind:body.kind,...(body.kind==='answer_decision'?{outcome:body.outcome}:{})};
+      this.inFlight.add(record.commandId);
       localStorage.setItem(this.key(record),JSON.stringify(record));this.changed();
       try{const operation=body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind,body.force):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
       catch(error){
         // Registered definitive refusal has no accepted side effect. Persist no body/error text.
         if(error instanceof ApiError && ['invalid_request','forbidden','session_required','stale_version','operation_not_allowed','payload_too_large'].includes(error.code)){
+          this.inFlight.delete(record.commandId);
           localStorage.removeItem(this.key(record));this.changed();throw error;
         }
         return {record,uncertain:true,error};
-      }
+      }finally{this.inFlight.delete(record.commandId);}
     };
     try{return await navigator.locks.request(this.projectPrefix+slot,run);}finally{this.busy.delete(slot);}
   }

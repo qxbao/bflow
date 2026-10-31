@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { expect, it } from 'vitest';
 import { fixture, client } from './helpers.js';
-it.each(['text/html','image/svg+xml','text/markdown','application/json','text/plain'])('serves %s as inert content and requires exact authenticated scope',async mediaType=>{
+it.each(['text/html','image/svg+xml','text/markdown','application/json','text/plain','text/x-patch','text/diff'])('serves %s as inert content and requires exact authenticated scope',async mediaType=>{
  const bytes=Buffer.from('<script>alert(1)</script> [x](javascript:alert(1)) ![remote](https://example.test/track)');let ack=0;
  const f=await fixture({},async()=>({...client,async readArtifact(_p,id){return {ok:true as const,value:{metadata:{apiVersion:1,artifactId:id,runId:'r',mediaType,checksum:{algorithm:'sha256' as const,value:createHash('sha256').update(bytes).digest('hex')},sizeBytes:bytes.length,disposition:'inline' as const,previewLimitBytes:1048576},chunks:(async function*(){yield bytes;})()}};},async acknowledgeNotice(_p,id){ack++;return {ok:true as const,value:{apiVersion:1 as const,noticeId:id,displayedAt:new Date().toISOString()}};}}));
  try{

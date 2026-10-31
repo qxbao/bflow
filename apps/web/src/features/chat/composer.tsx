@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { WebHttpContracts, WEB_LIMITS } from '@bflow/contracts/web';
 import { ApiClient, ApiError, explain, projectPath } from '../../api/client';
+import { FieldLabel } from '../../components/FieldHelp';
 import { useRead } from '../data';
 const DEFINITIVE_PRE_ADMISSION_CODES=new Set(['invalid_request','forbidden','session_required','not_found','stale_version','operation_not_allowed','payload_too_large']);
 function pending(key:string):string|undefined {
@@ -61,7 +62,7 @@ export function ChatComposer({api,projectId,sessionId,runId,revision,historyReje
  const tooLarge=new TextEncoder().encode(draft).byteLength>WEB_LIMITS.chatBytes;
  return <form onSubmit={submit} className="mt-3 min-w-0 [&_textarea]:my-2" aria-busy={busy}>
   {!ready&&<p id="chat-unavailable" className="my-2 border-l-3 border-warning pl-3 text-sm">Trò chuyện qua web chưa sẵn sàng trong phiên này. Bạn vẫn có thể dùng biểu mẫu và nút quyết định.</p>}
-  <label htmlFor="chat-draft">Tin nhắn cho Conversation</label><textarea id="chat-draft" value={draft} onChange={e=>setDraft(e.target.value)} disabled={!ready||busy||uncertain} aria-describedby={!ready?'chat-unavailable':undefined} placeholder={ready?'Nhập trao đổi bổ sung cho phiên làm việc…':'Trò chuyện trực tiếp chưa bật trong phiên này'} rows={3}/>
+  <FieldLabel htmlFor="chat-draft" label="Tin nhắn cho Conversation" help="Gửi trao đổi hoặc ghi chú bổ sung tới vai trò Trợ lý tiếp nhận (Conversation) của công việc này. Các quyết định phê duyệt chính thức vẫn thực hiện qua nút Xem xét gói ở phía trên."/><textarea id="chat-draft" value={draft} onChange={e=>setDraft(e.target.value)} disabled={!ready||busy||uncertain} aria-describedby={!ready?'chat-unavailable':undefined} placeholder={ready?'Nhập trao đổi bổ sung cho phiên làm việc…':'Trò chuyện trực tiếp chưa bật trong phiên này'} rows={3}/>
   {tooLarge&&<p role="alert">Tin nhắn vượt quá giới hạn 16 KiB.</p>}
   <div className="flex flex-wrap items-center gap-2"><button type="submit" className="min-w-28" disabled={!ready||busy||uncertain||tooLarge||!draft.trim()}>{busy?'Đang xử lý…':'Gửi tin nhắn'}</button>
   {uncertain&&<button type="button" disabled={busy} onClick={()=>void reconcile()}>Đối chiếu tin nhắn</button>}</div>

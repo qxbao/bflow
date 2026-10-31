@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router';
 import type { WebProject } from '@bflow/contracts/web';
+import { FieldHelp } from './FieldHelp';
 
 export function AppShell({projects,projectId,children}:{projects:WebProject[];projectId?:string;children:ReactNode}) {
   const navigate=useNavigate(), location=useLocation(), main=useRef<HTMLElement>(null);
@@ -20,7 +21,13 @@ export function AppShell({projects,projectId,children}:{projects:WebProject[];pr
     </header>
     <div className="mx-auto grid max-w-[1680px] lg:min-h-[calc(100dvh-7rem)] lg:grid-cols-[224px_minmax(0,1fr)]">
       <aside id="workspace-navigation" ref={menu} className={`${menuOpen?'block':'hidden'} min-w-0 border-b border-line p-4 lg:block lg:border-r lg:border-b-0 lg:p-5`}>
-        <label htmlFor="project">Dự án đang xem</label>
+        <div className="flex items-center justify-between gap-1.5">
+          <label htmlFor="project">Dự án đang xem</label>
+          <FieldHelp
+            label="Dự án đang xem"
+            help="Chuyển nhanh giữa các kho Git đã đăng ký trên máy này để xem tiến độ công việc, hộp phê duyệt hoặc cài đặt riêng của từng dự án."
+          />
+        </div>
         <select id="project" className="mt-2 mb-4" value={projectId??''} onChange={e=>navigate(e.target.value?`/projects/${encodeURIComponent(e.target.value)}`:'/')}>
           <option value="">Chọn dự án</option>{projects.map(item=><option key={item.projectId} value={item.projectId}>{item.displayName}</option>)}
         </select>

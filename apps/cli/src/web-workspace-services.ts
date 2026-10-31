@@ -213,7 +213,21 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
     },
     async preview(projectId) {
       try {
-        const { repository } = await context(projectId);
+        const { repository } = await registered(projectId);
+        try {
+          await readPreviewFile(join(repository.root, '.bflow/config.yml'));
+          await readEnvironmentConfig(repository);
+        } catch (failure) {
+          const missing = (failure as NodeJS.ErrnoException).code === 'ENOENT';
+          return WebProjectPreviewResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId,
+            available: false,
+            summary: missing
+              ? 'Kho mã chưa có tệp cấu hình (.bflow/config.yml). Mở Cài đặt dự án để khởi tạo cấu hình.'
+              : 'Tệp cấu hình (.bflow/config.yml) chưa hợp lệ. Mở Cài đặt dự án để kiểm tra và sửa lại.',
+            blockers: [],
+            observedAt: new Date().toISOString(),
+          }});
+        }
         const plan = ExecutionPlanSchema.parse(await loadExecutionPreview(repository.root));
         return WebProjectPreviewResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId,
           available: true, summary: `Execution preview: ${plan.mode}. Đây là cấu hình dự kiến, chưa cấp quyền hay xác nhận readiness.`,

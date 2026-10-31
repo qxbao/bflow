@@ -9,6 +9,7 @@ import { ErrorState } from '../components/ErrorState';
 import { LoadingState } from '../components/LoadingState';
 import { Pagination } from '../components/Pagination';
 import { ActionConfirmation } from '../components/ActionConfirmation';
+import { FieldLabel } from '../components/FieldHelp';
 import { localPage } from './pagination';
 
 export function Review({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) {
@@ -24,7 +25,7 @@ export function Review({api,id,revision,refresh}:{api:ApiClient;id:string;revisi
   function page(value:number){const next=new URLSearchParams(query);next.set('page',String(value));change(next);}
   return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Hộp xem xét</div><h1>Cần bạn quyết định</h1>
     <p className="mb-4 max-w-2xl text-base text-muted">Đọc câu hỏi và tài liệu của đúng phiên bản công việc.</p>
-    <div className="my-4 flex flex-wrap items-end justify-between gap-3"><div className="w-full sm:max-w-xs"><label htmlFor="review-status">Trạng thái gói</label><select id="review-status" value={status} onChange={event=>{const next=new URLSearchParams(query);if(event.target.value)next.set('status',event.target.value);else next.delete('status');next.delete('page');change(next);}}><option value="">Tất cả trạng thái</option>{['pending','approved','rejected','changes_requested','expired','superseded','cancelled'].map(value=><option key={value} value={value}>{phases[value]}</option>)}</select></div><p className="m-0 text-sm text-muted">{filtered.length} gói trong bản đọc hiện có</p></div>
+    <div className="my-4 flex flex-wrap items-end justify-between gap-3"><div className="w-full sm:max-w-xs"><FieldLabel htmlFor="review-status" label="Trạng thái gói" help="Lọc hộp phê duyệt theo tình trạng quyết định (ví dụ Chờ quyết định để xem các gói đang đợi bạn xử lý, hoặc Đã duyệt để tra cứu lại)."/><select id="review-status" value={status} onChange={event=>{const next=new URLSearchParams(query);if(event.target.value)next.set('status',event.target.value);else next.delete('status');next.delete('page');change(next);}}><option value="">Tất cả trạng thái</option>{['pending','approved','rejected','changes_requested','expired','superseded','cancelled'].map(value=><option key={value} value={value}>{phases[value]}</option>)}</select></div><p className="m-0 text-sm text-muted">{filtered.length} gói trong bản đọc hiện có</p></div>
     <LoadingState loading={result.loading} initial={!result.data} label="Đang tải gói xem xét…"/>
     {Boolean(result.error) && <><ErrorState stale={Boolean(result.data)} error={result.error} retry={refresh}/><Link to={`/projects/${encodeURIComponent(id)}/runs`}>Xem theo từng công việc</Link></>}
     {Boolean(runs.error) && pagination.items.length>0 && <ErrorState stale={Boolean(runs.data)} error={runs.error} retry={refresh}/>}

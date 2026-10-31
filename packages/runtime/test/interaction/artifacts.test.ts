@@ -25,6 +25,17 @@ it('reads only catalog-owned project/session runs and verifies integrity before 
  await store.delete(ref.artifactId);expect(await read()).toMatchObject({ok:false});
  } finally {store.close();await rm(root,{recursive:true,force:true});}
 });
+it('marks patch and diff artifacts within preview limit as inline while keeping active content as attachment',async()=>{
+ const root=await mkdtemp('/tmp/w05-artifact-inline-'); const store=unwrap(await openFilesystemArtifactStore({root,storeId:'store'}));
+ try {
+ for (const [id, mediaType, expected] of [['patch-1','text/x-patch','inline'],['diff-1','text/diff','inline'],['svg-1','image/svg+xml','attachment']] as const) {
+   const bytes=Buffer.from('diff --git a/src/slug.ts b/src/slug.ts\n+export function toSlug() {}\n');
+   unwrap(await store.put({options:{artifactId:id,runId:'r',kind:'document',mediaType,expectedIntegrity:{checksum:{algorithm:'sha256',value:createHash('sha256').update(bytes).digest('hex')},sizeBytes:bytes.length},idempotencyKey:id},content:(async function*(){yield bytes;})()}));
+   const result=unwrap(await readScopedArtifact(store,'p','p',id,async runId=>runId==='r'));
+   expect(result.metadata.disposition).toBe(expected);
+ }
+ } finally {store.close();await rm(root,{recursive:true,force:true});}
+});
 import { createServer, connect } from 'node:net';
 import { once } from 'node:events';
 import { serveArtifact, connectArtifact, ARTIFACT_TRANSFER_BYTES } from '../../src/interaction/artifacts.js';

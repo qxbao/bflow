@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import type { WebProject, WebProjectInspection, WebProjectInitialization } from '@bflow/contracts/web';
 import { ApiClient, ApiError, explain } from '../api/client';
+import { FieldHelp, FieldLabel } from '../components/FieldHelp';
 import { StatusBadge } from '../components/StatusBadge';
 import { ProjectConfiguration } from './project-configuration';
 
@@ -54,13 +55,28 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
   <h2 className="mt-0 text-base">Khởi tạo / sửa GitNexus & Commit cấu hình</h2>
   <p className="my-1.5 text-sm">Tạo tệp cấu hình Bflow nếu chưa có, tùy chọn lập chỉ mục mã nguồn GitNexus và commit cấu hình sạch vào Git trước khi khởi động phiên.</p>
   <div className="my-2.5 grid gap-1.5 sm:grid-cols-2">
-   <label className="flex min-h-11 items-start gap-2.5 border border-line bg-canvas p-2.5 font-normal sm:min-h-9 [&_span]:min-w-0"><input type="checkbox" checked={skipGitNexus} disabled={busy||running} onChange={e=>setSkipGitNexus(e.target.checked)}/><span className="text-sm">Khởi tạo không dùng GitNexus (tắt công cụ này trong cấu hình)</span></label>
-   <label className="flex min-h-11 items-start gap-2.5 border border-line bg-canvas p-2.5 font-normal sm:min-h-9 [&_span]:min-w-0"><input type="checkbox" checked={license} disabled={busy||running} onChange={e=>setLicense(e.target.checked)}/><span className="text-sm">Tôi chấp nhận điều kiện GitNexus và cho phép tạo chỉ mục dự án</span></label>
-   <label className="flex min-h-11 items-start gap-2.5 border border-line bg-canvas p-2.5 font-normal sm:min-h-9 [&_span]:min-w-0"><input type="checkbox" checked={update} disabled={busy||running||commitConfiguration} onChange={e=>setUpdate(e.target.checked)}/><span className="text-sm">Cập nhật cấu hình: bổ sung mặc định mới, giữ lựa chọn đã có</span></label>
-   <label className="flex min-h-11 items-start gap-2.5 border border-line bg-canvas p-2.5 font-normal sm:min-h-9 [&_span]:min-w-0"><input type="checkbox" checked={commitConfiguration} disabled={busy||running||configDirty||!configFileRevision} onChange={e=>{setCommitConfiguration(e.target.checked);if(e.target.checked)setUpdate(false);}}/><span className="text-sm">Commit cấu hình đã xem vào Git: chỉ .bflow/config.yml và .bflow/.gitignore (không chạy Git hooks)</span></label>
+   <div className="flex min-h-11 items-start justify-between gap-2 border border-line bg-canvas p-2.5 sm:min-h-9">
+    <label htmlFor="init-skip-gitnexus" className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 font-normal [&_span]:min-w-0"><input id="init-skip-gitnexus" type="checkbox" checked={skipGitNexus} disabled={busy||running} onChange={e=>setSkipGitNexus(e.target.checked)}/><span className="text-sm">Khởi tạo không dùng GitNexus (tắt công cụ này trong cấu hình)</span></label>
+    <FieldHelp label="Khởi tạo không dùng GitNexus" help="Chọn mục này nếu bạn muốn tạo nhanh .bflow/config.yml mà không cần lập chỉ mục đồ thị mã nguồn GitNexus (ví dụ kho mã nhỏ hoặc dự án thương mại không dùng giấy phép phi thương mại của GitNexus)."/>
+   </div>
+   <div className="flex min-h-11 items-start justify-between gap-2 border border-line bg-canvas p-2.5 sm:min-h-9">
+    <label htmlFor="init-accept-gitnexus" className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 font-normal [&_span]:min-w-0"><input id="init-accept-gitnexus" type="checkbox" checked={license} disabled={busy||running} onChange={e=>setLicense(e.target.checked)}/><span className="text-sm">Tôi chấp nhận điều kiện GitNexus và cho phép tạo chỉ mục dự án</span></label>
+    <FieldHelp label="Chấp nhận điều kiện GitNexus" help="Xác nhận bạn đồng ý giấy phép PolyForm-Noncommercial-1.0.0 của GitNexus và cho phép Bflow lập chỉ mục mã nguồn cục bộ (.gitnexus/) để các vai trò AI tra cứu phụ thuộc chính xác hơn."/>
+   </div>
+   <div className="flex min-h-11 items-start justify-between gap-2 border border-line bg-canvas p-2.5 sm:min-h-9">
+    <label htmlFor="init-update-config" className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 font-normal [&_span]:min-w-0"><input id="init-update-config" type="checkbox" checked={update} disabled={busy||running||commitConfiguration} onChange={e=>setUpdate(e.target.checked)}/><span className="text-sm">Cập nhật cấu hình: bổ sung mặc định mới, giữ lựa chọn đã có</span></label>
+    <FieldHelp label="Cập nhật cấu hình" help="Tương đương lệnh bflow init --update: tự động điền thêm các khóa cấu hình mặc định của phiên bản Bflow mới mà không ghi đè model hay chính sách bạn đã chọn."/>
+   </div>
+   <div className="flex min-h-11 items-start justify-between gap-2 border border-line bg-canvas p-2.5 sm:min-h-9">
+    <label htmlFor="init-commit-config" className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5 font-normal [&_span]:min-w-0"><input id="init-commit-config" type="checkbox" checked={commitConfiguration} disabled={busy||running||configDirty||!configFileRevision} onChange={e=>{setCommitConfiguration(e.target.checked);if(e.target.checked)setUpdate(false);}}/><span className="text-sm">Commit cấu hình đã xem vào Git: chỉ .bflow/config.yml và .bflow/.gitignore (không chạy Git hooks)</span></label>
+    <FieldHelp label="Commit cấu hình vào Git" help="Bflow yêu cầu tệp cấu hình phải được commit sạch trước khi mở worktree cho lập trình viên. Tùy chọn này chỉ commit đúng 2 tệp .bflow/config.yml và .bflow/.gitignore bạn đang xem; nếu kho đang có tệp khác staged thì hệ thống sẽ dừng an toàn."/>
+   </div>
   </div>
   <div className="my-2.5 grid items-end gap-3 sm:grid-cols-[minmax(0,280px)_auto]">
-   <label>Provider khi tạo / cập nhật cấu hình<select disabled={busy||running} value={provider} onChange={e=>setProvider(e.target.value)}><option value="">Giữ cấu hình hiện tại / mặc định</option>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select></label>
+   <div>
+    <FieldLabel htmlFor="init-provider" label="Provider khi tạo / cập nhật cấu hình" help="Chọn công cụ AI mặc định (claude, codex hoặc agy) khi khởi tạo tệp .bflow/config.yml lần đầu hoặc khi chạy cập nhật. Để mặc định nếu muốn giữ nguyên cấu hình hiện tại."/>
+    <select id="init-provider" disabled={busy||running} value={provider} onChange={e=>setProvider(e.target.value)}><option value="">Giữ cấu hình hiện tại / mặc định</option>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select>
+   </div>
    <div><button className="min-w-48 border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface" disabled={busy||running||configDirty||(!license&&!skipGitNexus)} onClick={()=>void initialize()}>{running?'Đang khởi tạo…':'Khởi tạo / sửa GitNexus'}</button></div>
   </div>
   {configDirty && <p className="my-1.5 text-xs text-warning">Bạn đang có thay đổi cấu hình chưa lưu. Hãy lưu hoặc bỏ thay đổi ở mục Cấu hình trước.</p>}

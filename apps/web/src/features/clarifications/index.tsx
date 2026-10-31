@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent } from 'react';
 import type { WebClarification } from '@bflow/contracts/web';
 import { ApiClient, explain } from '../../api/client';
+import { FieldLabel } from '../../components/FieldHelp';
 import { useCommands } from '../operations';
 const unsettled=(cmd:{tracked?:unknown;operation?:{state:string}|undefined})=>Boolean(cmd.tracked && (!cmd.operation || !['applied','failed'].includes(cmd.operation.state)));
 const isSettled=(cmd:{operation?:{state:string}|undefined})=>Boolean(cmd.operation && ['applied','failed'].includes(cmd.operation.state));
@@ -15,5 +16,5 @@ export function ClarificationForm({api,id,question,runId,intakeId,enabled}:{api:
       await commands.submit({kind:'answer_clarification',...(runId?{runId}:{intakeId:intakeId!}),questionId:question.questionId,expectedVersion:question.expectedVersion,answer:answer.trim()});setError('');
     }catch(e){setError(e instanceof Error && !('code' in e)?e.message:explain(e));}
   }
-  return <article className="panel min-w-0 border border-line bg-surface p-4 sm:p-5"><h3>{question.question}</h3><form onSubmit={e=>void submit(e)}><label htmlFor={uid}>Câu trả lời</label><textarea id={uid} maxLength={16000} rows={3} value={answer} onChange={e=>setAnswer(e.target.value)} aria-invalid={Boolean(error)} aria-describedby={error?uid+'error':undefined}/>{question.options.length>0 && <div className="my-4 flex flex-wrap items-center gap-2">{question.options.map(option=><button type="button" key={option} onClick={()=>setAnswer(option)}>{option}</button>)}</div>}{error && <p id={uid+'error'} role="alert">{error}</p>}<button disabled={!enabled || commands.busy || !commands.online || unsettled(commands)}>Gửi câu trả lời</button></form></article>;
+  return <article className="panel min-w-0 border border-line bg-surface p-4 sm:p-5"><h3>{question.question}</h3><form onSubmit={e=>void submit(e)}><FieldLabel htmlFor={uid} label="Câu trả lời" help="Trả lời trực tiếp câu hỏi làm rõ của Trợ lý tiếp nhận (hoặc bấm chọn nhanh một gợi ý bên dưới rồi chỉnh sửa thêm trước khi gửi)."/><textarea id={uid} maxLength={16000} rows={3} value={answer} onChange={e=>setAnswer(e.target.value)} aria-invalid={Boolean(error)} aria-describedby={error?uid+'error':undefined}/>{question.options.length>0 && <div className="my-4 flex flex-wrap items-center gap-2">{question.options.map(option=><button type="button" key={option} onClick={()=>setAnswer(option)}>{option}</button>)}</div>}{error && <p id={uid+'error'} role="alert">{error}</p>}<button disabled={!enabled || commands.busy || !commands.online || unsettled(commands)}>Gửi câu trả lời</button></form></article>;
 }
