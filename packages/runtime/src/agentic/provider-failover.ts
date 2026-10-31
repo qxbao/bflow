@@ -77,13 +77,19 @@ export class TaskProviderFailover {
   }
 
   async continue(): Promise<void> {
+    let firstError: unknown;
     for (const run of this.state.runs) for (const task of run.tasks) for (const entry of task.failovers ?? []) {
       if (["dispatched", "cancelled"].includes(entry.phase)) continue;
       if (run.cancelled) { entry.phase = "cancelled"; await this.save(); continue; }
       if (entry.phase === "blocked" || !this.ports.providerFailover) continue;
-      await this.step(run, task, entry);
-      await this.save();
+      try {
+        await this.step(run, task, entry);
+        await this.save();
+      } catch (error) {
+        firstError ??= error;
+      }
     }
+    if (firstError !== undefined) throw firstError;
   }
   private async step(run: RunRecord, task: TaskRecord, entry: TaskFailover): Promise<void> {
     if (!await this.safe(run, entry)) return;
