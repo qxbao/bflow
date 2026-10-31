@@ -8,9 +8,22 @@ export const INVALID_ROLE_MESSAGE_LIMIT = 3;
 const MAX_FEEDBACK_LENGTH = 1500;
 
 interface IssueLike { path?: unknown; message?: unknown }
+function appendRoleMessageHint(fieldPath: string, message: string): string {
+  if (fieldPath === "type") {
+    const inventedTaskStatus = /received ['"]task\.(blocked|failed|completed|inconclusive|progress)['"]/i.exec(message);
+    if (inventedTaskStatus) {
+      const mapped = inventedTaskStatus[1]!.toLowerCase() === "progress" ? "blocked" : inventedTaskStatus[1]!.toLowerCase();
+      return `${message} (hint: RoleMessage has no 'task.${inventedTaskStatus[1]}' type; use type 'task.status' with payload.status '${mapped}', or call report_progress / request_user_decision for user communication)`;
+    }
+  }
+  return message;
+}
 function issueText(issues: readonly IssueLike[]): string | undefined {
-  const parts = issues.flatMap(issue => typeof issue?.message === "string"
-    ? [`${Array.isArray(issue.path) && issue.path.length ? issue.path.map(String).join(".") : "(message)"}: ${issue.message}`] : []);
+  const parts = issues.flatMap(issue => {
+    if (typeof issue?.message !== "string") return [];
+    const fieldPath = Array.isArray(issue.path) && issue.path.length ? issue.path.map(String).join(".") : "(message)";
+    return [`${fieldPath}: ${appendRoleMessageHint(fieldPath, issue.message)}`];
+  });
   return parts.length ? parts.join("; ") : undefined;
 }
 /** Zod issues embedded in an error's text (String(ZodError) is the JSON issue list), when present. */

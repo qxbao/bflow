@@ -1,14 +1,25 @@
 import type {
-  AgentExecutionHandle, AgentRequest, AgentResult, AgentTransport, ApprovalDecision, ApprovalRequest, ArtifactStore,
-  AgentRole, GitChangeSet, JsonValue, OperationOptions, OperationResult, PaneBinding, QualityGate,
-  QualityGateDefinition, QualityGateResult, RoleMessage, RunStore, SessionManifest, Specification, TestStrategy,
-  VerificationCycle, VerificationResult, WorkflowDefinition, WorkflowEngine
+  AgentExecutionHandle, AgentRegistry, AgentRequest, AgentResult, AgentRole, AgentTransport, ApprovalDecision,
+  ApprovalRequest, ArtifactStore, DeveloperContinuationAllocation, ExecutorLineage, FailoverCandidate, GitChangeSet,
+  JsonValue, OperationOptions, OperationResult, PaneBinding, ProviderFailoverPolicy, ProviderFailureObservation,
+  QualityGate, QualityGateDefinition, QualityGateResult, ResolvedRoleProfileSnapshot, RoleMessage, RoleProfilePin,
+  RunStore, SessionManifest, SpecialistRole, Specification, TestStrategy, VerificationCycle, VerificationResult,
+  WorkflowDefinition, WorkflowEngine
 } from "@bflow/contracts";
+import type { CancellationStopProof, NamespaceExitProof } from "./cancellation-stop.js";
+import type { ExecutionResolutionReader } from "./execution-binding.js";
+import type { NativeDiagnosticFenceAuthority } from "./native-diagnostic-fence.js";
 import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+import * as spec from "@bflow/specification";
+import * as tdd from "@bflow/test-strategy";
+import * as verification from "@bflow/verification";
+import * as gitModule from "@bflow/git-orchestrator";
 
 const execFileAsync = promisify(execFile);
+// Untyped as before the package-specifier import: local port types do not match the package declarations yet.
+const git: any = gitModule;
 
 /** Package-local composition interfaces. Wire values always use frozen contracts. */
 export interface SpecificationPolicy {
@@ -68,13 +79,13 @@ export interface PanePolicy {
   inspectRoleHealth(role: string, options?: OperationOptions): Promise<OperationResult<{ readyForPrompt: boolean; occupantMatches: boolean; paneExists?: boolean; paneId: string; agentId: string }>>;
   allocateDeveloper(request: {
     taskId: string; runId: string; worktreePath: string; branchName: string; agentName: string;
-    roleProfile?: import("@bflow/contracts").ResolvedRoleProfileSnapshot;
-    failoverCandidate?: import("@bflow/contracts").FailoverCandidate;
+    roleProfile?: ResolvedRoleProfileSnapshot;
+    failoverCandidate?: FailoverCandidate;
     continuationId?: string;
-    continuation?: import("@bflow/contracts").DeveloperContinuationAllocation;
+    continuation?: DeveloperContinuationAllocation;
   }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
-  allocateSpecialist?(request: { taskId: string; runId: string; role: import("@bflow/contracts").SpecialistRole;
-    roleProfile: import("@bflow/contracts").ResolvedRoleProfileSnapshot; agentName?: string }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
+  allocateSpecialist?(request: { taskId: string; runId: string; role: SpecialistRole;
+    roleProfile: ResolvedRoleProfileSnapshot; agentName?: string }, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
   releaseSpecialist?(request: { taskId?: string; agentId?: string; paneId?: string }, options?: OperationOptions): Promise<OperationResult<unknown>>;
   releaseDeveloper(request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions): Promise<OperationResult<unknown>>;
   /** Cancelled, proven-stopped allocation: retain the pane/worktree for idempotent manifest cleanup. */
@@ -95,30 +106,30 @@ export interface AgenticPolicies {
   assertEvidenceComplete(strategy: unknown): void;
 }
 export interface AgenticRuntimePorts {
-  roleProfiles?: readonly import("@bflow/contracts").ResolvedRoleProfileSnapshot[];
-  roleProfileDefaults?: Readonly<Partial<Record<AgentRole, import("@bflow/contracts").RoleProfilePin>>>;
-  preflightRoleProfile?(snapshot: import("@bflow/contracts").ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): Promise<void>;
-  attestExecutorLineage?(binding: PaneBinding, purpose: import("@bflow/contracts").ExecutorLineage["purpose"], assignmentId: string): Promise<import("@bflow/contracts").ExecutorLineage>;
+  roleProfiles?: readonly ResolvedRoleProfileSnapshot[];
+  roleProfileDefaults?: Readonly<Partial<Record<AgentRole, RoleProfilePin>>>;
+  preflightRoleProfile?(snapshot: ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): Promise<void>;
+  attestExecutorLineage?(binding: PaneBinding, purpose: ExecutorLineage["purpose"], assignmentId: string): Promise<ExecutorLineage>;
   providerFailover?: {
-    policyFor(binding: PaneBinding): { policy: import("@bflow/contracts").ProviderFailoverPolicy; current: import("@bflow/contracts").FailoverCandidate } | undefined;
-    authenticate(binding: PaneBinding, failure: import("@bflow/contracts").ProviderFailureObservation): Promise<boolean>;
+    policyFor(binding: PaneBinding): { policy: ProviderFailoverPolicy; current: FailoverCandidate } | undefined;
+    authenticate(binding: PaneBinding, failure: ProviderFailureObservation): Promise<boolean>;
     assertMutationSafe(binding: PaneBinding, runId: string, taskId: string): Promise<void>;
-    preflight(candidate: import("@bflow/contracts").FailoverCandidate, binding: PaneBinding): Promise<void>;
+    preflight(candidate: FailoverCandidate, binding: PaneBinding): Promise<void>;
   };
   /** Host-owned current readonly resolution; absent is an explicit legacy host without historical drift protection. */
-  readExecutionResolution?: import("./execution-binding.js").ExecutionResolutionReader;
+  readExecutionResolution?: ExecutionResolutionReader;
   /** Physical Conversation hook only; not an agent tool or an approval inferred by a model. */
-  authorizeReviewReplacement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
-  authorizePolicyPhaseRetirement?: (authority: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority) => Promise<boolean>;
+  authorizeReviewReplacement?: (authority: NativeDiagnosticFenceAuthority) => Promise<boolean>;
+  authorizePolicyPhaseRetirement?: (authority: NativeDiagnosticFenceAuthority) => Promise<boolean>;
   hasPolicyPhaseReceipt?: (request: RoleMessage) => Promise<boolean>;
-  authorizeNativeDiagnosticFence?(input: import("./native-diagnostic-fence.js").NativeDiagnosticFenceAuthority): Promise<boolean>;
+  authorizeNativeDiagnosticFence?(input: NativeDiagnosticFenceAuthority): Promise<boolean>;
   engine: WorkflowEngine; runStore: RunStore; artifactStore: ArtifactStore;
-  registry: import("@bflow/contracts").AgentRegistry; transport: AgentTransport;
+  registry: AgentRegistry; transport: AgentTransport;
   panes: PanePolicy; policies: AgenticPolicies;
   pinDeveloperDispatch?: (request: AgentRequest, binding: PaneBinding) => Promise<void>;
   bindDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<void>;
-  stopDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<import("./cancellation-stop.js").CancellationStopProof | undefined>;
-  stopUnboundDeveloperScope?: (binding: PaneBinding) => Promise<import("./cancellation-stop.js").NamespaceExitProof | undefined>;
+  stopDeveloperExecutionScope?: (handle: AgentExecutionHandle, binding: PaneBinding) => Promise<CancellationStopProof | undefined>;
+  stopUnboundDeveloperScope?: (binding: PaneBinding) => Promise<NamespaceExitProof | undefined>;
   /** Trusted host authentication of a Herdr-originated envelope, never an agent-supplied flag. */
   authenticateMessage(message: RoleMessage): Promise<boolean>;
   /**
@@ -161,11 +172,6 @@ export interface AgenticCompositionOptions {
 }
 /** Loads the actual reviewed P15–P18 packages; no alternate policy implementations. */
 export async function loadAgenticPolicies(options: AgenticCompositionOptions): Promise<AgenticPolicies> {
-  const spec = await import("@bflow/specification");
-  const tdd = await import("@bflow/test-strategy");
-  const verification = await import("@bflow/verification");
-  // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
-  const git: any = await import("@bflow/git-orchestrator");
   const engines = new Map<string, VerificationPolicy>();
   const activePlans = new Set<string>();
   const engineFor = (plan: VerificationPlan): VerificationPolicy => {
