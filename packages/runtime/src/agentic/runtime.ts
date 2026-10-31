@@ -3,7 +3,7 @@ import { provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError } from "./
 import { recoverUnqueuedWebCancellations } from "../interaction/cancellation-recovery.js";
 import type { WebOperationStore } from "../interaction/operation-store.js";
 import { unmeasuredPolicyPhaseRequests } from "./phase-recovery.js";
-import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReconciliationReportSchema, ownsCancellationPane, ownsCancelledAllocation, type CancellationStopProof, type CancellationReconciliationReport } from "./cancellation-stop.js";
+import { CancellationStopProofSchema, NamespaceExitProofSchema, CancellationReconciliationReportSchema, isSpecialistHealthConfirmedAbsent, ownsCancellationPane, ownsCancelledAllocation, type CancellationStopProof, type CancellationReconciliationReport } from "./cancellation-stop.js";
 import { actionVersion } from "../interaction/actions.js";
 import { WebCommandSchema, type WebCommand } from "@bflow/contracts";
 import { assertAcceptedWorkflowSelection, assertRunExecutionPlan, bindAcceptedExecutionPlan, ExecutionPlanDriftError, publicExecutionRun } from "./execution-binding.js";
@@ -83,6 +83,15 @@ const TEST_INTEGRITY_REJECT_OPTION = "Reject test-integrity exception";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
 const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
+
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
 /** Terminal specialist `task.status` values (every agents/<role>/system-prompt.md); each discharges the correlated handoff's result obligation. */
 /** Automatic Developer resolver attempts per P18 conflict before the run escalates to a human. */
 export const CONFLICT_RESOLVER_ATTEMPTS = 2;
@@ -1549,7 +1558,9 @@ export class AgenticWorkflowRuntime {
       // Same holders as RunFacts: only obligations still owing a correlated result (an answered assignment is not a holder).
       const holders = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
         (this.outboundOwesResult(state, run, out) || out.message.recipient.role === "coordinator" && out.status === "accepted" && out.handle !== undefined));
-      const holder = holders.find(out => out.message.recipient.role === "developer") ??
+      const holder =
+        holders.find(out => out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence") ??
+        holders.find(out => out.message.recipient.role === "developer") ??
         holders.find(out => out.message.recipient.role !== "coordinator") ?? holders[0];
       // First stall of a holder: remind that exact holder once through Herdr to send its result or report blocked. The reminder
       // is new activity, so the next stall episode starts after it; a holder still silent then is handed to the Coordinator.
@@ -2066,10 +2077,12 @@ export class AgenticWorkflowRuntime {
           digest(command.expectedVersion) !== digest(actionVersion(run, "resume"))) throw new Error("Stale web resume version or action");
       }
       const explicitId = options.conversationUserMessageId ?? options.webCommand?.commandId;
-      const leaseFailure = action && state.outbound.find(out => out.message.message_id === action.sourceMessageId && out.phaseFailure?.leaseRecoveryRequired);
+      const leaseFailure = action && state.outbound.find(out =>
+        (out.message.message_id === action.sourceMessageId || (out.message.run_id === runId && !out.phaseFailure?.retryAuthorized)) &&
+        out.phaseFailure?.leaseRecoveryRequired);
       if (leaseFailure && (options.automatic || !explicitId))
         throw new Error("Expired writer lease requires authenticated explicit owner resume through Conversation or Web UI; do not retry resume_run from Coordinator — call report_progress to inform the user and end your turn");
-      const resumeUnmeasured = !options.automatic && !!explicitId && run.status === "implementing" &&
+      const resumeUnmeasured = !options.automatic && !leaseFailure && run.status === "implementing" &&
         action?.kind === "coordinator_continuation" && action.state === "pending" && this.unmeasuredPhaseRequests(state, run).length > 0;
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before resume");
@@ -2101,7 +2114,9 @@ export class AgenticWorkflowRuntime {
           !["resume_coordinator", "reconcile_delivery"].includes(action.kind) && !resumeUnmeasured) {
         const prior = state.outbound.find(item => item.message.message_id === `resume-${digest([runId, actionId])}`);
         if (prior) return json({ queued: true, messageId: prior.message.message_id, actionId });
-        throw new Error("No matching recoverable blocker to resume");
+        throw new Error(
+          `No matching recoverable blocker to resume (status=${run.status}, activeActionId=${action?.actionId ?? "none"}, activeKind=${action?.kind ?? "none"}, activeState=${action?.state ?? "none"})`
+        );
       }
       // Explicitly restoring a paused approval wait answers no human decision
       // and cannot schedule work. Automatic resumes must still stop at the gate.
@@ -2187,8 +2202,16 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
-      const measurement = state.outbound.find(item => item.message.message_id === action.sourceMessageId && (item.phaseFailure?.repairable === false || item.phaseFailure?.leaseRecoveryRequired === true));
-      if (measurement) measurement.phaseFailure!.retryAuthorized = true;
+      for (const item of state.outbound) {
+        if (!item.phaseFailure || item.phaseFailure.retryAuthorized) continue;
+        const matchesSource = item.message.message_id === action.sourceMessageId;
+        const matchesActiveRunUnrepairable = !options.automatic && item.message.run_id === runId && item.phaseFailure.applied &&
+          (item.phaseFailure.repairable === false || (!!explicitId && item.phaseFailure.leaseRecoveryRequired === true));
+        if ((matchesSource || matchesActiveRunUnrepairable) &&
+            (item.phaseFailure.repairable === false || item.phaseFailure.leaseRecoveryRequired === true)) {
+          item.phaseFailure.retryAuthorized = true;
+        }
+      }
       // A verifier request released with no evidence, no recorded failure and no retirement can never settle on its own. The explicit
       // resume authorizes one new measurement of the same revision through the existing bounded phase-retry path; no outcome is claimed.
       if (!options.automatic) for (const orphan of this.unmeasuredPhaseRequests(state, run)) {
@@ -2204,7 +2227,7 @@ export class AgenticWorkflowRuntime {
         action.resumeAttempts = 0;
         if (action.kind === "resume_coordinator" && (action.recovery === undefined || action.recovery === "manual")) action.recovery = "auto_resume";
       }
-      run.status = action.previousStatus ?? (explicitAfterAutomatic ? run.status : "specifying");
+      run.status = action.previousStatus ?? (explicitAfterAutomatic || resumeUnmeasured ? run.status : "specifying");
       if (verificationRetry) this.prepareVerificationRetry(state, run); // same as retry_verification
       delete action.previousStatus;
       delete run.error;
@@ -3576,9 +3599,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (!allocation.ok) {
         run.error = `Developer allocation pending for ${task.taskId}: ${allocation.error.message}`;
         if (allocation.error.code !== "conflict" || !allocation.error.retryable) this.pauseDeveloperAllocation(run, task.taskId, run.error, allocation.error.retryable);
-        this.progress(state, outbox, run, run.error); await save(); continue;
+        this.progress(state, outbox, run, run.error); await save();
+        if (run.status === "escalated") break;
+        continue;
       }
       if (run.error?.startsWith(`Developer allocation pending for ${task.taskId}: `)) delete run.error;
+      if (run.pendingAction?.sourceMessageId.startsWith("developer-allocation-") && !run.error?.startsWith("Developer allocation pending for ")) {
+        delete run.pendingAction;
+      }
       const pane = PaneBindingSchema.parse(allocation.value);
       assertProfileBinding(selectedProfile, pane);
       if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
@@ -3681,7 +3709,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   /** Optional historical context only. Existing journal lock serializes selection/proposals with retries and decisions. */
   async taskHandover(bindingInput: PaneBinding, input: unknown): Promise<JsonValue> {
     const binding = PaneBindingSchema.parse(bindingInput);
-    const args = z.object({ runId: z.string().min(1).optional(), taskId: z.string().min(1).optional(), proposal: z.unknown().optional() }).strict().parse(input);
+    const emptyOrNull = (value: unknown) =>
+      value === null || (typeof value === "string" && value.trim() === "") ? undefined : value;
+    const args = z.object({
+      runId: z.preprocess(emptyOrNull, z.string().min(1).optional()),
+      taskId: z.preprocess(emptyOrNull, z.string().min(1).optional()),
+      proposal: z.preprocess(value => (value === null ? undefined : value), z.unknown().optional())
+    }).strict().parse(input ?? {});
     return this.transaction(async (state, _save, core, outbox) => {
       if (binding.role !== "developer" || !binding.worktreePath) {
         // Reads are optional context for assignment_context; a Developer pane without a worktree has no task yet.
@@ -4111,10 +4145,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (state.outbound.some(item => item.message.run_id === run.runId &&
           item.message.type === "verification.requested" && record(item.message.payload).taskId === task.taskId &&
           record(item.message.payload).phase === phase && !item.phaseFailure && !item.phaseRetirement && item.status !== "cancelled")) continue;
+      const activeLeaseAlreadyValid = !request.phaseFailure?.leaseRecoveryRequired && !parent.leaseReacquisition && this.canEnqueueTaskNotice(state, parent);
       try { await outbox.recoverTaskLease(parent, request); }
       catch (error) {
-        parent.error = `Task lease continuation blocked: ${String(error)}`;
-        await save(); continue;
+        if (activeLeaseAlreadyValid) {
+          try { await outbox.renew(parent); }
+          catch (renewError) {
+            parent.error = `Task lease continuation blocked: ${String(renewError)}`;
+            await save(); continue;
+          }
+        } else {
+          parent.error = `Task lease continuation blocked: ${String(error)}`;
+          await save(); continue;
+        }
       }
       if (notice) {
         if (reviveUnsent) {
@@ -4128,6 +4171,26 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           ? `Explicit owner resume restored the same writer lease after: ${request.phaseFailure.summary}. Inspect the independent failure evidence, repair source and commit before requesting this phase again. Frozen Red tests and verification limits remain unchanged.`
           : `Explicit resume authorized a new independent measurement of ${phase} at ${textField(payload.sourceRevision)}. Call request_verification for this phase again; this notice grants no Red evidence or implementation authority.`, request.message.message_id);
       await save();
+    }
+    for (const run of state.runs) {
+      if (run.cancelled || run.status !== "implementing" || run.pendingAction) continue;
+      for (const orphan of this.unmeasuredPhaseRequests(state, run)) {
+        if (await this.ports.hasPolicyPhaseReceipt?.(orphan.message)) continue;
+        const reason = UNMEASURED_PHASE_SUMMARY;
+        run.error = sliceUtf16(reason, 2000);
+        run.pendingAction = {
+          actionId: `next-${digest([run.runId, orphan.message.message_id])}`,
+          kind: "coordinator_continuation",
+          owner: "coordinator",
+          reason: run.error,
+          sourceMessageId: orphan.message.message_id,
+          createdAt: this.now(),
+          state: "pending",
+          previousStatus: run.status
+        };
+        await save();
+        break;
+      }
     }
     await this.recoverPolicyPhaseRetirements(state, save, outbox);
   }
@@ -4846,9 +4909,36 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     return attempt && run.conflictResolution ? { resolution: run.conflictResolution, attempt } : undefined;
   }
   /** Metadata-only release of a proven-stopped allocation: pane and worktree are retained, dirty work is never discarded. */
-  private async releaseCancelledAllocation(allocationTaskId: string): Promise<void> {
+  private async releaseCancelledAllocation(allocationTaskId: string, worktreePath?: string): Promise<void> {
     const release = this.ports.panes.releaseCancelledDeveloper ?? this.ports.panes.releaseDeveloper;
-    unwrap(await release.call(this.ports.panes, { taskId: allocationTaskId, closePane: false, removeWorktree: false }));
+    const result = await release.call(this.ports.panes, { taskId: allocationTaskId, closePane: false, removeWorktree: false });
+    if (!result.ok && result.error.code === "not_found") {
+      const manifest = unwrap(await this.ports.panes.getManifest());
+      if (manifest && !manifest.panes.some(pane => pane.role === "developer" && pane.metadata?.allocationStatus !== "released" &&
+          (pane.metadata?.taskId === allocationTaskId || (worktreePath !== undefined && pane.worktreePath === worktreePath)))) {
+        return;
+      }
+    }
+    unwrap(result);
+  }
+  private async resolveDeveloperExecutionBinding(out: Outbound): Promise<PaneBinding | null> {
+    if (!out.handle) return null;
+    const manifest = await this.ports.panes.getManifest();
+    if (manifest.ok && manifest.value) {
+      const exact = manifest.value.panes.find(pane => ownsCancellationPane(out.handle!, pane));
+      if (exact) return exact;
+      const unreleasedReplacement = manifest.value.panes.find(pane =>
+        pane.role === "developer" && pane.metadata?.allocationStatus !== "released" &&
+        (pane.paneId === out.handle!.target.paneId || pane.worktreePath === out.handle!.target.worktreePath ||
+          pane.metadata?.taskId === `${out.handle!.runId}-${out.handle!.taskId}`));
+      if (unreleasedReplacement) return unreleasedReplacement;
+    }
+    const bySelector = unwrap(await this.ports.panes.getRoleBinding(out.selector));
+    if (bySelector && (bySelector.metadata?.allocationStatus !== "released" || ownsCancellationPane(out.handle, bySelector))) return bySelector;
+    if (!out.handle.target.paneId) return null;
+    const byPane = unwrap(await this.ports.panes.getRoleBinding(out.handle.target.paneId));
+    if (byPane && byPane.role === "developer" && byPane.metadata?.allocationStatus === "released" && !ownsCancellationPane(out.handle, byPane)) return null;
+    return byPane;
   }
   /** The Developer writer behind this execution is released (task) or its resolver attempt is settled. */
   private writerSettled(run: RunRecord, out: Outbound): boolean {
@@ -5057,7 +5147,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     let scopeError: string | undefined;
     if (out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope) {
       try {
-        const binding = unwrap(await this.ports.panes.getRoleBinding(out.handle.target.paneId!));
+        const binding = await this.resolveDeveloperExecutionBinding(out);
         const observed = binding ? await this.ports.stopDeveloperExecutionScope(out.handle, binding) : undefined;
         if (observed) {
           const proof = CancellationStopProofSchema.parse(observed);
@@ -5073,7 +5163,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
     }
     const hadPriorLeaseRenewal = out.leaseRenewal !== undefined;
-    const ttlExpired = !out.leaseReacquisition && !out.leaseRelease && !!out.lease && Date.parse(out.lease.expiresAt) <= Date.parse(this.now());
+    const nowMs = Date.parse(this.now());
+    const reacqExpired = !out.leaseReacquisition || Date.parse(out.leaseReacquisition.requestedAt) + out.leaseReacquisition.ttlMs <= nowMs;
+    const ttlExpired = reacqExpired && !out.leaseRelease && !!out.lease && Date.parse(out.lease.expiresAt) <= nowMs;
     try { await outbox.renew(out); }
     catch (error) {
       if (!(ttlExpired && /\b(?:Lease expired or (?:already )?released|Expired assignment lease)\b/.test(String(error)))) {
@@ -5093,7 +5185,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         await save();
         return;
       }
-      const currentBinding = out.handle.target.paneId ? unwrap(await this.ports.panes.getRoleBinding(out.handle.target.paneId)) : null;
+      const currentBinding = out.message.recipient.role === "developer"
+        ? await this.resolveDeveloperExecutionBinding(out)
+        : (out.handle.target.paneId ? unwrap(await this.ports.panes.getRoleBinding(out.handle.target.paneId)) : null);
       if (currentBinding) {
         if (out.message.recipient.role === "developer" && !ownsCancellationPane(out.handle, currentBinding)) {
           out.error = `${scopeError ? scopeError + "; " : ""}Cancelled Developer binding was replaced; writer retained`;
@@ -5124,7 +5218,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (!manifest.value.panes.some(pane => pane.paneId === out.handle!.target.paneId)) return true;
     try {
       const health = await this.ports.panes.inspectRoleHealth(out.handle.target.paneId);
-      return health.ok && health.value.paneExists === false && health.value.paneId === out.handle.target.paneId;
+      return isSpecialistHealthConfirmedAbsent(out.handle.target.paneId, health);
     } catch {
       return false;
     }
@@ -5133,19 +5227,22 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    * Herdr `done` is turn completion and a timeout or error is no evidence either, so only an observed `idle` or `cancelled` from
    * the bound execution proves the stop. Herdr's own cancel acknowledgement reports stopConfirmed:false and is never used here.
    */
-  private async stopObserved(out: Outbound): Promise<CancellationStopProof | undefined> {
+  private async stopObserved(out: Outbound): Promise<{ proof?: CancellationStopProof; waitNotFound?: boolean }> {
     const handle = out.handle!;
     // Herdr supports idle, not cancelled, in agent wait. Lifecycle alone still cannot establish execution correlation.
     const observed = await this.ports.transport.wait(handle, { until: ["idle"], timeoutMs: CANCEL_STOP_OBSERVATION_WAIT_MS });
-    if (!observed.ok) { out.error = `Stop observation unavailable: ${observed.error.message}`; return undefined; }
+    if (!observed.ok) {
+      out.error = `Stop observation unavailable: ${observed.error.message}`;
+      return { waitNotFound: observed.error.code === "not_found" || /\bnot[_ ]found\b/i.test(observed.error.message) };
+    }
     const observation = AgentTransportObservationSchema.parse(observed.value);
     if (!["idle", "cancelled"].includes(observation.state) || observation.correlationVerified !== true ||
         digest(observation.handle) !== digest(handle) || Date.parse(observation.observedAt) < Date.parse(handle.acceptedAt) ||
         Date.parse(observation.observedAt) > Date.parse(this.now())) {
       out.error = "No correlated stop evidence for the exact execution; current Herdr lifecycle/interrupt observations do not prove process exit. Retain writer and worktree; operator reconciliation requires a supported stop-evidence source.";
-      return undefined;
+      return {};
     }
-    return CancellationStopProofSchema.parse({ source: "correlated_transport", handle, observedAt: observation.observedAt });
+    return { proof: CancellationStopProofSchema.parse({ source: "correlated_transport", handle, observedAt: observation.observedAt }) };
   }
   /** Operator-only observation: no tick, dispatch, interrupt, retry-budget reset or approval. Legacy final reports remain intact. */
   async reconcileCancellation(runId: string): Promise<CancellationReconciliationReport> {
@@ -5166,14 +5263,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     let justObserved = false;
     if (!out.cancellationStopProof) {
       const binding = out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope
-        ? unwrap(await this.ports.panes.getRoleBinding(out.handle!.target.paneId!)) : undefined;
+        ? await this.resolveDeveloperExecutionBinding(out) : undefined;
       const scoped = binding ? await this.ports.stopDeveloperExecutionScope?.(out.handle!, binding) : undefined;
       // Seal/stop the exact namespace even while a message is uncertain; retain allocation, lease and Core until that delivery settles.
-      const proof = scoped ? CancellationStopProofSchema.parse(scoped) : !uncertain ? await this.stopObserved(out) : undefined;
+      const waitOutcome = !scoped && !uncertain ? await this.stopObserved(out) : undefined;
+      const proof = scoped ? CancellationStopProofSchema.parse(scoped) : waitOutcome?.proof;
       if (!proof) {
         if (uncertain) throw new Error("Uncertain delivery may still wake the cancelled execution; writer and lease retained");
         if (out.message.recipient.role !== "developer" &&
-            /^Stop observation unavailable:.*\bnot[_ ]found\b/i.test(out.error ?? "") &&
+            (waitOutcome?.waitNotFound === true || /^Stop observation unavailable:.*\bnot[_ ]found\b/i.test(out.error ?? "")) &&
             await this.nonWriterSpecialistPaneConfirmedAbsent(out)) {
           out.cancelRequested = true;
           await outbox.release(out);
@@ -5187,20 +5285,20 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save(); justObserved = true;
     }
     if (uncertain) throw new Error("Uncertain delivery still requires reconciliation; namespace is stopped but allocation and lease are retained");
-    if (!justObserved && out.cancellationStopProof.source === "correlated_transport" && !(await this.stopObserved(out))) return false;
+    if (!justObserved && out.cancellationStopProof.source === "correlated_transport" && !(await this.stopObserved(out)).proof) return false;
     if (out.message.recipient.role === "developer") {
       const task = run.tasks.find(item => item.taskId === out.taskId);
       const resolver = this.currentResolver(run, out);
       if (!task && !resolver) throw new Error("Cancelled Developer has no owned task or resolver attempt");
       if (!this.writerSettled(run, out)) {
-        const binding = unwrap(await this.ports.panes.getRoleBinding(out.handle!.target.paneId!));
+        const binding = await this.resolveDeveloperExecutionBinding(out);
         if (binding) {
           if (!ownsCancellationPane(out.handle!, binding)) throw new Error("Cancelled Developer binding was replaced; writer retained");
           // P13 rejects dirty worktrees. Never delete/overwrite work to make cancellation succeed.
-          await this.releaseCancelledAllocation(`${run.runId}-${out.taskId}`);
+          await this.releaseCancelledAllocation(`${run.runId}-${out.taskId}`, out.handle!.target.worktreePath);
         } else {
           const manifest = unwrap(await this.ports.panes.getManifest());
-          if (!manifest || manifest.panes.some(pane => pane.role === "developer" &&
+          if (!manifest || manifest.panes.some(pane => pane.role === "developer" && pane.metadata?.allocationStatus !== "released" &&
               (pane.worktreePath === out.handle!.target.worktreePath || pane.metadata?.taskId === `${run.runId}-${out.taskId}`)))
             throw new Error("Cancelled Developer allocation is uncertain; writer retained");
         }
@@ -5423,6 +5521,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (!this.outboundOwesResult(state, run, out) || run.nativeDeliveries?.length) continue;
         const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
         const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;
+        if (out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence" && !run.pendingAction) {
+          run.error = sliceUtf16(reason, 2000);
+          run.pendingAction = {
+            actionId: `next-${digest([run.runId, out.message.message_id])}`,
+            kind: "coordinator_continuation",
+            owner: "coordinator",
+            reason: run.error,
+            sourceMessageId: out.message.message_id,
+            createdAt: this.now(),
+            state: "pending",
+            previousStatus: run.status
+          };
+        }
         this.emit(state, outbox, run, "conversation.progress", { kind, runId: run.runId, reason, headline: `${role} không trả kết quả: ${out.message.type}`,
           options: ["Yêu cầu Coordinator giao lại việc hoặc giải thích trạng thái", "Hủy run"], blockageReason: reason },
         `${kind}:${out.message.message_id}`, "conversation", []);

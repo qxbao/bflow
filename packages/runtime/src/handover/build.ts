@@ -20,6 +20,14 @@ export interface HandoverAttachment { readonly path: string; readonly bytes: Buf
 export interface HandoverBuild { readonly document: HandoverDocument; readonly attachments: readonly HandoverAttachment[] }
 export interface HandoverBuildOptions { readonly includeEvidence?: boolean | undefined }
 
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
 type Scrub = (value: unknown, max?: number) => string;
 function scrubber(paths: readonly string[]): { field: Scrub; body: (text: string) => string } {
   const sorted = [...new Set(paths.filter(path => path.length > 1))].sort((a, b) => b.length - a.length);
@@ -27,7 +35,7 @@ function scrubber(paths: readonly string[]): { field: Scrub; body: (text: string
   return {
     field: (value, max = 2000) => {
       const text = unpath(redactString(String(value ?? "")).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " "));
-      return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+      return text.length > max ? `${sliceUtf16(text, max - 1)}…` : text;
     },
     // Packaged evidence keeps its line structure; the same redaction and path rules apply, without truncation.
     body: text => unpath(redactString(text).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " "))
