@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
-import { rename, unlink } from "node:fs/promises";
+import { lstat, readdir, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import {
@@ -12,21 +12,50 @@ import { openCatalog } from "./catalog.js";
 import { SafeRoot } from "./filesystem.js";
 import { Budget, afterCursor, conflict, cursor, digest, fail, failure, fingerprint, parse, storedJson } from "./support.js";
 
+const UNSUPPORTED_FILE_FSYNC_CODES = new Set([
+  "EINVAL",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "ENOSYS",
+  "EPERM",
+  "EACCES",
+  "EROFS"
+]);
+
+const ORPHAN_STAGING_NAME_RE = /^(?:stage|read)-[a-f0-9-]{36}$/;
+
 export interface FilesystemArtifactStoreOptions {
   readonly root: string;
   readonly storeId: string;
   readonly busyTimeoutMs?: number;
   readonly clock?: () => number;
+  readonly orphanStagingMaxAgeMs?: number;
 }
 export async function openFilesystemArtifactStore(options: FilesystemArtifactStoreOptions): Promise<OperationResult<FilesystemArtifactStore>> {
   try {
     const busy = options.busyTimeoutMs ?? 5_000;
+    const orphanMaxAge = options.orphanStagingMaxAgeMs ?? 3_600_000;
+    const clock = options.clock ?? Date.now;
     if (!options.root || !/^[A-Za-z0-9._-]+$/.test(options.storeId) || [".", ".."].includes(options.storeId) ||
-      !Number.isSafeInteger(busy) || busy < 0 || busy > 2_147_483_647) fail("validation", "Invalid artifact store configuration");
+      !Number.isSafeInteger(busy) || busy < 0 || busy > 2_147_483_647 ||
+      !Number.isSafeInteger(orphanMaxAge) || orphanMaxAge < 0) fail("validation", "Invalid artifact store configuration");
     const root = await SafeRoot.create(options.root);
     await root.check();
+    const nowMs = clock();
+    for (const entry of await readdir(root.path)) {
+      if (!ORPHAN_STAGING_NAME_RE.test(entry)) continue;
+      const target = root.file(entry);
+      try {
+        const info = await lstat(target);
+        if (info.isFile() && !info.isSymbolicLink() && nowMs - info.mtimeMs >= orphanMaxAge) {
+          await unlink(target);
+        }
+      } catch (error) {
+        if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) throw error;
+      }
+    }
     return { ok: true, value: new FilesystemArtifactStore(root, openCatalog(root.file("catalog.sqlite"), options.storeId, busy),
-      options.storeId, busy, options.clock ?? Date.now) };
+      options.storeId, busy, clock) };
   } catch (error) { return failure(error); }
 }
 
@@ -54,9 +83,14 @@ export class FilesystemArtifactStore implements ArtifactStore {
       try { this.db.exec("BEGIN IMMEDIATE"); }
       catch (error) { budget.check(); throw error; }
       try { budget.check(); const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
-      catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      catch (error) {
+        try { this.db.exec("ROLLBACK"); } catch { /* already auto-rolled back by SQLite */ }
+        throw error;
+      }
     } finally {
-      if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+      if (!this.closed) {
+        try { this.db.exec(`PRAGMA busy_timeout=${this.busy}`); } catch { /* preserve primary failure */ }
+      }
     }
   }
   private observation<T>(options: OperationOptions | undefined, work: () => T): Promise<OperationResult<T>> {
@@ -70,12 +104,17 @@ export class FilesystemArtifactStore implements ArtifactStore {
           value = work();
           budget.check(true);
           this.db.exec("COMMIT");
-        } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        } catch (error) {
+          try { this.db.exec("ROLLBACK"); } catch { /* already auto-rolled back by SQLite */ }
+          throw error;
+        }
         // Read-only COMMIT has no business mutation; do not apply this post-check to put/delete.
         budget.check(true);
         return value;
       } finally {
-        if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+        if (!this.closed) {
+          try { this.db.exec(`PRAGMA busy_timeout=${this.busy}`); } catch { /* preserve primary failure */ }
+        }
       }
     }, true);
   }
@@ -153,7 +192,14 @@ export class FilesystemArtifactStore implements ArtifactStore {
         }
         if (hash.digest("hex") !== input.expectedIntegrity.checksum.value.toLowerCase() ||
           input.expectedIntegrity.sizeBytes !== undefined && size !== input.expectedIntegrity.sizeBytes) fail("corruption", "Artifact integrity mismatch");
-        await handle.sync();
+        try {
+          await handle.sync();
+        } catch (error) {
+          const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+            ? error.code
+            : undefined;
+          if (code === undefined || !UNSUPPORTED_FILE_FSYNC_CODES.has(code)) throw error;
+        }
         const final = await handle.stat();
         if (!final.isFile() || final.nlink !== 1 || final.size !== size) fail("corruption", "Staged artifact size or file identity is inconsistent");
         const reference = parse(ArtifactReferenceSchema, { trust: "stored", artifactId: input.artifactId, runId: input.runId,

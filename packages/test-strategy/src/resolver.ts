@@ -8,7 +8,7 @@ import { evaluatePolicy } from "./policy.js";
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b))
+    return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
       .map(([key, v]) => `${JSON.stringify(key)}:${canonical(v)}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
@@ -78,9 +78,12 @@ export class TestStrategyResolver {
     const criterionMappings = hasValidExistingMappings
       ? existingMappings!.map(m => ({
           criterionId: m.criterionId,
-          testNames: m.testNames.map(t => t.trim())
+          testNames: m.testNames.map(t => t.trim().normalize("NFC"))
         }))
-      : spec.acceptanceCriteria.map(c => ({ criterionId: c.id, testNames: [`${c.id}: ${c.description}`] }));
+      : spec.acceptanceCriteria.map(c => ({
+          criterionId: c.id,
+          testNames: [`${c.id.trim().normalize("NFC")}: ${c.description.trim().normalize("NFC")}`]
+        }));
 
     return TestStrategySchema.parse({
       schemaVersion: 2, strategyId: `strategy-${digest}`, specId: spec.specId, tddDecision: decision,

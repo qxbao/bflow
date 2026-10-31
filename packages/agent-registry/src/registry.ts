@@ -38,21 +38,45 @@ function reconcileLeases(state: RegistryState, clock: () => Date, advanceClock: 
   if (!Number.isFinite(rawMs)) {
     return fail(validation("Registry clock returned an invalid timestamp"));
   }
-  const time = Math.max(rawMs, Date.parse(state.lastNow));
-  let swept = false;
+  const lastNowMs = Date.parse(state.lastNow);
+  const backwardSkew = Number.isFinite(lastNowMs) && rawMs < lastNowMs;
+  const sweepWatermark = backwardSkew ? lastNowMs : rawMs;
+  let swept = backwardSkew;
   for (const entry of Object.values(state.leases)) {
-    if (entry.active && Date.parse(entry.lease.expiresAt) <= time) {
+    if (!entry.active) continue;
+    const expiresMs = Date.parse(entry.lease.expiresAt);
+    if (expiresMs <= sweepWatermark || expiresMs <= rawMs) {
       entry.active = false;
       swept = true;
+    } else if (backwardSkew) {
+      // Heal persisted future clock skew without extending any active lease beyond its pre-rollback remaining TTL
+      const remainingMs = Math.max(0, expiresMs - lastNowMs);
+      if (remainingMs <= 0) {
+        entry.active = false;
+        swept = true;
+      } else {
+        const clampedExpiresAt = new Date(rawMs + remainingMs).toISOString();
+        const clampedAcquiredAt = Date.parse(entry.lease.acquiredAt) > rawMs
+          ? new Date(rawMs).toISOString()
+          : entry.lease.acquiredAt;
+        if (clampedExpiresAt !== entry.lease.expiresAt || clampedAcquiredAt !== entry.lease.acquiredAt) {
+          entry.lease = AgentLeaseSchema.parse({
+            ...entry.lease,
+            acquiredAt: clampedAcquiredAt,
+            expiresAt: clampedExpiresAt
+          });
+          swept = true;
+        }
+      }
     }
   }
   if (pruneStaleRenewReceipts(state)) {
     swept = true;
   }
   if (advanceClock || swept) {
-    state.lastNow = new Date(time).toISOString();
+    state.lastNow = new Date(rawMs).toISOString();
   }
-  return ok(time);
+  return ok(rawMs);
 }
 
 function active(entry: { lease: AgentLease; active: boolean }, time: number): boolean {

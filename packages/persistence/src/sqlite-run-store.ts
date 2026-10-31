@@ -1,3 +1,4 @@
+import { lstatSync } from "node:fs";
 import type { DatabaseSync as DatabaseConnection, SQLInputValue } from "node:sqlite";
 import { DatabaseSync } from "./sqlite.js";
 import {
@@ -24,6 +25,14 @@ export function openSqliteRunStore(options: SqliteRunStoreOptions): OperationRes
   try {
     const busy = options.busyTimeoutMs ?? 5_000;
     if (!options.filename || options.filename === ":memory:" || !Number.isSafeInteger(busy) || busy < 0 || busy > 2_147_483_647) fail("validation", "Invalid file-backed SQLite configuration");
+    for (const candidate of [options.filename, `${options.filename}-wal`, `${options.filename}-shm`, `${options.filename}-journal`]) {
+      try {
+        const info = lstatSync(candidate);
+        if (!info.isFile() || info.isSymbolicLink()) fail("validation", "RunStore database path must be a regular file");
+      } catch (error) {
+        if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) throw error;
+      }
+    }
     db = new DatabaseSync(options.filename);
     db.exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=${busy}; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;`);
     migrate(db);
@@ -62,9 +71,14 @@ export class SqliteRunStore implements RunStore {
         budget.check();
         this.db.exec("COMMIT");
         return result;
-      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+      } catch (error) {
+        try { this.db.exec("ROLLBACK"); } catch { /* already auto-rolled back by SQLite */ }
+        throw error;
+      }
     } finally {
-      if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+      if (!this.closed) {
+        try { this.db.exec(`PRAGMA busy_timeout=${this.busy}`); } catch { /* preserve primary failure */ }
+      }
     }
   }
   private read<T>(options: OperationOptions | undefined, work: () => T): OperationResult<T> {
@@ -75,9 +89,14 @@ export class SqliteRunStore implements RunStore {
         // All rows making up a public response come from one consistent SQLite read snapshot.
         this.db.exec("BEGIN DEFERRED");
         try { const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
-        catch (error) { this.db.exec("ROLLBACK"); throw error; }
+        catch (error) {
+          try { this.db.exec("ROLLBACK"); } catch { /* already auto-rolled back by SQLite */ }
+          throw error;
+        }
       } finally {
-        if (!this.closed) this.db.exec(`PRAGMA busy_timeout=${this.busy}`);
+        if (!this.closed) {
+          try { this.db.exec(`PRAGMA busy_timeout=${this.busy}`); } catch { /* preserve primary failure */ }
+        }
       }
     });
   }
