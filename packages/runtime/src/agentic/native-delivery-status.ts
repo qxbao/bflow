@@ -6,18 +6,34 @@ import type { HostReceiptJournal } from "./host-receipts.js";
 
 /** Recheck owned ACK evidence around a stale timeout report; never send the envelope again. */
 export async function reportNativeDeliveryUncertainty(
-  receipts: Pick<HostReceiptJournal, "nativeDelivery">,
+  receipts: Pick<HostReceiptJournal, "nativeDelivery"> & Partial<Pick<HostReceiptJournal, "nativeRejection" | "recordNativeAcknowledgement">>,
   runtime: { reportUncertainNativeDelivery(message: RoleMessage, operationId: string, reason: string): Promise<void>;
-    reconcileNativeDelivery(messageId: string): Promise<boolean> },
+    reconcileNativeDelivery(messageId: string): Promise<boolean>;
+    nativeDeliveryInbox?(): Promise<unknown> },
   message: RoleMessage, operationId: string, reason: string
 ): Promise<boolean> {
   const acknowledged = async () => {
     const delivery = await receipts.nativeDelivery(operationId);
     if (!delivery || nativeMessageFingerprint(delivery.message) !== nativeMessageFingerprint(message))
       throw new Error("Native uncertainty report does not match its immutable intent");
-    if (delivery.status !== "acknowledged") return false;
-    await runtime.reconcileNativeDelivery(message.message_id);
-    return true;
+    if (delivery.status === "acknowledged") {
+      await runtime.reconcileNativeDelivery(delivery.message.message_id);
+      return true;
+    }
+    if (typeof runtime.nativeDeliveryInbox === "function" && typeof receipts.nativeRejection === "function" &&
+        typeof receipts.recordNativeAcknowledgement === "function") {
+      const inspection = await inspectNativeDelivery(
+        { nativeDelivery: async () => delivery, nativeRejection: id => receipts.nativeRejection!(id) },
+        operationId,
+        await runtime.nativeDeliveryInbox()
+      );
+      if (inspection.delivery === "applied") {
+        await receipts.recordNativeAcknowledgement(delivery.message);
+        await runtime.reconcileNativeDelivery(delivery.message.message_id);
+        return true;
+      }
+    }
+    return false;
   };
   if (await acknowledged()) return true;
   await runtime.reportUncertainNativeDelivery(message, operationId, reason);

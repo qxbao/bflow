@@ -1,5 +1,43 @@
 import type { OperationOptions, OperationResult } from "@bflow/contracts";
 
+const MAX_TIMEOUT_SLICE_MS = 2_147_483_647;
+const MAX_DATE_EPOCH_MS = 8.64e15;
+
+/**
+ * Schedules a timeout without overflowing Node's signed 32-bit `setTimeout` limit (2,147,483,647 ms).
+ * Chains bounded slices until the full delay has elapsed and returns an idempotent cancel function.
+ */
+export function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void {
+  let cancelled = false;
+  let remaining = Math.max(1, Math.ceil(delayMs));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_TIMEOUT_SLICE_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (cancelled) return;
+      if (remaining > 0) {
+        arm();
+      } else {
+        callback();
+      }
+    }, slice);
+  };
+
+  arm();
+
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+}
+
 /** Normalize a relative timeout once, so every substep shares one deadline. */
 export function operationBudget<T extends OperationOptions>(
   options: T | undefined, clock: () => Date, defaultTimeoutMs: number
@@ -11,10 +49,17 @@ export function operationBudget<T extends OperationOptions>(
   }
   if (options?.signal?.aborted) return { ok: false, error: { code: "cancelled", retryable: false, message: "Operation aborted before start" } };
   const current = clock().getTime();
-  const end = Math.min(current + timeoutMs, absolute);
-  if (end <= current) return { ok: false, error: { code: "timeout", retryable: true, retrySafety: "not_started", message: "Operation deadline elapsed before start" } };
-  if (!Number.isFinite(end) || end > 8.64e15) return { ok: false, error: { code: "validation", retryable: false, message: "Operation deadline exceeds supported range" } };
-  return { ok: true, value: { ...options, timeoutMs, deadline: new Date(end).toISOString() } as T & OperationOptions };
+  if (!Number.isFinite(current) || Math.abs(current) > MAX_DATE_EPOCH_MS) {
+    return { ok: false, error: { code: "validation", retryable: false, message: "Operation clock exceeds supported Date range" } };
+  }
+  const rawEnd = Math.min(current + timeoutMs, absolute);
+  if (rawEnd <= current) return { ok: false, error: { code: "timeout", retryable: true, retrySafety: "not_started", message: "Operation deadline elapsed before start" } };
+  const end = Math.ceil(rawEnd);
+  if (!Number.isFinite(end) || Math.abs(end) > MAX_DATE_EPOCH_MS) {
+    return { ok: false, error: { code: "validation", retryable: false, message: "Operation deadline exceeds supported range" } };
+  }
+  const boundedTimeoutMs = Math.min(timeoutMs, end - current);
+  return { ok: true, value: { ...options, timeoutMs: boundedTimeoutMs, deadline: new Date(end).toISOString() } as T & OperationOptions };
 }
 
 /** Validate SemVer 2.0.0, allowing an optional leading v. */

@@ -413,7 +413,7 @@ export class TaskDispatcher {
             return recRes;
           }
           if (recRes.value.emittedEvents.length > 0) {
-            await this.persistEvents(
+            const appendReconRes = await this.persistEvents(
               snapshot.runId,
               activeSnapshot.version,
               activeSnapshot.lastEventSequence,
@@ -421,6 +421,10 @@ export class TaskDispatcher {
               `recon-events:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
               options
             );
+            if (!appendReconRes.ok) {
+              await this.releaseLease(lease, options);
+              return appendReconRes as OperationResult<AgentExecutionHandle>;
+            }
           }
           this.#activeExecutions.set(`${snapshot.runId}:${taskId}`, {
             runId: snapshot.runId,
@@ -445,7 +449,7 @@ export class TaskDispatcher {
             occurredAt: this.#clock().toISOString()
           }, options);
           if (recRes.ok && recRes.value.emittedEvents.length > 0) {
-            await this.persistEvents(
+            const appendReconRes = await this.persistEvents(
               snapshot.runId,
               activeSnapshot.version,
               activeSnapshot.lastEventSequence,
@@ -453,6 +457,10 @@ export class TaskDispatcher {
               `recon-events:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
               options
             );
+            if (!appendReconRes.ok) {
+              await this.releaseLease(lease, options);
+              return appendReconRes as OperationResult<AgentExecutionHandle>;
+            }
           }
           // Re-send prompt to transport safely
           const retrySubmission = await this.#transport.send(agentRequest, options);
@@ -475,7 +483,7 @@ export class TaskDispatcher {
               await this.releaseLease(lease, options);
               return boundRes;
             }
-            await this.persistEvents(
+            const appendRetryBoundRes = await this.persistEvents(
               snapshot.runId,
               recRes.ok ? recRes.value.snapshot.version : activeSnapshot.version,
               recRes.ok ? recRes.value.snapshot.lastEventSequence : activeSnapshot.lastEventSequence,
@@ -483,6 +491,10 @@ export class TaskDispatcher {
               `bind-events:${snapshot.runId}:${taskId}:${taskState.attemptId}`,
               options
             );
+            if (!appendRetryBoundRes.ok) {
+              await this.releaseLease(lease, options);
+              return appendRetryBoundRes as OperationResult<AgentExecutionHandle>;
+            }
             this.#activeExecutions.set(`${snapshot.runId}:${taskId}`, {
               runId: snapshot.runId,
               taskId,
@@ -508,7 +520,7 @@ export class TaskDispatcher {
             occurredAt: this.#clock().toISOString()
           }, options);
           if (recRes.ok && recRes.value.emittedEvents.length > 0) {
-            await this.persistEvents(
+            const appendReconRes = await this.persistEvents(
               snapshot.runId,
               activeSnapshot.version,
               activeSnapshot.lastEventSequence,
@@ -516,6 +528,10 @@ export class TaskDispatcher {
               `recon-events:${snapshot.runId}:${taskId}:${agentRequest.requestId}`,
               options
             );
+            if (!appendReconRes.ok) {
+              await this.releaseLease(lease, options);
+              return appendReconRes as OperationResult<AgentExecutionHandle>;
+            }
           }
           await this.releaseLease(lease, options);
           return {

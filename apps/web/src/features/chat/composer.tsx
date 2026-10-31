@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { WebHttpContracts, WEB_LIMITS } from '@bflow/contracts/web';
-import { ApiClient, ApiError, projectPath } from '../../api/client';
+import { ApiClient, ApiError, explain, projectPath } from '../../api/client';
 import { useRead } from '../data';
+const DEFINITIVE_PRE_ADMISSION_CODES=new Set(['invalid_request','forbidden','session_required','not_found','stale_version','operation_not_allowed','payload_too_large']);
 function pending(key:string):string|undefined {
  const raw=localStorage.getItem(key);if(!raw)return;
  const value:unknown=JSON.parse(raw);
@@ -23,7 +24,15 @@ export function ChatComposer({api,projectId,sessionId,runId,revision,historyReje
     const input=WebHttpContracts.sendMessage.body.parse({apiVersion:1,messageId:crypto.randomUUID(),projectId,sessionId,runId,content:draft});
     // Only an ID survives a failed HTTP ACK. Message content/credentials never enter localStorage.
     localStorage.setItem(key,JSON.stringify({version:1,messageId:input.messageId}));setUncertain(true);
-    const message=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`,WebHttpContracts.sendMessage.response,'POST',input,40000);
+    let message;
+    try{
+     message=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`,WebHttpContracts.sendMessage.response,'POST',input,40000);
+    }catch(error){
+     if(error instanceof ApiError && DEFINITIVE_PRE_ADMISSION_CODES.has(error.code)){
+      localStorage.removeItem(key);setUncertain(false);setNotice(explain(error));return;
+     }
+     throw error;
+    }
     if(message.messageId!==input.messageId||message.sessionId!==sessionId||message.runId!==runId||message.sender!=='user'||message.source!=='web'||message.content!==input.content)throw new ApiError('invalid_response');
     localStorage.removeItem(key);setUncertain(false);setDraft('');setNotice('Đã tiếp nhận tin nhắn. Trạng thái chuyển tin được đối chiếu trong lịch sử.');refresh();
    });

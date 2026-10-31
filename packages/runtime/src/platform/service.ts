@@ -1,7 +1,7 @@
 import type { GatewayToolOperationOptions } from "./browser-resource-transactions.js";
-import { lstat, mkdir } from "node:fs/promises";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
   AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema, ROLE_PROFILE_FEATURE,
   canonicalReceiptJson,
@@ -505,7 +505,13 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       if (attempt.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
       return failWith(attempt.error);
     }
-    const launched = await this.launchRole(attempt, options);
+    let launched: OperationResult<PreparedRoleLaunch>;
+    try {
+      launched = await this.launchRole(attempt, options);
+    } catch (error) {
+      if (attempt.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
+      throw error;
+    }
     if (!launched.ok) {
       if (attempt.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
       return launched;
@@ -743,7 +749,13 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     options?: OperationOptions
   ): Promise<RoleAttempt> {
     const prepared = await this.prepareRoleEnvironment(identity, requirement, options);
-    return prepared.ready ? this.checkPreparedRole(prepared, options) : prepared;
+    if (!prepared.ready) return prepared;
+    try {
+      return await this.checkPreparedRole(prepared, options);
+    } catch (error) {
+      if (prepared.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
+      throw error;
+    }
   }
 
   private async prepareRoleEnvironment(
@@ -1053,7 +1065,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
 
   private async checkPreparedRole(prepared: RoleEnvironmentReady, options?: OperationOptions): Promise<RoleAttempt> {
     await this.deps.beforeSideEffect?.();
-    const preflight = await this.deps.providers.preflight(prepared.environment, prepared.context, options);
+    let preflight: OperationResult<AgentHealthResult>;
+    try {
+      preflight = await this.deps.providers.preflight(prepared.environment, prepared.context, options);
+    } catch (error) {
+      return this.blockedRole(prepared, {
+        code: "validation",
+        retryable: false,
+        message: `Provider preflight failed before returning a health verdict: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
     return preflight.ok ? { ...prepared, preflight: preflight.value,
       summary: summaryOf(prepared.requirement, "ready", [...preflight.value.checks, ...prepared.toolChecks]) } : this.blockedRole(prepared, preflight.error);
   }
@@ -1071,8 +1092,22 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         assertRoleProfilePin(requirement.roleProfile.pin, attempt.environment.roleProfile);
       } catch { return fail("conflict", "Role profile snapshot missing, corrupted or mismatched before launch"); }
     }
-    const profile = await this.deps.providers.prepareLaunch(attempt.environment, attempt.context, identity.generation, options);
+    let profile: OperationResult<AgentLaunchProfile>;
+    try {
+      profile = await this.deps.providers.prepareLaunch(attempt.environment, attempt.context, identity.generation, options);
+    } catch (error) {
+      return fail(
+        "validation",
+        `Provider launch preparation failed before returning launch material: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
     if (!profile.ok) return failWith(profile.error);
+
+    const sanitizedPath = await sanitizeLaunchPathForProvider(
+      attempt.context.launchEnvironment?.["PATH"],
+      requirement.provider,
+      profile.value
+    );
 
     const prepared: PreparedRoleLaunch = {
       role: requirement.role,
@@ -1088,6 +1123,7 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       launch: {
         argv: profile.value.argv,
         env: { ...(attempt.context.launchEnvironment ?? {}),
+          ...(sanitizedPath !== undefined ? { PATH: sanitizedPath } : {}),
           ...(attempt.requirement.toolGrants === undefined ? attempt.gateway.tokenEnvironment : {}),
           ...providerSessionEnvironment(requirement.provider) },
         launchId: profile.value.launchId,
@@ -1155,4 +1191,60 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       if (!bestEffort) throw error;
     }
   }
+}
+
+/**
+ * Removes PATH segments where `<segment>/<providerCommand>` exists on disk as a non-regular file
+ * (such as Bflow's managed `tools/superpowers/{claude,codex,agy}` directories) when the verified
+ * provider executable (or shim config file) was resolved from PATH or an explicit launch PATH was
+ * supplied. Prevents downstream PATH walkers and shells from colliding on `+x` directories (EISDIR).
+ */
+async function sanitizeLaunchPathForProvider(
+  explicitLaunchPath: string | undefined,
+  provider: AgentProviderId,
+  profile: AgentLaunchProfile
+): Promise<string | undefined> {
+  const providerCommand = provider === "claude" ? "claude" : provider === "agy" ? "agy" : "codex";
+  const effectivePath = explicitLaunchPath ?? process.env["PATH"] ?? "/usr/bin:/bin";
+  const segments = effectivePath.split(delimiter);
+  let targetCanonical: string | undefined;
+  try {
+    targetCanonical = await realpath(profile.executable);
+  } catch {
+    targetCanonical = undefined;
+  }
+  const allowedTargets = new Set<string>([
+    profile.executable,
+    ...(targetCanonical !== undefined ? [targetCanonical] : []),
+    ...profile.configFiles.map(file => file.path)
+  ]);
+
+  let hasShadowingNonRegular = false;
+  let targetReachableOnEffectivePath = false;
+  const kept: string[] = [];
+
+  for (const segment of segments) {
+    const dir = segment.length === 0 ? "." : segment;
+    const candidate = join(dir, providerCommand);
+    try {
+      const resolved = await realpath(candidate);
+      const info = await stat(resolved);
+      if (!info.isFile()) {
+        hasShadowingNonRegular = true;
+        continue;
+      }
+      if (allowedTargets.has(resolved) || allowedTargets.has(candidate)) {
+        targetReachableOnEffectivePath = true;
+      }
+    } catch {
+      // Missing or broken entry in this segment: retain segment unchanged.
+    }
+    kept.push(segment);
+  }
+
+  if (!hasShadowingNonRegular) return explicitLaunchPath;
+  if (explicitLaunchPath === undefined && !targetReachableOnEffectivePath) {
+    return undefined;
+  }
+  return kept.join(delimiter);
 }

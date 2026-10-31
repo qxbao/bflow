@@ -18,6 +18,12 @@ import { prepareRepositoryGitNexus, resolveSetupPlatform } from './gateway-repos
 const MAX_RECEIPT_BYTES=128*1024;
 const ReceiptSchema=z.object({request:WebProjectInitRequestSchema,result:WebProjectInitializationSchema}).strict();
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+async function syncDirectorySafe(directory:string){
+ let handle;
+ try{handle=await open(directory,'r');await handle.sync();}
+ catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!['EINVAL','ENOTSUP','EPERM','EACCES','EBADF','EISDIR','EROFS'].includes(code))throw error;}
+ finally{await handle?.close().catch(()=>{});}
+}
 const failure=<T>(e:unknown,code:'validation'|'conflict'|'not_found'='validation'):OperationResult<T>=>({ok:false,error:ContractErrorSchema.parse({code,retryable:code==='conflict',message:(e instanceof Error?e.message:String(e)).slice(0,4000)})});
 export interface WebProjectSettingsOptions {
  resolveProject(id:string):Promise<WebProject>;
@@ -44,7 +50,7 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
  const receipt=(id:string,operationId:string)=>join(options.receiptDirectory,'init-'+hash(JSON.stringify([id,operationId]))+'.json');
  const writeReceipt=async(value:WebProjectInitialization,request:WebProjectInitRequest)=>{
   const path=receipt(value.projectId,value.operationId),temp=path+'.'+randomUUID()+'.tmp';
-  const file=await open(temp,'wx',0o600);try{await file.writeFile(JSON.stringify(ReceiptSchema.parse({request,result:value})));await file.sync();await file.close();await rename(temp,path);}finally{await file.close();await unlink(temp).catch(()=>{});}
+  const file=await open(temp,'wx',0o600);try{await file.writeFile(JSON.stringify(ReceiptSchema.parse({request,result:value})));await file.sync();await file.close();await rename(temp,path);await syncDirectorySafe(options.receiptDirectory);}finally{await file.close();await unlink(temp).catch(()=>{});}
  };
  const readJob=async(id:string,operationId:string)=>{
   WebSessionStartRequestSchema.parse({apiVersion:1,operationId});
@@ -95,7 +101,7 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
      try{
       await file.writeFile(yaml);await file.sync();await file.close();
       if((await snapshot(id,r.root)).revision!==request.expectedRevision)return failure('Cấu hình đã đổi. Tải lại trước khi lưu.','conflict');
-      await rename(temp,path);const directory=await open(join(r.root,'.bflow'),'r');try{await directory.sync();}finally{await directory.close();}
+      await rename(temp,path);await syncDirectorySafe(join(r.root,'.bflow'));
      }finally{await file.close();await unlink(temp).catch(()=>{});}
      return {ok:true as const,value:await snapshot(id,r.root)};
     });

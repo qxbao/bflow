@@ -101,7 +101,7 @@ export function reduceWorkflowEvent(
         const expectedAttempt = task.status === "ready" && event.payload.to === "running"
           ? task.attempt + 1 : task.attempt;
         if (event.payload.attempt !== expectedAttempt) throw new Error("Task status event attempt is not contiguous");
-        const enteringRun = event.payload.to === "running" && event.payload.from !== "waiting";
+        const enteringRun = event.payload.to === "running" && event.payload.from === "ready";
         const enteringReady = event.payload.to === "ready";
         const terminal = ["succeeded", "failed", "cancelled"].includes(event.payload.to);
         const base: TaskState = {

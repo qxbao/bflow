@@ -80,13 +80,16 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
         o.evidenceArtifactId === evaluated.evidenceArtifactId &&
         (o.method === "manual_review" || (
           (evaluated.command === undefined || o.command === evaluated.command) &&
-          (evaluated.exitCode === undefined || o.exitCode === evaluated.exitCode)
+          (evaluated.exitCode === undefined || o.exitCode === evaluated.exitCode) &&
+          (o.exitCode === undefined || evaluated.passed === (o.exitCode === 0))
         ))
       );
       if (!matching) {
         throw new Error("Observation must agree with the evaluated criterion command and exit code");
       }
-      if (matching.method !== "manual_review" && matching.exitCode !== undefined && evaluated.passed !== (matching.exitCode === 0)) {
+      if (evaluated.passed && details.observations.some(o =>
+        o.criterionId === evaluated.criterionId && o.exitCode !== undefined && o.exitCode !== 0
+      )) {
         throw new Error("Observation must agree with the evaluated criterion command and exit code");
       }
     }
@@ -99,7 +102,7 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
           behavioralCriteria.some(c => !details.observations.some(o => o.criterionId === c.id && o.method === c.verificationMethod))) {
         throw new Error("Red must cover required behavioral acceptance criteria");
       }
-      const names = strategy.criterionMappings.filter(m => observedCriteria.has(m.criterionId)).flatMap(m => m.testNames);
+      const names = strategy.criterionMappings.filter(m => observedCriteria.has(m.criterionId)).flatMap(m => m.testNames.map(name => name.trim()));
       if (!names.every(name => details.testNames.includes(name))) throw new Error("Red tests must derive from the mapped spec criteria");
       redDetails = details;
     } else {

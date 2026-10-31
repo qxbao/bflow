@@ -31,12 +31,18 @@ export class ApiClient {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (method !== 'GET' && this.csrf) headers['X-Bflow-CSRF'] = this.csrf;
-    const response = await fetch(path, { method, credentials: 'same-origin', cache: 'no-store', headers,
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs) });
+    let response: Response;
+    try {
+      response = await fetch(path, { method, credentials: 'same-origin', cache: 'no-store', headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs) });
+    } catch {
+      throw new ApiError('unavailable');
+    }
     if (!response.ok) {
-      const error = WebApiErrorSchema.safeParse(await response.json());
       if (response.status === 401) { this.csrf = undefined; this.session = undefined; }
-      throw new ApiError(error.success ? error.data.code : 'invalid_response');
+      const raw = await response.json().catch(() => undefined);
+      const error = WebApiErrorSchema.safeParse(raw);
+      throw new ApiError(error.success ? error.data.code : response.status === 401 ? 'session_required' : 'invalid_response');
     }
     try { return schema.parse(response.status === 204 ? undefined : await response.json()); } catch { throw new ApiError('invalid_response'); }
   }

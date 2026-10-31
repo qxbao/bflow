@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { AgentExecutionHandleSchema, ArtifactReferenceSchema, ArtifactWriteOptionsSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
 import { measureBehavior, parseBehavioralCommands, type BehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
 import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./runtime.js";
 import { digest, json, record, strings, textField } from "./journal.js";
@@ -55,7 +56,8 @@ export class HostDevelopment {
   }
   private async git(cwd: string, args: string[]) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
-    return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", ...args],
+    const dirFlags = await runtimeGitDirectoryFlags(cwd);
+    return (await execute("git", [...dirFlags, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", ...args],
       { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
   }
   private async identity(bindingInput: PaneBinding, input: unknown) {

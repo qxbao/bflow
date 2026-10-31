@@ -13,7 +13,7 @@ export const ChangeAssessmentSchema = z.object({
   architectureImpact: z.boolean(),
   migrationRequired: z.boolean(),
   risk: RiskLevelSchema,
-  unresolvedQuestions: z.array(z.string().trim().min(1))
+  unresolvedQuestions: z.array(z.string().trim().min(1)).default([])
 }).strict();
 
 export type ChangeAssessment = z.infer<typeof ChangeAssessmentSchema>;
@@ -33,11 +33,11 @@ export function hasSecurityPathHint(paths: readonly string[]): boolean {
 }
 
 export function hasPublicApiPathHint(paths: readonly string[]): boolean {
-  return paths.some(path => /(?:^|\/)(?:contracts|openapi|proto|graphql)(?:\/|\.|$)/i.test(path));
+  return paths.some(path => /(?:^|[/\\])(?:contracts|openapi|proto|graphql)(?:[/\\]|\.|$)/i.test(path));
 }
 
 export function hasDataSchemaPathHint(paths: readonly string[]): boolean {
-  return paths.some(path => /(?:^|\/)(?:migrations?|schema)(?:\/|\.|$)|\.sql$/i.test(path));
+  return paths.some(path => /(?:^|[/\\])(?:migrations?|schema)(?:[/\\]|\.|$)|\.sql$/i.test(path));
 }
 
 export function classifyChange(input: unknown, affectedPaths: readonly string[] = []): Classification {
@@ -55,7 +55,8 @@ export function classifyChange(input: unknown, affectedPaths: readonly string[] 
     reasons.push("persistent data schema impact");
   }
   if (change.architectureImpact) reasons.push("architecture impact");
-  if (new Set(change.modules).size > 1) reasons.push("multiple modules affected");
+  const normalizedModules = change.modules.map(m => m.replace(/[/\\]+$/, "") || m);
+  if (new Set(normalizedModules).size > 1) reasons.push("multiple modules affected");
   if (change.migrationRequired) reasons.push("migration required");
   if (change.risk === "high" || change.risk === "critical") reasons.push("high declared risk");
   const complex = reasons.length > 0;

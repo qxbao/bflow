@@ -20,6 +20,22 @@ import type { CommandRunner, HostEnvironment, PlatformProfile, SetupComponent, S
 export const MACHINE_CONFIG_FILE = "machine.json";
 export const CONFIG_REPAIR_NEEDED = "machine config invalid; run setup --repair";
 
+/** Computes the executable directory for a managed CLI tool pin, excluding non-CLI plugin bundles (e.g. superpowers). */
+export function managedToolPathDir(
+  dataDir: string,
+  pin: { readonly toolId: string; readonly installerId?: string | undefined; readonly method: string }
+): string | null {
+  if (pin.installerId === "bflow-tools-native") return null;
+  if (!TOOL_CATALOG.some((entry) => entry.toolId === pin.toolId)) return null;
+  if (pin.method === "npm" || pin.method === "pnpm") {
+    return path.join(dataDir, "tools", pin.toolId, "node_modules", ".bin");
+  }
+  if (pin.toolId === "mempalace") {
+    return path.join(dataDir, "tools", "mempalace", "bin");
+  }
+  return path.join(dataDir, "tools", pin.toolId);
+}
+
 export type SetupMode = SetupContext["mode"];
 export type SetupOutcome =
   | "healthy"
@@ -328,8 +344,7 @@ export class MachineSetupService {
       ...(this.options.launcher ? { launcher: this.options.launcher } : {}),
       // Plan PATH ownership before installs: a newly created executable must be usable on the first run.
       observations: [...observations, ...config.toolPins.map((pin) => ({
-        pathMissingDir: path.join(platform.paths.data, "tools", pin.toolId,
-          ...(pin.method === "npm" || pin.method === "pnpm" ? ["node_modules", ".bin"] : []))
+        pathMissingDir: managedToolPathDir(platform.paths.data, pin)
       }))]
     });
     const skills = createSkillsComponent(this.options.skills);

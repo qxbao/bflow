@@ -26,7 +26,7 @@ function finish(results: TestResult[], outcome: QualityCommandOutcome, expected:
 }
 // Whitelist assertion exception families. Arbitrary <failure> and arbitrary panic are never Red evidence.
 function assertion(input: string): boolean {
-  return /(?:^|[\s:.(\\])(?:AssertionError|AssertionFailedError|AssertFailedException|AssertionException|ComparisonFailure|MultipleFailuresError|ExpectationFailedException|ExpectationNotMetError|AssertError|AssertException|Minitest::Assertion|Xunit\.Sdk\.[A-Za-z]*Exception|Microsoft\.VisualStudio\.TestTools\.UnitTesting\.AssertFailedException)(?:$|[\s:.)\[])/.test(input) || /(?:^|\n)\s*(?:E\s+)?(?:assert\s+|AssertionError:|Failed: DID NOT RAISE\b|XCTAssert\w* failed:|Assertion [^\n]+ failed\.|Assert\.[A-Za-z]+\(\) Failure:)/.test(input);
+  return /(?:^|[\s:.(\\])(?:AssertionError|VitestAssertionError|JestAssertionError|JestExtendError|ChaiError|ExpectError|TestingLibraryElementError|HtmlElementTypeError|AssertionFailedError|AssertFailedException|AssertionException|ComparisonFailure|MultipleFailuresError|ExpectationFailedException|ExpectationNotMetError|AssertError|AssertException|Minitest::Assertion|Xunit\.Sdk\.[A-Za-z]*Exception|Microsoft\.VisualStudio\.TestTools\.UnitTesting\.AssertFailedException)(?:$|[\s:.)\[])/.test(input) || /(?:^|\n)\s*(?:E\s+)?(?:assert\s+|AssertionError:|Failed: DID NOT RAISE\b|XCTAssert\w* failed:|Assertion [^\n]+ failed\.|Assert\.[A-Za-z]+\(\) Failure:)/.test(input);
 }
 
 interface XmlNode { name: string; attrs: Record<string, string>; children: XmlNode[]; text: string }
@@ -226,23 +226,30 @@ function trxResults(reports: readonly string[]): TestResult[] {
 function jestResults(input: string, selected: readonly string[]): TestResult[] {
   const report = object(json(input)), results: TestResult[] = [];
   const tests = number(report.numTotalTests), passed = number(report.numPassedTests), failed = number(report.numFailedTests);
-  if (number(report.numTodoTests) || number(report.numPendingTestSuites) || number(report.numRuntimeErrorTestSuites) || report.wasInterrupted !== false || report.success !== (failed === 0)) invalid("Jest skipped, interrupted or runtime errors");
-  const suites = array(report.testResults); let failedSuites = 0, filtered = 0;
+  const pendingSuitesCount = number(report.numPendingTestSuites);
+  if (number(report.numTodoTests) || number(report.numRuntimeErrorTestSuites) || report.wasInterrupted !== false || report.success !== (failed === 0)) invalid("Jest skipped, interrupted or runtime errors");
+  const suites = array(report.testResults); let failedSuites = 0, pendingSuites = 0, filtered = 0;
   for (const item of suites) {
-    const suite = object(item), leaves = array(suite.assertionResults); let suiteFailed = false;
-    if (!leaves.length || !["passed", "failed"].includes(String(suite.status)) || suite.testExecError !== undefined) invalid("Jest suite infrastructure error");
+    const suite = object(item), leaves = array(suite.assertionResults); let suiteFailed = false, suiteExecuted = false;
+    if (!leaves.length || !["passed", "failed", "pending"].includes(String(suite.status)) || suite.testExecError !== undefined) invalid("Jest suite infrastructure error");
     for (const leaf of leaves) {
       const test = object(leaf), failed = test.status === "failed", messages = array(test.failureMessages);
       if (!["passed", "failed", "pending"].includes(String(test.status)) || messages.some(value => typeof value !== "string") || (failed ? !messages.length || messages.some(message => !assertion(String(message)) && !/^Error: expect\(/.test(String(message))) : messages.length > 0)) invalid("Jest skipped or non-assertion failure");
       const ancestors = array(test.ancestorTitles).map(text), title = text(test.title), fullName = text(test.fullName);
       if ([...ancestors, title].join(" ") !== fullName) invalid("Jest fullName contradicts titles");
       if (test.status === "pending") { if (selected.includes(fullName)) invalid("Selected Jest test skipped"); filtered++; continue; }
+      suiteExecuted = true;
       results.push({ name: fullName, passed: !failed }); suiteFailed ||= failed;
     }
-    if (suite.status !== (suiteFailed ? "failed" : "passed") || !suiteFailed && suite.message !== "") invalid("Jest suite status contradiction");
-    if (suiteFailed) failedSuites++;
+    if (suiteExecuted) {
+      if (suite.status !== (suiteFailed ? "failed" : "passed") || !suiteFailed && suite.message !== "") invalid("Jest suite status contradiction");
+      if (suiteFailed) failedSuites++;
+    } else {
+      if (!["pending", "passed"].includes(String(suite.status)) || suite.message !== "") invalid("Jest suite status contradiction");
+      if (suite.status === "pending") pendingSuites++;
+    }
   }
-  if (tests !== results.length + filtered || number(report.numPendingTests) !== filtered || passed !== results.filter(test => test.passed).length || failed !== results.length - passed || number(report.numTotalTestSuites) !== suites.length || number(report.numPassedTestSuites) !== suites.length - failedSuites || number(report.numFailedTestSuites) !== failedSuites) invalid("Jest counters contradict results");
+  if (pendingSuitesCount !== pendingSuites || tests !== results.length + filtered || number(report.numPendingTests) !== filtered || passed !== results.filter(test => test.passed).length || failed !== results.length - passed || number(report.numTotalTestSuites) !== suites.length || number(report.numPassedTestSuites) !== suites.length - failedSuites - pendingSuites || number(report.numFailedTestSuites) !== failedSuites) invalid("Jest counters contradict results");
   return results;
 }
 function mochaResults(input: string): TestResult[] {

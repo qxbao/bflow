@@ -59,7 +59,8 @@ const compactWorkflow = (workflow: unknown, brief: boolean) => {
  * never truncated, even when they alone exceed the budget, because the model must act on them. Each trim is counted.
  */
 export function boundConversationContext(result: unknown, budget = CONVERSATION_CONTEXT_BUDGET): unknown {
-  if (sizeOf(result) <= budget) return result;
+  const effectiveBudget = Number.isFinite(budget) ? Math.max(0, budget) : CONVERSATION_CONTEXT_BUDGET;
+  if (sizeOf(result) <= effectiveBudget) return result;
   const whole = record(result), context = record(whole.context ?? {});
   if (!Array.isArray(context.messages)) return result;
   const messages = context.messages, clarifications = record(context.pendingClarifications ?? {});
@@ -85,17 +86,17 @@ export function boundConversationContext(result: unknown, budget = CONVERSATION_
   const ladder: [number, boolean][] = [...Array.from({ length: terminal.length + 1 }, (_, dropped): [number, boolean] => [dropped, false]), [terminal.length, true]];
   for (const [dropped, brief] of ladder) {
     const candidate = render(messages.length, clarifications, dropped, brief);
-    if (sizeOf(candidate) <= budget) return candidate;
+    if (sizeOf(candidate) <= effectiveBudget) return candidate;
   }
   const dropped = terminal.length;
   // Keep as much history as fits with clarifications; drop clarifications only when history alone cannot fit.
   for (let keep = messages.length; keep >= 0; keep--) {
     const candidate = render(keep, clarifications, dropped, true);
-    if (sizeOf(candidate) <= budget) return candidate;
+    if (sizeOf(candidate) <= effectiveBudget) return candidate;
   }
   for (let keep = messages.length; keep >= 0; keep--) {
     const candidate = render(keep, {}, dropped, true);
-    if (sizeOf(candidate) <= budget) return candidate;
+    if (sizeOf(candidate) <= effectiveBudget) return candidate;
   }
   return render(0, {}, dropped, true);
 }

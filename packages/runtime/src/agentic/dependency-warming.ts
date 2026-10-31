@@ -105,14 +105,16 @@ async function readManifest(root: string, name: string): Promise<string> {
     return bytes.toString("utf8");
   } finally { await handle.close(); }
 }
-async function findNpm(repositoryRoot: string): Promise<{ node: string; npmRoot: string }> {
+export async function findNpm(repositoryRoot: string): Promise<{ node: string; npmRoot: string }> {
   const node = await realpath(process.execPath);
   const probeHome = await mkdtemp(join(tmpdir(), "bflow-npm-probe-"));
   try {
     for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-      if (!isAbsolute(directory)) continue;
+      if (!directory || !isAbsolute(directory)) continue;
       try {
-        const cli = await realpath(join(directory, "npm")); await access(cli, constants.X_OK);
+        const cli = await realpath(join(directory, "npm"));
+        if (!(await lstat(cli)).isFile()) continue;
+        await access(cli, constants.X_OK);
         if (cli === repositoryRoot || cli.startsWith(repositoryRoot + "/")) continue;
         const npmRoot = dirname(dirname(cli));
         if (basename(npmRoot) !== "npm" || npmRoot === resolve(homedir()) || cli !== join(npmRoot, "bin", "npm-cli.js") || record(JSON.parse(await readFile(join(npmRoot, "package.json"), "utf8"))).name !== "npm" || await realpath(npmRoot) !== npmRoot) continue;

@@ -58,6 +58,7 @@ function Overview({api,project,revision,refresh,events}:{api:ApiClient;project:W
   const id=project.projectId;
   const runs=useRead(`overview-runs:${id}`,()=>api.runs(id),revision),decisions=useRead(`overview-decisions:${id}`,()=>api.decisions(id),revision);
   const session=useRead(`session:${id}`,()=>api.sessionView(id),revision),preview=useRead(`preview:${id}`,()=>api.preview(id),revision);
+  useEffect(()=>{if(!session.data || !['starting','stopping'].includes(session.data.state))return;const poll=setInterval(refresh,2500);return()=>clearInterval(poll);},[session.data?.state,refresh]);
   const pendingDecisions=(decisions.data?.items??[]).filter(decision=>decision.status==='pending');
   return <><div className="mb-3 flex flex-wrap items-baseline justify-between gap-2"><div><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Dự án / Tổng quan</div><h1 className="mt-1 mb-1">Tổng quan <em>dự án.</em></h1><p className="m-0 max-w-2xl text-sm text-muted">Theo dõi tiến độ thực tế, trả lời làm rõ và phê duyệt kết quả ngay tại một nơi.</p></div></div>
     <ReadProblems retry={refresh} problems={[{label:'phiên dự án',result:session},{label:'công việc',result:runs},{label:'quyết định',result:decisions},{label:'thông tin chuẩn bị',result:preview}].filter(item=>Boolean(item.result.error)).map(item=>({label:item.label,error:item.result.error,stale:Boolean(item.result.data)}))}/><LoadingState loading={session.loading} initial={!session.data} label="Đang đọc phiên dự án…"/>

@@ -84,8 +84,16 @@ export function resolveDraftCriteria(
 ): OperationResult<readonly { readonly description: string; readonly verificationMethod?: VerificationMethod | undefined }[]> {
   const invalid = (message: string) => ({ ok: false as const, error: { code: "validation" as const, retryable: false as const, message } });
   const methods = draft.verificationMethods ?? [];
-  if (draft.acceptanceCriteria !== undefined) {
-    if (draft.acceptanceCriteriaDescriptions.length > 0 || methods.length > 0) {
+  if (draft.acceptanceCriteria !== undefined &&
+      !(draft.acceptanceCriteria.length === 0 && (draft.acceptanceCriteriaDescriptions.length > 0 || fallbackDescriptions.length > 0))) {
+    const descriptionsMatch = draft.acceptanceCriteriaDescriptions.length === 0 ||
+      (draft.acceptanceCriteriaDescriptions.length === draft.acceptanceCriteria.length &&
+        draft.acceptanceCriteriaDescriptions.every((desc, idx) => desc.trim() === draft.acceptanceCriteria![idx]!.description.trim()));
+    const methodsMatch = methods.length === 0 ||
+      (methods.length === 1 && draft.acceptanceCriteria.every(item => item.verificationMethod === methods[0])) ||
+      (methods.length === draft.acceptanceCriteria.length &&
+        methods.every((method, idx) => method === draft.acceptanceCriteria![idx]!.verificationMethod));
+    if (!descriptionsMatch || !methodsMatch) {
       return invalid("Use either acceptanceCriteria[] or acceptanceCriteriaDescriptions with verificationMethods, not both");
     }
     return { ok: true, value: draft.acceptanceCriteria };

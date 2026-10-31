@@ -133,8 +133,8 @@ function aliases(file:ts.SourceFile):{names:Map<string,string>;unsupported:Set<s
       const original=(element.propertyName??element.name).text;
       if(!clause.isTypeOnly&&!element.isTypeOnly&&original==="defineConfig"&&["vitest/config","vite","@playwright/test"].includes(module)) {configWrappers.add(element.name.text);names.set(element.name.text,"defineConfig");}
       else if(!known||clause.isTypeOnly||element.isTypeOnly)reject(element.name.text,original);
-      else if(["test","it","describe","expect"].includes(original)) names.set(element.name.text,original);
-      else if(module.includes("assert")) names.set(element.name.text,`assert.${original}`);
+      else if(["test","it","describe","expect"].includes(original)||(!module.includes("assert")&&original==="assert")) names.set(element.name.text,original);
+      else if(module.includes("assert")) names.set(element.name.text,original==="strict"||original==="default"?"assert":`assert.${original}`);
       else reject(element.name.text,original);
     }
   }

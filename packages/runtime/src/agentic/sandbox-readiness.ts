@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { access, readFile, realpath } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
@@ -27,13 +27,16 @@ async function probeSandbox(repositoryRoot: string): Promise<{ readiness: Sandbo
   const seen = new Set<string>();
   let failure: { reason: string; usernsDenied?: string } | undefined;
   for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
-    if (!isAbsolute(directory)) continue;
+    if (!directory || !isAbsolute(directory)) continue;
     let executable: string;
     try {
       executable = await realpath(join(directory, "bwrap"));
       if (executable === repositoryRoot || executable.startsWith(repositoryRoot + "/")) continue;
       if (seen.has(executable)) continue;
       seen.add(executable);
+      let nonFile = false;
+      try { nonFile = !statSync(executable).isFile(); } catch { /* virtual path in unit mocks */ }
+      if (nonFile) continue;
       await access(executable, constants.X_OK);
     } catch { continue; }
     try {

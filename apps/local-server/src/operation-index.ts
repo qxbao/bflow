@@ -24,6 +24,12 @@ export async function privateStateIsFree(directory:string):Promise<boolean>{
   try{const info=await file.stat();if(!info.isFile()||info.nlink!==1)throw new Error('Unsafe server lock');return await exclusiveLock(file);}
   finally{await file.close();}
 }
+async function syncDirectorySafe(directory:string):Promise<void>{
+  let handle:FileHandle|undefined;
+  try{handle=await open(directory,constants.O_RDONLY);await handle.sync();}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!['EINVAL','ENOTSUP','EPERM','EACCES','EBADF','EISDIR','EROFS'].includes(code))throw error;}
+  finally{await handle?.close().catch(()=>{});}
+}
 /** Local POSIX private files. Fails closed on foreign/symlink state; no same-UID or power-loss claim. */
 export class PrivateState {
   private constructor(readonly directory:string,private lock:FileHandle,readonly principalId:string) {}
@@ -40,6 +46,9 @@ export class PrivateState {
     }catch(error){await lock.close();throw error;}
     const state=new PrivateState(directory,lock,'');
     try {
+      for(const entry of await readdir(directory)){
+        if(/^\.tmp-[0-9a-f-]{36}$/i.test(entry))await unlink(join(directory,entry)).catch(()=>{});
+      }
       let principal=await state.read('principal.json');
       if(principal===undefined) {principal=randomUUID();await state.write('principal.json',principal);}
       return new PrivateState(directory,lock,IdentifierSchema.parse(principal));
@@ -55,7 +64,7 @@ export class PrivateState {
   async write(name:string,value:unknown):Promise<void> {
     const temporary=join(this.directory,`.tmp-${randomUUID()}`);
     const file=await open(temporary,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
-    try {await file.writeFile(JSON.stringify(value));await file.sync();await file.close();await rename(temporary,join(this.directory,name));}
+    try {await file.writeFile(JSON.stringify(value));await file.sync();await file.close();await rename(temporary,join(this.directory,name));await syncDirectorySafe(this.directory);}
     finally{await file.close();await unlink(temporary).catch(()=>{});}
   }
   async names():Promise<string[]> {return readdir(this.directory);}
@@ -64,6 +73,7 @@ export class PrivateState {
 }
 export interface IndexedOperation {index:WebOperationIndexRecord;operation:WebOperation}
 export class OperationIndex {
+  private queues=new Map<string,Promise<void>>();
   constructor(readonly state:PrivateState){}
   private name(projectId:string,id:string):string{return 'operation-'+createHash('sha256').update(canonicalWebJson([this.state.principalId,projectId,id])).digest('hex')+'.json';}
   private parse(raw:unknown):IndexedOperation {
@@ -76,9 +86,18 @@ export class OperationIndex {
     const raw=await this.state.read(this.name(projectId,id));if(raw===undefined)return undefined;
     const value=this.parse(raw);if(value.index.projectId!==projectId || value.index.commandId!==id)throw new Error('Operation scope mismatch');return value;
   }
-  async save(record:IndexedOperation):Promise<void>{const parsed=this.parse(record);const old=await this.read(parsed.index.projectId,parsed.index.commandId);
-    if(old && canonicalWebJson(old.index)!==canonicalWebJson(parsed.index))throw new HttpError('operation_conflict');
-    await this.state.write(this.name(parsed.index.projectId,parsed.index.commandId),parsed);
+  async save(record:IndexedOperation):Promise<void>{
+    const parsed=this.parse(record),fileName=this.name(parsed.index.projectId,parsed.index.commandId);
+    const previous=this.queues.get(fileName)??Promise.resolve();
+    const next=previous.then(async()=>{
+      const old=await this.read(parsed.index.projectId,parsed.index.commandId);
+      if(old && canonicalWebJson(old.index)!==canonicalWebJson(parsed.index))throw new HttpError('operation_conflict');
+      await this.state.write(fileName,parsed);
+    });
+    const settled=next.then(()=>{},()=>{});
+    this.queues.set(fileName,settled);
+    void settled.then(()=>{if(this.queues.get(fileName)===settled)this.queues.delete(fileName);});
+    return next;
   }
   async unresolved(projectId:string):Promise<boolean>{for(const name of await this.state.names()) if(/^operation-[a-f0-9]{64}\.json$/.test(name)){
     const value=this.parse(await this.state.read(name));if(value.index.projectId===projectId && !['applied','failed'].includes(value.operation.state))return true;

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import type { MCPToolCall, OperationOptions } from "@bflow/contracts";
 import { DEFAULT_MCP_PROTOCOL_VERSION } from "./types.js";
-import { validateLoopbackHost, validateRequestOrigin } from "./security.js";
+import { computePartitionKey, validateLoopbackHost, validateRequestOrigin } from "./security.js";
 import type { BflowSharedMCPGateway } from "./gateway.js";
 
 export interface StreamableHttpGatewayServerOptions {
@@ -93,6 +93,10 @@ export class StreamableHttpGatewayServer {
 
   async stop(): Promise<void> {
     if (!this.server) return;
+    for (const ctrl of this.inFlightRequests.values()) {
+      ctrl.abort(new Error("Gateway HTTP server stopping"));
+    }
+    this.inFlightRequests.clear();
     for (const socket of this.sockets) {
       socket.destroy();
     }
@@ -394,7 +398,34 @@ export class StreamableHttpGatewayServer {
           let serviceId = params?.serviceId as string | undefined;
 
           if (!serviceId) {
-            serviceId = clientReg.serviceIds[0];
+            if (clientReg.serviceIds.length > 1 && typeof toolName === "string" && toolName.length > 0) {
+              const matchingServices = clientReg.serviceIds.filter(sid => {
+                const svc = this.gateway.registry.getService(sid);
+                if (!svc) return false;
+                if (svc.definition.tool.operations.includes(toolName)) return true;
+                const partRes = computePartitionKey(svc.definition, svc.policy, clientReg.scope);
+                if (!partRes.ok) return false;
+                const part = this.gateway.serviceManager.getPartitionState(partRes.value);
+                return part?.discoveredTools.includes(toolName) ?? false;
+              });
+              if (matchingServices.length > 1) {
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(
+                  JSON.stringify({
+                    jsonrpc: "2.0",
+                    id,
+                    error: {
+                      code: -32602,
+                      message: `Ambiguous tool '${toolName}' across multiple registered services; specify serviceId explicitly`
+                    }
+                  })
+                );
+                return;
+              }
+              serviceId = matchingServices[0] ?? clientReg.serviceIds[0];
+            } else {
+              serviceId = clientReg.serviceIds[0];
+            }
           }
 
           const callId = (params?.callId as string) ?? `call-${randomUUID()}`;
@@ -418,19 +449,36 @@ export class StreamableHttpGatewayServer {
           const abortCtrl = new AbortController();
           this.inFlightRequests.set(reqKey, abortCtrl);
 
-          const onClose = () => {
-            abortCtrl.abort();
+          const socket = req.socket;
+          const onDisconnect = () => {
+            if (!res.writableEnded && !res.writableFinished) {
+              abortCtrl.abort(new Error("HTTP client disconnected"));
+            }
           };
-          req.on("close", onClose);
+          req.on("aborted", onDisconnect);
+          res.on("close", onDisconnect);
+          socket?.on("close", onDisconnect);
+          if ((res.destroyed || socket?.destroyed) && !res.writableEnded) {
+            abortCtrl.abort(new Error("HTTP client disconnected"));
+          }
 
           const callOptions: OperationOptions = {
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
             signal: abortCtrl.signal
           };
-          const callRes = await this.gateway.call(toolCall, callOptions);
+          let callRes: Awaited<ReturnType<BflowSharedMCPGateway["call"]>>;
+          try {
+            callRes = await this.gateway.call(toolCall, callOptions);
+          } finally {
+            this.inFlightRequests.delete(reqKey);
+            req.removeListener("aborted", onDisconnect);
+            res.removeListener("close", onDisconnect);
+            socket?.removeListener("close", onDisconnect);
+          }
 
-          this.inFlightRequests.delete(reqKey);
-          req.removeListener("close", onClose);
+          if (res.destroyed || res.writableEnded) {
+            return;
+          }
 
           const acceptHeader = req.headers.accept ?? "";
           if (acceptHeader.includes("text/event-stream")) {
