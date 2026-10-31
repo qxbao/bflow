@@ -21,6 +21,15 @@ export const PREFLIGHT_RETRY_DELAYS_MS: readonly number[] = [0, 2_000, 8_000, 30
 /** Backoff between consecutive execution-plan drift checks of one unsent message while keeping it queued for drift remediation. */
 export const EXECUTION_DRIFT_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000, 30_000];
 const DEFERRED_CONTROL_NOTICE_KINDS = new Set(["policy_phase_outcome", "user_decision_answer"]);
+function isPermanentTaskNoticeAuthorityError(error: unknown): boolean {
+  return /Task notice (requires an active parent assignment|parent lease is expired or mismatched|parent execution is stopped or terminal|recipient session or worktree changed|parent Core execution is stopped or terminal)|Lease expired or already released|Lease expired or released|Expired assignment lease|Assignment lease release is pending|Assignment has no current lease|Invalid pending task lease continuation|Pending task lease continuation ownership mismatch|Task lease continuation limit exhausted/i.test(String(error));
+}
+function formatTaskNoticeAuthorityError(error: unknown): string {
+  const detail = String(error);
+  return /Lease expired|Expired assignment lease/i.test(detail) && !detail.includes("parent lease is expired")
+    ? `Task notice parent lease is expired or mismatched: ${detail}`
+    : detail;
+}
 
 export function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -318,6 +327,15 @@ export class HerdrOutbox {
           !["conversation", "coordinator"].includes(out.message.recipient.role))
         return; // Cancellation reconciliation owns stop proof and lease release for this exact execution; pane readiness is insufficient.
       if (!out.parentAssignmentId) await onBound(out, out.handle);
+      if (out.parentAssignmentId) {
+        const parent = this.state.outbound.find(item => item.message.message_id === out.parentAssignmentId);
+        const parentRun = this.state.runs.find(item => item.runId === out.message.run_id);
+        const parentTask = parentRun?.tasks.find(item => item.taskId === out.taskId);
+        if (!parent || parent.status !== "accepted" || parent.cancelRequested || parent.leaseRelease || parentTask?.writerReleased) {
+          await this.release(out);
+          return;
+        }
+      }
       if (out.message.type === "task.assignment") {
         const run = this.state.runs.find(item => item.runId === out.message.run_id);
         const task = run?.tasks.find(item => item.taskId === out.taskId);
@@ -514,7 +532,8 @@ export class HerdrOutbox {
     // Registry is authoritative: renewal detects stale/released fencing tokens and optimistic versions.
     try { await this.renew(out); } catch (error) {
       if (!out.parentAssignmentId) throw error;
-      out.error = String(error); await this.save(); return;
+      if (isPermanentTaskNoticeAuthorityError(error)) out.status = "cancelled";
+      out.error = formatTaskNoticeAuthorityError(error); await this.save(); return;
     }
     if (!out.lease) throw new Error("Dispatch has no lease");
     if (out.lease.agentId !== pane.agentId || Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Stale dispatch lease");
@@ -558,7 +577,16 @@ export class HerdrOutbox {
         if (!currentHealth.readyForPrompt || !currentHealth.occupantMatches || currentHealth.paneId !== currentPane.paneId || currentHealth.agentId !== currentPane.agentId)
           throw new Error("Task notice recipient is no longer ready");
         await this.validateNotice(out, currentPane); await this.renew(out);
-      } catch (error) { out.status = "queued"; out.error = String(error); await this.save(); return; }
+      } catch (error) {
+        const formatted = formatTaskNoticeAuthorityError(error);
+        if (isPermanentTaskNoticeAuthorityError(error)) {
+          out.status = "cancelled";
+          if (!out.handle && formatted.includes("parent lease is expired")) delete out.request;
+        } else {
+          out.status = "queued";
+        }
+        out.error = formatted; await this.save(); return;
+      }
     }
     if (pane.role === "developer" && !out.parentAssignmentId && this.ports.pinDeveloperDispatch) {
       // Scope bootstrap verification can await the OS. Revalidate the current lease/fence after it and the durable dispatch intent.

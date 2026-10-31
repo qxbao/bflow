@@ -1,11 +1,13 @@
 import { record, type JournalState, type RunRecord, type Outbound } from "./journal.js";
 
-/** Released, current phase requests with no observed result: only explicit recovery may authorize a new measurement. */
+/** Released or delivery-exhausted current phase requests with no observed result: only explicit recovery may authorize a new measurement. */
 export function unmeasuredPolicyPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
     return state.outbound.filter((item, itemIndex) => {
       const payload = record(item.message.payload);
+      const terminalWithoutMeasurement = item.status === "released" ||
+        (item.status === "failed" && !item.error?.includes("RoleCapabilityPreflightError"));
       if (item.message.run_id !== run.runId || item.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
-          item.status !== "released" || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
+          !terminalWithoutMeasurement || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
       if (state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected")) return false;
       const task = run.tasks.find(entry => entry.taskId === payload.taskId);
       if (!task || task.writerReleased || task.result) return false;

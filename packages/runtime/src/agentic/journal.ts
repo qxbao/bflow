@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -619,9 +621,16 @@ export class AgenticJournal {
     this.spawnTimeoutMs = options.spawnTimeoutMs ?? JOURNAL_LOCK_SPAWN_TIMEOUT_MS;
   }
   private static readonly queues = new Map<string, Promise<unknown>>();
+  private static readonly heldDirectories = new AsyncLocalStorage<ReadonlySet<string>>();
   async exclusive<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+    const active = AgenticJournal.heldDirectories.getStore();
+    if (active?.has(this.directory)) {
+      throw new Error(`Re-entrant AgenticJournal lock acquisition on ${this.directory}`);
+    }
+    const nextHeld = new Set(active);
+    nextHeld.add(this.directory);
     const previous = AgenticJournal.queues.get(this.directory) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => this.locked(action));
+    const next = previous.catch(() => undefined).then(() => AgenticJournal.heldDirectories.run(nextHeld, () => this.locked(action)));
     AgenticJournal.queues.set(this.directory, next);
     try { return await next; }
     finally { if (AgenticJournal.queues.get(this.directory) === next) AgenticJournal.queues.delete(this.directory); }
@@ -632,7 +641,7 @@ export class AgenticJournal {
     while (true) {
       const acquired = await new Promise<boolean>((accept, reject) => {
         const child = spawn("flock", ["--nonblock", "3"], { stdio: ["ignore", "ignore", "ignore", fd] });
-        const timer = setTimeout(() => { child.kill(); reject(new Error("Journal lock timeout")); }, this.spawnTimeoutMs);
+        const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Journal lock timeout")); }, this.spawnTimeoutMs);
         child.once("error", e => { clearTimeout(timer); reject(e); });
         child.once("close", code => { clearTimeout(timer); accept(code === 0); });
       });
@@ -646,13 +655,14 @@ export class AgenticJournal {
   }
   private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const lock = await open(join(this.directory, "lock"), "a+", 0o600);
+    const lock = await open(join(this.directory, "lock"), constants.O_CREAT | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0), 0o600);
     try {
+      if (!(await lock.stat()).isFile()) throw Object.assign(new Error(`Journal lock is not a regular file: ${this.directory}`), { code: "EISDIR" });
       await this.acquireFlock(lock.fd);
       let state: JournalState, baseline: JournalState | undefined, durableBytes: Buffer | undefined;
       const statePath = join(this.directory, "state.json");
       try {
-        const bytes = await readFile(statePath);
+        const bytes = await readRegularJournalFile(statePath);
         if (this.validatedSnapshot?.bytes.equals(bytes)) state = structuredClone(this.validatedSnapshot.value);
         else {
           state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository);
@@ -669,7 +679,7 @@ export class AgenticJournal {
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId)) state.version = 7;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
-          try { if ((await readFile(statePath)).equals(durableBytes)) return; }
+          try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         }
         parseAgenticJournalState(state, this.repository);
@@ -677,7 +687,7 @@ export class AgenticJournal {
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
         try {
           const file = await open(path, "wx", 0o600);
-          try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }
+          try { await file.writeFile(serialized); await syncFileHandle(file); } finally { await file.close(); }
           await rename(path, statePath);
           const dir = await open(this.directory, "r");
           try {
@@ -692,5 +702,23 @@ export class AgenticJournal {
         baseline = normalized; durableBytes = this.validatedSnapshot.bytes;
       });
     } finally { await lock.close(); }
+  }
+}
+
+const IGNORED_REGULAR_FSYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"]);
+export async function syncFileHandle(file: { sync(): Promise<void> }): Promise<void> {
+  try { await file.sync(); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !IGNORED_REGULAR_FSYNC_CODES.has(code)) throw error;
+  }
+}
+async function readRegularJournalFile(path: string): Promise<Buffer> {
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) throw Object.assign(new Error(`Journal state is not a regular file: ${path}`), { code: "EISDIR" });
+    return await handle.readFile();
+  } finally {
+    await handle.close();
   }
 }

@@ -86,7 +86,7 @@ export function preserveBuiltinRolePrompt(original: string, trustedHostInstructi
   if (!original.trim()) throw new Error("Original role prompt is required");
   return `${original}\n\n${trustedHostInstructions}`;
 }
-import { inspectNativeDelivery, NativeAckGrace, nativeAckGraceMs, nativeMessageFingerprint, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
+import { inspectNativeDelivery, matchInboundPromptInboxStatus, NativeAckGrace, nativeAckGraceMs, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
 import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import {
@@ -675,14 +675,33 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     try {
       const socketPath = textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket);
       await new Promise<void>((accept, reject) => {
-        const socket = connect(socketPath); let output = "";
-        socket.setTimeout(20_000, () => { socket.destroy(); reject(new Error("Native Herdr action timed out; reconcile before retry")); });
-        socket.once("error", reject);
-        socket.once("close", () => { if (!output.includes("\n")) reject(new Error("Native Herdr action closed before acknowledgement; reconcile before retry")); });
+        const socket = connect(socketPath);
+        const chunks: Buffer[] = [];
+        let outputBytes = 0;
+        let settled = false;
+        const finish = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+        socket.setTimeout(20_000, () => { socket.destroy(); finish(() => reject(new Error("Native Herdr action timed out; reconcile before retry"))); });
+        socket.once("error", error => finish(() => reject(error)));
+        socket.once("close", () => finish(() => reject(new Error("Native Herdr action closed before acknowledgement; reconcile before retry"))));
         socket.once("connect", () => socket.write(JSON.stringify({ id: message.message_id, method: "plugin.action.invoke", params: { plugin_id: "bflow.receipts", action_id: "deliver",
           context: { selected_text: encodeNativePluginSelection(operationId, message), correlation_id: message.causation_id ?? message.message_id, focused_pane_id: sender.paneId, workspace_id: sender.workspaceId } } }) + "\n"));
-        socket.on("data", chunk => { output += String(chunk); if (output.length > 1024 * 1024) { socket.destroy(); reject(new Error("Oversized native response")); }
-          if (output.includes("\n")) { socket.end(); try { const response = record(JSON.parse(output.split("\n")[0]!)); if (response.error) reject(new Error(JSON.stringify(response.error))); else accept(); } catch (error) { reject(error); } } });
+        socket.on("data", chunk => {
+          if (settled) return;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          outputBytes += buf.length;
+          if (outputBytes > 1024 * 1024) { socket.destroy(); finish(() => reject(new Error("Oversized native response"))); return; }
+          chunks.push(buf);
+          if (buf.indexOf(10) >= 0) {
+            const full = Buffer.concat(chunks, outputBytes);
+            const lineEnd = full.indexOf(10);
+            socket.end();
+            try {
+              const response = record(JSON.parse(full.subarray(0, lineEnd).toString("utf8")));
+              if (response.error) finish(() => reject(new Error(JSON.stringify(response.error))));
+              else finish(() => accept());
+            } catch (error) { finish(() => reject(error)); }
+          }
+        });
       });
       // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend. A refusal by Runtime
       // arrives through the same ingress, so it is checked on a slower cadence than the acknowledgement itself.
@@ -733,6 +752,19 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     { suites: appChecks, leaseDirectory: join(configuration.directory, "app-checks") }, hostReviewChecks);
   const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration);
   const activePolicyMeasurements = new Set<string>();
+  const activeHostVerifications = new Map<string, number>();
+  const withActiveHostVerification = async <T>(runId: string | undefined, action: () => Promise<T>): Promise<T> => {
+    const key = typeof runId === "string" && runId.trim().length > 0 ? runId : undefined;
+    if (key) activeHostVerifications.set(key, (activeHostVerifications.get(key) ?? 0) + 1);
+    try { return await action(); }
+    finally {
+      if (key) {
+        const next = (activeHostVerifications.get(key) ?? 1) - 1;
+        if (next <= 0) activeHostVerifications.delete(key);
+        else activeHostVerifications.set(key, next);
+      }
+    }
+  };
   const conversationIntake = new HostConversationIntake(receipts, () => requireWorkspace().conversation, async (turn, operationId) => {
     const delivery = await receipts.nativeDelivery(operationId);
     if (!delivery || delivery.status !== "unknown_delivery" || await receipts.nativeRejection(delivery.message.message_id))
@@ -1769,7 +1801,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return development.writeWorkspaceFile(binding, parameters);
     }
     if (name === "commit_changes") return development.commit(binding, parameters);
-    if (name === "check_work") return runnerBindings.run(binding, () => development.check(binding, parameters));
+    if (name === "check_work") return withActiveHostVerification(typeof parameters.runId === "string" ? parameters.runId : undefined,
+      () => runnerBindings.run(binding, () => development.check(binding, parameters)));
     if (name === "request_verification") {
       const current = record(await development.status(binding, parameters));
       return host.runtime.requestPhaseVerification(binding, textField(current.runId), textField(current.taskId), textField(parameters.phase), textField(current.head));
@@ -1804,7 +1837,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       try {
       let completed: Awaited<ReturnType<HostVerification["behavioralEvidence"]>>;
       try {
-        completed = await runnerBindings.run(binding, () => verification.behavioralEvidence(binding, parameters));
+        completed = await withActiveHostVerification(source.run_id, () => runnerBindings.run(binding, () => verification.behavioralEvidence(binding, parameters)));
         if (record(completed.result.metadata?.conditionalTdd).sourceRevision !== record(source.payload).sourceRevision)
           throw new Error("Policy phase source changed after the request; reconcile before accepting evidence");
       } catch (error) {
@@ -1824,14 +1857,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     if (name === "inspect_alternative_verification") return verification.inspectAlternative(binding, parameters);
     if (name === "complete_review") {
-      const completed = await runnerBindings.run(binding, () => verification.completeReview(binding, parameters));
+      const completed = await withActiveHostVerification(typeof parameters.runId === "string" ? parameters.runId : undefined,
+        () => runnerBindings.run(binding, () => verification.completeReview(binding, parameters)));
       const state = record(await host.runtime.inspect());
       const out = (state.outbound as Record<string, unknown>[]).find(item => record(item.message).message_id === parameters.messageId);
       if (!out) throw new Error("Review causation unavailable");
       return nativeDeliver(envelope(RoleMessageSchema.parse(out.message), "review.verdict", completed.result, [completed.artifact]), `review:${textField(parameters.reviewId)}`);
     }
     if (name === "record_alternative_verification") {
-      const completed = await runnerBindings.run(binding, () => verification.alternativeEvidence(binding, parameters));
+      const completed = await withActiveHostVerification(typeof parameters.runId === "string" ? parameters.runId : undefined,
+        () => runnerBindings.run(binding, () => verification.alternativeEvidence(binding, parameters)));
       return nativeDeliver(envelope(RoleMessageSchema.parse(completed.assignment), "verification.result", completed.result, completed.result.evidenceArtifacts), `alternative:${textField(parameters.observationId)}`);
     }
     if (name === "propose_workflow") {
@@ -2382,11 +2417,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const operation = new AbortController();
     socket.once("close", () => operation.abort());
     sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => undefined); socket.setTimeout(600_000, () => socket.destroy());
-    let input = "", started = false;
-    socket.on("data", chunk => { if (started) return; input += String(chunk);
-      if (Buffer.byteLength(input) > 4 * 1024 * 1024) { socket.destroy(); return; }
-      if (!input.includes("\n")) return; started = true;
-      void (async () => { const value = record(JSON.parse(input.split("\n")[0]!));
+    const chunks: Buffer[] = [];
+    let inputBytes = 0, started = false;
+    socket.on("data", chunk => {
+      if (started) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      inputBytes += buf.length;
+      if (inputBytes > 4 * 1024 * 1024) { socket.destroy(); return; }
+      chunks.push(buf);
+      if (buf.indexOf(10) < 0) return;
+      started = true;
+      const full = Buffer.concat(chunks, inputBytes);
+      const lineEnd = full.indexOf(10);
+      chunks.length = 0;
+      void (async () => { const value = record(JSON.parse(full.subarray(0, lineEnd).toString("utf8")));
         if (value.method === "interaction_artifact") {
           if (value.token !== configuration.token) throw new Error("Artifact query requires owner authentication");
           const request = WebHttpPathParamsSchema.parse(value.params);
@@ -2414,9 +2458,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
     if (message.sender.role === "runtime" || !["coordinator", "runtime", "conversation"].includes(message.recipient.role)) return;
     if (deliveredMessageIds.has(message.message_id)) return;
-    const inbox = await runtime.nativeDeliveryInbox();
-    if (inbox.some(row => row.status === "applied" && row.message.message_id === message.message_id &&
-        nativeMessageFingerprint(row.message) === nativeMessageFingerprint(message))) return;
+    const settledInbox = matchInboundPromptInboxStatus(await runtime.nativeDeliveryInbox(), message);
+    if (settledInbox.status === "applied") { deliveredMessageIds.add(message.message_id); return; }
+    if (settledInbox.status === "rejected") throw new AdmissionRejectedError(settledInbox.reason ?? "Native message was rejected after admission");
     const current = SessionManifestSchema.parse(unwrap(await runtime.ports.panes.getManifest()));
     const sender = current.panes.find(pane => pane.role === message.sender.role && (!message.sender.pane_id || pane.paneId === message.sender.pane_id));
     if (!sender) throw new Error("Transport sender binding unavailable");
@@ -2621,7 +2665,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     // An unreadable pane is "unavailable", which is not "not working": it never produces a stall.
     const panes = await Promise.all(current.panes.filter(pane => pane.role !== "conversation").map(async pane => ({ role: pane.role, paneId: pane.paneId,
       status: await observeAgent(pane.paneId).then(agent => agent.status, () => "unavailable") })));
-    for (const action of evaluateWatchdog({ now, runs, notices, panes })) {
+    const activeVerificationRunIds = [...activeHostVerifications.entries()].filter(([, count]) => count > 0).map(([id]) => id);
+    for (const action of evaluateWatchdog({ now, runs, notices, panes, activeVerificationRunIds })) {
       try {
         if (action.kind === "reconcile_notice") {
           const pending = runs.flatMap(run => run.pendingDecisionRequests).find(item => item.request.approvalId === action.approvalId);
@@ -2634,6 +2679,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         } else if (action.kind === "resurface") {
           if (await receipts.resurfaceConversationNotice(action.messageId) !== undefined) inbox.forget(action.messageId);
         } else {
+          if (action.kind === "stalled" && (activeHostVerifications.get(action.runId) ?? 0) > 0) continue;
           const key = action.kind === "stalled" ? `stalled:${action.episodeKey}` : `blocked:${action.messageId}`;
           if (watchdogReported.has(key)) continue;
           if (action.kind === "blocked") await host.runtime.reportWorkflowBlocked(action.runId, action.approvalId, action.resends);
@@ -2658,10 +2704,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const due = new Set(ackGrace.due(unacknowledged.map(item => item.operationId), Date.now()));
     for (const { operationId, message } of unacknowledged) {
       if (reportedUncertain.has(operationId) || !due.has(operationId)) continue;
-      // A refused delivery is settled by Runtime's refusal notice: it is not uncertain and is never resent.
-      if (await host.runtime.inboundRejection(message.message_id) !== undefined) { reportedUncertain.add(operationId); continue; }
-      await reportNativeDeliveryUncertainty(receipts, host.runtime, message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
-      reportedUncertain.add(operationId);
+      try {
+        // A refused delivery is settled by Runtime's refusal notice: it is not uncertain and is never resent.
+        if (await host.runtime.inboundRejection(message.message_id) !== undefined) { reportedUncertain.add(operationId); continue; }
+        await reportNativeDeliveryUncertainty(receipts, host.runtime, message, operationId, "Native delivery acknowledgement was not observed; the message was not resent and needs reconciliation");
+        reportedUncertain.add(operationId);
+      } catch (error) {
+        process.stderr.write(`Bflow delivery reconcile (${operationId}): ${redactString(String(error))}\n`);
+      }
     }
     // Optional Runtime capability: a Conversation delivery that Runtime gave up on is shown to the user as a durable notice.
     const failed = (host.runtime as unknown as { failedConversationDeliveries?: () => Promise<{ message: RoleMessage; error: string }[]> }).failedConversationDeliveries;
@@ -2867,18 +2917,31 @@ async function reportHerdrNativeSession(params: {
     try {
       await new Promise<void>((accept, reject) => {
         const socket = connect(params.socketPath);
-        let response = "";
-        socket.setTimeout(5000, () => { socket.destroy(); reject(new Error("Native session report timed out")); });
-        socket.once("error", reject);
-        socket.once("close", () => { if (!response.includes("\n")) reject(new Error("Native session report closed before acknowledgement")); });
+        const chunks: Buffer[] = [];
+        let responseBytes = 0;
+        let settled = false;
+        const finish = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+        socket.setTimeout(5000, () => { socket.destroy(); finish(() => reject(new Error("Native session report timed out"))); });
+        socket.once("error", error => finish(() => reject(error)));
+        socket.once("close", () => finish(() => reject(new Error("Native session report closed before acknowledgement"))));
         socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
         socket.on("data", chunk => {
-          response += String(chunk);
-          if (!response.includes("\n")) return;
+          if (settled) return;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          responseBytes += buf.length;
+          if (responseBytes > 1024 * 1024) { socket.destroy(); finish(() => reject(new Error("Oversized native session report response"))); return; }
+          chunks.push(buf);
+          if (buf.indexOf(10) < 0) return;
+          const full = Buffer.concat(chunks, responseBytes);
+          const lineEnd = full.indexOf(10);
           socket.end();
           try {
-            record(JSON.parse(response.split("\n")[0]!)).error ? reject(new Error("Herdr rejected native provider session")) : accept();
-          } catch (error) { reject(error); }
+            finish(() => {
+              record(JSON.parse(full.subarray(0, lineEnd).toString("utf8"))).error
+                ? reject(new Error("Herdr rejected native provider session"))
+                : accept();
+            });
+          } catch (error) { finish(() => reject(error)); }
         });
       });
       return;

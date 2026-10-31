@@ -5,6 +5,7 @@ import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -16,7 +17,7 @@ import {
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
-import { digest, record, textField } from "./journal.js";
+import { digest, record, syncFileHandle, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
 import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
@@ -100,9 +101,18 @@ export interface AgenticHostController {
 }
 export interface HostConfiguration extends AgenticHostOptions { executionSourceDigests?: Record<string, string>; directory: string; socketPath: string; token: string }
 export async function readHostConfiguration(path: string): Promise<HostConfiguration> {
-  const stat = await lstat(path);
-  if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
-  const value = record(JSON.parse(await readFile(path, "utf8")));
+  const file = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  let raw: string;
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > 256 * 1024) {
+      throw new Error("Host configuration must be a private regular file within size bounds");
+    }
+    raw = await file.readFile("utf8");
+  } finally {
+    await file.close();
+  }
+  const value = record(JSON.parse(raw));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
   parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
   parseAppChecks(value.appChecks);
@@ -269,7 +279,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     const temporaryConfig = `${configPath}.${randomBytes(8).toString("hex")}.tmp`;
     try {
       const file = await open(temporaryConfig, "wx", 0o600);
-      try { await file.writeFile(JSON.stringify({ ...options, ...(executionSourceDigests ? { executionSourceDigests } : {}), repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await file.sync(); }
+      try { await file.writeFile(JSON.stringify({ ...options, ...(executionSourceDigests ? { executionSourceDigests } : {}), repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await syncFileHandle(file); }
       finally { await file.close(); }
       // Location/recovery readers may inspect the config before acquiring boot.lock.
       // Publish complete bytes exclusively; retain an existing host's exact token.
@@ -336,8 +346,17 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
         ...(executionSourceDigests ? { executionSourceDigests } : {}) };
       const temporaryConfig = `${configPath}.${randomBytes(8).toString("hex")}.tmp`;
       const file = await open(temporaryConfig, "wx", 0o600);
-      try { await file.writeFile(JSON.stringify(next)); await file.sync(); await file.close(); await rename(temporaryConfig, configPath); }
-      finally { await file.close(); await unlink(temporaryConfig).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }); }
+      let closed = false;
+      try {
+        await file.writeFile(JSON.stringify(next));
+        await syncFileHandle(file);
+        await file.close();
+        closed = true;
+        await rename(temporaryConfig, configPath);
+      } finally {
+        if (!closed) await file.close();
+        await unlink(temporaryConfig).catch(error => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+      }
       configuration = await readHostConfiguration(configPath);
     }
     const log = await open(join(directory, "host.log"), "a", 0o600);
