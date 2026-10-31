@@ -131,6 +131,13 @@ export class ConversationGateway {
       }
       return merged;
     };
+    const mergeAliases = (
+      base: Readonly<Record<string, string>> | undefined,
+      latest: Readonly<Record<string, string>> | undefined
+    ): Record<string, string> | undefined => {
+      if (!base && !latest) return undefined;
+      return { ...(base ?? {}), ...(latest ?? {}) };
+    };
     // 1. Merge any items currently in this.snapshot.pendingInboundQueue that are not yet in candidate.pendingInboundQueue
     // (unless candidate explicitly removed a specific queueId in removedQueueIds during flush)
     const candidateQueueIds = new Set(candidate.pendingInboundQueue.map((item) => item.queueId));
@@ -145,10 +152,15 @@ export class ConversationGateway {
       }
     }
 
+    const mergedApprovalAliases = mergeAliases(candidate.approvalShortIds, this.snapshot?.approvalShortIds);
+    const mergedRunAliases = mergeAliases(candidate.runShortIds, this.snapshot?.runShortIds);
+
     let toSave: ConversationContextSnapshot = {
       ...candidate,
       ...(candidate.structuredInteractions || this.snapshot?.structuredInteractions
         ? { structuredInteractions: mergeStructured(candidate.structuredInteractions, this.snapshot?.structuredInteractions) } : {}),
+      ...(mergedApprovalAliases !== undefined ? { approvalShortIds: mergedApprovalAliases } : {}),
+      ...(mergedRunAliases !== undefined ? { runShortIds: mergedRunAliases } : {}),
       pendingInboundQueue: [...candidate.pendingInboundQueue, ...missingItems]
     };
 
@@ -175,10 +187,17 @@ export class ConversationGateway {
 
     const structuredAfterSave = mergeStructured(saveRes.value.structuredInteractions, this.snapshot?.structuredInteractions);
     const structuredChanged = !isDeepStrictEqual(saveRes.value.structuredInteractions ?? {}, structuredAfterSave);
-    if (newArrivalsDuringSave.length > 0 || structuredChanged) {
+    const approvalAliasesAfterSave = mergeAliases(saveRes.value.approvalShortIds, this.snapshot?.approvalShortIds);
+    const runAliasesAfterSave = mergeAliases(saveRes.value.runShortIds, this.snapshot?.runShortIds);
+    const aliasesChanged =
+      !isDeepStrictEqual(saveRes.value.approvalShortIds, approvalAliasesAfterSave) ||
+      !isDeepStrictEqual(saveRes.value.runShortIds, runAliasesAfterSave);
+    if (newArrivalsDuringSave.length > 0 || structuredChanged || aliasesChanged) {
       const doubleMerged: ConversationContextSnapshot = {
         ...(structuredChanged ? this.snapshot! : saveRes.value),
         ...(structuredChanged ? { structuredInteractions: structuredAfterSave } : {}),
+        ...(approvalAliasesAfterSave !== undefined ? { approvalShortIds: approvalAliasesAfterSave } : {}),
+        ...(runAliasesAfterSave !== undefined ? { runShortIds: runAliasesAfterSave } : {}),
         pendingInboundQueue: [...saveRes.value.pendingInboundQueue, ...newArrivalsDuringSave]
       };
       this.snapshot = doubleMerged;
@@ -1138,6 +1157,9 @@ export class ConversationGateway {
             this.snapshot!.pendingClarifications[correlationId] === undefined;
           const updatedPendingClarifications = independentRequest ? {} : { ...this.snapshot!.pendingClarifications };
           delete updatedPendingClarifications[correlationId];
+          if (classification.resolvedClarificationCorrelationId) {
+            delete updatedPendingClarifications[classification.resolvedClarificationCorrelationId];
+          }
 
           const remainingUnresolvedQuestions = Object.values(updatedPendingClarifications).flatMap(
             (c) => c.unresolvedQuestions
@@ -1491,6 +1513,74 @@ export class ConversationGateway {
           const cancelInput = classification.cancellationInput;
           const batchKey = input.messageId ?? this.generateId("cancel-batch");
           let batch = this.snapshot!.cancellationBatches?.[batchKey];
+          if (!batch && cancelInput?.closeSessionClarifications && (cancelInput.runIds?.length ?? 0) === 0) {
+            const userMsg: ConversationMessage = {
+              schemaVersion: 2,
+              messageId: input.messageId ?? this.generateId("msg-user"),
+              sessionId: this.config.sessionId,
+              correlationId,
+              turnSequence: userTurnSequence,
+              sender: "user",
+              ...decisionReceipt,
+              recipient: "conversation",
+              intent: "user_request",
+              content: input.content,
+              artifactReferences: input.inputArtifacts ? [...input.inputArtifacts] : [],
+              createdAt: input.occurredAt ?? now
+            };
+            const agentReply: ConversationMessage = {
+              schemaVersion: 2,
+              messageId: this.generateId("msg-chat"),
+              sessionId: this.config.sessionId,
+              correlationId,
+              turnSequence: agentTurnSequence,
+              sender: "conversation",
+              recipient: "user",
+              intent: "progress_update",
+              content: "Đã hủy yêu cầu và câu hỏi làm rõ đang mở trong phiên hiện tại; chưa có công việc nào được gửi sang Runtime.",
+              artifactReferences: [],
+              createdAt: now
+            };
+            const valid = this.validateConversationMessages(userMsg, agentReply);
+            if (!valid.ok) return valid;
+            const nextStatus: ConversationSessionStatus =
+              this.snapshot!.session.status === "awaiting_user_clarification" ? "active" : this.snapshot!.session.status;
+            const saved = await this.persistUpdatedSnapshot({
+              ...this.snapshot!,
+              pendingClarifications: {},
+              session: {
+                ...this.snapshot!.session,
+                status: nextStatus,
+                unresolvedQuestions: [],
+                turnCount: agentTurnSequence,
+                updatedAt: now
+              },
+              messages: [...this.snapshot!.messages, userMsg, agentReply],
+              pendingInboundQueue: [
+                ...this.snapshot!.pendingInboundQueue,
+                ...(classification.followUpContents ?? []).map(content => ({
+                  queueId: this.generateId("queue-followup"),
+                  kind: "user_turn" as const,
+                  enqueuedAt: now,
+                  input: { sessionId: input.sessionId, content, provenance: input.provenance, inputArtifacts: input.inputArtifacts }
+                }))
+              ]
+            });
+            if (!saved.ok) return saved;
+            return {
+              ok: true,
+              value: {
+                sessionId: this.config.sessionId,
+                correlationId,
+                recognizedIntent: "cancellation_request",
+                sessionStatus: this.snapshot!.session.status,
+                userMessage: userMsg,
+                agentReply,
+                queuedBecauseBusy: false,
+                substantiveUpdate: true
+              }
+            };
+          }
           const saveBatch = async (): Promise<OperationResult<unknown>> => this.persistUpdatedSnapshot({ ...this.snapshot!,
             cancellationBatches: { ...this.snapshot!.cancellationBatches, [batchKey]: batch! },
             deliveryRecords: this.config.bridge.getAllDeliveryRecords() });
@@ -1576,8 +1666,16 @@ export class ConversationGateway {
               ...(single ? { cancellationRequest: JSON.parse(JSON.stringify(single.request)) } : {}) }, artifactReferences: [], createdAt: now };
           const valid = this.validateConversationMessages(userMsg, agentReply);
           if (!valid.ok) return valid;
+          const closeClarifications = Boolean(cancelInput?.closeSessionClarifications);
+          const nextStatus: ConversationSessionStatus =
+            closeClarifications && this.snapshot!.session.status === "awaiting_user_clarification"
+              ? (this.snapshot!.session.activeRunId ? "delegated_to_coordinator" : "active")
+              : this.snapshot!.session.status;
           const saved = await this.persistUpdatedSnapshot({ ...this.snapshot!,
-            session: { ...this.snapshot!.session, turnCount: agentTurnSequence, updatedAt: now },
+            ...(closeClarifications ? { pendingClarifications: {} } : {}),
+            session: { ...this.snapshot!.session, status: nextStatus,
+              ...(closeClarifications ? { unresolvedQuestions: [] } : {}),
+              turnCount: agentTurnSequence, updatedAt: now },
             messages: [...this.snapshot!.messages, userMsg, agentReply],
             pendingInboundQueue: [...this.snapshot!.pendingInboundQueue, ...(classification.followUpContents ?? []).map(content => ({
               queueId: this.generateId("queue-followup"), kind: "user_turn" as const, enqueuedAt: now,
