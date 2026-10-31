@@ -18,10 +18,15 @@ import { prepareRepositoryGitNexus, resolveSetupPlatform } from './gateway-repos
 const MAX_RECEIPT_BYTES=128*1024;
 const ReceiptSchema=z.object({request:WebProjectInitRequestSchema,result:WebProjectInitializationSchema}).strict();
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+const IGNORED_FSYNC_CODES=['EINVAL','ENOTSUP','EOPNOTSUPP','ENOSYS','EPERM','EACCES','EBADF','EISDIR','EROFS'];
+async function syncHandleSafe(handle:{sync():Promise<void>}){
+ try{await handle.sync();}
+ catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
+}
 async function syncDirectorySafe(directory:string){
  let handle;
- try{handle=await open(directory,'r');await handle.sync();}
- catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!['EINVAL','ENOTSUP','EPERM','EACCES','EBADF','EISDIR','EROFS'].includes(code))throw error;}
+ try{handle=await open(directory,'r');await syncHandleSafe(handle);}
+ catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
  finally{await handle?.close().catch(()=>{});}
 }
 const failure=<T>(e:unknown,code:'validation'|'conflict'|'not_found'='validation'):OperationResult<T>=>({ok:false,error:ContractErrorSchema.parse({code,retryable:code==='conflict',message:(e instanceof Error?e.message:String(e)).slice(0,4000)})});
@@ -50,7 +55,9 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
  const receipt=(id:string,operationId:string)=>join(options.receiptDirectory,'init-'+hash(JSON.stringify([id,operationId]))+'.json');
  const writeReceipt=async(value:WebProjectInitialization,request:WebProjectInitRequest)=>{
   const path=receipt(value.projectId,value.operationId),temp=path+'.'+randomUUID()+'.tmp';
-  const file=await open(temp,'wx',0o600);try{await file.writeFile(JSON.stringify(ReceiptSchema.parse({request,result:value})));await file.sync();await file.close();await rename(temp,path);await syncDirectorySafe(options.receiptDirectory);}finally{await file.close();await unlink(temp).catch(()=>{});}
+  let file:Awaited<ReturnType<typeof open>>|undefined=await open(temp,'wx',0o600);
+  try{await file.writeFile(JSON.stringify(ReceiptSchema.parse({request,result:value})));await syncHandleSafe(file);await file.close();file=undefined;await rename(temp,path);await syncDirectorySafe(options.receiptDirectory);}
+  finally{await file?.close().catch(()=>{});await unlink(temp).catch(()=>{});}
  };
  const readJob=async(id:string,operationId:string)=>{
   WebSessionStartRequestSchema.parse({apiVersion:1,operationId});
@@ -97,12 +104,12 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
      if(Buffer.byteLength(yaml,'utf8')>180000)throw Error('Cấu hình vượt quá 180000 byte.');
      await readEnvironmentConfig(r,yaml);
      const path=configPath(r.root),temp=path+'.web-'+randomUUID()+'.tmp';
-     const file=await open(temp,'wx',0o600);
+     let file:Awaited<ReturnType<typeof open>>|undefined=await open(temp,'wx',0o600);
      try{
-      await file.writeFile(yaml);await file.sync();await file.close();
+      await file.writeFile(yaml);await syncHandleSafe(file);await file.close();file=undefined;
       if((await snapshot(id,r.root)).revision!==request.expectedRevision)return failure('Cấu hình đã đổi. Tải lại trước khi lưu.','conflict');
       await rename(temp,path);await syncDirectorySafe(join(r.root,'.bflow'));
-     }finally{await file.close();await unlink(temp).catch(()=>{});}
+     }finally{await file?.close().catch(()=>{});await unlink(temp).catch(()=>{});}
      return {ok:true as const,value:await snapshot(id,r.root)};
     });
    }catch(e){return failure(e);}
@@ -117,9 +124,9 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
     await mkdir(options.receiptDirectory,{recursive:true,mode:0o700});
     const info=await lstat(options.receiptDirectory);
     if(!info.isDirectory() || await realpath(options.receiptDirectory)!==options.receiptDirectory || info.uid!==process.getuid?.() || (info.mode&0o077))throw Error('Unsafe initialization receipt directory');
-    let file;try{file=await open(path,'wx',0o600);}catch(e){if((e as NodeJS.ErrnoException).code==='EEXIST'){const saved=ReceiptSchema.parse(JSON.parse(await readPreviewFile(path,MAX_RECEIPT_BYTES)));if(JSON.stringify(saved.request)!==JSON.stringify(request))return failure('Mã khởi tạo đã được dùng với lựa chọn khác.','conflict');return {ok:true,value:await readJob(id,request.operationId)};}throw e;}
+    let file:Awaited<ReturnType<typeof open>>|undefined;try{file=await open(path,'wx',0o600);}catch(e){if((e as NodeJS.ErrnoException).code==='EEXIST'){const saved=ReceiptSchema.parse(JSON.parse(await readPreviewFile(path,MAX_RECEIPT_BYTES)));if(JSON.stringify(saved.request)!==JSON.stringify(request))return failure('Mã khởi tạo đã được dùng với lựa chọn khác.','conflict');return {ok:true,value:await readJob(id,request.operationId)};}throw e;}
     const initial:WebProjectInitialization={apiVersion:1,projectId:id,operationId:request.operationId,state:'running',message:'Đang chuẩn bị cấu hình, chỉ mục GitNexus và đăng ký Gateway…',updatedAt:new Date().toISOString()};
-    try{await file.writeFile(JSON.stringify(ReceiptSchema.parse({request,result:initial})));await file.sync();}finally{await file.close();}
+    try{await file.writeFile(JSON.stringify(ReceiptSchema.parse({request,result:initial})));await syncHandleSafe(file);await file.close();file=undefined;await syncDirectorySafe(options.receiptDirectory);}finally{await file?.close().catch(()=>{});}
     activeProjects.set(path,id);
     let configurationCommitMessage:string|undefined;
     const task=withLifecycleLock(join(r.root,'.bflow/state'),async()=>{
@@ -130,9 +137,10 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
        throw Error('Tắt GitNexus và lưu cấu hình trước; xem lại cấu hình rồi mới xác nhận commit.');
      await initializeEnvironmentConfig({cwd:r.root,update:request.update,...(request.provider?{provider:request.provider}:{})});
      if(request.skipGitNexus && (await readEnvironmentConfig(r)).environment.tools?.gitnexus?.enabled!==false){
-      const path=configPath(r.root),doc=parseDocument(await readPreviewFile(path,180000));doc.setIn(['environment','tools','gitnexus','enabled'],false);
-      const temp=path+'.web-'+randomUUID()+'.tmp',file=await open(temp,'wx',0o600);
-      try{await file.writeFile(doc.toString());await file.sync();await file.close();await rename(temp,path);}finally{await file.close();await unlink(temp).catch(()=>{});}
+      const cfgPath=configPath(r.root),doc=parseDocument(await readPreviewFile(cfgPath,180000));doc.setIn(['environment','tools','gitnexus','enabled'],false);
+      const temp=cfgPath+'.web-'+randomUUID()+'.tmp';
+      let cfgFile:Awaited<ReturnType<typeof open>>|undefined=await open(temp,'wx',0o600);
+      try{await cfgFile.writeFile(doc.toString());await syncHandleSafe(cfgFile);await cfgFile.close();cfgFile=undefined;await rename(temp,cfgPath);await syncDirectorySafe(join(r.root,'.bflow'));}finally{await cfgFile?.close().catch(()=>{});await unlink(temp).catch(()=>{});}
      }
      const config=await readEnvironmentConfig(r);
      if(request.commitConfiguration && (await snapshot(id,r.root)).revision!==request.expectedConfigurationRevision)

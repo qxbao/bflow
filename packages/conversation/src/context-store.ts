@@ -251,14 +251,37 @@ export class FileConversationContextStore implements ConversationContextStore {
 
   private readonly writeQueues = new Map<string, Promise<unknown>>();
 
+  private static readonly IGNORED_FSYNC_CODES = new Set([
+    "EINVAL",
+    "ENOTSUP",
+    "EOPNOTSUPP",
+    "ENOSYS",
+    "EPERM",
+    "EACCES",
+    "EBADF",
+    "EISDIR",
+    "EROFS"
+  ]);
+
+  private async syncHandleSafe(handle: fs.FileHandle): Promise<void> {
+    try {
+      await handle.sync();
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code ?? "";
+      if (!FileConversationContextStore.IGNORED_FSYNC_CODES.has(code)) {
+        throw err;
+      }
+    }
+  }
+
   private async syncDirectorySafe(dirPath: string): Promise<void> {
     let dirHandle: fs.FileHandle | undefined;
     try {
       dirHandle = await fs.open(dirPath, "r");
-      await dirHandle.sync();
+      await this.syncHandleSafe(dirHandle);
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException)?.code ?? "";
-      if (!["EINVAL", "ENOTSUP", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) {
+      if (!FileConversationContextStore.IGNORED_FSYNC_CODES.has(code)) {
         throw err;
       }
     } finally {
@@ -292,7 +315,7 @@ export class FileConversationContextStore implements ConversationContextStore {
         await fs.mkdir(this.storageDir, { recursive: true });
         handle = await fs.open(tmpFilePath, "wx", 0o600);
         await handle.writeFile(serialized, "utf8");
-        await handle.sync();
+        await this.syncHandleSafe(handle);
         await handle.close();
         handle = undefined;
         await fs.rename(tmpFilePath, targetFilePath);

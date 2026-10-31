@@ -8,12 +8,30 @@ type Draft={title:string;requestKind:'feature'|'bugfix'|'refactor'|'spike';objec
 const empty:Draft={title:'',requestKind:'feature',objective:'',criteria:'',constraints:'',verificationMethod:'integration_test',methods:{}};
 const methodLabels:Record<Method,string>={unit_test:'Kiểm thử đơn vị',integration_test:'Kiểm thử tích hợp',e2e_test:'Kiểm thử toàn luồng',typecheck:'Kiểm tra kiểu',lint:'Kiểm tra mã',static_analysis:'Phân tích tĩnh',manual_review:'Xem xét thủ công'};
 const lines=(text:string)=>[...new Set(text.split('\n').map(line=>line.trim()).filter(Boolean))];
+function readDraft(storageKey:string):Draft{
+  try{
+    const parsed=JSON.parse(sessionStorage.getItem(storageKey)??'null');
+    return parsed && Object.keys(empty).filter(k=>k!=='methods').every(k=>typeof parsed[k]==='string')
+      ? {...empty,...parsed,methods:parsed.methods && typeof parsed.methods==='object'?parsed.methods:{}}
+      : empty;
+  }catch{return empty;}
+}
 export function RequestForm({api,id,sessionId,enabled,runId,action}:{api:ApiClient;id:string;sessionId:string;enabled:boolean;runId?:string;action?:WebAction}) {
   const slot=runId?`revise:${runId}`:'create',key=`bflow:web:draft:${encodeURIComponent(id)}:${encodeURIComponent(sessionId)}:${slot}`,uid=useId();
-  const [draft,setDraft]=useState<Draft>(()=>{try{const parsed=JSON.parse(sessionStorage.getItem(key)??'null');return parsed && Object.keys(empty).filter(k=>k!=='methods').every(k=>typeof parsed[k]==='string')?{...empty,...parsed,methods:parsed.methods && typeof parsed.methods==='object'?parsed.methods:{}}:empty;}catch{return empty;}});
+  const [draft,setDraft]=useState<Draft>(()=>readDraft(key));
+  const loadedKey=useRef(key);
   const [errors,setErrors]=useState<Record<string,string>>({}),[message,setMessage]=useState('');const summary=useRef<HTMLDivElement>(null);
   const commands=useCommands(slot);
-  useEffect(()=>{try{sessionStorage.setItem(key,JSON.stringify(draft));}catch{setMessage('Không lưu được bản nháp trong trình duyệt.');}},[key,draft]);
+  useEffect(()=>{
+    if(loadedKey.current!==key){
+      loadedKey.current=key;
+      setDraft(readDraft(key));
+      setErrors({});
+      setMessage('');
+      return;
+    }
+    try{sessionStorage.setItem(key,JSON.stringify(draft));}catch{setMessage('Không lưu được bản nháp trong trình duyệt.');}
+  },[key,draft]);
   useEffect(()=>{if(Object.keys(errors).length)summary.current?.focus();},[errors]);
   function field(key:'title'|'objective'|'criteria'|'constraints'){return {id:uid+key,value:draft[key],onChange:(e:{target:{value:string}})=>setDraft({...draft,[key]:e.target.value}), 'aria-invalid':Boolean(errors[key]),'aria-describedby':errors[key]?uid+key+'-error':undefined};}
   async function submit(event:FormEvent){event.preventDefault();if(commands.busy)return;

@@ -3,7 +3,7 @@ import { randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { WebSessionBootstrapRequestSchema } from '@bflow/contracts/web';
 import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile } from '@bflow/machine-setup';
@@ -56,11 +56,35 @@ async function readLocator(file: string) {
   if (info.uid !== process.getuid?.() || (info.mode & 0o077) || info.nlink !== 1) throw new Error('Unsafe web locator');
   return LocatorSchema.parse(JSON.parse(await readPreviewFile(file, 8192)));
 }
+const IGNORED_FSYNC_CODES = ['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EPERM', 'EACCES', 'EBADF', 'EISDIR', 'EROFS'];
+async function syncHandleSafe(handle: { sync(): Promise<void> }) {
+  try { await handle.sync(); }
+  catch (error) { const code = (error as NodeJS.ErrnoException)?.code ?? ''; if (!IGNORED_FSYNC_CODES.includes(code)) throw error; }
+}
+async function syncDirectorySafe(directory: string) {
+  let handle;
+  try { handle = await open(directory, 'r'); await syncHandleSafe(handle); }
+  catch (error) { const code = (error as NodeJS.ErrnoException)?.code ?? ''; if (!IGNORED_FSYNC_CODES.includes(code)) throw error; }
+  finally { await handle?.close().catch(() => {}); }
+}
 async function writeLocator(file: string, value: z.infer<typeof LocatorSchema>) {
   const temporary = file + '.tmp-' + randomBytes(8).toString('hex');
-  const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-  try { await handle.writeFile(JSON.stringify(LocatorSchema.parse(value))); await handle.sync(); await handle.close(); await rename(temporary, file); }
-  finally { await handle.close(); await unlink(temporary).catch(() => {}); }
+  let handle: Awaited<ReturnType<typeof open>> | undefined = await open(
+    temporary,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    await handle.writeFile(JSON.stringify(LocatorSchema.parse(value)));
+    await syncHandleSafe(handle);
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, file);
+    await syncDirectorySafe(dirname(file));
+  } finally {
+    await handle?.close().catch(() => {});
+    await unlink(temporary).catch(() => {});
+  }
 }
 function mac(key: string, purpose: string, origin: string, nonce: string, value = '') {
   return createHmac('sha256', key).update(JSON.stringify([purpose, origin, nonce, value])).digest('base64url');

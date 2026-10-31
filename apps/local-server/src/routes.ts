@@ -57,13 +57,14 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       if(name==='session'){respond(session);return;}
       const authentication=WebAuthenticatedContextSchema.parse({principalId:ctx.principalId,browserSessionId:session!.sessionId,expiresAt:session!.expiresAt});
       if(name==='projects'){respond({apiVersion:1,items:await ctx.registry.list()});return;}
-      if(name==='registerProject'){const b=WebHttpContracts.registerProject.body.parse(input);const result=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return ctx.registry.register(b.path);});respond(result.project,result.created?201:200);return;}
+      if(name==='registerProject'){res.setTimeout(45000);const b=WebHttpContracts.registerProject.body.parse(input);const result=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return ctx.registry.register(b.path);});respond(result.project,result.created?201:200);return;}
       if(!id)throw new HttpError('not_found');
       await ctx.registry.get(id);
-      if(name==='unregisterProject'){await ctx.serialize(async()=>{ctx.sessions.authenticate(req);if(ctx.operations.workspace.projectMutationStatus){const value=unwrap(WebProjectMutationStatusResultSchema.parse(await ctx.operations.workspace.projectMutationStatus(id)));if(value.projectId!==id)throw new HttpError('unavailable');if(value.initializationPending)throw new HttpError('operation_conflict');}return ctx.registry.unregister(id);});respond(undefined,204);return;}
+      if(name==='unregisterProject'){res.setTimeout(45000);await ctx.serialize(async()=>{ctx.sessions.authenticate(req);if(ctx.operations.workspace.projectMutationStatus){const value=unwrap(WebProjectMutationStatusResultSchema.parse(await ctx.operations.workspace.projectMutationStatus(id)));if(value.projectId!==id)throw new HttpError('unavailable');if(value.initializationPending)throw new HttpError('operation_conflict');}return ctx.registry.unregister(id);});respond(undefined,204);return;}
       if(name==='operation'){res.setTimeout(40000);respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);},authentication));return;}
       await ctx.registry.require(id);
       if(name==='configuration' || name==='saveConfiguration'){
+        res.setTimeout(45000);
         const workspace=ctx.operations.workspace;
         const result=name==='configuration'
           ? workspace.readConfiguration && await workspace.readConfiguration(id)
@@ -73,6 +74,7 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         const value=unwrap(WebProjectConfigurationResultSchema.parse(result));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
       }
       if(name==='initializeProject' || name==='initialization'){
+        res.setTimeout(45000);
         const workspace=ctx.operations.workspace;
         const result=name==='initialization'
           ? workspace.readInitialization && await workspace.readInitialization(id,params.operationId!)
@@ -81,6 +83,7 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         const value=unwrap(WebProjectInitializationResultSchema.parse(result));if(value.projectId!==id || value.operationId!==(name==='initialization'?params.operationId:WebHttpContracts.initializeProject.body.parse(input).operationId))throw new HttpError('unavailable');respond(value,name==='initializeProject'?202:200);return;
       }
       if(name==='startSession'||name==='stopSession'){
+        res.setTimeout(45000);
         const b=WebHttpContracts.startSession.body.parse(name==='startSession'?input:{apiVersion:1,operationId:WebHttpContracts.stopSession.body.parse(input).operationId});
         respond(await ctx.operations.lifecycle(id,b.operationId,name==='startSession'?'session_start':'session_stop',input,()=>{ctx.sessions.authenticate(req);}),202);return;
       }
@@ -105,6 +108,7 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         await streamEvents(req,res,client.events(id,cursor),id,ctx.eventEpoch,()=>{ctx.sessions.authenticate(req);},Date.parse(session!.expiresAt));return;
       }
       if(name==='artifact'){
+        res.setTimeout(45000);
         const value=unwrap(WebArtifactReadResultSchema.parse(await observeWithinDeadline(()=>client.readArtifact(id,params.artifactId!))));
         await artifactResponse(req,res,value,params.artifactId!,()=>{ctx.sessions.authenticate(req);});return;
       }
