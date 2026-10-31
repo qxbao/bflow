@@ -86,7 +86,7 @@ export function preserveBuiltinRolePrompt(original: string, trustedHostInstructi
   if (!original.trim()) throw new Error("Original role prompt is required");
   return `${original}\n\n${trustedHostInstructions}`;
 }
-import { inspectNativeDelivery, NativeAckGrace, nativeAckGraceMs, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
+import { inspectNativeDelivery, NativeAckGrace, nativeAckGraceMs, nativeMessageFingerprint, reportNativeDeliveryUncertainty } from "./native-delivery-status.js";
 import { readAgyNativeTurn, type AgyPendingNativeTool } from "./agy-native-transcript.js";
 import { handleTaskLogTool, taskLogAssignmentContext } from "./task-log-tools.js";
 import {
@@ -373,6 +373,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let preparation: Promise<unknown> | undefined;
   let activation: Promise<unknown> | undefined;
   let scheduler: Promise<unknown> | undefined, schedulerError: string | undefined, inboundError: string | undefined;
+  let watchdogTask: Promise<void> | undefined, chatPump: Promise<void> | undefined;
   let schedulerTimerAlive = false, schedulerLastTickAt: string | undefined;
   const assignmentSurvey = new AssignmentSurvey(configuration.repositoryPath);
   const activityLog = TaskActivityLog.open(join(configuration.directory, "../../agentic/task-activity.jsonl"));
@@ -654,6 +655,19 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         await finalizeCompletedToolActionDisposition(message, sender);
         return json({ delivered: true, messageId: previous.message.message_id });
       }
+      if (workspace) {
+        const inspection = await inspectNativeDelivery(receipts, operationId, await workspace.runtime.nativeDeliveryInbox());
+        if (inspection.delivery === "applied") {
+          await receipts.recordNativeAcknowledgement(previous.message);
+          await workspace.runtime.reconcileNativeDelivery(previous.message.message_id);
+          await finalizeCompletedToolActionDisposition(message, sender);
+          return json({ delivered: true, messageId: previous.message.message_id });
+        }
+        if (inspection.delivery === "rejected_after_admission") {
+          const reason = (await workspace.runtime.inboundRejection(previous.message.message_id)) ?? "Native message was rejected after admission";
+          throw new AdmissionRejectedError(reason);
+        }
+      }
       throw new Error("Native delivery is uncertain; reconcile the original operation before retrying");
     }
     if (!await receipts.recordNativeIntent(operationId, message)) throw new Error("Native delivery already started; reconcile before retrying");
@@ -672,7 +686,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       });
       // The plugin action is asynchronous. Wait for signed ingress acknowledgement, never resend. A refusal by Runtime
       // arrives through the same ingress, so it is checked on a slower cadence than the acknowledgement itself.
-      const deadline = Date.now() + 15_000;
+      const deadline = Date.now() + 35_000;
       let refusalCheckAt = 0;
       while (Date.now() < deadline) {
         if (deliveredMessageIds.has(message.message_id)) {
@@ -2325,6 +2339,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
         await workspace.runtime.quiesce();
         if (scheduler) await Promise.race([scheduler, new Promise((_, reject) => setTimeout(() => reject(new Error("Outstanding verification has not drained; preserve the live session and retry shutdown after reconciliation")), 15_000))]);
+        await watchdogTask?.catch(() => undefined);
+        await chatPump?.catch(() => undefined);
         await requireWorkspace().tools.drain(); await userQueue;
         if (physicalPrompts.length || pumping) throw new Error("Inbound transport receipts are still draining; preserve session and retry shutdown");
         await taskLogPane.close();
@@ -2379,15 +2395,19 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const message = incoming.message;
     const binding = await principal(incoming.role, incoming.paneId);
     if (binding.session?.value !== incoming.nativeSessionId) throw new Error("Queued provider prompt native session changed");
-    await requireWorkspace().runtime.validateProviderDelivery(message, binding);
+    const runtime = requireWorkspace().runtime;
+    await runtime.validateProviderDelivery(message, binding);
     // A Runtime-originated notice (e.g. specialist_result_ready) is already the exact outbox delivery just validated; it has no pane to re-sign.
-    if (message.sender.role === "runtime") return;
-    const current = SessionManifestSchema.parse(unwrap(await requireWorkspace().runtime.ports.panes.getManifest()));
+    // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
+    if (message.sender.role === "runtime" || !["coordinator", "runtime", "conversation"].includes(message.recipient.role)) return;
+    if (deliveredMessageIds.has(message.message_id)) return;
+    const inbox = await runtime.nativeDeliveryInbox();
+    if (inbox.some(row => row.status === "applied" && row.message.message_id === message.message_id &&
+        nativeMessageFingerprint(row.message) === nativeMessageFingerprint(message))) return;
+    const current = SessionManifestSchema.parse(unwrap(await runtime.ports.panes.getManifest()));
     const sender = current.panes.find(pane => pane.role === message.sender.role && (!message.sender.pane_id || pane.paneId === message.sender.pane_id));
     if (!sender) throw new Error("Transport sender binding unavailable");
-    // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
-    if (["coordinator", "runtime", "conversation"].includes(message.recipient.role))
-      await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
+    await nativeDeliver(RoleMessageSchema.parse({ ...message, sender: { ...message.sender, pane_id: sender.paneId, agent_id: sender.agentId } }));
   };
   /**
    * Settles one Coordinator Stop receipt. A pane that can no longer be matched is unrecoverable: Conversation gets the
@@ -2528,7 +2548,6 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
     }
   };
-  let chatPump:Promise<void>|undefined;
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
     if(!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
@@ -2650,15 +2669,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: id }));
     }
   };
-  let watchdogRunning = false;
   const watchdogTimer = setInterval(() => {
-    if (!shouldRunWatchdog({ workspace: workspace !== undefined, manifest: manifest !== undefined, quiesced, closing }) || watchdogRunning) return;
-    watchdogRunning = true;
-    void reconcileRuntimeDeliveries()
+    if (!shouldRunWatchdog({ workspace: workspace !== undefined, manifest: manifest !== undefined, quiesced, closing }) || watchdogTask) return;
+    const task = reconcileRuntimeDeliveries()
       .catch(error => { process.stderr.write(`Bflow delivery reconcile: ${redactString(String(error))}\n`); })
       .then(() => runWatchdog())
       .catch(error => { process.stderr.write(`Bflow watchdog: ${redactString(String(error))}\n`); })
-      .finally(() => { watchdogRunning = false; });
+      .finally(() => { if (watchdogTask === task) watchdogTask = undefined; });
+    watchdogTask = task;
   }, 15_000);
   watchdogTimer.unref();
   const close = async () => {
@@ -2671,7 +2689,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       await rm(runner, { force: true }).catch(() => undefined);
     }
     if (useShortHook) await rm(shortHookDir, { recursive: true, force: true });
-    if (workspace) { await workspace.runtime.quiesce(); await scheduler; await workspace.close(); }
+    if (workspace) { await workspace.runtime.quiesce(); await scheduler?.catch(() => undefined); await watchdogTask?.catch(() => undefined); await chatPump?.catch(() => undefined); await workspace.close(); }
     await preparation?.catch(() => undefined);
     await disposeDetectedDependencies();
     queryStore?.close();

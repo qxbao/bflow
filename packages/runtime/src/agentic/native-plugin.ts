@@ -77,7 +77,7 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
   await new Promise<void>((accept, reject) => {
     const socket = connect(textField(config.runtimeSocket));
     let response = "";
-    socket.setTimeout(15_000, () => { socket.destroy(); reject(new Error("Native ingress reply timed out; reconcile before replay")); });
+    socket.setTimeout(35_000, () => { socket.destroy(); reject(new Error("Native ingress reply timed out; reconcile before replay")); });
     socket.once("error", reject);
     socket.once("connect", () => socket.write(JSON.stringify(packet) + "\n"));
     socket.on("data", chunk => { response += String(chunk); if (response.length > 8192) socket.destroy(); });
