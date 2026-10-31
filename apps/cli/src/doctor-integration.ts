@@ -12,9 +12,12 @@ import {
 import {
   EnvironmentDoctorReportSchema,
   EnvironmentDoctorCheckSchema,
+  SessionManifestSchema,
   type EnvironmentDoctorCheck,
-  type EnvironmentDoctorReport
+  type EnvironmentDoctorReport,
+  type SessionManifest
 } from "@bflow/contracts";
+import { observeAuthoritativeRuntime } from "./runtime-observation.js";
 import type { EnvironmentConfig } from "./environment-config.js";
 import { namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import type { RepositoryIdentity } from "./repository.js";
@@ -501,6 +504,51 @@ export async function runDoctorDiagnostics(
 
   // lifecycle-lock
   const stateRoot = options.statePath ? options.statePath(".") : resolve(repository.root, ".bflow/state");
+
+  // Authoritative RunStore vs session.json projection drift & Gate B loaded-host build skew (read-only; never spawns a host daemon)
+  let savedManifest: SessionManifest | null = null;
+  try {
+    const manifestPath = resolve(stateRoot, "session.json");
+    if (existsSync(manifestPath)) {
+      const parsed = SessionManifestSchema.safeParse(JSON.parse(await readFile(manifestPath, "utf8")));
+      if (
+        parsed.success &&
+        parsed.data.workspaceRoot === repository.root &&
+        parsed.data.sessionId === repository.sessionName
+      ) {
+        savedManifest = parsed.data;
+      }
+    }
+  } catch {
+    savedManifest = null;
+  }
+  const observedServer: "running" | "stopped" | "unknown" =
+    sessionVersion === "running" ? "running" : sessionVersion === "stopped" ? "stopped" : "unknown";
+  const runtimeObservation = await observeAuthoritativeRuntime({
+    repositoryRoot: repository.root,
+    sessionName: repository.sessionName,
+    server: observedServer,
+    manifest: savedManifest,
+    injectedRuntime: dependencies?.integration?.runtime
+  });
+  runtimeChecks.push({
+    checkId: "runtime-active-runs",
+    group: "runtime",
+    component: "run-store",
+    status: runtimeObservation.activeRunsCheck.status,
+    detected_version: null,
+    reason: runtimeObservation.activeRunsCheck.reason,
+    remediation: runtimeObservation.activeRunsCheck.remediation
+  });
+  runtimeChecks.push({
+    checkId: "runtime-host-build",
+    group: "runtime",
+    component: "host",
+    status: runtimeObservation.hostBuildCheck.status,
+    detected_version: null,
+    reason: runtimeObservation.hostBuildCheck.reason,
+    remediation: runtimeObservation.hostBuildCheck.remediation
+  });
   try {
     const lockStatus = await lifecycleLockStatus(stateRoot);
     if (lockStatus.startsWith("Legacy")) {

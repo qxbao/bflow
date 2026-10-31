@@ -72,16 +72,21 @@ export async function createDefaultSetupConfiguration(options: {
   }
   const explicitTools = new Set(config.toolPins.map(pin => pin.toolId));
   const providerExecutables: Partial<Record<"claude" | "codex" | "agy", string>> = {};
+  const superpowersRoot = join(platform.paths.data, "tools", "superpowers").replace(/\\/g, "/").replace(/\/+$/, "");
+  const isSafePathEntry = (dir: string) => {
+    const normalized = dir.replace(/\\/g, "/").replace(/\/+$/, "");
+    return normalized !== superpowersRoot && !normalized.startsWith(`${superpowersRoot}/`);
+  };
   for (const provider of config.providers) {
     const catalogEntry = TOOL_CATALOG.find(entry => entry.toolId === provider);
-    const directories = [...platform.pathEntries, ...(catalogEntry?.knownInstallDirs(platform) ?? [])];
+    const directories = [...platform.pathEntries.filter(isSafePathEntry), ...(catalogEntry?.knownInstallDirs(platform) ?? [])];
     const nodePlatform = platform.os === "other" ? "linux" : platform.os;
     const executable = await findExecutable(provider, directories, nodePlatform);
     if (executable) providerExecutables[provider] = executable;
     providerExecutables[provider] ??= join(platform.paths.data, "tools", provider,
       provider === "agy" ? "agy" : join("node_modules", ".bin", provider));
   }
-  const nativePath = [...new Set([...platform.pathEntries, ...Object.values(providerExecutables).map(path => dirname(path))])].join(delimiter);
+  const nativePath = [...new Set([...platform.pathEntries, ...Object.values(providerExecutables).map(path => dirname(path))].filter(isSafePathEntry))].join(delimiter);
   const nativeHost = { ...leaf.systemToolHost,
     run: (executable: string, args: readonly string[], runOptions?: { environment?: Readonly<Record<string, string>> }) =>
       leaf.systemToolHost.run(executable, args, { ...runOptions, environment: { ...runOptions?.environment, PATH: nativePath } }) };
