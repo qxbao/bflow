@@ -15,7 +15,7 @@ Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 | Công việc | Search/phase URL filters, cursor pages, run detail, tasks/blockers, lineage links | Pre-Core null, all engine/task statuses, unknown/done terminal observations, historical continuation, empty/error/stale |
 | Cần bạn quyết định | DecisionCard, revision/status/expiry, safe evidence | Pending/expired/superseded etc. as returned; view-only, no approval inferred from phase |
 | Cài đặt dự án | Explicit init/update/GitNexus repair, readiness inspection, role/provider/model forms, policy/tool/MCP/skills groups, full YAML, confirmed unregister | Durable initialization ID/progress/recovery, revision conflict and validation errors; config changes apply after session restart |
-| Trò chuyện | Run detail panel on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
+| Trò chuyện | Own project tab (`/chat`, `/chat/:runId`): one thread per run on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
 
 Workflow create/revise/clarification/approval/resume/cancel and lifecycle start/stop
 controls belong to W07. The registry form and read-only inspect call the frozen
@@ -165,7 +165,7 @@ See W07-HANDOFF.md for measured results and integration-owned runner proposal.
 
 ## W08 optional chat
 
-Run detail includes normalized session history and a bounded text composer. It uses
+The Trò chuyện tab shows normalized session history and a bounded text composer. It uses
 the same authenticated HTTP origin and run/session as direct actions. The host
 rechecks readiness and native binding; successful history alone grants no authority.
 Claude/Codex adapters use correlated real native hooks and provider transcript IDs.
@@ -265,7 +265,8 @@ Source plus local tests; not live acceptance. Behaviour added on top of the froz
 - Blockers are classified as required, in-progress check or optional degradation. Unknown codes stay required. Several reads failing for one cause on the overview render one notice.
 - Settled approvals are read from the run page under "Đã có hiệu lực". The review inbox stays a to-do list. Runtime keeps only the run's latest approval, so an earlier design approval is replaced once a task or delivery approval is issued.
 - A request form still tracking an operation says so, disables sending and offers a new intent only after the outcome is known.
-- Chat defaults to the latest messages of this run plus session-wide ones, reading at most 20 pages; "Toàn phiên" keeps the paged history.
+- Chat is a messenger-style tab with one thread per run, reading at most 20 pages. It hides other runs' messages but keeps those without a `runId`, because Conversation replies and terminal turns carry none yet.
+- "Đang soạn tin" is inferred, not a provider signal: the user's last message is `delivered`, the session is ready, no reply has arrived and the message is under five minutes old. The thread re-reads history every five seconds during that window.
 - Operations settled over ten minutes ago and unrelated to the open run move to a collapsed history.
 - Each acceptance criterion carries its own verification method; the default applies only until changed.
 

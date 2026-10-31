@@ -12,7 +12,6 @@ import { EmptyState } from '../components/EmptyState';
 import { DecisionReview } from './decisions';
 import { ClarificationForm } from './clarifications';
 import { RunActions } from './run-actions';
-import { ChatHistory } from './chat';
 import { Pagination } from '../components/Pagination';
 import { LoadingState } from '../components/LoadingState';
 import { useCursorPagination } from './pagination';
@@ -55,7 +54,7 @@ export function RunView({api,id,runId,revision,refresh}:{api:ApiClient;id:string
     </div><div className="min-w-0">
     <section><h2>Thao tác tiếp theo</h2><RunActions api={api} id={id} run={run} fresh={!result.loading && !result.error} refreshing={result.loading && !result.error}/>{run.availableActions.filter(action=>!action.enabled && action.kind==='answer_decision').map(action=><p key={action.actionId} className="my-3 border-l-3 border-warning pl-3 text-sm">{reason(action.disabledReason)}</p>)}</section>
     </div></div>
-    <ChatHistory api={api} projectId={id} sessionId={run.sessionId} runId={run.runId} revision={revision}/>
+    <section><h2>Trò chuyện</h2><Link to={`/projects/${encodeURIComponent(id)}/chat/${encodeURIComponent(run.runId)}`}>Mở trò chuyện của công việc →</Link></section>
     <section><h2>Mốc quan sát</h2><p><time dateTime={run.updatedAt}>{new Date(run.updatedAt).toLocaleString('vi')}</time> · Lần cập nhật của bản đọc hiện tại.</p><p className="text-sm text-muted">Chưa có dữ liệu lịch sử công việc đầy đủ để hiển thị. Cập nhật trực tiếp ở trang tổng quan chỉ phản ánh lần mở trang này.</p></section>
     <details><summary>Thông tin đối chiếu</summary><dl><dt>Mã công việc</dt><dd className="font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">{run.runId}</dd><dt>Cập nhật</dt><dd>{new Date(run.updatedAt).toLocaleString('vi')}</dd></dl></details>
   </>}</>;
