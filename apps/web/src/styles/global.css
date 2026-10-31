@@ -36,26 +36,26 @@
   button[aria-pressed="true"] { @apply border-ink bg-faint font-semibold; }
   input, select, textarea { @apply w-full; }
   input[type="checkbox"], input[type="radio"] { @apply mt-0.5 size-5 min-h-0 shrink-0 accent-accent; }
-  textarea { @apply max-h-[60dvh] resize-y font-prose leading-relaxed [field-sizing:content]; }
+  textarea { @apply min-h-20 max-h-[60dvh] resize-y font-prose leading-relaxed; }
   input::placeholder, textarea::placeholder { @apply text-muted opacity-100; }
   label { @apply block font-data text-sm font-semibold leading-6; }
   label small { @apply block font-normal text-muted; }
-  h1 { @apply my-4 font-prose text-[26px] leading-snug font-bold text-balance [overflow-wrap:anywhere] sm:text-[30px]; }
+  h1 { @apply my-3 font-prose text-[24px] leading-snug font-bold text-balance [overflow-wrap:anywhere] sm:text-[28px]; }
   h1 em { @apply not-italic text-accent; }
-  h2 { @apply mb-3 font-prose text-lg leading-snug font-semibold; }
+  h2 { @apply mb-2.5 font-prose text-lg leading-snug font-semibold; }
   h3 { @apply mb-2 font-prose text-base leading-snug font-semibold; }
-  p { @apply my-3 max-w-prose; }
-  section { @apply my-5; }
-  fieldset { @apply my-4 min-w-0 border border-line p-4 disabled:opacity-65; }
+  p { @apply my-2.5 max-w-prose; }
+  section { @apply my-4; }
+  fieldset { @apply my-3 min-w-0 border border-line p-3.5 disabled:opacity-65; }
   legend { @apply px-2 font-data text-sm font-semibold; }
-  details { @apply my-4 min-w-0 border-t border-line py-3; }
+  details { @apply my-3 min-w-0 border-t border-line py-2.5; }
   summary { @apply flex min-h-11 cursor-pointer list-item items-center font-data text-sm font-semibold lg:min-h-9; }
-  pre { @apply my-3 max-h-[60dvh] overflow-auto border border-code-line bg-code p-3 font-mono text-sm leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]; }
+  pre { @apply my-2.5 max-h-[60dvh] overflow-auto border border-code-line bg-code p-3 font-mono text-sm leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]; }
   time { @apply tabular-nums; }
-  ul, ol { @apply my-3 pl-5; }
+  ul, ol { @apply my-2.5 pl-5; }
   ul { @apply list-disc; }
   ol { @apply list-decimal; }
-  dt { @apply mt-3 font-data text-sm font-semibold; }
+  dt { @apply mt-2.5 font-data text-sm font-semibold; }
   dd { @apply text-sm text-muted; }
   [id] { @apply scroll-mt-4; }
 }

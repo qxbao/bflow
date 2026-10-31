@@ -1644,8 +1644,9 @@ rl.on("line", line => {
     const [gatewayLaunch] = launches;
     expect(gatewayLaunch?.launch.argv.length).toBeGreaterThan(0);
     expect(gatewayLaunch?.launch.argv).toEqual(gatewayLaunch?.profile.argv);
-    const { DISABLE_AUTOUPDATER, ...tokenEnv } = gatewayLaunch?.launch.env ?? {};
+    const { DISABLE_AUTOUPDATER, MCP_TIMEOUT, ...tokenEnv } = gatewayLaunch?.launch.env ?? {};
     expect(DISABLE_AUTOUPDATER).toBe("1");
+    expect(MCP_TIMEOUT).toBe("120000");
     expect(tokenEnv.HOME).toBeTruthy();
     expect(tokenEnv.CLAUDE_CONFIG_DIR).toBeTruthy();
     const tokenValues = Object.entries(tokenEnv).filter(([name]) => !["HOME", "CLAUDE_CONFIG_DIR"].includes(name)).map(([,value]) => value);
@@ -2048,10 +2049,11 @@ rl.on("line", line => {
     expect(launched.ok).toBe(true);
     if (!launched.ok) return;
     expect(launched.value.taskId).toBe("t1");
-    expect(Object.keys(launched.value.launch.env).filter(name => !["HOME", "CLAUDE_CONFIG_DIR"].includes(name))).toHaveLength(2);
+    expect(Object.keys(launched.value.launch.env).filter(name => !["HOME", "CLAUDE_CONFIG_DIR"].includes(name))).toHaveLength(3);
     expect(launched.value.launch.env["HOME"]).toBeTruthy();
     expect(launched.value.launch.env["CLAUDE_CONFIG_DIR"]).toBeTruthy();
     expect(launched.value.launch.env["DISABLE_AUTOUPDATER"]).toBe("1");
+    expect(launched.value.launch.env["MCP_TIMEOUT"]).toBe("120000");
     expect(await journalKinds(journal)).toEqual(["intent"]);
 
     const blocked = await service.prepareDeveloper(identity, requirement({

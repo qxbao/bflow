@@ -492,9 +492,32 @@ export class EnvironmentLifecycle {
       // integrations) never writes into the account's provider configuration.
       const defaultComposition = !this.dependencies.integration && !this.dependencies.openIntegration && !process.env.BFLOW_ENVIRONMENT_MODULE;
       // Explicit opt-in only: pre-accept Claude Code's per-project trust dialog so headless panes are not stuck on it.
-      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true && distinctRequiredClis.includes("claude")) {
-        const { claudeConfigFile, ensureClaudeWorkspaceTrust } = await import("./claude-trust.js");
-        await ensureClaudeWorkspaceTrust(repository.root, claudeConfigFile(this.env));
+      // Check rolesToRun directly (distinctRequiredClis omits profile-selected roles) and cover both ~/.claude.json,
+      // ~/.claude/.claude.json (Claude Code 2.x / Orca interactive shells), and any selected isolator profile home.
+      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true &&
+          rolesToRun.some(role => (role.required ?? true) && role.cli === "claude")) {
+        const { claudeConfigFiles, ensureClaudeWorkspaceTrust } = await import("./claude-trust.js");
+        const files = new Set<string>();
+        const baseHome = this.env.HOME?.trim() || homedir();
+        for (const role of rolesToRun.filter(item => (item.required ?? true) && item.cli === "claude")) {
+          const profileName = role["profile-name"] ?? selectedProfiles?.claude?.["profile-name"];
+          if (profileName === undefined) {
+            for (const f of await claudeConfigFiles(this.env, baseHome)) files.add(f);
+            continue;
+          }
+          try {
+            const { resolveIsolatorStateRoot } = await import("./platform-options.js");
+            const profiles = await import("@bflow/runtime/platform/isolator-profile");
+            const resolved = await new profiles.IsolatorProfileResolver({
+              stateRoot: resolveIsolatorStateRoot(this.env, baseHome), environment: this.env
+            }).resolve("claude", profileName, { timeoutMs: Math.min(8000, deadline.remaining()) });
+            const env = resolved.ok ? resolved.value.environment : undefined;
+            if (env) {
+              for (const f of await claudeConfigFiles(env, env.HOME?.trim() || baseHome)) files.add(f);
+            }
+          } catch { /* Profile readiness is reported by provider preflight; trust stays a dialog. */ }
+        }
+        for (const file of files) await ensureClaudeWorkspaceTrust(repository.root, file);
       }
       // Same opt-in for Codex: headless panes otherwise stop on "Trust this folder?". Record the answer
       // in each Codex home a required role will use (selected isolator profile, or the account's own).

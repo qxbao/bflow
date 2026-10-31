@@ -9,7 +9,7 @@ Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin
 | [Khởi tạo dự án (`bflow init`)](bflow-init.md) | Cấu trúc tệp config.yml có chú thích, lập chỉ mục/đăng ký GitNexus (`--check`, `--remove`, `--no-gitnexus`), định danh Git, chuyển đổi phiên bản và cờ ghi đè |
 | [Khởi động dịch vụ (`bflow up`)](bflow-up.md) | Quản lý phiên có tên (named session), các vai trò thường trực, điều kiện sẵn sàng và các giới hạn khi khởi động host |
 | [Gắn kết phiên (`bflow attach`)](bflow-attach.md) | Cơ chế gắn kết trực tiếp vào pane của Conversation Agent |
-| [UI web cục bộ (`bflow web`)](../../apps/web/README.md) | Quản lý dự án, theo dõi công việc, trả lời quyết định và chat trên trình duyệt tại `127.0.0.1:4317` |
+| [UI web cục bộ (`bflow web`)](web-manual.md) | Cẩm nang từng bước có ảnh chụp màn hình: đăng ký dự án, cài đặt, khởi động phiên, giao việc, làm rõ, phê duyệt, khôi phục và bàn giao ([Web README](../../apps/web/README.md)) |
 | [Cập nhật trong Conversation](conversation-updates.md) | Thẻ tiếng Việt, mã `#n`/`Việc #k`, lựa chọn, chi tiết và Log |
 | [Khôi phục sự cố sau Ctrl+C](troubleshooting.md) | Cơ chế khoá kernel (kernel lock), lệnh `recover --yes`, hộp thoại khởi động native và nhãn định danh pane |
 | [Hạ dịch vụ (`bflow down`)](bflow-down.md) | Rào chắn an toàn (barrier), điểm kiểm tra (checkpoint) và các giới hạn khi dừng hệ thống |
@@ -43,8 +43,8 @@ Hướng dẫn sử dụng hiện tại: build và gọi `node apps/cli/dist/bin
 | CLI tự động khởi động và tắt host P19 | Đã triển khai provider-aware prepare/activate và native hooks/MCP; probe/lifecycle reports có phạm vi riêng |
 | Tầng truyền tải thông điệp Herdr có chữ ký số | Đã kiểm chứng thực tế; việc truyền tải thông điệp không thay thế cho bằng chứng nghiệm thu kết quả của AI |
 | Conversation plaintext/alias/Log | Có source và local hook/RPC/render tests; receipt hiển thị không là human approval hay live-provider acceptance |
-| Rework/NFR/risk references & test integrity | Có source/local coverage (bao gồm bắt buộc đủ per-finding verdict và cổng `host-test-integrity`); [main updates](../main-updates-2026-10-25.md) ghi các mốc và giới hạn nghiệm thu live |
-| Nghiệm thu Agentic SDLC đầu-cuối với mô hình trực tiếp | **Chưa kiểm chứng đầy đủ trong đợt phát hành này** |
+| Rework/NFR/risk references, test integrity & Web UX | Có source/local coverage (bao gồm bắt buộc đủ per-finding verdict, cổng `host-test-integrity`, Slices 1–8 hardening và UX ổn định `CLS = 0.00000`); [main updates 2026-10-31](../main-updates-2026-10-31.md) ghi các mốc chi tiết |
+| Nghiệm thu Agentic SDLC đầu-cuối với mô hình trực tiếp | Đã có bằng chứng live SDLC đơn provider qua `bflow web` (`run-web-c72842ea-a325-4305-833e-760d560e095b`, [báo cáo](../reliability/web-ux-stabilization.md)); **ma trận đa provider và chiến dịch lỗi giữa turn vẫn còn mở** |
 | Tự động tích hợp, merge và triển khai nhánh được bảo vệ | Runtime hiện tại không cấp quyền thực thi tự động các thao tác đẩy nhánh/triển khai lên remote |
 
 ---

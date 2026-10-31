@@ -33,6 +33,7 @@ export function subscribeEvents(projectId:string,changed:(event:WebEvent)=>void,
   };
   const onOnline=()=>{
     if(stopped)return;
+    if(source && (source as {readyState?:number}).readyState===1){state('connected');return;}
     attempt=0;
     if(timer!==undefined){clearTimeout(timer);timer=undefined;}
     source?.close();
@@ -40,8 +41,7 @@ export function subscribeEvents(projectId:string,changed:(event:WebEvent)=>void,
     connect();
   };
   const onOffline=()=>{if(!stopped)state('offline');};
-  window.addEventListener('online',onOnline);
-  window.addEventListener('offline',onOffline);
+  if(typeof window!=='undefined'){window.addEventListener('online',onOnline);window.addEventListener('offline',onOffline);}
   state('connecting');connect();
-  return()=>{stopped=true;clearTimeout(timer);window.removeEventListener('online',onOnline);window.removeEventListener('offline',onOffline);source?.close();};
+  return()=>{stopped=true;clearTimeout(timer);if(typeof window!=='undefined'){window.removeEventListener('online',onOnline);window.removeEventListener('offline',onOffline);}source?.close();};
 }

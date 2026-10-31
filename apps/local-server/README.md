@@ -39,7 +39,7 @@ lock. A second owner fails closed; stale lock recovery after an abrupt process
 exit needs operator/CLI verification, never PID-only takeover. Registry, stable
 principal and immutable operation owner/kind/fingerprint survive restart. Host
 records pin the original hostSessionId/receiptId. Lifecycle receipts stay readable
-without a host. Backend calls have a five-second observation deadline; timeout
+without a host. Backend calls use route-specific observation deadlines (`5s` default reads and lifecycle start/stop reservations so `close()` stays bounded under `7s`; `15s` preview; `35s` structured host commands/operations/notices/chat; `45s` multi-role `session/inspect`) with matching per-route HTTP socket timeouts; timeout
 does not cancel the underlying effect. Only registry/reservation writes use the
 shared critical section; operations serialize per project/ID. Shutdown waits for
 bounded handlers before releasing private state, without stopping any host.

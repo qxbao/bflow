@@ -636,4 +636,87 @@ describe("escalated verification retry and design approval", () => {
     expect(createCalls).toBe(2);
     expect(saveCalls).toBe(2);
   });
+
+  it("holds conditional_evidence verifier lease during pre-turn prompt readiness lag until specialist stop or 45s grace", async () => {
+    const f = await fixture();
+    f.panes.bindings.push(PaneBindingSchema.parse({
+      schemaVersion: 2, bindingId: "binding-qa", sessionId: "session-1", role: "qa", paneGroup: "verification", agentId: "qa-agent",
+      workspaceId: "workspace-1", tabId: "tab-1", paneId: "pane-qa", provider: "test", agentKind: "test", cwd: "/tmp",
+      isolationMode: "dedicated_pane", readOnlyWorkspace: true, session: { source: "test", kind: "id", value: "session-qa" },
+      transportState: "idle", boundAt: T0
+    }));
+    await f.registry.upsert({ agentId: "qa-agent", role: "qa", transport: "herdr", enabled: true,
+      priority: 1, maxConcurrentTasks: 1, capabilities: ["testing"], settings: {} });
+    await f.journal.exclusive(async (state: JournalState, save: () => Promise<void>) => {
+      const leaseRes = await f.ports.registry.acquireLease({
+        leaseId: "lease-qa-1",
+        agentId: "qa-agent",
+        runId: "run-1",
+        taskId: "task-1",
+        attemptId: "attempt-red-1",
+        ttlMs: 300_000,
+        requestedAt: T0,
+        idempotencyKey: "lease-qa-1"
+      });
+      if (!leaseRes.ok) throw new Error("failed to acquire qa lease");
+      const phaseMsg = message("phase-red-1", {
+        recipient: { role: "qa" },
+        type: "verification.requested",
+        payload: { kind: "conditional_evidence", taskId: "task-1", phase: "red", sourceRevision: "abc1234" }
+      });
+      state.outbound.push({
+        message: phaseMsg,
+        status: "accepted",
+        selector: "binding-qa",
+        taskId: "task-1",
+        attemptId: "attempt-red-1",
+        capabilities: ["testing"],
+        lease: leaseRes.value,
+        request: {
+          requestId: "req-qa-1",
+          attemptId: "attempt-red-1",
+          runId: "run-1",
+          taskId: "task-1",
+          role: "qa",
+          target: { transport: "herdr", agentId: "qa-agent", paneId: "pane-qa", workspaceId: "workspace-1", tabId: "tab-1" },
+          instruction: JSON.stringify(phaseMsg),
+          workingDirectory: "/tmp",
+          inputs: [],
+          context: phaseMsg,
+          attempt: 1,
+          retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 60_000, onTimeout: "block" },
+          idempotency: { key: "phase-red-1", scope: "agent-request", fingerprint: digest(phaseMsg) },
+          createdAt: T0
+        },
+        handle: {
+          executionId: "exec-qa-1",
+          requestId: "req-qa-1",
+          attemptId: "attempt-red-1",
+          runId: "run-1",
+          taskId: "task-1",
+          idempotencyKey: "phase-red-1",
+          target: { transport: "herdr", agentId: "qa-agent", paneId: "pane-qa", workspaceId: "workspace-1", tabId: "tab-1", session: { source: "test", kind: "id", value: "session-qa" } },
+          correlation: { token: "corr-qa-1", provenance: "transport", verified: true },
+          acceptedAt: T0
+        }
+      });
+      await save();
+    });
+
+    // 2s after herdr send: QA TUI still reports readyForPrompt=true before streaming starts; lease MUST stay accepted.
+    f.advance(2_000);
+    await f.journal.exclusive(async (state: JournalState, save: () => Promise<void>) =>
+      new HerdrOutbox(f.ports, state, save).flush(async () => {}));
+    let state = await f.runtime.inspect() as unknown as JournalState;
+    expect(state.outbound.find(item => item.message.message_id === "phase-red-1")!.status).toBe("accepted");
+
+    // Once specialist Stop records specialist_no_response (or >= 45s elapses), readyForPrompt=true releases the verifier lease.
+    await f.runtime.specialistTurnStopped(f.panes.bindings.find(b => b.role === "qa")!, "qa", new Date(Date.parse(T0) + 10_000).toISOString(), "phase-red-1");
+    f.advance(8_000);
+    await f.journal.exclusive(async (s: JournalState, save: () => Promise<void>) =>
+      new HerdrOutbox(f.ports, s, save).flush(async () => {}));
+    state = await f.runtime.inspect() as unknown as JournalState;
+    expect(state.outbound.find(item => item.message.message_id === "phase-red-1")!.status).toBe("released");
+  });
 });

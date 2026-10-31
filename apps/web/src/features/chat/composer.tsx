@@ -9,12 +9,12 @@ function pending(key:string):string|undefined {
  if(!value||typeof value!=='object'||Object.keys(value).sort().join(',')!=='messageId,version'||!('version' in value)||value.version!==1||!('messageId' in value)||typeof value.messageId!=='string'||!/^[-a-f0-9]{36}$/i.test(value.messageId))throw Error('Invalid chat recovery metadata');
  return value.messageId;
 }
-export function ChatComposer({api,projectId,sessionId,runId,revision,refresh}:{api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;historyReady:boolean;refresh:()=>void}){
+export function ChatComposer({api,projectId,sessionId,runId,revision,historyRejected=false,refresh}:{api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;historyReady:boolean;historyRejected?:boolean;refresh:()=>void}){
  const key=JSON.stringify(['bflow-chat',projectId,sessionId]);
  const [draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[uncertain,setUncertain]=useState(()=>{try{return !!pending(key);}catch{return true;}});
  const session=useRead(`chat-session:${projectId}:${sessionId}`,()=>api.sessionView(projectId),revision);
- // Sending is governed by fresh host/session readiness; unavailable first-message history remains an independent read error.
- const ready=!session.loading&&!session.error&&session.data?.state==='ready'&&session.data.sessionId===sessionId&&!session.data.blockers.some(b=>b.code==='chat_adapter_unavailable');
+ // Sending is governed by fresh host/session readiness; cold 503 history stays independent, while non-retryable adapter rejection disables send.
+ const ready=!historyRejected&&!session.loading&&!session.error&&session.data?.state==='ready'&&session.data.sessionId===sessionId&&!session.data.blockers.some(b=>b.code==='chat_adapter_unavailable');
  async function submit(event:FormEvent){event.preventDefault();if(!ready||busy||uncertain)return;
   setBusy(true);setNotice('');
   try{
@@ -26,7 +26,7 @@ export function ChatComposer({api,projectId,sessionId,runId,revision,refresh}:{a
     localStorage.setItem(key,JSON.stringify({version:1,messageId:input.messageId}));setUncertain(true);
     let message;
     try{
-     message=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`,WebHttpContracts.sendMessage.response,'POST',input);
+     message=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages`,WebHttpContracts.sendMessage.response,'POST',input,40000);
     }catch(error){
      if(error instanceof ApiError && DEFINITIVE_PRE_ADMISSION_CODES.has(error.code)){
       localStorage.removeItem(key);setUncertain(false);setNotice(explain(error));return;
@@ -47,7 +47,7 @@ export function ChatComposer({api,projectId,sessionId,runId,revision,refresh}:{a
     let cursor:string|undefined;const seen=new Set<string>();
     for(let page=0;page<102;page++){
      const suffix=cursor?`?${new URLSearchParams({cursor})}`:'';
-     const history=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages${suffix}`,WebHttpContracts.messages.response);
+     const history=await api.request(`${projectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}/messages${suffix}`,WebHttpContracts.messages.response,'GET',undefined,40000);
      if(history.items.some(m=>m.sessionId!==sessionId))throw Error('Foreign history');
      const message=history.items.find(m=>m.messageId===id&&m.sender==='user'&&m.source==='web');
      if(message){localStorage.removeItem(key);setUncertain(false);setDraft('');setNotice('Đã tìm thấy tin nhắn gốc. Không gửi lại tin này.');refresh();return;}
@@ -59,12 +59,12 @@ export function ChatComposer({api,projectId,sessionId,runId,revision,refresh}:{a
   finally{setBusy(false);}
  }
  const tooLarge=new TextEncoder().encode(draft).byteLength>WEB_LIMITS.chatBytes;
- return <form onSubmit={submit} className="min-w-0 [&_textarea]:my-3" aria-busy={busy}>
-  {!ready&&<p id="chat-unavailable" className="my-3 border-l-3 border-warning pl-3 text-sm">Trò chuyện qua web chưa sẵn sàng trong phiên này. Bạn vẫn có thể dùng biểu mẫu và nút quyết định.</p>}
-  <label htmlFor="chat-draft">Tin nhắn cho Conversation</label><textarea id="chat-draft" value={draft} onChange={e=>setDraft(e.target.value)} disabled={!ready||busy||uncertain} aria-describedby={!ready?'chat-unavailable':undefined} rows={3}/>
+ return <form onSubmit={submit} className="mt-3 min-w-0 [&_textarea]:my-2" aria-busy={busy}>
+  {!ready&&<p id="chat-unavailable" className="my-2 border-l-3 border-warning pl-3 text-sm">Trò chuyện qua web chưa sẵn sàng trong phiên này. Bạn vẫn có thể dùng biểu mẫu và nút quyết định.</p>}
+  <label htmlFor="chat-draft">Tin nhắn cho Conversation</label><textarea id="chat-draft" value={draft} onChange={e=>setDraft(e.target.value)} disabled={!ready||busy||uncertain} aria-describedby={!ready?'chat-unavailable':undefined} placeholder={ready?'Nhập trao đổi bổ sung cho phiên làm việc…':'Trò chuyện trực tiếp chưa bật trong phiên này'} rows={3}/>
   {tooLarge&&<p role="alert">Tin nhắn vượt quá giới hạn 16 KiB.</p>}
-  <button type="submit" disabled={!ready||busy||uncertain||tooLarge||!draft.trim()}>{busy?'Đang xử lý…':'Gửi tin nhắn'}</button>
-  {uncertain&&<button type="button" disabled={busy} onClick={()=>void reconcile()}>Đối chiếu tin nhắn</button>}
-  {notice&&<p role="status">{notice}</p>}
+  <div className="flex flex-wrap items-center gap-2"><button type="submit" className="min-w-28" disabled={!ready||busy||uncertain||tooLarge||!draft.trim()}>{busy?'Đang xử lý…':'Gửi tin nhắn'}</button>
+  {uncertain&&<button type="button" disabled={busy} onClick={()=>void reconcile()}>Đối chiếu tin nhắn</button>}</div>
+  {notice&&<p role="status" className="my-2 text-sm">{notice}</p>}
  </form>;
 }

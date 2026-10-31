@@ -331,8 +331,17 @@ export class HerdrOutbox {
         }
         return;
       }
+      const isPolicyPhase = out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence";
+      const stoppedWithoutOutcome = isPolicyPhase && this.state.outbound.some(item =>
+        item.message.run_id === out.message.run_id &&
+        item.message.type === "task.status" &&
+        record(item.message.payload).kind === "specialist_no_response" &&
+        record(item.message.payload).sourceMessageId === out.message.message_id &&
+        record(item.message.payload).stoppedExecutionId === out.handle!.executionId);
+      const canReleaseOnPromptReady = !isPolicyPhase || stoppedWithoutOutcome ||
+        Date.parse(this.now()) - Date.parse(out.handle.acceptedAt) >= 45_000;
       const health = await this.ports.panes.inspectRoleHealth(out.selector);
-      if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
+      if (canReleaseOnPromptReady && health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
         await this.release(out); // transport capacity only; never task-success evidence
       else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId &&
           (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
