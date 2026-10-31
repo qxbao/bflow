@@ -1,6 +1,6 @@
 # Trạng thái triển khai hiện tại
 
-Đối chiếu bổ sung ngày **2026-10-31** tại `main` **`74f8d3f`** (Slices 1–8 `integration/full-flow-hardening`) cùng nhánh `fix/web/ux-stabilization`, tiếp nối đợt 2026-10-30 tại `8d86553`, đợt 2026-10-27 tại `901caa6` + PR #53 và đợt 2026-10-25 tại `a7686be` / `2357669` / `5dfceac`. [Commit 8d86553..74f8d3f & Web UX](main-updates-2026-10-31.md), [commit 901caa6..8d86553](main-updates-2026-10-29.md) và [commit trước đó](main-updates-2026-10-25.md) ghi chi tiết thay đổi. Đây là bản đồ source và bằng chứng đã lưu, không phải nghiệm thu ma trận provider mới. Khi source thay đổi, kiểm tra lại các liên kết triển khai trước khi nâng mức hỗ trợ.
+Đối chiếu bổ sung ngày **2026-10-31** tại `main` **`2bf5d2e`** (Slices 1–9 / Wave 3 `integration/full-flow-hardening`) cùng nhánh `fix/web/ux-stabilization`, tiếp nối đợt 2026-10-30 tại `8d86553`, đợt 2026-10-27 tại `901caa6` + PR #53 và đợt 2026-10-25 tại `a7686be` / `2357669` / `5dfceac`. [Commit 8d86553..2bf5d2e & Web UX](main-updates-2026-10-31.md), [commit 901caa6..8d86553](main-updates-2026-10-29.md) và [commit trước đó](main-updates-2026-10-25.md) ghi chi tiết thay đổi. Đây là bản đồ source và bằng chứng đã lưu, không phải nghiệm thu ma trận provider mới. Khi source thay đổi, kiểm tra lại các liên kết triển khai trước khi nâng mức hỗ trợ.
 
 ## Cách đọc bằng chứng
 

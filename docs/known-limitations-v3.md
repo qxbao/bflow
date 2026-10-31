@@ -1,6 +1,6 @@
 # Giới hạn hiện tại và điều kiện đóng
 
-Đối chiếu source ngày **2026-10-31** (`main` tại `74f8d3f` cùng nhánh `fix/web/ux-stabilization`); [implementation status](implementation-status.md) và [main updates 2026-10-31](main-updates-2026-10-31.md) ghi baseline và đường triển khai. Các báo cáo [release v3](release-readiness-v3.md), [provider](provider-compatibility.md), [E2E](e2e-report.md) và [Web UX & live SDLC](reliability/web-ux-stabilization.md) là bằng chứng có phạm vi riêng, không phải chứng nhận toàn ma trận cho HEAD.
+Đối chiếu source ngày **2026-10-31** (`main` tại `2bf5d2e` cùng nhánh `fix/web/ux-stabilization`); [implementation status](implementation-status.md) và [main updates 2026-10-31](main-updates-2026-10-31.md) ghi baseline và đường triển khai. Các báo cáo [release v3](release-readiness-v3.md), [provider](provider-compatibility.md), [E2E](e2e-report.md) và [Web UX & live SDLC](reliability/web-ux-stabilization.md) là bằng chứng có phạm vi riêng, không phải chứng nhận toàn ma trận cho HEAD.
 
 ## Nghiệm thu hệ thống
 

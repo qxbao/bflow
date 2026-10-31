@@ -1,6 +1,6 @@
-# Bổ sung tài liệu từ các commit mới trên main (8d86553..74f8d3f và nhánh ổn định Web)
+# Bổ sung tài liệu từ các commit mới trên main (8d86553..2bf5d2e và nhánh ổn định Web)
 
-Tiếp nối [đợt đối chiếu 2026-10-29 (`901caa6..8d86553`)](main-updates-2026-10-29.md) và [đợt 2026-10-25/27](main-updates-2026-10-25.md). Tài liệu này đối chiếu các thay đổi đã hợp nhất từ **`8d86553`** đến **`74f8d3f`** (bao gồm chuỗi gia cố toàn luồng Slice 1–8 trên `main`) cùng đợt ổn định UX/CLS và kiểm chứng SDLC thực tế trên Bflow Web (`fix/web/ux-stabilization`).
+Tiếp nối [đợt đối chiếu 2026-10-29 (`901caa6..8d86553`)](main-updates-2026-10-29.md) và [đợt 2026-10-25/27](main-updates-2026-10-25.md). Tài liệu này đối chiếu các thay đổi đã hợp nhất từ **`8d86553`** đến **`2bf5d2e`** (bao gồm chuỗi gia cố toàn luồng Slice 1–8 và Wave 3 cross-slice integration Slice 9 trên `main`) cùng đợt ổn định UX/CLS và kiểm chứng SDLC thực tế trên Bflow Web (`fix/web/ux-stabilization`).
 
 Mức bằng chứng của từng mục được ghi rõ theo 4 cấp độ của [trạng thái triển khai](implementation-status.md): **source**, **local tests**, **live probe có phạm vi**, và **full SDLC acceptance**.
 
@@ -28,6 +28,7 @@ Mức bằng chứng của từng mục được ghi rõ theo 4 cấp độ củ
 | `53e78b6` · `89c709a` | **Slice 5:** gia cố phân loại/truy vết SDD, bộ giải quyết bằng chứng Conditional TDD, ngữ nghĩa hủy/chặn trên DAG của Core, SQLite `RunStore`, `ArtifactStore` và `AgentRegistry` | [SDLC policies](sdlc-policies.md) |
 | `4fdc9e7` · `9ad460b` | **Slice 7:** chuẩn hóa `PATH`/`fsync` trong `developer-process-scope`, phân loại assertion và suite có lọc của Vitest JSON reporter, hỗ trợ Git worktree trên FUSE/NTFS và rút cạn đường ống (pipe drain) | [Verification runners](verification-runners.md) |
 | `7206ee6` · `182cb86` · `74f8d3f` | **Slice 8:** gia cố máy trạng thái workflow agentic, đối soát hủy sau khi hết hạn lease, thông báo tác vụ và công cụ theo vai trò; kiểm thử đảm bảo prompt Coordinator điều hướng qua `task.status` | [Runtime README](../packages/runtime/README.md) |
+| `3f48bb4` · `2bf5d2e` | **Wave 3 / Slice 9 (cross-slice integration):** đồng bộ chịu lỗi `fsync` thư mục trên FUSE/NTFS cho toàn bộ state/journal/handover của Runtime, cờ Git an toàn, nhịp tim gia hạn lease (`lease heartbeats`) và chống tranh chấp đồng thời trên Conversation host (`slice9-cross-slice-integration.test.ts`) | [Runtime README](../packages/runtime/README.md) |
 | `936dac3` .. `71e8389` | Chiến dịch khám phá lỗi có trạng thái (stateful fault exploration) và bộ hồ sơ độ tin cậy dưới `docs/reliability/` | [Stateful exploration](reliability/stateful-exploration-results.md) |
 
 ---

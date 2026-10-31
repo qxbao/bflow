@@ -1,7 +1,7 @@
 # Bflow Web — End-to-End UX/UI Overhaul, Layout Stabilization & Live SDLC Verification
 
 **Validation date:** 2026-10-31 (Asia/Bangkok)  
-**Isolated worktree / branch:** `.worktrees/web-ux-stabilization` (`fix/web/ux-stabilization`, merged with `main` at `74f8d3f`)  
+**Isolated worktree / branch:** `.worktrees/web-ux-stabilization` (`fix/web/ux-stabilization`, merged with `main` at `2bf5d2e`)  
 **Browser & runtime environment:** `/usr/bin/google-chrome` via Playwright/CDP, Node `v24.16.0`, Herdr `0.9.5` (protocol `22`), Claude Code `v2.1.316`  
 **Contract boundary:** `packages/contracts/**` untouched (`0` diff bytes; `apiVersion: 1`, ADR 0006 & ADR 0007 preserved).  
 **Isolation rule:** All testing used ephemeral loopback ports, disposable `/tmp/bflow-ux-*` Git repositories, isolated `web-state` directories, and dedicated Herdr sessions (`bf-322c1b1ad6e9026133ba`, cleanly stopped after teardown). Pre-existing host sessions (`default`, `bf-c1695ccd3f2b994f91bd`) and user state (`~/.local/state/bflow/web`) were never touched.

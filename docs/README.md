@@ -33,7 +33,7 @@ Bắt đầu từ [README](../README.md), [cài đặt](guide/installation.md) v
 | Nguyên nhân gốc, per-finding verdicts và test integrity | [Rework causality](rework-causality.md) · [Test integrity](../packages/runtime/TEST-INTEGRITY-VALIDATION.md) |
 | Telemetry chỉ đọc của workflow (`--telemetry`) | [Telemetry spec](../packages/runtime/TELEMETRY-SPEC.md) |
 | NFR và kiểm thử tương xứng rủi ro | [NFR/test design](nfr-and-test-design.md) |
-| Commit mới so với mốc docs ban đầu | [Đến 2026-10-27](main-updates-2026-10-25.md) · [901caa6..8d86553](main-updates-2026-10-29.md) · [8d86553..74f8d3f & Web UX](main-updates-2026-10-31.md) |
+| Commit mới so với mốc docs ban đầu | [Đến 2026-10-27](main-updates-2026-10-25.md) · [901caa6..8d86553](main-updates-2026-10-29.md) · [8d86553..2bf5d2e & Web UX](main-updates-2026-10-31.md) |
 | Local web: contract, composition, thiết kế | [ADR 0006](adr/0006-local-web-interaction.md) · [ADR 0007](adr/0007-local-web-composition.md) · [Design](superpowers/specs/2026-10-28-local-web-design.md) · [DESIGN tokens](DESIGN.md) |
 | Provider failover có phê duyệt | [Decision](provider-failover-decision.md) · [Plan](provider-failover-plan.md) |
 | Specialist profiles, BA-only, QA-only, data checks | [Runtime README](../packages/runtime/README.md#custom-specialist-profiles-rp-01) · [BA-only](../packages/runtime/ANALYSIS-ONLY-WORKFLOW.md) · [QA-only](../packages/runtime/QA-ONLY-WORKFLOW.md) · [Data](../packages/runtime/DATA-VERIFICATION.md) |
