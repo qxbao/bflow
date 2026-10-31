@@ -41,6 +41,8 @@ export interface NoticeLike {
   runLabel?: string | undefined;
   summary?: string | undefined;
   truncated?: boolean | undefined;
+  /** Bounded summary/reason/status extracted before the 4096-byte JSON summary is truncated. */
+  reason?: string | undefined;
   /** Preferred over the summary when present and valid. Receipts written before this field existed simply lack it. */
   userDecision?: unknown;
   /** Structured fields of a non-decision approval, when stored. */
@@ -331,21 +333,62 @@ export function approvalNoticeFields(payload: unknown): ApprovalNotice | undefin
   return fields.success ? fields.data : undefined;
 }
 
+const VERIFICATION_OUTCOME_LABELS: Readonly<Record<string, string>> = {
+  passed: "Kết quả kiểm tra đạt yêu cầu",
+  approved: "Kết quả đánh giá đạt yêu cầu",
+  failed: "Kết quả kiểm tra chưa đạt yêu cầu",
+  rejected: "Kết quả đánh giá chưa đạt yêu cầu",
+  changes_requested: "Cần chỉnh sửa theo góp ý đánh giá",
+  blocked: "Bước kiểm tra đang tạm dừng vì vướng mắc",
+  inconclusive: "Kết quả kiểm tra chưa đủ căn cứ kết luận"
+};
+
+const BARE_PROGRESS_STATUS_TOKENS = new Set([
+  "pending", "accepted", "clarifying", "specifying", "designing", "planning",
+  "awaiting_approval", "implementing", "verifying", "integrating", "completed",
+  "succeeded", "failed", "cancelled", "escalated", "running"
+]);
+
+function extractUpdateText(type: string, notice: NoticeLike, payload: unknown): string | undefined {
+  const obj = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : undefined;
+  if (["conversation.progress", "conversation.clarification", "delegation.accepted"].includes(type)) {
+    const fromPayload = obj
+      ? [obj.blockageReason, obj.headline].find((value): value is string => typeof value === "string" && value.length > 0)
+      : undefined;
+    if (fromPayload) return fromPayload;
+    const fallback = typeof notice.reason === "string" ? notice.reason.trim() : "";
+    if (fallback.length > 0 && !BARE_PROGRESS_STATUS_TOKENS.has(fallback.toLowerCase())) return fallback;
+    return undefined;
+  }
+  if (["verification.result", "review.verdict", "verification.escalation"].includes(type)) {
+    const escalation = obj?.escalation && typeof obj.escalation === "object" && !Array.isArray(obj.escalation)
+      ? obj.escalation as Record<string, unknown>
+      : undefined;
+    const candidate = (obj
+      ? [obj.summary, obj.reason, escalation?.reason, obj.verdict, obj.status]
+          .find((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : undefined) ?? (typeof notice.reason === "string" && notice.reason.trim().length > 0 ? notice.reason : undefined);
+    if (!candidate) return undefined;
+    const trimmed = candidate.trim();
+    return VERIFICATION_OUTCOME_LABELS[trimmed.toLowerCase()] ?? trimmed;
+  }
+  return undefined;
+}
+
 function updateNotice(notice: NoticeLike): RenderedNotice {
   const type = notice.type ?? "notice";
   const truncated = notice.truncated === true;
-  // A Runtime progress message says why it matters in blockageReason (or headline); show that instead of only the type.
-  const payload = ["conversation.progress", "conversation.clarification", "delegation.accepted"].includes(type) ? parseSummary(notice) : undefined;
-  const rawText = payload && typeof payload === "object" && !Array.isArray(payload)
-    ? [(payload as Record<string, unknown>).blockageReason, (payload as Record<string, unknown>).headline].find(value => typeof value === "string" && value.length > 0) as string | undefined
+  // A Runtime progress or verification message says why it matters in blockageReason/headline/summary/reason; show that instead of only the type.
+  const payload = ["conversation.progress", "conversation.clarification", "delegation.accepted", "verification.result", "review.verdict", "verification.escalation"].includes(type)
+    ? parseSummary(notice)
     : undefined;
+  const rawText = extractUpdateText(type, notice, payload);
   const runLabel = notice.runLabel;
   const workTag = workTagOf(notice, notice.runId) ?? formatRoleLabel(notice.senderRole ?? "runtime");
   const cleanText = rawText ? sanitizeCardProse(rawText, { runId: notice.runId, workTag }) : (MESSAGE_TYPE_LABELS[type] ? `Đã nhận ${MESSAGE_TYPE_LABELS[type]}` : "Có cập nhật tiến độ mới");
   // Bind display to this exact notice and its content: repeated/stale headlines must not acknowledge a different update.
   const ackToken = notice.runId && rawText ? `${workTag}: ${cleanText}` : undefined;
   const headline = `▶ ${workTag}: ${cleanText}`;
-  const note = truncated ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
   // The user can only answer a clarification whose questions are shown; the headline alone hides them.
   const rawQuestions = type === "conversation.clarification" && payload && typeof payload === "object" && !Array.isArray(payload)
     ? (payload as Record<string, unknown>).questions : undefined;
@@ -353,6 +396,8 @@ function updateNotice(notice: NoticeLike): RenderedNotice {
     ? rawQuestions.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 10)
       .map((item, index) => `  ${index + 1}. ${sanitizeCardProse(sliceUtf16Safe(item, 1000), { runId: notice.runId, workTag })}`)
     : [];
+  const missingTruncatedContent = truncated && (!rawText || (type === "conversation.clarification" && questions.length === 0));
+  const note = missingTruncatedContent ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
   // Substantive progress needs display recovery too. Its text is an acknowledgement token, never approval authority.
   return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}),
     ...(runLabel ? { runLabel } : {}), headline,

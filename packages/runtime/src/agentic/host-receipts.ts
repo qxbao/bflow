@@ -96,6 +96,9 @@ function extractNoticeReason(
   blocked?: { readonly reason: string }
 ): string | undefined {
   const obj = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const escalation = obj.escalation && typeof obj.escalation === "object" && !Array.isArray(obj.escalation)
+    ? obj.escalation as Record<string, unknown>
+    : undefined;
   const candidates = [
     obj.reason,
     obj.blockageReason,
@@ -104,6 +107,8 @@ function extractNoticeReason(
     userDecision?.question,
     obj.headline,
     obj.summary,
+    escalation?.reason,
+    obj.verdict,
     obj.status
   ];
   const raw = candidates.find((val): val is string => typeof val === "string" && val.trim().length > 0);

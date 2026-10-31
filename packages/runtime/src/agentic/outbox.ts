@@ -364,6 +364,9 @@ export class HerdrOutbox {
       const health = await this.ports.panes.inspectRoleHealth(out.selector);
       if (canReleaseOnPromptReady && health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
         await this.release(out); // transport capacity only; never task-success evidence
+      else if (health.ok && health.value.occupantMatches && health.value.paneId !== out.handle.target.paneId &&
+          out.message.recipient.role === "coordinator")
+        await this.release(out); // singleton Coordinator moved to a new session pane; release transport capacity without claiming specialist/review outcomes
       else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId &&
           (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
         try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); } // a bounded host measurement may outlive one lease period

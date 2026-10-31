@@ -33,7 +33,17 @@ export async function callHost(socketPath: string, token: string, method: string
       socket.end();
       try {
         const response = record(JSON.parse(full.subarray(0, lineEnd).toString("utf8")));
-        finish(() => { response.ok === true ? accept(response.value) : reject(new Error(textField(response.error))); });
+        if (response.ok === true) {
+          finish(() => accept(response.value));
+        } else {
+          const errMessage = typeof response.error === "string" && response.error.trim().length > 0
+            ? response.error
+            : response.error && typeof response.error === "object" && !Array.isArray(response.error)
+              ? textField((response.error as Record<string, unknown>).message)
+              : textField(response.error);
+          const err = new Error(errMessage);
+          finish(() => reject(err));
+        }
       } catch (error) { finish(() => reject(error)); }
     });
   });

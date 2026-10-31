@@ -520,7 +520,7 @@ export class AgenticWorkflowRuntime {
         Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) return false;
     const run = state.runs.find(item => item.runId === parent.message.run_id);
     const task = run?.tasks.find(item => item.taskId === parent.taskId);
-    return !!run && !run.cancelled && !["completed", "failed", "cancelled", "escalated"].includes(run.status) && !!task && !task.result;
+    return !!run && !run.cancelled && !["completed", "failed", "cancelled", "escalated"].includes(run.status) && !!task && !task.writerReleased && !task.result;
   }
   private escalateExpiredWriterNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, sourceMessageId: string, reason: string): void {
     if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) return;
