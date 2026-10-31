@@ -308,12 +308,94 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
       return compat;
     }
 
-    if (state?.inFlightEnsure) {
-      const res = await state.inFlightEnsure;
-      if (res.ok && state) {
-        state.attachedScopes.add(this.formatScopeKey(operation.scope));
+    if (options?.signal?.aborted) {
+      return err({
+        code: "cancelled",
+        retryable: false,
+        message: "Service ensure cancelled before execution"
+      });
+    }
+
+    const awaitEnsureForCaller = async (
+      sharedEnsure: Promise<OperationResult<MCPServiceObservation>>,
+      targetState: typeof state
+    ): Promise<OperationResult<MCPServiceObservation>> => {
+      const callerSignal = options?.signal;
+      const callerTimeoutMs =
+        options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+          ? options.timeoutMs
+          : undefined;
+
+      if (!callerSignal && callerTimeoutMs === undefined) {
+        const res = await sharedEnsure;
+        if (res.ok && targetState) {
+          targetState.attachedScopes.add(this.formatScopeKey(operation.scope));
+        }
+        return res;
+      }
+
+      const res = await new Promise<OperationResult<MCPServiceObservation>>((resolve) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+
+        const finish = (outcome: OperationResult<MCPServiceObservation>) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          if (callerSignal) callerSignal.removeEventListener("abort", onAbort);
+          resolve(outcome);
+        };
+
+        const onAbort = () => {
+          finish(
+            err({
+              code: "cancelled",
+              retryable: false,
+              message: "Service ensure cancelled by caller signal"
+            })
+          );
+        };
+
+        if (callerSignal) {
+          if (callerSignal.aborted) {
+            onAbort();
+            return;
+          }
+          callerSignal.addEventListener("abort", onAbort, { once: true });
+        }
+
+        if (callerTimeoutMs !== undefined) {
+          timer = setTimeout(() => {
+            finish(
+              err({
+                code: "timeout",
+                retryable: true,
+                retrySafety: "observation_only",
+                message: `Timed out waiting for service '${service.serviceId}' readiness`
+              })
+            );
+          }, Math.min(2_147_483_647, Math.ceil(callerTimeoutMs)));
+        }
+
+        sharedEnsure.then(finish, (e) =>
+          finish(
+            err({
+              code: "transport_unavailable",
+              retryable: true,
+              message: e instanceof Error ? e.message : String(e)
+            })
+          )
+        );
+      });
+
+      if (res.ok && targetState) {
+        targetState.attachedScopes.add(this.formatScopeKey(operation.scope));
       }
       return res;
+    };
+
+    if (state?.inFlightEnsure) {
+      return awaitEnsureForCaller(state.inFlightEnsure, state);
     }
 
     if (state && state.status === "ready" && state.driver?.isAlive()) {
@@ -359,7 +441,7 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
         instanceId: `pending-${service.serviceId}`,
         status: "starting",
         discoveredTools: [],
-        attachedScopes: new Set([this.formatScopeKey(operation.scope)]),
+        attachedScopes: new Set(),
         activeClients: new Set(),
         restartCount: 0,
         diagnosticCode: "starting",
@@ -369,7 +451,6 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
     } else {
       state.status = "starting";
       state.diagnosticCode = "starting";
-      state.attachedScopes.add(this.formatScopeKey(operation.scope));
     }
 
     const currentGen = state.startGeneration + 1;
@@ -378,7 +459,8 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
     const capturedEntry = entry;
     const capturedState = state;
 
-    const ensurePromise = (async (): Promise<OperationResult<MCPServiceObservation>> => {
+    let ensurePromise!: Promise<OperationResult<MCPServiceObservation>>;
+    ensurePromise = (async (): Promise<OperationResult<MCPServiceObservation>> => {
       try {
         const driverRes = await this.driverFactory.createInstance(
           capturedEntry,
@@ -395,12 +477,9 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
           this.metrics.recordProcessStart(service.serviceId, driver.instanceId, driver.pid);
         }
 
-        const initTimeout = options?.timeoutMs ?? service.healthTimeoutMs;
-        const initOptions: OperationOptions = {
-          timeoutMs: initTimeout,
-          ...(options?.signal !== undefined ? { signal: options.signal } : {})
-        };
-        const initRes = await driver.initialize(initOptions);
+        const initRes = await driver.initialize({
+          timeoutMs: service.healthTimeoutMs
+        });
 
         if (!initRes.ok) {
           if (capturedEntry.definition.connection.ownership === "bflow") {
@@ -479,17 +558,15 @@ export class DefaultMCPServiceManager implements ExtendedMCPServiceManager {
           retryable: true,
           message: e instanceof Error ? e.message : String(e)
         });
+      } finally {
+        if (capturedState.inFlightEnsure === ensurePromise) {
+          capturedState.inFlightEnsure = undefined;
+        }
       }
     })();
 
     state.inFlightEnsure = ensurePromise;
-    try {
-      return await ensurePromise;
-    } finally {
-      if (state.inFlightEnsure === ensurePromise) {
-        state.inFlightEnsure = undefined;
-      }
-    }
+    return awaitEnsureForCaller(ensurePromise, state);
   }
 
   async inspect(

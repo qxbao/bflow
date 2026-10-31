@@ -97,9 +97,9 @@ export class BflowSharedMCPGateway {
   private readonly concurrencyQueues = new Map<string, ConcurrencySlot>();
 
   constructor(options?: BflowSharedMCPGatewayOptions) {
-    this.registry = options?.registry ?? new MCPServiceRegistry();
-    this.metrics = options?.metrics ?? new GatewayMetricsCollector();
-    this.secretStore = options?.secretStore ?? new GatewaySecretStore();
+    this.registry = options?.registry ?? options?.serviceManager?.registry ?? new MCPServiceRegistry();
+    this.metrics = options?.metrics ?? options?.serviceManager?.metrics ?? new GatewayMetricsCollector();
+    this.secretStore = options?.secretStore ?? options?.serviceManager?.secretStore ?? new GatewaySecretStore();
     this.serviceManager =
       options?.serviceManager ??
       new DefaultMCPServiceManager({
@@ -959,11 +959,11 @@ export class BflowSharedMCPGateway {
     const requestId = randomUUID();
 
     return new Promise<OperationResult<() => void>>((resolve) => {
-      let timer: NodeJS.Timeout | undefined;
+      let cancelTimer: (() => void) | undefined;
       let abortListener: (() => void) | undefined;
 
       const cleanup = () => {
-        if (timer) clearTimeout(timer);
+        if (cancelTimer) cancelTimer();
         if (signal && abortListener) signal.removeEventListener("abort", abortListener);
         this.metrics.recordQueueExit(serviceId);
         const idx = slot!.queue.findIndex(item => item.requestId === requestId);
@@ -973,7 +973,7 @@ export class BflowSharedMCPGateway {
       };
 
       if (timeoutMs && timeoutMs > 0) {
-        timer = setTimeout(() => {
+        cancelTimer = scheduleSafeTimeout(() => {
           cleanup();
           resolve(
             err({
@@ -1348,6 +1348,15 @@ export class BflowSharedMCPGateway {
       }
     }
 
+    if (options?.signal?.aborted) {
+      releaseSlot();
+      return err({
+        code: "cancelled",
+        retryable: false,
+        message: "Tool call cancelled before upstream dispatch"
+      });
+    }
+
     const isReadOnly = entry.policy.readOnlyTools?.includes(request.tool) ?? false;
     const mutating = !isReadOnly;
     const requestId = `req-${randomUUID()}`;
@@ -1381,7 +1390,7 @@ export class BflowSharedMCPGateway {
     const callTimeoutMs = options?.timeoutMs ?? entry.policy.callTimeoutMs ?? 60_000;
     const abortCtrl = new AbortController();
     let timedOut = false;
-    const timeoutTimer = setTimeout(() => {
+    const cancelTimeoutTimer = scheduleSafeTimeout(() => {
       timedOut = true;
       abortCtrl.abort(new Error("Call timeout"));
     }, callTimeoutMs);
@@ -1413,7 +1422,7 @@ export class BflowSharedMCPGateway {
 
       const upstreamRes = await driver.callTool(upstreamInput);
 
-      clearTimeout(timeoutTimer);
+      cancelTimeoutTimer();
       if (options?.signal) {
         options.signal.removeEventListener("abort", onParentAbort);
       }
@@ -1483,8 +1492,12 @@ export class BflowSharedMCPGateway {
       }
 
       const outputSchema = negotiatedDefinition?.outputSchema;
+      let resolvedStructuredContent = upstreamRes.value.structuredContent;
+      if (!upstreamRes.value.isError && outputSchema !== undefined && resolvedStructuredContent === undefined) {
+        resolvedStructuredContent = trySynthesizeStructuredContent(upstreamRes.value.content, outputSchema);
+      }
       const invalidStructuredOutput = !upstreamRes.value.isError && outputSchema !== undefined &&
-        (upstreamRes.value.structuredContent === undefined || !validateJsonSchema(upstreamRes.value.structuredContent, outputSchema));
+        (resolvedStructuredContent === undefined || !validateJsonSchema(resolvedStructuredContent, outputSchema));
       if (invalidStructuredOutput) {
         const invalidResult: MCPToolCallResult = MCPToolCallResultSchema.parse({ schemaVersion: 3, callId: request.callId,
           status: mutating ? "unknown" : "failed",
@@ -1510,7 +1523,7 @@ export class BflowSharedMCPGateway {
         schemaVersion: 3,
         callId: request.callId,
         status: outcomeStatus,
-        output: preserveStructuredToolOutput(upstreamRes.value.content, upstreamRes.value.structuredContent),
+        output: preserveStructuredToolOutput(upstreamRes.value.content, resolvedStructuredContent),
         observedAt: this.now().toISOString()
       });
 
@@ -1530,7 +1543,7 @@ export class BflowSharedMCPGateway {
       this.recordIdempotency(request.idempotencyKey, request, res);
       return res;
     } catch (e) {
-      clearTimeout(timeoutTimer);
+      cancelTimeoutTimer();
       if (options?.signal) {
         options.signal.removeEventListener("abort", onParentAbort);
       }
@@ -1660,8 +1673,13 @@ export class BflowSharedMCPGateway {
       const rec = await driver.reconcileRequest(request.callId, ledger.requestId);
       if (rec.status === "completed" || rec.status === "failed") {
         const outputSchema = this.serviceManager.getPartitionState(ledger.partitionKey)?.toolDefinitions?.find(tool => tool.name === request.tool)?.outputSchema;
+        let resolvedStructuredContent = rec.structuredContent;
+        const candidateOutput = rec.output ?? ledger.result.output;
+        if (rec.status === "completed" && outputSchema !== undefined && resolvedStructuredContent === undefined) {
+          resolvedStructuredContent = trySynthesizeStructuredContent(candidateOutput, outputSchema);
+        }
         const invalidStructuredOutput = rec.status === "completed" && outputSchema !== undefined &&
-          (rec.structuredContent === undefined || !validateJsonSchema(rec.structuredContent, outputSchema));
+          (resolvedStructuredContent === undefined || !validateJsonSchema(resolvedStructuredContent, outputSchema));
         if (invalidStructuredOutput) {
           const status = ledger.mutating ? "unknown" : "failed";
           ledger.result = MCPToolCallResultSchema.parse({ schemaVersion: 3, callId: request.callId, status,
@@ -1680,7 +1698,7 @@ export class BflowSharedMCPGateway {
           schemaVersion: 3,
           callId: request.callId,
           status: rec.status,
-          output: preserveStructuredToolOutput(rec.output ?? ledger.result.output, rec.structuredContent),
+          output: preserveStructuredToolOutput(candidateOutput, resolvedStructuredContent),
           observedAt: this.now().toISOString()
         });
         this.durableCallLedger?.recordResult(request.callId, ledger.result);
@@ -1723,6 +1741,49 @@ export class BflowSharedMCPGateway {
     }
 
     return ok(ledger.result);
+  }
+}
+
+const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
+
+function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void {
+  if (!Number.isFinite(delayMs)) return () => {};
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let remaining = Math.max(0, Math.ceil(delayMs));
+
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_SAFE_TIMEOUT_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      if (cancelled) return;
+      if (remaining > 0) {
+        arm();
+      } else {
+        callback();
+      }
+    }, slice);
+  };
+
+  arm();
+  return () => {
+    cancelled = true;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
+function trySynthesizeStructuredContent(content: JsonValue, outputSchema: Readonly<Record<string, JsonValue>>): JsonValue | undefined {
+  if (!Array.isArray(content) || content.length !== 1) return undefined;
+  const first = content[0];
+  if (typeof first !== "object" || first === null || Array.isArray(first)) return undefined;
+  const record = first as Record<string, unknown>;
+  if (record.type !== "text" || typeof record.text !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(record.text) as JsonValue;
+    return validateJsonSchema(parsed, outputSchema) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }
 

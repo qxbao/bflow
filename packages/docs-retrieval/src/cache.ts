@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface CachePolicy {
@@ -71,10 +71,19 @@ export class MemoryDocsCache implements DocsCache {
     return entry;
   }
   async set(parts: CacheKeyParts, content: string, ttlSeconds: number): Promise<void> {
+    const key = cacheKey(parts);
     const max = this.options.maxEntries ?? 500;
-    while (this.entries.size >= max) { const oldest = this.entries.keys().next().value; if (oldest === undefined) break; this.entries.delete(oldest); this.counters.evictions++; }
+    if (this.entries.has(key)) {
+      this.entries.delete(key);
+    }
+    while (this.entries.size >= max) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+      this.counters.evictions++;
+    }
     const now = this.now();
-    this.entries.set(cacheKey(parts), { libraryId: parts.libraryId, version: parts.version, language: parts.language, content,
+    this.entries.set(key, { libraryId: parts.libraryId, version: parts.version, language: parts.language, content,
       storedAt: new Date(now).toISOString(), expiresAt: new Date(now + ttlSeconds * 1000).toISOString() });
     this.counters.writes++;
   }
@@ -101,8 +110,8 @@ export class FileDocsCache implements DocsCache {
   async get(parts: CacheKeyParts): Promise<CacheEntry | null> {
     const file = this.path(cacheKey(parts));
     try {
-      const info = await stat(file);
-      if (!info.isFile()) throw new Error("not a file");
+      const info = await lstat(file);
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error("not a regular file");
       const entry = JSON.parse(await readFile(file, "utf8")) as Partial<CacheEntry> & { schemaVersion?: number };
       if (entry.schemaVersion !== 1 || typeof entry.content !== "string" || typeof entry.expiresAt !== "string" || typeof entry.libraryId !== "string") throw new Error("invalid entry");
       if (Date.parse(entry.expiresAt) <= this.now()) { await rm(file, { force: true }); this.counters.expired++; this.counters.misses++; return null; }
@@ -121,9 +130,14 @@ export class FileDocsCache implements DocsCache {
     const body = JSON.stringify({ schemaVersion: 1, libraryId: parts.libraryId, version: parts.version, language: parts.language, content,
       storedAt: new Date(now).toISOString(), expiresAt: new Date(now + ttlSeconds * 1000).toISOString() });
     const target = this.path(cacheKey(parts));
-    const temporary = `${target}.${process.pid}.tmp`;
-    await writeFile(temporary, body, { mode: 0o600 });
-    await rename(temporary, target);
+    const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, body, { mode: 0o600 });
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
     this.counters.writes++;
     await this.prune();
   }
@@ -134,8 +148,8 @@ export class FileDocsCache implements DocsCache {
     const files: Array<{ file: string; mtime: number; size: number }> = [];
     for (const name of await readdir(this.options.directory).catch(() => [] as string[])) {
       if (!name.endsWith(".json")) continue;
-      const info = await stat(join(this.options.directory, name)).catch(() => null);
-      if (info?.isFile()) files.push({ file: join(this.options.directory, name), mtime: info.mtimeMs, size: info.size });
+      const info = await lstat(join(this.options.directory, name)).catch(() => null);
+      if (info?.isFile() && !info.isSymbolicLink()) files.push({ file: join(this.options.directory, name), mtime: info.mtimeMs, size: info.size });
     }
     files.sort((a, b) => a.mtime - b.mtime);
     let total = files.reduce((sum, item) => sum + item.size, 0);

@@ -305,12 +305,15 @@ export class AgyStdioHttpGatewayBridge {
         await this.write(toolError(id, "Gateway returned a malformed or mismatched tool call result"));
         return;
       }
-      const content = toolContent(parsed.data.output);
+      const unwrapped = unwrapGatewayToolOutput(parsed.data.output);
       await this.write({ jsonrpc: "2.0", id, result: {
-        isError: parsed.data.status !== "completed",
+        isError: parsed.data.status !== "completed" || unwrapped.innerIsError,
         content: parsed.data.status === "unknown"
-          ? [{ type: "text", text: `Gateway outcome is unknown; do not retry this mutation. ${content[0]?.text ?? ""}` }]
-          : content
+          ? [{ type: "text", text: `Gateway outcome is unknown; do not retry this mutation. ${unwrapped.content[0]?.text ?? ""}` }]
+          : unwrapped.content,
+        ...(parsed.data.status !== "unknown" && unwrapped.structuredContent !== undefined
+          ? { structuredContent: unwrapped.structuredContent }
+          : {})
       } });
     } catch {
       await this.write(toolError(id, "Gateway tool call failed or was cancelled; outcome may be unknown. Do not retry a mutation."));
@@ -404,6 +407,29 @@ function rpcIdKey(id: string | number): string {
 
 function toolError(id: string | number, message: string): unknown {
   return { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: message }] } };
+}
+
+const STRUCTURED_ENVELOPE_KEYS = new Set(["content", "structuredContent", "isError", "_meta"]);
+
+function unwrapGatewayToolOutput(output: unknown): {
+  readonly content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+  readonly structuredContent?: unknown;
+  readonly innerIsError: boolean;
+} {
+  if (
+    isRecord(output) &&
+    Object.keys(output).every(key => STRUCTURED_ENVELOPE_KEYS.has(key)) &&
+    ("structuredContent" in output ||
+      (Array.isArray(output.content) && output.content.every(item => isRecord(item) && typeof item.type === "string")))
+  ) {
+    const rawContent = "content" in output ? output.content : output.structuredContent;
+    return {
+      content: toolContent(rawContent),
+      ...(output.structuredContent !== undefined ? { structuredContent: output.structuredContent } : {}),
+      innerIsError: output.isError === true
+    };
+  }
+  return { content: toolContent(output), innerIsError: false };
 }
 
 function toolContent(output: unknown): Array<{ type: string; text?: string; [key: string]: unknown }> {
