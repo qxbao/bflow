@@ -1,8 +1,50 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { x as extractTar } from "tar";
+
+const FSYNC_TOLERATED_CODES = new Set([
+  "EINVAL",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "ENOSYS",
+  "EPERM",
+  "EACCES",
+  "EBADF",
+  "EISDIR",
+  "EROFS"
+]);
+
+export async function fsyncTolerant(handle: { sync(): Promise<void> }): Promise<void> {
+  try {
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== undefined && FSYNC_TOLERATED_CODES.has(code)) return;
+    throw error;
+  }
+}
+
+async function isDeadOrRecycledLockPid(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | undefined)?.code === "ESRCH";
+  }
+  if (process.platform !== "linux") return false;
+  try {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
+    if (!cmdline) return false;
+    const exeBase = basename(cmdline.split("\0")[0] ?? "");
+    if (/^(node|nodejs|bflow|tsx|vitest|bun|deno)($|[-.])/i.test(exeBase)) return false;
+    if (cmdline.includes("bflow") || cmdline.includes("vitest")) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export const sha256 = (bytes: string | Buffer): string => createHash("sha256").update(bytes).digest("hex");
 export async function fileDigest(path: string): Promise<string> {
@@ -54,7 +96,7 @@ export async function existingPrivateDirectory(path: string): Promise<string> {
 export async function atomicJson(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.tmp-${randomUUID()}`;
   const handle = await open(temporary, "wx", 0o600);
-  try { await handle.writeFile(JSON.stringify(value, null, 2) + "\n"); await handle.sync(); }
+  try { await handle.writeFile(JSON.stringify(value, null, 2) + "\n"); await fsyncTolerant(handle); }
   finally { await handle.close(); }
   try { await rename(temporary, path); }
   finally { await rm(temporary, { force: true }); }
@@ -105,7 +147,52 @@ export async function extractPinnedArchive(artifact: string, target: string): Pr
 
 export async function withFileLock<T>(path: string, action: () => Promise<T>): Promise<T> {
   await privateDirectory(dirname(path));
-  const handle = await open(path, "wx", 0o600);
-  try { await handle.writeFile(JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })); return await action(); }
-  finally { await handle.close(); await rm(path, { force: true }); }
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      handle = await open(path, "wx", 0o600);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "EEXIST" || attempt > 0) throw error;
+      let raw: string;
+      let holderPid: number | undefined;
+      try {
+        raw = await readRegular(path, 4096);
+        const parsed = JSON.parse(raw) as { pid?: unknown; acquiredAt?: unknown };
+        if (typeof parsed?.pid === "number" && typeof parsed?.acquiredAt === "string") {
+          holderPid = parsed.pid;
+        }
+      } catch {
+        throw error;
+      }
+      if (holderPid === undefined || !(await isDeadOrRecycledLockPid(holderPid))) {
+        throw error;
+      }
+      const reclaimTmp = `${path}.stale-${randomUUID()}`;
+      try {
+        if ((await readRegular(path, 4096)) === raw) {
+          await rename(path, reclaimTmp);
+          await rm(reclaimTmp, { force: true });
+        }
+      } catch {
+        await rm(reclaimTmp, { force: true }).catch(() => undefined);
+      }
+    }
+  }
+  if (!handle) throw Object.assign(new Error(`EEXIST: file already exists, open '${path}'`), { code: "EEXIST" });
+  const payload = JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), token: randomUUID() });
+  try {
+    await handle.writeFile(payload);
+    await fsyncTolerant(handle);
+    return await action();
+  } finally {
+    await handle.close();
+    try {
+      if ((await readRegular(path, 4096)) === payload) {
+        await rm(path, { force: true });
+      }
+    } catch {
+      await rm(path, { force: true }).catch(() => undefined);
+    }
+  }
 }

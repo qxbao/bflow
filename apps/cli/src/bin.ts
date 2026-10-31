@@ -139,6 +139,7 @@ export async function main(
             ...(context?.cwd !== undefined ? { cwd: context.cwd } : {}),
             ...(configPath !== undefined ? { configPath } : {}),
             ...(context?.clock !== undefined ? { clock: context.clock } : {}),
+            ...(parseRes.value.command === "status" ? { readOnly: true } : {}),
             ...(context?.operationOptions !== undefined
               ? { operationOptions: context.operationOptions }
               : {})

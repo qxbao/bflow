@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { GatewayControlClient, resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
 import type { MCPClientRegistration, ResolvedToolGrant } from "@bflow/contracts";
 import type { DocsTool, DocsToolCaller, ToolCallOutcome } from "@bflow/docs-retrieval";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
+import { gitSafeDirectoryFlags, sanitizedGitEnv } from "./git-safe-directory.js";
 import type { RepositoryIdentity } from "./repository.js";
 
 import { DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS } from "./deepwiki-constants.js";
@@ -24,17 +25,19 @@ const LAUNCH_ID = /^[A-Za-z0-9_-]{1,200}$/;
  * git directory. Returns undefined outside git.
  */
 export async function resolveHostRepositoryRoot(cwd: string): Promise<string | undefined> {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+  const env = sanitizedGitEnv();
+  const safeFlags = gitSafeDirectoryFlags(cwd);
   const query = (flag: string) => new Promise<string | undefined>(done => {
-    execFile("git", ["rev-parse", flag], { cwd, env, timeout: 5000 }, (error, stdout) => done(error ? undefined : stdout.trim() || undefined));
+    execFile("git", [...safeFlags, "rev-parse", flag], { cwd, env, timeout: 5000 }, (error, stdout) => done(error ? undefined : stdout.trim() || undefined));
   });
   const common = await query("--git-common-dir");
   if (common) {
     const absolute = isAbsolute(common) ? common : resolve(cwd, common);
-    if (basename(absolute) === ".git") return dirname(absolute);
+    const canonical = await realpath(absolute).catch(() => absolute);
+    if (basename(canonical) === ".git") return dirname(canonical);
   }
-  return query("--show-toplevel");
+  const top = await query("--show-toplevel");
+  return top ? await realpath(top).catch(() => top) : undefined;
 }
 
 export interface GatewayTarget {

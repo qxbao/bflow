@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { EnvironmentConfigSchema } from "./environment-config.js";
 import { loadRepositoryConfig } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
+import { fsyncTolerant } from "./fs-resilience.js";
 import { identifyRepository } from "./repository.js";
 
 export interface ConfigMigrationOutput {
@@ -85,7 +86,7 @@ export async function migrateRepositoryConfig(cwd: string): Promise<ConfigMigrat
     if (await readFile(backupPath, "utf8") !== sourceContent)
       throw new Error(`Cannot migrate: legacy config changed while its backup was being created. Backup retained at ${backupPath}.`);
     const backupHandle = await open(backupPath, "r");
-    try { await backupHandle.sync(); } finally { await backupHandle.close(); }
+    try { await fsyncTolerant(backupHandle); } finally { await backupHandle.close(); }
   }
   if (await readFile(source, "utf8") !== sourceContent) {
     throw new Error(`Cannot complete migration: legacy config changed while being backed up. Original and backup were retained at ${source} and ${backupPath}; canonical output was not written.`);
@@ -96,7 +97,7 @@ export async function migrateRepositoryConfig(cwd: string): Promise<ConfigMigrat
   try {
     temporaryHandle = await open(temporary, "wx", 0o600);
     await temporaryHandle.writeFile(output, "utf8");
-    await temporaryHandle.sync();
+    await fsyncTolerant(temporaryHandle);
     await temporaryHandle.close();
     temporaryHandle = undefined;
     await link(temporary, target);

@@ -252,8 +252,20 @@ export class PathComponent implements SetupComponent {
         return { content: "", mode: 0, error: `launcher is not an owned regular file: ${file}` };
       }
       const content = await readFile(file, "utf8");
-      if (!content.startsWith(LAUNCHER_HEADER)) return { content, mode: info.mode & 0o777, error: `refusing to replace launcher without Bflow ownership: ${file}` };
-      return { content, mode: info.mode & 0o777 };
+      const rawMode = info.mode & 0o777;
+      let mode = rawMode;
+      if ((rawMode & 0o755) === 0o755 && (rawMode & 0o022) !== 0) {
+        try {
+          const parentMode = (await lstat(path.dirname(file))).mode & 0o777;
+          if (((rawMode & 0o022) & ~(parentMode & 0o022)) === 0) {
+            mode = 0o755;
+          }
+        } catch {
+          // retain rawMode if parent cannot be inspected
+        }
+      }
+      if (!content.startsWith(LAUNCHER_HEADER)) return { content, mode, error: `refusing to replace launcher without Bflow ownership: ${file}` };
+      return { content, mode };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
       return { content: "", mode: 0, error: `cannot inspect launcher: ${e instanceof Error ? e.message : String(e)}` };

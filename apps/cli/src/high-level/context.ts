@@ -57,8 +57,11 @@ export async function readJsonFile(path: string, label: string): Promise<unknown
   try {
     text = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT")
       throw new HighLevelError(notFoundError(`${label} file not found: ${path}`, { reason: "file_not_found", path }));
+    if (code === "EISDIR" || code === "ENOTDIR")
+      throw new HighLevelError(validationError(`${label} path is not a regular file: ${path}`, { reason: "not_a_regular_file", path }));
     throw error;
   }
   try {

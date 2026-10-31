@@ -1,16 +1,22 @@
-import { resolvePlatformConfiguration, rolePreferenceConstraints } from "./platform-resolution.js";
+import {
+  configuredPlatformRoles,
+  modelSettings,
+  resolvePlatformConfiguration,
+  resolveRepositoryToolPolicy,
+  rolePreferenceConstraints,
+  selectedProfileName
+} from "./platform-resolution.js";
+export { configuredPlatformRoles, resolveRepositoryToolPolicy, selectedProfileName };
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOption } from "@bflow/runtime";
 import { createHash } from "node:crypto";
-import type { RepositoryToolPolicy, ResolvedToolGrant, RoleToolRequirement } from "@bflow/contracts";
-import { MCPServiceDefinitionSchema, OperationResultSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema,
+import type { RepositoryToolPolicy, ResolvedToolGrant } from "@bflow/contracts";
+import { MCPServiceDefinitionSchema, OperationResultSchema, ResolvedToolGrantSchema,
   VerifiedToolExecutableIdentitySchema } from "@bflow/contracts";
-import { digest as canonicalDigest } from "@bflow/machine-setup";
 import { readGatewayReadiness, type ServiceReadiness } from "./gateway-readiness.js";
 import type { EnvironmentCompositionInput } from "./environment.js";
-import { EnvironmentProviderSchema, isGovernanceRoleConfig, type EnvironmentGovernanceRoleConfig, type EnvironmentProvider,
-  type EnvironmentRoleConfig } from "./environment-config.js";
+import { EnvironmentProviderSchema, isGovernanceRoleConfig, type EnvironmentGovernanceRoleConfig } from "./environment-config.js";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { readGatewayRepositoriesState } from "./gateway-repositories.js";
 import { DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS } from "./deepwiki-constants.js";
@@ -251,19 +257,6 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   });
 }
 
-/** Preserve governance roles while inheriting only the Developer launch template. */
-export function configuredPlatformRoles(input: EnvironmentCompositionInput): EnvironmentGovernanceRoleConfig[] {
-  // The sos rescue role is launched by the host on demand and never joins platform readiness.
-  const roles = input.config.environment.roles.filter(isGovernanceRoleConfig);
-  const coordinator = roles.find(role => role.role === "coordinator");
-  if (!coordinator) throw new Error("Configuration must include a coordinator role");
-  if (!roles.some(role => role.role === "developer")) {
-    const profile = selectedProfileName(coordinator, input.config.environment);
-    roles.push({ role: "developer", cli: coordinator.cli, required: false, ...modelSettings(coordinator), ...(profile ? { "profile-name": profile } : {}) });
-  }
-  return roles;
-}
-
 export function resolveRolePlatformOption(role: EnvironmentGovernanceRoleConfig, input: EnvironmentCompositionInput, skills: MachineSkillCatalog,
   grants: readonly ResolvedToolGrant[] = [], warn?: (message: string) => void): PlatformRoleOption {
   const environment = input.config.environment;
@@ -335,103 +328,6 @@ export function resolveRolePlatformOption(role: EnvironmentGovernanceRoleConfig,
       return pin ? { ...selection, approvalReceiptId: pin.approvalReceiptId } : selection;
     })
   };
-}
-
-export function resolveRepositoryToolPolicy(input: EnvironmentCompositionInput, machineId: string): RepositoryToolPolicy | undefined {
-  const explicit = input.config.environment.toolPolicy;
-  if (explicit) {
-    const parsed = RepositoryToolPolicySchema.parse(explicit);
-    if (parsed.repositoryId !== input.repository.id || parsed.scope.kind !== "repository" || parsed.scope.repositoryId !== input.repository.id || parsed.scope.machineId !== machineId || parsed.scope.workspaceRoot !== input.repository.root)
-      throw new Error("environment.toolPolicy repository identity must match this repository");
-    const { digest: _digest, ...body } = parsed;
-    if (canonicalDigest(body) !== parsed.digest) throw new Error("environment.toolPolicy digest does not match its canonical contents");
-    const legacyDeepWikiRoles = ["specifier", "architect", "planner", "developer", "reviewer", "qa"];
-    if (input.config.environment.deepwiki?.enabled === true) {
-      const requirement = parsed.requirements.find(item => item.toolId === DEEPWIKI_SERVICE_ID && item.serviceId === DEEPWIKI_SERVICE_ID);
-      if (!requirement || requirement.operations.length !== DEEPWIKI_TOOLS.length ||
-          !DEEPWIKI_TOOLS.every(operation => requirement.operations.includes(operation)) ||
-          requirement.requiredness !== (input.config.environment.deepwiki.required === true ? "required" : "optional") ||
-          requirement.roles.length !== legacyDeepWikiRoles.length || !legacyDeepWikiRoles.every(role => requirement.roles.includes(role as typeof requirement.roles[number])))
-        throw new Error("Legacy environment.deepwiki conflicts with environment.toolPolicy; retain its exact service, operation, requiredness and role allowlist or remove the legacy field");
-    }
-    return parsed;
-  }
-  const requirements: RoleToolRequirement[] = [];
-  const deepwiki = input.config.environment.deepwiki;
-  if (deepwiki?.enabled !== false) {
-    const roles = ["specifier", "architect", "planner", "developer", "reviewer", "qa"] as const;
-    requirements.push({
-      toolId: "deepwiki",
-      kind: "native_remote_mcp",
-      serviceId: DEEPWIKI_SERVICE_ID,
-      operations: [...DEEPWIKI_TOOLS],
-      requiredness: deepwiki?.required ? "required" : "optional",
-      roles: [...roles],
-      triggers: ["external_documentation"]
-    });
-  }
-  const tools = input.config.environment.tools;
-  if (tools?.rtk?.enabled !== false) {
-    requirements.push({
-      toolId: "rtk",
-      kind: "cli_only",
-      operations: ["pipe"],
-      ...(tools?.rtk?.cliCommandProfiles?.length ? { cliCommandProfiles: [...tools.rtk.cliCommandProfiles] } : {}),
-      requiredness: tools?.rtk?.required ? "required" : "optional",
-      roles: ["developer", "reviewer", "tester", "qa"],
-      triggers: ["routine_command"]
-    });
-  }
-  if (tools?.gitnexus?.enabled !== false) {
-    requirements.push({
-      toolId: "gitnexus",
-      kind: "stdio_mcp",
-      operations: ["query", "context", "impact"],
-      requiredness: tools?.gitnexus?.required ? "required" : "optional",
-      roles: ["architect", "developer", "reviewer", "security"],
-      triggers: ["code_relationships"]
-    });
-  }
-  if (tools?.mempalace?.enabled !== false) {
-    const defaultMempalaceServiceId = `mempalace-${createHash("sha256").update(machineId).digest("hex").slice(0, 24)}`;
-    requirements.push({
-      toolId: "mempalace",
-      kind: "stdio_mcp",
-      serviceId: tools?.mempalace?.serviceId ?? defaultMempalaceServiceId,
-      operations: ["mempalace_search"],
-      requiredness: tools?.mempalace?.required ? "required" : "optional",
-      roles: ["developer", "qa", "security"],
-      triggers: ["prior_context"],
-      memoryScope: {
-        wing: tools?.mempalace?.wing ?? input.repository.id,
-        repositoryId: input.repository.id,
-        access: "read_only"
-      }
-    });
-  }
-  if (tools?.["chrome-devtools-mcp"]?.enabled !== false) {
-    requirements.push({
-      toolId: "chrome-devtools-mcp",
-      kind: "stdio_mcp",
-      operations: ["list_pages", "new_page", "navigate_page"],
-      requiredness: tools?.["chrome-devtools-mcp"]?.required ? "required" : "optional",
-      roles: ["tester", "qa"],
-      triggers: ["browser_inspection"]
-    });
-  }
-  if (requirements.length === 0) return undefined;
-  const base = {
-    schemaVersion: 3 as const,
-    repositoryId: input.repository.id,
-    scope: {
-      kind: "repository" as const,
-      machineId,
-      repositoryId: input.repository.id,
-      workspaceRoot: input.repository.root
-    },
-    requirements
-  };
-  return RepositoryToolPolicySchema.parse({ ...base, digest: canonicalDigest(base) });
 }
 
 export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, context: HostPlatformContext, input: EnvironmentCompositionInput,
@@ -531,20 +427,8 @@ export function resolveToolGrants(policy: RepositoryToolPolicy | undefined, cont
   return grants;
 }
 
-export function selectedProfileName(role: EnvironmentRoleConfig, environment: EnvironmentCompositionInput["config"]["environment"]): string | undefined {
-  return role["profile-name"] ?? environment.defaults?.[role.cli as EnvironmentProvider]?.["profile-name"];
-}
-
 function profileSettings(profileName: string | undefined): { readonly profileName?: string } {
   return profileName === undefined ? {} : { profileName };
-}
-
-/** Model selection and effort are role-local. */
-function modelSettings(role: EnvironmentRoleConfig): Pick<PlatformRoleOption, "model" | "effort"> {
-  return {
-    ...(role.model !== undefined ? { model: role.model } : {}),
-    ...(role.effort !== undefined ? { effort: role.effort } : {})
-  };
 }
 
 /**

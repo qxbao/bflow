@@ -140,9 +140,15 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
     if (activeHost) return activeHost;
     const privateState = resolvePrivateRuntimeStateDirectory(input.repository.root);
     const hostConfigPath = resolve(privateState, "host", input.repository.sessionName, "host.json");
-    const runStorePath = resolve(privateState, "agentic/runs.db");
+    const runStoreCandidates = [
+      resolve(privateState, "agentic/runs.db"),
+      resolve(input.repository.root, ".bflow/state/agentic/runs.db"),
+      resolve(input.repository.root, ".bflow/state/runs.db")
+    ];
     const hasHostConfig = await lstat(hostConfigPath).then(stat => stat.isFile(), () => false);
-    const hasRunStore = await lstat(runStorePath).then(stat => stat.isFile(), () => false);
+    const hasRunStore = (await Promise.all(
+      runStoreCandidates.map(candidate => lstat(candidate).then(stat => stat.isFile(), () => false))
+    )).some(Boolean);
     if (!hasHostConfig && !hasRunStore) return null;
 
     activeHost = (async () => {

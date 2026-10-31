@@ -549,6 +549,15 @@ export async function runDoctorDiagnostics(
     reason: runtimeObservation.hostBuildCheck.reason,
     remediation: runtimeObservation.hostBuildCheck.remediation
   });
+  runtimeChecks.push({
+    checkId: "runtime-managed-worktrees",
+    group: "runtime",
+    component: "worktrees",
+    status: runtimeObservation.managedWorktreesCheck.status,
+    detected_version: null,
+    reason: runtimeObservation.managedWorktreesCheck.reason,
+    remediation: runtimeObservation.managedWorktreesCheck.remediation
+  });
   try {
     const lockStatus = await lifecycleLockStatus(stateRoot);
     if (lockStatus.startsWith("Legacy")) {

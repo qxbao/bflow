@@ -3,6 +3,7 @@ import { lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parseDocument } from "yaml";
+import { fsyncTolerant } from "./fs-resilience.js";
 
 export interface Context7MigrationOutput {
   readonly configPath: string;
@@ -45,7 +46,7 @@ export async function migrateLegacyContext7Config(repositoryRoot: string, option
     if (error.code === "EEXIST") throw new Error(`Cannot migrate: backup ${backupPath} already exists. Nothing was changed.`);
     throw error;
   });
-  try { await backup.writeFile(source, "utf8"); await backup.sync(); } finally { await backup.close(); }
+  try { await backup.writeFile(source, "utf8"); await fsyncTolerant(backup); } finally { await backup.close(); }
 
   if (!document.hasIn(["environment", "deepwiki"])) document.setIn(["environment", "deepwiki"], document.createNode(carried));
   document.deleteIn(["environment", "context7"]);
@@ -54,7 +55,7 @@ export async function migrateLegacyContext7Config(repositoryRoot: string, option
   const handle = await open(temporary, "wx", 0o600);
   try {
     await handle.writeFile(document.toString(), "utf8");
-    await handle.sync();
+    await fsyncTolerant(handle);
     await handle.close();
     await rename(temporary, configPath);
   } catch (error) {

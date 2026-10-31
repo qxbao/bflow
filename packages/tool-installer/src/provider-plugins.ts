@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { OperationOptions } from "@bflow/contracts";
-import { systemToolHost, type ManagedToolPin, type ProviderPluginAdapter, type ToolHost } from "./installer.js";
+import { systemToolHost, type ToolHost } from "./host.js";
+import type { ManagedToolPin, ProviderPluginAdapter } from "./installer.js";
 import { NativePluginRuntime, type NativeRuntimeOptions } from "./native-runtime.js";
 
 type Provider = "claude" | "codex" | "agy";

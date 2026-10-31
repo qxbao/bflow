@@ -139,7 +139,10 @@ function withDefaultSkillsPort(services: HighLevelServices, cwd: string): HighLe
                 approvedBuiltinDigests: [...catalog.approvedBuiltinSkillDigests]
               });
               return new skillsMod.SkillsSetupSynchronizer(manager, store, [...catalog.entries]);
-            })();
+            })().catch((error) => {
+              cachedSynchronizer = undefined;
+              throw error;
+            });
           }
           return cachedSynchronizer;
         };
@@ -238,7 +241,28 @@ function createMachineSetupMcpGatewayPort(
         ...(opts?.signal !== undefined ? [opts.signal] : [])
       ]);
       const response = await fetch(healthUrl, { method: "GET", redirect: "error", signal });
-      await response.body?.cancel().catch(() => undefined);
+      if (response.status === 200) {
+        await response.body?.cancel().catch(() => undefined);
+      } else if (response.status === 401) {
+        let validGatewayAuthChallenge = false;
+        try {
+          const text = await response.text();
+          const parsed: unknown = JSON.parse(text);
+          validGatewayAuthChallenge =
+            parsed !== null &&
+            typeof parsed === "object" &&
+            !Array.isArray(parsed) &&
+            (parsed as Record<string, unknown>).jsonrpc === "2.0";
+        } catch {
+          validGatewayAuthChallenge = false;
+        }
+        if (!validGatewayAuthChallenge) {
+          throw new Error(`Shared MCP Gateway health probe returned unauthorized non-JSON-RPC response (HTTP 401)`);
+        }
+      } else {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`Shared MCP Gateway health probe returned HTTP ${response.status}`);
+      }
 
       const observations: MCPServiceObservation[] = rawReady.observations.map((item) =>
         MCPServiceObservationSchema.parse(item)
