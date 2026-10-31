@@ -38,6 +38,23 @@ export async function readState(directory: string, repository: string): Promise<
   return state;
 }
 
+const BENIGN_DIR_SYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EBADF", "EROFS"]);
+
+export async function syncDirectory(
+  directory: string,
+  openDirectory: (path: string, flags: string) => Promise<{ sync: () => Promise<void>; close: () => Promise<void> }> = open
+): Promise<void> {
+  const directoryHandle = await openDirectory(directory, "r");
+  try {
+    await directoryHandle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_DIR_SYNC_CODES.has(code)) throw error;
+  } finally {
+    await directoryHandle.close();
+  }
+}
+
 export async function writeState(directory: string, state: State): Promise<void> {
   const temporary = join(directory, `state.${randomUUID()}.tmp`);
   const handle = await open(temporary, "wx", 0o600);
@@ -47,7 +64,6 @@ export async function writeState(directory: string, state: State): Promise<void>
   } finally { await handle.close(); }
   try {
     await rename(temporary, join(directory, "state.json"));
-    const directoryHandle = await open(directory, "r");
-    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+    await syncDirectory(directory);
   } finally { await rm(temporary, { force: true }); }
 }

@@ -10,6 +10,7 @@ import {
   type QualityFinding, type QualityGateResult, type VerificationCycle, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, textField } from "./journal.js";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 
 const execute = promisify(execFile);
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -400,7 +401,8 @@ export function toAssignedQualityFindings(context: ReworkAssignmentContext): Qua
 
 async function gitInWorktree(cwd: string, args: string[]): Promise<string> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
-  return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args],
+  const dirFlags = await runtimeGitDirectoryFlags(cwd);
+  return (await execute("git", [...dirFlags, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args],
     { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
 }
 

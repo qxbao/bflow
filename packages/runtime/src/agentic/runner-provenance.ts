@@ -5,12 +5,14 @@ import { dirname, isAbsolute, join, posix } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { BoundBehavioralCommand, RunnerDetection } from "./behavioral-runner.js";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 const execute = promisify(execFile);
 /** Files controlling runner execution are authority, just like test blobs. Never re-read task branch scripts as commands. */
 export const runnerDefinitionPattern = /(^|\/)(?:.*\.(?:gradle(?:\.kts)?|props|targets|cmake|mk|make)|\.gitattributes|\.gitmodules|\.lfsconfig|build\.rs|sitecustomize\.py|usercustomize\.py|Makefile|GNUmakefile|justfile|Justfile|Taskfile\.ya?ml|package\.json|composer\.json|Gemfile|Gemfile\.lock|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.properties|pyproject\.toml|pytest\.ini|tox\.ini|noxfile\.py|conftest\.py|setup\.cfg|setup\.py|Pipfile(?:\.lock)?|uv\.lock|poetry\.lock|requirements[^/]*\.txt|CMakeLists\.txt|CTestTestfile\.cmake|Directory\.[^/]+|global\.json|nuget\.config|.*\.(?:csproj|fsproj|vbproj|sln)|(?:vitest|vite|jest|mocha|phpunit|rspec)[^/]*|\.rspec|\.mocharc[^/]*|\.npmrc|\.yarnrc[^/]*|.*lock.*|tsconfig[^/]*|CMakePresets\.json)$|(^|\/)(?:\.github\/workflows|\.cargo|\.mvn|gradle|buildSrc|scripts|test|tests|__tests__|spec)\//i;
 async function blobs(cwd: string, revision: string, extra: readonly string[] = []): Promise<Record<string, string>> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-  const result = await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "ls-tree", "-r", "-z", revision], { cwd, env, timeout: 30_000, maxBuffer: 4_194_304 });
+  const baseGitFlags = [...(await runtimeGitDirectoryFlags(cwd)), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"];
+  const result = await execute("git", [...baseGitFlags, "ls-tree", "-r", "-z", revision], { cwd, env, timeout: 30_000, maxBuffer: 4_194_304 });
   const found: Record<string, string> = {}, tracked: Record<string, string> = {};
   for (const entry of result.stdout.split("\0")) {
     const match = /^(100644|100755|120000) blob ([a-f0-9]{40})\t(.+)$/.exec(entry);
@@ -47,7 +49,7 @@ async function blobs(cwd: string, revision: string, extra: readonly string[] = [
     if (!/\.(?:gradle(?:\.kts)?|props|targets|[cfv]sproj|cmake)$|(?:^|\/)(?:CMakeLists\.txt|Makefile|GNUmakefile)$/.test(path) && !imported) continue;
     visited.add(key);
     if (visited.size > 2000) throw new Error("Execution definition dependency closure exceeds bounds");
-    const source = (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "show", `${revision}:${path}`], { cwd, env, timeout: 30000, maxBuffer: 1048576 })).stdout;
+    const source = (await execute("git", [...baseGitFlags, "show", `${revision}:${path}`], { cwd, env, timeout: 30000, maxBuffer: 1048576 })).stdout;
     if ((imported || /\.gradle(?:\.kts)?$/.test(path)) && /apply\s*(?:\(\s*from\s*=|from\s*:)\s*(?![\s"'])\S/.test(source)) throw new Error("Dynamic execution imports require a reviewed static runner setup");
     const references: { path: string; projectRelative: boolean }[] = [];
     if ((imported || /\.gradle(?:\.kts)?$/.test(path)) && /apply\s*(?:\(\s*from\s*=|from\s*:)\s*["'][^"']+["']\s*\+/.test(source)) throw new Error("Concatenated execution imports require a reviewed static runner setup");
@@ -65,7 +67,7 @@ async function blobs(cwd: string, revision: string, extra: readonly string[] = [
       const dependency = candidates.find(candidate => !candidate.startsWith("../") && tracked[candidate] !== undefined);
       if (!dependency) throw new Error("Execution definition import is not a committed repository file");
       if (tracked[dependency] === "120000") throw new Error("Execution definition imports cannot traverse symbolic links");
-      const entry = (await execute("git", ["ls-tree", "-z", revision, "--", dependency], { cwd, env, timeout: 30000, maxBuffer: 65536 })).stdout;
+      const entry = (await execute("git", [...baseGitFlags, "ls-tree", "-z", revision, "--", dependency], { cwd, env, timeout: 30000, maxBuffer: 65536 })).stdout;
       const hash = /^100(?:644|755) blob ([a-f0-9]{40})\t/.exec(entry)?.[1];
       if (!hash) throw new Error("Invalid execution definition dependency");
       found[dependency] = hash; pending.push({ path: dependency, base, imported: true });

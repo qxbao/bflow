@@ -1,22 +1,34 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { GitChangeSetSchema, type ArtifactStore, type GitChangeSet } from "@bflow/contracts";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { unwrap } from "./outbox.js";
 
 async function gitRead(cwd: string, args: string[]): Promise<string> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
+  const dirFlags = await runtimeGitDirectoryFlags(cwd);
   return new Promise((accept, reject) => {
-    const child = spawn("git", ["-c", "core.hooksPath=/dev/null", "-c", "diff.external=", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
-    const chunks: Buffer[] = []; let length = 0;
-    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Integration evidence read timed out")); }, 60_000);
+    const child = spawn("git", [...dirFlags, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = []; let length = 0, settled = false;
+    const abort = (message: string) => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      child.stdout.destroy();
+      child.stderr.destroy();
+      reject(new Error(message));
+    };
+    const timer = setTimeout(() => abort("Integration evidence read timed out"), 60_000);
     child.stdout.on("data", (chunk: Buffer) => {
       length += chunk.length;
-      if (length > 64 * 1024 * 1024) { child.kill("SIGKILL"); reject(new Error("Integration evidence exceeds limit")); }
+      if (length > 64 * 1024 * 1024) { clearTimeout(timer); abort("Integration evidence exceeds limit"); }
       else chunks.push(Buffer.from(chunk));
     });
-    child.once("error", error => { clearTimeout(timer); reject(error); });
+    child.once("error", error => { clearTimeout(timer); if (settled) return; settled = true; reject(error); });
     child.once("close", code => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       const bytes = Buffer.concat(chunks); const text = bytes.toString("utf8");
       if (code !== 0 || !Buffer.from(text).equals(bytes)) reject(new Error("Cannot read UTF-8 integration evidence")); else accept(text);
     });

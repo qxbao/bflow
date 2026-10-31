@@ -84,7 +84,13 @@ export async function validateTestIntegrityEvidence(cwd: string, report: TestInt
       lines = (await integrityGit(cwd, ["cat-file", "blob", match[2]!])).split(/\r?\n/);
       sources.set(key, lines);
     }
-    if (lines[anchor.line - 1]?.trim() !== anchor.excerpt) throw new Error("Test-integrity evidence excerpt does not match the exact committed line");
+    const excerptLines = anchor.excerpt.split(/\r?\n/);
+    const matchesCommitted = excerptLines.every(
+      (expectedLine, offset) =>
+        anchor.line - 1 + offset < lines.length &&
+        lines[anchor.line - 1 + offset]?.trim() === expectedLine.trim()
+    );
+    if (!matchesCommitted) throw new Error("Test-integrity evidence excerpt does not match the exact committed line");
   }
 }
 /** Every suspicion is explicitly adjudicated; a syntactic fact is never silently upgraded to a semantic violation. */

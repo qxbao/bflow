@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, GitChangeSetSchema, RoleMessageSchema,
@@ -49,6 +49,34 @@ function scopeCheck(task: TaskRecord, paths: readonly string[]): void {
   }
 }
 
+async function canonicalizeTargetPath(targetPath: string): Promise<string> {
+  const normalized = resolve(targetPath);
+  const suffix: string[] = [];
+  let current = normalized;
+  for (;;) {
+    try {
+      const resolved = await realpath(current);
+      return suffix.length > 0 ? join(resolved, ...suffix.reverse()) : resolved;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) return normalized;
+      suffix.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+async function pathExistsOnDisk(targetPath: string): Promise<boolean> {
+  try {
+    await lstat(targetPath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 /** Git mechanics only: Runtime consumes durable RoleMessage requests and applies all business gates. */
 export class GitIntegrationEngine {
   private constructor(
@@ -56,7 +84,8 @@ export class GitIntegrationEngine {
     readonly stateDirectory: string,
     private readonly artifactStore: ArtifactStore,
     private readonly provider: GitProvider | undefined,
-    readonly worktreeRoot: string = join(stateDirectory, "trees")
+    readonly worktreeRoot: string = join(stateDirectory, "trees"),
+    private readonly legacyConfiguredWorktreeRoot?: string
   ) {}
 
   /**
@@ -69,8 +98,12 @@ export class GitIntegrationEngine {
     if (options.worktreeRoot !== undefined) requireCondition(isAbsolute(options.worktreeRoot), "invalid_input", "worktreeRoot must be an absolute path");
     const repository = await repositoryPaths(options.repositoryPath);
     const stateDirectory = join(repository.commonDir, "bflow-git");
+    const canonicalWorktreeRoot = options.worktreeRoot !== undefined
+      ? await canonicalizeTargetPath(options.worktreeRoot)
+      : join(stateDirectory, "trees");
+    const rawWorktreeRoot = options.worktreeRoot !== undefined ? resolve(options.worktreeRoot) : undefined;
     const engine = new GitIntegrationEngine(repository.root, stateDirectory, options.artifactStore, options.provider,
-      options.worktreeRoot ?? join(stateDirectory, "trees"));
+      canonicalWorktreeRoot, rawWorktreeRoot);
     await engine.transaction(async () => undefined);
     return engine;
   }
@@ -79,7 +112,12 @@ export class GitIntegrationEngine {
   private integrationPath(key: string): string { return join(this.worktreeRoot, `integration-${key}`); }
   /** New worktrees use `worktreeRoot`; records created before it was configured keep their original managed location. */
   private managedPath(recorded: string, name: string): boolean {
-    return [this.worktreeRoot, join(this.stateDirectory, "trees")].some(root => recorded === join(root, name));
+    const roots = [
+      this.worktreeRoot,
+      join(this.stateDirectory, "trees"),
+      ...(this.legacyConfiguredWorktreeRoot ? [this.legacyConfiguredWorktreeRoot] : [])
+    ];
+    return roots.some(root => recorded === join(root, name));
   }
   private async transaction<T>(action: (state: State) => Promise<T>): Promise<T> {
     return withRepositoryLock(this.stateDirectory, async () => {
@@ -115,14 +153,15 @@ export class GitIntegrationEngine {
   private async branchExists(branch: string): Promise<boolean> {
     return succeeds(this.repositoryPath, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
   }
-  private async worktrees(): Promise<{ path: string; branch?: string; locked: boolean }[]> {
+  private async worktrees(): Promise<{ path: string; branch?: string; locked: boolean; prunable: boolean }[]> {
     const output = await git(this.repositoryPath, ["worktree", "list", "--porcelain", "-z"]);
     return output.split("\0\0").filter(Boolean).map(block => {
       const fields = block.split("\0"), path = fields.find(field => field.startsWith("worktree "))?.slice(9);
       requireCondition(path, "invalid_git_output", "Invalid Git worktree listing");
       const branch = fields.find(field => field.startsWith("branch refs/heads/"))?.slice(18);
       const locked = fields.some(field => field === "locked" || field.startsWith("locked "));
-      return branch === undefined ? { path, locked } : { path, branch, locked };
+      const prunable = fields.some(field => field === "prunable" || field.startsWith("prunable "));
+      return branch === undefined ? { path, locked, prunable } : { path, branch, locked, prunable };
     });
   }
   private async ensureWorktreeRoot(): Promise<void> {
@@ -133,8 +172,19 @@ export class GitIntegrationEngine {
     });
   }
   private async provision(record: TaskRecord | IntegrationRecord): Promise<void> {
-    const bindings = await this.worktrees();
-    const existing = bindings.find(binding => binding.path === record.worktreePath);
+    let bindings = await this.worktrees();
+    if (bindings.some(binding => !binding.locked && binding.prunable)) {
+      await git(this.repositoryPath, ["worktree", "prune"]);
+      bindings = await this.worktrees();
+    }
+    let existing = bindings.find(binding => binding.path === record.worktreePath);
+    if (existing && !(await pathExistsOnDisk(record.worktreePath))) {
+      requireCondition(existing.branch === record.branchName, "worktree_mismatch", "Managed worktree points to another branch");
+      if (existing.locked) await git(this.repositoryPath, ["worktree", "unlock", record.worktreePath]);
+      await git(this.repositoryPath, ["worktree", "prune"]);
+      bindings = await this.worktrees();
+      existing = bindings.find(binding => binding.path === record.worktreePath);
+    }
     if (existing) {
       requireCondition(existing.branch === record.branchName, "worktree_mismatch", "Managed worktree points to another branch");
       const bound = await this.assertBinding(record);
@@ -225,7 +275,12 @@ export class GitIntegrationEngine {
   }
   /** Removes a managed temporary worktree, if registered, and its directory. Only the engine-owned `dependency-*` names reach here. */
   private async removeTemporaryWorktree(path: string): Promise<void> {
-    if ((await this.worktrees()).some(binding => binding.path === path)) await git(this.repositoryPath, ["worktree", "remove", "--force", path]);
+    const registered = (await this.worktrees()).find(binding => binding.path === path);
+    if (registered) {
+      if (registered.locked) await git(this.repositoryPath, ["worktree", "unlock", path]);
+      if (await pathExistsOnDisk(path)) await git(this.repositoryPath, ["worktree", "remove", "--force", path]);
+      else await git(this.repositoryPath, ["worktree", "prune"]);
+    }
     await rm(path, { recursive: true, force: true });
   }
 
@@ -500,10 +555,15 @@ export class GitIntegrationEngine {
   }
   private async cleanup(record: TaskRecord | IntegrationRecord): Promise<void> {
     const registered = (await this.worktrees()).find(binding => binding.path === record.worktreePath);
+    const existsOnDisk = await pathExistsOnDisk(record.worktreePath);
     if (!registered) {
-      try { await lstat(record.worktreePath); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+      if (!existsOnDisk) return;
       throw new GitOrchestrationError("unregistered_worktree", "Unregistered directory exists; refusing removal");
+    }
+    if (!existsOnDisk) {
+      if (registered.locked) await git(this.repositoryPath, ["worktree", "unlock", record.worktreePath]);
+      await git(this.repositoryPath, ["worktree", "prune"]);
+      return;
     }
     await this.assertBoundClean(record);
     requireCondition((await git(record.worktreePath, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"])).length === 0,

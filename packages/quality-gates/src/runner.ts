@@ -157,18 +157,20 @@ export function createQualityCommandRunner(): QualityCommandRunner {
       function appendToBuffer(
         chunk: Buffer,
         target: Buffer[],
-        currentLength: number
+        currentLength: number,
+        limitBytes: number,
+        markTruncated: boolean
       ): number {
         if (settled) return currentLength;
-        if (currentLength >= maxBytes) {
-          outputTruncated = true;
+        if (currentLength >= limitBytes) {
+          if (markTruncated) outputTruncated = true;
           return currentLength;
         }
-        if (currentLength + chunk.length > maxBytes) {
-          const slice = chunk.subarray(0, maxBytes - currentLength);
+        if (currentLength + chunk.length > limitBytes) {
+          const slice = chunk.subarray(0, limitBytes - currentLength);
           target.push(slice);
-          outputTruncated = true;
-          return maxBytes;
+          if (markTruncated) outputTruncated = true;
+          return limitBytes;
         }
         target.push(chunk);
         return currentLength + chunk.length;
@@ -286,15 +288,15 @@ export function createQualityCommandRunner(): QualityCommandRunner {
 
         if (child.stdout) {
           child.stdout.on("data", (chunk: Buffer) => {
-            stdoutBytes = appendToBuffer(chunk, stdoutChunks, stdoutBytes);
-            combinedBytes = appendToBuffer(chunk, combinedChunks, combinedBytes);
+            stdoutBytes = appendToBuffer(chunk, stdoutChunks, stdoutBytes, maxBytes, true);
+            combinedBytes = appendToBuffer(chunk, combinedChunks, combinedBytes, maxBytes * 2, false);
           });
         }
 
         if (child.stderr) {
           child.stderr.on("data", (chunk: Buffer) => {
-            stderrBytes = appendToBuffer(chunk, stderrChunks, stderrBytes);
-            combinedBytes = appendToBuffer(chunk, combinedChunks, combinedBytes);
+            stderrBytes = appendToBuffer(chunk, stderrChunks, stderrBytes, maxBytes, true);
+            combinedBytes = appendToBuffer(chunk, combinedChunks, combinedBytes, maxBytes * 2, false);
           });
         }
 
