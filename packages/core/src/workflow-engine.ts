@@ -355,23 +355,30 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
           }
         }
         const index = buildDependencyIndex(aggregate.definition);
-        for (const definition of aggregate.definition.tasks) {
-          const task = taskState(aggregate, definition.id);
-          if (task?.status !== "pending") continue;
-          if (dependenciesSatisfied(aggregate.definition, aggregate.snapshot, task.taskId, schedulingContext(aggregate), index)) {
-            const transitioned = this.#transitionTask(aggregate, emitted, task.taskId, "ready", "normal", parsed.data.occurredAt,
-              parsed.data.idempotencyKey, "dependencies satisfied");
-            if (!transitioned.ok) return transitioned;
-          } else if (dependencyPermanentlyUnsatisfied(
-            aggregate.definition,
-            aggregate.snapshot,
-            task.taskId,
-            schedulingContext(aggregate),
-            index
-          )) {
-            const transitioned = this.#transitionTask(aggregate, emitted, task.taskId, "cancelled", "normal",
-              parsed.data.occurredAt, parsed.data.idempotencyKey, "required dependency did not succeed");
-            if (!transitioned.ok) return transitioned;
+        let progressed = true;
+        while (progressed) {
+          progressed = false;
+          const context = schedulingContext(aggregate);
+          for (const definition of aggregate.definition.tasks) {
+            const task = taskState(aggregate, definition.id);
+            if (task?.status !== "pending") continue;
+            if (dependenciesSatisfied(aggregate.definition, aggregate.snapshot, task.taskId, context, index)) {
+              const transitioned = this.#transitionTask(aggregate, emitted, task.taskId, "ready", "normal", parsed.data.occurredAt,
+                parsed.data.idempotencyKey, "dependencies satisfied");
+              if (!transitioned.ok) return transitioned;
+              progressed = true;
+            } else if (dependencyPermanentlyUnsatisfied(
+              aggregate.definition,
+              aggregate.snapshot,
+              task.taskId,
+              context,
+              index
+            )) {
+              const transitioned = this.#transitionTask(aggregate, emitted, task.taskId, "cancelled", "normal",
+                parsed.data.occurredAt, parsed.data.idempotencyKey, "required dependency did not succeed");
+              if (!transitioned.ok) return transitioned;
+              progressed = true;
+            }
           }
         }
 
@@ -551,7 +558,9 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
             data.idempotencyKey, data.result.reason, undefined, {
               code: "manual_intervention", message: data.result.reason, since: data.occurredAt, retryable: false
             });
-          return blocked.ok ? success([]) : blocked;
+          if (!blocked.ok) return blocked;
+          const recomputed = this.#recomputeRunStatus(aggregate, emitted, data.occurredAt, data.idempotencyKey);
+          return recomputed.ok ? success([]) : recomputed;
         }
         return success([]);
       });
@@ -942,7 +951,9 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
           aggregate.snapshot.tasks.filter((task) => task.taskId === data.taskId);
         for (const task of targets) {
           if (["succeeded", "failed", "cancelled"].includes(task.status)) continue;
-          const target = task.status === "pending" || task.status === "retrying" ? "cancelled" : "cancelling";
+          const target = task.status === "pending" || task.status === "retrying" || task.status === "ready"
+            ? "cancelled"
+            : "cancelling";
           const transitioned = this.#transitionTask(aggregate, emitted, task.taskId, target, "cancel", data.requestedAt,
             data.idempotencyKey, data.reason ?? "cancellation requested");
           if (!transitioned.ok) return transitioned;
@@ -952,7 +963,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
             data.reason ?? "cancellation requested");
           if (!moved.ok) return moved;
         }
-        return success([]);
+        const recomputed = this.#recomputeRunStatus(aggregate, emitted, data.requestedAt, data.idempotencyKey);
+        return recomputed.ok ? success([]) : recomputed;
       });
   }
 
@@ -1764,7 +1776,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     if (!direct.valid) {
       let bridge: WorkflowRunSnapshot["status"] | undefined;
       if (target === "cancelled" && current !== "cancelling") bridge = "cancelling";
-      else if (current === "queued" || ((current === "waiting" || current === "blocked") && target === "succeeded")) bridge = "running";
+      else if (current === "queued" || ((current === "waiting" || current === "blocked") && target === "succeeded") ||
+        (current === "blocked" && target === "waiting")) bridge = "running";
       if (bridge === undefined || !validateRunTransition(current, bridge).valid) return validation(direct.reason ?? "Invalid run transition");
       const bridged = this.#emit(aggregate, emitted, {
         type: "run.status_changed", occurredAt, commandKey,
@@ -1790,20 +1803,35 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     const tasks = aggregate.snapshot.tasks;
     if (["succeeded", "failed", "cancelled"].includes(aggregate.snapshot.status)) return success(undefined);
     let target: WorkflowRunSnapshot["status"];
+    const context = schedulingContext(aggregate);
     if (aggregate.snapshot.status === "cancelling") {
       if (tasks.some((task) => !["succeeded", "failed", "cancelled"].includes(task.status))) return success(undefined);
-      target = tasks.every((task) => task.status === "succeeded") ? "succeeded" :
-        tasks.every((task) => task.status === "cancelled") ? "cancelled" : "failed";
+      target = tasks.every((task) => taskBusinessSucceeded(aggregate.definition, task, context)) ? "succeeded" :
+        tasks.some((task) => task.status === "failed") ? "failed" : "cancelled";
       return this.#moveRun(aggregate, emitted, target, occurredAt, commandKey);
     }
-    const context = schedulingContext(aggregate);
     const rejectedApproval = aggregate.definition.tasks.some((definition) => {
       const task = taskState(aggregate, definition.id);
       return definition.requiresApproval && task !== undefined &&
         aggregate.approvalDecisions.get(approvalKey(task.taskId, task.generation))?.decision === "rejected";
     });
     const allBusinessSucceeded = tasks.every((task) => taskBusinessSucceeded(aggregate.definition, task, context));
-    const hasActive = tasks.some((task) => ["pending", "ready", "running", "retrying", "cancelling"].includes(task.status));
+    const hasNonTerminalQueueOrRunning = tasks.some((task) =>
+      ["pending", "ready", "running", "retrying", "cancelling"].includes(task.status));
+    const activeCapacity = tasks.filter((task) =>
+      ["running", "waiting", "blocked", "cancelling"].includes(task.status)).length;
+    const depIndex = buildDependencyIndex(aggregate.definition);
+    const hasProgressableActive =
+      tasks.some((task) => ["running", "retrying", "cancelling"].includes(task.status)) ||
+      selectRunnableTasks(aggregate.definition, aggregate.snapshot, context).length > 0 ||
+      tasks.some((task) => task.status === "pending" && (
+        dependencyPermanentlyUnsatisfied(aggregate.definition, aggregate.snapshot, task.taskId, context, depIndex) ||
+        (activeCapacity < aggregate.definition.maxConcurrency &&
+          dependenciesSatisfied(aggregate.definition, aggregate.snapshot, task.taskId, context, depIndex))
+      )) ||
+      (aggregate.definition.failurePolicy === "fail-fast" &&
+        tasks.some((task) => task.status === "failed") &&
+        tasks.some((task) => ["pending", "ready", "retrying"].includes(task.status)));
     const exhaustedRework = aggregate.definition.tasks.flatMap((definition) => {
       const task = taskState(aggregate, definition.id);
       const policy = definition.rework ?? { maxReworks: 0, onExhausted: "fail" as const };
@@ -1818,8 +1846,12 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     const hasFailure = tasks.some((task) => task.status === "failed" || task.status === "cancelled") ||
       rejectedApproval || exhaustedRework.includes("fail");
     if (allBusinessSucceeded) target = "succeeded";
-    else if (hasActive) target = "running";
-    else if (exhaustedRework.includes("require_human")) target = "blocked";
+    else if (hasNonTerminalQueueOrRunning) {
+      if (hasProgressableActive) target = "running";
+      else if (hasBlocked || (hasFailure && aggregate.definition.failurePolicy === "block")) target = "blocked";
+      else if (hasWaiting) target = "waiting";
+      else target = "running";
+    } else if (exhaustedRework.includes("require_human")) target = "blocked";
     else if (exhaustedRework.includes("fail")) target = "failed";
     else if (hasBlocked || (hasFailure && aggregate.definition.failurePolicy === "block")) target = "blocked";
     else if (hasWaiting) target = "waiting";

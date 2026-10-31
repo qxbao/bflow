@@ -27,7 +27,7 @@ export function project(run: StoredRun, events: readonly DomainEvent[]): StoredR
       if (task.status === "ready") {
         clearAttempt(task);
       } else {
-        if (task.status === "running" && event.payload.from !== "waiting") task.startedAt = event.occurredAt;
+        if (task.status === "running" && event.payload.from === "ready") task.startedAt = event.occurredAt;
         if (["succeeded", "failed", "cancelled"].includes(task.status)) task.completedAt = event.occurredAt;
         if (task.status !== "blocked") delete task.blockage;
         else if (event.payload.blockage !== undefined) task.blockage = event.payload.blockage;

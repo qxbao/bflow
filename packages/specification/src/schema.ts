@@ -15,12 +15,12 @@ const Text = z.string().trim().min(1);
 export const PolicyDetailsSchema = z.object({
   policyVersion: z.literal(1),
   assessment: ChangeAssessmentSchema,
-  functionalRequirements: z.array(Text),
+  functionalRequirements: z.array(Text).default([]),
   proposedTestStrategy: Text.optional(),
   designProposal: Text.optional(),
-  technicalConstraints: z.array(Text),
-  apiDataContracts: z.array(Text),
-  risksAndTradeoffs: z.array(Text),
+  technicalConstraints: z.array(Text).default([]),
+  apiDataContracts: z.array(Text).default([]),
+  risksAndTradeoffs: z.array(Text).default([]),
   migrationStrategy: Text.optional(),
   traceability: z.array(z.object({ criterionId: Text, taskIds: z.array(Text).min(1) }).strict()),
   revisionReason: Text.optional()
@@ -109,8 +109,19 @@ export function parseContractOrP15Specification(input: unknown): Specification {
     };
   }
 
+  const nonBlank = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+  const nonBlankList = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.map(item => (typeof item === "string" ? item : String(item)).trim()).filter(item => item.length > 0)
+      : [];
+
   const rawSdd = (existingSdd && typeof existingSdd === "object") ? (existingSdd as Record<string, unknown>) : {};
   const rawAssessment = (rawSdd.assessment && typeof rawSdd.assessment === "object") ? (rawSdd.assessment as Record<string, unknown>) : {};
+  const rawModules = nonBlankList(rawAssessment.modules);
 
   const kind = contractSpec.complexity === "trivial" ? "documentation" : "feature";
   const assessment: ChangeAssessment = {
@@ -120,8 +131,8 @@ export function parseContractOrP15Specification(input: unknown): Specification {
     behaviorChange: typeof rawAssessment.behaviorChange === "boolean"
       ? rawAssessment.behaviorChange
       : contractSpec.complexity !== "trivial",
-    modules: Array.isArray(rawAssessment.modules) && rawAssessment.modules.length > 0
-      ? rawAssessment.modules.map(String)
+    modules: rawModules.length > 0
+      ? rawModules
       : (contractSpec.affectedPaths.length > 0 ? [...contractSpec.affectedPaths] : ["root"]),
     securityImpact: Boolean(rawAssessment.securityImpact),
     publicApiImpact: Boolean(rawAssessment.publicApiImpact),
@@ -137,18 +148,17 @@ export function parseContractOrP15Specification(input: unknown): Specification {
     risk: (typeof rawAssessment.risk === "string" && ["low", "medium", "high", "critical"].includes(rawAssessment.risk))
       ? (rawAssessment.risk as ChangeAssessment["risk"])
       : (contractSpec.riskLevel ?? "low"),
-    unresolvedQuestions: Array.isArray(rawAssessment.unresolvedQuestions)
-      ? rawAssessment.unresolvedQuestions.map(String)
-      : []
+    unresolvedQuestions: nonBlankList(rawAssessment.unresolvedQuestions)
   };
 
   let traceability: PolicyDetails["traceability"] = [];
   if (Array.isArray(rawSdd.traceability)) {
-    const validMappings = rawSdd.traceability
-      .filter((m): m is { criterionId: string; taskIds: string[] } =>
-        typeof m === "object" && m !== null && typeof (m as any).criterionId === "string" && Array.isArray((m as any).taskIds) && (m as any).taskIds.length > 0
-      )
-      .map(m => ({ criterionId: String(m.criterionId), taskIds: m.taskIds.map(String) }));
+    const validMappings = rawSdd.traceability.flatMap((m) => {
+      if (typeof m !== "object" || m === null) return [];
+      const criterionId = nonBlank((m as Record<string, unknown>).criterionId);
+      const taskIds = nonBlankList((m as Record<string, unknown>).taskIds);
+      return criterionId && taskIds.length > 0 ? [{ criterionId, taskIds }] : [];
+    });
     if (validMappings.length > 0) {
       traceability = validMappings;
     }
@@ -164,24 +174,24 @@ export function parseContractOrP15Specification(input: unknown): Specification {
     }));
   }
 
-  const functionalRequirements = Array.isArray(rawSdd.functionalRequirements) && rawSdd.functionalRequirements.length > 0
-    ? rawSdd.functionalRequirements.map(String)
-    : (contractSpec.summary ? [contractSpec.summary] : [contractSpec.title]);
+  const rawFunctional = nonBlankList(rawSdd.functionalRequirements);
+  const functionalRequirements = rawFunctional.length > 0
+    ? rawFunctional
+    : (nonBlank(contractSpec.summary) ? [contractSpec.summary.trim()] : [contractSpec.title.trim()]);
 
   const synthesizedDetails: PolicyDetails = {
     policyVersion: 1,
     assessment,
     functionalRequirements,
-    proposedTestStrategy: typeof rawSdd.proposedTestStrategy === "string"
-      ? rawSdd.proposedTestStrategy
-      : (contractSpec.testStrategy ? "Test strategy defined in contract" : undefined),
-    designProposal: typeof rawSdd.designProposal === "string" ? rawSdd.designProposal : undefined,
-    technicalConstraints: Array.isArray(rawSdd.technicalConstraints) ? rawSdd.technicalConstraints.map(String) : [],
-    apiDataContracts: Array.isArray(rawSdd.apiDataContracts) ? rawSdd.apiDataContracts.map(String) : [],
-    risksAndTradeoffs: Array.isArray(rawSdd.risksAndTradeoffs) ? rawSdd.risksAndTradeoffs.map(String) : [],
-    migrationStrategy: typeof rawSdd.migrationStrategy === "string" ? rawSdd.migrationStrategy : undefined,
+    proposedTestStrategy: nonBlank(rawSdd.proposedTestStrategy)
+      ?? (contractSpec.testStrategy ? "Test strategy defined in contract" : undefined),
+    designProposal: nonBlank(rawSdd.designProposal),
+    technicalConstraints: nonBlankList(rawSdd.technicalConstraints),
+    apiDataContracts: nonBlankList(rawSdd.apiDataContracts),
+    risksAndTradeoffs: nonBlankList(rawSdd.risksAndTradeoffs),
+    migrationStrategy: nonBlank(rawSdd.migrationStrategy),
     traceability,
-    revisionReason: typeof rawSdd.revisionReason === "string" ? rawSdd.revisionReason : undefined
+    revisionReason: nonBlank(rawSdd.revisionReason)
   };
 
   return {
