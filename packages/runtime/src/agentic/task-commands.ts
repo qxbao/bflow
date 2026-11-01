@@ -108,9 +108,40 @@ function matchesRunnerFile(profile: RunnerProfile, path: string): boolean {
 }
 export function automaticTestPaths(profile: RunnerProfile, specification: Specification, ownedPaths?: readonly string[]) {
   const project = profile.adapter?.projectDirectory;
-  return unique(specification.affectedPaths.filter(path => testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
-    (project === undefined || project === "." || path.startsWith(project + "/")) &&
-    (ownedPaths === undefined || ownedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`)))));
+  const inProjectScope = (path: string) =>
+    testFilePattern.test(path) && matchesRunnerFile(profile, path) &&
+    (project === undefined || project === "." || path.startsWith(project + "/"));
+  const inOwnedScope = (path: string) =>
+    ownedPaths === undefined || ownedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`));
+  const scoped = unique(specification.affectedPaths.filter(path => inProjectScope(path) && inOwnedScope(path)));
+  const adapter = profile.adapter?.adapterId;
+  if ((adapter === "rust" || adapter === "cargo") && scoped.length > 0) {
+    const relativeToProject = (path: string) =>
+      project !== undefined && project !== "." && path.startsWith(project + "/") ? path.slice(project.length + 1) : path;
+    const isCargoIntegrationTest = (path: string) => /^tests\/[^/]+\.rs$/.test(relativeToProject(path));
+    const isDedicatedRustUnitTest = (path: string) =>
+      !isCargoIntegrationTest(path) && /(?:^|\/)tests\.rs$|_tests?\.rs$|(?:^|\/)tests\/.*\.rs$/.test(relativeToProject(path));
+    const allProjectPaths = unique(specification.affectedPaths.filter(inProjectScope));
+    const specHasIntegrationCriterion = specification.acceptanceCriteria.some(
+      item => item.required !== false && item.status !== "waived" && item.verificationMethod === "integration_test"
+    );
+    const integrationTests = scoped.filter(isCargoIntegrationTest);
+    const dedicatedUnitTests = scoped.filter(isDedicatedRustUnitTest);
+    if (profile.method === "integration_test" && integrationTests.length > 0) return integrationTests;
+    if (integrationTests.length > 0 && (!specHasIntegrationCriterion || profile.method !== "unit_test")) return integrationTests;
+    if (dedicatedUnitTests.length > 0) return dedicatedUnitTests;
+    const methodHasExternalDedicatedTests = profile.method === "integration_test"
+      ? allProjectPaths.some(isCargoIntegrationTest)
+      : allProjectPaths.some(isDedicatedRustUnitTest) || (!specHasIntegrationCriterion && allProjectPaths.some(isCargoIntegrationTest));
+    if (methodHasExternalDedicatedTests && ownedPaths !== undefined) {
+      return [];
+    }
+    if (specHasIntegrationCriterion && profile.method === "unit_test") {
+      const nonIntegration = scoped.filter(path => !isCargoIntegrationTest(path));
+      if (nonIntegration.length > 0) return nonIntegration;
+    }
+  }
+  return scoped;
 }
 
 export interface TaskCommandInput {
