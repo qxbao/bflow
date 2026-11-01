@@ -314,6 +314,33 @@ export class ConversationGateway {
     return createHash("sha256").update(canonical(value)).digest("hex");
   }
 
+  private preservedLineageMetadata(runId: string): Record<string, string | number> {
+    const meta = this.snapshot?.runtimeCancellationTargets?.[runId]?.delegation.metadata;
+    if (!meta) return {};
+    return {
+      ...(typeof meta.originRunId === "string" && meta.originRunId.length > 0 ? { originRunId: meta.originRunId } : {}),
+      ...(typeof meta.parentRunId === "string" && meta.parentRunId.length > 0 ? { parentRunId: meta.parentRunId } : {}),
+      ...(typeof meta.followUp === "number" && Number.isInteger(meta.followUp) && meta.followUp >= 1 ? { followUp: meta.followUp } : {}),
+      ...(typeof meta.supersededApprovalId === "string" && meta.supersededApprovalId.length > 0 ? { supersededApprovalId: meta.supersededApprovalId } : {})
+    };
+  }
+
+  private extractSubstantiveTestIntegrityReason(approvalId: string, rawReason: string | undefined): string | undefined {
+    if (!rawReason) return undefined;
+    let rest = rawReason.trim();
+    if (rest.startsWith(approvalId)) {
+      rest = rest.slice(approvalId.length).replace(/^[\s:：,.)—–-]+/u, "");
+    } else {
+      const shortPrefix = /^(#[1-9]\d*)(?=[\s:：,.)—–-]|$)/u.exec(rest)?.[1];
+      if (shortPrefix) rest = rest.slice(shortPrefix.length).replace(/^[\s:：,.)—–-]+/u, "");
+    }
+    rest = rest
+      .replace(/^(?:(?:chọn|lựa chọn|option|choose)\s*)?1(?:\s*[.)]|\s*[:：—–-]\s*|$)/iu, "")
+      .replace(/^approve\s+test-integrity\s+exception(?:[.!?]*|\s*[:：—–-]\s*)/iu, "")
+      .trim();
+    return rest.length > 0 ? rest : undefined;
+  }
+
   private async structuredInteractionCore(commandInput: unknown, principalInput: unknown): Promise<OperationResult<WebOperationResult>> {
     const fail = (code: "validation" | "conflict" | "not_found" | "unknown_delivery", message: string): OperationResult<WebOperationResult> =>
       code === "conflict" ? { ok: false, error: { code, retryable: true, message } } :
@@ -390,11 +417,13 @@ export class ConversationGateway {
           result = { kind: "interaction", runId, currentRunId: runId };
         }
         if (result.kind === "interaction") {
+          const preservedSpecId = workflow?.specificationId ?? this.snapshot!.runtimeCancellationTargets?.[runId]?.delegation.specificationId;
           const built = buildDelegationRequest({ sessionId: this.config.sessionId, correlationId, runId,
+            ...(preservedSpecId ? { specificationId: preservedSpecId } : {}),
             messageId: `web-delegation-${id}`, previousDelegationId: `web-del-${id}`, idempotencyKey: `web-delegation-${id}`,
             draft, requestedAt: now, revision: workflow ? workflow.revision + 1 : 1 });
           if (!built.ok) return built;
-          delegation = DelegationRequestSchema.parse({ ...built.value, metadata: { ...built.value.metadata, constraints,
+          delegation = DelegationRequestSchema.parse({ ...built.value, metadata: { ...this.preservedLineageMetadata(runId), ...built.value.metadata, constraints,
             userInteractionCommandId: id, userInteractionSource: "local_web" } });
           resultingWorkflow = { correlationId, sessionId: this.config.sessionId, delegationId: delegation.delegationId,
             specificationId: delegation.specificationId, runId, title: draft.title, objective: draft.objective, kind: draft.kind,
@@ -420,14 +449,23 @@ export class ConversationGateway {
           return fail("conflict", "Approval version/target/evidence is stale or already settled");
         if (pending.expiresAt && Date.parse(pending.expiresAt) <= Date.parse(now)) return fail("conflict", "Approval has expired");
         const options = Array.isArray(pending.metadata?.options) ? pending.metadata.options.filter((value): value is string => typeof value === "string") : [];
+        if (isUserDecisionRequest(pending) && command.outcome === "changes_requested")
+          return fail("validation", "User decisions only accept approved or rejected outcomes");
         if ((!isUserDecisionRequest(pending) && command.selectedOption !== undefined) ||
           (command.selectedOption !== undefined && !options.includes(command.selectedOption)) ||
           (isUserDecisionRequest(pending) && options.length && command.outcome === "approved" && command.selectedOption === undefined))
           return fail("validation", "Selected option is not an offered choice");
+        if (isUserDecisionRequest(pending) && !options.length && !command.reason?.trim())
+          return fail("validation", "Open-ended user decision requires a non-empty answer");
+        if (isUserDecisionRequest(pending) && pending.metadata?.testIntegrityException !== undefined &&
+          command.outcome === "approved" && command.selectedOption === "Approve test-integrity exception" && !command.reason?.trim())
+          return fail("validation", "Test-integrity exception approval requires an explicit owner reason");
         if (!this.config.onStructuredApproval) return fail("validation", "Structured approval capability is unavailable");
+        const trimmedReason = command.reason?.trim();
         decision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: command.decisionId, runId: command.runId,
           sessionId: this.config.sessionId, target: version.target, revision: version.revision, generation: version.generation,
-          decision: command.outcome, decidedBy: principal.principalId, decidedAt: now, reason: command.reason ?? "User approved",
+          decision: command.outcome, decidedBy: principal.principalId, decidedAt: now,
+          reason: trimmedReason && trimmedReason.length > 0 ? trimmedReason : (isUserDecisionRequest(pending) && command.selectedOption !== undefined ? command.selectedOption : "User approved"),
           feedbackArtifacts: [], idempotencyKey: `web-decision-${id}`,
           ...(command.selectedOption !== undefined ? { metadata: { selectedOption: command.selectedOption } } : {}) });
         result = { kind: "interaction", runId: command.runId, currentRunId: command.runId };
@@ -1054,12 +1092,14 @@ export class ConversationGateway {
           // already carries this exact delegation; replay must preserve its revision and envelope.
           const sameDelegation = input.conversationDecision && existingWorkflow?.delegationId === this.generateTurnId(input, "del");
           const revision = existingWorkflow ? existingWorkflow.revision + (sameDelegation ? 0 : 1) : 1;
+          const preservedSpecId = existingWorkflow?.specificationId ?? this.snapshot!.runtimeCancellationTargets?.[runId]?.delegation.specificationId;
 
           const delegationResult = buildDelegationRequest({
             sessionId: this.config.sessionId,
             correlationId,
             messageId,
             runId,
+            ...(preservedSpecId ? { specificationId: preservedSpecId } : {}),
             draft,
             ...(input.inputArtifacts ? { inputArtifacts: input.inputArtifacts } : {}),
             requestedAt,
@@ -1074,7 +1114,10 @@ export class ConversationGateway {
             return delegationResult;
           }
 
-          const delegationRequest = delegationResult.value;
+          const lineageMetadata = this.preservedLineageMetadata(runId);
+          const delegationRequest = Object.keys(lineageMetadata).length > 0
+            ? DelegationRequestSchema.parse({ ...delegationResult.value, metadata: { ...lineageMetadata, ...delegationResult.value.metadata } })
+            : delegationResult.value;
 
           const userMsg: ConversationMessage = {
             schemaVersion: 2,
@@ -1345,12 +1388,17 @@ export class ConversationGateway {
 
           // Specialist user decisions: the selected option must be one that was offered and the
           // request must still be live. Validation failures never fall back to a default option.
+          let resolvedApprovalReason = approvalInput.reason;
           if (isUserDecisionRequest(targetApproval)) {
             const rawOffered = targetApproval.metadata?.options;
             const offered = Array.isArray(rawOffered)
               ? rawOffered.filter((option): option is string => typeof option === "string")
               : undefined;
             const selected = approvalInput.selectedOption;
+            if (approvalInput.decision === "changes_requested") {
+              return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
+                "Câu hỏi quyết định chỉ nhận lựa chọn đồng ý hoặc từ chối.", offered));
+            }
             if (approvalInput.decision === "approved" && offered !== undefined && (selected === undefined || !offered.includes(selected))) {
               return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
                 "Hãy trả lời bằng số hoặc đúng nội dung một lựa chọn trong danh sách.", offered));
@@ -1363,6 +1411,16 @@ export class ConversationGateway {
               return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
                 "Câu hỏi này đã hết hạn và không còn nhận trả lời.", undefined));
             }
+            if (targetApproval.metadata?.testIntegrityException !== undefined &&
+              approvalInput.decision === "approved" &&
+              selected === "Approve test-integrity exception") {
+              const ownerReason = this.extractSubstantiveTestIntegrityReason(targetApproval.approvalId, approvalInput.reason);
+              if (!ownerReason) {
+                return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
+                  "Chấp thuận ngoại lệ toàn vẹn kiểm thử cần kèm lý do rõ ràng của chủ dự án (ví dụ: `1: <lý do>`).", offered));
+              }
+              resolvedApprovalReason = ownerReason;
+            }
           }
 
           // The 1-based position is sent with the option text so Coordinator sees the same choice the prompt numbered.
@@ -1374,7 +1432,7 @@ export class ConversationGateway {
             decision: approvalInput.decision,
             decidedBy: input.provenance?.userId ?? "user",
             decidedAt: now,
-            reason: approvalInput.reason ?? (approvalInput.decision === "approved" ? "User approved" : "User rejected"),
+            reason: resolvedApprovalReason ?? (approvalInput.decision === "approved" ? "User approved" : "User rejected"),
             provenance: input.provenance,
             repositoryContext: input.repositoryContext,
             userContent: input.content,
@@ -1716,6 +1774,23 @@ export class ConversationGateway {
     const pending = { ...this.snapshot!.pendingApprovals }, closed = { ...this.snapshot!.closedApprovals };
     const terminal = new Set<string>();
     const runtimeCancellationTargets = { ...this.snapshot!.runtimeCancellationTargets };
+    const supersededMap = new Map<string, string>();
+    const recordSuperseded = (runId: string, supersededBy: string | undefined, metadata: Record<string, unknown> | undefined) => {
+      if (typeof supersededBy === "string" && supersededBy.length > 0) supersededMap.set(runId, supersededBy);
+      const parentRunId = metadata?.parentRunId;
+      if (typeof parentRunId === "string" && parentRunId.length > 0 && !supersededMap.has(parentRunId)) {
+        supersededMap.set(parentRunId, runId);
+      }
+    };
+    for (const existing of Object.values(runtimeCancellationTargets)) {
+      recordSuperseded(existing.runId, existing.supersededBy, existing.delegation.metadata);
+    }
+    for (const raw of rawEntries) {
+      const pre = RuntimeCancellationTargetSchema.strip().safeParse(raw);
+      if (pre.success && pre.data.delegation.sessionId === this.config.sessionId && pre.data.delegation.runId === pre.data.runId) {
+        recordSuperseded(pre.data.runId, pre.data.supersededBy, pre.data.delegation.metadata);
+      }
+    }
     for (const raw of rawEntries) {
       // The private projection accepts Runtime fields but parses exchanged public values with their contracts.
       const parsed = RuntimeCancellationTargetSchema.strip().safeParse(raw);
@@ -1732,11 +1807,13 @@ export class ConversationGateway {
       runtimeCancellationTargets[run.runId] = RuntimeCancellationTargetSchema.parse(run);
       const status = run.cancelled ? "cancelled" : run.status;
       const runtimeRevision = z.number().int().nonnegative().catch(1).parse(delegation.metadata?.revision);
+      const runIsSuperseded = supersededMap.has(run.runId);
+      const previousIsSuperseded = previous !== undefined && supersededMap.has(previous.runId);
       const keepActiveSibling =
         previous !== undefined &&
         previous.runId !== run.runId &&
-        !isTerminalRunStatus(previous.sdlcStatus) &&
-        isTerminalRunStatus(status);
+        ((runIsSuperseded && !previousIsSuperseded) ||
+          (!previousIsSuperseded && !isTerminalRunStatus(previous.sdlcStatus) && isTerminalRunStatus(status)));
       if (!keepActiveSibling) {
         // A queued newer requirement can precede Runtime ingress. Preserve its identity as a pair;
         // when Runtime is newer, adopt its revision together with the delegation id for exact-turn recovery.
@@ -1755,24 +1832,37 @@ export class ConversationGateway {
       updated.push(run.runId);
     }
     for (const request of Object.values(pending)) {
-      if (!terminal.has(request.runId)) continue;
-      closed[request.approvalId] = { approvalId: request.approvalId, runId: request.runId, status: "expired",
-        reason: `Runtime xác nhận run ${request.runId} đã kết thúc; không thể tiếp tục bằng approval`, closedAt: now };
-      delete pending[request.approvalId];
+      if (terminal.has(request.runId)) {
+        closed[request.approvalId] = { approvalId: request.approvalId, runId: request.runId, status: "expired",
+          reason: `Runtime xác nhận run ${request.runId} đã kết thúc; không thể tiếp tục bằng approval`, closedAt: now };
+        delete pending[request.approvalId];
+      } else if (supersededMap.has(request.runId)) {
+        closed[request.approvalId] = { approvalId: request.approvalId, runId: request.runId, status: "superseded",
+          reason: `Run ${request.runId} đã chuyển sang lượt chạy tiếp nối ${supersededMap.get(request.runId)}; phê duyệt cũ không còn hiệu lực`, closedAt: now };
+        delete pending[request.approvalId];
+      }
     }
     for (const [id, workflow] of Object.entries(workflows)) {
       workflows[id] = { ...workflow, activeApprovalIds: workflow.activeApprovalIds.filter(id => pending[id] !== undefined) };
     }
     const activeApprovalIds = this.snapshot!.session.activeApprovalIds.filter(id => pending[id] !== undefined);
     const { activeRunId, ...sessionBase } = this.snapshot!.session;
+    let nextActiveRunId = activeRunId;
+    const seenActive = new Set<string>();
+    while (nextActiveRunId !== undefined && supersededMap.has(nextActiveRunId) && !seenActive.has(nextActiveRunId)) {
+      seenActive.add(nextActiveRunId);
+      nextActiveRunId = supersededMap.get(nextActiveRunId);
+    }
     const session = { ...sessionBase, activeApprovalIds,
-      ...(activeRunId !== undefined && !terminal.has(activeRunId) ? { activeRunId } : {}),
+      ...(nextActiveRunId !== undefined && !terminal.has(nextActiveRunId) ? { activeRunId: nextActiveRunId } : {}),
       status: sessionBase.status === "awaiting_user_approval" && activeApprovalIds.length === 0 ? "reporting_progress" as const : sessionBase.status,
       updatedAt: now };
     let reconciled: ConversationContextSnapshot = { ...this.snapshot!, session, workflows, runIdToCorrelationId: runMap,
       pendingApprovals: pending, closedApprovals: closed, runtimeCancellationTargets };
     for (const request of Object.values(this.snapshot!.pendingApprovals)) {
-      if (terminal.has(request.runId)) reconciled = closeClarificationsForApproval(reconciled, request.approvalId, now);
+      if (terminal.has(request.runId) || supersededMap.has(request.runId)) {
+        reconciled = closeClarificationsForApproval(reconciled, request.approvalId, now);
+      }
     }
     const saved = await this.persistUpdatedSnapshot(reconciled);
     if (!saved.ok) return saved;

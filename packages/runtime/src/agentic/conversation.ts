@@ -57,7 +57,15 @@ export async function createAgenticConversationHost(options: {
       return { ok: false, error: { code: refused ? "validation" : "corruption", retryable: false, message: String(error) } };
     }
   };
-  const enqueueDecision = async (input: unknown): Promise<OperationResult<void>> => {
+  const conflictError = (message: string): OperationResult<never> => ({
+    ok: false,
+    error: { code: "conflict", retryable: true, message }
+  });
+  const validationError = (message: string): OperationResult<never> => ({
+    ok: false,
+    error: { code: "validation", retryable: false, message }
+  });
+  const prepareDecisionEnvelope = async (input: unknown): Promise<OperationResult<RoleMessage | undefined>> => {
     const decision = ApprovalDecisionSchema.parse(input);
     // Preserve the original envelope (including pane identity) if already queued or uncertain.
     const state = record(await runtime.inspect());
@@ -65,36 +73,68 @@ export async function createAgenticConversationHost(options: {
     const existing = (state.outbound as { message: unknown }[]).find(item => record(item.message).message_id === messageId);
     if (existing) {
       const message = RoleMessageSchema.parse(existing.message);
-      if (message.type !== "approval.decision" || digest(message.payload) !== digest(decision)) throw new Error("Conflicting recovered human decision");
+      if (message.type !== "approval.decision" || digest(message.payload) !== digest(decision)) {
+        return conflictError("Conflicting recovered human decision");
+      }
       return { ok: true, value: undefined };
     }
-    const run = record(await runtime.inspect(decision.runId));
-    if (run.cancelled === true || ["completed", "failed", "cancelled"].includes(String(run.status)))
-      throw new Error("Run is terminal; approval cannot continue it");
+    let run: Record<string, unknown>;
+    try {
+      run = record(await runtime.inspect(decision.runId));
+    } catch (error) {
+      return { ok: false, error: { code: "not_found", retryable: false, message: error instanceof Error ? error.message : String(error) } };
+    }
+    if (run.cancelled === true || ["completed", "failed", "cancelled"].includes(String(run.status))) {
+      return conflictError("Run is terminal; approval cannot continue it");
+    }
     const userDecision = (run.userDecisions as Record<string, { request: unknown; status?: string } | undefined> | undefined)?.[decision.approvalId];
     if (userDecision) {
       // Specialist user decisions have their own record; they never occupy the single design/task approval slot.
       // A reply for an already answered/expired request is refused here, not queued for Runtime to reject later.
-      if (userDecision.status !== "pending") throw new Error("User decision is no longer pending");
-      validateUserDecisionAnswer(ApprovalRequestSchema.parse(userDecision.request), decision, new Date().toISOString());
+      if (userDecision.status !== "pending") {
+        return conflictError("User decision is no longer pending");
+      }
+      try {
+        validateUserDecisionAnswer(ApprovalRequestSchema.parse(userDecision.request), decision, new Date().toISOString());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return /expired/i.test(message) ? conflictError(message) : validationError(message);
+      }
     } else if (prototypeApproval(run.prototype as PrototypeRecord | undefined, decision.approvalId)) {
       // Prototype reviews have their own approvals; one is never matched against the design/task/delivery slot.
       const entry = prototypeApproval(run.prototype as PrototypeRecord, decision.approvalId)!;
-      if (entry.status !== "pending") throw new Error("Prototype approval is no longer pending");
-      assertPrototypeDecision(entry, decision, new Date().toISOString());
+      if (entry.status !== "pending") {
+        return conflictError("Prototype approval is no longer pending");
+      }
+      try {
+        assertPrototypeDecision(entry, decision, new Date().toISOString());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return /expired/i.test(message) ? conflictError(message) : validationError(message);
+      }
     } else {
-      const request = ApprovalRequestSchema.parse(run.approval);
+      const parsedApproval = ApprovalRequestSchema.safeParse(run.approval);
+      if (!parsedApproval.success) {
+        return conflictError("Recovered decision does not match the exact approval request");
+      }
+      const request = parsedApproval.data;
       if (request.approvalId !== decision.approvalId || request.runId !== decision.runId || request.sessionId !== decision.sessionId ||
-          request.revision !== decision.revision || request.generation !== decision.generation || digest(request.target) !== digest(decision.target))
-        throw new Error("Recovered decision does not match the exact approval request");
+          request.revision !== decision.revision || request.generation !== decision.generation || digest(request.target) !== digest(decision.target)) {
+        return conflictError("Recovered decision does not match the exact approval request");
+      }
     }
     const correlationId = textField(record(run.delegation).correlationId);
-    return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
+    return { ok: true, value: RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
       correlation_id: correlationId, run_id: decision.runId,
       sender: { role: "conversation", agent_id: conversation!.agentId, pane_id: conversation!.paneId },
       recipient: { role: "coordinator", agent_id: coordinator!.agentId, pane_id: coordinator!.paneId },
       type: "approval.decision", payload: json(decision), artifact_references: decision.feedbackArtifacts,
-      occurred_at: decision.decidedAt, idempotency_key: decision.idempotencyKey }));
+      occurred_at: decision.decidedAt, idempotency_key: decision.idempotencyKey }) };
+  };
+  const enqueueDecision = async (input: unknown): Promise<OperationResult<void>> => {
+    const prepared = await prepareDecisionEnvelope(input);
+    if (!prepared.ok) return prepared;
+    return prepared.value ? enqueue(prepared.value) : { ok: true, value: undefined };
   };
   class DurableBridge extends module.HerdrConversationBridge {
     constructor(config: unknown) { super(config); }
@@ -109,8 +149,15 @@ export async function createAgenticConversationHost(options: {
     }
     async receiveApprovalDecision(input: unknown): Promise<OperationResult<void>> {
       const decision = ApprovalDecisionSchema.parse(input);
-      await options.onHumanDecision?.(decision);
-      return enqueueDecision(decision);
+      const prepared = await prepareDecisionEnvelope(decision);
+      if (!prepared.ok) return prepared;
+      try {
+        await options.onHumanDecision?.(decision);
+      } catch (error) {
+        if (String(error).includes("Human approval requires physical user input hook")) throw error;
+        return conflictError(error instanceof Error ? error.message : String(error));
+      }
+      return prepared.value ? enqueue(prepared.value) : { ok: true, value: undefined };
     }
     async reportProgressToConversation(): Promise<OperationResult<void>> {
       throw new Error("Runtime must queue a RoleMessage through Herdr; local progress callbacks are disabled");
@@ -132,8 +179,10 @@ export async function createAgenticConversationHost(options: {
     onStructuredApproval: async (decision: unknown, command: WebCommand, principal: WebPrincipal) => {
       if (!structured) throw new Error("Structured web authority is not configured");
       const parsed = ApprovalDecisionSchema.parse(decision);
+      const prepared = await prepareDecisionEnvelope(parsed);
+      if (!prepared.ok) return prepared;
       await structured.approval(parsed, command, principal);
-      return enqueueDecision(parsed);
+      return prepared.value ? enqueue(prepared.value) : { ok: true, value: undefined };
     },
     onStructuredResume: async (command: Extract<WebCommand, { kind: "resume" }>, principal: WebPrincipal) => {
       if (!structured) throw new Error("Structured web authority is not configured");
@@ -190,7 +239,13 @@ export async function createAgenticConversationHost(options: {
         hasNativeDeliveries: Array.isArray(run.nativeDeliveries) && run.nativeDeliveries.length > 0,
         ...(typeof run.supersededBy === "string" && run.supersededBy.length > 0 ? { supersededBy: run.supersededBy } : {})
       });
-      return { runId: run.runId, delegation, status: run.status, cancelled: run.cancelled };
+      return {
+        runId: run.runId,
+        delegation,
+        status: run.status,
+        cancelled: run.cancelled,
+        ...(typeof run.supersededBy === "string" && run.supersededBy.length > 0 ? { supersededBy: run.supersededBy } : {})
+      };
     }).filter(run => run.delegation.sessionId === manifest.conversationSessionId);
     runtimeRunMeta = nextMeta;
     const runShortIds: Record<string, string> = { ...(baseAliases?.runShortIds ?? {}) };

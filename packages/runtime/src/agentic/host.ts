@@ -807,16 +807,26 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const live=record(record(record(JSON.parse(await herdr(["agent","get",b.paneId]))).result).agent);
       return {sessionId:manifest!.conversationSessionId,nativeSessionId:b.session!.value,paneId:b.paneId,provider:b.provider ?? b.agentKind,
         ready:interactionReady() && native?.role==="conversation" && !!native.transcriptPath && !!native.transcriptRoot && native.sessionId===b.session!.value && await registeredChatAvailable(native,b.provider??b.agentKind,b.session!.value,manifest!.conversationSessionId),
-        busy:!["idle","done"].includes(String(live.agent_status))};
+        busy:!["idle","done"].includes(String(live.agent_status)) || (await conversationIntake.pendingDecision(b))!==undefined};
     },
     observeAdmission: async record => {
       const turn=(await receipts.conversationTurns()).find(t=>t.messageId===record.input.messageId);
       if(!turn)return undefined;
       if(turn.source!=="local_web"||turn.content!==record.input.content||turn.userId!==record.principalId||turn.conversationSessionId!==record.input.sessionId||turn.binding.paneId!==record.paneId||turn.binding.session?.value!==record.nativeSessionId)throw new Error("Chat admission receipt mismatch");
+      const approvalFailure=await receipts.conversationApprovalFailure(turn.messageId);
+      if(approvalFailure)return {messageId:turn.messageId,requiresConversationDecision:false,approvalFailed:true,approvalFailure:{error:approvalFailure.error,note:approvalFailure.note}};
       return {messageId:turn.messageId,requiresConversationDecision:(await receipts.conversationDecision(turn.messageId))?.result===undefined};
     },
     approvalContext: async runId => runId?(await readWebRun(runId)).decisions.filter(d=>d.status==="pending"):[],
-    prompt: async (wire,target) => {const b=await chatBinding();if(b.paneId!==target.paneId||b.session!.value!==target.nativeSessionId||manifest!.conversationSessionId!==target.sessionId)throw new Error("Chat dispatch binding changed");await herdr(["agent","prompt",b.paneId,wire]);},
+    prompt: async (wire,target) => {
+      const b=await chatBinding();
+      if(b.paneId!==target.paneId||b.session!.value!==target.nativeSessionId||manifest!.conversationSessionId!==target.sessionId)
+        throw Object.assign(new Error("Chat dispatch binding changed"),{preDispatchReason:"session_changed"});
+      const live=record(record(record(JSON.parse(await herdr(["agent","get",b.paneId]))).result).agent);
+      if(!interactionReady()||!["idle","done"].includes(String(live.agent_status))||(await conversationIntake.pendingDecision(b))!==undefined)
+        throw Object.assign(new Error("Conversation pane busy before web chat dispatch"),{preDispatchReason:"busy"});
+      await herdr(["agent","prompt",b.paneId,wire]);
+    },
     admit: (messageId,content,userId,runId) => webChatContext.run({messageId},async()=>{
       const b=await chatBinding();return conversationIntake.receive(b,{conversationSessionId:manifest!.conversationSessionId,messageId,content,userId,source:"local_web",...(runId?{runId}:{})});
     }),

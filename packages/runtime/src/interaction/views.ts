@@ -29,6 +29,7 @@ export interface ReadSources {
   commandsSupported?: boolean;
   pendingClarifications?: import("@bflow/conversation").ConversationContextSnapshot["pendingClarifications"] | undefined;
   redact?: (text: string) => string;
+  redactOption?: (text: string) => string;
 }
 function sliceUtf16Safe(text: string, max: number): string {
   if (max <= 0) return "";
@@ -39,6 +40,8 @@ function sliceUtf16Safe(text: string, max: number): string {
 
 const safe = (s: ReadSources, text: string, max = 16000) =>
   sliceUtf16Safe(s.redact?.(text) ?? text, max) || "[redacted]";
+const safeOption = (s: ReadSources, text: string, max = 200) =>
+  sliceUtf16Safe((s.redactOption ?? s.redact)?.(text) ?? text, max) || "[redacted]";
 export function projectDecision(
   s: ReadSources,
   r: RunRecord,
@@ -66,7 +69,7 @@ export function projectDecision(
       ? request.metadata.options
           .filter((v): v is string => typeof v === "string")
           .slice(0, 10)
-          .map((v) => safe(s, v, 200))
+          .map((v) => safeOption(s, v, 200))
       : [],
     expectedVersion: {
       revisionToken: digest(request),
@@ -424,14 +427,19 @@ export async function hostInteractionQuery(
     configuration.repositoryPath,
     configuration.socketPath,
   ];
-  const redact = (text: string) => {
+  const redactSecrets = (text: string) => {
     for (const value of secrets)
       if (value) text = text.split(value).join("[redacted]");
     return redactString(text).replace(
-      /(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key)\s*[=:]\s*\S+|\/(?:[^\s/]+\/)+[^\s]*)/gi,
+      /(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key)\s*[=:]\s*\S+)/gi,
       "[redacted]",
     );
   };
+  const redact = (text: string) =>
+    redactSecrets(text).replace(
+      /\/(?:[^\s/]+\/)+[^\s]*/gi,
+      "[redacted]",
+    );
   const rawContext = await readSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
   const context = rawContext === undefined ? undefined : ConversationContextSnapshotSchema.parse(rawContext);
   if (context && (context.session.sessionId !== sessionId || context.session.herdrSessionId !== configuration.sessionId))
@@ -445,6 +453,7 @@ export async function hostInteractionQuery(
     commandsSupported: options.commandsSupported ?? false,
     pendingClarifications: context?.pendingClarifications,
     redact,
+    redactOption: redactSecrets,
     transport: {
       states: [...new Set(manifest.panes.map((p) => p.transportState))].slice(
         0,

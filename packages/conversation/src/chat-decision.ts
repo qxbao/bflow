@@ -2,7 +2,7 @@ import type { OperationResult } from "@bflow/contracts";
 import { resolveDraftCriteria } from "./delegation-builder.js";
 import type { ChatDecision, ConversationContextSnapshot, ExtractedRequirementDraft, IntentClassificationResult } from "./types.js";
 
-const WORK_ALIAS_REGEX = /^việc\s*#([1-9]\d*)(?:\s*[:—–-].*)?$/iu;
+const WORK_ALIAS_REGEX = /^`?việc\s*#?([1-9]\d*)`?(?:\s*[:—–-].*)?$/iu;
 
 function resolveWorkRunAlias(raw: string | undefined, context: ConversationContextSnapshot): string | undefined {
   if (raw === undefined) return undefined;

@@ -220,3 +220,70 @@ it("does not let an unresolved old-generation approval reserve a newly issued ge
   expect(await restored.handleStructuredInteraction(next, principal(next))).toMatchObject({ ok: true });
   expect(calls).toBe(2);
 });
+it("rejects changes_requested, blank open-ended answers, and reason-less test-integrity approvals before reserving structured intent", async () => {
+  const withOptions = await pendingApproval({ kind: "user_decision", options: ["SQLite", "Postgres"] });
+  const changesReq = { ...withOptions.answer, commandId: randomUUID(), outcome: "changes_requested" as const, reason: "Clarify", selectedOption: "SQLite" };
+  expect(await withOptions.gateway.handleStructuredInteraction(changesReq, principal(changesReq))).toMatchObject({ ok: false, error: { code: "validation" } });
+  expect(withOptions.decisions).toHaveLength(0);
+  const validOption = { ...withOptions.answer, commandId: randomUUID(), selectedOption: "SQLite" };
+  expect(await withOptions.gateway.handleStructuredInteraction(validOption, principal(validOption))).toMatchObject({ ok: true });
+
+  const openEnded = await pendingApproval({ kind: "user_decision" });
+  const blankOpen = { ...openEnded.answer, commandId: randomUUID() };
+  expect(await openEnded.gateway.handleStructuredInteraction(blankOpen, principal(blankOpen))).toMatchObject({ ok: false, error: { code: "validation" } });
+  expect(openEnded.decisions).toHaveLength(0);
+  const answeredOpen = { ...openEnded.answer, commandId: randomUUID(), reason: "Use 30s timeout" };
+  expect(await openEnded.gateway.handleStructuredInteraction(answeredOpen, principal(answeredOpen))).toMatchObject({ ok: true });
+  expect(openEnded.decisions[0]?.reason).toBe("Use 30s timeout");
+
+  const integrity = await pendingApproval({
+    kind: "user_decision",
+    testIntegrityException: { findingId: "TI-1", candidateRevision: "a".repeat(40) },
+    options: ["Approve test-integrity exception", "Reject test-integrity exception"]
+  });
+  const missingOwnerReason = { ...integrity.answer, commandId: randomUUID(), selectedOption: "Approve test-integrity exception" };
+  expect(await integrity.gateway.handleStructuredInteraction(missingOwnerReason, principal(missingOwnerReason))).toMatchObject({ ok: false, error: { code: "validation" } });
+  expect(integrity.decisions).toHaveLength(0);
+  const withOwnerReason = { ...integrity.answer, commandId: randomUUID(), selectedOption: "Approve test-integrity exception", reason: "Approved temporary platform waiver at exact revision" };
+  expect(await integrity.gateway.handleStructuredInteraction(withOwnerReason, principal(withOwnerReason))).toMatchObject({ ok: true });
+  expect(integrity.decisions[0]?.reason).toBe("Approved temporary platform waiver at exact revision");
+});
+it("preserves follow-up lineage metadata and specificationId when revising a follow-up child run on web", async () => {
+  const f = await setup(), c = command();
+  const created = await f.gateway.handleStructuredInteraction(c, principal(c));
+  if (!created.ok || created.value.kind !== "interaction") throw new Error("Missing admission");
+  const parentDel = f.transport.sentRoleMessages[0]!.payload as any;
+  const childRunId = `${parentDel.runId}-r2`;
+  const childDel = {
+    ...parentDel,
+    runId: childRunId,
+    specificationId: "spec-custom-preserved",
+    metadata: { ...parentDel.metadata, originRunId: parentDel.runId, parentRunId: parentDel.runId, followUp: 2, supersededApprovalId: "apr-1", revision: 1 }
+  };
+  await f.gateway.reconcileRuntimeRuns([
+    { runId: parentDel.runId, delegation: parentDel, status: "escalated", cancelled: false, supersededBy: childRunId },
+    { runId: childRunId, delegation: childDel, status: "planning", cancelled: false }
+  ]);
+  const revise = WebCommandSchema.parse({
+    apiVersion: 1,
+    commandId: randomUUID(),
+    projectId: "project",
+    kind: "revise_request",
+    runId: childRunId,
+    expectedVersion: { revisionToken: "host-validated" },
+    objective: "Updated child objective",
+    acceptanceCriteria: [{ description: "Updated child criterion", verificationMethod: "unit_test" }],
+    constraints: ["Keep lineage"]
+  });
+  expect(await f.gateway.handleStructuredInteraction(revise, principal(revise))).toMatchObject({ ok: true, value: { kind: "interaction", runId: childRunId } });
+  const revisedPayload = f.transport.sentRoleMessages.at(-1)?.payload as any;
+  expect(revisedPayload.specificationId).toBe("spec-custom-preserved");
+  expect(revisedPayload.metadata).toMatchObject({
+    originRunId: parentDel.runId,
+    parentRunId: parentDel.runId,
+    followUp: 2,
+    supersededApprovalId: "apr-1",
+    revision: 2,
+    isRequirementChange: true
+  });
+});
