@@ -346,6 +346,22 @@ describe("DefaultPlatformReadinessService", () => {
     }
   });
 
+  it("leaves CLAUDE_CONFIG_DIR unset when the account uses the default location so native login still resolves", async () => {
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CLAUDE_CONFIG_DIR;
+    try {
+      let context: ProviderAdapterContext | undefined;
+      const providers = contextProviderFactory((_provider, value) => { context = value; });
+      const { service } = buildService({ providerFactory: providers });
+      const result = await service.prepareDeveloper(identity, requirement());
+      expect(result.ok).toBe(true);
+      expect(context?.launchEnvironment).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+      expect(context?.launchEnvironment?.HOME).toBeTruthy();
+    } finally {
+      if (previous !== undefined) process.env.CLAUDE_CONFIG_DIR = previous;
+    }
+  });
+
   it("pins profile instructions, environment, launch intent and status without replacing builtin policy", async () => {
     const { service, journal } = buildService();
     const snapshot = specialistProfile();
@@ -1649,7 +1665,6 @@ rl.on("line", line => {
     expect(MCP_TIMEOUT).toBe("120000");
     expect(MCP_TOOL_TIMEOUT).toBe("600000");
     expect(tokenEnv.HOME).toBeTruthy();
-    expect(tokenEnv.CLAUDE_CONFIG_DIR).toBeTruthy();
     const tokenValues = Object.entries(tokenEnv).filter(([name]) => !["HOME", "CLAUDE_CONFIG_DIR"].includes(name)).map(([,value]) => value);
     expect(tokenValues).toHaveLength(1);
     expect(tokenValues[0]).toBe(gatewayControl.tokens()[0]);
@@ -2052,7 +2067,6 @@ rl.on("line", line => {
     expect(launched.value.taskId).toBe("t1");
     expect(Object.keys(launched.value.launch.env).filter(name => !["HOME", "CLAUDE_CONFIG_DIR"].includes(name))).toHaveLength(4);
     expect(launched.value.launch.env["HOME"]).toBeTruthy();
-    expect(launched.value.launch.env["CLAUDE_CONFIG_DIR"]).toBeTruthy();
     expect(launched.value.launch.env["DISABLE_AUTOUPDATER"]).toBe("1");
     expect(launched.value.launch.env["MCP_TIMEOUT"]).toBe("120000");
     expect(launched.value.launch.env["MCP_TOOL_TIMEOUT"]).toBe("600000");
