@@ -505,7 +505,9 @@ export class HostReceiptJournal {
     const current = starts[0]; if (!current) return false;
     if ((await this.coordinatorBoundaries()).some(item => this.bindingIdentity(item.binding) === this.bindingIdentity(binding) && item.sequence >= current.sequence)) return false;
     if (starts[1]?.sequence === current.sequence) throw new Error("Ambiguous Coordinator turn identity");
-    await this.write("coordinator-stop", this.turnId(binding, current.message), current); return true;
+    const id = this.turnId(binding, current.message);
+    if (sourceMessageId === undefined && await this.read("coordinator-stop-handled", id) !== undefined) return false;
+    await this.write("coordinator-stop", id, current); return true;
   }
   async pendingCoordinatorStops(): Promise<CoordinatorTurnObservation[]> {
     const pending: CoordinatorTurnObservation[] = [];

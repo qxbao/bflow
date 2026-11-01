@@ -1937,6 +1937,16 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   /** Next time a pump should retry unsettled Stop receipts (0 when none are waiting for a retry). */
   let stopRetryAt = 0;
   const stopAttempts = new Map<string, number>();
+  const earlyCoordinatorStops = new Map<string, number>();
+  const recordCoordinatorStop = async (binding: PaneBinding): Promise<void> => {
+    const key = `${binding.paneId}:${binding.session!.value}`;
+    if (await receipts.stopCoordinatorTurn(binding)) {
+      earlyCoordinatorStops.delete(key);
+      stopGeneration++;
+    } else {
+      earlyCoordinatorStops.set(key, Date.now());
+    }
+  };
   const dispatch = async (token: string, method: string, params: unknown, operation?: OperationOptions): Promise<unknown> => {
     if (token !== configuration.token) {
       const web = webCredentials.get(token);
@@ -2147,12 +2157,26 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return {registered:true};
       }
       if (method === "provider_failure") {
-        if (!workspace || quiesced || !platformRoles.some(option => option.role === role && option.failover)) return { recorded: false };
-        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1), event: JsonValueSchema }).strict().parse(params);
+        if (!workspace || quiesced || role === "conversation") return { recorded: false };
+        const input = z.object({ paneId: z.string().min(1), nativeSessionId: z.string().min(1), launchId: z.string().min(1).optional(), event: JsonValueSchema }).strict().parse(params);
         const binding = await principal(role, input.paneId);
-        if (binding.provider !== "claude" || binding.session?.value !== input.nativeSessionId || binding.metadata?.launchId !== input.launchId)
+        const expectedLaunchId = typeof binding.metadata?.launchId === "string"
+          ? binding.metadata.launchId
+          : platformSession?.bindingLaunchId(binding);
+        if (binding.provider !== "claude" || binding.session?.value !== input.nativeSessionId ||
+            (expectedLaunchId !== undefined ? input.launchId !== expectedLaunchId : platformSession !== undefined))
           throw new Error("Provider failure belongs to a foreign native session or launch");
-        await receipts.recordProviderErrorSignal(binding, input.event, new Date().toISOString());
+        if (role === "developer" && platformRoles.some(option => option.role === role && option.failover)) {
+          await receipts.recordProviderErrorSignal(binding, input.event, new Date().toISOString());
+          const outbound = ((record(await workspace.runtime.inspect()).outbound as unknown[] | undefined) ?? []).map(record);
+          const hasFailoverAssignment = outbound.some(out => ["sending", "accepted"].includes(String(out.status)) &&
+            record(out.message).type === "task.assignment" &&
+            (record(out.handle).target ? record(record(out.handle).target).paneId === binding.paneId : textField(out.selector) === binding.bindingId));
+          if (!hasFailoverAssignment) { await receipts.recordSpecialistStop(binding); stopGeneration++; }
+          return { recorded: true };
+        }
+        if (role === "coordinator") await recordCoordinatorStop(binding);
+        else { await receipts.recordSpecialistStop(binding); stopGeneration++; }
         return { recorded: true };
       }
       if (method === "transport_prompt") {
@@ -2160,7 +2184,19 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         // Enqueue only: agent.prompt may still own Runtime's journal while this hook runs.
         const binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider prompt native session mismatch");
-        if (role === "coordinator" && isCoordinatorTrigger(message)) await receipts.startCoordinatorTurn(binding, message);
+        if (role === "coordinator" && isCoordinatorTrigger(message)) {
+          await receipts.startCoordinatorTurn(binding, message);
+          const key = `${binding.paneId}:${binding.session.value}`;
+          const earlyAt = earlyCoordinatorStops.get(key);
+          if (earlyAt !== undefined) {
+            earlyCoordinatorStops.delete(key);
+            const occurredMs = message.occurred_at ? Date.parse(message.occurred_at) : NaN;
+            if (Date.now() - earlyAt <= 5_000 && (!Number.isFinite(occurredMs) || earlyAt >= occurredMs) &&
+                await receipts.stopCoordinatorTurn(binding, message.message_id)) {
+              stopGeneration++;
+            }
+          }
+        }
         physicalPrompts.push({ role, paneId: binding.paneId, nativeSessionId: binding.session.value, message, attempts: 0, retryAt: 0 });
         return { queued: true };
       }
@@ -2169,7 +2205,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (!workspace) return { recorded: false };
         const input = record(params), binding = await principal(role, textField(input.paneId));
         if (!binding.session || binding.session.value !== textField(input.nativeSessionId)) throw new Error("Provider prompt boundary native session mismatch");
-        if (role === "coordinator") await receipts.recordCoordinatorBoundary(binding);
+        if (role === "coordinator") {
+          earlyCoordinatorStops.delete(`${binding.paneId}:${binding.session.value}`);
+          await receipts.recordCoordinatorBoundary(binding);
+        }
         return { recorded: true };
       }
       if (method === "provider_stopped") {
@@ -2183,7 +2222,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           return { recorded: false, reason: "native_stop_epoch_unproven" };
         }
         // Every non-Conversation role's Stop is durable: an unanswered assignment must not vanish with its turn.
-        if (role === "coordinator") { if (await receipts.stopCoordinatorTurn(binding)) stopGeneration++; }
+        if (role === "coordinator") await recordCoordinatorStop(binding);
         else { await receipts.recordSpecialistStop(binding); stopGeneration++; }
         return { recorded: true };
       }
@@ -3276,8 +3315,9 @@ async function handleProviderHook(configuration: RoleConfiguration, event: strin
   const hook = configuration.provider === "agy" ? parseAgyHookJson(rawInput, event) : parseHookJson(rawInput, event);
   if (event === "StopFailure") {
     if (configuration.provider !== "claude" || hook.agent_id) return;
+    const launchId = process.env[BFLOW_LAUNCH_ID_ENV]?.trim();
     await callHost(configuration.socketPath, configuration.token, "provider_failure", { paneId: textField(process.env.HERDR_PANE_ID),
-      nativeSessionId: textField(hook.session_id), launchId: textField(process.env[BFLOW_LAUNCH_ID_ENV]),
+      nativeSessionId: textField(hook.session_id), ...(launchId ? { launchId } : {}),
       event: { hook_event_name: "StopFailure", error: textField(hook.error) } });
     process.stdout.write("{}\n"); return;
   }

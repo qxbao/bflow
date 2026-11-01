@@ -353,18 +353,44 @@ export class HerdrOutbox {
         return;
       }
       const isPolicyPhase = out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence";
-      const stoppedWithoutOutcome = isPolicyPhase && this.state.outbound.some(item =>
+      const health = await this.ports.panes.inspectRoleHealth(out.selector);
+      const liveOccupant = health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId;
+      if (liveOccupant && !health.value.readyForPrompt && out.turnObservedWorkingAt === undefined) {
+        const observedAt = this.now();
+        if (Date.parse(observedAt) >= Date.parse(out.handle.acceptedAt)) {
+          out.turnObservedWorkingAt = observedAt;
+          await this.save();
+        }
+      }
+      const hasRealTransportState = health.ok && typeof (health.value as { transportState?: unknown }).transportState === "string";
+      const stoppedWithoutOutcome = out.stopObservedAt !== undefined || this.state.outbound.some(item =>
         item.message.run_id === out.message.run_id &&
         item.message.type === "task.status" &&
-        record(item.message.payload).kind === "specialist_no_response" &&
+        ["specialist_no_response", "developer_no_response"].includes(String(record(item.message.payload).kind)) &&
         record(item.message.payload).sourceMessageId === out.message.message_id &&
         record(item.message.payload).stoppedExecutionId === out.handle!.executionId);
-      const canReleaseOnPromptReady = !isPolicyPhase || stoppedWithoutOutcome ||
+      const answeredInInbox = this.state.inbox.some(item =>
+        item.message.run_id === out.message.run_id &&
+        item.message.causation_id === out.message.message_id &&
+        item.message.sender.role === out.message.recipient.role &&
+        ["applied", "rejected"].includes(item.status));
+      const coordinatorRun = out.message.recipient.role === "coordinator"
+        ? this.state.runs.find(item => item.runId === out.message.run_id)
+        : undefined;
+      const coordinatorResponded = out.message.recipient.role === "coordinator" && (
+        coordinatorRun?.pendingAction?.kind === "resume_coordinator" && coordinatorRun.pendingAction.state === "pending" ||
+        this.state.outbound.slice(out.coordinatorResponseBaseline ?? 0).some(item =>
+          item !== out && item.message.run_id === out.message.run_id &&
+          item.message.sender.role === "coordinator" && item.message.type !== "delegation.accepted"));
+      const canReleaseOnPromptReady = (!isPolicyPhase && !hasRealTransportState) ||
+        out.turnObservedWorkingAt !== undefined ||
+        stoppedWithoutOutcome ||
+        answeredInInbox ||
+        coordinatorResponded ||
         Date.parse(this.now()) - Date.parse(out.handle.acceptedAt) >= 45_000;
-      const health = await this.ports.panes.inspectRoleHealth(out.selector);
-      if (canReleaseOnPromptReady && health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
+      if (canReleaseOnPromptReady && liveOccupant && health.value.readyForPrompt)
         await this.release(out); // transport capacity only; never task-success evidence
-      else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId &&
+      else if (liveOccupant && !out.parentAssignmentId &&
           (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
         try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); } // a bounded host measurement may outlive one lease period
       }
@@ -577,7 +603,7 @@ export class HerdrOutbox {
       timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
       idempotency: { key: wire.idempotency_key, scope: "agent-request", fingerprint: digest(wire) },
       createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
-    if (wire.type === "delegation.request" && wire.recipient.role === "coordinator")
+    if (wire.recipient.role === "coordinator")
       out.coordinatorResponseBaseline ??= this.state.outbound.length;
     await guardWorkDispatch();
     if (pane.role === "developer" && !out.parentAssignmentId) await this.ports.pinDeveloperDispatch?.(out.request, pane);
