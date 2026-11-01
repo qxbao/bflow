@@ -582,9 +582,56 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     }
   }
 
+  private resolveOperationTimeoutMs(options?: OperationOptions): OperationResult<number> {
+    if (options?.signal?.aborted) {
+      return err({
+        code: "cancelled",
+        retryable: false,
+        message: "Request was aborted before execution"
+      });
+    }
+    if (options?.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
+      return err({
+        code: "timeout",
+        retryable: true,
+        retrySafety: "not_started",
+        message: "Operation timeout budget exhausted before dispatch"
+      });
+    }
+    let budget = options?.timeoutMs ?? this.defaultTimeoutMs;
+    if (options?.deadline !== undefined) {
+      const deadlineMs = Date.parse(options.deadline);
+      if (!Number.isFinite(deadlineMs)) {
+        return err({
+          code: "validation",
+          retryable: false,
+          message: "Invalid operation deadline"
+        });
+      }
+      const remaining = deadlineMs - Date.now();
+      if (remaining <= 0) {
+        return err({
+          code: "timeout",
+          retryable: true,
+          retrySafety: "not_started",
+          message: "Operation deadline exceeded before dispatch"
+        });
+      }
+      budget = Math.min(budget, remaining);
+    }
+    return ok(Math.max(1, budget));
+  }
+
   async initialize(
     options?: OperationOptions
   ): Promise<OperationResult<MCPUpstreamInitializeResult>> {
+    const initialBudget = this.resolveOperationTimeoutMs(options);
+    if (!initialBudget.ok) {
+      return err(initialBudget.error);
+    }
+    const effectiveDeadlineMs = Date.now() + initialBudget.value;
+    const effectiveDeadline = new Date(effectiveDeadlineMs).toISOString();
+
     const initParams = {
       protocolVersion: DEFAULT_MCP_PROTOCOL_VERSION,
       capabilities: {},
@@ -595,7 +642,8 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     };
 
     const initRes = await this.sendJsonRpcRequest("init", "initialize", initParams, {
-      timeoutMs: options?.timeoutMs
+      timeoutMs: initialBudget.value,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {})
     });
 
     if (!initRes.ok) {
@@ -608,6 +656,22 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
         retryable: false,
         message: `Upstream initialization failed: ${initRes.value.error.message}`,
         details: initRes.value.error as unknown as JsonValue
+      });
+    }
+
+    if (options?.signal?.aborted) {
+      return err({
+        code: "cancelled",
+        retryable: false,
+        message: "Initialization aborted by signal"
+      });
+    }
+    if (effectiveDeadlineMs <= Date.now()) {
+      return err({
+        code: "timeout",
+        retryable: true,
+        retrySafety: "observation_only",
+        message: "Initialization timed out before tools/list"
       });
     }
 
@@ -626,7 +690,10 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       });
     }
 
-    const listRes = await this.listToolDefinitions("init", options);
+    const listRes = await this.listToolDefinitions("init", {
+      deadline: effectiveDeadline,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {})
+    });
     if (!listRes.ok) {
       return err(listRes.error);
     }
@@ -667,8 +734,13 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     sessionId: string,
     options?: OperationOptions
   ): Promise<OperationResult<MCPUpstreamToolList>> {
+    const budget = this.resolveOperationTimeoutMs(options);
+    if (!budget.ok) {
+      return err(budget.error);
+    }
     const res = await this.sendJsonRpcRequest(sessionId, "tools/list", {}, {
-      timeoutMs: options?.timeoutMs
+      timeoutMs: budget.value,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {})
     });
 
     if (!res.ok) {

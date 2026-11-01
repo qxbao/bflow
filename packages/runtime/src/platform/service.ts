@@ -19,7 +19,16 @@ import {
   type OperationResult,
   type RoleProfilePin
 } from "@bflow/contracts";
-import { computeFileSha256, defaultRolePrompt, providerSessionEnvironment, resolveAndVerifyExecutable, type LiveReadinessObservation } from "@bflow/agent-providers";
+import {
+  computeFileSha256,
+  defaultRolePrompt,
+  propagateClaudeWorktreeTrustIfRootTrusted,
+  propagateCodexWorktreeTrustIfRootTrusted,
+  providerLaunchEnvironment,
+  providerSessionEnvironment,
+  resolveAndVerifyExecutable,
+  type LiveReadinessObservation
+} from "@bflow/agent-providers";
 import { appendRoleProfileInstructions, assertRoleProfilePin, loadRoleProfileSnapshot, persistRoleProfileSnapshot, resolveRoleProfile } from "./role-profiles.js";
 import {
   preparePrivateCodexHome,
@@ -959,6 +968,29 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
           "environment"
         )
       );
+      if (
+        preparedCodexHome.mode === "native_auth_compatible" &&
+        resolve(preliminaryEnvironment.value.cwd) !== resolve(identity.workspaceRoot)
+      ) {
+        await propagateCodexWorktreeTrustIfRootTrusted({
+          workspaceRoot: identity.workspaceRoot,
+          worktreePath: preliminaryEnvironment.value.cwd,
+          configFile: join(preparedCodexHome.CODEX_HOME, "config.toml")
+        });
+      }
+    } else if (
+      requirement.provider === "codex" &&
+      isolatorProfile !== undefined &&
+      resolve(preliminaryEnvironment.value.cwd) !== resolve(identity.workspaceRoot)
+    ) {
+      const isolatorCodexHome =
+        isolatorProfile.environment["CODEX_HOME"] ??
+        join(isolatorProfile.environment["HOME"] ?? homedir(), ".codex");
+      await propagateCodexWorktreeTrustIfRootTrusted({
+        workspaceRoot: identity.workspaceRoot,
+        worktreePath: preliminaryEnvironment.value.cwd,
+        configFile: join(isolatorCodexHome, "config.toml")
+      });
     }
 
     const environmentRequirement = preparedCodexHome === undefined
@@ -1024,6 +1056,20 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       launchEnvironmentValues["XDG_STATE_HOME"] = join(privateHome, ".local", "state");
       launchEnvironmentValues["XDG_CACHE_HOME"] = join(privateHome, ".cache");
       launchEnvironmentValues["PATH"] = `${join(privateHome, "bin")}:${process.env["PATH"] ?? "/usr/bin:/bin"}`;
+    }
+    if (
+      requirement.provider === "claude" &&
+      resolve(environment.value.cwd) !== resolve(identity.workspaceRoot)
+    ) {
+      await propagateClaudeWorktreeTrustIfRootTrusted({
+        workspaceRoot: identity.workspaceRoot,
+        worktreePath: environment.value.cwd,
+        env: {
+          ...process.env,
+          ...(requirement.environmentVariables ?? {}),
+          ...launchEnvironmentValues
+        }
+      });
     }
     const launchEnvironment = Object.keys(launchEnvironmentValues).length > 0 ? launchEnvironmentValues : undefined;
     const context: ProviderAdapterContext = {
@@ -1108,6 +1154,15 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       requirement.provider,
       profile.value
     );
+    const hasConfiguredMcpServers =
+      (attempt.context.mcpRegistrations?.length ?? 0) > 0 ||
+      Object.keys(attempt.context.hostMcpServers ?? {}).length > 0;
+    const providerEnvDefaults = hasConfiguredMcpServers
+      ? providerLaunchEnvironment(requirement.provider)
+      : providerSessionEnvironment(requirement.provider);
+    const explicitToolTimeout =
+      requirement.environmentVariables?.["MCP_TOOL_TIMEOUT"] ??
+      attempt.context.launchEnvironment?.["MCP_TOOL_TIMEOUT"];
 
     const prepared: PreparedRoleLaunch = {
       role: requirement.role,
@@ -1125,7 +1180,8 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         env: { ...(attempt.context.launchEnvironment ?? {}),
           ...(sanitizedPath !== undefined ? { PATH: sanitizedPath } : {}),
           ...(attempt.requirement.toolGrants === undefined ? attempt.gateway.tokenEnvironment : {}),
-          ...providerSessionEnvironment(requirement.provider) },
+          ...providerEnvDefaults,
+          ...(explicitToolTimeout !== undefined ? { MCP_TOOL_TIMEOUT: explicitToolTimeout } : {}) },
         launchId: profile.value.launchId,
         launchFingerprint: profile.value.launchFingerprint,
         ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin, features: [ROLE_PROFILE_FEATURE],

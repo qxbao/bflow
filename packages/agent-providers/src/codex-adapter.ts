@@ -97,12 +97,30 @@ async function readBoundedRegularUtf8(path: string, maxBytes = 4 * 1024 * 1024):
  * reach a server only when named in its `env_vars`; the Bflow role MCP server needs these two (verified against codex-cli 0.162.0).
  */
 export const CODEX_MCP_FORWARDED_ENV = ["HERDR_PANE_ID", "BFLOW_LAUNCH_ID"] as const;
+/** Cold multi-pane Node MCP startup on FUSE/NTFS (~25–31s) exceeds Codex's 10s default handshake budget. */
+export const CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC = 120;
+/** Long-running host MCP tools (`check_work`, `submit_implementation`, `propose_workflow`) exceed Codex's 60s default tool budget. */
+export const CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC = 600;
 
 /** Adds the forwarded env names to a stdio server (keeps existing `env_vars` first); URL servers are unchanged. */
 function withForwardedMcpEnv(server: Record<string, unknown>): Record<string, unknown> {
   if (typeof server["command"] !== "string") return server;
   const existing = Array.isArray(server["env_vars"]) ? server["env_vars"].filter((name): name is string => typeof name === "string") : [];
   return { ...server, env_vars: [...new Set([...existing, ...CODEX_MCP_FORWARDED_ENV])] };
+}
+
+function withCodexMcpTimeouts(server: Record<string, unknown>): Record<string, unknown> {
+  const configuredStartup = typeof server["startup_timeout_sec"] === "number" && Number.isFinite(server["startup_timeout_sec"])
+    ? server["startup_timeout_sec"]
+    : undefined;
+  const configuredTool = typeof server["tool_timeout_sec"] === "number" && Number.isFinite(server["tool_timeout_sec"])
+    ? server["tool_timeout_sec"]
+    : undefined;
+  return {
+    ...server,
+    startup_timeout_sec: Math.max(CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC, configuredStartup ?? 0),
+    tool_timeout_sec: Math.max(CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC, configuredTool ?? 0)
+  };
 }
 
 /** Environment-bound local bootstrap. The host UserPromptSubmit hook must block it before inference. */
@@ -693,8 +711,19 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
         // `--ask-for-approval never` auto-rejects every MCP call Codex would prompt for ("MCP tool call
         // requires approval, but approval policy is never"), so the trusted host/Gateway servers are
         // pre-approved like Claude's `--allowedTools mcp__<server>__*`; the host still guards each call.
-        const approved = Object.fromEntries(Object.entries(mcpParsed.mcpServers).map(([name, server]) =>
-          [name, { ...withForwardedMcpEnv(server as Record<string, unknown>), default_tools_approval_mode: "approve" }]));
+        const approved = Object.fromEntries(Object.entries(mcpParsed.mcpServers).map(([name, server]) => {
+          const hostServerOverride = this.options.hostMcpServers?.[name];
+          const mergedServer: Record<string, unknown> = {
+            ...(server as Record<string, unknown>),
+            ...(hostServerOverride?.startup_timeout_sec !== undefined
+              ? { startup_timeout_sec: hostServerOverride.startup_timeout_sec }
+              : {}),
+            ...(hostServerOverride?.tool_timeout_sec !== undefined
+              ? { tool_timeout_sec: hostServerOverride.tool_timeout_sec }
+              : {})
+          };
+          return [name, { ...withCodexMcpTimeouts(withForwardedMcpEnv(mergedServer)), default_tools_approval_mode: "approve" }];
+        }));
         argv.push("-c", `mcp_servers=${tomlValue(approved)}`);
       }
     } catch (err) {

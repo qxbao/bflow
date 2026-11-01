@@ -259,7 +259,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe host socket directory");
   const bootLock = await open(join(directory, "boot.lock"), "a+", 0o600);
   try {
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + HOST_STARTUP_TIMEOUT_MS;
     while (true) {
       const acquired = await new Promise<boolean>((accept, reject) => {
         const child = spawn("flock", ["--nonblock", "3"], {stdio:["ignore","ignore","ignore",bootLock.fd]});
@@ -301,9 +301,13 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
   const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
   const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
+  const resolveDeadlineMs = (deadlineValue: OperationOptions["deadline"]): number => {
+    if (deadlineValue === undefined) return Infinity;
+    return Date.parse(deadlineValue);
+  };
   const request = (method: string, params: unknown = {}, op?: OperationOptions) => {
-    const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000),
-      op?.deadline === undefined ? Infinity : Math.max(1, Date.parse(op.deadline) - Date.now()));
+    const deadlineRemainingMs = op?.deadline === undefined ? Infinity : resolveDeadlineMs(op.deadline) - Date.now();
+    const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000), deadlineRemainingMs);
     return callHost(configuration.socketPath, configuration.token, method, params, timeoutMs, op?.signal);
   };
   let alive = true;
@@ -386,8 +390,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   };
   return {
     async prepare(op) {
-      const deadline = new Date(Math.min(Date.now() + (op?.timeoutMs ?? 600_000),
-        op?.deadline === undefined ? Infinity : Date.parse(op.deadline))).toISOString();
+      const deadline = new Date(Math.min(Date.now() + (op?.timeoutMs ?? 600_000), resolveDeadlineMs(op?.deadline))).toISOString();
       return HostPrepareResponseSchema.parse(await request("prepare", { deadline }, op));
     },
     async platformStatus() { return HostPlatformStatusSchema.parse(await request("platform_status")); },

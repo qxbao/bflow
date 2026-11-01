@@ -145,7 +145,20 @@ export class BrowserResourceTransactions {
         const result = await this.control.releaseResource(entry.lease, { schemaVersion: 3,
           scope: { kind: "session", machineId: identity.machineId, repositoryId: identity.repositoryId,
             workspaceRoot: identity.workspaceRoot, sessionId: identity.sessionId }, idempotencyKey: `browser-release-${entry.lease.leaseId}` });
-        if (result.ok) { entry.state = "closed"; await this.write(identity, ledger); } else failure ??= result.error;
+        const expiredAndSuperseded =
+          !result.ok &&
+          result.error.code === "conflict" &&
+          Date.parse(entry.lease.expiresAt) <= this.now().getTime() &&
+          typeof result.error.details === "object" &&
+          result.error.details !== null &&
+          !Array.isArray(result.error.details) &&
+          (result.error.details as { readonly diagnosticCode?: unknown }).diagnosticCode === "stale_lease";
+        if (result.ok || expiredAndSuperseded) {
+          entry.state = "closed";
+          await this.write(identity, ledger);
+        } else {
+          failure ??= result.error;
+        }
       }
       return failure ? failWith(failure) : ok(undefined);
     });

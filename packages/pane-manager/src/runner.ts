@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import type {
   AgentSessionLocator,
   ContractError,
@@ -47,6 +48,10 @@ export function validArguments(args: readonly string[]): boolean {
 }
 
 const MAX_SAFE_TIMEOUT_MS = 2147483647; // 2^31 - 1, Node timer limit
+const PIPE_DRAIN_GRACE_MS = 50;
+const ACTIVE_EXIT_DRAIN_IDLE_MS = 80;
+const MAX_POST_EXIT_DRAIN_MS = 1_000;
+const PRE_EXEC_INVALID_ARG_CODES = new Set<string>(["E2BIG", "ENAMETOOLONG", "EINVAL"]);
 
 export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
   return {
@@ -98,11 +103,13 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
             env: env ?? process.env
           });
         } catch (spawnError) {
+          const errnoCode = (spawnError as NodeJS.ErrnoException | undefined)?.code;
+          const isArgFailure = typeof errnoCode === "string" && PRE_EXEC_INVALID_ARG_CODES.has(errnoCode);
           resolve({
             exitCode: null,
             stdout: "",
             stderr: "",
-            failure: "spawn",
+            failure: isArgFailure ? "invalid_arguments" : "spawn",
             started: false,
             cause: (spawnError as Error).message || "Process could not launch"
           });
@@ -116,10 +123,63 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
 
         let stdout = "";
         let stderr = "";
+        let totalBytes = 0;
+        const stdoutDecoder = new StringDecoder("utf8");
+        const stderrDecoder = new StringDecoder("utf8");
         let failure: CommandOutcome["failure"];
         let cause: string | undefined;
         let settled = false;
+        let exited = false;
+        let observedExitCode: number | null = null;
+        let exitTimestampMs: number | undefined;
         let timer: ReturnType<typeof setTimeout> | undefined;
+        let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const destroyPipes = () => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+        };
+
+        const finalize = (exitCode: number | null) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          if (exitDrainTimer !== undefined) clearTimeout(exitDrainTimer);
+          signal?.removeEventListener("abort", onAbort);
+          if (failure !== "output_limit") {
+            stdout += stdoutDecoder.end();
+            stderr += stderrDecoder.end();
+          }
+          resolve({
+            exitCode,
+            stdout,
+            stderr,
+            started,
+            ...(failure !== undefined && { failure }),
+            ...(cause !== undefined && { cause })
+          });
+        };
+
+        const scheduleExitDrain = (delayMs: number) => {
+          if (settled || !exited) return;
+          if (exitDrainTimer !== undefined) {
+            clearTimeout(exitDrainTimer);
+            exitDrainTimer = undefined;
+          }
+          const elapsed = exitTimestampMs !== undefined ? Date.now() - exitTimestampMs : 0;
+          const remainingBudget = MAX_POST_EXIT_DRAIN_MS - elapsed;
+          if (remainingBudget <= 0) {
+            destroyPipes();
+            finalize(observedExitCode);
+            return;
+          }
+          const waitMs = Math.min(delayMs, remainingBudget);
+          exitDrainTimer = setTimeout(() => {
+            destroyPipes();
+            finalize(observedExitCode);
+          }, waitMs);
+          exitDrainTimer.unref?.();
+        };
 
         const stop = (reason: NonNullable<CommandOutcome["failure"]>, customCause?: string) => {
           failure ??= reason;
@@ -130,6 +190,10 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
             child.kill("SIGKILL");
           } catch {
             // ignore kill error
+          }
+          if (exited) {
+            destroyPipes();
+            finalize(observedExitCode);
           }
         };
 
@@ -145,18 +209,19 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
         }
 
         const append = (which: "stdout" | "stderr", chunk: Buffer) => {
-          if (failure === "output_limit") return;
-          const next = (which === "stdout" ? stdout : stderr) + chunk.toString("utf8");
-          const totalBytes =
-            Buffer.byteLength(next) + Buffer.byteLength(which === "stdout" ? stderr : stdout);
+          if (settled || failure === "output_limit") return;
+          totalBytes += chunk.byteLength;
           if (totalBytes > maxOutputBytes) {
             stop("output_limit", `Output exceeded maximum allowed limit of ${maxOutputBytes} bytes`);
             return;
           }
           if (which === "stdout") {
-            stdout = next;
+            stdout += stdoutDecoder.write(chunk);
           } else {
-            stderr = next;
+            stderr += stderrDecoder.write(chunk);
+          }
+          if (exited && !settled) {
+            scheduleExitDrain(ACTIVE_EXIT_DRAIN_IDLE_MS);
           }
         };
 
@@ -164,23 +229,26 @@ export function createProcessRunner(binary = "herdr"): HerdrCommandRunner {
         child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
 
         child.on("error", (error: Error) => {
-          failure ??= "spawn";
+          const errnoCode = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (typeof errnoCode === "string" && PRE_EXEC_INVALID_ARG_CODES.has(errnoCode)) {
+            started = false;
+            failure ??= "invalid_arguments";
+          } else {
+            failure ??= "spawn";
+          }
           cause ??= error.name === "Error" ? `Process unavailable: ${error.message}` : error.message;
         });
 
+        child.on("exit", (exitCode) => {
+          if (settled || exited) return;
+          exited = true;
+          observedExitCode = exitCode;
+          exitTimestampMs = Date.now();
+          scheduleExitDrain(PIPE_DRAIN_GRACE_MS);
+        });
+
         child.on("close", (exitCode) => {
-          if (settled) return;
-          settled = true;
-          if (timer !== undefined) clearTimeout(timer);
-          signal?.removeEventListener("abort", onAbort);
-          resolve({
-            exitCode,
-            stdout,
-            stderr,
-            started,
-            ...(failure !== undefined && { failure }),
-            ...(cause !== undefined && { cause })
-          });
+          finalize(exitCode ?? observedExitCode);
         });
       });
     }
@@ -308,6 +376,101 @@ export function createGitWorktreeInspector(gitBinary = "git"): WorktreeInspector
   };
 }
 
+type EnvelopeScanResult =
+  | { readonly kind: "object"; readonly value: Record<string, unknown> }
+  | { readonly kind: "invalid_root" }
+  | { readonly kind: "unparsed" };
+
+function scanJsonEnvelope(raw: string): EnvelopeScanResult {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { kind: "unparsed" };
+  }
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { kind: "object", value: parsed as Record<string, unknown> };
+    }
+    return { kind: "invalid_root" };
+  } catch {
+    // Fall back to scanning single-line JSON envelopes surrounded by CLI warning lines.
+  }
+
+  const candidates: Record<string, unknown>[] = [];
+  for (const line of trimmed.split(/\r?\n/)) {
+    const candidate = line.trim();
+    if (!candidate.startsWith("{") || !candidate.endsWith("}")) {
+      continue;
+    }
+    try {
+      const parsed: unknown = JSON.parse(candidate);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        candidates.push(parsed as Record<string, unknown>);
+      }
+    } catch {
+      // Ignore non-JSON log lines.
+    }
+  }
+  if (candidates.length === 1) {
+    return { kind: "object", value: candidates[0]! };
+  }
+  return { kind: "unparsed" };
+}
+
+function isRemoteNotFoundError(remoteCode: string, remoteMessage: string): boolean {
+  if (
+    remoteCode === "invalid_target" ||
+    remoteCode === "not_found" ||
+    remoteCode === "target_not_found" ||
+    remoteCode === "agent_not_found" ||
+    remoteCode === "pane_not_found" ||
+    remoteCode === "tab_not_found" ||
+    remoteCode === "workspace_not_found" ||
+    remoteCode === "session_not_found" ||
+    remoteCode === "terminal_not_found" ||
+    remoteCode === "agent_not_running" ||
+    remoteCode.endsWith("_not_found")
+  ) {
+    return true;
+  }
+  if (
+    (remoteCode === "error" || remoteCode === "cli_error" || remoteCode === "command_failed") &&
+    /\b(?:pane|tab|workspace|agent|target|session|terminal)\b[^\n]*\bnot found\b/i.test(remoteMessage)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function classifyPlainTextCliError(rawText: string): ContractError | null {
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (
+    /\b(?:pane|tab|workspace|agent|target|session|terminal)\b[^\n]*\bnot found\b/i.test(trimmed) ||
+    /^error:\s*unknown (?:pane|tab|workspace|agent|target|session|terminal)\b/i.test(trimmed)
+  ) {
+    return {
+      code: "not_found",
+      retryable: false,
+      message: trimmed
+    };
+  }
+  if (
+    /\b(?:connection refused|econnrefused|enoent[^\n]*socket|daemon (?:is )?not running|failed to connect to herdr|socket (?:is )?not available|broken pipe)\b/i.test(
+      trimmed
+    )
+  ) {
+    return {
+      code: "transport_unavailable",
+      retryable: true,
+      message: trimmed
+    };
+  }
+  return null;
+}
+
 export function mapCommandFailure(outcome: CommandOutcome): ContractError | null {
   if (outcome.failure !== undefined) {
     switch (outcome.failure) {
@@ -355,11 +518,15 @@ export function mapCommandFailure(outcome: CommandOutcome): ContractError | null
     return null;
   }
 
-  // Parse stderr JSON
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(outcome.stderr);
-  } catch {
+  const stderrScan = scanJsonEnvelope(outcome.stderr);
+  const stdoutScan = stderrScan.kind === "unparsed" ? scanJsonEnvelope(outcome.stdout) : { kind: "unparsed" as const };
+  const activeScan = stderrScan.kind !== "unparsed" ? stderrScan : stdoutScan;
+
+  if (activeScan.kind === "unparsed") {
+    const plainError = classifyPlainTextCliError(outcome.stderr || outcome.stdout);
+    if (plainError !== null) {
+      return plainError;
+    }
     return {
       code: "corruption",
       retryable: false,
@@ -368,26 +535,33 @@ export function mapCommandFailure(outcome: CommandOutcome): ContractError | null
   }
 
   if (
-    parsed === null ||
-    typeof parsed !== "object" ||
-    Array.isArray(parsed) ||
-    !("error" in parsed) ||
-    typeof (parsed as Record<string, unknown>).error !== "object" ||
-    (parsed as Record<string, unknown>).error === null
+    activeScan.kind === "invalid_root" ||
+    !("error" in activeScan.value) ||
+    typeof activeScan.value.error !== "object" ||
+    activeScan.value.error === null ||
+    Array.isArray(activeScan.value.error)
   ) {
     return {
       code: "corruption",
       retryable: false,
-      message: `Command exited with status ${outcome.exitCode} and invalid error envelope: ${outcome.stderr}`
+      message: `Command exited with status ${outcome.exitCode} and invalid error envelope: ${outcome.stderr || outcome.stdout}`
     };
   }
 
-  const errorObj = (parsed as { error: Record<string, unknown> }).error;
+  const errorObj = activeScan.value.error as Record<string, unknown>;
   const remoteCode = typeof errorObj.code === "string" ? errorObj.code : "";
   const remoteMessage =
     typeof errorObj.message === "string" && errorObj.message.length > 0
       ? errorObj.message
       : `Herdr error: ${remoteCode || "unknown"}`;
+
+  if (isRemoteNotFoundError(remoteCode, remoteMessage)) {
+    return {
+      code: "not_found",
+      retryable: false,
+      message: remoteMessage
+    };
+  }
 
   switch (remoteCode) {
     case "agent_blocked":
@@ -405,18 +579,6 @@ export function mapCommandFailure(outcome: CommandOutcome): ContractError | null
         code: "timeout",
         retryable: true,
         retrySafety: "observation_only",
-        message: remoteMessage
-      };
-
-    case "invalid_target":
-    case "agent_not_found":
-    case "pane_not_found":
-    case "tab_not_found":
-    case "workspace_not_found":
-    case "agent_not_running":
-      return {
-        code: "not_found",
-        retryable: false,
         message: remoteMessage
       };
 
@@ -486,13 +648,18 @@ function parseSessionLocator(raw: unknown, paneAgent?: string | null): AgentSess
 }
 
 export function parseHerdrResponse(outcome: CommandOutcome): Record<string, unknown> {
-  let value: unknown;
-  try {
-    value = JSON.parse(outcome.exitCode === 0 ? outcome.stdout : outcome.stderr);
-  } catch {
+  const primary = outcome.exitCode === 0 ? scanJsonEnvelope(outcome.stdout) : scanJsonEnvelope(outcome.stderr);
+  const scan =
+    outcome.exitCode !== 0 && primary.kind === "unparsed"
+      ? scanJsonEnvelope(outcome.stdout)
+      : primary;
+  if (scan.kind === "unparsed") {
     throw new HerdrProtocolError("Herdr returned malformed JSON", "malformed");
   }
-  const envelope = record(value, "envelope");
+  if (scan.kind === "invalid_root") {
+    throw new HerdrProtocolError("Malformed Herdr envelope", "malformed");
+  }
+  const envelope = scan.value;
   if (outcome.exitCode !== 0) {
     const error = record(envelope.error, "error envelope");
     throw new HerdrProtocolError(

@@ -74,6 +74,8 @@ export type HostHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop" | "Stop
 export interface HostMcpServer {
   readonly command: string;
   readonly args: readonly string[];
+  readonly startup_timeout_sec?: number;
+  readonly tool_timeout_sec?: number;
 }
 
 export interface ProviderAdapterOptions {
