@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import type { WebProject, WebProjectInspection, WebProjectInitialization } from '@bflow/contracts/web';
-import { ApiClient, ApiError, explain } from '../api/client';
+import { ApiClient, ApiError, ConfigurationError, explain } from '../api/client';
 import { FieldHelp, FieldLabel } from '../components/FieldHelp';
 import { StatusBadge } from '../components/StatusBadge';
 import { ProjectConfiguration } from './project-configuration';
@@ -23,18 +23,57 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
  const navigate=useNavigate(),id=project.projectId;
  const key=`bflow:init:${id}`;
  const [inspection,setInspection]=useState<WebProjectInspection>(),[inspecting,setInspecting]=useState(false),[error,setError]=useState<unknown>(),[busy,setBusy]=useState(false),[license,setLicense]=useState(false),[update,setUpdate]=useState(false),[provider,setProvider]=useState(''),[skipGitNexus,setSkipGitNexus]=useState(false),[job,setJob]=useState<WebProjectInitialization>(),[operationId,setOperationId]=useState(()=>localStorage.getItem(key)??''),[confirmRemove,setConfirmRemove]=useState(false),[configRevision,setConfigRevision]=useState(0),[pollAttempt,setPollAttempt]=useState(0),[configDirty,setConfigDirty]=useState(false),[configFileRevision,setConfigFileRevision]=useState(''),[commitConfiguration,setCommitConfiguration]=useState(false);
+ const refreshRef=useRef(refresh);refreshRef.current=refresh;
+ const inspectGen=useRef(0),activeId=useRef(id);activeId.current=id;
  const running=job?.state==='running' || Boolean(operationId && !job);
  useEffect(()=>{
-  setInspection(undefined);setError(undefined);setJob(undefined);setConfirmRemove(false);setConfigDirty(false);setConfigFileRevision('');setCommitConfiguration(false);
+  inspectGen.current+=1;
+  setInspecting(false);setInspection(undefined);setError(undefined);setJob(undefined);setConfirmRemove(false);setConfigDirty(false);setConfigFileRevision('');setCommitConfiguration(false);
   setOperationId(localStorage.getItem(`bflow:init:${id}`)??'');
  },[id]);
- async function inspect(){setInspecting(true);setError(undefined);try{setInspection(await api.inspect(id));}catch(e){setError(e);}finally{setInspecting(false);}}
+ async function inspect(){
+  const targetId=id,gen=++inspectGen.current;
+  const current=()=>activeId.current===targetId && inspectGen.current===gen;
+  setInspecting(true);setError(undefined);
+  try{const next=await api.inspect(targetId);if(current())setInspection(next);}catch(e){if(current())setError(e);}finally{if(current())setInspecting(false);}
+ }
  useEffect(()=>{
   if(!operationId)return;let active=true,timer:ReturnType<typeof setTimeout>;
-  const poll=async()=>{try{const next=await api.initialization(id,operationId);if(!active)return;setJob(next);setError(undefined);if(next.state==='running')timer=setTimeout(()=>void poll(),1500);else{if(next.state==='succeeded')setConfigRevision(v=>v+1);localStorage.removeItem(key);}}catch(e){if(active){setError(e);if(e instanceof ApiError && ['not_found','invalid_request','forbidden','operation_not_allowed'].includes(e.code)){localStorage.removeItem(key);setJob({apiVersion:1,projectId:id,operationId,state:'interrupted',message:e.code==='not_found'?'Chưa tìm thấy biên nhận. Có thể yêu cầu chưa được gửi. Dùng Gửi lại cùng mã để kiểm tra và tiếp tục an toàn.':explain(e),updatedAt:new Date().toISOString()});}else timer=setTimeout(()=>void poll(),5000);}}};
+  const poll=async()=>{try{const next=await api.initialization(id,operationId);if(!active)return;setJob(next);setError(undefined);if(next.state==='running')timer=setTimeout(()=>void poll(),1500);else{if(next.state==='succeeded'){setConfigRevision(v=>v+1);refreshRef.current();}localStorage.removeItem(key);if(next.state!=='interrupted')localStorage.removeItem(key+':request');}}catch(e){if(active){setError(e);if(e instanceof ApiError && ['not_found','invalid_request','forbidden','operation_not_allowed'].includes(e.code)){localStorage.removeItem(key);setJob({apiVersion:1,projectId:id,operationId,state:'interrupted',message:e.code==='not_found'?'Chưa tìm thấy biên nhận. Có thể yêu cầu chưa được gửi. Dùng Gửi lại cùng mã để kiểm tra và tiếp tục an toàn.':explain(e),updatedAt:new Date().toISOString()});}else timer=setTimeout(()=>void poll(),5000);}}};
   void poll();return()=>{active=false;clearTimeout(timer);};
- },[api,id,operationId,pollAttempt]);
- async function initialize(retry=false){setError(undefined);setBusy(true);const request=retry?JSON.parse(localStorage.getItem(key+':request')??'null'):{apiVersion:1,operationId:crypto.randomUUID(),acceptGitNexusLicense:license,skipGitNexus,update,...(commitConfiguration?{commitConfiguration:true,expectedConfigurationRevision:configFileRevision}:{}),...(provider?{provider}:{})};if(!request){setBusy(false);return;}const op=request.operationId;localStorage.setItem(key,op);localStorage.setItem(key+':request',JSON.stringify(request));setJob(undefined);try{setJob(await api.initialize(id,request));setOperationId(op);setPollAttempt(value=>value+1);}catch(e){setError(e);if(e instanceof ApiError && ['invalid_request','forbidden','operation_not_allowed','not_found','stale_version'].includes(e.code)){setOperationId('');localStorage.removeItem(key);return;}setOperationId(op);setPollAttempt(value=>value+1);}finally{setBusy(false);}}
+ },[api,id,operationId,pollAttempt,key]);
+ async function initialize(retry=false){
+  setError(undefined);setBusy(true);
+  let op='';
+  try{
+   let request:Record<string,unknown>|null;
+   if(retry){
+    try{
+     const parsed:unknown=JSON.parse(localStorage.getItem(key+':request')??'null');
+     request=parsed && typeof parsed==='object' && 'operationId' in parsed && typeof parsed.operationId==='string'?parsed as Record<string,unknown>:null;
+    }catch{
+     localStorage.removeItem(key+':request');
+     throw new ConfigurationError('Dữ liệu yêu cầu khởi tạo đã lưu bị hỏng. Hãy thực hiện khởi tạo mới.');
+    }
+    if(!request){
+     localStorage.removeItem(key+':request');
+     throw new ConfigurationError('Không còn biên nhận yêu cầu khởi tạo để gửi lại. Hãy thực hiện khởi tạo mới.');
+    }
+   }else{
+    request={apiVersion:1,operationId:crypto.randomUUID(),acceptGitNexusLicense:license,skipGitNexus,update,...(commitConfiguration?{commitConfiguration:true,expectedConfigurationRevision:configFileRevision}:{}),...(provider?{provider}:{})};
+   }
+   op=String(request.operationId);
+   localStorage.setItem(key,op);localStorage.setItem(key+':request',JSON.stringify(request));
+   setJob(undefined);
+   setJob(await api.initialize(id,request));setOperationId(op);setPollAttempt(value=>value+1);
+  }catch(e){
+   setError(e);
+   if(e instanceof ConfigurationError || (e instanceof ApiError && ['invalid_request','forbidden','operation_not_allowed','not_found','stale_version'].includes(e.code))){
+    setOperationId('');localStorage.removeItem(key);localStorage.removeItem(key+':request');return;
+   }
+   if(op){setOperationId(op);setPollAttempt(value=>value+1);}
+  }finally{setBusy(false);}
+ }
  async function unregister(){setBusy(true);setError(undefined);try{await api.unregister(id);refresh();navigate('/');}catch(e){setError(e);}finally{setBusy(false);}}
  const attentionChecks=inspection?.checks.filter(c=>c.state!=='passed')??[],passedChecks=inspection?.checks.filter(c=>c.state==='passed')??[];
  return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Thông tin trên máy này</div><h1>Cài đặt dự án</h1>
