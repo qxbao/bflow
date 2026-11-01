@@ -4643,9 +4643,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   /** Bounded retries for a durable verification outcome that cannot be finished. Other entries and runs are unaffected. */
   private async recordVerificationFailure(item: JournalState["pendingVerifications"][number], error: unknown): Promise<void> {
     const id = pendingVerificationId(item);
-    if (id === undefined) return;
+    const itemKey = id === undefined ? digest([item.job, item.outcome]) : undefined;
     await this.transaction(async (state, save, _core, outbox) => {
-      const entry = state.pendingVerifications.find(candidate => pendingVerificationId(candidate) === id);
+      const entry = state.pendingVerifications.find(candidate => id !== undefined
+        ? pendingVerificationId(candidate) === id
+        : pendingVerificationId(candidate) === undefined && digest([candidate.job, candidate.outcome]) === itemKey);
       if (!entry) return; // finished or cleared meanwhile
       const reason = redactString(String(error));
       entry.attempts = (entry.attempts ?? 0) + 1; entry.lastError = reason;
@@ -4872,8 +4874,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   private async integrate(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord): Promise<void> {
     let integration: Integration;
-    if (run.integrationKey) integration = await this.ports.policies.git.getIntegration(run.integrationKey);
-    else {
+    if (run.integrationKey) {
+      integration = await this.ports.policies.git.getIntegration(run.integrationKey);
+      if (["creating", "ready", "merging"].includes(integration.status) && typeof this.ports.policies.git.resumeIntegration === "function") {
+        integration = await this.ports.policies.git.resumeIntegration(run.integrationKey);
+      }
+    } else {
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       integration = await this.ports.policies.git.beginIntegration({ runId: run.runId, integrationId: `integration-${digest(run.runId)}`,
         baseRevision: run.baseRevision!, tasks: run.tasks.map(task => ({ taskKey: task.worktrees.at(-1)!.key,
@@ -5033,7 +5039,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   /** The Developer writer behind this execution is released (task) or its resolver attempt is settled. */
   private writerSettled(run: RunRecord, out: Outbound): boolean {
-    return !!(run.tasks.find(task => task.taskId === out.taskId)?.writerReleased || this.currentResolver(run, out)?.attempt.settled);
+    if (run.tasks.find(task => task.taskId === out.taskId)?.writerReleased || this.currentResolver(run, out)?.attempt.settled) return true;
+    return objectField(out.message.payload, "kind") === CONFLICT_RESOLUTION_KIND && ["released", "cancelled"].includes(out.status);
   }
   /**
    * An unsettled delivery that could still wake this exact execution/allocation: same recipient role, and the same pane or
@@ -5115,7 +5122,15 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         this.progress(state, outbox, run, "Committed conflict resolution accepted; workflow verification required");
         await save(); return json({ committed: true, accepted: true, head, integrationStatus: integration.status });
       } catch (error) {
-        this.failConflictResolver(state, outbox, run, attempt, `P18 rejected the resolution commit: ${String(error)}`);
+        let restoreNote = "";
+        if (resolution.attempts.length < CONFLICT_RESOLVER_ATTEMPTS) {
+          try {
+            const { restoreRejectedConflictMerge } = await import("./integration-change.js");
+            await restoreRejectedConflictMerge({ worktreePath: resolution.worktreePath, branchName: resolution.branchName,
+              rejectedHead: head, ...(resolution.incomingCommitHash ? { incomingCommitHash: resolution.incomingCommitHash } : {}) });
+          } catch (restoreError) { restoreNote = `; merge restore failed: ${String(restoreError)}`; }
+        }
+        this.failConflictResolver(state, outbox, run, attempt, `P18 rejected the resolution commit: ${String(error)}${restoreNote}`);
         await save(); return json({ committed: true, accepted: false, head, reason: attempt.reason ?? String(error) });
       }
     });

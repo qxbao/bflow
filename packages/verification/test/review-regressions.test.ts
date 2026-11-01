@@ -108,6 +108,9 @@ describe("P17 review regressions", () => {
     expect(outcome.result.findings.some(finding => typeof finding.details === "object" &&
       finding.details !== null && !Array.isArray(finding.details) && finding.details.checkId === "review-check" &&
       finding.details.criterionId === "ac-review" && finding.details.responsibleRole === "developer")).toBe(true);
+    // Explicit gate findings must also preserve details.checkId so multi-gate rework attributes findings per gate
+    expect(outcome.result.findings.some(finding => finding.code !== "check_failed" && typeof finding.details === "object" &&
+      finding.details !== null && !Array.isArray(finding.details) && typeof finding.details.checkId === "string")).toBe(true);
   });
 });
 

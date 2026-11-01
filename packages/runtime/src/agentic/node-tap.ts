@@ -248,11 +248,20 @@ function isNodeTapAssertionFailure(yaml: string): boolean {
   return isRecognizedAssertionMessage(synthesized);
 }
 
+function parseTapTitleAndDirective(raw: string): { title: string; directive?: "skip" | "todo" } {
+  const directiveMatch = /^(.*?)\s+#\s*(SKIP|TODO)(?:$|\s+.*)$/i.exec(raw);
+  const body = directiveMatch ? directiveMatch[1]! : raw;
+  const directive = directiveMatch ? (directiveMatch[2]!.toLowerCase() as "skip" | "todo") : undefined;
+  const title = body.replace(/\\([#\\])/g, "$1");
+  return directive ? { title, directive } : { title };
+}
+
 interface TapTreeEntry {
   readonly level: number;
   readonly index: number;
   readonly ok: boolean;
   readonly name: string;
+  readonly directive?: "skip" | "todo" | undefined;
   readonly yaml: string;
   readonly isSuite: boolean;
   readonly children: readonly TapTreeEntry[];
@@ -261,6 +270,7 @@ interface TapTreeEntry {
 interface TapLeafEntry extends ObservedIdentityLeaf {
   readonly level: number;
   readonly ok: boolean;
+  readonly directive?: "skip" | "todo" | undefined;
   readonly yaml: string;
 }
 
@@ -312,7 +322,9 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
     const level = indent.length / 4;
     const ok = resultMatch[2] === "ok";
     const index = Number(resultMatch[3]);
-    const name = resultMatch[4]!;
+    const parsedTitle = parseTapTitleAndDirective(resultMatch[4]!);
+    const name = parsedTitle.title;
+    const directive = parsedTitle.directive;
 
     let yaml = "";
     if (lines[i + 1] === `${indent}  ---`) {
@@ -347,7 +359,7 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
       bucket = [];
       childrenAtLevel[level] = bucket;
     }
-    bucket.push({ level, index, ok, name, yaml, isSuite, children });
+    bucket.push({ level, index, ok, name, ...(directive ? { directive } : {}), yaml, isSuite, children });
   }
 
   for (let level = 1; level < Math.max(childrenAtLevel.length, openBlockAtLevel.length); level++) {
@@ -382,6 +394,7 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
           rawName: ancestors.length > 0 ? [...ancestors, entry.name].join(" > ") : entry.name,
           level: entry.level,
           ok: entry.ok,
+          ...(entry.directive ? { directive: entry.directive } : {}),
           yaml: entry.yaml
         });
       }
@@ -395,20 +408,12 @@ export function parseNodeTap(outcome: QualityCommandOutcome, expectedNames: read
     throw new Error("Zero, nested, skipped or incomplete tests cannot prove behavior");
   }
 
-  const skipDirectiveRe = / # SKIP(?: .*)?$/i;
-  const todoDirectiveRe = / # TODO(?: .*)?$/i;
-  const isUnselectedDirectiveLeaf = (leaf: TapLeafEntry, directiveRe: RegExp): boolean => {
-    if (!leaf.ok || !directiveRe.test(leaf.title)) return false;
-    const strippedTitle = leaf.title.replace(directiveRe, "");
-    const candidate: ObservedIdentityLeaf = {
-      ancestors: leaf.ancestors,
-      title: strippedTitle,
-      rawName: leaf.ancestors.length > 0 ? [...leaf.ancestors, strippedTitle].join(" > ") : strippedTitle
-    };
-    return !expectedNames.some(expected => matchesExpectedIdentity(candidate, expected));
+  const isUnselectedDirectiveLeaf = (leaf: TapLeafEntry, targetDirective: "skip" | "todo"): boolean => {
+    if (!leaf.ok || leaf.directive !== targetDirective) return false;
+    return !expectedNames.some(expected => matchesExpectedIdentity(leaf, expected));
   };
-  const filteredSkipped = nameSelection ? allLeaves.filter(leaf => isUnselectedDirectiveLeaf(leaf, skipDirectiveRe)) : [];
-  const filteredTodo = nameSelection ? allLeaves.filter(leaf => isUnselectedDirectiveLeaf(leaf, todoDirectiveRe)) : [];
+  const filteredSkipped = nameSelection ? allLeaves.filter(leaf => isUnselectedDirectiveLeaf(leaf, "skip")) : [];
+  const filteredTodo = nameSelection ? allLeaves.filter(leaf => isUnselectedDirectiveLeaf(leaf, "todo")) : [];
   // Node 22 reports a selected file without any matching test as a passing top-level test named after the file. Only an
   // exact selected path qualifies; a failing file entry (for example a load error) remains a failure.
   const isSelectedFilePlaceholder = (leaf: TapLeafEntry): boolean => {
