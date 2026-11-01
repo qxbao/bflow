@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -10,7 +11,7 @@ import {
   type ArtifactReference, type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateDefinition, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
-import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
+import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, requiredReworkFindingIdsForGate, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
 import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
   type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
@@ -208,7 +209,8 @@ export class HostVerification {
     const task = taskId === undefined ? undefined : tasks.find(item => item.taskId === taskId);
     if (taskId !== undefined && !task) throw new Error("Unknown task");
     const dossier = record(task ? task.spec : run.workflowSpec);
-    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) };
+    // Keep the initial trusted task baseline across rework attempts so rejected attempt-1 commits never become the baseline.
+    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) && task.worktrees.length > 0 ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) };
   }
   private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string }): BoundBehavioralCommand[] {
     const rest = this.splitApp(input.specification, input.strategy);
@@ -287,9 +289,9 @@ export class HostVerification {
     return { cwd: textField(value.cwd), base: textField(value.base), revision: textField(value.revision), command: whitespaceCommand,
       exitCode: Number(value.exitCode), output: value.output, diff: value.diff };
   }
-  private async artifact(runId: string, taskId: string, body: unknown, artifactId?: string) {
+  private async artifact(runId: string, taskId: string | undefined, body: unknown, artifactId?: string) {
     const bytes = Buffer.from(JSON.stringify(body)); const id = artifactId ?? `host-observation-${randomUUID()}`;
-    return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: id, runId, taskId, kind: "test-result", mediaType: "application/json",
+    return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: id, runId, ...(taskId ? { taskId } : {}), kind: "test-result", mediaType: "application/json",
       expectedIntegrity: { checksum: { algorithm: "sha256", value: createHash("sha256").update(bytes).digest("hex") }, sizeBytes: bytes.length }, idempotencyKey: id }),
       content: (async function* () { yield bytes; })() })));
   }
@@ -757,14 +759,17 @@ export class HostVerification {
       const effectiveTaskId = taskId === "workflow-verification" ? undefined : taskId;
       try {
         const inspected = record(await this.runtime().inspect(runId));
-        const runObj = inspected.run !== null && typeof inspected.run === "object" ? record(inspected.run) : inspected;
+        const fromRuns = Array.isArray(inspected.runs)
+          ? inspected.runs.filter(item => item !== null && typeof item === "object").map(record).find(item => item.runId === runId)
+          : undefined;
+        const runObj = inspected.run !== null && typeof inspected.run === "object" ? record(inspected.run) : (fromRuns ?? inspected);
         if (effectiveTaskId !== undefined && Array.isArray(runObj.tasks)) {
           const task = runObj.tasks
             .filter(item => item !== null && typeof item === "object")
             .map(record)
             .find(item => item.taskId === effectiveTaskId);
           if (task && Array.isArray(task.worktrees) && task.worktrees.length > 0) {
-            const baseCommit = record(task.worktrees.at(-1)).baseCommitHash;
+            const baseCommit = record(task.worktrees[0]).baseCommitHash;
             if (typeof baseCommit === "string" && baseCommit.trim().length > 0) return baseCommit.trim();
           }
         }
@@ -918,13 +923,14 @@ export class HostVerification {
           }
 
           const budgetMs = Math.min(540_000, profile.timeoutMs * 3);
-          const bindAtCurrentCheckout = async (testPaths: string[]) => {
-            const pinned = await pinRunnerDefinitions(cwd, {
+          const bindAtCheckout = async (checkoutDir: string, testPaths: string[]) => {
+            const baseProfile = profile.dependencySource ? profile : { ...profile, dependencySource: repositoryRoot };
+            const pinned = await pinRunnerDefinitions(checkoutDir, {
               status: "detected",
-              profiles: [profile],
+              profiles: [baseProfile],
               notes: []
             });
-            const activeProfile = pinned.status === "detected" ? pinned.profiles[0]! : profile;
+            const activeProfile = pinned.status === "detected" ? pinned.profiles[0]! : baseProfile;
             return bindRegressionProfile(activeProfile, testPaths, budgetMs);
           };
 
@@ -952,7 +958,7 @@ export class HostVerification {
 
           let headMeasured: RegressionMeasurement;
           try {
-            const headCommand = await bindAtCurrentCheckout([...selection.testPaths]);
+            const headCommand = await bindAtCheckout(cwd, [...selection.testPaths]);
             headMeasured = await measureRegression(headCommand, cwd, head);
           } catch (error) {
             return await handleInfraFailure(error);
@@ -988,24 +994,22 @@ export class HostVerification {
 
           let baseFailures: RegressionFailure[] = [];
           if (baseTestPaths.length > 0) {
-            const symbolicBranch = (
-              await this.git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"]).catch(() => "")
-            ).trim();
+            const tempRoot = await mkdtemp(join(tmpdir(), "bflow-regression-base-"));
+            const baseCheckout = join(tempRoot, "checkout");
+            let worktreeAdded = false;
             try {
-              await this.git(cwd, ["checkout", "--detach", "--force", base]);
-              const baseCommand = await bindAtCurrentCheckout(baseTestPaths);
-              const baseMeasured = await measureRegression(baseCommand, cwd, base);
+              await this.git(cwd, ["worktree", "add", "--detach", baseCheckout, base]);
+              worktreeAdded = true;
+              const baseCommand = await bindAtCheckout(baseCheckout, baseTestPaths);
+              const baseMeasured = await measureRegression(baseCommand, baseCheckout, base);
               baseFailures = baseMeasured.observation.failures;
             } catch (error) {
               return await handleInfraFailure(error);
             } finally {
-              if (symbolicBranch) {
-                await this.git(cwd, ["checkout", "--force", symbolicBranch]).catch(async () => {
-                  await this.git(cwd, ["checkout", "--detach", "--force", head]);
-                });
-              } else {
-                await this.git(cwd, ["checkout", "--detach", "--force", head]);
+              if (worktreeAdded) {
+                await this.git(cwd, ["worktree", "remove", "--force", baseCheckout]).catch(() => undefined);
               }
+              await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
             }
           }
 
@@ -1118,7 +1122,7 @@ export class HostVerification {
     const split = splitAppCriteria(spec, strategy, this.appSuites), appBindings = split.app;
     const criteria = split.rest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
     const allCriteria = [...criteria, ...appBindings.map(binding => binding.criterion)], attemptId = randomUUID();
-    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) });
+    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) });
     // Real-app criteria need no runner command; a runner-verified criterion still does.
     const compilerCriteria = this.runners.automatic ? criteria.filter(criterion => ["typecheck", "static_analysis"].includes(criterion.verificationMethod)) : [];
     if (criteria.some(criterion => criterion.verificationMethod === "manual_review") || (!commands.length && (criteria.length > 0 || appBindings.length === 0))) throw new Error("This strategy requires independent alternative evidence");
@@ -1204,7 +1208,7 @@ export class HostVerification {
     // Static target commands are measured here; every other target command must come from a measured runner above.
     const staticAnalyses = [];
     if (phase !== "red") for (const command of strategy.targetCommands.filter(isAutomaticStaticCommand)) {
-      const taskBase = Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision);
+      const taskBase = Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision);
       const analysis = await this.captureStaticAnalysis(cwd, taskBase, revision, command, phaseDeadline, [...new Set(commands.flatMap(item => item.testPaths))]);
       staticAnalyses.push({ command, exitCode: analysis.exitCode, output: analysis.output });
     }
@@ -1253,11 +1257,72 @@ export class HostVerification {
       ? [json({ commandId: item.commandId, exitCode: item.outcome.exitCode, compressedOutput: item.rtk.compressedOutput })] : []) };
   }
   private judgments(input: unknown, ids: string[]) {
-    if (!Array.isArray(input)) throw new Error("Independent criterion judgments are required");
+    if (!Array.isArray(input)) {
+      throw new Error(`Independent criterion judgments are required; submit criteria covering criterionId(s): ${ids.join(", ") || "none"}`);
+    }
     const values = input.map(value => { const item = record(value); if (typeof item.passed !== "boolean") throw new Error("Criterion verdict must be boolean");
       return { criterionId: textField(item.criterionId), passed: item.passed, summary: textField(item.summary) }; });
-    if (new Set(values.map(value => value.criterionId)).size !== values.length || digest(values.map(value => value.criterionId).sort()) !== digest([...ids].sort())) throw new Error("Review must cover exactly the assigned criteria");
+    const expectedSet = new Set(ids);
+    const seen = new Set<string>();
+    const duplicates: string[] = [];
+    for (const value of values) {
+      if (seen.has(value.criterionId)) duplicates.push(value.criterionId);
+      seen.add(value.criterionId);
+    }
+    const missing = ids.filter(id => !seen.has(id));
+    const unexpected = values.map(v => v.criterionId).filter(id => !expectedSet.has(id));
+    if (duplicates.length > 0 || missing.length > 0 || unexpected.length > 0) {
+      const details = [
+        ...(missing.length > 0 ? [`missing criterionId(s): ${missing.join(", ")}`] : []),
+        ...(unexpected.length > 0 ? [`unexpected criterionId(s): ${unexpected.join(", ")}`] : []),
+        ...(duplicates.length > 0 ? [`duplicate criterionId(s): ${[...new Set(duplicates)].join(", ")}`] : [])
+      ].join("; ");
+      throw new Error(`Review must cover exactly the assigned criteria (${details}; expected: ${ids.join(", ") || "none"})`);
+    }
     return values;
+  }
+  private reviewGateScope(state: Record<string, unknown>, context: import("@bflow/contracts").QualityGateContext, role: string) {
+    const run = Array.isArray(state.runs) ? state.runs.map(record).find(item => item.runId === context.runId) : undefined;
+    const task = context.taskId && context.taskId !== "workflow-verification" && Array.isArray(run?.tasks)
+      ? run!.tasks.map(record).find(item => item.taskId === context.taskId)
+      : undefined;
+    const planObj = task?.verificationPlan ?? (!task && run?.workflowVerificationPlan ? run.workflowVerificationPlan : undefined);
+    const planChecks = planObj && typeof planObj === "object" && Array.isArray(record(planObj).checks)
+      ? (record(planObj).checks as unknown[]).filter(c => c !== null && typeof c === "object").map(record)
+      : [];
+    const reviewDefs: { id: string; role: string }[] = [];
+    for (const check of planChecks) {
+      const cfg = check.configuration && typeof check.configuration === "object" ? record(check.configuration) : undefined;
+      if (cfg?.kind === "review" && cfg.method === "manual_review" && ["reviewer", "qa", "tester"].includes(String(cfg.role)) && typeof check.id === "string") {
+        if (!reviewDefs.some(item => item.id === check.id)) reviewDefs.push({ id: check.id, role: String(cfg.role) });
+      }
+    }
+    if (reviewDefs.length === 0) {
+      const sourceRev = record(context.input).sourceRevision;
+      const outbound = Array.isArray(state.outbound) ? (state.outbound as Record<string, unknown>[]) : [];
+      for (const out of outbound) {
+        if (out.reviewReplacement || !["accepted", "released"].includes(String(out.status))) continue;
+        const msg = out.message && typeof out.message === "object" ? record(out.message) : undefined;
+        if (msg?.type !== "verification.requested" || !msg.payload || typeof msg.payload !== "object") continue;
+        const payload = record(msg.payload);
+        if (payload.runId !== context.runId || payload.taskId !== context.taskId || payload.attemptId !== context.attemptId) continue;
+        if (record(payload.input).sourceRevision !== sourceRev) continue;
+        const def = payload.definition && typeof payload.definition === "object" ? record(payload.definition) : undefined;
+        const cfg = def?.configuration && typeof def.configuration === "object" ? record(def.configuration) : undefined;
+        if (cfg?.kind === "review" && cfg.method === "manual_review" && ["reviewer", "qa", "tester"].includes(String(cfg.role)) && typeof def?.id === "string") {
+          if (!reviewDefs.some(item => item.id === def.id)) reviewDefs.push({ id: def.id, role: String(cfg.role) });
+        }
+      }
+    }
+    if (!reviewDefs.some(item => item.id === context.definition.id)) {
+      reviewDefs.push({ id: context.definition.id, role });
+    }
+    return {
+      gateId: context.definition.id,
+      role,
+      siblingReviewGateIds: reviewDefs.map(item => item.id),
+      hasReviewerGate: reviewDefs.some(item => item.role === "reviewer")
+    };
   }
   private reworkDossierFor(state: Record<string, unknown>, runId: string, taskId?: string, attemptId?: string): ReworkResolutionDossier | undefined {
     if (!taskId || !attemptId || !Array.isArray(state.runs)) return undefined;
@@ -1287,14 +1352,16 @@ export class HostVerification {
     const details = record(context.input), config = record(context.definition.configuration);
     if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
-    const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
-    const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
-    if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
     let testIntegrityObservation: TestIntegrityObservation | undefined;
-    if (integrityReport.findings.length) {
-      const evidence = await this.artifact(context.runId, context.taskId!, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
-      testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
-      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+    if (binding.role === "reviewer") {
+      const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
+      const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
+      if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
+      if (integrityReport.findings.length) {
+        const evidence = await this.artifact(context.runId, context.taskId, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
+        testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
+        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+      }
     }
     let qaBehavioralObservation: JsonValue | undefined;
     if (binding.role === "qa" && details.scope === "workflow") {
@@ -1311,7 +1378,7 @@ export class HostVerification {
         }
         const after = await this.capture(observation.cwd, observation.base, observation.revision);
         if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
-        const artifact = await this.artifact(context.runId, context.taskId!, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
+        const artifact = await this.artifact(context.runId, context.taskId, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
         for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
         qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
           evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
@@ -1325,6 +1392,19 @@ export class HostVerification {
       if (reworkResolution.submittedRevision !== observation.revision) throw new Error("Rework dossier revision mismatch");
       context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
     }
+    const gateScope = this.reviewGateScope(state, context, binding.role);
+    const reworkScope = reworkResolution
+      ? requiredReworkFindingIdsForGate(reworkResolution, gateScope)
+      : { requiredFindingIds: [] as string[], optionalFindingIds: [] as string[] };
+    const requiredCriterionIds = strings(config.criterionIds);
+    const buildRequirements = (integrityIds: readonly string[], integrityTotal: number) => ({
+      role: binding.role,
+      requiredCriterionIds,
+      requiredFindingVerdictIds: reworkScope.requiredFindingIds,
+      ...(reworkScope.optionalFindingIds.length > 0 ? { optionalFindingVerdictIds: reworkScope.optionalFindingIds } : {}),
+      requiredTestIntegrityFindingIds: [...integrityIds],
+      ...(integrityTotal !== integrityIds.length ? { requiredTestIntegrityFindingTotal: integrityTotal } : {})
+    });
     const sourceMessageId = textField(args.messageId);
     const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
       rev.sourceMessageId === sourceMessageId &&
@@ -1335,7 +1415,16 @@ export class HostVerification {
     const reviewId = existingReviewId ?? randomUUID();
     await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
     this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
-    const fullReply = { reviewId, ...(testIntegrityObservation ? { testIntegrityObservation } : {}), ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
+    const fullIntegrityIds = testIntegrityObservation ? testIntegrityObservation.report.findings.map(f => f.id) : [];
+    const fullReply = {
+      reviewId,
+      reviewRequirements: buildRequirements(fullIntegrityIds, fullIntegrityIds.length),
+      ...(testIntegrityObservation ? { testIntegrityObservation } : {}),
+      ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
+      ...(reworkResolution ? { reworkResolution } : {}),
+      context,
+      observation
+    };
     const isAgy = binding.provider === "agy" || binding.agentKind === "agy";
     const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number" || typeof args.integrityOffset === "number";
     const oversizedReply = isAgy ? exceedsAgyInlineReply(fullReply) : Buffer.byteLength(JSON.stringify(fullReply)) > 65_536;
@@ -1413,8 +1502,10 @@ export class HostVerification {
       // The complete observation remains immutable in the receipt journal and ArtifactStore; response pages carry its digest.
       const boundedContext = testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
         hostTestIntegrityObservation: { evidence: testIntegrityObservation.evidence, reportDigest: digest(testIntegrityObservation.report), findingTotal: testIntegrityObservation.report.findings.length } } } : dossierContext;
+      const pageIntegrityIds = boundedIntegrity ? boundedIntegrity.report.findings.map(f => f.id) : [];
       return {
         reviewId,
+        reviewRequirements: buildRequirements(pageIntegrityIds, fullIntegrityIds.length),
         ...(boundedIntegrity ? { testIntegrityObservation: boundedIntegrity } : {}),
         ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
         ...(boundedRework ? { reworkResolution: boundedRework } : {}),
@@ -1488,14 +1579,24 @@ export class HostVerification {
         (record(out.message).message_id === pending.sourceMessageId || digest(originalReviewContext(record(out.message).payload)) === digest(originalReviewContext(context)))))
       throw new Error("Replaced workflow review cannot complete a stored observation");
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
-    const integrityReport = await this.measureIntegrity(context, pending.observation.cwd, pending.observation.base, pending.observation.revision);
-    const integrityObservation = details.hostTestIntegrityObservation === undefined ? undefined : TestIntegrityObservationSchema.parse(details.hostTestIntegrityObservation);
-    if (integrityReport.findings.length && !integrityObservation) throw new Error("Test-integrity verdict requires a new inspect_review observation");
-    if (integrityObservation && digest(integrityObservation.report) !== digest(integrityReport)) throw new Error("Test-integrity report changed since review observation");
-    if (binding.role !== "reviewer" && args.testIntegrityVerdicts !== undefined) throw new Error("Only Reviewer may submit test-integrity verdicts");
-    const integrityJudgment = binding.role === "reviewer"
-      ? adjudicateTestIntegrity(integrityReport, args.testIntegrityVerdicts, await this.integrityGrants(context)) : undefined;
-    if (integrityJudgment) await validateTestIntegrityEvidence(pending.observation.cwd, integrityReport, integrityJudgment.verdicts);
+    if (binding.role !== "reviewer") {
+      if (Array.isArray(args.testIntegrityVerdicts) && args.testIntegrityVerdicts.length === 0) {
+        args.testIntegrityVerdicts = undefined;
+      } else if (args.testIntegrityVerdicts !== undefined) {
+        throw new Error("Only Reviewer may submit test-integrity verdicts; omit testIntegrityVerdicts when completing a QA or Tester review");
+      }
+    }
+    let integrityReport: Awaited<ReturnType<HostVerification["measureIntegrity"]>> | undefined;
+    let integrityObservation: TestIntegrityObservation | undefined;
+    let integrityJudgment: ReturnType<typeof adjudicateTestIntegrity> | undefined;
+    if (binding.role === "reviewer") {
+      integrityReport = await this.measureIntegrity(context, pending.observation.cwd, pending.observation.base, pending.observation.revision);
+      integrityObservation = details.hostTestIntegrityObservation === undefined ? undefined : TestIntegrityObservationSchema.parse(details.hostTestIntegrityObservation);
+      if (integrityReport.findings.length && !integrityObservation) throw new Error("Test-integrity verdict requires a new inspect_review observation");
+      if (integrityObservation && digest(integrityObservation.report) !== digest(integrityReport)) throw new Error("Test-integrity report changed since review observation");
+      integrityJudgment = adjudicateTestIntegrity(integrityReport, args.testIntegrityVerdicts, await this.integrityGrants(context));
+      await validateTestIntegrityEvidence(pending.observation.cwd, integrityReport, integrityJudgment.verdicts);
+    }
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
     const pinnedRework = details.hostReworkVerification;
@@ -1506,46 +1607,59 @@ export class HostVerification {
         throw new Error("Missing or stale rework observation binding");
       }
     }
-    const findingVerdicts = reworkResolution ? parseRequiredFindingVerdicts(reworkResolution, args.findingVerdicts) : args.findingVerdicts === undefined ? [] : (() => {
+    const gateScope = this.reviewGateScope(state, context, binding.role);
+    const findingVerdicts = reworkResolution ? parseRequiredFindingVerdicts(reworkResolution, args.findingVerdicts, gateScope) : args.findingVerdicts === undefined ? [] : (() => {
       if (!Array.isArray(args.findingVerdicts)) throw new Error("findingVerdicts must be an array");
       const parsed = args.findingVerdicts.map(item => ReworkFindingVerdictSchema.parse(item));
       if (new Set(parsed.map(item => item.findingId)).size !== parsed.length) throw new Error("Duplicate findingId in findingVerdicts");
       if (parsed.length > 0) throw new Error("findingVerdicts cannot be submitted for an initial non-rework review");
       return parsed;
     })();
+    const nonEmptyStr = (v: unknown): string | undefined => typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+    const parseLineNum = (v: unknown): number | undefined => {
+      if (typeof v === "number" && Number.isInteger(v) && v >= 1) return v;
+      if (typeof v === "string") {
+        const m = /^\s*(\d+)(?:\s*-\s*\d+)?\s*$/.exec(v);
+        if (m) {
+          const n = Number.parseInt(m[1]!, 10);
+          if (n >= 1) return n;
+        }
+      }
+      return undefined;
+    };
     const explicitFindings = args.findings === undefined ? [] : (() => {
       if (!Array.isArray(args.findings)) throw new Error("findings must be an array");
-      return args.findings.map(value => {
+      return args.findings.map((value, idx) => {
         const item = record(value);
         const locObj = item.location !== null && typeof item.location === "object" && !Array.isArray(item.location)
           ? (item.location as Record<string, unknown>) : undefined;
-        const filePath = typeof item.filePath === "string" && item.filePath.trim()
-          ? item.filePath.trim()
-          : typeof locObj?.path === "string" && locObj.path.trim()
-            ? locObj.path.trim()
-            : undefined;
-        const line = typeof item.line === "number"
-          ? item.line
-          : typeof locObj?.line === "number"
-            ? locObj.line
-            : undefined;
-        const location = typeof item.location === "string" && item.location.trim()
-          ? item.location.trim()
-          : filePath !== undefined
-            ? (line !== undefined ? `${filePath}:${line}` : filePath)
-            : undefined;
+        const filePath = nonEmptyStr(item.filePath) ?? nonEmptyStr(item.file) ?? nonEmptyStr(locObj?.path);
+        const line = parseLineNum(item.line) ?? parseLineNum(locObj?.line) ?? parseLineNum(locObj?.startLine);
+        const location = nonEmptyStr(item.location)
+          ?? (filePath !== undefined ? (line !== undefined ? `${filePath}:${line}` : filePath) : undefined);
+        const code = nonEmptyStr(item.code) ?? nonEmptyStr(item.category);
+        if (!code) throw new Error(`Finding at index ${idx} in complete_review findings requires a non-empty 'code' string`);
+        const evidenceText = nonEmptyStr(item.evidence);
+        const remediationText = nonEmptyStr(item.suggestedRemediation);
+        const message = nonEmptyStr(item.message)
+          ?? (evidenceText && remediationText ? `${evidenceText} (Remediation: ${remediationText})` : evidenceText ?? remediationText);
+        if (!message) throw new Error(`Finding '${code}' at index ${idx} in complete_review findings requires a non-empty 'message' string`);
+        const rawSeverity = nonEmptyStr(item.severity);
         return QualityFindingSchema.parse({
-          code: textField(item.code),
-          severity: item.severity === undefined ? "error" : textField(item.severity),
-          message: textField(item.message),
+          code,
+          severity: rawSeverity ?? "error",
+          message,
           ...(location !== undefined ? { location } : {}),
-          ...(typeof item.artifactId === "string" && item.artifactId.trim() ? { artifactId: item.artifactId.trim() } : {}),
+          ...(nonEmptyStr(item.artifactId) !== undefined ? { artifactId: nonEmptyStr(item.artifactId) } : {}),
           details: json({
             ...(item.details !== null && typeof item.details === "object" && !Array.isArray(item.details) ? item.details : {}),
+            checkId: context.definition.id,
             ...(filePath !== undefined ? { filePath } : {}),
             ...(line !== undefined ? { line } : {}),
-            ...(typeof item.criterionId === "string" && item.criterionId.trim() ? { criterionId: item.criterionId.trim() } : {}),
-            ...(typeof item.priorFindingId === "string" && item.priorFindingId.trim() ? { priorFindingId: item.priorFindingId.trim() } : {})
+            ...(nonEmptyStr(item.criterionId) !== undefined ? { criterionId: nonEmptyStr(item.criterionId) } : {}),
+            ...(nonEmptyStr(item.priorFindingId) !== undefined ? { priorFindingId: nonEmptyStr(item.priorFindingId) } : {}),
+            ...(nonEmptyStr(item.category) !== undefined && nonEmptyStr(item.code) !== undefined ? { category: nonEmptyStr(item.category) } : {}),
+            ...(remediationText !== undefined && nonEmptyStr(item.message) !== undefined ? { suggestedRemediation: remediationText } : {})
           })
         });
       });
@@ -1572,18 +1686,18 @@ export class HostVerification {
         })
       });
     });
-    const integrityFindings = integrityJudgment?.unresolved.map(verdict => {
+    const integrityFindings = integrityJudgment && integrityReport ? integrityJudgment.unresolved.map(verdict => {
       const finding = integrityReport.findings.find(item => item.id === verdict.findingId)!;
       return QualityFindingSchema.parse({ code: finding.ruleId, severity: "error", message: `Reviewer confirmed test weakening: ${verdict.reason}; owner exception required`,
         details: json(finding), location: `${finding.path}:${finding.line}:${finding.column}` });
-    }) ?? [];
+    }) : [];
     const allFindings = [...verdictFindings, ...explicitFindings, ...integrityFindings];
     const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;
     const submission = digest({
       criteria,
       summary: textField(args.summary),
       ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts } : {}),
-      ...(findingVerdicts.length ? { findingVerdicts } : {}),
+      ...(reworkResolution || findingVerdicts.length ? { findingVerdicts } : {}),
       ...(explicitFindings.length ? { findings: explicitFindings } : {})
     });
     const replay = this.receipts ? await this.receipts.getGate(evaluationId) : this.gateRecords.get(evaluationId);
@@ -1598,14 +1712,14 @@ export class HostVerification {
       throw new Error("Workflow QA needs a new inspect_review observation with owner-run measurements; no old diff-only observation is upgraded into test evidence");
     const qaPassed = qaBehavioralObservation === undefined || record(qaBehavioralObservation).passed === true;
     const reworkRejected = findingVerdicts.some(item => item.verdict === "rejected") || allFindings.some(item => item.severity === "error");
-    const evidence = await this.artifact(context.runId, context.taskId!, {
+    const evidence = await this.artifact(context.runId, context.taskId, {
       observation: observed,
       criteria,
       reviewedBy: binding.agentId,
       ...(integrityObservation ? { testIntegrityObservation: integrityObservation } : {}),
       ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts, testIntegrityExceptions: integrityJudgment.grants } : {}),
       ...(qaBehavioralObservation === undefined ? {} : { qaBehavioralObservation }),
-      ...(findingVerdicts.length ? { findingVerdicts } : {}),
+      ...(reworkResolution || findingVerdicts.length ? { findingVerdicts } : {}),
       ...(allFindings.length ? { findings: allFindings } : {})
     });
     const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId,
@@ -1614,7 +1728,7 @@ export class HostVerification {
       metadata: {
         ...(integrityJudgment ? { testIntegrityVerdicts: json(integrityJudgment.verdicts), testIntegrityExceptions: json(integrityJudgment.grants) } : {}),
         ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }),
-        ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts), reworkVerification: pinnedRework } : {}),
+        ...(reworkResolution || findingVerdicts.length ? { findingVerdicts: json(findingVerdicts), reworkVerification: pinnedRework, reworkGateScope: json(gateScope) } : {}),
         verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
           sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
           role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) },

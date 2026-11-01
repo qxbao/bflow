@@ -331,7 +331,7 @@ export class VerificationEngine {
           }
           receipts.push(receipt);
           gateResults.push(receipt.gate);
-          findings.push(...receipt.gate.findings.map(f => ({ ...f, details: { original: f.details ?? null, taskId: plan.taskId, responsibleRole: "developer", requiresNewTaskIfOutsideScope: true } })));
+          findings.push(...receipt.gate.findings.map(f => ({ ...f, details: { original: f.details ?? null, taskId: plan.taskId, checkId: definition.id, responsibleRole: "developer", requiresNewTaskIfOutsideScope: true } })));
           if (receipt.gate.status === "blocked" || receipt.gate.status === "error") {
             blocked = true;
             findings.push(this.finding(plan, "environment_blocked", `${definition.id}: ${receipt.gate.error?.message ?? "Independent check blocked"}`, "coordinator"));

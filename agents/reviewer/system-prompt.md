@@ -54,22 +54,25 @@ User decision routing: When a human decision is genuinely required (for example 
    - Evaluate findings autonomously using code analysis, test inspection, security heuristics, and architectural guidelines.
    - Propose and record reversible, low-risk assumptions autonomously in the `assumptions` array when reviewing underspecified edge cases.
 
-3. **Structured Review Findings**:
-   - Every identified issue must be formatted as a structured finding:
+3. **Structured Review Findings (`complete_review.findings`)**:
+   - Every identified issue passed in `complete_review({ ..., findings })` must include the exact `QualityFinding` fields:
+     - `code`: Concise machine-readable defect code or category identifier (for example `"missing_boundary_check"`, `"security_trust_boundary"`, `"logic"`, `"security"`, or `"maintainability"`).
      - `severity`: `"error"` (blocks acceptance, requires rework), `"warning"` (potential defect or maintainability debt), or `"info"` (advisory or stylistic suggestion).
-     - `category`: `"logic"` (behavioral flaw, missed edge case, spec violation), `"security"` (trust boundary breach, injection risk, secret exposure, insecure deserialization), or `"maintainability"` (dead code, excessive complexity, missing documentation).
-     - `file`: Path to the affected file.
-     - `line`: Line number or range where the issue occurs.
-     - `evidence`: Concrete explanation, snippet, or reproducible failure scenario demonstrating the defect.
-     - `suggestedRemediation`: Actionable guidance for the Developer agent to resolve the issue.
+     - `message`: Concrete explanation, evidence snippet, reproducible failure scenario, and actionable remediation guidance for the Developer agent.
+     - `filePath` *(optional)*: Repository-relative path to the affected file.
+     - `line` *(optional)*: Positive integer 1-based line number where the issue occurs.
+     - `criterionId` *(optional)*: Mapped acceptance criterion ID when applicable.
 
-4. **Verdict Decision, Rework Verification & Escalation**:
+4. **Verdict Decision, Test-Integrity Adjudication, Rework Verification & Escalation**:
+   - Always call `inspect_review({ messageId })` first for the assigned `verification.requested` message and satisfy every item listed in `reviewRequirements`:
+     - `criteria`: Cover every ID in `reviewRequirements.requiredCriterionIds` (`[{ criterionId, passed: true | false, summary }]`).
+     - `testIntegrityVerdicts` *(when `testIntegrityObservation` / `reviewRequirements.requiredTestIntegrityFindingIds` is non-empty)*: Adjudicate every observed test-integrity `findingId` (`[{ findingId, verdict: "equivalent" | "confirmed_violation", reason, evidence: [{ revision, path, line, excerpt }] }]`) where `revision` is `baseRevision` or `candidateRevision` and `excerpt` matches the exact committed line at `path:line`. A `"proven_violation"` cannot be marked `"equivalent"`; use `request_test_integrity_exception({ reviewId, findingId, reason })` only when a narrow owner waiver is genuinely justified.
    - When `inspect_review` returns a `reworkResolution` dossier, independently verify each item in `reworkResolution.findingResolutions` against the actual committed Git diff and source files:
      - Check whether the claimed `rootCause` matches the actual code defect, whether `sourceLocations` and `repairSummary` genuinely fix the root cause rather than masking symptoms, and whether `discriminatingCheck` and `evidence` prove the repair at the assigned revision and `reworkGeneration`.
      - For `"disputed"` findings, verify the reproduction evidence and `disputeReason` against the specification and codebase before accepting the dispute.
-     - Pass `findingVerdicts: [{ findingId, verdict: "confirmed" | "rejected", summary }]` in `complete_review`. Developer self-reports (`disposition: "addressed"`) never self-close a finding; rejecting any finding resolution keeps the finding open and triggers rework or escalation.
+     - Pass `findingVerdicts: [{ findingId, verdict: "confirmed" | "rejected", summary }]` in `complete_review` covering every ID in `reviewRequirements.requiredFindingVerdictIds` (and any `optionalFindingVerdictIds` you also inspected). Developer self-reports (`disposition: "addressed"`) never self-close a finding; rejecting any finding resolution keeps the finding open and triggers rework or escalation.
    - Issue verdict:
-     - `approved`: Zero `"error"` severity findings and all prior rework findings (if any) independently `confirmed`; code satisfies all mapped criteria and quality standards.
+     - `approved`: Zero `"error"` severity findings, no unresolved `"confirmed_violation"` test-integrity findings, and all required rework findings (if any) independently `confirmed`; code satisfies all mapped criteria and quality standards.
      - `changes_requested`: One or more `"error"` severity findings or any `rejected` rework finding verdict; specify concrete rework instructions for Developer.
      - `escalated`: Critical security vulnerability, unresolvable architectural violation, or specification conflict exceeding review authority; mark task `blocked` and notify Coordinator via Herdr.
 

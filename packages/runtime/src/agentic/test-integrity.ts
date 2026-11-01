@@ -16,7 +16,7 @@ export type TestIntegrityReport = z.infer<typeof TestIntegrityReportSchema>;
 const InputSchema = z.object({baseRevision:RevisionSchema,candidateRevision:RevisionSchema,files:z.array(z.object({path:PathSchema,previousPath:PathSchema.optional(),
   base:z.string().max(4_194_304).optional(),candidate:z.string().max(4_194_304).optional()}).strict()).max(2000)}).strict();
 type Input = z.infer<typeof InputSchema>;
-type Source = {path:string; side:"base"|"candidate"; file:ts.SourceFile; aliases:Map<string,string>; unsupportedImports:Set<string>; configWrappers:Set<string>; playwright:boolean; browserNames:Set<string>};
+type Source = {path:string; side:"base"|"candidate"; file:ts.SourceFile; aliases:Map<string,string>; unsupportedImports:Set<string>; configWrappers:Set<string>; moduleDeclarations:Set<ts.VariableDeclaration>; playwright:boolean; browserNames:Set<string>};
 type Located = {source:Source; node:ts.Node};
 type Assertion = Located & {subject:string; matcher:string; args:string[]; modifiers:string; signature:string; literal?:string; numeric?:number};
 type TestCase = Located & {name:string; body:string; assertions:Assertion[]};
@@ -79,18 +79,18 @@ function bindingHas(node:ts.BindingName|undefined,name:string):boolean {
   if(!node)return false;if(ts.isIdentifier(node))return node.text===name;
   return node.elements.some(element=>!ts.isOmittedExpression(element)&&bindingHas(element.name,name));
 }
-function locallyShadowed(name:string,node:ts.Node):boolean {
+function locallyShadowed(name:string,node:ts.Node,source:Source):boolean {
   for(let scope:ts.Node|undefined=node.parent;scope;scope=scope.parent) {
     if(ts.isFunctionLike(scope)&&scope.parameters.some(parameter=>bindingHas(parameter.name,name)))return true;
     if(ts.isBlock(scope)||ts.isSourceFile(scope))for(const statement of scope.statements) {
-      if(ts.isVariableStatement(statement)&&statement.declarationList.declarations.some(declaration=>bindingHas(declaration.name,name)))return true;
+      if(ts.isVariableStatement(statement)&&statement.declarationList.declarations.some(declaration=>!source.moduleDeclarations.has(declaration)&&bindingHas(declaration.name,name)))return true;
       if((ts.isFunctionDeclaration(statement)||ts.isClassDeclaration(statement))&&statement.name?.text===name)return true;
     }
   }
   return false;
 }
 function assertion(node:ts.CallExpression,source:Source):Assertion|undefined {
-  const root=rootIdentifier(node.expression);if(root&&locallyShadowed(root.text,node))return undefined;
+  const root=rootIdentifier(node.expression);if(root&&locallyShadowed(root.text,node,source))return undefined;
   if(ts.isPropertyAccessExpression(node.expression)) {
     const matcher=node.expression.name.text, target=node.expression.expression;
     const identity=chain(target,source);
@@ -116,29 +116,68 @@ function assertion(node:ts.CallExpression,source:Source):Assertion|undefined {
   }
   return undefined;
 }
-function aliases(file:ts.SourceFile):{names:Map<string,string>;unsupported:Set<string>;configWrappers:Set<string>;playwright:boolean} {
-  const names=new Map<string,string>(),unsupported=new Set<string>(),configWrappers=new Set<string>();let playwright=false;
+function collectBoundIdentifiers(node:ts.BindingName,out:string[]=[]):string[] {
+  if(ts.isIdentifier(node))out.push(node.text);
+  else for(const element of node.elements)if(!ts.isOmittedExpression(element))collectBoundIdentifiers(element.name,out);
+  return out;
+}
+function aliases(file:ts.SourceFile):{names:Map<string,string>;unsupported:Set<string>;configWrappers:Set<string>;moduleDeclarations:Set<ts.VariableDeclaration>;playwright:boolean} {
+  const names=new Map<string,string>(),unsupported=new Set<string>(),configWrappers=new Set<string>(),moduleDeclarations=new Set<ts.VariableDeclaration>();let playwright=false;
+  const knownModules=["vitest","@jest/globals","@playwright/test","node:test","node:assert","node:assert/strict","assert","assert/strict"];
+  const requireShadowed=file.statements.some(stmt=>(ts.isFunctionDeclaration(stmt)&&stmt.name?.text==="require")||(ts.isVariableStatement(stmt)&&stmt.declarationList.declarations.some(d=>bindingHas(d.name,"require")))||(ts.isImportDeclaration(stmt)&&Boolean(stmt.importClause&&(stmt.importClause.name?.text==="require"||(stmt.importClause.namedBindings&&(ts.isNamespaceImport(stmt.importClause.namedBindings)?stmt.importClause.namedBindings.name.text==="require":stmt.importClause.namedBindings.elements.some(e=>e.name.text==="require")))))));
   for(const statement of file.statements) {
-    if(!ts.isImportDeclaration(statement)||!ts.isStringLiteral(statement.moduleSpecifier)||!statement.importClause) continue;
-    const module=statement.moduleSpecifier.text, clause=statement.importClause;
-    const known=["vitest","@jest/globals","@playwright/test","node:test","node:assert","node:assert/strict","assert","assert/strict"].includes(module);
-    const reject=(local:string,original:string)=>{unsupported.add(local);names.set(local,`unsupported:${module}:${original}`);};
-    if(module==="@playwright/test") playwright=true;
-    if(clause.name) {
-      if(!clause.isTypeOnly&&known&&(module.includes("assert")||module==="node:test"))names.set(clause.name.text,module.includes("assert")?"assert":"test");
-      else reject(clause.name.text,"default");
+    if(ts.isImportDeclaration(statement)&&ts.isStringLiteral(statement.moduleSpecifier)&&statement.importClause) {
+      const module=statement.moduleSpecifier.text, clause=statement.importClause;
+      const known=knownModules.includes(module);
+      const reject=(local:string,original:string)=>{unsupported.add(local);names.set(local,`unsupported:${module}:${original}`);};
+      if(module==="@playwright/test") playwright=true;
+      if(clause.name) {
+        if(!clause.isTypeOnly&&known&&(module.includes("assert")||module==="node:test"))names.set(clause.name.text,module.includes("assert")?"assert":"test");
+        else reject(clause.name.text,"default");
+      }
+      if(clause.namedBindings&&ts.isNamespaceImport(clause.namedBindings))reject(clause.namedBindings.name.text,"namespace");
+      if(clause.namedBindings&&ts.isNamedImports(clause.namedBindings)) for(const element of clause.namedBindings.elements) {
+        const original=(element.propertyName??element.name).text;
+        if(!clause.isTypeOnly&&!element.isTypeOnly&&original==="defineConfig"&&["vitest/config","vite","@playwright/test"].includes(module)) {configWrappers.add(element.name.text);names.set(element.name.text,"defineConfig");}
+        else if(!known||clause.isTypeOnly||element.isTypeOnly)reject(element.name.text,original);
+        else if(["test","it","describe","expect"].includes(original)||(!module.includes("assert")&&original==="assert")) names.set(element.name.text,original);
+        else if(module.includes("assert")) names.set(element.name.text,original==="strict"||original==="default"?"assert":`assert.${original}`);
+        else reject(element.name.text,original);
+      }
+      continue;
     }
-    if(clause.namedBindings&&ts.isNamespaceImport(clause.namedBindings))reject(clause.namedBindings.name.text,"namespace");
-    if(clause.namedBindings&&ts.isNamedImports(clause.namedBindings)) for(const element of clause.namedBindings.elements) {
-      const original=(element.propertyName??element.name).text;
-      if(!clause.isTypeOnly&&!element.isTypeOnly&&original==="defineConfig"&&["vitest/config","vite","@playwright/test"].includes(module)) {configWrappers.add(element.name.text);names.set(element.name.text,"defineConfig");}
-      else if(!known||clause.isTypeOnly||element.isTypeOnly)reject(element.name.text,original);
-      else if(["test","it","describe","expect"].includes(original)||(!module.includes("assert")&&original==="assert")) names.set(element.name.text,original);
-      else if(module.includes("assert")) names.set(element.name.text,original==="strict"||original==="default"?"assert":`assert.${original}`);
-      else reject(element.name.text,original);
+    if(!requireShadowed&&ts.isVariableStatement(statement)&&(statement.declarationList.flags&ts.NodeFlags.Const)!==0) {
+      for(const declaration of statement.declarationList.declarations) {
+        const init=declaration.initializer;
+        if(!init||!ts.isCallExpression(init)||!ts.isIdentifier(init.expression)||init.expression.text!=="require"||init.arguments.length!==1||!ts.isStringLiteral(init.arguments[0]!)) continue;
+        const module=init.arguments[0]!.text, known=knownModules.includes(module);
+        const reject=(local:string,original:string)=>{unsupported.add(local);names.set(local,`unsupported:${module}:${original}`);};
+        if(module==="@playwright/test") playwright=true;
+        moduleDeclarations.add(declaration);
+        if(ts.isIdentifier(declaration.name)) {
+          if(known&&(module.includes("assert")||module==="node:test"))names.set(declaration.name.text,module.includes("assert")?"assert":"test");
+          else reject(declaration.name.text,"default");
+        } else if(ts.isObjectBindingPattern(declaration.name)) {
+          for(const element of declaration.name.elements) {
+            if(element.dotDotDotToken||!ts.isIdentifier(element.name)) {
+              for(const id of collectBoundIdentifiers(element.name))reject(id,"destructured");
+              continue;
+            }
+            const original=element.propertyName?nameOf(element.propertyName):element.name.text;
+            if(!original) reject(element.name.text,"computed");
+            else if(element.initializer===undefined&&original==="defineConfig"&&["vitest/config","vite","@playwright/test"].includes(module)) {configWrappers.add(element.name.text);names.set(element.name.text,"defineConfig");}
+            else if(!known||element.initializer!==undefined)reject(element.name.text,original);
+            else if(["test","it","describe","expect"].includes(original)||(!module.includes("assert")&&original==="assert")) names.set(element.name.text,original);
+            else if(module.includes("assert")) names.set(element.name.text,original==="strict"||original==="default"?"assert":`assert.${original}`);
+            else reject(element.name.text,original);
+          }
+        } else {
+          for(const id of collectBoundIdentifiers(declaration.name))reject(id,"destructured");
+        }
+      }
     }
   }
-  return {names,unsupported,configWrappers,playwright};
+  return {names,unsupported,configWrappers,moduleDeclarations,playwright};
 }
 function canonicalBody(body:ts.Node,source:Source):string {
   // These primitive equality matchers have the same oracle for the supported literal RHS.
@@ -148,7 +187,7 @@ function canonicalBody(body:ts.Node,source:Source):string {
 function parse(path:string,text:string,side:Source["side"]):Source {
   const kind=/\.json$/.test(path)?ts.ScriptKind.JSON:/\.tsx$/.test(path)?ts.ScriptKind.TSX:/\.jsx$/.test(path)?ts.ScriptKind.JSX:/\.[cm]?js$/.test(path)?ts.ScriptKind.JS:ts.ScriptKind.TS;
   const file=ts.createSourceFile(path,text,ts.ScriptTarget.Latest,true,kind), imported=aliases(file);
-  return {path,side,file,aliases:imported.names,unsupportedImports:imported.unsupported,configWrappers:imported.configWrappers,playwright:imported.playwright,browserNames:new Set(["page","browser","context"])};
+  return {path,side,file,aliases:imported.names,unsupportedImports:imported.unsupported,configWrappers:imported.configWrappers,moduleDeclarations:imported.moduleDeclarations,playwright:imported.playwright,browserNames:new Set(["page","browser","context"])};
 }
 function staticConfigValue(node:ts.Expression):boolean {
   if(primitive(node)!==undefined)return true;
@@ -167,7 +206,7 @@ function scan(source:Source,snapshot:Snapshot):void {
     if(ts.isCallExpression(node)) {
       const identity=chain(node.expression,source);
       const calleeOfAnotherCall=ts.isCallExpression(node.parent)&&node.parent.expression===node;
-      const root=rootIdentifier(node.expression), shadowed=root&&locallyShadowed(root.text,node);
+      const root=rootIdentifier(node.expression), shadowed=root&&locallyShadowed(root.text,node,source);
       if(root&&source.unsupportedImports.has(root.text)&&identity&&
         (/:(?:expect|assert)$/.test(identity.root)||["expect","assert"].includes(root.text)||identity.members.some(member=>member==="expect"||member==="assert"))) {
         snapshot.markers.push({source,node,key:normalized(node,source),ruleId:"TI_UNSUPPORTED_ASSERTION_API",classification:"coverage_gap",reason:"The assertion-like API is imported from an unsupported module or through a type-only/namespace binding. A familiar matcher spelling does not establish runtime assertion semantics."});

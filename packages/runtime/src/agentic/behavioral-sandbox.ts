@@ -48,7 +48,7 @@ export async function sandboxBehavior(command: BoundBehavioralCommand, checkout:
   if (process.platform === "darwin") {
     if (command.adapter && (command.adapter.mounts.length || command.adapter.helpers?.length || !["node_tap", "vitest_json", "mocha_json"].includes(command.adapter.format)))
       throw new Error("runner_setup_required: this adapter requires Linux toolchain/report sandbox support");
-    const readiness = await probeBehavioralSandbox();
+    const readiness = await probeBehavioralSandbox(command.dependencySource ?? checkout);
     if (readiness.status !== "ready") throw new Error(readiness.code + ": " + readiness.reason);
     const checkoutMounts = await checkoutDependencyMounts(command, checkout);
     await validateDependencyTrees([...(command.dependencyRoots ?? []), ...checkoutMounts.map(([from]) => from)], command.dependencySource);
@@ -56,7 +56,7 @@ export async function sandboxBehavior(command: BoundBehavioralCommand, checkout:
     return sandboxBehaviorDarwin(command, checkout, argv, reporter);
   }
   if (process.platform !== "linux") throw new Error("Behavioral verification requires the Linux Bubblewrap or macOS Seatbelt sandbox");
-  const readiness = await probeBehavioralSandbox();
+  const readiness = await probeBehavioralSandbox(command.dependencySource ?? checkout);
   if (readiness.status !== "ready") throw new Error(readiness.code + ": " + readiness.reason);
   const executable = readiness.executable;
   const args = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
