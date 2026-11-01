@@ -67,13 +67,15 @@ export const SpecificationDocumentSchema = SpecificationSchema.superRefine((spec
       if (!details.migrationStrategy || !spec.dataModelChanges) issue("data changes require migration strategy and dataModelChanges", ["metadata", "sdd", "migrationStrategy"]);
     }
   }
-  const criteria = new Set(spec.acceptanceCriteria.map(criterion => criterion.id));
+  const nfcId = (id: string) => id.trim().normalize("NFC");
+  const criteria = new Set(spec.acceptanceCriteria.map(criterion => nfcId(criterion.id)));
   const seen = new Set<string>();
   const tasks = new Set<string>();
   for (const mapping of details.traceability) {
-    if (!criteria.has(mapping.criterionId) || seen.has(mapping.criterionId)) issue(`unknown or duplicate mapped criterion: ${mapping.criterionId}`, ["metadata", "sdd", "traceability"]);
+    const criterionKey = nfcId(mapping.criterionId);
+    if (!criteria.has(criterionKey) || seen.has(criterionKey)) issue(`unknown or duplicate mapped criterion: ${mapping.criterionId}`, ["metadata", "sdd", "traceability"]);
     if (new Set(mapping.taskIds).size !== mapping.taskIds.length) issue(`duplicate mapped task in criterion ${mapping.criterionId}`, ["metadata", "sdd", "traceability"]);
-    seen.add(mapping.criterionId);
+    seen.add(criterionKey);
     mapping.taskIds.forEach(task => tasks.add(task));
   }
   const expectedTasks = [...tasks].sort();
@@ -86,10 +88,11 @@ export const SpecificationDocumentSchema = SpecificationSchema.superRefine((spec
     if (spec.testStrategy.specId !== spec.specId) issue("test strategy references another spec", ["testStrategy", "specId"]);
     const mapped = new Set<string>();
     for (const mapping of spec.testStrategy.criterionMappings) {
-      if (!criteria.has(mapping.criterionId) || mapped.has(mapping.criterionId)) issue(`unknown or duplicate test criterion: ${mapping.criterionId}`, ["testStrategy", "criterionMappings"]);
-      mapped.add(mapping.criterionId);
+      const criterionKey = nfcId(mapping.criterionId);
+      if (!criteria.has(criterionKey) || mapped.has(criterionKey)) issue(`unknown or duplicate test criterion: ${mapping.criterionId}`, ["testStrategy", "criterionMappings"]);
+      mapped.add(criterionKey);
     }
-    const missingRequiredCriteria = spec.acceptanceCriteria.filter(criterion => criterion.required && !mapped.has(criterion.id)).map(c => c.id);
+    const missingRequiredCriteria = spec.acceptanceCriteria.filter(criterion => criterion.required && !mapped.has(nfcId(criterion.id))).map(c => c.id);
     if (missingRequiredCriteria.length > 0) issue(`test strategy must cover required criteria: ${missingRequiredCriteria.join(", ")}`, ["testStrategy", "criterionMappings"]);
   }
   for (const decision of [spec.tddDecision, spec.testStrategy?.tddDecision]) {

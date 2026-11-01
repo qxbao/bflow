@@ -31,12 +31,16 @@ export class TestStrategyResolver {
   resolve(input: unknown): TestStrategy {
     const spec = SpecificationSchema.innerType().parse(input);
     if (!spec.runId) throw new Error("Policy resolution requires Specification.runId");
+    const nfcId = (id: string) => id.trim().normalize("NFC");
+    const canonicalCriteriaByKey = new Map<string, string>();
     const seenCriteriaIds = new Set<string>();
     spec.acceptanceCriteria.forEach((criterion) => {
-      if (seenCriteriaIds.has(criterion.id)) {
+      const key = nfcId(criterion.id);
+      if (seenCriteriaIds.has(key)) {
         throw new Error(`duplicate acceptance criterion id: ${criterion.id}`);
       }
-      seenCriteriaIds.add(criterion.id);
+      seenCriteriaIds.add(key);
+      canonicalCriteriaByKey.set(key, criterion.id);
     });
     if (spec.level === "full") {
       if (!spec.architectureNotes) throw new Error("architectureNotes is required for full SDD level");
@@ -64,20 +68,20 @@ export class TestStrategyResolver {
 
     const requiredCriteria = spec.acceptanceCriteria.filter(c => c.required !== false);
     const existingMappings = spec.testStrategy?.criterionMappings;
-    const existingCriterionIds = Array.isArray(existingMappings)
-      ? existingMappings.map(m => m.criterionId)
+    const existingCriterionKeys = Array.isArray(existingMappings)
+      ? existingMappings.map(m => nfcId(m.criterionId))
       : [];
     const hasValidExistingMappings = Array.isArray(existingMappings) &&
       existingMappings.length > 0 &&
-      new Set(existingCriterionIds).size === existingCriterionIds.length &&
-      existingCriterionIds.every(id => seenCriteriaIds.has(id)) &&
+      new Set(existingCriterionKeys).size === existingCriterionKeys.length &&
+      existingCriterionKeys.every(key => seenCriteriaIds.has(key)) &&
       requiredCriteria.every(c =>
-        existingMappings.some(m => m.criterionId === c.id && Array.isArray(m.testNames) && m.testNames.length > 0 && m.testNames.every(t => typeof t === "string" && t.trim().length > 0))
+        existingMappings.some(m => nfcId(m.criterionId) === nfcId(c.id) && Array.isArray(m.testNames) && m.testNames.length > 0 && m.testNames.every(t => typeof t === "string" && t.trim().length > 0))
       );
 
     const criterionMappings = hasValidExistingMappings
       ? existingMappings!.map(m => ({
-          criterionId: m.criterionId,
+          criterionId: canonicalCriteriaByKey.get(nfcId(m.criterionId)) ?? m.criterionId.trim().normalize("NFC"),
           testNames: m.testNames.map(t => t.trim().normalize("NFC"))
         }))
       : spec.acceptanceCriteria.map(c => ({
@@ -119,17 +123,19 @@ export class TestStrategyResolver {
         d.requiresFailingTestFirst !== (p.mode === "required")) {
       throw new Error("Strategy violates the assessed conditional TDD policy");
     }
-    const validCriterionIds = new Set(snapshot.acceptanceCriteria.map(c => c.id));
+    const nfcId = (id: string) => id.trim().normalize("NFC");
+    const validCriterionIds = new Set(snapshot.acceptanceCriteria.map(c => nfcId(c.id)));
     const seenMappedIds = new Set<string>();
     for (const mapping of strategy.criterionMappings) {
-      if (!validCriterionIds.has(mapping.criterionId) || seenMappedIds.has(mapping.criterionId)) {
+      const key = nfcId(mapping.criterionId);
+      if (!validCriterionIds.has(key) || seenMappedIds.has(key)) {
         throw new Error(`Strategy has unknown or duplicate criterion mapping: ${mapping.criterionId}`);
       }
-      seenMappedIds.add(mapping.criterionId);
+      seenMappedIds.add(key);
     }
     const requiredCriteria = snapshot.acceptanceCriteria.filter(c => c.required !== false);
     for (const criterion of requiredCriteria) {
-      const mapping = strategy.criterionMappings.find(m => m.criterionId === criterion.id);
+      const mapping = strategy.criterionMappings.find(m => nfcId(m.criterionId) === nfcId(criterion.id));
       if (!mapping || !Array.isArray(mapping.testNames) || mapping.testNames.length === 0 ||
           mapping.testNames.some(name => typeof name !== "string" || name.trim().length === 0)) {
         throw new Error(`Strategy lacks required criterion mapping for ${criterion.id}`);

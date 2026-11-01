@@ -182,4 +182,50 @@ describe("Round 2 Slice 5 specification hardening", () => {
     const twoTaskWf = workflow(["implement", "unmapped-extra"]);
     expect(() => validateTraceability(spec, twoTaskWf)).toThrow(/unmapped workflow tasks.*unmapped-extra/i);
   });
+
+  it("matches Vietnamese NFC/NFD criterionId values in SpecificationDocumentSchema traceability and testStrategy.criterionMappings", () => {
+    const baseSpec = draft("bugfix");
+    const sdd = policyDetails(baseSpec);
+    const nfcId = "ac-đăng-nhập-1".normalize("NFC");
+    const nfdId = "ac-đăng-nhập-1".normalize("NFD");
+
+    const parsed = parseSpecification({
+      ...baseSpec,
+      acceptanceCriteria: [{ ...baseSpec.acceptanceCriteria[0]!, id: nfcId }],
+      metadata: {
+        ...baseSpec.metadata,
+        sdd: {
+          ...sdd,
+          traceability: [{ criterionId: nfdId, taskIds: ["implement"] }]
+        }
+      },
+      ...(baseSpec.testStrategy
+        ? {
+            testStrategy: {
+              ...baseSpec.testStrategy,
+              criterionMappings: [{ criterionId: nfdId, testNames: ["login test"] }]
+            }
+          }
+        : {})
+    });
+    expect(parsed.acceptanceCriteria[0]?.id).toBe(nfcId);
+
+    // Canonically duplicate NFC + NFD mappings must still be rejected
+    expect(() =>
+      parseSpecification({
+        ...baseSpec,
+        acceptanceCriteria: [{ ...baseSpec.acceptanceCriteria[0]!, id: nfcId }],
+        metadata: {
+          ...baseSpec.metadata,
+          sdd: {
+            ...sdd,
+            traceability: [
+              { criterionId: nfcId, taskIds: ["implement"] },
+              { criterionId: nfdId, taskIds: ["implement"] }
+            ]
+          }
+        }
+      })
+    ).toThrow(/unknown or duplicate mapped criterion/i);
+  });
 });

@@ -48,8 +48,55 @@ export class CoreSession {
     }
     this.remember(result.snapshot);
   }
+  private async recoverRun(run: RunRecord, rawStored: unknown): Promise<void> {
+    if (!run.definition) throw new Error("Missing persisted definition");
+    // Register the actual persisted definition in a newly constructed deterministic engine.
+    const memory = unwrap(await this.ports.engine.getSnapshot(run.runId));
+    if (!memory) unwrap(await this.ports.engine.createRun({
+      runId: run.runId, definition: run.definition, createdAt: run.delegation.requestedAt,
+      idempotencyKey: `p19-create:${run.runId}`
+    }));
+    const stored = StoredRunSchema.parse(rawStored), cached = this.restored.get(run.runId);
+    if (memory && cached?.engine === this.ports.engine && cached.runStore === this.ports.runStore &&
+        cached.definitionDigest === digest(run.definition) && cached.definitionDigest === digest(stored.definition) &&
+        digest(WorkflowRunSnapshotSchema.parse(memory)) === digest(cached.snapshot) &&
+        digest(memory) === digest(stored.snapshot)) return;
+    // Invalidate before recovery: a failed decode, failed append, changed port or divergent engine cannot retain reuse authority.
+    this.restored.delete(run.runId);
+    const rawCheckpoint = unwrap(await this.ports.runStore.loadLatestCheckpoint(run.runId));
+    const checkpoint = rawCheckpoint === null ? undefined : unwrap(parseRecoveryCheckpointWithCompatibility(rawCheckpoint));
+    if (checkpoint) {
+      if (checkpoint.runId !== run.runId || checkpoint.version > stored.snapshot.version || checkpoint.eventSequence > stored.snapshot.lastEventSequence)
+        throw new Error("Checkpoint does not belong to the authoritative run history");
+      if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version))
+        throw new Error("Core recovery requires a complete aggregate checkpoint");
+      // The decoder preserves approvals, fencing, cancellation/retry and command outcomes; a query projection is never a substitute.
+      unwrap(decodeWorkflowAggregateCheckpointState(checkpoint));
+    }
+    const events = [];
+    let cursor: string | undefined = checkpoint ? eventTailCursor(run.runId, checkpoint.eventSequence) : undefined;
+    do {
+      const page = unwrap(await this.ports.runStore.readEvents(run.runId, { limit: 100, ...(cursor ? { cursor } : {}) }));
+      events.push(...page.items.map(event => DomainEventSchema.parse(event))); cursor = page.nextCursor;
+    } while (cursor);
+    unwrap(await this.ports.engine.recover({ runId: run.runId, ...(checkpoint ? { checkpoint } : {}), events, expectedVersion: stored.snapshot.version }));
+    this.remember(await this.snapshot(run.runId), checkpoint?.version);
+  }
   async create(run: RunRecord): Promise<void> {
     if (!run.definition) throw new Error("Missing workflow definition");
+    await this.flush();
+    const stored = unwrap(await this.ports.runStore.get(run.runId));
+    if (stored) {
+      const parsedStored = StoredRunSchema.parse(stored);
+      if (digest(parsedStored.definition) !== digest(run.definition)) {
+        throw new Error("Persisted Core run definition conflicts with proposed workflow definition");
+      }
+      if (parsedStored.snapshot.lastEventSequence > 0) {
+        await this.recoverRun(run, parsedStored);
+        run.coreCreated = true; await this.save();
+        return;
+      }
+    }
     const at = run.delegation.requestedAt;
     const result = WorkflowAdvanceResultSchema.parse(unwrap(await this.ports.engine.createRun({
       runId: run.runId, definition: run.definition, createdAt: at, idempotencyKey: `p19-create:${run.runId}`
@@ -59,7 +106,6 @@ export class CoreSession {
       status: "queued", tasks: run.definition.tasks.map(task => ({ taskId: task.id, status: "pending", attempt: 0, generation: 0, version: 0 })),
       createdAt: at, updatedAt: at, version: 0, lastEventSequence: 0
     } });
-    const stored = unwrap(await this.ports.runStore.get(run.runId));
     if (!stored) unwrap(await this.ports.runStore.create(initial, `p19-store:${run.runId}`));
     await this.persist(result, 0, 0);
     run.coreCreated = true; await this.save();
@@ -68,39 +114,45 @@ export class CoreSession {
     await this.flush();
     for (const run of this.state.runs.filter(item => item.coreCreated)) {
       if (!run.definition) throw new Error("Missing persisted definition");
-      // Register the actual persisted definition in a newly constructed deterministic engine.
-      const memory = unwrap(await this.ports.engine.getSnapshot(run.runId));
-      if (!memory) unwrap(await this.ports.engine.createRun({
-        runId: run.runId, definition: run.definition, createdAt: run.delegation.requestedAt,
-        idempotencyKey: `p19-create:${run.runId}`
-      }));
       const rawStored = unwrap(await this.ports.runStore.get(run.runId));
       if (!rawStored) throw new Error("Missing authoritative run store record");
-      const stored = StoredRunSchema.parse(rawStored), cached = this.restored.get(run.runId);
-      if (memory && cached?.engine === this.ports.engine && cached.runStore === this.ports.runStore &&
-          cached.definitionDigest === digest(run.definition) && cached.definitionDigest === digest(stored.definition) && digest(WorkflowRunSnapshotSchema.parse(memory)) === digest(cached.snapshot) &&
-          digest(memory) === digest(stored.snapshot)) continue;
-      // Invalidate before recovery: a failed decode, failed append, changed port or divergent engine cannot retain reuse authority.
-      this.restored.delete(run.runId);
-      const rawCheckpoint = unwrap(await this.ports.runStore.loadLatestCheckpoint(run.runId));
-      const checkpoint = rawCheckpoint === null ? undefined : unwrap(parseRecoveryCheckpointWithCompatibility(rawCheckpoint));
-      if (checkpoint) {
-        if (checkpoint.runId !== run.runId || checkpoint.version > stored.snapshot.version || checkpoint.eventSequence > stored.snapshot.lastEventSequence)
-          throw new Error("Checkpoint does not belong to the authoritative run history");
-        if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version))
-          throw new Error("Core recovery requires a complete aggregate checkpoint");
-        // The decoder preserves approvals, fencing, cancellation/retry and command outcomes; a query projection is never a substitute.
-        unwrap(decodeWorkflowAggregateCheckpointState(checkpoint));
-      }
-      const events = [];
-      let cursor: string | undefined = checkpoint ? eventTailCursor(run.runId, checkpoint.eventSequence) : undefined;
-      do {
-        const page = unwrap(await this.ports.runStore.readEvents(run.runId, { limit: 100, ...(cursor ? { cursor } : {}) }));
-        events.push(...page.items.map(event => DomainEventSchema.parse(event))); cursor = page.nextCursor;
-      } while (cursor);
-      unwrap(await this.ports.engine.recover({ runId: run.runId, ...(checkpoint ? { checkpoint } : {}), events, expectedVersion: stored.snapshot.version }));
-      this.remember(await this.snapshot(run.runId), checkpoint?.version);
+      await this.recoverRun(run, rawStored);
     }
+  }
+  needsAdvance(run: RunRecord, before: WorkflowRunSnapshot): boolean {
+    if (before.status === "queued" || this.hasUncheckpointedEvents(run.runId)) return true;
+    const definition = run.definition;
+    if (!definition) return false;
+    const terminalStatuses = new Set(["succeeded", "failed", "cancelled"]);
+    const capacityStatuses = new Set(["running", "waiting", "blocked", "cancelling"]);
+    const activeCapacity = before.tasks.filter(task => capacityStatuses.has(task.status)).length;
+    const states = new Map(before.tasks.map(task => [task.taskId, task]));
+    const taskDefs = new Map(definition.tasks.map(task => [task.id, task]));
+    const hasFailFastCandidate = definition.failurePolicy === "fail-fast" &&
+      before.tasks.some(task => task.status === "failed" || (task.status === "succeeded" && taskDefs.get(task.taskId)?.requiresApproval === true));
+    if (hasFailFastCandidate && before.tasks.some(task => ["pending", "ready", "retrying"].includes(task.status))) return true;
+    if (before.tasks.some(task => task.status === "retrying")) return true;
+    for (const task of before.tasks) {
+      const deps = definition.dependencies.filter(dep => dep.taskId === task.taskId);
+      const anyDepTerminalFailureOrApproval = deps.some(dep => {
+        if (dep.condition === "completed") return false;
+        const pre = states.get(dep.dependsOnTaskId);
+        return pre !== undefined && (pre.status === "failed" || pre.status === "cancelled" ||
+          (pre.status === "succeeded" && taskDefs.get(pre.taskId)?.requiresApproval === true));
+      });
+      if (task.status === "pending") {
+        const allSatisfied = deps.every(dep => {
+          const pre = states.get(dep.dependsOnTaskId);
+          if (!pre) return false;
+          return dep.condition === "completed" ? terminalStatuses.has(pre.status) : pre.status === "succeeded";
+        });
+        if (allSatisfied || anyDepTerminalFailureOrApproval) return true;
+      } else if (task.status === "ready") {
+        if (activeCapacity < definition.maxConcurrency || anyDepTerminalFailureOrApproval) return true;
+      }
+    }
+    return before.status === "running" &&
+      before.tasks.every(task => ["succeeded", "failed", "blocked", "cancelled"].includes(task.status));
   }
   async hasEvent(runId: string, type: string, id: string): Promise<boolean> {
     let cursor: string | undefined;

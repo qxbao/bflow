@@ -113,4 +113,56 @@ describe("Round 2 Slice 5 test-strategy hardening", () => {
     invertedRed.completedAt = "2026-10-16T01:04:00Z";
     expect(() => recordEvidence(reqStrategy, invertedRed)).toThrow(/monotonic|completedAt must be greater than or equal to startedAt/i);
   });
+
+  it("matches Vietnamese NFC/NFD criterionIds across TestStrategyResolver.resolve and validate while rejecting canonical duplicates", () => {
+    const baseSpec = spec(assessment("domain_logic"));
+    const nfcId = "ac-kiểm-định-1".normalize("NFC");
+    const nfdId = "ac-kiểm-định-1".normalize("NFD");
+    const s = {
+      ...baseSpec,
+      acceptanceCriteria: [{ ...baseSpec.acceptanceCriteria[0]!, id: nfcId }],
+      testStrategy: {
+        schemaVersion: 2,
+        strategyId: "strat-pre",
+        specId: baseSpec.specId,
+        tddDecision: {
+          schemaVersion: 2,
+          decisionId: "tdd-pre",
+          runId: baseSpec.runId!,
+          taskId: "task-1",
+          specId: baseSpec.specId,
+          mode: "required",
+          rationale: "Placeholder rationale",
+          verifiableConditions: [nfcId],
+          changeClassification: "domain_logic",
+          requiresFailingTestFirst: true,
+          decidedBy: "coordinator",
+          decidedAt: baseSpec.updatedAt
+        },
+        requiredTestLevels: ["unit"],
+        targetCommands: ["pnpm test"],
+        independentVerificationRequired: true,
+        criterionMappings: [{ criterionId: nfdId, testNames: ["custom-vietnamese-test"] }],
+        createdAt: baseSpec.updatedAt
+      }
+    };
+    const resolved = resolver.resolve(s);
+    expect(resolved.criterionMappings).toEqual([{ criterionId: nfcId, testNames: ["custom-vietnamese-test"] }]);
+    expect(() =>
+      resolver.validate({
+        ...resolved,
+        criterionMappings: [{ criterionId: nfdId, testNames: ["custom-vietnamese-test"] }]
+      })
+    ).not.toThrow();
+
+    expect(() =>
+      resolver.resolve({
+        ...baseSpec,
+        acceptanceCriteria: [
+          { ...baseSpec.acceptanceCriteria[0]!, id: nfcId },
+          { ...baseSpec.acceptanceCriteria[0]!, id: nfdId }
+        ]
+      })
+    ).toThrow(/duplicate acceptance criterion id/i);
+  });
 });
