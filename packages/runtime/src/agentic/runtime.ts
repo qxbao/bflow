@@ -2632,9 +2632,47 @@ export class AgenticWorkflowRuntime {
       if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
       const pin = profileInput === undefined ? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(requestedRole)] : RoleProfilePinSchema.parse(profileInput);
       const selectedProfile = selectRoleProfile(this.ports.roleProfiles, requestedRole, pin, [...requiredCapabilities, "repository.read"]);
-      if (selectedProfile && state.outbound.some(out => out.message.recipient.role === requestedRole && ["accepted", "sending", "unknown_delivery"].includes(out.status)))
-        throw new Error("Profile base specialist capacity is occupied by an active assignment");
       if (selectedProfile && (!this.ports.panes.allocateSpecialist || !this.ports.preflightRoleProfile)) throw new Error("Profiled specialist allocation is unsupported by this host");
+      if (selectedProfile) {
+        for (const settledOut of state.outbound) {
+          if (settledOut.roleProfile && !settledOut.profileAllocationReleased && settledOut.status === "accepted" &&
+              settledOut.handle && settledOut.message.type === "delegation.request" &&
+              !this.outboundOwesResult(state, state.runs.find(item => item.runId === settledOut.message.run_id) ?? run, settledOut)) {
+            const health = await this.ports.panes.inspectRoleHealth(settledOut.selector);
+            if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === settledOut.handle.target.paneId) {
+              await outbox.release(settledOut);
+            }
+          }
+        }
+        await this.cleanupProfileSpecialists(state, save);
+      }
+      const resolveSpecialistAttemptKey = (targetRole: string, targetObjective: string): { key: string; prior?: Outbound } => {
+        let candidateKey = `specialist:${targetRole}:${digest([targetObjective, requiredCapabilities, ...(pin ? [pin] : [])])}`;
+        let existing = state.outbound.find(out => out.message.message_id === `p19-${digest([runId, candidateKey])}`);
+        while (existing && (
+          this.supersededAttempt(state, existing) ||
+          this.stoppedWithoutResult(state, run, existing) ||
+          ["cancelled", "failed"].includes(existing.status) ||
+          digest(record(existing.message.payload).acceptanceCriteria) !== digest(run.delegation.acceptanceCriteria) ||
+          state.inbox.some(item =>
+            item.status === "applied" &&
+            item.message.run_id === run.runId &&
+            item.message.causation_id === existing!.message.message_id &&
+            item.message.type === "task.status" &&
+            ["blocked", "failed", "inconclusive"].includes(String(objectField(item.message.payload, "status")))
+          )
+        )) {
+          candidateKey = nextAttemptKey(candidateKey);
+          existing = state.outbound.find(out => out.message.message_id === `p19-${digest([runId, candidateKey])}`);
+        }
+        return { key: candidateKey, ...(existing ? { prior: existing } : {}) };
+      };
+      const precheckedProfileAttempt = selectedProfile ? resolveSpecialistAttemptKey(requestedRole, objective) : undefined;
+      if (precheckedProfileAttempt?.prior) return json(precheckedProfileAttempt.prior.message);
+      if (selectedProfile && state.outbound.some(out => out.message.recipient.role === requestedRole && !out.phaseRetirement && !out.reviewReplacement &&
+          (["sending", "unknown_delivery"].includes(out.status) ||
+            (out.status === "accepted" && this.outboundOwesResult(state, state.runs.find(item => item.runId === out.message.run_id) ?? run, out)))))
+        throw new Error("Profile base specialist capacity is occupied by an active assignment");
       if (selectedProfile) {
         await this.ports.preflightRoleProfile!(selectedProfile, AgentRoleSchema.parse(requestedRole), [...requiredCapabilities, "repository.read"]);
         assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
@@ -2643,7 +2681,10 @@ export class AgenticWorkflowRuntime {
         await save();
       }
       let role = requestedRole, fallbackFrom: string | undefined;
-      const allocationTask = `specialist-${digest([runId, requestedRole, objective, requiredCapabilities, pin ?? null])}`;
+      const profileAttemptSuffix = precheckedProfileAttempt?.key.includes("#attempt-")
+        ? precheckedProfileAttempt.key.slice(precheckedProfileAttempt.key.indexOf("#attempt-"))
+        : "";
+      const allocationTask = `specialist-${digest([runId, requestedRole, objective, requiredCapabilities, pin ?? null, ...(profileAttemptSuffix ? [profileAttemptSuffix] : [])])}`;
       let pane = selectedProfile ? unwrap(await this.ports.panes.allocateSpecialist!({ taskId: allocationTask, runId,
         role: SpecialistRoleSchema.parse(requestedRole), roleProfile: selectedProfile })) : unwrap(await this.ports.panes.getRoleBinding(role));
       if (selectedProfile && pane) assertProfileBinding(selectedProfile, pane);
@@ -2677,11 +2718,11 @@ export class AgenticWorkflowRuntime {
         `capability-preflight:${sourceMessageId}`, "conversation");
         await save(); return json({ blocked: true, actionId: pendingAction.actionId, reason: run.error });
       }
-      // Exact dedupe within one attempt; a stopped holder that still owes the result gets a new deterministic attempt instead.
-      let key = `specialist:${role}:${digest([objective, requiredCapabilities, ...(pin ? [pin] : [])])}`;
-      for (let prior = state.outbound.find(out => out.message.message_id === `p19-${digest([runId, key])}`);
-        prior && (this.supersededAttempt(state, prior) || this.stoppedWithoutResult(state, run, prior)); prior = state.outbound.find(out => out.message.message_id === `p19-${digest([runId, key])}`))
-        key = nextAttemptKey(key);
+      // Exact dedupe within one attempt; stopped/cancelled/failed/inconclusive/superseded attempts advance deterministically.
+      const { key, prior } = resolveSpecialistAttemptKey(role, objective);
+      if (prior) {
+        return json(fallbackFrom ? { ...prior.message, fallback: { requestedRole: fallbackFrom, actingRole: role } } : prior.message);
+      }
       const delegation = DelegationRequestSchema.parse({ ...run.delegation, delegationId: `delegation-${digest([runId, key])}`,
         ...(selectedProfile ? { roleProfile: selectedProfile.pin } : {}),
         messageId: `p19-${digest([runId, key])}`, requestedBy: "coordinator", targetRole: role, objective,
@@ -2724,10 +2765,15 @@ export class AgenticWorkflowRuntime {
     if (this.quiesced) throw new Error("Runtime is quiesced");
     const draft = SpecificationSchema.parse(normalizeSpecificationOptionals(specificationInput));
     const originalProposal = WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
+    const taskRequiredCapabilities = (task: TaskDefinition): string[] => {
+      if (task.metadata?.requiredCapabilities === undefined) return ["implementation"];
+      const caps = strings(task.metadata.requiredCapabilities);
+      if (!caps.length) throw new Error(`Task ${task.id} metadata.requiredCapabilities cannot be empty; omit it or include "implementation"`);
+      return caps;
+    };
     const proposalProfiles = [...new Map(originalProposal.tasks.flatMap(task => {
       const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
-      const profile = selectRoleProfile(this.ports.roleProfiles, task.role, pin,
-        task.metadata?.requiredCapabilities ? strings(task.metadata.requiredCapabilities) : ["implementation"]);
+      const profile = selectRoleProfile(this.ports.roleProfiles, task.role, pin, taskRequiredCapabilities(task));
       return profile ? [profile] : [];
     }).map(profile => [profile.pin.digest, profile])).values()];
     for (const profile of proposalProfiles) {
@@ -2736,14 +2782,13 @@ export class AgenticWorkflowRuntime {
     }
     // Dispatch checks each task's own capabilities against its profile scope; reject them here, before design approval.
     for (const task of originalProposal.tasks) {
-      const required = task.metadata?.requiredCapabilities ? strings(task.metadata.requiredCapabilities) : ["implementation"];
+      const required = taskRequiredCapabilities(task);
       const profile = selectRoleProfile(proposalProfiles, task.role, task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)], required);
       if (profile) await this.ports.preflightRoleProfile!(profile, profile.definition.baseRole, required);
     }
     const proposed = WorkflowDefinitionSchema.parse({ ...originalProposal, tasks: originalProposal.tasks.map(task => {
       const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
-      return narrowProfileTask(task, selectRoleProfile(proposalProfiles, task.role, pin,
-        task.metadata?.requiredCapabilities ? strings(task.metadata.requiredCapabilities) : ["implementation"]));
+      return narrowProfileTask(task, selectRoleProfile(proposalProfiles, task.role, pin, taskRequiredCapabilities(task)));
     }) });
     if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 10) throw new Error("Invalid verification limit");
     return this.transaction(async (state, save, core, outbox) => {
@@ -2754,20 +2799,32 @@ export class AgenticWorkflowRuntime {
         if (digest(run.definition.metadata?.proposalFingerprint) === digest(digest([draft, proposed, maxIterations]))) {
           // An identical retry re-attempts a design step that is still pending (e.g. a failed autonomous approval); it never succeeds silently.
           if (run.status === "awaiting_approval" && run.approvalKind === "design" && run.approval && !run.decision) {
-            await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, run.definition, run.fastPath));
+            await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(run, draft, run.definition, run.fastPath));
             await save();
           }
           return json(publicExecutionRun(run));
         }
         throw new Error("Workflow already proposed; requirement changes need a newly approved delegation");
       }
-      if (draft.runId !== runId || draft.specId !== run.delegation.specificationId || draft.sessionId !== run.delegation.sessionId || draft.status !== "draft")
-        throw new Error("Specification does not match delegation");
-      // Intake criteria cannot be weakened by a planning shortcut (canonically equivalent NFC/NFD Vietnamese descriptions match).
+      const delegationMismatches: string[] = [];
+      if (draft.runId !== runId) delegationMismatches.push(`runId expected ${runId}, got ${String(draft.runId)}`);
+      if (draft.specId !== run.delegation.specificationId) delegationMismatches.push(`specId expected ${run.delegation.specificationId}, got ${draft.specId}`);
+      if (draft.sessionId !== run.delegation.sessionId) delegationMismatches.push(`sessionId expected ${run.delegation.sessionId}, got ${draft.sessionId}`);
+      if (draft.status !== "draft") delegationMismatches.push(`status expected draft, got ${draft.status}`);
+      if (delegationMismatches.length)
+        throw new Error(`Specification does not match delegation (${delegationMismatches.join("; ")})`);
+      const nfc = (text: string) => text.trim().normalize("NFC");
+      // Intake criteria cannot be weakened by a planning shortcut (canonically equivalent NFC/NFD Vietnamese IDs & descriptions match).
       for (const criterion of run.delegation.acceptanceCriteria) {
-        const accepted = draft.acceptanceCriteria.find(item => item.id === criterion.id);
-        if (!accepted || accepted.description.trim().normalize("NFC") !== criterion.description.trim().normalize("NFC") || accepted.verificationMethod !== criterion.verificationMethod || criterion.required && !accepted.required)
-          throw new Error("Planning weakens the delegated acceptance criteria");
+        const accepted = draft.acceptanceCriteria.find(item => nfc(item.id) === nfc(criterion.id));
+        if (!accepted)
+          throw new Error(`Planning weakens the delegated acceptance criteria (missing criterion ${criterion.id})`);
+        if (nfc(accepted.description) !== nfc(criterion.description))
+          throw new Error(`Planning weakens the delegated acceptance criteria (description changed for ${criterion.id})`);
+        if (accepted.verificationMethod !== criterion.verificationMethod)
+          throw new Error(`Planning weakens the delegated acceptance criteria (verificationMethod changed for ${criterion.id}: expected ${criterion.verificationMethod}, got ${accepted.verificationMethod})`);
+        if (criterion.required && !accepted.required)
+          throw new Error(`Planning weakens the delegated acceptance criteria (required criterion ${criterion.id} marked optional)`);
       }
       if (run.delegation.sddLevel === "full" && draft.level !== "full")
         throw new Error("Planning weakens the delegated full SDD specification level");
@@ -2776,7 +2833,8 @@ export class AgenticWorkflowRuntime {
       if (proposed.tasks.some(task => task.role !== "developer")) throw new Error("Implementation DAG nodes must be Developer tasks; request read-only specialists through requestSpecialist");
       if (proposed.dependencies.some(dep => dep.condition !== "succeeded")) throw new Error("Dependencies must require verified success");
       const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
-      if (classification.level !== draft.level) throw new Error("SDD level conflicts with assessed policy");
+      if (classification.level !== draft.level)
+        throw new Error(`SDD level conflicts with assessed policy (expected level ${classification.level}, complexity ${classification.complexity}, riskLevel ${classification.riskLevel}; got level ${draft.level})`);
       // An accepted prototype is input to the formal design, never its approval; an open prototype review blocks the design.
       const prototype = prototypeDesignInput(run.prototype, proposed);
       const definition = WorkflowDefinitionSchema.parse({ ...proposed,
@@ -2787,18 +2845,42 @@ export class AgenticWorkflowRuntime {
         evaluator: "p19-verification", required: true, timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
         metadata: { boundedVerificationRetry: true } }],
         metadata: { ...proposed.metadata, proposalFingerprint: digest([draft, proposed, maxIterations]) } });
+      const followUpOrRevision = Boolean(
+        run.delegationHistory?.length ||
+        revisionOf(run.delegation) > 1 ||
+        run.delegation.metadata?.followUpFromRunId ||
+        run.delegation.metadata?.parentRunId ||
+        (typeof run.delegation.metadata?.followUp === "number" && run.delegation.metadata.followUp > 1)
+      );
+      const normalizeLiteralRepoPrefix = (rawPath: string, label: string): string => {
+        const normalized = rawPath.trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/+$/g, "");
+        const segments = normalized ? normalized.split("/") : [];
+        if (!normalized || rawPath.trim().startsWith("/") || /^[A-Za-z]:/.test(normalized) ||
+            segments.some(seg => seg === "" || seg === "." || seg === "..")) {
+          throw new Error(`Task ownership must be within approved literal affectedPaths (invalid ${label}: ${rawPath})`);
+        }
+        return normalized;
+      };
+      const normalizedAffectedPaths = draft.affectedPaths.map(prefix => normalizeLiteralRepoPrefix(prefix, "affectedPath"));
       // Build every dossier before publishing any implementation intent.
       const workflowSpec = await this.reviewSpec({ ...draft, metadata: { ...draft.metadata,
-        conditionalTdd: { ...record(draft.metadata?.conditionalTdd), taskId: FINAL_TASK } } });
+        conditionalTdd: { ...record(draft.metadata?.conditionalTdd), taskId: FINAL_TASK } } }, followUpOrRevision);
       const tasks: TaskRecord[] = [];
       for (const task of definition.tasks) {
         const ownedPaths = strings(record(task.metadata).ownedPaths);
-        if (!ownedPaths.length || ownedPaths.some(path => !draft.affectedPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`))))
-          throw new Error("Task ownership must be within approved literal affectedPaths");
-        const criteria = draft.acceptanceCriteria.filter(c => task.acceptanceCriteria.includes(c.id));
-        if (!criteria.length) throw new Error("Every task must have mapped acceptance criteria");
+        if (!ownedPaths.length)
+          throw new Error(`Task ownership must be within approved literal affectedPaths (task ${task.id} has empty metadata.ownedPaths)`);
+        for (const rawOwned of ownedPaths) {
+          const normalizedOwned = normalizeLiteralRepoPrefix(rawOwned, `task ${task.id} ownedPath`);
+          if (!normalizedAffectedPaths.some(prefix => normalizedOwned === prefix || normalizedOwned.startsWith(`${prefix}/`))) {
+            throw new Error(`Task ownership must be within approved literal affectedPaths (task ${task.id} path ${rawOwned} outside [${draft.affectedPaths.join(", ")}])`);
+          }
+        }
+        const taskCriteriaKeys = new Set(task.acceptanceCriteria.map(nfc));
+        const criteria = draft.acceptanceCriteria.filter(c => taskCriteriaKeys.has(nfc(c.id)));
+        if (!criteria.length) throw new Error(`Every task must have mapped acceptance criteria (task ${task.id})`);
         const taskSpec = await this.reviewSpec(projectTaskSpecificationInput(draft, task.id, criteria, digest(task.id).slice(0, 12),
-          task.metadata?.conditionalTdd ?? draft.metadata?.conditionalTdd));
+          task.metadata?.conditionalTdd ?? draft.metadata?.conditionalTdd), followUpOrRevision);
         if (this.ports.validateTaskCommands) {
           try { this.ports.validateTaskCommands(taskSpec.specification, taskSpec.strategy, ownedPaths); }
           catch (error) {
@@ -2815,11 +2897,6 @@ export class AgenticWorkflowRuntime {
       delete run.lastWorkflowRejection;
       const specialistRequested = state.outbound.some(
         out => out.message.run_id === run.runId && out.status !== "cancelled" && SPECIALIST_ROLES.includes(out.message.recipient.role)
-      );
-      const followUpOrRevision = Boolean(
-        run.delegationHistory?.length ||
-        revisionOf(run.delegation) > 1 ||
-        run.delegation.metadata?.followUpFromRunId
       );
       const fastPathDecision = evaluateFastPath({
         mode: this.ports.fastPathMode ?? "off",
@@ -2866,7 +2943,7 @@ export class AgenticWorkflowRuntime {
       run.approvalKind = "design"; run.status = "awaiting_approval";
       if (run.pendingAction?.kind === "coordinator_continuation") delete run.pendingAction;
       await save();
-      await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(draft, definition, run.fastPath));
+      await this.settleDesignApproval(state, save, core, outbox, run, this.designNeedsHuman(run, draft, definition, run.fastPath));
       await save(); return json(publicExecutionRun(run));
     });
   }
@@ -3017,9 +3094,12 @@ export class AgenticWorkflowRuntime {
     }
     await save();
   }
-  private designNeedsHuman(draft: Specification, definition: WorkflowDefinition, fastPath?: FastPathRecord): boolean {
+  private designNeedsHuman(run: RunRecord, draft: Specification, definition: WorkflowDefinition, fastPath?: FastPathRecord): boolean {
     const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
-    return classification.humanApprovalRequired || (fastPath?.status !== "active" && !!this.ports.projectApprovalRequired?.("implementation", json(definition)));
+    const humanRequestedDesignChanges = run.delegation.metadata?.supersededApprovalKind === "design" ||
+      (typeof run.delegation.metadata?.supersededApprovalId === "string" && run.delegation.metadata.supersededApprovalId.startsWith("design-"));
+    return classification.humanApprovalRequired || humanRequestedDesignChanges ||
+      (fastPath?.status !== "active" && !!this.ports.projectApprovalRequired?.("implementation", json(definition)));
   }
   /**
    * Human gate, or autonomous acceptance of the pending design. A failed autonomous step is rolled back to the pending state,
@@ -3054,10 +3134,16 @@ export class AgenticWorkflowRuntime {
       throw error;
     }
   }
-  private async reviewSpec(input: unknown): Promise<SpecRecord> {
+  private async reviewSpec(input: unknown, allowRevisedVersion = false): Promise<SpecRecord> {
     const original = SpecificationSchema.innerType().parse(input);
     const strategy = TestStrategySchema.parse(this.ports.policies.strategy.resolve(original));
-    const draft = this.ports.policies.specification.createDraft({ ...original, testStrategy: strategy, tddDecision: strategy.tddDecision });
+    const candidate = { ...original, version: original.version ?? 1, testStrategy: strategy, tddDecision: strategy.tddDecision };
+    if (allowRevisedVersion && candidate.version > 1 && !String(record(original.metadata?.sdd).revisionReason ?? "").trim()) {
+      throw new Error("Revised specification (version > 1) requires metadata.sdd.revisionReason");
+    }
+    const draft = allowRevisedVersion && candidate.version > 1
+      ? candidate
+      : this.ports.policies.specification.createDraft(candidate);
     const specification = SpecificationSchema.parse(await this.ports.policies.specification.submitForReview(draft));
     const request = ApprovalRequestSchema.parse(await this.ports.policies.specification.requestApproval(specification, {
       approvalId: `spec-approval-${digest([specification.specId, specification.artifactRef])}`, requestedBy: "coordinator"
@@ -3100,7 +3186,12 @@ export class AgenticWorkflowRuntime {
       else this.live(run);
       if (role !== "coordinator" && !state.outbound.some(out => out.message.run_id === run.runId && ["accepted", "released"].includes(out.status) &&
           out.handle !== undefined && out.handle.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
-          (out.message.type === "task.assignment" ? out.taskId === input.taskId : out.message.type === "delegation.request")))
+          (out.message.type === "task.assignment"
+            ? out.taskId === input.taskId
+            : out.message.type === "delegation.request" ||
+              (out.message.type === "verification.requested" && !out.reviewReplacement && !out.phaseRetirement &&
+                (out.taskId === input.taskId || objectField(out.message.payload, "taskId") === input.taskId ||
+                  out.taskId === `evidence-${input.taskId}`)))))
         throw new Error("Only the Runtime-bound specialist execution for this run may request a user decision");
       const decisions = run.userDecisions ?? (run.userDecisions = {});
       // Revision counts resolved decisions for the task, so a still-pending identical request keeps its approvalId (idempotent).
@@ -3283,7 +3374,15 @@ export class AgenticWorkflowRuntime {
         );
       }
     } else {
-      outbox.enqueue(message, entry.role, entry.taskId, `attempt-${id}`);
+      const askerOut = [...state.outbound].reverse().find(out =>
+        out.message.run_id === run.runId &&
+        out.message.recipient.role === entry.role &&
+        !out.reviewReplacement &&
+        !out.phaseRetirement &&
+        out.handle?.target.agentId === entry.agentId &&
+        out.handle.target.paneId === entry.paneId);
+      const resumed = outbox.enqueue(message, askerOut?.selector ?? entry.role, entry.taskId, `attempt-${id}`, askerOut?.capabilities);
+      if (askerOut?.roleProfile) resumed.roleProfile = askerOut.roleProfile;
     }
     // When Coordinator asked request_user_decision to resolve a blocked active Developer task.assignment,
     // also enqueue a task notice to that Developer under its active writer lease so it can resume.
@@ -3326,7 +3425,7 @@ export class AgenticWorkflowRuntime {
       throw new Error("Stale or mismatched approval decision");
     if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
     if (decision.decision === "changes_requested" && (run.approvalKind === "design" || run.approvalKind === "delivery") &&
-        this.continueAsFollowUp(state, outbox, run, decision)) { await save(); return; }
+        await this.continueAsFollowUp(state, outbox, run, decision)) { await save(); return; }
     if (decision.decision !== "approved") {
       if (run.approvalKind === "task") await core.mutate(run.runId, snapshot => this.ports.engine.applyApproval({
         decision, expectedVersion: snapshot.version, idempotencyKey: decision.idempotencyKey }));
@@ -3335,7 +3434,16 @@ export class AgenticWorkflowRuntime {
       run.error = decision.reason ?? "Approval refused";
       this.progress(state, outbox, run, run.error); await save(); return;
     }
-    await this.verifyReferences(request.evidence, run.runId);
+    const lineageRunIds = state.runs
+      .filter(item =>
+        item.delegation.sessionId === run.delegation.sessionId &&
+        item.delegation.correlationId === run.delegation.correlationId &&
+        (item.runId === run.runId ||
+          item.runId === run.delegation.metadata?.originRunId ||
+          item.runId === run.delegation.metadata?.parentRunId ||
+          item.supersededBy !== undefined))
+      .map(item => item.runId);
+    await this.verifyReferences(request.evidence, run.runId, lineageRunIds);
     if (run.approvalKind === "design") { await this.acceptDesign(run, decision); await save(); await core.create(run); }
     else if (run.approvalKind === "task") {
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
@@ -3358,7 +3466,7 @@ export class AgenticWorkflowRuntime {
    * correlation (`<origin>-r<n>`), built on the parent's delivered head with the feedback appended to the unchanged criteria. Core
    * cannot re-plan an aggregate that already ran, so the parent becomes terminal and superseded. False once the bound is spent.
    */
-  private continueAsFollowUp(state: JournalState, outbox: HerdrOutbox, run: RunRecord, decision: ApprovalDecision): boolean {
+  private async continueAsFollowUp(state: JournalState, outbox: HerdrOutbox, run: RunRecord, decision: ApprovalDecision): Promise<boolean> {
     const metadata = run.delegation.metadata ?? {};
     const origin = typeof metadata.originRunId === "string" ? metadata.originRunId : run.runId;
     const followUp = (typeof metadata.followUp === "number" ? metadata.followUp : 1) + 1;
@@ -3368,15 +3476,71 @@ export class AgenticWorkflowRuntime {
     const approvalKind = run.approvalKind!, feedback = redactString(decision.reason ?? "Changes requested").slice(0, 2000);
     const base = approvalKind === "delivery" ? run.workflowChange?.headCommitHash : run.baseRevision;
     if (approvalKind === "delivery" && !base) return false;
+    const rebindArtifact = async (input: ArtifactReference): Promise<ArtifactReference> => {
+      const ref = ArtifactReferenceSchema.parse(input);
+      if (ref.runId === childId) return ref;
+      const resolved = await this.ports.artifactStore.resolve(ref.artifactId);
+      if (!resolved.ok || !resolved.value) return ArtifactReferenceSchema.parse({ ...ref, runId: childId });
+      const chunks: Buffer[] = [];
+      for await (const chunk of this.ports.artifactStore.get(ref)) chunks.push(Buffer.from(unwrap(chunk)));
+      const bytes = Buffer.concat(chunks);
+      const putResult = await this.ports.artifactStore.put({
+        options: {
+          artifactId: `followup-${digest([childId, ref.artifactId, ref.checksum.value]).slice(0, 40)}`,
+          runId: childId,
+          ...(ref.taskId !== undefined ? { taskId: ref.taskId } : {}),
+          kind: ref.kind,
+          mediaType: ref.mediaType,
+          expectedIntegrity: { checksum: ref.checksum, sizeBytes: bytes.length },
+          idempotencyKey: `followup-artifact:${childId}:${ref.artifactId}:${ref.checksum.value}`
+        },
+        content: (async function* () { yield bytes; })()
+      });
+      return ArtifactReferenceSchema.parse(unwrap(putResult));
+    };
+    const rebindArtifacts = async (refs: readonly ArtifactReference[]): Promise<ArtifactReference[]> => {
+      const bound: ArtifactReference[] = [];
+      for (const item of refs) bound.push(await rebindArtifact(item));
+      return bound;
+    };
+    const childInputArtifacts = await rebindArtifacts([...run.delegation.inputArtifacts, ...decision.feedbackArtifacts]);
     const delegation = DelegationRequestSchema.parse({ ...run.delegation, runId: childId, delegationId: `delegation-${digest([childId])}`,
       messageId: `follow-up-${digest([childId, decision.approvalId])}`, idempotencyKey: `follow-up:${childId}`, requestedAt: this.now(),
       objective: `${run.delegation.objective}
 
 Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}`.slice(0, 8000),
-      inputArtifacts: [...run.delegation.inputArtifacts, ...decision.feedbackArtifacts],
-      metadata: { ...metadata, originRunId: origin, parentRunId: run.runId, followUp, supersededApprovalId: decision.approvalId, revision: revisionOf(run.delegation) } });
+      inputArtifacts: childInputArtifacts,
+      metadata: { ...metadata, originRunId: origin, parentRunId: run.runId, followUpFromRunId: run.runId, followUp, supersededApprovalId: decision.approvalId, supersededApprovalKind: approvalKind, revision: revisionOf(run.delegation) } });
+    let inheritedPrototype: RunRecord["prototype"];
+    if (approvalKind === "design" && run.prototype?.status === "accepted" &&
+        run.prototype.acceptance !== undefined &&
+        run.prototype.requirementRevision === revisionOf(run.delegation)) {
+      const cloned = structuredClone(run.prototype);
+      for (const version of cloned.versions) {
+        version.manifest = await rebindArtifact(version.manifest);
+        for (const file of version.files) file.artifact = await rebindArtifact(file.artifact);
+      }
+      for (const entry of cloned.approvals) {
+        const evidence = await rebindArtifacts(entry.request.evidence);
+        entry.request = ApprovalRequestSchema.parse({
+          ...entry.request,
+          runId: childId,
+          evidence,
+          metadata: { ...entry.request.metadata, inheritedFromRunId: entry.request.runId }
+        });
+        if (entry.decision) {
+          const feedbackArtifacts = await rebindArtifacts(entry.decision.feedbackArtifacts);
+          entry.decision = ApprovalDecisionSchema.parse({ ...entry.decision, runId: childId, feedbackArtifacts });
+        }
+      }
+      for (const fb of cloned.feedback) fb.artifacts = await rebindArtifacts(fb.artifacts);
+      inheritedPrototype = cloned;
+    }
     state.runs.push({ runId: childId, delegation, status: "planning", tasks: [], coreCreated: false, cancelled: false,
-      maxIterations: run.maxIterations, ...(base ? { baseRevision: base } : {}) });
+      maxIterations: run.maxIterations, ...(base ? { baseRevision: base } : {}),
+      ...(inheritedPrototype ? { prototype: inheritedPrototype } : {}),
+      ...(run.roleProfiles?.length ? { roleProfiles: structuredClone(run.roleProfiles) } : {}),
+      ...(run.roleProfileDefaults ? { roleProfileDefaults: structuredClone(run.roleProfileDefaults) } : {}) });
     run.decision = decision; run.status = "escalated"; run.error = `Changes requested; continued as ${childId}`;
     run.supersededBy = childId; delete run.pendingAction;
     const child = state.runs.at(-1)!;
@@ -3392,10 +3556,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       headline: `Đã ghi nhận yêu cầu chỉnh sửa; workflow tiếp tục với run ${childId}`, sdlcStatus: child.status }, `follow-up:${childId}`, "conversation");
     return true;
   }
-  private async verifyReferences(references: ArtifactReference[], runId: string): Promise<void> {
+  private async verifyReferences(references: ArtifactReference[], runId: string, allowedRunIds: readonly string[] = [runId]): Promise<void> {
     for (const input of references) {
       const reference = ArtifactReferenceSchema.parse(input);
-      if (reference.runId !== runId) throw new Error("Foreign artifact");
+      if (reference.runId !== runId && !allowedRunIds.includes(reference.runId)) throw new Error("Foreign artifact");
       const resolved = unwrap(await this.ports.artifactStore.resolve(reference.artifactId));
       if (!resolved || digest(resolved) !== digest(reference)) throw new Error("Untrusted artifact reference");
       const hash = createHash(reference.checksum.algorithm); let size = 0;
@@ -3559,10 +3723,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
     const before = await core.snapshot(run.runId);
     if (["succeeded", "failed", "cancelled", "cancelling"].includes(before.status)) return;
-    const needsAdvance = before.status === "queued" ||
-      core.hasUncheckpointedEvents(run.runId) ||
-      before.tasks.some(task => ["pending", "ready", "retrying"].includes(task.status)) ||
-      (before.status === "running" && before.tasks.every(task => ["succeeded", "failed", "blocked", "cancelled"].includes(task.status)));
+    const needsAdvance = core.needsAdvance(run, before);
     if (needsAdvance) {
       await core.mutate(run.runId, snapshot => this.ports.engine.advance({ runId: run.runId, expectedVersion: snapshot.version,
         occurredAt: this.now(), idempotencyKey: `advance:${run.runId}:${snapshot.version}` }));
@@ -3571,8 +3732,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     for (const taskState of snapshot.tasks.filter(task => task.status === "running" && !task.agentExecution)) {
       const task = run.tasks.find(item => item.taskId === taskState.taskId)!;
       const definition = run.definition!.tasks.find(item => item.id === task.taskId)!;
-      const selectedProfile = selectRoleProfile(run.roleProfiles, definition.role, definition.roleProfile,
-        definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : ["implementation"]);
+      const rawTaskCaps = definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : [];
+      const requiredCapabilities = rawTaskCaps.length ? rawTaskCaps : ["implementation"];
+      const selectedProfile = selectRoleProfile(run.roleProfiles, definition.role, definition.roleProfile, requiredCapabilities);
       if (selectedProfile) {
         assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
         if (!this.ports.preflightRoleProfile) throw new Error("Pinned profile dispatch preflight is unsupported");
@@ -3580,7 +3742,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
       }
       const id = `assignment:${run.runId}:${taskState.attemptId}`;
-      if (state.outbound.some(out => out.message.idempotency_key === id)) continue;
+      const existingOut = state.outbound.find(out => out.message.idempotency_key === id);
+      const recoverableCancelledOut = existingOut !== undefined && existingOut.status === "cancelled" &&
+        !existingOut.handle && !existingOut.request && !run.cancelled;
+      if (existingOut && !recoverableCancelledOut) continue;
       const agentName = `dev-${digest([run.runId, taskState.attemptId]).slice(0, 20)}`;
       const prior = task.changeSet;
       // A dependent task starts from its verified dependencies' heads; a fallback attempt stays on the run base once its merge conflicted.
@@ -3608,7 +3773,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
       if (!allocation.ok) {
         run.error = `Developer allocation pending for ${task.taskId}: ${allocation.error.message}`;
-        if (allocation.error.code !== "conflict" || !allocation.error.retryable) this.pauseDeveloperAllocation(run, task.taskId, run.error, allocation.error.retryable);
+        const siblingActive = snapshot.tasks.some(other => other.taskId !== task.taskId && Boolean(other.agentExecution)) ||
+          state.outbound.some(out => out.message.run_id === run.runId && out.message.type === "task.assignment" &&
+            out.taskId !== task.taskId && ["queued", "sending", "accepted"].includes(out.status));
+        if (!allocation.error.retryable || (allocation.error.code !== "conflict" && !siblingActive)) {
+          this.pauseDeveloperAllocation(run, task.taskId, run.error, allocation.error.retryable);
+        }
         this.progress(state, outbox, run, run.error); await save();
         if (run.status === "escalated") break;
         continue;
@@ -3621,7 +3791,6 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       assertProfileBinding(selectedProfile, pane);
       if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
       if (pane.worktreePath !== tree.worktreePath || pane.agentId !== agentName) throw new Error("Developer allocation mismatch");
-      const requiredCapabilities = definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : ["implementation"];
       const reworkContext = task.cycle?.status === "rework_required" && task.cycle.history.length > 0
         ? buildReworkAssignmentContext({
             runId: run.runId,
@@ -3637,25 +3806,38 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const instruction = reworkContext
         ? `${baseInstruction} Rework generation ${reworkContext.reworkGeneration}: every assigned finding in reworkContext.findings must be explained in findingResolutions when calling submit_implementation (or in AgentResult.output.findingResolutions), binding findingId -> disposition (addressed | disputed | blocked) -> rootCause -> sourceLocations -> repairSummary -> discriminatingCheck -> evidence (with current sourceRevision and reworkGeneration). Developer self-reported 'addressed' never closes a finding without independent verification.`
         : baseInstruction;
-      const messageId = `message-${digest(id)}`;
-      const message = RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
-        correlation_id: run.delegation.correlationId, causation_id: run.delegation.messageId, run_id: run.runId,
-        sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: pane.agentId, pane_id: pane.paneId },
-        type: "task.assignment", payload: { task: definition, specification: task.spec.specification,
-          testStrategy: task.spec.strategy, worktree: tree,
-          handoverBinding: HandoverBindingSchema.parse({ runId: run.runId, taskId: task.taskId, assignmentId: messageId,
-            attempt: taskState.attempt, attemptId: taskState.attemptId, generation: taskState.generation, reworkGeneration: reworkContext?.reworkGeneration ?? 0,
-            worktreePath: tree.worktreePath, revision: tree.baseCommitHash, specId: task.spec.specification.specId,
-            specVersion: task.spec.specification.version ?? null, specFingerprint: digest(task.spec.specification),
-            requirementFingerprint: digest(run.delegation) }),
-          findings: reworkContext ? toAssignedQualityFindings(reworkContext) : (task.cycle?.history.at(-1)?.findings ?? []),
-          ...(reworkContext ? { reworkContext } : {}),
-          implementationAuthorizationRequired: task.spec.strategy.tddDecision.mode === "required",
-          instruction },
-        artifact_references: [task.spec.specification.artifactRef!], occurred_at: this.now(), idempotency_key: id });
-      const assignmentOut = outbox.enqueue(message, pane.bindingId, task.taskId, taskState.attemptId!, requiredCapabilities);
+      let assignmentOut: Outbound;
+      if (recoverableCancelledOut && existingOut &&
+          existingOut.selector === pane.bindingId &&
+          existingOut.message.recipient.agent_id === pane.agentId &&
+          existingOut.message.recipient.pane_id === pane.paneId) {
+        existingOut.status = "queued";
+        delete existingOut.error;
+        existingOut.capabilities = requiredCapabilities;
+        assignmentOut = existingOut;
+      } else {
+        const effectiveKey = recoverableCancelledOut ? `${id}:reallocated:${pane.paneId}` : id;
+        const messageId = `message-${digest(effectiveKey)}`;
+        const message = RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
+          correlation_id: run.delegation.correlationId, causation_id: run.delegation.messageId, run_id: run.runId,
+          sender: { role: "coordinator" }, recipient: { role: "developer", agent_id: pane.agentId, pane_id: pane.paneId },
+          type: "task.assignment", payload: { task: definition, specification: task.spec.specification,
+            testStrategy: task.spec.strategy, worktree: tree,
+            handoverBinding: HandoverBindingSchema.parse({ runId: run.runId, taskId: task.taskId, assignmentId: messageId,
+              attempt: taskState.attempt, attemptId: taskState.attemptId, generation: taskState.generation, reworkGeneration: reworkContext?.reworkGeneration ?? 0,
+              worktreePath: tree.worktreePath, revision: tree.baseCommitHash, specId: task.spec.specification.specId,
+              specVersion: task.spec.specification.version ?? null, specFingerprint: digest(task.spec.specification),
+              requirementFingerprint: digest(run.delegation) }),
+            findings: reworkContext ? toAssignedQualityFindings(reworkContext) : (task.cycle?.history.at(-1)?.findings ?? []),
+            ...(reworkContext ? { reworkContext } : {}),
+            implementationAuthorizationRequired: task.spec.strategy.tddDecision.mode === "required",
+            instruction },
+          artifact_references: [task.spec.specification.artifactRef!], occurred_at: this.now(), idempotency_key: effectiveKey });
+        assignmentOut = outbox.enqueue(message, pane.bindingId, task.taskId, taskState.attemptId!, requiredCapabilities);
+        if (!task.outboundIds.includes(messageId)) task.outboundIds.push(messageId);
+      }
       if (selectedProfile) assignmentOut.roleProfile = selectedProfile.pin;
-      task.outboundIds.push(messageId); delete task.result; task.writerReleased = false;
+      delete task.result; task.writerReleased = false;
       await save();
     }
   }

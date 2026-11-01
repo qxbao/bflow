@@ -897,6 +897,11 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
                 attemptId: task.attemptId!, eligibleAt: new Date(Date.parse(data.result.evaluatedAt) + delay).toISOString() }
             });
             if (!scheduled.ok) return scheduled;
+            if (delay === 0) {
+              const ready = this.#transitionTask(aggregate, emitted, task.taskId, "ready", "normal",
+                data.result.evaluatedAt, data.idempotencyKey, "retry eligible immediately");
+              if (!ready.ok) return ready;
+            }
           } else if (binding.required && data.result.status !== "passed" && request.phase === "before_dispatch" && task.status === "ready") {
             const cancelled = this.#transitionTask(aggregate, emitted, task.taskId, "cancelled", "normal",
               data.result.evaluatedAt, data.idempotencyKey, `required quality gate ${request.gateId} ${data.result.status}`);

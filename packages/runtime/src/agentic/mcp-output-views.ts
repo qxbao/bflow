@@ -88,7 +88,7 @@ const COMPACT_PLANNING_SECTIONS = {
       superRefineRules: [
         "strict schemaVersion=2; status='draft' for propose_workflow",
         "metadata.sdd (policyVersion=1) requires assessment & traceability; level/complexity/riskLevel must match classifyChange",
-        "level='full' requires architectureNotes, securityConsiderations, rollbackPlan; non-trivial requires functionalRequirements & proposedTestStrategy",
+        "level='full' requires architectureNotes, securityConsiderations, rollbackPlan, testStrategy & tddDecision; non-trivial requires functionalRequirements & proposedTestStrategy",
         "traceabilityTaskIds must equal sorted taskIds in metadata.sdd.traceability"
       ]
     },
@@ -451,11 +451,16 @@ function projectRunByView(
   }
 
   if (view === "status") {
+    const isVerifiedComplete = (t: Record<string, unknown>) =>
+      record(t.result ?? {}).status === "succeeded" && record(t.cycle ?? {}).status === "passed";
     const completedTaskIds = selectedTasks
-      .filter(t => record(t.result ?? {}).status === "succeeded")
+      .filter(isVerifiedComplete)
+      .map(t => String(t.taskId));
+    const submittedUnverifiedTaskIds = selectedTasks
+      .filter(t => record(t.result ?? {}).status === "succeeded" && record(t.cycle ?? {}).status !== "passed")
       .map(t => String(t.taskId));
     const pendingTaskIds = selectedTasks
-      .filter(t => record(t.result ?? {}).status !== "succeeded")
+      .filter(t => !isVerifiedComplete(t))
       .map(t => String(t.taskId));
     return {
       runId: runInput.runId,
@@ -466,9 +471,12 @@ function projectRunByView(
       ...(runInput.supersededBy !== undefined ? { supersededBy: runInput.supersededBy } : {}),
       ...(runInput.error !== undefined ? { error: runInput.error } : {}),
       ...(runInput.approvalKind !== undefined ? { approvalKind: runInput.approvalKind } : {}),
+      ...(runInput.fastPath !== undefined ? { fastPath: runInput.fastPath } : {}),
+      ...(runInput.executionPlanDrift !== undefined ? { executionPlanDrift: runInput.executionPlanDrift } : {}),
       pendingAction: runInput.pendingAction ?? null,
       taskCount: selectedTasks.length,
       completedTaskIds,
+      submittedUnverifiedTaskIds,
       pendingTaskIds
     };
   }
@@ -491,6 +499,8 @@ function projectRunByView(
           res.status === "blocked" ||
           cyc.status === "failed" ||
           cyc.status === "blocked" ||
+          cyc.status === "rework_required" ||
+          cyc.status === "aborted" ||
           cyc.status === "escalated" ||
           t.reworkResolutions !== undefined
         );
@@ -503,6 +513,11 @@ function projectRunByView(
       pendingAction: runInput.pendingAction ?? null,
       ...(runInput.lastWorkflowRejection !== undefined
         ? { lastWorkflowRejection: runInput.lastWorkflowRejection }
+        : {}),
+      ...(runInput.executionPlanDrift !== undefined ? { executionPlanDrift: runInput.executionPlanDrift } : {}),
+      ...(runInput.prototype !== undefined ? { prototype: runInput.prototype } : {}),
+      ...(runInput.fastPath !== undefined && record(runInput.fastPath).status === "downgraded"
+        ? { fastPath: runInput.fastPath }
         : {}),
       ...(runInput.conflictResolution !== undefined ? { conflictResolution: runInput.conflictResolution } : {}),
       ...(runInput.approvalKind !== undefined ? { approvalKind: runInput.approvalKind } : {}),
@@ -564,6 +579,10 @@ function projectRunByView(
     ...(runInput.lastWorkflowRejection !== undefined
       ? { lastWorkflowRejection: runInput.lastWorkflowRejection }
       : {}),
+    ...(runInput.executionPlanDrift !== undefined ? { executionPlanDrift: runInput.executionPlanDrift } : {}),
+    ...(runInput.prototype !== undefined ? { prototype: runInput.prototype } : {}),
+    ...(runInput.fastPath !== undefined ? { fastPath: runInput.fastPath } : {}),
+    ...(runInput.roleProfileDefaults !== undefined ? { roleProfileDefaults: runInput.roleProfileDefaults } : {}),
     ...(runInput.conflictResolution !== undefined ? { conflictResolution: runInput.conflictResolution } : {}),
     ...(runInput.approvalKind !== undefined ? { approvalKind: runInput.approvalKind } : {}),
     ...(runInput.approval !== undefined ? { approval: runInput.approval } : {}),
@@ -985,6 +1004,10 @@ export function compactAssignmentContext(
             ...(run.lastWorkflowRejection !== undefined
               ? { lastWorkflowRejection: run.lastWorkflowRejection }
               : {}),
+            ...(run.executionPlanDrift !== undefined ? { executionPlanDrift: run.executionPlanDrift } : {}),
+            ...(run.prototype !== undefined ? { prototype: run.prototype } : {}),
+            ...(run.fastPath !== undefined ? { fastPath: run.fastPath } : {}),
+            ...(run.roleProfileDefaults !== undefined ? { roleProfileDefaults: run.roleProfileDefaults } : {}),
             ...(run.conflictResolution !== undefined ? { conflictResolution: run.conflictResolution } : {}),
             ...(run.workflowCycle !== undefined ? { workflowCycle: run.workflowCycle } : {}),
             ...(run.workflowChange !== undefined ? { workflowChange: run.workflowChange } : {}),

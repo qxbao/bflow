@@ -509,6 +509,91 @@ describe("Round 2 Slice 5 core workflow engine & DAG hardening", () => {
     expect(ff.snapshot.status).toBe("failed");
   });
 
+  it("promotes boundedVerificationRetry quality-gate retries with delay === 0 immediately from retrying to ready and replays identically", async () => {
+    const def: WorkflowDefinition = {
+      schemaVersion: "1",
+      id: "bounded-verification-retry-zero-delay",
+      name: "Bounded Verification Retry Zero Delay",
+      version: "1.0.0",
+      tasks: [
+        {
+          id: "A",
+          title: "Task A",
+          role: "developer",
+          instruction: "Do A",
+          acceptanceCriteria: ["ac-1"],
+          retry: { maxAttempts: 2, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 5_000, onTimeout: "fail" },
+          requiresApproval: false,
+          qualityGates: [{ gateId: "p19-independent-task-verification", phase: "before_completion", required: true }]
+        }
+      ],
+      dependencies: [],
+      qualityGates: [
+        {
+          id: "p19-independent-task-verification",
+          name: "Independent task verification",
+          evaluator: "p19-verification",
+          required: true,
+          timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
+          metadata: { boundedVerificationRetry: true }
+        }
+      ],
+      maxConcurrency: 1,
+      failurePolicy: "fail-fast",
+      recovery: { checkpoint: "task-boundary", resumeStrategy: "checkpoint-then-replay", staleExecution: "reconcile" }
+    };
+
+    const engine = new DeterministicWorkflowEngine({ definitions: [def] });
+    const history: DomainEvent[] = [];
+    let state = unwrap(await engine.createRun({ runId: "run-bvr", definition: def, idempotencyKey: "c", createdAt: t0 }));
+    history.push(...state.emittedEvents);
+    state = unwrap(await engine.advance({ runId: "run-bvr", expectedVersion: state.snapshot.version, idempotencyKey: "adv-1", occurredAt: t1 }));
+    history.push(...state.emittedEvents);
+    const h1 = makeHandle(state, "A", "1");
+    state = unwrap(await engine.bindAgentExecution({ runId: "run-bvr", taskId: "A", attempt: 1, handle: h1, expectedVersion: state.snapshot.version, idempotencyKey: "bind-1", occurredAt: t1 }));
+    history.push(...state.emittedEvents);
+    state = unwrap(await engine.recordAgentResult({ runId: "run-bvr", taskId: "A", expectedVersion: state.snapshot.version, result: makeAgentResult(h1, "succeeded"), idempotencyKey: "res-1", occurredAt: t2 }));
+    history.push(...state.emittedEvents);
+    state = unwrap(await engine.requestQualityGateEvaluation({
+      runId: "run-bvr",
+      taskId: "A",
+      attemptId: h1.attemptId,
+      gateId: "p19-independent-task-verification",
+      evaluationId: "eval-bvr-1",
+      expectedVersion: state.snapshot.version,
+      idempotencyKey: "req-bvr-1",
+      occurredAt: t2
+    }));
+    history.push(...state.emittedEvents);
+    state = unwrap(await engine.recordQualityGateResult({
+      expectedVersion: state.snapshot.version,
+      idempotencyKey: "gate-res-bvr-1",
+      result: {
+        runId: "run-bvr",
+        taskId: "A",
+        gateId: "p19-independent-task-verification",
+        evaluationId: "eval-bvr-1",
+        status: "failed",
+        findings: [{ code: "rework_needed", severity: "error", message: "fix edge case" }],
+        producedArtifacts: [],
+        evaluatedAt: t2,
+        metadata: { independentVerification: true }
+      }
+    }));
+    history.push(...state.emittedEvents);
+    expect(state.snapshot.tasks[0]?.status).toBe("ready");
+
+    state = unwrap(await engine.advance({ runId: "run-bvr", expectedVersion: state.snapshot.version, idempotencyKey: "adv-2", occurredAt: t2 }));
+    history.push(...state.emittedEvents);
+    expect(state.snapshot.tasks[0]?.status).toBe("running");
+    expect(state.snapshot.tasks[0]?.attempt).toBe(2);
+
+    const replay = new DeterministicWorkflowEngine({ definitions: [def] });
+    const recovered = unwrap(await replay.recover({ runId: "run-bvr", events: history, expectedVersion: state.snapshot.version }));
+    expect(recovered.snapshot).toEqual(state.snapshot);
+  });
+
   it("verifies zero intra-package ESM circular runtime imports across all 6 Slice 5 packages", () => {
     const packagesRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
     const slice5Packages = [

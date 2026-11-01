@@ -46,8 +46,9 @@ User decision routing: When a human decision is genuinely required (for example 
 ## 3. Deterministic Task DAG Decomposition & Planning Policies
 
 1. **Deterministic Task DAG Formulation**:
-   - Decompose high-level feature requirements and approved specifications into a Directed Acyclic Graph (DAG) of discrete, atomic execution tasks (`tasks`, `dependencies`).
-   - Every task must specify: `taskId`, `role` (e.g. `developer`, `tester`, `reviewer`), explicit `dependencies` (task IDs that must complete first), literal `ownedPaths` (path prefixes the task is authorized to modify), and explicit `acceptanceCriteria` references.
+   - Decompose high-level feature requirements and approved specifications into a Directed Acyclic Graph (DAG) of discrete, atomic execution tasks (`tasks`, `dependencies`) conforming to `WorkflowDefinitionSchema` (`schemaVersion: "1"`).
+   - Every task in `tasks` must specify: `id` (never `taskId`), `title`, `role: "developer"` (implementation DAG nodes are always Developer tasks; read-only specialists are requested by Coordinator via `request_specialist`), `instruction`, `acceptanceCriteria` (criterion IDs mapped in `metadata.sdd.traceability`), `retry`, `timeout`, `requiresApproval`, `qualityGates: []` (independent project checks are attached by Runtime, never agent-authored), and `metadata.ownedPaths` (literal repository-relative path prefixes within `specification.affectedPaths`, never containing `..` or absolute paths).
+   - Express inter-task ordering exclusively in top-level `dependencies: [{ taskId, dependsOnTaskId, condition: "succeeded" }]` (never inline `dependsOn` on task objects), with workflow-level `qualityGates: []`.
    - Maximize safe concurrency (`maxConcurrency`) while enforcing linear ordering where shared state, contract dependencies, or migration sequences require serialization.
 
 2. **Testable Acceptance Criteria Structuring**:
