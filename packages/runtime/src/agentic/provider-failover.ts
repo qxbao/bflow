@@ -147,6 +147,16 @@ export class TaskProviderFailover {
       entry.handoverStatus = selected?.status === "selected" ? "selected" : loaded.status === "absent" ? "absent" : "withheld";
       await this.save();
       // The original Registry grant and pane are retired before any replacement is allocated. Replays use their existing receipts.
+      for (const child of this.state.outbound) {
+        if (child.parentAssignmentId !== source.message.message_id) continue;
+        if (child.status === "accepted") await this.outbox.release(child);
+        else if (child.status === "queued") {
+          delete child.request;
+          delete child.lease;
+          child.status = "cancelled";
+          child.error = "Parent assignment retired for provider failover continuation";
+        }
+      }
       await this.outbox.release(source);
       const release = this.ports.panes.releaseCancelledDeveloper ?? this.ports.panes.releaseDeveloper;
       unwrap(await release.call(this.ports.panes, { taskId: `${run.runId}-${task.taskId}`, closePane: false, removeWorktree: false }));

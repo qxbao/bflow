@@ -257,6 +257,8 @@ export interface Outbound {
   prelaunchFailure?: { request: AgentRequest; reconciledAt: string; executorLineage?: ExecutorLineage; lease?: AgentLease };
   /** Host-observed terminal turn for this exact pinned specialist execution; never task success. */
   stopObservedAt?: string;
+  /** First time Herdr observed the recipient pane leave prompt-ready state after accepting this delivery. */
+  turnObservedWorkingAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
   /** Private v6 write-ahead proof; never inferred from legacy cancellation flags. */
@@ -495,6 +497,11 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       IsoDateTimeSchema.parse(out.stopObservedAt);
       if (!out.handle || out.message.type !== "delegation.request" || Date.parse(out.stopObservedAt) < Date.parse(out.handle.acceptedAt))
         throw new Error("Invalid specialist Stop observation");
+    }
+    if (out.turnObservedWorkingAt !== undefined) {
+      IsoDateTimeSchema.parse(out.turnObservedWorkingAt);
+      if (!out.handle || Date.parse(out.turnObservedWorkingAt) < Date.parse(out.handle.acceptedAt))
+        throw new Error("Invalid turn working observation");
     }
     if (out.phaseRetirement) {
       const retirement = z.object({ operationId: z.string().min(1), sessionId: z.string().min(1), userMessageId: z.string().min(1), userId: z.string().min(1),

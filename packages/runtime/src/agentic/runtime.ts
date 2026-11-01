@@ -543,8 +543,14 @@ export class AgenticWorkflowRuntime {
   }
   private async releaseChildNotices(state: JournalState, outbox: HerdrOutbox, parent: Outbound): Promise<void> {
     for (const child of state.outbound) {
-      if (child.parentAssignmentId === parent.message.message_id && child.status === "accepted") {
+      if (child.parentAssignmentId !== parent.message.message_id) continue;
+      if (child.status === "accepted") {
         await outbox.release(child);
+      } else if (child.status === "queued") {
+        delete child.request;
+        delete child.lease;
+        child.status = "cancelled";
+        child.error = "Parent assignment settled before queued task notice dispatch";
       }
     }
   }
@@ -647,8 +653,21 @@ export class AgenticWorkflowRuntime {
             Object.values(run.userDecisions ?? {}).some(decision => decision.status === "pending")) continue;
         const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
         if (state.outbound.some(out => out.message.message_id === wakeId)) continue;
-        const blockage = specialistBlockage(message.payload);
+        const blockage = !this.echoesMeasuredPhaseFailure(state, run, message)
+          ? specialistBlockage(message.payload)
+          : undefined;
         if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
+        this.wakeCoordinator(state, outbox, run, message);
+        recovered++;
+      }
+      for (const item of state.inbox.filter(entry => entry.status === "applied" && isConversationContext(entry.message))) {
+        const message = RoleMessageSchema.parse(item.message);
+        if (!message.run_id) continue;
+        const run = state.runs.find(candidate => candidate.runId === message.run_id);
+        if (!run || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) ||
+            message.correlation_id !== run.delegation.correlationId) continue;
+        const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
+        if (state.outbound.some(out => out.message.message_id === wakeId)) continue;
         this.wakeCoordinator(state, outbox, run, message);
         recovered++;
       }
@@ -1230,9 +1249,12 @@ export class AgenticWorkflowRuntime {
             // unknown business outcome remain untouched; this separately leased diagnostic grants no gate verdict.
             const receipt = run.resumeReceipts?.find(item => item.actionId === run.pendingAction?.actionId);
             const wake = receipt && state.outbound.find(item => item.message.message_id === receipt.messageId);
-            const userTurn = wake && record(wake.message.payload).conversationUserMessageId;
+            const wakePayload = wake ? record(wake.message.payload) : undefined;
+            const userTurn = wakePayload && (typeof wakePayload.conversationUserMessageId === "string"
+              ? wakePayload.conversationUserMessageId
+              : wakePayload.webCommandId);
             if (unanswered.status === "released" && unanswered.handle && configuration.kind === "review" &&
-                run.pendingAction?.state === "queued" && typeof userTurn === "string" && record(wake!.message.payload).automatic === false &&
+                run.pendingAction?.state === "queued" && typeof userTurn === "string" && wakePayload?.automatic === false &&
                 !run.nativeDeliveries?.length && !state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) &&
                 (!run.approval || run.decision?.approvalId === run.approval.approvalId) &&
                 !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
@@ -1916,6 +1938,11 @@ export class AgenticWorkflowRuntime {
               }
             }
           }
+          if (run.pendingAction?.kind === "coordinator_continuation" && run.pendingAction.sourceMessageId === message.causation_id &&
+              specialistBlockage(message.payload) === undefined) {
+            if (run.error === run.pendingAction.reason) delete run.error;
+            delete run.pendingAction;
+          }
           const blockage = message.sender.role !== "coordinator" && !this.echoesMeasuredPhaseFailure(state, run, message)
             ? specialistBlockage(message.payload) : undefined;
           if (blockage !== undefined) this.reportSpecialistBlocked(state, outbox, run, message, blockage);
@@ -2419,10 +2446,14 @@ export class AgenticWorkflowRuntime {
           const source = state.outbound.find(item => item.message.message_id === payload.sourceMessageId);
           const receipt = run.resumeReceipts?.find(item => item.actionId === run.pendingAction?.actionId);
           const wake = receipt && state.outbound.find(item => item.message.message_id === receipt.messageId);
+          const wakePayload = wake ? record(wake.message.payload) : undefined;
+          const wakeUserTurn = wakePayload && (typeof wakePayload.conversationUserMessageId === "string"
+            ? wakePayload.conversationUserMessageId
+            : wakePayload.webCommandId);
           const target = source?.handle?.target;
           continuation = ["reviewer", "qa", "tester"].includes(binding.role) && run.status === "verifying" &&
             run.pendingAction?.state === "queued" && typeof payload.conversationUserMessageId === "string" &&
-            record(wake?.message.payload).automatic === false && record(wake?.message.payload).conversationUserMessageId === payload.conversationUserMessageId &&
+            wakePayload?.automatic === false && wakeUserTurn === payload.conversationUserMessageId &&
             source?.status === "released" && source.message.type === "verification.requested" && source.message.run_id === run.runId &&
             record(record(record(source.message.payload).definition).configuration).kind === "review" && !source.reviewReplacement &&
             target !== undefined && target.agentId === binding.agentId && target.paneId === binding.paneId &&
@@ -2505,7 +2536,7 @@ export class AgenticWorkflowRuntime {
       out.message.recipient.role !== "coordinator" && ["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type) &&
       ["queued", "sending"].includes(out.status));
     if (activeHandoff) return true;
-    if (state.outbound.some(out => this.outboundOwesResult(state, run, out))) return true;
+    if (state.outbound.some(out => this.outboundOwesResult(state, run, out) && !this.hasObservedUnansweredStop(state, run, out))) return true;
     if (run.pendingAction?.kind === "coordinator_continuation") return false; // A wake exists; only an actual downstream request consumes it.
     // Once Core exists, the Runtime scheduler (dispatch, verification, integration, workflow cycle) and watchdog own liveness.
     if (run.coreCreated && run.tasks.length > 0) return true;
@@ -2514,13 +2545,25 @@ export class AgenticWorkflowRuntime {
     return false;
   }
 
+  private hasObservedUnansweredStop(state: JournalState, run: RunRecord, out: Outbound): boolean {
+    if (run.nativeDeliveries?.length || !out.handle || !this.outboundOwesResult(state, run, out)) return false;
+    const reminderId = this.holderReminderId(run, out);
+    if (state.outbound.some(item => item.message.message_id === reminderId && ["queued", "sending"].includes(item.status))) return false;
+    if (out.stopObservedAt !== undefined) return true;
+    return ["specialist_no_response", "developer_no_response"].some(kind =>
+      state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `${kind}:${out.message.message_id}`])}` &&
+        objectField(item.message.payload, "stoppedExecutionId") === out.handle!.executionId &&
+        Date.parse(String(objectField(item.message.payload, "stopObservedAt"))) >= Date.parse(out.handle!.acceptedAt)));
+  }
+
   /** A matching host Stop and released capacity are required; a warning or resume is never proof of stop. */
   private stoppedWithoutResult(state: JournalState, run: RunRecord, out: Outbound): boolean {
     if (out.status !== "released" || run.nativeDeliveries?.length || !this.outboundOwesResult(state, run, out)) return false;
     if (out.stopObservedAt !== undefined) return true;
-    return state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `specialist_no_response:${out.message.message_id}`])}` &&
-      objectField(item.message.payload, "stoppedExecutionId") === out.handle!.executionId &&
-      Date.parse(String(objectField(item.message.payload, "stopObservedAt"))) >= Date.parse(out.handle!.acceptedAt));
+    return ["specialist_no_response", "developer_no_response"].some(kind =>
+      state.outbound.some(item => item.message.message_id === `p19-wake-${digest([run.runId, `${kind}:${out.message.message_id}`])}` &&
+        objectField(item.message.payload, "stoppedExecutionId") === out.handle!.executionId &&
+        Date.parse(String(objectField(item.message.payload, "stopObservedAt"))) >= Date.parse(out.handle!.acceptedAt)));
   }
   /** A specialist attempt replaced by a newer attempt of the same Coordinator request no longer owes a result. */
   private supersededAttempt(state: JournalState, out: Outbound): boolean {
@@ -5462,7 +5505,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     this.progress(state, outbox, run, "Run cancelled; stop confirmation and worktree reconciliation are in progress");
     await save();
     await this.requestCoreCancellation(run, core);
-    for (const out of state.outbound.filter(item => item.message.run_id === run.runId && isStoppableExecution(item))) {
+    for (const out of state.outbound.filter(item => item.message.run_id === run.runId && isStoppableExecution(item) && !item.phaseRetirement)) {
       if (out.status === "queued") { out.status = "cancelled"; continue; }
       if (out.status === "sending") out.status = "unknown_delivery";
       if (out.status === "accepted" && out.handle) await this.requestStop(state, core, outbox, save, run, out, reason);
@@ -5703,7 +5746,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    */
   private async reconcileCancellations(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox, explicitRunId?: string): Promise<CancellationReconciliationReport | undefined> {
     for (const run of state.runs.filter(item => item.cancelled && (explicitRunId ? item.runId === explicitRunId : !item.cancelReconciled))) {
-      const executions = state.outbound.filter(out => out.message.run_id === run.runId && isStoppableExecution(out));
+      const executions = state.outbound.filter(out => out.message.run_id === run.runId && isStoppableExecution(out) && !out.phaseRetirement);
       let waiting = false;
       for (const out of executions.filter(item => item.handle && (item.status === "accepted" ||
           item.status === "released" && item.cancelRequested && item.message.recipient.role === "developer" &&
@@ -5813,7 +5856,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (snapshot.status !== "cancelling") return;
     for (const task of snapshot.tasks.filter(item => item.status === "cancelling" && item.agentExecution !== undefined)) {
       const executionId = task.agentExecution!.executionId;
-      if (!executions.some(out => out.cancelRequested && out.status === "released" && out.handle?.executionId === executionId)) throw new Error(`Execution ${executionId} has no stop evidence`);
+      const failoverStopped = run.tasks.some(entry => (entry.failovers ?? []).some(failover =>
+        failover.sourceHandle.executionId === executionId && failover.stopProof !== undefined));
+      if (!executions.some(out => out.status === "released" && out.handle?.executionId === executionId &&
+          (out.cancelRequested || failoverStopped))) throw new Error(`Execution ${executionId} has no stop evidence`);
       await confirm(executionId);
     }
     const after = await core.snapshot(run.runId);
@@ -5828,6 +5874,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const binding = PaneBindingSchema.parse(bindingInput), role = textField(roleInput);
     if (binding.role !== role || role === "conversation" || role === "coordinator") throw new Error("Specialist Stop requires a non-Conversation specialist binding");
     await this.transaction(async (state, save, _core, outbox) => {
+      if (state.outbound.some(item => item.message.recipient.role === role && item.status === "sending" &&
+          (sourceMessageId === undefined || item.message.message_id === textField(sourceMessageId)) &&
+          (item.request?.target.paneId !== undefined
+            ? item.request.target.paneId === binding.paneId && item.request.target.agentId === binding.agentId
+            : item.selector === role || item.selector === binding.bindingId || item.selector === binding.paneId))) {
+        throw new Error("Specialist delivery is still sending; defer Stop settlement");
+      }
       const source = sourceMessageId === undefined ? undefined : state.outbound.find(item => item.message.message_id === textField(sourceMessageId));
       if (sourceMessageId !== undefined && (!source || source.message.recipient.role !== role || !source.handle ||
           source.handle.target.paneId !== binding.paneId || source.handle.target.agentId !== binding.agentId ||
@@ -5867,7 +5920,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (!this.outboundOwesResult(state, run, out) || run.nativeDeliveries?.length) continue;
         const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
         const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;
-        if (out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence" && !run.pendingAction) {
+        if ((out.message.type === "delegation.request" || out.message.type === "task.assignment" ||
+            out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence") && !run.pendingAction) {
           run.error = sliceUtf16(reason, 2000);
           run.pendingAction = {
             actionId: `next-${digest([run.runId, out.message.message_id])}`,
