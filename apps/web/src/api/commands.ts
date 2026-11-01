@@ -77,12 +77,14 @@ export class CommandStore {
     };
     try{return await navigator.locks.request(this.projectPrefix+slot,run);}finally{this.busy.delete(slot);}
   }
-  async newIntent(slot:string){
+  /** `superseded` names the one uncertain operation the caller proved finished; any other record still needs a settled result. */
+  async newIntent(slot:string,superseded?:string){
     if(!navigator.locks)throw new Error('Trình duyệt chưa hỗ trợ khóa thao tác.');
     return navigator.locks.request(this.projectPrefix+slot,async()=>{
     const record=this.records().find(r=>r.slot===slot);if(!record)return;
     const observed=await this.observe(record);
-    if(!observed.operation || !['applied','failed'].includes(observed.operation.state))throw new Error('Chưa xác định được kết quả. Chỉ đọc lại thao tác, chưa gửi yêu cầu mới.');
+    const released=record.commandId===superseded && observed.operation?.state==='reconciliation_required';
+    if(!released && (!observed.operation || !['applied','failed'].includes(observed.operation.state)))throw new Error('Chưa xác định được kết quả. Chỉ đọc lại thao tác, chưa gửi yêu cầu mới.');
     localStorage.removeItem(this.key(record));this.changed();
     });
   }

@@ -13,7 +13,7 @@ function belongsToHistory(item:Observation,runId:string|undefined){
   if(runId && (item.record.slot.endsWith(`:${runId}`) || (result?.kind==='interaction' && (result.runId===runId || result.currentRunId===runId))))return false;
   return Date.now()-Date.parse(item.operation!.updatedAt)>RECENT_MS;
 }
-const Context=createContext<{store:CommandStore;refresh:()=>void;ingest:(observation:Observation)=>void;online:boolean;observations:Observation[];notify:(message:string)=>void;startNew:(slot:string)=>Promise<void>}|null>(null);
+const Context=createContext<{store:CommandStore;refresh:()=>void;ingest:(observation:Observation)=>void;online:boolean;observations:Observation[];notify:(message:string)=>void;startNew:(slot:string,superseded?:string)=>Promise<void>}|null>(null);
 export function Operations({api,id,revision,refresh,children}:{api:ApiClient;id:string;revision?:number|undefined;refresh:()=>void;children:ReactNode}) {
   const [tick,setTick]=useState(0),[observations,setObservations]=useState<Observation[]>([]),[online,setOnline]=useState(navigator.onLine),[error,setError]=useState(''),[notices,setNotices]=useState<string[]>([]);
   const notify=useCallback((message:string)=>setNotices(list=>list.includes(message)?list:[...list.slice(-4),message]),[]);
@@ -41,7 +41,7 @@ export function Operations({api,id,revision,refresh,children}:{api:ApiClient;id:
     });
   },[recordSignature]);
   const runId=useMatch('/projects/:projectId/runs/:runId')?.params.runId;
-  const startNew=useCallback((slot:string)=>store.newIntent(slot).then(()=>{
+  const startNew=useCallback((slot:string,superseded?:string)=>store.newIntent(slot,superseded).then(()=>{
     for(const [commandId,entry] of known.current)if(entry.observation.record.slot===slot){known.current.delete(commandId);signatures.current.delete(commandId);}
     setError('');changed();
   },e=>setError(String(e.message))),[store,changed]);
@@ -92,5 +92,5 @@ export function useCommands(slot:string) {
     if(running.current || !context!.online)return;running.current=true;setBusy(true);setError(undefined);
     try{const observed=await context!.store.submit(slot,body);context!.ingest(observed);return observed;}catch(e){setError(e);throw e;}finally{running.current=false;setBusy(false);context!.refresh();}
   }
-  return {submit,busy,error,online:context.online,notify:context.notify,operation:context.observations.find(o=>o.record.slot===slot)?.operation,tracked:context.observations.find(o=>o.record.slot===slot),startNew:()=>context.startNew(slot)};
+  return {submit,busy,error,online:context.online,notify:context.notify,operation:context.observations.find(o=>o.record.slot===slot)?.operation,tracked:context.observations.find(o=>o.record.slot===slot),startNew:(superseded?:string)=>context.startNew(slot,superseded)};
 }
