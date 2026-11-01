@@ -21,7 +21,7 @@ import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConf
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
-import { withLifecycleLock } from "./lifecycle-lock.js";
+import { lifecycleLockStatus, withLifecycleLock } from "./lifecycle-lock.js";
 import { runDoctorDiagnostics } from "./doctor-integration.js";
 import { observeAuthoritativeRuntime } from "./runtime-observation.js";
 import { EnvironmentError } from "./environment-error.js";
@@ -945,13 +945,17 @@ export class EnvironmentLifecycle {
     try {
       return await this.locked(repository, () => this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force));
     } catch (error) {
-      // Only a host that cannot run the barrier at all is bypassed: an incompatible build, or an unactivated host that
-      // refuses to quiesce over persisted journal work or Core runs. Journal/run store stay on disk and the next `up` reconciles them.
-      // Genuine barrier/checkpoint failures on an active host still abort a forced stop.
-      const unactivated = /requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(error instanceof Error ? error.message : String(error));
+      // Only a host that cannot run the barrier at all is bypassed: an incompatible build, an unreachable dead-socket owner,
+      // or an unactivated host that refuses to quiesce over persisted journal work or Core runs. Journal/run store stay on disk
+      // and the next `up` reconciles them. Genuine barrier/checkpoint failures on an active host still abort a forced stop.
+      const msg = error instanceof Error ? error.message : String(error);
+      const unactivated = /requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(msg);
+      const unreachableOwner = /Host owner is still alive but unreachable/.test(msg);
       if (!force && unactivated && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
         message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
-      if (!force || !(unactivated || /Unknown host operation/.test(error instanceof Error ? error.message : String(error)))) throw error;
+      if (!force && unreachableOwner && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
+        message: error.message + " Run bflow down --force to stop the unreachable host owner and session; durable state is preserved." });
+      if (!force || !(unactivated || unreachableOwner || /Unknown host operation/.test(msg))) throw error;
     }
     this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");
     return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
@@ -1092,7 +1096,12 @@ export class EnvironmentLifecycle {
             }
             await this.checkpointRuns(offline, active, deadline);
             this.progress("Đang tắt tiến trình Runtime nền...");
-            await deadline.call(() => offline.shutdownHost!());
+            try {
+              await deadline.call(() => offline.shutdownHost!());
+            } catch (shutdownError) {
+              if (!force || !offline.terminateIncompatibleHost) throw shutdownError;
+              await deadline.call(() => offline.terminateIncompatibleHost!());
+            }
           }
           await this.writeIntent(repository, "down");
           this.cleanupMcpSession(repository);
@@ -1231,7 +1240,14 @@ export class EnvironmentLifecycle {
         }
         await this.saveManifest(repository, { ...stopped, status: "stopping" });
         this.progress("Đang tắt tiến trình Runtime nền...");
-        if (integration.shutdownHost) await deadline.call(() => integration.shutdownHost!());
+        if (integration.shutdownHost) {
+          try {
+            await deadline.call(() => integration.shutdownHost!());
+          } catch (shutdownError) {
+            if (!force || !integration.terminateIncompatibleHost) throw shutdownError;
+            await deadline.call(() => integration.terminateIncompatibleHost!());
+          }
+        }
         await this.writeIntent(repository, "down");
         const finalManifest = await this.saveManifest(repository, stopped);
         if (force) {
@@ -1255,8 +1271,12 @@ export class EnvironmentLifecycle {
     try { manifest = await this.savedManifest(repository); } catch (error) { issues.push(String(error)); }
     try {
       const intent = await this.intent(repository);
-      if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase))
-        issues.push(`Environment operation '${intent.phase}' was interrupted. ${intent.phase === 'stopping' ? 'Run bflow down --yes to finish shutdown, then bflow up.' : 'Run bflow up to reconcile existing panes; if there is no recoverable receipt, bflow down --yes stops the partial startup.'} Preserve .bflow.`);
+      if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase)) {
+        const lockState = await lifecycleLockStatus(resolve(repository.root, ".bflow/state")).catch(() => "");
+        if (!lockState.startsWith("Lifecycle operation is active")) {
+          issues.push(`Environment operation '${intent.phase}' was interrupted. ${intent.phase === 'stopping' ? 'Run bflow down --yes to finish shutdown, then bflow up.' : 'Run bflow up to reconcile existing panes; if there is no recoverable receipt, bflow down --yes stops the partial startup.'} Preserve .bflow.`);
+        }
+      }
     } catch (error) { issues.push(String(error)); }
     this.progress("Đang kiểm tra máy chủ phiên và các phụ thuộc...");
     try { server = await this.probe(repository, config) ? "running" : "stopped"; } catch (error) { issues.push(String(error)); }

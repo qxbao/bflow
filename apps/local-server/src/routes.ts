@@ -34,6 +34,17 @@ export function requestPath(raw:string):{path:string;query:Record<string,string>
   const query:Record<string,string>=Object.create(null);for(const [key,value] of new URLSearchParams(search)){if(Object.hasOwn(query,key))throw new HttpError('invalid_request');query[key]=value;}
   return {path,query};
 }
+const interactionQueues=new WeakMap<RouteContext['serialize'],Map<string,Promise<void>>>();
+function serializeInteraction<T>(ctx:RouteContext,key:string,call:()=>Promise<T>):Promise<T>{
+  let queues=interactionQueues.get(ctx.serialize);
+  if(!queues){queues=new Map();interactionQueues.set(ctx.serialize,queues);}
+  const previous=queues.get(key)??Promise.resolve();
+  const next=previous.then(call);
+  const settled=next.then(()=>{},()=>{});
+  queues.set(key,settled);
+  void settled.then(()=>{if(queues!.get(key)===settled)queues!.delete(key);});
+  return next;
+}
 export interface RouteContext {eventEpoch:string;sessions:BrowserSessions;registry:ProjectRegistry;operations:Operations;interaction:(id:string,context:WebAuthenticatedContext)=>Promise<UserInteractionClient>;principalId:string;assetsDirectory:string;serialize:<T>(fn:()=>Promise<T>)=>Promise<T>}
 export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteContext):Promise<void>{
   const {path,query}=requestPath(req.url??'/');
@@ -105,7 +116,7 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         const header=uniqueHeader(req,'last-event-id'),q=WebEventsQuerySchema.parse(parsedQuery);
         if(header!==undefined && q.cursor!==undefined && header!==q.cursor)throw new HttpError('invalid_request');
         const cursor=upstreamCursor(ctx.eventEpoch,header??q.cursor);
-        await streamEvents(req,res,client.events(id,cursor),id,ctx.eventEpoch,()=>{ctx.sessions.authenticate(req);},Date.parse(session!.expiresAt));return;
+        await streamEvents(req,res,client.events(id,cursor),id,ctx.eventEpoch,()=>{ctx.sessions.authenticate(req);},Date.parse(session!.expiresAt),cursor);return;
       }
       if(name==='artifact'){
         res.setTimeout(45000);
@@ -114,7 +125,10 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       }
       if(name==='noticeDisplayed'){
         res.setTimeout(40000);
-        const value=await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.acknowledgeNotice(id,params.noticeId!),35000);});
+        const value=await serializeInteraction(ctx,JSON.stringify([id,'notice',params.noticeId!]),async()=>{
+          await ctx.serialize(async()=>{await ctx.registry.require(id);ctx.sessions.authenticate(req);});
+          return observeWithinDeadline(()=>client.acknowledgeNotice(id,params.noticeId!),35000);
+        });
         const displayed=unwrap(WebNoticeDisplayedResultSchema.parse(value));if(displayed.noticeId!==params.noticeId)throw new HttpError('unavailable');respond(displayed);return;
       }
       if(name==='messages'){
@@ -127,7 +141,10 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         res.setTimeout(40000);
         const b=WebHttpContracts.sendMessage.body.parse(input);
         if(b.projectId!==id||b.sessionId!==params.sessionId)throw new HttpError('forbidden');
-        const value=unwrap(WebChatMessageResultSchema.parse(await ctx.serialize(()=>{ctx.sessions.authenticate(req);return observeWithinDeadline(()=>client.sendMessage(b),35000);})));
+        const value=unwrap(WebChatMessageResultSchema.parse(await serializeInteraction(ctx,JSON.stringify([id,'message',b.sessionId]),async()=>{
+          await ctx.serialize(async()=>{await ctx.registry.require(id);ctx.sessions.authenticate(req);});
+          return observeWithinDeadline(()=>client.sendMessage(b),35000);
+        })));
         if(value.messageId!==b.messageId||value.sessionId!==b.sessionId)throw new HttpError('unavailable');respond(value,202);return;
       }
       throw new HttpError('operation_not_allowed');
