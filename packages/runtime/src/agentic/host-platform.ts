@@ -673,13 +673,31 @@ export class HostPlatformSession {
   async allocateProfileSpecialist(request: { taskId: string; runId: string; role: import("@bflow/contracts").SpecialistRole; roleProfile: ResolvedRoleProfileSnapshot }): Promise<DeveloperLaunchMaterial> {
     if (!this.identity || request.role === "developer") throw new Error("Profiled specialist launch requires a prepared specialist generation");
     this.preflightProfile(request.roleProfile, request.role, ["repository.read"]);
-    const template = this.options.platform.roles.find(option => option.role === request.role)!;
+    const template = this.options.platform.roles.find(option => option.role === request.role);
+    if (!template) throw new Error(`Profiled specialist base role '${request.role}' is not configured in this platform session`);
     await this.releaseDeveloper(request.taskId);
-    const requirement = resolveRoleProfile(request.roleProfile, requirementFor(template, this.options.hostCapabilities, this.options.repositoryPath,
-      request.taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy));
+    const requirement = {
+      ...resolveRoleProfile(
+        request.roleProfile,
+        requirementFor(
+          template,
+          this.options.hostCapabilities,
+          this.options.repositoryPath,
+          request.taskId,
+          this.options.platform.toolGrants,
+          this.options.platform.toolPolicy
+        )
+      ),
+      required: true
+    };
     const generation = this.identity.generation;
     const result = await this.options.service.prepareSession(this.identity, [requirement]);
-    if (!result.ok || !result.value.report.ready || result.value.launches.length !== 1) throw new Error("Profiled specialist launch readiness is blocked");
+    if (!result.ok || !result.value.report.ready || result.value.launches.length !== 1) {
+      const reason = !result.ok
+        ? result.error.message
+        : result.value.report.roles.find(item => item.status !== "ready")?.message;
+      throw new Error(reason ? `Profiled specialist launch readiness is blocked: ${reason}` : "Profiled specialist launch readiness is blocked");
+    }
     const prepared = result.value.launches[0]!;
     const launchId = prepared.launch.launchId;
     try {
@@ -838,13 +856,21 @@ export class HostPlatformSession {
     const resourceKey = this.options.platform.exclusiveMcpResources?.[serviceId];
     if (trigger === "browser_inspection" && (!transactionId || !resourceKey))
       return { ok: false, error: { code: "validation", retryable: false, message: "Browser action needs an authenticated assignment and trusted machine resource key" } };
-    const boundedOptions: GatewayToolOperationOptions = {
-      ...(trigger === "browser_inspection" ? { browserTransaction: { id: transactionId!, resourceKey: resourceKey! } } : {}),
-      timeoutMs: Math.min(options?.timeoutMs ?? 5_000, 5_000),
+    const verifyOptions: OperationOptions = {
+      timeoutMs: Math.min(Math.max(1, options?.timeoutMs ?? 5_000), 5_000),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.deadline ? { deadline: options.deadline } : {})
     };
-    const gateway = await this.options.service.verifyGateway(boundedOptions);
+    const toolOptions: GatewayToolOperationOptions = {
+      ...(trigger === "browser_inspection" ? { browserTransaction: { id: transactionId!, resourceKey: resourceKey! } } : {}),
+      timeoutMs:
+        options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs)
+          ? Math.min(Math.max(1, options.timeoutMs), 120_000)
+          : 5_000,
+      ...(options?.signal ? { signal: options.signal } : {}),
+      ...(options?.deadline ? { deadline: options.deadline } : {})
+    };
+    const gateway = await this.options.service.verifyGateway(verifyOptions);
     if (!gateway.ok) return gateway;
     if (!gateway.value.healthy || gateway.value.uncertain)
       return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action Gateway registrations are lost or uncertain" } };
@@ -855,8 +881,8 @@ export class HostPlatformSession {
         if (current.launchId !== launchId || current.taskId !== taskId) throw new Error("Profile tool allocation changed during Gateway inspection");
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
     }
-    if (reconcile) return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
-    return this.options.service.invokeTool(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
+    if (reconcile) return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, toolOptions);
+    return this.options.service.invokeTool(identity, role, taskId, serviceId, operation, input, callId, toolOptions);
   }
 
   async finishToolTransaction(role: AgentRole, transactionId: string): Promise<OperationResult<void>> {

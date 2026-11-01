@@ -1299,6 +1299,23 @@ export class RolePaneManager {
         const args = [...startArgs, "--timeout", String(budget.value), ...providerArgs];
         return ok(await this.#runHerdr(args, { ...options, timeoutMs: budget.value }));
       };
+      let recordedDynamicProfileIntent = false;
+      const clearUnstartedProfileIntent = async (): Promise<void> => {
+        if (!recordedDynamicProfileIntent) return;
+        const current = await this.#store.load(this.#config.sessionId, options);
+        if (!current.ok || !current.value) return;
+        const entry = current.value.panes.find(item => item.paneId === pane.paneId);
+        if (!entry || entry.metadata?.["launchIntent"] !== true) return;
+        await this.#store.save(
+          {
+            ...current.value,
+            panes: current.value.panes.filter(item => item.paneId !== pane.paneId),
+            updatedAt: this.#clock().toISOString()
+          },
+          options
+        );
+        recordedDynamicProfileIntent = false;
+      };
       if (request.roleProfile) {
         const stored = await this.#store.load(this.#config.sessionId, options);
         if (!stored.ok) return stored;
@@ -1310,9 +1327,13 @@ export class RolePaneManager {
         const saved = await this.#store.save({ ...stored.value,
           panes: [...stored.value.panes.filter(item => item.paneId !== pane.paneId), intent.value] }, options);
         if (!saved.ok) return saved;
+        recordedDynamicProfileIntent = request.permanent === false;
       }
       let dispatched = await dispatchStart();
-      if (!dispatched.ok) return dispatched;
+      if (!dispatched.ok) {
+        await clearUnstartedProfileIntent();
+        return dispatched;
+      }
       let startOutcome = dispatched.value;
       const isBusyError = (outcome: CommandOutcome): boolean => {
         // Only an acknowledged pre-dispatch rejection proves that retry cannot
@@ -1334,6 +1355,24 @@ export class RolePaneManager {
       }
 
       if (startOutcome.exitCode !== 0 || startOutcome.failure) {
+        if (recordedDynamicProfileIntent) {
+          if (startOutcome.started === false) {
+            await clearUnstartedProfileIntent();
+          } else if (!startOutcome.failure) {
+            const checkPane = await this.#runHerdr(["pane", "get", request.paneId], options);
+            if (mapCommandFailure(checkPane)?.code === "not_found") {
+              await clearUnstartedProfileIntent();
+            } else if (checkPane.exitCode === 0 && !checkPane.failure) {
+              try {
+                if (parsePaneInfoResult(checkPane).agent === null) {
+                  await clearUnstartedProfileIntent();
+                }
+              } catch {
+                // Keep launchIntent recorded when pane state cannot be parsed unambiguously.
+              }
+            }
+          }
+        }
         if (
           startOutcome.stderr.includes("agent_not_ready") ||
           startOutcome.stdout.includes("agent_not_ready") ||
@@ -2422,7 +2461,26 @@ export class RolePaneManager {
       if (!loaded.ok) return loaded;
       if (!loaded.value) return notFoundError("Session manifest is required for specialist allocation");
       let manifest = loaded.value;
-      const active = manifest.panes.find(pane => pane.role === request.role && pane.permanent === false && pane.metadata?.["allocationStatus"] !== "released");
+      let active = manifest.panes.find(pane => pane.role === request.role && pane.permanent === false && pane.metadata?.["allocationStatus"] !== "released");
+      if (active) {
+        const activeHealth = await this.inspectRoleHealth(active.bindingId, options);
+        if (activeHealth.ok && (!activeHealth.value.paneExists || !activeHealth.value.occupantMatches)) {
+          if (activeHealth.value.paneExists && activeHealth.value.status === "not_ready" && active.metadata?.["launchIntent"] === true) {
+            await this.#closePane(active.paneId, options);
+          }
+          const pruned = await this.#store.save(
+            {
+              ...manifest,
+              updatedAt: this.#clock().toISOString(),
+              panes: manifest.panes.filter(pane => pane.bindingId !== active!.bindingId)
+            },
+            options
+          );
+          if (!pruned.ok) return pruned;
+          manifest = pruned.value;
+          active = undefined;
+        }
+      }
       if (active) {
         if (active.metadata?.["taskId"] !== request.taskId || !sameRoleProfilePin(active.roleProfile, request.roleProfile.pin) ||
             active.metadata?.["launchId"] !== request.launch.launchId || active.metadata?.["launchFingerprint"] !== request.launch.launchFingerprint)
@@ -2546,19 +2604,31 @@ export class RolePaneManager {
           p.metadata?.["taskId"] === request.taskId &&
           p.metadata?.["allocationStatus"] !== "released"
       );
-      if (existingTaskDeveloper && (!sameRoleProfilePin(existingTaskDeveloper.roleProfile, request.roleProfile?.pin) ||
-          (request.roleProfile && (existingTaskDeveloper.metadata?.["launchId"] !== request.launch?.launchId ||
-            existingTaskDeveloper.metadata?.["launchFingerprint"] !== request.launch?.launchFingerprint))))
+      if (existingTaskDeveloper && !sameRoleProfilePin(existingTaskDeveloper.roleProfile, request.roleProfile?.pin)) {
         return conflictError("Active task profile/launch cannot change without a new accepted allocation");
+      }
       // The same allocation whose pane vanished (e.g. with an earlier host generation) runs no provider process; drop it so
       // Runtime can reallocate the task instead of colliding with its stale binding or a reused Herdr pane ID.
       if (existingTaskDeveloper) {
         const health = await this.inspectRoleHealth(existingTaskDeveloper.bindingId, options);
         if (health.ok && (!health.value.paneExists || !health.value.occupantMatches)) {
+          if (
+            health.value.paneExists &&
+            health.value.status === "not_ready" &&
+            existingTaskDeveloper.metadata?.["launchIntent"] === true
+          ) {
+            await this.#closePane(existingTaskDeveloper.paneId, options);
+          }
           const pruned = await this.#store.save({ ...manifest, updatedAt: this.#clock().toISOString(),
             panes: manifest.panes.filter(pane => pane.bindingId !== existingTaskDeveloper.bindingId) }, options);
           if (!pruned.ok) return pruned;
           manifest = pruned.value;
+        } else if (
+          request.roleProfile &&
+          (existingTaskDeveloper.metadata?.["launchId"] !== request.launch?.launchId ||
+            existingTaskDeveloper.metadata?.["launchFingerprint"] !== request.launch?.launchFingerprint)
+        ) {
+          return conflictError("Active task profile/launch cannot change without a new accepted allocation");
         } else if (existingTaskDeveloper.worktreePath === request.worktreePath) {
           if (health.ok && (health.value.status === "ready" || health.value.status === "working")) {
             return ok(existingTaskDeveloper);

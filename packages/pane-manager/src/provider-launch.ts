@@ -6,6 +6,8 @@ export interface RoleMcpServer {
   readonly command: string;
   readonly args?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
+  readonly startup_timeout_sec?: number;
+  readonly tool_timeout_sec?: number;
 }
 export interface ProviderRoleLaunchOptions {
   readonly agentKind: "claude" | "codex";
@@ -77,6 +79,38 @@ async function readTrustedRegularUtf8(path: string, label: string, maxBytes = 4 
  * when listed in `env_vars` (mirrors agent-providers, which this leaf package must not import).
  */
 const CODEX_MCP_FORWARDED_ENV = ["HERDR_PANE_ID", "BFLOW_LAUNCH_ID"] as const;
+const CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC = 120;
+const CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC = 600;
+
+function withCodexRoleMcpTimeouts(server: RoleMcpServer): Record<string, unknown> {
+  const startupTimeoutSec =
+    typeof server.startup_timeout_sec === "number" && Number.isFinite(server.startup_timeout_sec) && server.startup_timeout_sec > 0
+      ? Math.max(server.startup_timeout_sec, CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC)
+      : CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC;
+  const toolTimeoutSec =
+    typeof server.tool_timeout_sec === "number" && Number.isFinite(server.tool_timeout_sec) && server.tool_timeout_sec > 0
+      ? Math.max(server.tool_timeout_sec, CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC)
+      : CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC;
+  return {
+    ...server,
+    env_vars: [...CODEX_MCP_FORWARDED_ENV],
+    default_tools_approval_mode: "approve",
+    startup_timeout_sec: startupTimeoutSec,
+    tool_timeout_sec: toolTimeoutSec,
+  };
+}
+
+function toClaudeRoleMcpServer(server: RoleMcpServer): {
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+} {
+  return {
+    command: server.command,
+    ...(server.args !== undefined ? { args: server.args } : {}),
+    ...(server.env !== undefined ? { env: server.env } : {}),
+  };
+}
 
 /** Roles that investigate read-only and may run the git reads below (mirrors the Runtime host guard). */
 const INVESTIGATION_ROLES: ReadonlySet<string> = new Set(["planner", "specifier", "architect", "reviewer", "qa"]);
@@ -97,6 +131,9 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
   if (hook?.includes("\0")) throw new Error("Native session hook cannot contain NUL");
   if (options.agentKind === "claude") {
     const settings = hook ? { hooks: { SessionStart: [{ hooks: [{ type: "command", command: hook, timeout: 10 }] }] } } : {};
+    const claudeServers = Object.fromEntries(
+      Object.entries(servers).map(([name, server]) => [name, toClaudeRoleMcpServer(server)]),
+    );
     // Conversation and Coordinator get their scoped context through trusted host
     // tools; native repository reads would also expose host state/secrets.
     const tools = spec.topologyRole === "chat" || spec.topologyRole === "coordinator"
@@ -112,7 +149,7 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
       // Claude applies Read(path) to all read tools and Edit(path) to all file writes.
       "--disallowedTools", ["Read", "Edit"].flatMap(tool =>
         ["./.bflow/**", "./.git/**", "~/.claude/**", "~/.codex/**", "~/.ssh/**", "~/.aws/**", "~/.config/**"].map(pattern => `${tool}(${pattern})`)).join(","),
-      "--settings", JSON.stringify(settings), "--mcp-config", JSON.stringify({ mcpServers: servers }),
+      "--settings", JSON.stringify(settings), "--mcp-config", JSON.stringify({ mcpServers: claudeServers }),
       "--append-system-prompt", options.systemPrompt,
       ...(options.model ? ["--model", options.model] : [])];
   }
@@ -120,7 +157,7 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
     "--ask-for-approval", "never", "-c", `developer_instructions=${JSON.stringify(options.systemPrompt)}`,
     // Approval policy `never` auto-rejects MCP calls Codex would prompt for; pre-approve the operator servers.
     "-c", "web_search=\"disabled\"", "-c", `mcp_servers=${toml(Object.fromEntries(Object.entries(servers)
-      .map(([name, server]) => [name, { ...server, env_vars: [...CODEX_MCP_FORWARDED_ENV], default_tools_approval_mode: "approve" }])))}`];
+      .map(([name, server]) => [name, withCodexRoleMcpTimeouts(server)])))}`];
   if (hook) args.push("--enable", "hooks", "--dangerously-bypass-hook-trust", "-c",
     `hooks.SessionStart=${toml([{ hooks: [{ type: "command", command: hook, timeout: 10 }] }])}`);
   if (options.model) args.push("--model", options.model);
