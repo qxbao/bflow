@@ -81,11 +81,11 @@ export function availableActions(
   const previousResume = r.resumeReceipts?.find(item => item.actionId === r.pendingAction?.actionId);
   const retiredToResume = state.outbound.some(out => out.message.run_id === r.runId && out.phaseRetirement !== undefined && out.phaseRetirement.resumeAuthorizedBy === undefined);
   // Runtime accepts a separately identified explicit resume after its automatic wake or after a retired policy phase, including while queued.
-  const explicitAfterAutomatic = retiredToResume || (r.pendingAction?.kind === "resume_coordinator" && previousResume !== undefined &&
+  const explicitAfterAutomatic = r.pendingAction?.kind === "resume_coordinator" && (retiredToResume || (previousResume !== undefined &&
     state.outbound.some(out => out.message.message_id === previousResume.messageId && out.message.run_id === r.runId &&
       out.message.type === "task.status" && out.message.sender.role === "runtime" &&
       typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
-      out.message.payload.kind === "resume_run" && out.message.payload.actionId === r.pendingAction?.actionId && out.message.payload.automatic === true));
+      out.message.payload.kind === "resume_run" && out.message.payload.actionId === r.pendingAction?.actionId && out.message.payload.automatic === true)));
   const unmeasuredResume = r.pendingAction?.kind === "coordinator_continuation" && r.status === "implementing" &&
     unmeasuredPolicyPhaseRequests(state, r).length > 0;
   const resumeUncertain = !!r.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === r.runId &&
@@ -111,6 +111,9 @@ export function availableActions(
     const restore =
       a.previousStatus === "awaiting_approval" &&
       ["task", "delivery"].includes(r.approvalKind ?? "") &&
+      r.approval?.status === "pending" &&
+      decisions.some((d) => d.decisionId === r.approval?.approvalId && d.status === "pending") &&
+      !decisions.some((d) => d.status === "pending" && d.decisionId !== r.approval?.approvalId) &&
       !Object.values(r.userDecisions ?? {}).some((d) => d.status === "pending");
     actions.push(
       action(

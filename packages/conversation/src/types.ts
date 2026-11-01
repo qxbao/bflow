@@ -134,16 +134,35 @@ const blankToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
     schema.optional()
   );
 
+const normalizeLowerEnum = (value: unknown): unknown =>
+  typeof value === "string" ? value.trim().toLowerCase() : value;
+
+const normalizeBlankOrLowerEnum = (value: unknown): unknown =>
+  value === null || (typeof value === "string" && value.trim().length === 0)
+    ? undefined
+    : typeof value === "string"
+      ? value.trim().toLowerCase()
+      : value;
+
+const normalizeStringList = (value: unknown): unknown =>
+  value === null
+    ? undefined
+    : Array.isArray(value)
+      ? value
+          .filter(item => typeof item !== "string" || item.trim().length > 0)
+          .map(item => (typeof item === "string" ? item.trim() : item))
+      : value;
+
 export const ExtractedRequirementDraftSchema = z
   .object({
     title: z.string().trim().min(1),
     objective: z.string().trim().min(1),
-    kind: z.enum(["feature", "bugfix", "refactor", "spike"]),
-    sddLevel: SddPolicyLevelSchema,
-    priority: z.preprocess(value => (value === null ? undefined : value), z.enum(["low", "normal", "high", "critical"]).default("normal")),
+    kind: z.preprocess(normalizeLowerEnum, z.enum(["feature", "bugfix", "refactor", "spike"])),
+    sddLevel: z.preprocess(normalizeLowerEnum, SddPolicyLevelSchema),
+    priority: z.preprocess(normalizeBlankOrLowerEnum, z.enum(["low", "normal", "high", "critical"]).default("normal")),
     scopeDefined: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
     isLargeTask: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
-    affectedPaths: z.preprocess(value => (value === null ? undefined : value), z.array(z.string()).default([])),
+    affectedPaths: z.preprocess(normalizeStringList, z.array(z.string()).default([])),
     /** Legacy form; omitted when `acceptanceCriteria` states each criterion with its method. */
     acceptanceCriteriaDescriptions: z.preprocess(value => (value === null ? undefined : value), z.array(z.string()).default([])),
     /** Legacy methods: one per criterion (by index) or a single method for every criterion. */
@@ -159,8 +178,8 @@ export const ExtractedRequirementDraftSchema = z
   .strict();
 
 export const ClarifyRequirementDraftSchema = ExtractedRequirementDraftSchema.extend({
-  kind: z.preprocess(value => (value === null ? undefined : value), z.enum(["feature", "bugfix", "refactor", "spike"]).default("feature")),
-  sddLevel: z.preprocess(value => (value === null ? undefined : value), SddPolicyLevelSchema.default("lightweight"))
+  kind: z.preprocess(normalizeBlankOrLowerEnum, z.enum(["feature", "bugfix", "refactor", "spike"]).default("feature")),
+  sddLevel: z.preprocess(normalizeBlankOrLowerEnum, SddPolicyLevelSchema.default("lightweight"))
 }).strict();
 
 export interface ExtractedRequirementDraft {
@@ -213,12 +232,27 @@ const FLAT_CHAT_DECISION_SIBLING_KEYS = new Set([
   "cancellationInput"
 ]);
 
+function isEmptyUnusedObject(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every(
+    entry =>
+      entry === null ||
+      entry === undefined ||
+      (typeof entry === "string" && entry.trim().length === 0) ||
+      (Array.isArray(entry) && entry.every(item => item === null || item === undefined || (typeof item === "string" && item.trim().length === 0)))
+  );
+}
+
 function normalizeFlatChatDecisionInput(raw: unknown): unknown {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
   const record = raw as Record<string, unknown>;
-  const intent = record["intent"];
+  const intent = typeof record["intent"] === "string" ? record["intent"].trim().toLowerCase() : record["intent"];
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
+    if (key === "intent") {
+      cleaned[key] = intent;
+      continue;
+    }
     if (!FLAT_CHAT_DECISION_SIBLING_KEYS.has(key)) {
       cleaned[key] = value;
       continue;
@@ -230,7 +264,14 @@ function normalizeFlatChatDecisionInput(raw: unknown): unknown {
     if (key === "directReply" && intent !== "conversation_only" && typeof value === "string" && value.trim().length === 0) {
       continue;
     }
-    if (key === "clarifyingQuestions" && intent !== "clarify" && Array.isArray(value) && value.length === 0) {
+    if (key === "clarifyingQuestions" && intent !== "clarify" && Array.isArray(value) &&
+        value.every(item => item === null || item === undefined || (typeof item === "string" && item.trim().length === 0))) {
+      continue;
+    }
+    if (key === "cancellationInput" && intent !== "cancellation_request" && isEmptyUnusedObject(value)) {
+      continue;
+    }
+    if (key === "requirementDraft" && intent !== "workflow_request" && isEmptyUnusedObject(value)) {
       continue;
     }
     cleaned[key] = value;
@@ -238,12 +279,22 @@ function normalizeFlatChatDecisionInput(raw: unknown): unknown {
   return cleaned;
 }
 
+const NonEmptyClarifyingQuestionsSchema = z.preprocess(
+  value =>
+    Array.isArray(value)
+      ? value
+          .filter(item => typeof item !== "string" || item.trim().length > 0)
+          .map(item => (typeof item === "string" ? item.trim() : item))
+      : value,
+  z.array(z.string().trim().min(1)).min(1).max(8)
+);
+
 /** Private Chat/host intake protocol. Governance approvals are deliberately absent. */
 export const ChatDecisionSchema = z.preprocess(
   normalizeFlatChatDecisionInput,
   z.discriminatedUnion("intent", [
     z.object({ intent: z.literal("conversation_only"), directReply: z.string().trim().min(1) }).strict(),
-    z.object({ intent: z.literal("clarify"), clarifyingQuestions: z.array(z.string().trim().min(1)).min(1).max(8),
+    z.object({ intent: z.literal("clarify"), clarifyingQuestions: NonEmptyClarifyingQuestionsSchema,
       requirementDraft: nullToUndefined(ClarifyRequirementDraftSchema),
       targetCorrelationId: blankToUndefined(IdentifierSchema),
       targetRunId: blankToUndefined(IdentifierSchema) }).strict(),
@@ -546,7 +597,7 @@ export interface ClosedApproval {
 
 /** Session-owned Runtime targets, including multiple follow-up runs sharing a display correlation. */
 export const RuntimeCancellationTargetSchema = z.object({ runId: IdentifierSchema, delegation: DelegationRequestSchema,
-  status: SdlcWorkStatusSchema, cancelled: z.boolean() }).strict();
+  status: SdlcWorkStatusSchema, cancelled: z.boolean(), supersededBy: IdentifierSchema.optional() }).strict();
 export type RuntimeCancellationTarget = z.infer<typeof RuntimeCancellationTargetSchema>;
 
 /** Private durable Conversation plan. Existing public request schemas remain unchanged. */
