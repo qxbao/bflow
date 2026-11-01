@@ -2,7 +2,7 @@ import type { AgentRole, OperationOptions, OperationResult, SessionManifest } fr
 import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile } from "@bflow/machine-setup";
 import { resolvePrivateRuntimeStateDirectory, type HostPrepareResponse, type HostRoleLaunch } from "@bflow/runtime";
 import { join, resolve } from "node:path";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath, unlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
 import { loadHostExecutionResolution } from "./execution-preview.js";
@@ -133,7 +133,10 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
           concurrency: input.config.environment.concurrency
         }
       });
-    })();
+    })().catch(error => {
+      activeHost = undefined;
+      throw error;
+    });
   };
 
   const openExistingIfPresent = async (): Promise<LifecycleHost | null> => {
@@ -175,7 +178,10 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
           concurrency: input.config.environment.concurrency
         }
       });
-    })();
+    })().catch(error => {
+      activeHost = undefined;
+      throw error;
+    });
     return activeHost;
   };
 
@@ -235,7 +241,12 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
       await terminateHostOwner(directory);
     },
     close: async () => {
-      if (activeHost) await (await activeHost).close();
+      const current = activeHost;
+      activeHost = undefined;
+      if (current) {
+        const resolved = await current.catch(() => null);
+        if (resolved) await resolved.close();
+      }
     }
   };
 };
@@ -243,6 +254,23 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
 const sleep = (ms: number) => new Promise(accept => setTimeout(accept, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return false; throw error; } };
 const commandLine = (pid: number) => new Promise<string>(accept => execFile("ps", ["-p", String(pid), "-o", "command="], (error, stdout) => accept(error ? "" : stdout.trim())));
+
+async function unlinkDeadOwnerSockets(directory: string): Promise<void> {
+  let socketPath: string | undefined;
+  try {
+    const raw = JSON.parse(await readFile(resolve(directory, "host.json"), "utf8")) as { socketPath?: unknown };
+    if (typeof raw.socketPath === "string" && raw.socketPath.endsWith(".sock")) socketPath = raw.socketPath;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    return;
+  }
+  if (!socketPath) return;
+  for (const candidate of [socketPath, socketPath.replace(/\.sock$/, ".native.sock")]) {
+    await unlink(candidate).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
+  }
+}
 
 /**
  * Stops the daemon recorded in `owner.json`. The pid is only signalled when its live command line is this
@@ -254,7 +282,10 @@ export async function terminateHostOwner(directory: string): Promise<void> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
   if (!Number.isSafeInteger(pid) || Number(pid) <= 1) throw new Error("Host owner receipt has no valid pid; preserve state and inspect bflow doctor");
   const target = Number(pid);
-  if (!alive(target)) return;
+  if (!alive(target)) {
+    await unlinkDeadOwnerSockets(directory);
+    return;
+  }
   const command = await commandLine(target);
   if (!command.includes("host.js") || !command.includes("daemon") || !command.includes(resolve(directory, "host.json")))
     throw new Error(`Process ${target} is not this session's Bflow host; refusing to signal it`);
@@ -265,6 +296,7 @@ export async function terminateHostOwner(directory: string): Promise<void> {
     for (let waited = 0; waited < 2000 && alive(target); waited += 100) await sleep(100);
     if (alive(target)) throw new Error(`Host process ${target} did not exit; state was preserved`);
   }
+  await unlinkDeadOwnerSockets(directory);
 }
 
 /** Legacy prompt-injection path for hosts that return no v3 `launch` profile. Platform-prepared roles never reach it. */

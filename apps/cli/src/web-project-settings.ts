@@ -29,6 +29,15 @@ async function syncDirectorySafe(directory:string){
  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
  finally{await handle?.close().catch(()=>{});}
 }
+function stripUndefinedRecordKeys(value:unknown):unknown{
+ if(Array.isArray(value))return value.map(stripUndefinedRecordKeys);
+ if(value && typeof value==='object' && Object.getPrototypeOf(value)===Object.prototype){
+  const out:Record<string,unknown>={};
+  for(const [k,v] of Object.entries(value))if(v!==undefined)out[k]=stripUndefinedRecordKeys(v);
+  return out;
+ }
+ return value;
+}
 const failure=<T>(e:unknown,code:'validation'|'conflict'|'not_found'='validation'):OperationResult<T>=>({ok:false,error:ContractErrorSchema.parse({code,retryable:code==='conflict',message:(e instanceof Error?e.message:String(e)).slice(0,4000)})});
 export interface WebProjectSettingsOptions {
  resolveProject(id:string):Promise<WebProject>;
@@ -85,21 +94,32 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
   },
   async saveConfiguration(id:string,input:WebConfigurationSave):Promise<OperationResult<WebProjectConfiguration>>{
    try{
-    const request=WebConfigurationSaveSchema.parse(input),r=await registered(id);
+    const normalizedInput=input && typeof input==='object' && !Array.isArray(input) && input.values!==undefined
+     ? {...input,values:stripUndefinedRecordKeys(input.values) as WebConfigurationSave['values']}
+     : input;
+    const request=WebConfigurationSaveSchema.parse(normalizedInput),r=await registered(id);
     return await withLifecycleLock(join(r.root,'.bflow/state'),async()=>{
      const before=await snapshot(id,r.root);if(before.revision!==request.expectedRevision)return failure('Cấu hình đã đổi. Tải lại trước khi lưu.','conflict');
      let yaml=request.yaml;
      if(yaml===undefined){
       // Modify the YAML AST to retain comments, unknown untouched fields, and scalar styles.
-      const doc=parseDocument(before.yaml);const patch=(old:unknown,next:unknown,path:(string|number)[])=>{
-       if(JSON.stringify(old)===JSON.stringify(next))return;
-       if(Array.isArray(old) && Array.isArray(next) && old.length===next.length){next.forEach((value,index)=>patch(old[index],value,[...path,index]));return;}
-       if(old && next && typeof old==='object' && typeof next==='object' && !Array.isArray(old) && !Array.isArray(next)){
-        const a=old as Record<string,unknown>,b=next as Record<string,unknown>;
-        for(const key of Object.keys(a))if(!Object.hasOwn(b,key))doc.deleteIn([...path,key]);
-        for(const [key,value] of Object.entries(b))patch(a[key],value,[...path,key]);
-       }else doc.setIn(path,next);
-      };patch(before.values,request.values,[]);yaml=doc.toString();
+      const doc=parseDocument(before.yaml);
+      if(!doc.contents || typeof (doc.contents as {items?:unknown}).items==='undefined'){
+       doc.contents=doc.createNode(request.values) as any;
+      }else{
+       const patch=(old:unknown,next:unknown,path:(string|number)[])=>{
+        if(next===undefined){if(path.length>0)doc.deleteIn(path);return;}
+        if(JSON.stringify(old)===JSON.stringify(next))return;
+        if(Array.isArray(old) && Array.isArray(next) && old.length===next.length){next.forEach((value,index)=>patch(old[index],value,[...path,index]));return;}
+        if(old && next && typeof old==='object' && typeof next==='object' && !Array.isArray(old) && !Array.isArray(next)){
+         const a=old as Record<string,unknown>,b=next as Record<string,unknown>;
+         for(const key of Object.keys(a))if(!Object.hasOwn(b,key) || b[key]===undefined)doc.deleteIn([...path,key]);
+         for(const [key,value] of Object.entries(b))if(value!==undefined)patch(a[key],value,[...path,key]);
+        }else doc.setIn(path,next);
+       };
+       patch(before.values,request.values,[]);
+      }
+      yaml=doc.toString();
      }
      if(Buffer.byteLength(yaml,'utf8')>180000)throw Error('Cấu hình vượt quá 180000 byte.');
      await readEnvironmentConfig(r,yaml);
@@ -131,7 +151,8 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
     let configurationCommitMessage:string|undefined;
     const task=withLifecycleLock(join(r.root,'.bflow/state'),async()=>{
      await registered(id);
-     if(request.commitConfiguration && (await snapshot(id,r.root)).revision!==request.expectedConfigurationRevision)
+     const beforeInit=request.commitConfiguration?await snapshot(id,r.root):undefined;
+     if(request.commitConfiguration && beforeInit!.revision!==request.expectedConfigurationRevision)
        throw Error('Cấu hình đã đổi. Đọc lại cấu hình trước khi xác nhận commit.');
      if(request.commitConfiguration && request.skipGitNexus && (await readEnvironmentConfig(r)).environment.tools?.gitnexus?.enabled!==false)
        throw Error('Tắt GitNexus và lưu cấu hình trước; xem lại cấu hình rồi mới xác nhận commit.');
@@ -143,8 +164,12 @@ export function createWebProjectSettings(options:WebProjectSettingsOptions){
       try{await cfgFile.writeFile(doc.toString());await syncHandleSafe(cfgFile);await cfgFile.close();cfgFile=undefined;await rename(temp,cfgPath);await syncDirectorySafe(join(r.root,'.bflow'));}finally{await cfgFile?.close().catch(()=>{});await unlink(temp).catch(()=>{});}
      }
      const config=await readEnvironmentConfig(r);
-     if(request.commitConfiguration && (await snapshot(id,r.root)).revision!==request.expectedConfigurationRevision)
-       throw Error('Cấu hình đã đổi trong khởi tạo. Đọc lại cấu hình trước khi commit.');
+     if(request.commitConfiguration){
+      const afterInit=await snapshot(id,r.root);
+      const onlyGeneratedMissingIgnore=beforeInit!.gitIgnore===undefined && afterInit.yaml===beforeInit!.yaml && afterInit.gitIgnore!==undefined;
+      if(!onlyGeneratedMissingIgnore && afterInit.revision!==request.expectedConfigurationRevision)
+        throw Error('Cấu hình đã đổi trong khởi tạo. Đọc lại cấu hình trước khi commit.');
+     }
      const gitMessage=request.commitConfiguration?await commitWebConfiguration(r.root):undefined;configurationCommitMessage=gitMessage;
      if(config.environment.tools?.gitnexus?.enabled===false)return {status:'ready',diagnostics:[...(gitMessage?[gitMessage]:[]),'Cấu hình đã sẵn sàng. GitNexus đang tắt trong cấu hình.']};
      const result=await (options.prepareGitNexus??prepareRepositoryGitNexus)({repository:r,platform:resolveSetupPlatform()});

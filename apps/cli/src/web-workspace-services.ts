@@ -91,7 +91,7 @@ export interface WebWorkspaceServices extends LocalWorkspaceServices {
   pendingLifecycle(): Promise<void>[];
 }
 export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWorkspaceServices {
-  const inFlight = new Set<Promise<void>>();
+  const inFlight = new Map<string, Promise<void>>();
   const settings=createWebProjectSettings({resolveProject:options.resolveProject,
     receiptDirectory:options.receiptDirectory??join(process.cwd(),'.bflow/state/web-settings')});
   const registered = async (projectId: string) => {
@@ -119,7 +119,7 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
   });
   const directory=(project:WebProject)=>options.receiptDirectory??join(project.canonicalPath,'.bflow/state/web-lifecycle');
   const perform=async(project:WebProject,id:string,kind:'session_start'|'session_stop',effect:()=>Promise<OperationResult<WebProjectSession>>):Promise<OperationResult<WebProjectSession>>=>{
-    const root=directory(project),initial=WebOperationSchema.parse({apiVersion:1,projectId:project.projectId,operationId:id,
+    const root=directory(project),path=receiptPath(root,project.projectId,id),initial=WebOperationSchema.parse({apiVersion:1,projectId:project.projectId,operationId:id,
       owner:'local_lifecycle',operationKind:kind,state:'running',updatedAt:new Date().toISOString()});
     if(!await reserveReceipt(root,initial)){
       const previous=await readReceipt(root,project.projectId,id);
@@ -127,29 +127,34 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
       if(previous.state==='applied' && previous.result?.kind==='lifecycle')return WebProjectSessionResultSchema.parse({ok:true,value:previous.result.session});
       return error('transport_unavailable','Lifecycle operation chưa được xác nhận; không gửi lại effect.');
     }
-    let result:OperationResult<WebProjectSession>;
-    let finished!:()=>void;const tracked=new Promise<void>(resolve=>{finished=resolve;});inFlight.add(tracked);
-    try{result=WebProjectSessionResultSchema.parse(await effect().finally(()=>{inFlight.delete(tracked);finished();}));}
-    catch(failure){
-      // Settle every outcome: an unsettled `running` receipt would never resolve for the browser.
-      // Only a startup that proved no session side effect is definitive; anything else stays uncertain.
-      const definitive=startupLeftSessionUnchanged(failure),message=lifecycleFailureMessage(failure,kind);
-      await settleReceipt(root,WebOperationSchema.parse({...initial,state:definitive?'failed':'reconciliation_required',
-        error:{apiVersion:1,code:definitive?'operation_not_allowed':'reconciliation_required',message,retryable:false,operationId:id,correlationId:randomUUID()},
-        updatedAt:new Date().toISOString()}));
-      return error(definitive?'validation':'transport_unavailable',message);
+    let finished!:()=>void;const tracked=new Promise<void>(resolve=>{finished=resolve;});inFlight.set(path,tracked);
+    try{
+      let result:OperationResult<WebProjectSession>;
+      try{result=WebProjectSessionResultSchema.parse(await effect());}
+      catch(failure){
+        // Settle every outcome: an unsettled `running` receipt would never resolve for the browser.
+        // Only a startup that proved no session side effect is definitive; anything else stays uncertain.
+        const definitive=startupLeftSessionUnchanged(failure),message=lifecycleFailureMessage(failure,kind);
+        await settleReceipt(root,WebOperationSchema.parse({...initial,state:definitive?'failed':'reconciliation_required',
+          error:{apiVersion:1,code:definitive?'operation_not_allowed':'reconciliation_required',message,retryable:false,operationId:id,correlationId:randomUUID()},
+          updatedAt:new Date().toISOString()}));
+        return error(definitive?'validation':'transport_unavailable',message);
+      }
+      if(result.ok){
+        if(result.value.projectId!==project.projectId)throw new Error('Foreign lifecycle session');
+        await settleReceipt(root,WebOperationSchema.parse({...initial,state:'applied',result:{kind:'lifecycle',session:result.value},updatedAt:new Date().toISOString()}));
+      } else await settleReceipt(root,WebOperationSchema.parse({...initial,state:'reconciliation_required',
+        error:{apiVersion:1,code:'reconciliation_required',message:result.error.message.slice(0,4000),retryable:false,operationId:id,correlationId:randomUUID()},updatedAt:new Date().toISOString()}));
+      return result;
+    }finally{
+      if(inFlight.get(path)===tracked)inFlight.delete(path);
+      finished();
     }
-    if(result.ok){
-      if(result.value.projectId!==project.projectId)throw new Error('Foreign lifecycle session');
-      await settleReceipt(root,WebOperationSchema.parse({...initial,state:'applied',result:{kind:'lifecycle',session:result.value},updatedAt:new Date().toISOString()}));
-    } else await settleReceipt(root,WebOperationSchema.parse({...initial,state:'reconciliation_required',
-      error:{apiVersion:1,code:'reconciliation_required',message:result.error.message.slice(0,4000),retryable:false,operationId:id,correlationId:randomUUID()},updatedAt:new Date().toISOString()}));
-    return result;
   };
   const remediation = 'Mở Cài đặt dự án trên web để khởi tạo hoặc sửa cấu hình. Kiểm tra project đã đăng ký và cấu hình. Chạy bflow init trong kho mã; chạy bflow setup --check để kiểm tra môi trường. Dùng nút Khởi tạo / sửa GitNexus trong Cài đặt để khởi tạo rõ ràng; cài đặt máy vẫn thuộc machine setup.';
   return {
     ...settings,
-    pendingLifecycle: () => [...inFlight,...settings.pending()],
+    pendingLifecycle: () => [...inFlight.values(),...settings.pending()],
     async inspectProject(projectId) {
       try {
         const { repository } = await registered(projectId);
@@ -211,9 +216,11 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         // Observation only, including missing config/host/stopped sessions. Never call up/down.
         const project=WebProjectSchema.parse(await options.resolveProject(operation.projectId));
         if(project.projectId!==operation.projectId)throw new Error('Foreign registered project');
-        const saved=await readReceipt(directory(project),operation.projectId,operation.operationId);
+        const root=directory(project),path=receiptPath(root,operation.projectId,operation.operationId);
+        const saved=await readReceipt(root,operation.projectId,operation.operationId);
         if(saved && saved.operationKind!==operation.operationKind)throw new Error('Lifecycle receipt kind mismatch');
-        return WebOperationResponseSchema.parse({ok:true,value:saved && saved.state!=='running' && saved.state!=='accepted'?saved:
+        const activeInProcess=saved?.state==='running' && inFlight.has(path);
+        return WebOperationResponseSchema.parse({ok:true,value:activeInProcess || (saved && saved.state!=='running' && saved.state!=='accepted')?saved!:
           {...operation,state:'reconciliation_required'}});
       } catch { return error('validation', 'Operation lifecycle không hợp lệ.'); }
     },

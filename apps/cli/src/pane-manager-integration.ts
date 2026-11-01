@@ -170,7 +170,7 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
       for (const pane of current.value.panes) {
         if (stopped && pane.transportState === "cancelled") continue;
         checks.push({ checkId: `pane-${pane.bindingId}`.slice(0, 200), name: `${pane.role}: ${pane.paneId}`,
-          status: ["idle", "done", "working"].includes(pane.transportState) ? "passed" : "failed", message: `Agent ${pane.agentId}: ${pane.transportState}` });
+          status: ["idle", "done", "working", "accepted"].includes(pane.transportState) ? "passed" : "failed", message: `Agent ${pane.agentId}: ${pane.transportState}` });
       }
     }
     return EnvironmentDoctorReportSchema.parse({ schemaVersion: 2, workspaceRoot: root, sessionId: this.input.repository.sessionName,

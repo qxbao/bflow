@@ -22,7 +22,8 @@ export async function commitWebConfiguration(root:string):Promise<string>{
  const tracked=(await git(['ls-files','-z','--',...paths])).split('\0');
  if(!changes && paths.every(path=>tracked.includes(path)))return 'Cấu hình Bflow đã có trong Git; không cần commit mới.';
  // Check identity before changing the index. Do not invent an author or alter Git global config.
- await git(['var','GIT_AUTHOR_IDENT']);await git(['var','GIT_COMMITTER_IDENT']);
+ try{await git(['var','GIT_AUTHOR_IDENT']);await git(['var','GIT_COMMITTER_IDENT']);}
+ catch{throw Error('Chưa cấu hình danh tính Git (user.name / user.email). Hãy thiết lập git config user.name và git config user.email trước khi commit cấu hình.');}
  // The reviewed allowlist is explicit even when a repository ignores all of .bflow.
  await git(['add','--force','--',...paths]);
  const stagedAfter=(await git(['diff','--cached','--name-only','-z','--',...paths])).split('\0').filter(Boolean);

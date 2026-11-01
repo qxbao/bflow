@@ -7,11 +7,22 @@ export function upstreamCursor(epoch: string, cursor?: string): string | undefin
   if(!WebEventCursorSchema.safeParse(cursor).success)throw new HttpError('invalid_request');
   return cursor.startsWith(epoch+'_') ? cursor.slice(epoch.length+1) : undefined;
 }
+function parseUpstreamCursor(cursor: string): { epoch: string; seq: number } | undefined {
+  if (!WebEventCursorSchema.safeParse(cursor).success) return undefined;
+  const split = cursor.lastIndexOf(':');
+  if (split <= 0) return undefined;
+  const seq = Number(cursor.slice(split + 1));
+  return Number.isSafeInteger(seq) && seq >= 0 ? { epoch: cursor.slice(0, split), seq } : undefined;
+}
 export async function streamEvents(req: IncomingMessage, res: ServerResponse, source: AsyncIterable<WebEvent>, projectId: string,
-  epoch: string, authenticate: ()=>void, expiresAt: number): Promise<{maxQueued:number}> {
+  epoch: string, authenticate: ()=>void, expiresAt: number, resumedUpstreamCursor?: string): Promise<{maxQueued:number}> {
   const iterator=source[Symbol.asyncIterator]();
   const queue:WebEvent[]=[];let stopped=false,maxQueued=0,wake:(()=>void)|undefined;
   let cancelRead:(()=>void)|undefined;
+  const initialParsed = resumedUpstreamCursor !== undefined ? parseUpstreamCursor(resumedUpstreamCursor) : undefined;
+  let lastUpstream: { epoch: string; seq: number; resumed: boolean } | undefined = initialParsed
+    ? { ...initialParsed, resumed: true }
+    : undefined;
   const stop=()=>{if(stopped)return;stopped=true;cancelRead?.();wake?.();};
   const readNext=()=>new Promise<IteratorResult<WebEvent>|undefined>((resolve,reject)=>{
     const clear=()=>{res.off('close',cancel);req.off('aborted',cancel);if(cancelRead===cancel)cancelRead=undefined;};
@@ -20,8 +31,20 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
     if(stopped || res.destroyed){cancel();return;}
     Promise.resolve().then(()=>iterator.next()).then(value=>{clear();resolve(value);},error=>{clear();reject(error);});
   });
-  const frame=(input:unknown)=>{const event=WebEventSchema.parse(input);if(event.projectId!==projectId)throw new HttpError('unavailable');
-    return WebEventSchema.parse({...event,cursor:`${epoch}_${event.cursor}`});};
+  const frame=(input:unknown)=>{
+    const event=WebEventSchema.parse(input);
+    if(event.projectId!==projectId)throw new HttpError('unavailable');
+    const parsed=parseUpstreamCursor(event.cursor);
+    const discontinuous=parsed!==undefined && lastUpstream!==undefined && (
+      parsed.epoch!==lastUpstream.epoch ||
+      parsed.seq<lastUpstream.seq ||
+      (!lastUpstream.resumed && parsed.seq===lastUpstream.seq)
+    );
+    if(parsed!==undefined)lastUpstream={...parsed,resumed:false};
+    return WebEventSchema.parse(discontinuous && event.type!=='reset'
+      ? {...event,type:'reset',resourceIds:[],cursor:`${epoch}_${event.cursor}`}
+      : {...event,cursor:`${epoch}_${event.cursor}`});
+  };
   const close=()=>{stop();};res.once('close',close);req.once('aborted',close);
   const expiry=setTimeout(()=>res.destroy(),Math.max(0,Math.min(2147483647,expiresAt-Date.now())));
   let heartbeat:ReturnType<typeof setInterval>|undefined;

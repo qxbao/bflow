@@ -558,8 +558,10 @@ export async function runDoctorDiagnostics(
     reason: runtimeObservation.managedWorktreesCheck.reason,
     remediation: runtimeObservation.managedWorktreesCheck.remediation
   });
+  let lifecycleOperationActive = false;
   try {
     const lockStatus = await lifecycleLockStatus(stateRoot);
+    lifecycleOperationActive = lockStatus.startsWith("Lifecycle operation is active");
     if (lockStatus.startsWith("Legacy")) {
       legacyChecks.push({
         checkId: "lifecycle-lock",
@@ -601,13 +603,22 @@ export async function runDoctorDiagnostics(
       }
     }
     if (intentPhase && ["server_starting", "manager_pending", "stopping"].includes(intentPhase)) {
-      legacyChecks.push({
-        checkId: "operation-recovery",
-        name: "operation-recovery",
-        status: "failed",
-        message: `Environment operation '${intentPhase}' is unresolved. ${intentPhase === "stopping" ? "Run bflow down --yes to resume checked shutdown." : "Run bflow up to reconcile existing panes; resolve interactive dialogs in the named session, or bflow down --yes to stop safely."} Do not delete .bflow.`,
-        remediation: intentPhase === "stopping" ? "Run bflow down --yes" : "Run bflow up or bflow down --yes"
-      });
+      if (lifecycleOperationActive) {
+        legacyChecks.push({
+          checkId: "operation-recovery",
+          name: "operation-recovery",
+          status: "passed",
+          message: `Environment operation '${intentPhase}' is currently active under the lifecycle lock; wait for it to finish.`
+        });
+      } else {
+        legacyChecks.push({
+          checkId: "operation-recovery",
+          name: "operation-recovery",
+          status: "failed",
+          message: `Environment operation '${intentPhase}' is unresolved. ${intentPhase === "stopping" ? "Run bflow down --yes to resume checked shutdown." : "Run bflow up to reconcile existing panes; resolve interactive dialogs in the named session, or bflow down --yes to stop safely."} Do not delete .bflow.`,
+          remediation: intentPhase === "stopping" ? "Run bflow down --yes" : "Run bflow up or bflow down --yes"
+        });
+      }
     } else {
       legacyChecks.push({
         checkId: "operation-recovery",
