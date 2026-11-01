@@ -4206,7 +4206,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const payload = record(request.message.payload);
       const task = run.tasks.find(item => item.taskId === payload.taskId);
       const parent = task && !task.writerReleased && task.result === undefined
-        ? state.outbound.find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
+        ? [...state.outbound].reverse().find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
             item.taskId === task.taskId && item.status === "accepted" && !item.cancelRequested && !item.leaseRelease &&
             (payload.implementationAttemptId === undefined || item.handle?.attemptId === payload.implementationAttemptId) &&
             item.lease !== undefined && Date.parse(item.lease.expiresAt) > Date.parse(this.now()))
@@ -4280,10 +4280,18 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           previousStatus, ...inheritedManualResume(run), recovery: "manual" };
         this.progress(state, outbox, run, run.error);
       } else {
-        const parent = state.outbound.find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
+        const parent = [...state.outbound].reverse().find(item => item.message.run_id === run.runId && item.message.type === "task.assignment" &&
           item.taskId === task.taskId && item.status === "accepted" &&
           (payload.implementationAttemptId === undefined || item.handle?.attemptId === payload.implementationAttemptId));
-        if (parent?.lease && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now()) && !parent.cancelRequested && !parent.leaseRelease) {
+        let leaseExpired = Boolean(parent?.lease && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now()) && !parent.cancelRequested && !parent.leaseRelease);
+        if (!leaseExpired && parent?.lease && !parent.cancelRequested && !parent.leaseRelease && this.canEnqueueTaskNotice(state, parent)) {
+          try { await outbox.renew(parent); }
+          catch (error) {
+            if (/expired|released/i.test(String(error))) leaseExpired = true;
+            else delete parent.leaseRenewal;
+          }
+        }
+        if (leaseExpired) {
           request.phaseFailure!.leaseRecoveryRequired = true;
           const previousStatus = run.status;
           run.status = "escalated"; run.error = `Policy repair blocked by expired writer lease: ${summary}`;
@@ -4447,8 +4455,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         if (await this.ports.hasPolicyPhaseReceipt?.(orphan.message)) continue;
         const reason = UNMEASURED_PHASE_SUMMARY;
         run.error = sliceUtf16(reason, 2000);
+        const actionId = `next-${digest([run.runId, orphan.message.message_id])}`;
         run.pendingAction = {
-          actionId: `next-${digest([run.runId, orphan.message.message_id])}`,
+          actionId,
           kind: "coordinator_continuation",
           owner: "coordinator",
           reason: run.error,
@@ -4457,6 +4466,55 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           state: "pending",
           previousStatus: run.status
         };
+        const orphanPayload = record(orphan.message.payload);
+        const waitingParent = [...state.outbound].reverse().find(item =>
+          item.message.run_id === run.runId &&
+          item.message.type === "task.assignment" &&
+          item.taskId === orphanPayload.taskId &&
+          item.status === "accepted" &&
+          (orphanPayload.implementationAttemptId === undefined || item.handle?.attemptId === orphanPayload.implementationAttemptId)
+        );
+        if (waitingParent?.lease && !waitingParent.cancelRequested && !waitingParent.leaseRelease &&
+            Date.parse(waitingParent.lease.expiresAt) > Date.parse(this.now())) {
+          try { await outbox.renew(waitingParent); } catch { delete waitingParent.leaseRenewal; }
+        }
+        const wakeId = `p19-wake-${digest([run.runId, "unmeasured-policy-phase", orphan.message.message_id])}`;
+        if (!state.outbound.some(out => out.message.message_id === wakeId)) {
+          outbox.enqueue(RoleMessageSchema.parse({
+            schema_version: 2,
+            message_id: wakeId,
+            correlation_id: run.delegation.correlationId,
+            causation_id: orphan.message.message_id,
+            run_id: run.runId,
+            sender: { role: "runtime" },
+            recipient: { role: "coordinator" },
+            type: "task.status",
+            payload: json({
+              kind: "unmeasured_policy_phase",
+              runId: run.runId,
+              taskId: orphanPayload.taskId ?? null,
+              phase: orphanPayload.phase ?? null,
+              actionId,
+              sdlcStatus: run.status,
+              reason: run.error,
+              next: "Call resume_run with runId and actionId to authorize a fresh independent policy phase measurement and notify the waiting Developer."
+            }),
+            artifact_references: [],
+            occurred_at: this.now(),
+            idempotency_key: wakeId
+          }), "coordinator");
+        }
+        this.emit(state, outbox, run, "conversation.progress", {
+          kind: "workflow_blocked",
+          runId: run.runId,
+          owner: "coordinator",
+          actionId,
+          reason: run.error,
+          blockageReason: run.error,
+          headline: `Workflow blocked: ${run.error}`,
+          sdlcStatus: run.status,
+          options: ["Ask Coordinator to resume the run so QA re-measures the policy phase", "Cancel this run"]
+        }, `unmeasured-policy-phase:${orphan.message.message_id}`, "conversation");
         await save();
         break;
       }
@@ -4480,7 +4538,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       return cached;
     }
     const dossier = task?.spec ?? run.workflowSpec!;
-    const allChecks = ([...(task ? this.ports.taskChecks : this.ports.workflowChecks), ...(this.ports.behavioralChecks?.(dossier.specification, dossier.strategy, task?.worktrees.at(-1)?.baseCommitHash ?? run.baseRevision) ?? [])]).flatMap(check => {
+    const allChecks = ([...(task ? this.ports.taskChecks : this.ports.workflowChecks), ...(this.ports.behavioralChecks?.(dossier.specification, dossier.strategy, task?.worktrees[0]?.baseCommitHash ?? run.baseRevision) ?? [])]).flatMap(check => {
       if (check.metadata?.bindAcceptedCriteria !== true) return [check];
       const config = record(check.configuration);
       // A method-bound check (automatic runner) takes its names from the accepted mappings of that method, and does not apply without them.

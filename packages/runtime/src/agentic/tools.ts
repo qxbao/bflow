@@ -60,7 +60,11 @@ export class CoordinatorTools {
     switch (name) {
       case "read_role_profiles": return this.runtime.readRoleProfiles();
       case "inspect": {
-        const query = InspectInputSchema.parse(args);
+        const normalizedArgs = {
+          ...args,
+          ...(typeof args.cursor === "string" && args.cursor.trim() === "" ? { cursor: undefined } : {})
+        };
+        const query = InspectInputSchema.parse(normalizedArgs);
         const raw = await this.runtime.inspect(query.runId);
         if (query.view === undefined && query.taskId === undefined && query.cursor === undefined) {
           return raw;
@@ -80,7 +84,7 @@ export class CoordinatorTools {
       case "propose_prototype": return this.runtime.proposePrototype(textField(args.runId), args.scope);
       case "submit_prototype": return this.runtime.submitPrototype(textField(args.runId), args.submission);
       case "propose_workflow": return this.runtime.proposeWorkflow(textField(args.runId), args.specification, args.definition,
-        args.maxIterations === undefined || args.maxIterations === null ? 3 : Number(args.maxIterations));
+        args.maxIterations === undefined || args.maxIterations === null || (typeof args.maxIterations === "string" && args.maxIterations.trim() === "") ? 3 : Number(args.maxIterations));
       case "tick": return this.scheduleTick();
       case "tick_status": return JsonValueSchema.parse({ running: !!this.pendingTick, error: this.tickError ?? null });
       case "reconcile_delivery": return this.runtime.reconcileDelivery(textField(args.messageId));

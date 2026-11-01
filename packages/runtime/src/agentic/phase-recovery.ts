@@ -10,7 +10,18 @@ export function unmeasuredPolicyPhaseRequests(state: JournalState, run: RunRecor
           !terminalWithoutMeasurement || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
       if (state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected")) return false;
       const task = run.tasks.find(entry => entry.taskId === payload.taskId);
-      if (!task || task.verificationPending || task.cycle !== undefined) return false;
+      if (!task || task.verificationPending || (task.cycle !== undefined && task.cycle.status !== "rework_required")) return false;
+      if (typeof payload.implementationAttemptId === "string") {
+        const latestAssignment = [...state.outbound].reverse().find(entry =>
+          entry.message.run_id === run.runId &&
+          entry.message.type === "task.assignment" &&
+          entry.taskId === task.taskId &&
+          entry.status !== "cancelled" &&
+          (entry.handle?.attemptId ?? entry.attemptId) !== undefined
+        );
+        const activeAttemptId = latestAssignment?.handle?.attemptId ?? latestAssignment?.attemptId;
+        if (activeAttemptId !== undefined && activeAttemptId !== payload.implementationAttemptId) return false;
+      }
       const receipts = Array.isArray(task.spec.strategy.metadata?.tddEvidence) ? task.spec.strategy.metadata.tddEvidence : [];
       if (task.spec.strategy.tddDecision.mode === "required") {
         if (task.writerReleased || task.result) return false;
