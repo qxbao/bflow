@@ -637,7 +637,12 @@ export class AgenticJournal {
     const nextHeld = new Set(active);
     nextHeld.add(this.directory);
     const previous = AgenticJournal.queues.get(this.directory) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => AgenticJournal.heldDirectories.run(nextHeld, () => this.locked(action)));
+    const next = previous.catch(() => undefined).then(() =>
+      AgenticJournal.heldDirectories.run(nextHeld, async () => {
+        try { return await this.locked(action); }
+        finally { nextHeld.delete(this.directory); }
+      })
+    );
     AgenticJournal.queues.set(this.directory, next);
     try { return await next; }
     finally { if (AgenticJournal.queues.get(this.directory) === next) AgenticJournal.queues.delete(this.directory); }

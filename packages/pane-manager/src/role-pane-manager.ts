@@ -2466,7 +2466,7 @@ export class RolePaneManager {
         const activeHealth = await this.inspectRoleHealth(active.bindingId, options);
         if (activeHealth.ok && (!activeHealth.value.paneExists || !activeHealth.value.occupantMatches)) {
           if (activeHealth.value.paneExists && activeHealth.value.status === "not_ready" && active.metadata?.["launchIntent"] === true) {
-            await this.#closePane(active.paneId, options);
+            await this.#closePane(active.paneId, options).catch(() => undefined);
           }
           const pruned = await this.#store.save(
             {
@@ -2515,7 +2515,7 @@ export class RolePaneManager {
         const storedAfter = await this.#store.load(this.#config.sessionId, options);
         const recorded = !storedAfter.ok || Boolean(storedAfter.value?.panes.some(p => p.paneId === split.value.paneId));
         if (!recorded) {
-          await this.#closePane(split.value.paneId, options);
+          await this.#closePane(split.value.paneId, options).catch(() => undefined);
         }
         return started;
       }
@@ -2617,7 +2617,7 @@ export class RolePaneManager {
             health.value.status === "not_ready" &&
             existingTaskDeveloper.metadata?.["launchIntent"] === true
           ) {
-            await this.#closePane(existingTaskDeveloper.paneId, options);
+            await this.#closePane(existingTaskDeveloper.paneId, options).catch(() => undefined);
           }
           const pruned = await this.#store.save({ ...manifest, updatedAt: this.#clock().toISOString(),
             panes: manifest.panes.filter(pane => pane.bindingId !== existingTaskDeveloper.bindingId) }, options);
@@ -2857,7 +2857,7 @@ export class RolePaneManager {
                 const storedAfter = await this.#store.load(this.#config.sessionId, options);
                 const recorded = !storedAfter.ok || Boolean(storedAfter.value?.panes.some(p => p.paneId === targetPane.paneId));
                 if (!recorded) {
-                  await this.#closePane(targetPane.paneId, options);
+                  await this.#closePane(targetPane.paneId, options).catch(() => undefined);
                 }
               } else {
                 const probeTarget = await this.#runHerdr(["pane", "get", targetPane.paneId], options);
@@ -2947,11 +2947,11 @@ export class RolePaneManager {
         );
         if (!split.ok) {
           if (!manifest.panes.some(p => p.paneId === wtPaneId)) {
-            await this.#closePane(wtPaneId, options);
+            await this.#closePane(wtPaneId, options).catch(() => undefined);
           }
           return split;
         }
-        if (!manifest.panes.some(p => p.paneId === wtPaneId)) await this.#closePane(wtPaneId, options);
+        if (!manifest.panes.some(p => p.paneId === wtPaneId)) await this.#closePane(wtPaneId, options).catch(() => undefined);
         wtPaneId = split.value.paneId;
         wtWorkspaceId = split.value.workspaceId;
         wtTabId = split.value.tabId;
@@ -2986,7 +2986,7 @@ export class RolePaneManager {
         const storedAfter = await this.#store.load(this.#config.sessionId, options);
         const recorded = !storedAfter.ok || Boolean(storedAfter.value?.panes.some(p => p.paneId === wtPaneId));
         if (!recorded) {
-          await this.#closePane(wtPaneId, options);
+          await this.#closePane(wtPaneId, options).catch(() => undefined);
         }
         return startResult;
       }

@@ -629,7 +629,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const mcpConfigFile = join(configuration.directory, role + ".mcp.json");
     const hooksSettingsFile = join(configuration.directory, role + ".hooks.json");
     await privateFile(mcpConfigFile, JSON.stringify({ mcpServers: { bflow: { type: "stdio", command: process.execPath, args: [executable, "mcp", path] } } }));
-    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || provider === "claude" && platformRoles.some(option => option.role === role && option.failover)).map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
+    const hooks = Object.fromEntries(NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || (provider === "claude" && role !== "conversation")).map(event => [event, [{ hooks: [{ type: "command", command: hookCommandFor(path, event, hookRunnerPath), timeout: 30 }] }]]));
     await privateFile(hooksSettingsFile, JSON.stringify({ hooks }));
     const taskLogGuidance = role === "conversation"
       ? "Use read_task_log for recent diagnostic context; do not record specialist task steps."
@@ -679,7 +679,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const provider = requestedProvider ?? primaryProvider;
       const rolePath = join(configuration.directory, provider === primaryProvider ? role + ".json" : `${role}.${provider}.json`);
       const runner = hookRunners.get(provider === primaryProvider ? role : `${role}:${provider}`);
-      const regular = NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || provider === "claude" && platformRoles.some(option => option.role === role && option.failover));
+      const regular = NATIVE_HOOK_EVENTS.filter(event => event !== "StopFailure" || (provider === "claude" && role !== "conversation"));
       const hookEvents = provider === "agy" ? [...regular.filter(event => event !== "UserPromptSubmit"), "PreInvocation"] : regular;
       const hookEntries = Object.fromEntries(hookEvents.map(event => [event, hookCommandFor(rolePath, event, runner)]));
       return { mcpServers: { bflow: { command: process.execPath, args: [executable, "mcp", rolePath] } }, hooks: hookEntries };
@@ -1495,7 +1495,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           })()
         : request.input;
       const result = await platformSession.invokeTool(role, gatewayTaskId, grant.toolId, serviceId, request.operation,
-        trigger, normalizedInput, invocationId, reconcile, undefined,
+        trigger, normalizedInput, invocationId, reconcile, { timeoutMs: 60_000 },
         trigger === "browser_inspection" && assignment ? browserTransactionId(configuration.sessionId, role, assignment) : undefined, binding);
       if (!result.ok) {
         const uncertain = result.error.code === "timeout" || result.error.code === "unknown_delivery" || result.error.code === "cancelled" ||
@@ -1658,7 +1658,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         read: limit => platformSession ? platformSession.readPinnedInstructions(role, skillId, offset, limit, launchId) : Promise.resolve(undefined) }));
     }
     if (name === "resume_run") {
-      const runId = textField(parameters.runId);
+      let runId = textField(parameters.runId);
+      const aliasMatch = /^`?việc\s*#?([1-9]\d*)`?(?:\s*[:—–-].*)?$/iu.exec(runId.trim());
+      if (aliasMatch) {
+        const aliases = await receipts.noticeAliases();
+        runId = aliases.runShortIds[`việc #${aliasMatch[1]!}`] ?? runId;
+      }
       if (role === "conversation") {
         const msgId = parameters.messageId === undefined || parameters.messageId === null ||
           (typeof parameters.messageId === "string" && parameters.messageId.trim() === "")

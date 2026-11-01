@@ -1122,7 +1122,12 @@ export class HostVerification {
     const split = splitAppCriteria(spec, strategy, this.appSuites), appBindings = split.app;
     const criteria = split.rest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
     const allCriteria = [...criteria, ...appBindings.map(binding => binding.criterion)], attemptId = randomUUID();
-    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) });
+    const taskBase = Array.isArray(task.worktrees) && task.worktrees.length &&
+      typeof record(task.worktrees[0]).baseCommitHash === "string" &&
+      String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
+        ? textField(record(task.worktrees[0]).baseCommitHash)
+        : textField(run.baseRevision);
+    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: taskBase });
     // Real-app criteria need no runner command; a runner-verified criterion still does.
     const compilerCriteria = this.runners.automatic ? criteria.filter(criterion => ["typecheck", "static_analysis"].includes(criterion.verificationMethod)) : [];
     if (criteria.some(criterion => criterion.verificationMethod === "manual_review") || (!commands.length && (criteria.length > 0 || appBindings.length === 0))) throw new Error("This strategy requires independent alternative evidence");
@@ -1132,7 +1137,7 @@ export class HostVerification {
       const parsed = VerificationResultSchema.parse(replay);
       if (digest(this.bindingIdentity(PaneBindingSchema.parse(parsed.metadata?.hostVerifierBinding))) !== digest(this.bindingIdentity(binding)) || !await this.authenticateEvidence(parsed)) throw new Error("Behavioral phase receipt belongs to another verifier binding");
       if (review && parsed.metadata?.hostPolicyReviewSubmission !== digest(review)) throw new Error("Conflicting immutable policy review judgment");
-      await this.capture(cwd, textField(run.baseRevision), revision);
+      await this.capture(cwd, taskBase, revision);
       return { result: parsed, assignment: assignment.message };
     }
     if (phase !== expected) throw new Error(`Expected ${expected ?? "no further"} behavioral phase`);
@@ -1143,7 +1148,7 @@ export class HostVerification {
       if (!stored || digest(this.bindingIdentity(stored.binding)) !== digest(this.bindingIdentity(binding))) throw new Error("Policy review observation belongs to another verifier or is missing");
       const observation = z.object({ kind: z.literal("policy-phase-review"), stamp: z.string(), captured: z.unknown() }).strict().parse(stored.observation);
       if (observation.stamp !== reviewAssignment.stamp) throw new Error("Policy review observation has a stale assignment, attempt, phase or specification");
-      const captured = this.parseCapture(observation.captured), current = await this.capture(cwd, textField(run.baseRevision), revision);
+      const captured = this.parseCapture(observation.captured), current = await this.capture(cwd, taskBase, revision);
       if (digest(current) !== digest(captured)) throw new Error("Policy review source changed after inspection");
       const judgments = this.judgments(review.criteria, allCriteria.map(c => c.id));
       if (!judgments.every(c => c.passed)) {
@@ -1164,7 +1169,7 @@ export class HostVerification {
       }
       catch (error) {
         if (!(error instanceof NodeTapTestCodeFailure) && !(error instanceof RtkRequiredToolUnavailable && error.originalOutcome)) throw error;
-        const observation = await this.capture(cwd, textField(run.baseRevision), revision);
+        const observation = await this.capture(cwd, taskBase, revision);
         const originalOutcome = error instanceof NodeTapTestCodeFailure ? error.outcome : error.originalOutcome!;
         const evidence = await this.artifact(runId, taskId, { phase, observation, verifiedBy: binding.agentId, accepted: false,
           measurementFailure: { protocol: error instanceof BehavioralIdentityRepair ? error.protocol : error instanceof VitestTestCodeFailure ? "vitest_json" : error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
@@ -1175,7 +1180,7 @@ export class HostVerification {
           ? [json({ commandId: command.id, exitCode: error.outcome.exitCode, compressedOutput: error.rtk.compressedOutput })] : []);
       }
     }
-    const observation = await this.capture(cwd, textField(run.baseRevision), revision);
+    const observation = await this.capture(cwd, taskBase, revision);
     if (observation.exitCode !== 0) throw new Error("Committed diff integrity check failed");
     // Real-app criteria are measured on the same committed revision. A blocked prerequisite throws before any evidence is recorded.
     const appSuites: Extract<AppSuiteOutcome, { status: "completed" }>[] = [];
@@ -1208,7 +1213,6 @@ export class HostVerification {
     // Static target commands are measured here; every other target command must come from a measured runner above.
     const staticAnalyses = [];
     if (phase !== "red") for (const command of strategy.targetCommands.filter(isAutomaticStaticCommand)) {
-      const taskBase = Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision);
       const analysis = await this.captureStaticAnalysis(cwd, taskBase, revision, command, phaseDeadline, [...new Set(commands.flatMap(item => item.testPaths))]);
       staticAnalyses.push({ command, exitCode: analysis.exitCode, output: analysis.output });
     }
@@ -1220,7 +1224,7 @@ export class HostVerification {
     if (manual && reviewAssignment) {
       const current = await this.policyReviewAssignment(binding, runId, taskId, phase);
       if (current.stamp !== reviewAssignment.stamp || current.requestStatus !== "accepted" ||
-          digest(await this.capture(cwd, textField(run.baseRevision), revision)) !== digest(manual.captured))
+          digest(await this.capture(cwd, taskBase, revision)) !== digest(manual.captured))
         throw new Error("Policy review assignment or source changed during independent measurement");
     }
     const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured,
@@ -1749,11 +1753,16 @@ export class HostVerification {
     const assignment = [...state.outbound as Record<string, unknown>[]].reverse().find(item => item.taskId === taskId && record(item.message).run_id === runId && record(item.message).type === "task.assignment" && item.handle);
     if (!assignment) throw new Error("Implementation assignment unavailable");
     const target = record(record(assignment.handle).target); if (target.agentId === binding.agentId) throw new Error("Implementer cannot verify its own change");
+    const task = (run.tasks as Record<string, unknown>[]).find(item => item.taskId === taskId); if (!task) throw new Error("Unknown task");
+    const taskBase = Array.isArray(task.worktrees) && task.worktrees.length &&
+      typeof record(task.worktrees[0]).baseCommitHash === "string" &&
+      String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
+        ? textField(record(task.worktrees[0]).baseCommitHash)
+        : textField(run.baseRevision);
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim();
-    const observation = await this.capture(cwd, textField(run.baseRevision), revision), observationId = randomUUID();
+    const observation = await this.capture(cwd, taskBase, revision), observationId = randomUUID();
     await this.receipts?.putObservation("alternative", observationId, { binding, runId, taskId, observation: json(observation) });
     this.alternatives.set(observationId, { binding, runId, taskId, observation });
-    const task = (run.tasks as Record<string, unknown>[]).find(item => item.taskId === taskId); if (!task) throw new Error("Unknown task");
     return json({ observationId, observation, dossier: task.spec });
   }
   async alternativeEvidence(binding: PaneBinding, input: unknown) {
@@ -1761,6 +1770,11 @@ export class HostVerification {
     const args = record(input), runId = textField(args.runId), taskId = textField(args.taskId);
     const run = record(await this.runtime().inspect(runId));
     const task = (run.tasks as Record<string, unknown>[]).find(item => item.taskId === taskId); if (!task) throw new Error("Unknown task");
+    const taskBase = Array.isArray(task.worktrees) && task.worktrees.length &&
+      typeof record(task.worktrees[0]).baseCommitHash === "string" &&
+      String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
+        ? textField(record(task.worktrees[0]).baseCommitHash)
+        : textField(run.baseRevision);
     const dossier = record(task.spec), specification = SpecificationSchema.parse(dossier.specification), strategy = TestStrategySchema.parse(dossier.strategy);
     if (strategy.tddDecision.mode === "required" || strategy.targetCommands.length || specification.acceptanceCriteria.some(criterion => criterion.verificationMethod !== "manual_review")) throw new Error("Configured behavioral measurement runner required for this strategy");
     const state = record(await this.runtime().inspect());
@@ -1772,7 +1786,7 @@ export class HostVerification {
     const observationId = textField(args.observationId), stored = await this.receipts?.getObservation("alternative", observationId);
     const pending = stored ? { binding: stored.binding, runId: stored.runId, taskId: stored.taskId, observation: this.parseCapture(stored.observation) } : this.alternatives.get(observationId);
     if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding)) || pending.runId !== runId || pending.taskId !== taskId) throw new Error("Inspect the assigned alternative evidence before submitting a judgment");
-    const startedAt = new Date().toISOString(), observed = await this.capture(cwd, textField(run.baseRevision), revision);
+    const startedAt = new Date().toISOString(), observed = await this.capture(cwd, taskBase, revision);
     if (digest(observed) !== digest(pending.observation)) throw new Error("Alternative evidence source changed after inspection");
     const criteria = this.judgments(args.criteria, specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived").map(criterion => criterion.id));
     if (!criteria.every(criterion => criterion.passed) || observed.exitCode !== 0) throw new Error("Alternative acceptance evidence failed; request repairs instead");

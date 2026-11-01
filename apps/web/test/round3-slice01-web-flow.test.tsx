@@ -598,7 +598,7 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
       expectedVersion: { ...decision.expectedVersion, approvalId: 'd-2' },
     };
     let decisionItems = [decision];
-    let resolveRun2!: (res: Response) => void;
+    let resolveRun2: ((res: Response) => void) | undefined;
     vi.stubGlobal('fetch', (path: string) => {
       if (path.endsWith('/decisions')) return Promise.resolve(Response.json({ apiVersion: 1, items: decisionItems }));
       if (path.endsWith('/runs/run')) {
@@ -635,11 +635,12 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
     decisionItems = [decision, d2];
     mountedReview.rerender(reviewTree(1));
     await screen.findByRole('heading', { name: 'Quyết định thứ hai' });
+    await waitFor(() => expect(resolveRun2).toBeTypeOf('function'));
     // Run 1's textarea MUST remain enabled and retain draft while Run 2 is still in flight!
     expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).disabled).toBe(false);
     expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Đang nhập dở');
     await act(async () => {
-      resolveRun2(Response.json({ ...run, runId: 'run-2', currentRunId: 'run-2', decisions: [d2] }));
+      resolveRun2?.(Response.json({ ...run, runId: 'run-2', currentRunId: 'run-2', decisions: [d2] }));
     });
     cleanup();
 
@@ -958,5 +959,129 @@ describe('Round 3 Slice 1 — Web UI, SSE event loop, forms, routing & operation
     await waitFor(() =>
       expect((screen.getByLabelText('Tin nhắn cho Conversation') as HTMLTextAreaElement).disabled).toBe(false),
     );
+  });
+
+  it('Cross-Slice Web 1: clears effort when switching a role or all roles to agy in ProjectConfiguration', async () => {
+    const savedBodies: Array<Record<string, unknown>> = [];
+    const baseConfig: WebProjectConfiguration = {
+      apiVersion: 1,
+      projectId: 'p',
+      revision: '1'.repeat(64),
+      yaml: 'projectName: Demo\nenvironment: {}\n',
+      values: {
+        environment: {
+          roles: [
+            { role: 'developer', cli: 'claude', model: 'sonnet', effort: 'high' },
+            { role: 'reviewer', cli: 'codex', model: 'gpt-5.4', effort: 'medium' },
+          ],
+        },
+      },
+    };
+    vi.stubGlobal('fetch', async (path: string, init?: RequestInit) => {
+      if (path.endsWith('/configuration') && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body));
+        savedBodies.push(body);
+        return Response.json({
+          ...baseConfig,
+          revision: String(savedBodies.length + 1).repeat(64),
+          values: body.values ?? baseConfig.values,
+        });
+      }
+      return Response.json(baseConfig);
+    });
+
+    render(<ProjectConfiguration api={new ApiClient()} id="p" revision={0} />);
+    const devCli = await screen.findByLabelText<HTMLSelectElement>('Provider (developer)');
+    expect(devCli.value).toBe('claude');
+
+    // Per-role switch to agy strips effort from developer while preserving reviewer's effort
+    fireEvent.change(devCli, { target: { value: 'agy' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Lưu cấu hình' }));
+    await waitFor(() => expect(savedBodies.length).toBe(1));
+    const firstRoles = ((savedBodies[0]?.values as Record<string, unknown>)?.environment as Record<string, unknown>)
+      ?.roles as Array<Record<string, unknown>>;
+    expect(firstRoles[0]?.cli).toBe('agy');
+    expect('effort' in (firstRoles[0] ?? {})).toBe(false);
+    expect(firstRoles[1]?.effort).toBe('medium');
+
+    // Bulk applyAll to agy strips effort from every role
+    fireEvent.change(screen.getByLabelText('Áp dụng nhanh Provider'), { target: { value: 'agy' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Áp dụng cho tất cả vai trò' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Lưu cấu hình' }));
+    await waitFor(() => expect(savedBodies.length).toBe(2));
+    const secondRoles = ((savedBodies[1]?.values as Record<string, unknown>)?.environment as Record<string, unknown>)
+      ?.roles as Array<Record<string, unknown>>;
+    expect(secondRoles.every((role) => role.cli === 'agy' && !('effort' in role))).toBe(true);
+  });
+
+  it('Cross-Slice Web 2: immediately reconnects EventSource when project session transitions from stopped to ready', async () => {
+    const sockets: FakeEventSource[] = [];
+    class FakeEventSource {
+      url: string;
+      closed = false;
+      listeners = new Map<string, EventListener>();
+      constructor(url: string) {
+        this.url = url;
+        sockets.push(this);
+      }
+      addEventListener(type: string, listener: EventListener) {
+        this.listeners.set(type, listener);
+      }
+      emit(type: string) {
+        this.listeners.get(type)?.(new Event(type));
+      }
+      close() {
+        this.closed = true;
+      }
+    }
+    vi.stubGlobal('EventSource', FakeEventSource);
+
+    let sessionState: 'stopped' | 'ready' = 'stopped';
+    vi.stubGlobal('fetch', async (path: string) => {
+      if (path === '/api/v1/session') {
+        return Response.json({
+          apiVersion: 1,
+          sessionId: 'browser',
+          csrfToken: 'csrf',
+          expiresAt: new Date(Date.now() + 3600000).toISOString(),
+        });
+      }
+      if (path === '/api/v1/projects') return Response.json({ apiVersion: 1, items: projects });
+      if (path.endsWith('/session')) {
+        return Response.json({
+          apiVersion: 1,
+          projectId: 'p',
+          ...(sessionState === 'ready' ? { sessionId: 'host-1' } : {}),
+          state: sessionState,
+          pendingIntakes: [],
+          blockers: [],
+          updatedAt: now,
+        });
+      }
+      if (path.includes('/runs')) return Response.json({ apiVersion: 1, items: [] });
+      if (path.includes('/decisions')) return Response.json({ apiVersion: 1, items: [] });
+      if (path.includes('/preview')) return Response.json(preview);
+      return Response.json({ apiVersion: 1, items: [] });
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/projects/p']}>
+        <App api={new ApiClient()} />
+      </MemoryRouter>,
+    );
+    await screen.findAllByText('Vườn sách');
+    await waitFor(() => expect(sockets.length).toBe(1));
+
+    // Simulate 503 SSE failure while session is stopped -> subscribeEvents enters backoff timer
+    act(() => {
+      sockets[0]?.emit('error');
+    });
+    expect(sockets[0]?.closed).toBe(true);
+
+    // Session transitions to ready -> Tải lại dữ liệu refreshes sessionView -> immediate new EventSource without waiting 30s backoff!
+    sessionState = 'ready';
+    fireEvent.click(screen.getByRole('button', { name: 'Tải lại dữ liệu' }));
+    await waitFor(() => expect(sockets.length).toBe(2));
+    expect(sockets[1]?.closed).toBe(false);
   });
 });

@@ -902,10 +902,10 @@ export class HostReceiptJournal {
       throw new Error("Resume requires the current authenticated Conversation user message");
     const request = parseConversationResumeRequest(turn.content);
     let requestedRunId = request?.runId;
-    if (requestedRunId && /^việc\s*#[1-9]\d*$/iu.test(requestedRunId)) {
-      const key = requestedRunId.toLowerCase().replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #");
+    if (requestedRunId && /^việc\s*#?[1-9]\d*$/iu.test(requestedRunId)) {
+      const num = /^việc\s*#?([1-9]\d*)$/iu.exec(requestedRunId)![1]!;
       const aliases = await this.noticeAliases();
-      requestedRunId = aliases.runShortIds[key] ?? requestedRunId;
+      requestedRunId = aliases.runShortIds[`việc #${num}`] ?? requestedRunId;
     }
     if (!request || requestedRunId !== undefined && requestedRunId !== runId)
       throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
@@ -1356,7 +1356,7 @@ export class HostReceiptJournal {
 const RESUME_PREFIX = "(?:(?:ok(?:e|ay)?|được|hãy|vui lòng|please)[\\s,]+){0,2}";
 const RESUME_SUFFIX_WORDS = "đi|nhé|nha|giúp mình|giúp em|giúp tôi|please|pls";
 const RESUME_REQUEST = new RegExp(`^${RESUME_PREFIX}(?:tiếp tục|resume|continue)` +
-  `(?:\\s+(?:(việc\\s*#[1-9]\\d*)|(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*)))?` +
+  `(?:\\s+(?:(việc\\s*#?[1-9]\\d*)|(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*)))?` +
   `(?:[\\s,]+(?:${RESUME_SUFFIX_WORDS})){0,2}\\s*[.!]?$`, "iu");
 /** An explicit user request to resume, optionally naming the exact run or work alias: "tiếp tục", "tiếp tục việc #1", "Continue run-1 please". */
 export function parseConversationResumeRequest(content: string): { runId?: string } | undefined {
@@ -1364,8 +1364,7 @@ export function parseConversationResumeRequest(content: string): { runId?: strin
   if (!match) return undefined;
   const rawTarget = match[1] ?? match[2];
   if (rawTarget === undefined) return {};
-  const normalized = /^việc\s*#/iu.test(rawTarget)
-    ? rawTarget.replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #").toLowerCase()
-    : rawTarget;
+  const aliasMatch = /^việc\s*#?([1-9]\d*)$/iu.exec(rawTarget.trim());
+  const normalized = aliasMatch ? `việc #${aliasMatch[1]!}` : rawTarget;
   return { runId: normalized };
 }

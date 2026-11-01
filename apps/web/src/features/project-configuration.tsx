@@ -97,7 +97,7 @@ function Roles({value,onChange}:{value:WebConfigValue[];onChange:(v:WebConfigVal
  const [bulkCli,setBulkCli]=useState('claude'),[bulkModel,setBulkModel]=useState('');
  const configuredModels=[...new Set(value.flatMap(item=>item && typeof item==='object' && !Array.isArray(item) && typeof item.model==='string' && item.model?[item.model]:[]))];
  const suggestions=[...new Set([...configuredModels,...(presetModels[bulkCli]??[])])];
- const applyAll=()=>{onChange(value.map(item=>{if(!item || typeof item!=='object' || Array.isArray(item))return item;const next:Record<string,WebConfigValue>={...item,cli:bulkCli};if(bulkModel.trim())next.model=bulkModel.trim();return next;}));};
+ const applyAll=()=>{onChange(value.map(item=>{if(!item || typeof item!=='object' || Array.isArray(item))return item;const next:Record<string,WebConfigValue>={...item,cli:bulkCli};if(bulkCli==='agy')delete next.effort;if(bulkModel.trim())next.model=bulkModel.trim();return next;}));};
  return <>
   <div className="my-2 border border-line bg-canvas p-2.5 text-xs">
    <div className="flex flex-wrap items-end gap-2">
@@ -111,7 +111,7 @@ function Roles({value,onChange}:{value:WebConfigValue[];onChange:(v:WebConfigVal
    if(!item || typeof item!=='object' || Array.isArray(item))return null;
    const roleName=String(item.role),roleVi=roleLabels[roleName]??roleName;
    const baseId=`role-${index}-${roleName.replace(/[^a-zA-Z0-9_-]/g,'-')}`;
-   const update=(key:string,next:string)=>{const role={...item};if(next)role[key]=next;else delete role[key];onChange(value.map((v,i)=>i===index?role:v));};
+   const update=(key:string,next:string)=>{const role={...item};if(next)role[key]=next;else delete role[key];if(key==='cli' && next==='agy')delete role.effort;onChange(value.map((v,i)=>i===index?role:v));};
    const extraEntries=Object.entries(item).filter(([key])=>!['role','cli','model','profile-name','effort'].includes(key));
    return <fieldset className="my-0 min-w-0 border border-line bg-canvas p-2.5" key={index}><legend className="text-xs">{roleLabels[roleName]?`${roleLabels[roleName]} (${roleName})`:roleName}</legend><div className="grid gap-2 sm:grid-cols-2">
     <div><FieldLabel htmlFor={`${baseId}-cli`} label={`Provider (${roleName})`} labelClassName="text-xs" help={`Chọn CLI công cụ AI đảm nhận vai trò ${roleVi}.${roleName==='conversation'?' Lưu ý: vai trò conversation cần dùng claude hoặc codex.':''}`}/><select id={`${baseId}-cli`} value={String(item.cli??'claude')} onChange={e=>update('cli',e.target.value)}>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select></div>

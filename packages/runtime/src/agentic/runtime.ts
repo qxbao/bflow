@@ -35,7 +35,7 @@ import {
   formatFastPathDowngradeNotice
 } from "./conversation-notice-render.js";
 import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
-import { captureIntegratedChange } from "./integration-change.js";
+import { captureIntegratedChange, restoreRejectedConflictMerge } from "./integration-change.js";
 import { CoreSession, type CoreRestoreCache } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
 import { TaskActivityLog } from "./task-activity-log.js";
@@ -242,9 +242,12 @@ export function projectTaskSpecificationInput(draft: Specification, taskId: stri
   specIdSuffix: string, conditionalTdd: unknown = draft.metadata?.conditionalTdd): Specification {
   const ids = new Set(criteria.map(criterion => criterion.id));
   const sdd = record(draft.metadata?.sdd);
-  return { ...draft, specId: `${draft.specId}-${specIdSuffix}`, acceptanceCriteria: [...criteria], traceabilityTaskIds: [taskId],
-    ...(draft.testStrategy ? { testStrategy: { ...draft.testStrategy,
+  const projectedSpecId = `${draft.specId}-${specIdSuffix}`;
+  return { ...draft, specId: projectedSpecId, acceptanceCriteria: [...criteria], traceabilityTaskIds: [taskId],
+    ...(draft.testStrategy ? { testStrategy: { ...draft.testStrategy, specId: projectedSpecId,
+      tddDecision: { ...draft.testStrategy.tddDecision, specId: projectedSpecId, taskId },
       criterionMappings: draft.testStrategy.criterionMappings.filter(mapping => ids.has(mapping.criterionId)) } } : {}),
+    ...(draft.tddDecision ? { tddDecision: { ...draft.tddDecision, specId: projectedSpecId, taskId } } : {}),
     metadata: { ...draft.metadata,
       sdd: { ...sdd, traceability: criteria.map(c => ({ criterionId: c.id, taskIds: [taskId] })) },
       conditionalTdd: { ...record(conditionalTdd), taskId } } } as Specification;
@@ -4128,7 +4131,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           throw new Error("Tool action is outside the current approved Core task assignment");
         taskId = handle.taskId;
       } else if (out.message.type === "verification.requested") {
-        if (!taskId || !run.tasks.some(item => item.taskId === taskId)) throw new Error("Verification tool action has no current business task");
+        const isActiveWorkflowReview = taskId === FINAL_TASK && Boolean(run.workflowVerificationPending);
+        if (!taskId || (!isActiveWorkflowReview && !run.tasks.some(item => item.taskId === taskId)))
+          throw new Error("Verification tool action has no current business task");
       } else if (out.message.type === "delegation.request") {
         if (binding.role === "coordinator" && out.message.sender.role === "conversation" &&
             digest(DelegationRequestSchema.parse(out.message.payload)) !== digest(run.delegation))
@@ -5408,7 +5413,6 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         let restoreNote = "";
         if (resolution.attempts.length < CONFLICT_RESOLVER_ATTEMPTS) {
           try {
-            const { restoreRejectedConflictMerge } = await import("./integration-change.js");
             await restoreRejectedConflictMerge({ worktreePath: resolution.worktreePath, branchName: resolution.branchName,
               rejectedHead: head, ...(resolution.incomingCommitHash ? { incomingCommitHash: resolution.incomingCommitHash } : {}) });
           } catch (restoreError) { restoreNote = `; merge restore failed: ${String(restoreError)}`; }
@@ -6155,6 +6159,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         record(item.message.payload).taskId === payload.taskId && record(item.message.payload).implementationAttemptId === payload.implementationAttemptId && record(item.message.payload).phase === payload.phase);
       if (retirements.length >= run.maxIterations) throw new Error("Policy phase retirement bound exhausted");
       request.phaseRetirement = { ...authority, blockedReplyId: blocked.message.message_id, decidedAt: this.now(), disposition: "retired_without_measurement_claim" };
+      if (run.pendingAction?.kind === "coordinator_continuation") {
+        run.pendingAction = { ...run.pendingAction, kind: "resume_coordinator", state: "pending", recovery: "manual" };
+      }
       if (state.version < 3) state.version = 3;
       await save(); // Durable late-result fence before capacity release or any continuation.
       await this.recoverPolicyPhaseRetirements(state, save, outbox);

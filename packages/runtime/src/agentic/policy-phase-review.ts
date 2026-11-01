@@ -61,6 +61,11 @@ export function policyPhaseReviewAssignment(stateInput: unknown, runInput: unkno
     implementationHandle, implementationLineage: lineage(implementation) ?? null,
     request: message, handle, verifierLineage: lineage(request) ?? null, binding: identity,
     leaseId: lease.data.leaseId, fencingToken: lease.data.fencingToken });
+  const taskBase = Array.isArray(task.worktrees) && task.worktrees.length &&
+    typeof record(task.worktrees[0]).baseCommitHash === "string" &&
+    String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
+      ? textField(record(task.worktrees[0]).baseCommitHash)
+      : textField(run.baseRevision);
   return { stamp, requestId: message.message_id, revision, cwd: textField(implementationHandle.target.worktreePath),
-    base: textField(run.baseRevision), specification, strategy, requestStatus: request.status };
+    base: taskBase, specification, strategy, requestStatus: request.status };
 }
