@@ -25,6 +25,7 @@ import { ModeSwitch } from './features/office/ui/ModeSwitch';
 import { OfficeStage, type StageControl } from './features/office/ui/OfficeStage';
 import { OfficeHud, currentRun } from './features/office/ui/OfficeHud';
 import { useOfficeModel } from './features/office/ui/useOfficeModel';
+import { useAgentExcerpts } from './features/office/ui/useAgentExcerpts';
 import { AgentInspector, AgentList, handoffEvidence } from './features/office/ui/AgentInspector';
 import { CabinetInspector, ServerInspector, runEvidence } from './features/office/ui/ObjectInspector';
 import type { OfficeTarget } from './features/office/model/types';
@@ -111,6 +112,8 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   const state=useOfficeModel({api,id,session,connection,revision});
   const {model,runs,stale,overflow,workforce,decisions,authRequired,error}=state;
   const control=useRef<StageControl|null>(null);
+  const excerpts=useAgentExcerpts({api,id,enabled:model?.tier==='full'});
+  useEffect(()=>{control.current?.setExcerpts(excerpts);},[excerpts,model!==undefined]);
   const {inspector,openInspector}=frame;
   // A refused session is never shown as stale data: the panel offers re-pairing, the same ErrorState Classic uses.
   useEffect(()=>{

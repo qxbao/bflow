@@ -1,5 +1,11 @@
 import type { ProjectedLabel } from '../scene/renderer';
 
+const CLASSES: Record<ProjectedLabel['kind'], string> = {
+  agent: 'absolute left-0 top-0 whitespace-nowrap rounded-md bg-surface/80 px-1.5 py-0.5 font-data text-[0.6875rem] leading-4 text-ink',
+  bubble: 'office-bubble absolute left-0 top-0',
+  sleep: 'office-zzz absolute left-0 top-0',
+};
+
 /**
  * World-anchored text labels drawn over the scene. Imperative on purpose: positions change every rendered frame and must not go through
  * React. Text is set with `textContent` only, the layer ignores pointer events and is hidden from assistive technology (the DOM mirror
@@ -18,7 +24,7 @@ export function createLabelLayer(parent: HTMLElement): { update(labels: Projecte
         let n = nodes.get(l.id);
         if (!n) {
           const el = document.createElement('div');
-          el.className = 'absolute left-0 top-0 whitespace-nowrap rounded-md bg-surface/80 px-1.5 py-0.5 font-data text-[0.6875rem] leading-4 text-ink';
+          el.className = CLASSES[l.kind];
           el.dataset['kind'] = l.kind;
           layer.appendChild(el);
           n = { el, x: Number.NaN, y: Number.NaN, seen: true };

@@ -6,7 +6,7 @@ import {
 import { acquireModels, type ModelLease } from './assets';
 import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
-import { agentTag } from '../model/labels';
+import { agentTag, poseLabel } from '../model/labels';
 import { Choreographer } from './actors';
 import { AGENT_ZOOM, CameraIntent, CameraMove, FOV, NO_INSET, withInset, type Inset, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, HOME_ZOOM, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
@@ -22,6 +22,8 @@ export interface OfficeRenderer {
   projectLabels?(): ProjectedLabel[];
   /** Screen pixels the HUD or panel covers: labels hide inside it and selections centre in what is left. Setting it never moves the camera. */
   setInset?(inset: Inset): void;
+  /** Latest terminal text per agent instance, drawn in the message box over a working character. Stored and drawn on the next frame; wakes the scene. */
+  setExcerpts?(excerpts: ReadonlyMap<string, string>): void;
   /** Receives `projectLabels()` after every rendered frame (the same array, reused). */
   setLabelSink?(sink: ((labels: ProjectedLabel[]) => void) | undefined): void;
   /** Eases the camera to a target the user selected (also called for selections made in the DOM mirror). */
@@ -31,10 +33,11 @@ export interface OfficeRenderer {
   destroy(): void;
 }
 
-/** Text the DOM draws over the canvas. `kind` is a union so further label kinds can be added. */
-export interface ProjectedLabel { id: string; kind: 'agent'; text: string; x: number; y: number }
+/** Text the DOM draws over the canvas. `agent` is the name tag, `bubble` the message box over a working character, `sleep` the Zzz over a sleeping one; all anchored bottom-centre. */
+export interface ProjectedLabel { id: string; kind: 'agent' | 'bubble' | 'sleep'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
+const BUBBLE_W = 224, BUBBLE_H = 72, SLEEP_HEAD_Y = 1.45;
 const EXPOSURE_OPEN = 1, EXPOSURE_CLOSED = 0.6;
 const MOVING_MS = 1000 / 30;
 const IDLE_MS = 1000 / 8;
@@ -192,7 +195,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const probe = new Vector3();
   const pool: ProjectedLabel[] = [], out: ProjectedLabel[] = [];
   const rects: number[] = [];
-  const tags = new Map<string, { label: string; pose: string; text: string }>();
+  const tags = new Map<string, { label: string; pose: string; text: string; id: string; bubbleId: string; sleepId: string }>();
+  let excerpts: ReadonlyMap<string, string> = new Map();
   let agentsById = new Map<string, OfficeModel['agents'][number]>();
   const pt = { x: 0, y: 0 };
   /** Projects to host pixels; false when behind the camera or outside the safe area (the HUD and panel inset). */
@@ -207,6 +211,10 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     l.id = id; l.kind = kind; l.text = text; l.x = pt.x; l.y = pt.y;
     out[n] = l;
   };
+  const hits = (x0: number, x1: number, y0: number, y1: number, r: number): boolean => {
+    for (let i = 0; i < r; i += 4) if (x0 < (rects[i + 1] as number) && x1 > (rects[i] as number) && y0 < (rects[i + 3] as number) && y1 > (rects[i + 2] as number)) return true;
+    return false;
+  };
   const projectLabels = (): ProjectedLabel[] => {
     const v = size();
     let n = 0, r = 0;
@@ -214,14 +222,17 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       const a = agentsById.get(view.instanceId);
       if (!a || !project(view.point.x, 2.15, view.point.z, v.w, v.h)) continue;
       let tag = tags.get(a.instanceId);
-      if (!tag || tag.label !== a.label || tag.pose !== a.pose) { tag = { label: a.label, pose: a.pose, text: agentTag(a.label, a.pose) }; tags.set(a.instanceId, tag); }
-      const half = tag.text.length * 3.4 + 6, x0 = pt.x - half, x1 = pt.x + half, y0 = pt.y - 18, y1 = pt.y;
+      if (!tag || tag.label !== a.label || tag.pose !== a.pose) { tag = { label: a.label, pose: a.pose, text: agentTag(a.label, a.pose), id: `agent:${a.instanceId}`, bubbleId: `bubble:${a.instanceId}`, sleepId: `sleep:${a.instanceId}` }; tags.set(a.instanceId, tag); }
+      const far = state.zoom < 1.8;
+      const half = tag.text.length * 3.4 + 6, x0 = pt.x - half, x1 = pt.x + half, y0 = pt.y - 18, y1 = pt.y, tagX = pt.x, tagY = pt.y;
       // Far out, tags that would overlap an earlier one are hidden; closer in everything shows.
-      let clash = false;
-      if (state.zoom < 1.8) for (let i = 0; i < r; i += 4) if (x0 < (rects[i + 1] as number) && x1 > (rects[i] as number) && y0 < (rects[i + 3] as number) && y1 > (rects[i + 2] as number)) { clash = true; break; }
-      if (clash) continue;
-      rects[r++] = x0; rects[r++] = x1; rects[r++] = y0; rects[r++] = y1;
-      slot(n++, `agent:${a.instanceId}`, 'agent', tag.text);
+      if (!(far && hits(x0, x1, y0, y1, r))) { rects[r++] = x0; rects[r++] = x1; rects[r++] = y0; rects[r++] = y1; slot(n++, tag.id, 'agent', tag.text); }
+      const extra = poseLabel(a.pose);
+      if (extra === 'bubble') {
+        // Message box above the name tag; far out, one that would overlap an earlier tag or box is hidden.
+        const by = tagY - 22, bx0 = tagX - BUBBLE_W / 2, bx1 = tagX + BUBBLE_W / 2, by0 = by - BUBBLE_H;
+        if (!(far && hits(bx0, bx1, by0, by, r))) { rects[r++] = bx0; rects[r++] = bx1; rects[r++] = by0; rects[r++] = by; pt.y = by; slot(n++, tag.bubbleId, 'bubble', excerpts.get(a.instanceId) ?? a.statusText); }
+      } else if (extra === 'sleep' && project(view.point.x, SLEEP_HEAD_Y, view.point.z, v.w, v.h)) slot(n++, tag.sleepId, 'sleep', 'Zzz');
     }
     out.length = n;
     return out;
@@ -414,6 +425,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       return accepted;
     },
     projectLabels,
+    setExcerpts(next) { excerpts = next; dirty = true; wake(); },
     setInset(next) { inset = next.right === 0 && next.bottom === 0 && next.left === 0 ? NO_INSET : next; dirty = true; wake(); },
     setLabelSink(next) { sink = next; if (next && ready) next(projectLabels()); },
     setPaused(next) {

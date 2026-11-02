@@ -248,6 +248,22 @@ describe('label layer', () => {
     layer.destroy();
     expect(parent.children).toHaveLength(0);
   });
+
+  test('bubble and Zzz labels get their kind and class, hold only inert text and no child elements', async () => {
+    const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');
+    const parent = document.createElement('div');
+    const layer = createLabelLayer(parent);
+    layer.update([{ id: 'bubble:a', kind: 'bubble', text: '<img src=x onerror=alert(1)>\nxong', x: 10, y: 20 }, { id: 'sleep:b', kind: 'sleep', text: 'Zzz', x: 30, y: 40 }]);
+    const [bubble, zzz] = [...parent.querySelectorAll<HTMLElement>('[data-kind]')];
+    expect(bubble!.dataset['kind']).toBe('bubble');
+    expect(bubble!.classList.contains('office-bubble')).toBe(true);
+    expect(zzz!.dataset['kind']).toBe('sleep');
+    expect(zzz!.classList.contains('office-zzz')).toBe(true);
+    expect(parent.querySelectorAll('[data-kind] *')).toHaveLength(0);
+    expect(parent.querySelector('img')).toBeNull();
+    expect(bubble!.textContent).toContain('<img');
+    layer.destroy();
+  });
 });
 
 test('context loss during pending creation aborts and destroys the late renderer without adopting it', async () => {
