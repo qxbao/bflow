@@ -27,7 +27,7 @@ const receiver = (h: OfficeHandoff): VisualEndpoint =>
 function cueFor(h: OfficeHandoff): VisualCue | undefined {
   switch (h.state) {
     case 'accepted': case 'delivered': case 'released': case 'applied': {
-      // A walk needs a character; with no instance on either side there is nobody to animate.
+      // A walk needs a character: with neither sender nor receiver instance there is nobody to animate, so no cue.
       const actor = h.fromInstanceId ?? h.toInstanceId;
       return actor ? { kind: 'walk', handoffId: h.handoffId, actor, from: sender(h), to: receiver(h) } : undefined;
     }
@@ -38,18 +38,42 @@ function cueFor(h: OfficeHandoff): VisualCue | undefined {
   }
 }
 
+export type HandoffMark = 'waiting' | 'question' | 'blocked';
+
+const markOf = (state: OfficeHandoff['state']): HandoffMark | undefined => {
+  switch (state) {
+    case 'queued': case 'sending': return 'waiting';
+    case 'unknown_delivery': return 'question';
+    case 'rejected': case 'failed': return 'blocked';
+    default: return undefined; // walk states and cancelled carry no desk indicator
+  }
+};
+
+/** Desk indicators from handoff state alone; the scene renders them on every apply (also after reload). */
+export function handoffMarks(model: OfficeModel): { handoffId: string; at: VisualEndpoint; mark: HandoffMark }[] {
+  const out: { handoffId: string; at: VisualEndpoint; mark: HandoffMark }[] = [];
+  for (const h of model.handoffs) {
+    const mark = markOf(h.state);
+    if (mark) out.push({ handoffId: h.handoffId, at: sender(h), mark });
+  }
+  return out;
+}
+
 /**
  * Cues for what changed between two models. Undefined `prev` is the baseline (first read, reload or
- * reset): no cues. A handoff already known in `prev` only cues when it moves from a non-walk state
- * into a walk state, so each handoffId walks at most once.
+ * reset): no cues. A walk fires only on a non-walk -> walk move (or a new handoff already walking) and
+ * never for an id in `walked`, which the consumer owns. A non-walk cue fires when a handoff appears or
+ * moves into a different indicator state.
  */
-export function diffVisual(prev: OfficeModel | undefined, next: OfficeModel): VisualCue[] {
+export function diffVisual(prev: OfficeModel | undefined, next: OfficeModel, walked?: ReadonlySet<string>): VisualCue[] {
   if (!prev) return [];
   const before = new Map(prev.handoffs.map(h => [h.handoffId, h.state]));
   const cues: VisualCue[] = [];
   for (const h of next.handoffs) {
     const was = before.get(h.handoffId);
-    if (was !== undefined && !(!WALK.has(was) && WALK.has(h.state))) continue;
+    if (WALK.has(h.state)) {
+      if (walked?.has(h.handoffId) || (was !== undefined && WALK.has(was))) continue;
+    } else if (was !== undefined && markOf(was) === markOf(h.state)) continue;
     const cue = cueFor(h);
     if (cue) cues.push(cue);
   }

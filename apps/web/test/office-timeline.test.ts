@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { diffVisual, dropBacklog, enqueue, type VisualCue, type VisualLimits } from '../src/features/office/model/timeline';
+import { diffVisual, dropBacklog, handoffMarks, enqueue, type VisualCue, type VisualLimits } from '../src/features/office/model/timeline';
 import { findPath, type Grid } from '../src/features/office/model/path';
 import type { OfficeHandoff, OfficeModel } from '../src/features/office/model/types';
 
@@ -56,8 +56,46 @@ describe('diffVisual', () => {
     // The repeat (same model again) and a walk -> walk progression cue nothing.
     expect(diffVisual(accepted, accepted)).toEqual([]);
     expect(diffVisual(accepted, delivered)).toEqual([]);
-    // A handoff already present as non-walk does not re-cue its waiting bubble.
+    // Same indicator (queued -> sending) does not re-cue the waiting bubble.
     expect(diffVisual(queued, model([handoff('h', 'sending')]))).toEqual([]);
+  });
+
+  test('known handoff moving into a different indicator cues once', () => {
+    const cases: [OfficeHandoff['state'], OfficeHandoff['state'], string][] = [
+      ['queued', 'failed', 'blocked'], ['queued', 'unknown_delivery', 'question'], ['sending', 'rejected', 'blocked'],
+    ];
+    for (const [a, b, kind] of cases) {
+      expect(diffVisual(model([handoff('h', a)]), model([handoff('h', b)])).map(c => c.kind), `${a}->${b}`).toEqual([kind]);
+    }
+  });
+
+  test('walked set prevents a second walk across accepted -> failed -> delivered', () => {
+    const walked = new Set(['h']);
+    const failed = model([handoff('h', 'failed')]);
+    expect(diffVisual(model([handoff('h', 'accepted')]), failed, walked).map(c => c.kind)).toEqual(['blocked']);
+    expect(diffVisual(failed, model([handoff('h', 'delivered')]), walked)).toEqual([]);
+    // Without the set the consumer would see a second walk.
+    expect(diffVisual(failed, model([handoff('h', 'delivered')])).map(c => c.kind)).toEqual(['walk']);
+  });
+});
+
+describe('handoffMarks', () => {
+  test('every state maps to its section 4.4 indicator at the sender', () => {
+    const expected: Record<OfficeHandoff['state'], string | undefined> = {
+      accepted: undefined, delivered: undefined, released: undefined, applied: undefined,
+      queued: 'waiting', sending: 'waiting', unknown_delivery: 'question', rejected: 'blocked', failed: 'blocked', cancelled: undefined,
+    };
+    for (const [s, mark] of Object.entries(expected)) {
+      const marks = handoffMarks(model([handoff('h', s as OfficeHandoff['state'])]));
+      expect(marks.map(m => m.mark), s).toEqual(mark ? [mark] : []);
+      if (mark) expect(marks[0].at).toEqual({ kind: 'instance', instanceId: 'dev-1' });
+    }
+  });
+
+  test('first snapshot has no cues but marks are populated', () => {
+    const m = model([handoff('h', 'failed')]);
+    expect(diffVisual(undefined, m)).toEqual([]);
+    expect(handoffMarks(m)).toHaveLength(1);
   });
 });
 
