@@ -1,6 +1,6 @@
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { WebAgentTranscriptSchema, WebWorkforceExcerptsSchema, type SessionManifest } from "@bflow/contracts";
-import { cleanTerminalText, excerptOf, readAgentTranscript, readWorkforceExcerpts, type TranscriptSources } from "../../src/interaction/transcript.js";
+import { cleanTerminalText, excerptOf, readAgentTranscript, readWorkforceExcerpts, sharedFor, type TranscriptSources } from "../../src/interaction/transcript.js";
 import { instanceIdOf, projectWorkforce } from "../../src/interaction/workforce.js";
 import type { JournalState, Outbound } from "../../src/agentic/journal.js";
 import { run, state, at } from "./fixtures.js";
@@ -165,4 +165,45 @@ it("hostInteractionQuery answers unsupported without a pane reader and serves bo
     const transcript = await hostInteractionQuery(configuration, { kind: "agent_transcript", projectId, instanceId: id }, { ready: true, readPane }) as never as { value: { text: string } };
     expect(transcript.value.text).toBe("hello\n> typed");
   } finally { await rm(repositoryPath, { recursive: true, force: true }); }
+});
+
+describe("sharedFor", () => {
+  const ok = (value: unknown) => (value as { ok?: boolean }).ok === true;
+  const deferred = () => { let resolve!: (v: unknown) => void, reject!: (e: unknown) => void;
+    const promise = new Promise<unknown>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+  it("shares a pending load past the window and measures expiry from settle", async () => {
+    let clock = 0, loads = 0;
+    const shared = sharedFor<string, unknown>(2000, ok, () => clock);
+    const d = deferred();
+    const load = () => { loads++; return loads === 1 ? d.promise : Promise.resolve({ ok: true, n: loads }); };
+    const first = shared("p", load);
+    clock = 10_000;
+    expect(shared("p", load)).toBe(first);
+    expect(loads).toBe(1);
+    d.resolve({ ok: true, n: 1 });
+    await first;
+    clock = 11_999;
+    expect(shared("p", load)).toBe(first);
+    clock = 12_000;
+    expect(await shared("p", load)).toEqual({ ok: true, n: 2 });
+    expect(loads).toBe(2);
+  });
+  it("never reuses a rejection or a non-ok result", async () => {
+    let loads = 0;
+    const shared = sharedFor<string, unknown>(2000, ok, () => 0);
+    await shared("p", () => { loads++; return Promise.reject(new Error("x")); }).catch(() => undefined);
+    await Promise.resolve();
+    await shared("p", () => { loads++; return Promise.resolve({ ok: false }); });
+    await Promise.resolve();
+    await shared("p", () => { loads++; return Promise.resolve({ ok: true }); });
+    expect(loads).toBe(3);
+  });
+  it("keeps separate keys apart", async () => {
+    let loads = 0;
+    const shared = sharedFor<string, unknown>(2000, ok, () => 0);
+    await shared("a", async () => { loads++; return { ok: true }; });
+    await shared("b", async () => { loads++; return { ok: true }; });
+    await shared("a", async () => { loads++; return { ok: true }; });
+    expect(loads).toBe(2);
+  });
 });

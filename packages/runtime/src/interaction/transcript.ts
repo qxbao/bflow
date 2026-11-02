@@ -117,3 +117,22 @@ export async function readAgentTranscript(s: TranscriptSources, instanceId: stri
     apiVersion: 1, projectId: s.projectId, sessionId: s.sessionId, instanceId, source: "terminal_snapshot",
     text: tailSafe(cleaned, TRANSCRIPT_MAX), truncated, observedAt: s.observedAt }) };
 }
+
+/**
+ * Shares one in-flight load per key and keeps a successful result for `ms`, measured from when it settled (a slow read
+ * must not start a second batch while pending). Rejections and results `keep` refuses are never reused.
+ */
+export function sharedFor<K, T>(ms: number, keep: (value: T) => boolean, now: () => number = Date.now) {
+  const entries = new Map<K, { promise: Promise<T>; settledAt?: number }>();
+  return (key: K, load: () => Promise<T>): Promise<T> => {
+    const found = entries.get(key);
+    if (found && (found.settledAt === undefined || now() - found.settledAt < ms)) return found.promise;
+    const entry: { promise: Promise<T>; settledAt?: number } = { promise: load() };
+    entries.set(key, entry);
+    entry.promise.then(
+      value => { if (keep(value)) entry.settledAt = now(); else if (entries.get(key) === entry) entries.delete(key); },
+      () => { if (entries.get(key) === entry) entries.delete(key); },
+    );
+    return entry.promise;
+  };
+}

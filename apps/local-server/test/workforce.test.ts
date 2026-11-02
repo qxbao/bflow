@@ -81,3 +81,7 @@ it('not_found from the transcript port maps to not_found',async()=>{
   const s=await setup({readAgentTranscript:async()=>({ok:false,error:{code:'not_found',retryable:false,message:'Agent not found in this session.'}})});
   expect((await f.send(s.transcript,'GET',undefined,s.headers)).status).toBe(404);
 });
+it('unsupported_version from the excerpts port maps to 422 operation_not_allowed',async()=>{
+  const s=await setup({readWorkforceExcerpts:async()=>({ok:false,error:{code:'unsupported_version',retryable:false,supportedVersions:[1],receivedVersion:0,message:'Terminal transcripts are not supported by this host.'}})});
+  const r=await f.send(s.excerpts,'GET',undefined,s.headers);expect(r.status).toBe(422);expect(r.json.code).toBe('operation_not_allowed');
+});

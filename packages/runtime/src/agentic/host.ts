@@ -8,6 +8,7 @@ import { acknowledgeDisplayedNotice } from "../interaction/notices.js";
 import { WebEventsQuerySchema, WebHttpPathParamsSchema, WebChatSendSchema, WebChatMessageSchema, WebMessagesQuerySchema } from "@bflow/contracts/web";
 import { interactionHostReady } from "../interaction/actions.js";
 import { hostInteractionQuery } from "../interaction/views.js";
+import { sharedFor } from "../interaction/transcript.js";
 import { interactionProjectId } from "../interaction/client.js";
 import { WebInteractionAuthority, OwnerKeySchema } from "../interaction/authority.js";
 import { WebOperationStore } from "../interaction/operation-store.js";
@@ -590,18 +591,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const interactionReady = () => interactionHostReady({ workspace: !!workspace, manifest: !!manifest, activating: !!activation, closing, quiesced });
   // Excerpts spawn one herdr read per busy pane: a 2 s cache with one shared in-flight read keeps several tabs from multiplying subprocesses.
   // Terminal output is deliberately not part of webProjectionFingerprint, so it never raises an `invalidate` event.
-  let excerptCache: { at: number; result: Promise<unknown> } | undefined;
+  const sharedExcerpts = sharedFor<string, unknown>(2000, value => record(value).ok === true);
   const readPane = (paneId: string, lines: number) => herdr(["pane", "read", paneId, "--source", "recent", "--lines", String(lines), "--format", "text"]);
   const readWebQuery = async (params: unknown) => {
-    if (record(params).kind === "workforce_excerpts") {
-      if (!excerptCache || Date.now() - excerptCache.at >= 2000) {
-        const result = readWebQueryUncached(params);
-        const entry = { at: Date.now(), result };
-        excerptCache = entry;
-        result.catch(() => { if (excerptCache === entry) excerptCache = undefined; });
-      }
-      return excerptCache.result;
-    }
+    if (record(params).kind === "workforce_excerpts")
+      return sharedExcerpts(String(record(params).projectId), () => readWebQueryUncached(params));
     return readWebQueryUncached(params);
   };
   const readWebQueryUncached = async (params: unknown) => {
