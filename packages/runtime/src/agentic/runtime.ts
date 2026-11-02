@@ -4814,9 +4814,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId)!;
               if (! current || current.status !== "waiting") continue;
               const out = state.outbound.find(item => item.handle?.requestId === task.result!.requestId)!;
+              let writerAbsent = false;
               if (!task.writerReleased) {
                 const health = unwrap(await this.ports.panes.inspectRoleHealth(out.selector));
-                if (!health.readyForPrompt || !health.occupantMatches) continue; // writer still active
+                if (!health.readyForPrompt || !health.occupantMatches) {
+                  if (health.paneId !== out.handle!.target.paneId || health.paneExists !== false || health.readyForPrompt || health.occupantMatches) continue; // busy/unknown/replaced writers are not stopped here
+                  writerAbsent = true;
+                }
               }
               try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); }
               catch (error) {
@@ -4825,7 +4829,33 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               }
               delete run.error;
               if (!task.writerReleased) {
-                unwrap(await this.ports.panes.releaseDeveloper({ taskId: `${run.runId}-${task.taskId}`, closePane: false, removeWorktree: false }));
+                if (writerAbsent) {
+                  if (this.uncertainDeliveryTo(state, run, "developer", { paneId: out.handle!.target.paneId, taskId: `${run.runId}-${task.taskId}` })) {
+                    this.escalateForHumanDecision(state, outbox, run, task.taskId, "Completed Developer still has uncertain delivery; writer and lease retained",
+                      ["Reconcile the pending delivery and resume", "Cancel this run"], "Writer delivery requires reconciliation");
+                    break;
+                  }
+                  let stopped = false;
+                  try {
+                    const binding = await this.resolveDeveloperExecutionBinding(out);
+                    const observed = out.handle && binding && ownsCancellationPane(out.handle, binding)
+                      ? await this.ports.stopDeveloperExecutionScope?.(out.handle, binding) : undefined;
+                    if (observed) {
+                      const proof = CancellationStopProofSchema.parse(observed);
+                      stopped = proof.source === "linux_pid_namespace" && digest(proof.handle) === digest(out.handle) &&
+                        Date.parse(proof.observedAt) >= Date.parse(out.handle!.acceptedAt) && Date.parse(proof.observedAt) <= Date.parse(this.now());
+                    }
+                  } catch { /* preserve the writer when exact namespace evidence is unavailable */ }
+                  if (!stopped) {
+                    this.escalateForHumanDecision(state, outbox, run, task.taskId, "Completed Developer pane is missing; exact namespace stop proof is required before releasing its writer",
+                      ["Repair the owned process-scope evidence and resume", "Cancel this run"], "Writer stop requires reconciliation");
+                    break;
+                  }
+                  // The scope manager durably seals/stops the exact execution before metadata-only release.
+                  await this.releaseCancelledAllocation(`${run.runId}-${task.taskId}`, out.handle!.target.worktreePath);
+                } else {
+                  unwrap(await this.ports.panes.releaseDeveloper({ taskId: `${run.runId}-${task.taskId}`, closePane: false, removeWorktree: false }));
+                }
                 task.writerReleased = true; await save();
               }
               await outbox.release(out);
