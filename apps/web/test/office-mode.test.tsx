@@ -110,6 +110,7 @@ test('visual HUD is pinned outside the panel and holds exactly one operations do
   fireEvent.click(await screen.findByRole('button',{name:'Tổng quan'}));
   for(const [label,value] of [['Tên công việc','Tìm sách'],['Mục tiêu','Tìm nhanh'],['Tiêu chí chấp nhận (mỗi dòng một tiêu chí)','Tìm theo tên'],['Ràng buộc (mỗi dòng một ràng buộc)','Không đổi API']])fireEvent.change(await screen.findByLabelText(label!),{target:{value}});
   fireEvent.click(screen.getByRole('button',{name:'Tạo công việc'}));await waitFor(()=>expect(posts).toHaveLength(1));
+  fireEvent.click(await screen.findByRole('button',{name:/Thao tác đã gửi/}));
   const docks=await screen.findAllByRole('region',{name:'Theo dõi thao tác'});
   expect(docks).toHaveLength(1);
   const bar=screen.getByRole('region',{name:'Thanh điều khiển'}),main=document.getElementById('main')!;

@@ -127,6 +127,11 @@ test('a refused session opens re-pairing in the panel instead of stale data', as
   const main = document.getElementById('main')!;
   expect(await within(main).findByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Cần ghép nối lại');
+  // Toàn cảnh closes panels but the re-pair view cannot be dismissed.
+  fireEvent.click(screen.getByRole('button', { name: 'Toàn cảnh' }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(within(main).getByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
+  expect(main.classList.contains('hidden')).toBe(false);
 });
 
 test('the skip link targets the HUD in 3D', async () => {

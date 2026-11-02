@@ -15,7 +15,8 @@ import { ChatPage } from './features/chat/page';
 import { Review } from './features/review';
 import { Settings } from './features/settings';
 import { useRead } from './features/data';
-import { Operations, OperationsDock } from './features/operations';
+import { Operations, OperationsDock, useOperationsDockSummary } from './features/operations';
+import type { OfficeFocusZone } from './features/office/model/types';
 import { Overview } from './features/overview';
 import { useUiMode, type UiMode } from './features/office/mode';
 import { OfficeFrame, OverviewOutlet } from './features/office/ui/OfficeFrame';
@@ -61,9 +62,9 @@ function Project({api,projects,projectsLoading,projectsError,revision,refresh,on
   const openOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
   // Inspectors live in the panel on the index path: opening one leaves any page route and the overview.
   const openInspector=useCallback((next:Inspector|undefined)=>{if(next){setOverviewOpen(false);if(!isIndex)navigate(base);}setInspector(next);},[isIndex,navigate,base]);
-  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,closable,dockPx,inspectorRef:setInspectorHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,dockPx,setDockPx,inspector,openInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
+  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,closable,dockPx,inspectorRef:setInspectorHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,closePanels:close,dockPx,setDockPx,inspector,openInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
 }
-type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void;dockPx:number;setDockPx:(px:number)=>void;inspector:Inspector|undefined;openInspector:(next:Inspector|undefined)=>void;inspectorHost:HTMLElement|null};
+type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void;closePanels:()=>void;dockPx:number;setDockPx:(px:number)=>void;inspector:Inspector|undefined;openInspector:(next:Inspector|undefined)=>void;inspectorHost:HTMLElement|null};
 /** What the overlay panel shows in 3D besides pages: local state, never a route. */
 export type Inspector={kind:'agent';instanceId:string}|{kind:'unseated'}|{kind:'cabinet'}|{kind:'server'}|{kind:'repair'};
 function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame}) {
@@ -121,7 +122,16 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     const w=window.innerWidth,bottom=frame.hud?.querySelector<HTMLElement>('[data-hud-bottom]')?.offsetHeight??0;
     return {right:RAIL_PX+(open&&w>=768?Math.min(720,w*0.7):0),bottom,left:0};
   };
-  const hasModel=model!==undefined,refocusHud=useRef(false);
+  const hasModel=model!==undefined,refocusHud=useRef(false),panelNow=useRef(frame.panelOpen),mounted=useRef(true);
+  panelNow.current=frame.panelOpen;
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
+  const dockSummary=useOperationsDockSummary();
+  // Toàn cảnh closes every panel (the re-pair view stays); the camera eases only after that commit, with the then-current inset.
+  const focusZone=(zone:OfficeFocusZone)=>{
+    if(zone!=='overview'){control.current?.focusZone(zone);return;}
+    frame.closePanels();
+    setTimeout(()=>{if(!mounted.current)return;control.current?.setInset(insetFor(panelNow.current));control.current?.focusZone(zone);},0);
+  };
   useEffect(()=>{
     const apply=()=>control.current?.setInset(insetFor(frame.panelOpen));
     apply();window.addEventListener('resize',apply);return()=>window.removeEventListener('resize',apply);
@@ -162,7 +172,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     {inspected}
     {frame.hud && createPortal(<OfficeHud projectName={project.displayName} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} session={session} model={model} runs={runs} connection={connection} stale={stale} failed={error!==undefined&&!authRequired&&!model} authRequired={authRequired} mode={frame.mode} onMode={frame.setMode} panelOpen={frame.panelOpen} overflow={overflow}
       onOverview={frame.openOverview} onNavigate={path=>{if(path==='')frame.openOverview();else go(`${base}/${path}`);}} onDocuments={()=>openInspector({kind:'cabinet'})} onRefresh={refresh}
-      onFocusZone={zone=>control.current?.focusZone(zone)} onAgentList={()=>openInspector({kind:'unseated'})}
-      onChatDraft={draft=>{openInspector(undefined);navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} onDockHeight={frame.setDockPx}/>,frame.hud)}
+      onFocusZone={focusZone} onAgentList={()=>openInspector({kind:'unseated'})}
+      onChatDraft={draft=>{openInspector(undefined);navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} dockSummary={dockSummary} onDockHeight={frame.setDockPx}/>,frame.hud)}
   </>;
 }

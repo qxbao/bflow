@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { WebProjectSession, WebRunView } from '@bflow/contracts/web';
 import { phases } from '../../../components/StatusBadge';
 import type { Connection } from '../../../api/events';
@@ -81,8 +81,10 @@ export interface OfficeHudProps {
   onAgentList: () => void;
   /** Receives the draft; the page that takes it over decides what happens. The HUD never sends anything. */
   onChatDraft: (draft: string) => void;
-  /** The operations dock, rendered once at the bottom. */
+  /** The operations dock, rendered once at the bottom (collapsed behind a toggle until opened). */
   dock: ReactNode;
+  /** Drives the dock toggle: shown when something is tracked or needs attention. */
+  dockSummary: { count: number; attention: boolean };
   /** Set on the shell ancestor so the panel can stop above the dock on small screens. */
   onDockHeight?: (px: number) => void;
 }
@@ -93,6 +95,8 @@ export interface OfficeHudProps {
  */
 export function OfficeHud(p: OfficeHudProps) {
   const [draft, setDraft] = useState('');
+  const [dockOpen, setDockOpen] = useState(false);
+  const dockId = useId();
   const bottom = useRef<HTMLDivElement>(null);
   const { onDockHeight } = p;
   useEffect(() => {
@@ -163,10 +167,11 @@ export function OfficeHud(p: OfficeHudProps) {
       </button>)}
     </nav>
     <div ref={bottom} data-hud-bottom className={`absolute inset-x-3 bottom-0 flex flex-col gap-2 pb-3 ${p.panelOpen ? 'max-md:pb-0' : ''}`}>
-      <div data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
+      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={dockOpen} aria-controls={dockId} onClick={() => setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count}){p.dockSummary.attention && <span className="sr-only"> Có thao tác cần xem</span>}</button>}
+      <div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
       <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
         <div role="group" aria-label="Góc nhìn camera" className={`pointer-events-auto flex flex-wrap gap-1 self-start p-1 ${panel}`}>
-          {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => p.onFocusZone(zone)}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
+          {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
           {p.overflow > 0 && <button type="button" className={`${camButton} text-accent`} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} title="Mở danh sách nhân viên" onClick={p.onAgentList}>+{p.overflow}</button>}
         </div>
         <form onSubmit={submit} className={`pointer-events-auto m-0 flex min-w-0 flex-1 items-center gap-2 py-1 pr-1 pl-3 md:mx-auto md:w-full md:max-w-xl ${panel}`}>

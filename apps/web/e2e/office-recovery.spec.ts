@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { startAcceptanceHost, type AcceptanceHost } from './acceptance-fixture';
-import { browserOptions, enterVisual, mirror, recordWebGl, sceneReady, stableCount, workforceBody } from './office-fixture';
+import { browserOptions, enterVisual, mirror, openDock, recordWebGl, sceneReady, stableCount, workforceBody } from './office-fixture';
 // V8.3: the W09 recovery scenarios of recovery.spec.ts through the 3D mode (same deterministic host, assertions on host-side effect logs),
 // plus the §8.3 browser/fault rows: uncertain delivery, lost WebGL context, expired session, a full developer pool and repeated mode switching.
 test.use(browserOptions());
@@ -37,11 +37,13 @@ test('3D AC08 response lost after commit, Local Server restart mid-operation and
   await page.getByRole('button', { name: 'Xem xét gói' }).click(); await page.getByRole('button', { name: 'Duyệt gói' }).click();
   await expect.poll(() => dropped).toBe(1);
   await expect.poll(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'answer_decision').length).toBe(1);
+  await openDock(page);
   await expect(page.getByText(/Mất phản hồi|Chưa xác định kết quả|Đã áp dụng thao tác/).first()).toBeVisible();
   await page.reload();
   // The reload keeps 3D and rebuilds the scene; the dock (HUD) recovers the operation by its stored ID without a second POST.
   await expect(page.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await sceneReady(page);
+  await openDock(page);
   await expect(page.getByText('Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.').first()).toBeVisible({ timeout: 15000 });
   await stableCount(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'answer_decision').length, 1);
   let state = await host.call('inspect');
@@ -59,6 +61,7 @@ test('3D AC08 response lost after commit, Local Server restart mid-operation and
   await page.goto(new URL(base + '/runs/run', repair).href);
   await expect(page.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await sceneReady(page);
+  await openDock(page);
   await expect(page.getByText('Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.')).toBeVisible({ timeout: 15000 });
   // The host held the cancel for 3 s inside the restart; wait it out and keep watching for a duplicate.
   await stableCount(async () => (await host.call('inspect')).effects.filter((k: string) => k === 'cancel').length, 1, 3200);
@@ -87,6 +90,7 @@ test('3D AC08/AC05 two tabs with conflicting decisions commit exactly one; the o
   expect(state.effects).toEqual(['answer_decision']);
   expect(state.commands.map((c: any) => c.outcome)).toHaveLength(1);
   const winner = state.decisionOutcome === 'approved' ? a : b, loser = winner === a ? b : a;
+  await openDock(winner); await openDock(loser);
   await expect(winner.getByText(/Đã áp dụng thao tác|Mất phản hồi/).first()).toBeVisible();
   await expect(winner.getByText(`Quyết định gói: ${state.decisionOutcome === 'approved' ? 'Duyệt' : 'Từ chối'}`).first()).toBeVisible();
   await expect(loser.getByText(/chưa được gửi|không được áp dụng/).first()).toBeVisible({ timeout: 10000 });
