@@ -114,7 +114,13 @@ Audit 101 cue accepted-walk đã capture (54 handoff IDs duy nhất) khớp rece
 
 Còn double independent gate, workflow integration/verification và duyệt bàn giao. Chưa tuyên bố V9 đạt.
 
-Đã chuẩn bị đề xuất read-only evidence packet trong ledger `v9-review-evidence-proposal.md`, đang chờ owner mở phạm vi mới vì quyền Runtime vừa cấp chỉ bao gồm writer-stop. Chưa sửa thêm production logic. Phải phân biệt `sourceRevision` của candidate với `testRevision` frozen; không lấy self-check thay independent evidence hay ép Reviewer/QA đổi verdict.
+Owner đã duyệt tiếp đề xuất `v9-review-evidence-proposal.md`. Commit `3d04ff6a` bổ sung view chỉ đọc của các receipt candidate đã có; không thay gate, thứ tự kiểm chứng, lease/fence hay ngân sách. Phải phân biệt `sourceRevision` của candidate với `testRevision` frozen; không lấy self-check thay independent evidence hay ép Reviewer/QA đổi verdict.
+
+Bản sửa evidence: task `inspect_review` nay trả `candidateBehavioralEvidence`, pin run/task/sourceRevision/spec/decision, giữ attempt gốc và phân biệt testRevision frozen. Phase receipts phải xác thực và artifact phải đọc/hash đúng; gate receipts phải xác thực, đúng behavioral executor và fingerprint. Self-check, revision/task/spec khác hoặc thiếu artifact bị loại. View giới hạn ba entry, 4 MiB mỗi artifact/12 MiB mỗi lần đọc; không chạy thêm test hay mint kết quả. Private review context giữ snapshot; khi xin ngoại lệ test-integrity, host gỡ riêng field mới để giữ guard context gốc.
+
+Regression RED→GREEN; targeted 62 PASS, sau review 66 PASS, kiểm tra candidate cuối 12 PASS; typecheck/build/diff-check PASS. Sonnet finding Important ở đường owner exception đã sửa và scoped re-review không còn Important. Runtime forced build được kiểm tra chứa source cuối. Không chạy lại full CLI hay Playwright cho thay đổi host-only này.
+
+Host được nạp lại qua owner-loss recovery: SIGTERM riêng host cũ, không dừng Herdr/Developer, không tạo graceful-down receipt giả. Built `up` exit0, bảy role pane thường trực được tạo lại; Developer binding giữ nguyên. UI 3D resume cùng run. Chẩn đoán chỉ đọc trên receipt live cho candidate `cebc7cbc…` trả available, receipt `d0be6277-2465-4998-8199-261091a09eed`, checksum digest và test name đúng; đây chưa phải verdict live mới. Coordinator đã xác nhận routing bị chặn: `prepareRoleToolMessage` cấm gửi trực tiếp tới specialist; path explicit resume hiện chỉ đánh thức Developer khi có đúng một Red receipt. Rework đã đủ ba phase không nhận task notice, nên Developer chưa được đánh thức để submit dossier và chưa có lượt review live mới. Đây là blocker tiếp theo, không ghi view đã có verdict mới. Đề xuất mở rộng hẹp task notice trong resume ở ledger `v9-resume-holder-proposal.md` đang chờ owner; chưa sửa behavior này.
 
 Lệnh checkpoint `down --yes` sau blocker mới **exit 1**: guard báo Developer chưa có correlated result, không dừng gì. Không dùng `--force` hoặc cancel để làm đẹp teardown vì sẽ mất attempt hiện tại. Session vẫn **up**, worktrees/run được giữ nguyên; scoped hook policy chưa revoke khi session còn up. Đây là giới hạn teardown thực tế, không ghi là đã checkpoint thành công. Web/Chrome/observer chiến dịch được giữ cho cùng-run continuation; không đụng process của người dùng. Thời gian run gồm cả điều tra/sửa và downtime, không phải benchmark thời gian hoàn tất.
 
@@ -134,6 +140,6 @@ Ledger ngoài Git (không xóa): `.superpowers/sdd/2026-11-02-web-visualization-
 - `v9-preflight/`: preflight cũ; `v9-live/`, `v9-fixed-live/`: các chiến dịch trước.
 - `v9-golden-live/evidence/`: Golden checkpoints, concurrent Developer tool witness, fault/recovery, exact writer-stop proof, cue/receipt audit, evidence contradiction và lỗi teardown.
 - `writer-stop-{sonnet-review,sonnet-rereview}.md`, `writer-stop-checks/`, `writer-stop-review-green-final.log`: scoped review và kiểm chứng sửa Runtime.
-- `v9-review-evidence-proposal.md`: phạm vi sửa tiếp theo đang chờ owner quyết định.
+- `v9-review-evidence-proposal.md`: phạm vi evidence đã được owner duyệt và sửa tại `3d04ff6a`; `v9-resume-holder-proposal.md`: blocker resume holder mới đang chờ owner.
 
 Ruling mới: giữ ledger theo lệnh owner; timeout 240s là trần test tổng; không đổi screenshot khi chưa tái hiện flaky; không thay review độc lập bằng self-review/quota fallback; không gọi phép đo fixture hay catalog access là live acceptance. Chi phí: còn gate review, full suite và V9 trước khi owner quyết định merge/phát hành.
