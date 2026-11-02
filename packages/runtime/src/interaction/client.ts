@@ -6,7 +6,7 @@ import {
   WebRunPageResultSchema,
   WebRunViewResultSchema,
   WebDecisionPageResultSchema,
-  WebWorkforceViewSchema, OperationResultSchema,
+  WebWorkforceViewSchema, WebActivityEntrySchema, OperationResultSchema,
   WebCommandSchema, WebOperationResponseSchema, type WebCommand,
   type UserInteractionClient,
   type OperationResult,
@@ -25,6 +25,7 @@ export function interactionProjectId(canonicalRepositoryPath: string): string {
   );
 }
 const WebWorkforceResultSchema = OperationResultSchema(WebWorkforceViewSchema);
+const WebActivityResultSchema = OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
 const unavailable = <T>(): OperationResult<T> => ({
   ok: false,
   error: {
@@ -139,6 +140,14 @@ export async function openUserInteractionClient(options: {
       }),
     readWorkforce: id =>
       query({ kind: "workforce", projectId: id }, (v) => WebWorkforceResultSchema.parse(v)),
+    readRunActivity: (id, runId, cursor) =>
+      query({ kind: "activity", projectId: id, runId, ...(cursor ? { cursor } : {}) }, (v) => {
+        const result = WebActivityResultSchema.parse(v);
+        return result.ok
+          ? { ok: true, value: { apiVersion: 1, items: result.value.items,
+            ...(result.value.nextCursor ? { nextCursor: result.value.nextCursor } : {}) } }
+          : result;
+      }),
     async execute(input) {
       if (!options.interaction) return refused();
       let command;

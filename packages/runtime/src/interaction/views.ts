@@ -299,6 +299,7 @@ import {
   WebRunViewResultSchema,
   WebDecisionPageResultSchema,
   WebWorkforceViewSchema,
+  WebActivityEntrySchema,
   OperationResultSchema,
 } from "@bflow/contracts";
 import { ConversationContextSnapshotSchema } from "@bflow/conversation";
@@ -307,8 +308,10 @@ import type { HostConfiguration } from "../agentic/host-controller.js";
 import { InteractionQuerySchema } from "./schemas.js";
 import { interactionProjectId } from "./client.js";
 import { projectWorkforce } from "./workforce.js";
+import { readRunActivityPage } from "./activity.js";
 const projectionSnapshots = new ProjectionSnapshots();
 const WebWorkforceResultSchema = OperationResultSchema(WebWorkforceViewSchema);
+const WebActivityResultSchema = OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
 async function readSnapshot(path: string): Promise<unknown | undefined>;
 async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
 async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown, maxBytes = 16 * 1024 * 1024): Promise<unknown | undefined> {
@@ -418,7 +421,7 @@ export async function hostInteractionQuery(
       : journal;
   const core = new Map<string, WorkflowRunSnapshot>();
   // The workforce projection needs only the manifest and journal; skipping Core reads keeps its 1 s polling cheap.
-  for (const r of query.kind === "workforce" ? [] : state.runs.filter(
+  for (const r of query.kind === "workforce" || query.kind === "activity" ? [] : state.runs.filter(
     (r) => r.delegation.sessionId === sessionId && r.coreCreated,
   )) {
     const value = await options.readCore?.(r.runId);
@@ -455,6 +458,13 @@ export async function hostInteractionQuery(
       value: projectWorkforce({ state, sessionId, observedAt, core: new Map(), ready: options.ready, manifest, projectId,
         redact, redactOption: redactSecrets }),
     });
+  if (query.kind === "activity") {
+    if (!state.runs.some(r => r.runId === query.runId && r.delegation.sessionId === sessionId))
+      return { ok: false as const, error: { code: "not_found" as const, retryable: false as const, message: "Run not found in this session." } };
+    return WebActivityResultSchema.parse({
+      ok: true, value: await readRunActivityPage(join(root, "agentic/task-activity.jsonl"), query.runId, query.cursor, redact),
+    });
+  }
   const rawContext = await readSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
   const context = rawContext === undefined ? undefined : ConversationContextSnapshotSchema.parse(rawContext);
   if (context && (context.session.sessionId !== sessionId || context.session.herdrSessionId !== configuration.sessionId))
