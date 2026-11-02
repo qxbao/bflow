@@ -192,9 +192,13 @@ bàn giao Markdown sau khi người duyệt đúng digest tài liệu; phê duy�
 `AgenticWorkflowRuntime.proposeWorkflow` bắt buộc DAG chỉ gồm Developer task và kết thúc bằng workflow verification
 trên change đã tích hợp Git. Vì vậy BA-only được tách thành luồng tương thích riêng, không giả lập implementation.
 
-Chi tiết về pack, provenance, các kiểm tra, recovery, revision, phần tích hợp host/CLI còn lại và giới hạn: xem
+Chi tiết về pack, provenance, các kiểm tra, recovery, revision, tích hợp host/CLI và giới hạn: xem
 [ANALYSIS-ONLY-WORKFLOW.md](ANALYSIS-ONLY-WORKFLOW.md). Pack mẫu: [support/analysis-only-pack.json](support/analysis-only-pack.json).
-Mức bằng chứng: source cộng test local với role giả lập; chưa nối host/Herdr/Conversation/CLI.
+Host đã có nhánh pack BA riêng, giao việc native có receipt ký, tool output có cấu trúc và chuyển nguyên quyết định
+người dùng qua Conversation. Quyền mỗi assignment chỉ cho `repository_read` trong surveyPaths; native read/shell/write/network
+bị chặn kể cả trên pane từng có quyền rộng hơn. Review native yêu cầu khác agent, pane và provider session với tác giả.
+Mức bằng chứng hiện tại là source cộng test local với transport giả lập và Core/Registry/SQLite/ArtifactStore thật;
+chưa chứng nhận BA live hoặc toàn bộ recovery/lifecycle của host.
 
 ## Workflow chỉ kiểm thử (QA-only, extension)
 

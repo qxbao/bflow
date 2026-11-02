@@ -104,7 +104,7 @@ Việc file tồn tại không đủ để pass. `verifyAnalysisDocument` kiểm
 Khi gate thất bại, Core chạy retry có giới hạn và gửi lại cho specifier kèm findings. Mặc định tối đa 3 lần
 (`maxIterations` cho phép 1–10). Gate `independent-review` yêu cầu đủ ba điều kiện:
 
-- reviewer khác danh tính với tác giả;
+- reviewer khác danh tính với tác giả; ở chế độ native còn phải khác pane và provider session theo binding receipt có xác thực;
 - verdict ghim đúng digest tài liệu hiện tại;
 - verdict là `approved`, không có finding blocking, và tài liệu vẫn pass kiểm tra.
 
@@ -136,7 +136,8 @@ Khi gate thất bại, Core chạy retry có giới hạn và gửi lại cho sp
 
 - Core event được append vào RunStore sau mỗi mutation. Sau restart, aggregate được dựng lại bằng `engine.recover`
   replay event, sau đó mới áp approval hay gate.
-- Binding được ghi vào Core trước khi giao việc cho role:
+- SDK local ghi logical binding trước khi gọi role port. Host native giữ intent/request trong WAL trước khi giao việc,
+  rồi ghi handle thực vào Core sau khi transport chấp nhận; kết quả phải có receipt ký và được Core xác thực:
   - Execution đã bind nhưng chưa có kết quả thì không bao giờ gửi lại mù. Runtime gọi `roles.reconcile`.
     Nếu kết quả `unknown`, run bị `blocked` với `unknown_delivery:<executionId>`.
   - Nếu journal mất bản ghi binding, Runtime nhận binding từ Core và đi tiếp bằng reconcile.
@@ -160,23 +161,26 @@ await runtime.decideBusinessQuestions(runId, { decision: "approved", answers, de
 await runtime.decideDocument(runId, { decision: "approved", documentDigest, decidedBy: "user:<id>" });
 ```
 
-## Tích hợp còn lại (đề xuất, cần owner duyệt)
+## Tích hợp host trong source
 
-1. Host MCP tool cho Coordinator: `propose_analysis_workflow` gọi `start`. Port `AnalysisRolePort` giao việc qua
-   Runtime → Herdr `RoleMessage`. `reconcile` dùng execution binding/receipt hiện có.
-2. Conversation route `decideBusinessQuestions`/`decideDocument` qua `request_user_decision` hiện có.
-   `authorizeHuman` dùng cùng cơ chế xác thực human decision của host.
-3. Chọn pack qua `environment.workflowPack` (đã có). `bflow up` cần nhánh khởi động không yêu cầu Developer/Git
-   integration khi `workflow.id = bflow.analysis-only`. Đây là thay đổi trong P29/P30, không phải contract.
-4. Lưu journal trong private runtime state (`resolvePrivateRuntimeStateDirectory`), giống journal agentic.
+Host đóng băng family và pin pack từ Conversation delegation. Coordinator gọi `start_extension` với intake hợp lệ;
+Runtime giao `extension.assignment` qua Registry/Herdr và nhận `submit_extension_output` cùng receipt ký. Không tạo
+Developer task. `assignment_context` cung cấp schema output theo task. SDK native dùng journal v2 riêng trong private
+runtime state; lịch sử SDK local v1 không được chuyển thành bằng chứng native.
+
+Conversation giữ hai approval scope `business_decisions` và `analysis_document`; host lưu nguyên `ApprovalDecision`
+đã xác thực, không tái tạo timestamp hay idempotency key. `applyHumanDecision` áp đúng receipt đó vào Core.
+Mỗi assignment chỉ đọc qua `repository_read` trong `surveyPaths` của repository hiện tại, không kế thừa verification
+worktree của task trước. Guard chặn native file/shell/network, MCP ghi và tool ngoài scope; sau khi task kết thúc quyền
+rộng chỉ được khôi phục bởi assignment thông thường mới đã được chấp nhận.
+
+Kiểm chứng restart/cancel/concurrency toàn host và BA live vẫn là các bước acceptance riêng.
 
 ## Giới hạn
 
-- Mức bằng chứng: source cộng test local (`test/analysis/analysis-workflow.test.ts`) với role giả lập xác định,
-  Core/RunStore/ArtifactStore thật. Chưa nối với host/Herdr/Conversation, chưa có lệnh CLI, chưa có live provider
-  acceptance.
-- Correlation của kết quả role do Runtime gán qua port in-process. Khi nối Herdr, correlation phải đến từ binding
-  receipt có xác thực.
+- Mức bằng chứng: source cộng test local (`test/analysis/**`, `test/extension-analysis.test.ts`, `test/extension-native-runtime.test.ts`)
+  với transport giả lập, Core/Registry/RunStore/ArtifactStore thật. Host/Conversation/CLI đã có source wiring; chưa có BA live provider acceptance.
+- Port SDK local vẫn dùng logical handle. Chỉ nhánh native nhận actual handle và binding receipt ký; hai loại bằng chứng được tách riêng.
 - Kiểm tra từ ngữ mơ hồ dùng danh sách từ khóa, không phải hiểu ngữ nghĩa. Verdict reviewer không chứng minh chất
   lượng phán đoán.
 - Run bị thay thế không bị hủy trong Core (task chờ quyết định vẫn treo). Journal chặn mọi tiến triển của run đó.

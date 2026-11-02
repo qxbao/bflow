@@ -1,8 +1,8 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, DomainEventSchema, IdentifierSchema, JsonValueSchema,
-  PaneBindingSchema, RoleMessageSchema, StoredRunSchema, WorkflowPackSchema, type ApprovalDecision, type ApprovalRequest, type DelegationRequest, type JsonValue,
-  type PaneBinding, type RoleMessage, type RunStore, type WorkflowPack } from "@bflow/contracts";
+  PaneBindingSchema, RoleMessageSchema, WorkflowRunSnapshotSchema, WorkflowPackSchema, type ApprovalDecision, type ApprovalRequest, type DelegationRequest, type JsonValue,
+  type PaneBinding, type RoleMessage, type RunStore, type WorkflowEngine, type WorkflowPack } from "@bflow/contracts";
 import { AnalysisWorkflowRuntime } from "../analysis/workflow.js";
 import { AnalysisIntakeSchema, type AnalysisIntakeInput } from "../analysis/model.js";
 import { ANALYSIS_WORKFLOW_ID, resolveAnalysisPack, type AnalysisPackPin } from "../analysis/pack.js";
@@ -59,7 +59,7 @@ export function workflowPackFamily(input: unknown): WorkflowFamily {
 
 export async function createWorkflowExtensionHost(options: {
   repositoryPath: string; sessionId: string; journalDirectory: string;
-  analysis: AnalysisWorkflowRuntime; qa: QaWorkflowRuntime; native: NativeExtensionRolePort; runStore: RunStore;
+  analysis: AnalysisWorkflowRuntime; qa: QaWorkflowRuntime; native: NativeExtensionRolePort; runStore: RunStore; engine: WorkflowEngine;
   isLegacyImplementationRun?(runId: string): Promise<boolean>;
   readPack(): Promise<WorkflowPack | undefined>;
   publishToConversation(message: RoleMessage): Promise<void>;
@@ -219,9 +219,9 @@ export async function createWorkflowExtensionHost(options: {
       await currentPack(entry);
       if (!entry.started || intent.family !== entry.kind || !entry.input || !binding.readOnlyWorkspace || binding.role === "developer")
         throw new Error("Native assignment has no active extension scope");
-      const stored = await options.runStore.get(entry.runId);
-      if (!stored.ok) throw new Error("Native extension Core snapshot is unavailable");
-      const snapshot = StoredRunSchema.parse(stored.value).snapshot;
+      const current = await options.engine.getSnapshot(entry.runId);
+      if (!current.ok || !current.value) throw new Error("Native extension authoritative Core snapshot is unavailable");
+      const snapshot = WorkflowRunSnapshotSchema.parse(current.value);
       const task = snapshot.tasks.find(item => item.taskId === intent.taskId);
       const sdk = runtime(entry).status(entry.runId);
       const definition = sdk.definition.tasks.find(item => item.id === intent.taskId);

@@ -26,6 +26,15 @@ export function extensionIntent(family: "analysis" | "qa", sessionId: string, as
 
 const same = (a: unknown, b: unknown) => canonicalReceiptJson(a) === canonicalReceiptJson(b);
 
+/** Native review requires different authenticated actors, panes and provider sessions. Missing proof cannot establish independence. */
+export function nativeExecutionsIndependent(author: ExtensionExecution | undefined, reviewer: ExtensionExecution): boolean {
+  if (!author?.outcome || !reviewer.outcome) return false;
+  const a = AgentExecutionHandleSchema.parse(author.outcome.receipt.handle).target;
+  const b = AgentExecutionHandleSchema.parse(reviewer.outcome.receipt.handle).target;
+  return Boolean(a.agentId && b.agentId && a.agentId !== b.agentId && a.paneId && b.paneId && a.paneId !== b.paneId &&
+    a.session && b.session && !same(a.session, b.session));
+}
+
 /** Delivery proof remains owned by the native bridge; Core independently authenticates the binding receipt. */
 export async function executeExtension(input: {
   execution: ExtensionExecution; port: NativeExtensionRolePort; save(): Promise<void>;

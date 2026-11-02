@@ -48,7 +48,7 @@ export async function openWorkflowExtensionRuntimes(options: {
   const qa = await QaWorkflowRuntime.open({ ...shared, ...options.qa, roles: roleAdapter("qa", options.sessionId, options.native, options.now),
     journalPath: join(options.directory, "native-qa-v2.json") });
   const host = await createWorkflowExtensionHost({ repositoryPath: options.repositoryPath, sessionId: options.sessionId,
-    journalDirectory: join(options.directory, "routes"), analysis, qa, native: options.native, runStore: options.runStore,
+    journalDirectory: join(options.directory, "routes"), analysis, qa, native: options.native, runStore: options.runStore, engine: options.engine,
     ...(options.isLegacyImplementationRun ? { isLegacyImplementationRun: options.isLegacyImplementationRun } : {}),
     readPack: options.readPack, publishToConversation: options.publishToConversation });
   return { host, analysis, qa };

@@ -10,7 +10,7 @@ import { openSqliteRunStore } from "@bflow/persistence";
 import { AgentBindingReceiptSchema, AgentConfigurationSchema, PaneBindingSchema, RoleMessageSchema, receiptSigningBytes,
   type AgentExecutionHandle, type AgentRequest, type OperationResult } from "@bflow/contracts";
 import { AnalysisWorkflowRuntime, QaWorkflowRuntime, buildAnalysisPack, createNativeExtensionRolePort } from "../../src/index.js";
-import type { NativeExtensionRolePort } from "../../src/agentic/extension-delivery.js";
+import type { NativeExtensionDeliveryOptions, NativeExtensionRolePort } from "../../src/agentic/extension-delivery.js";
 import { AppCheckBrowserLeases } from "../../src/agentic/app-check-lease.js";
 import { FakeAgentTransport } from "./fake-transport.js";
 
@@ -54,9 +54,11 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
   };
   transport.customReconcileHandler = request => ({ ok: true, value: { status: "bound", handle: handles.get(request.requestId)! } });
   let bridge: NativeExtensionRolePort;
+  let outputFor: ((request: AgentRequest, assignment: Record<string, any>) => unknown) | undefined;
+  let authorize: NativeExtensionDeliveryOptions["authorize"] = async () => {};
   const createBridge = () => createNativeExtensionRolePort({ repositoryPath: repo, journalDirectory: join(root, "delivery"),
     sessionId: sessionId, registry, transport, artifactStore, bindingReceiptKeys,
-    authorize: async () => {}, preflight: async () => {}, authenticateMessage: async () => true,
+    authorize: (intent, binding) => authorize(intent, binding), preflight: async () => {}, authenticateMessage: async () => true,
     panes: { getRoleBinding: async role => ({ ok: true, value: panes.get(role)! }), inspectRoleHealth: async selector => {
       const pane = [...panes.values()].find(item => item.bindingId === selector)!;
       return { ok: true, value: { readyForPrompt: true, occupantMatches: true, paneId: pane.paneId, agentId: pane.agentId } };
@@ -69,7 +71,7 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
     waitResult: async id => {
       const request = requests.get(id)!, handle = handles.get(id)!, wire = RoleMessageSchema.parse(request.context);
       const assignment = (wire.payload as { intent: { message: { payload: Record<string, any> } } }).intent.message.payload;
-      const output = request.taskId === "survey" ? { observations: [{ path: "src/health.ts", note: "Health state exists" }] } : request.taskId === "elicitation" ? { questions: [] }
+      const output = outputFor ? outputFor(request, assignment) : request.taskId === "survey" ? { observations: [{ path: "src/health.ts", note: "Health state exists" }] } : request.taskId === "elicitation" ? { questions: [] }
         : request.taskId === "design" ? { design: { schemaVersion: 1, title: "Health design", cases: [{ id: "TC-1", title: "Health",
           criterionIds: ["AC-1"], sideEffect: "none", expected: "healthy", steps: [{ kind: "http", method: "GET", url: "/health", expect: { status: 200 } }], cleanup: [] }],
           criteriaCoverage: [{ criterionId: "AC-1", caseIds: ["TC-1"] }] } }
@@ -110,5 +112,7 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
       criteria: [{ id: "AC-1", description: "Health returns HTTP 200" }], allowedActions: ["http_read"], accountPolicy: { accounts: [] },
       dataPolicy: { fixturePrefix: "native-qa", redactKeys: [] }, cleanup: { required: true }, workspace: { assetRoot: "qa" }, protectedPaths: [] } });
   };
-  return { root, repo, runStore, artifactStore, native, open, start, transport, handles, journalPath, loseAck: () => { loseAck = true; }, omitReceipt: () => { missingReceipt = true; } };
+  return { root, repo, runStore, artifactStore, native, open, start, transport, handles, journalPath, panes,
+    setOutput: (fn: NonNullable<typeof outputFor>) => { outputFor = fn; },
+    setAuthorize: (fn: typeof authorize) => { authorize = fn; }, loseAck: () => { loseAck = true; }, omitReceipt: () => { missingReceipt = true; } };
 }

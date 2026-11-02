@@ -21,7 +21,7 @@ import { extensionDecisionRequest } from "../extension-decisions.js";
 import { canonicalReceiptJson } from "@bflow/contracts";
 import { z } from "zod";
 
-import { executeExtension, extensionIntent, type ExtensionExecution } from "../extension-execution.js";
+import { executeExtension, extensionIntent, nativeExecutionsIndependent, type ExtensionExecution } from "../extension-execution.js";
 import type { NativeExtensionRolePort } from "../agentic/extension-delivery.js";
 /** One assignment delivered to a standard role; it carries read context only, never write/command authority. */
 export interface AnalysisAssignment {
@@ -501,7 +501,9 @@ export class AnalysisWorkflowRuntime {
       const review = run.review!;
       const recheck = this.verify(run, latest.content);
       const problems: { code: string; message: string; ids: string[]; severity: string }[] = [];
-      if (review.agentId === author) problems.push({ code: "review_not_independent", message: "The reviewer authored the document", ids: [review.agentId], severity: "error" });
+      const authorExecution = run.executions.find(item => item.attemptId === latest.attemptId);
+      if (review.agentId === author || execution.native && !nativeExecutionsIndependent(authorExecution?.native, execution.native))
+        problems.push({ code: "review_not_independent", message: "The reviewer must have an independent authenticated actor, pane and native session", ids: [review.agentId], severity: "error" });
       if (review.documentDigest !== latest.digest) problems.push({ code: "review_stale", message: "Review is not pinned to the current document digest", ids: [review.documentDigest], severity: "error" });
       if (review.verdict !== "approved" || review.findings.some(item => item.severity === "blocking"))
         problems.push({ code: "review_changes_requested", message: "Independent review requested changes", ids: review.findings.map(item => item.id), severity: "error" });

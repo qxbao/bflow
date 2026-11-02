@@ -20,14 +20,14 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 async function fixture(sessionId = "session-native") {
   const a = await nativeExtensionFixture("analysis", sessionId), q = await nativeExtensionFixture("qa", sessionId);
-  const analysis = (await a.open()).sdk, qa = (await q.open()).sdk;
+  const { sdk: analysis, engine } = await a.open(), qa = (await q.open()).sdk;
   const notices: unknown[] = [];
   let pack: WorkflowPack | undefined = runtime.buildAnalysisPack({ id: "host-analysis", version: "1" });
   const create = async (extra: Record<string, unknown> = {}) => {
     const factory = Reflect.get(runtime, "createWorkflowExtensionHost");
     expect(factory, "host must freeze exact pack identity before dispatch, then compose the existing SDKs").toBeTypeOf("function");
     return factory({ repositoryPath: a.repo, sessionId, journalDirectory: join(a.root, "routes"),
-      analysis, qa, native: a.native, runStore: a.runStore, readPack: async () => pack,
+      analysis, qa, engine, native: a.native, runStore: a.runStore, readPack: async () => pack,
       publishToConversation: async (message: unknown) => { notices.push(message); }, ...extra });
   };
   const intake = { schemaVersion: 1, requestId: "host-ba", sessionId, title: "Health analysis",

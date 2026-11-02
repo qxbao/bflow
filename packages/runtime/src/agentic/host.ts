@@ -1,3 +1,5 @@
+import { guardExtensionTool, selectNativeExtensionScope, readNativeExtensionRepository } from "./extension-permissions.js";
+export { guardExtensionTool, selectNativeExtensionScope, readNativeExtensionRepository } from "./extension-permissions.js";
 import { readExtensionReference } from "./extension-reference.js";
 import { WorkflowExtensionPump } from "./extension-pump.js";
 import { AnalysisIntakeSchema } from "../analysis/model.js";
@@ -672,7 +674,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       systemPrompt += roleReplyGuidance(role);
       systemPrompt += buildRoleBriefing(role, provider);
     }
-    systemPrompt += " When a RoleMessage payload.kind is extension.assignment, this is a Runtime-owned BA/QA task: call assignment_context for its exact outputReference and messageId, obey its read-only permissions, and submit the schema-valid object through submit_extension_output. Never use implementation/review/verification submission tools for extension output. Collect questions and undecided facts in the assigned output schema; human decisions stay with Runtime/Conversation. For a Coordinator delegation whose assignment_context includes extensionIntakes, use start_extension with its exact kind/packPin and the validated intake schema; never create Developer or no-op tasks.";
+    systemPrompt += " When a RoleMessage payload.kind is extension.assignment, this is a Runtime-owned BA/QA task: call assignment_context for its exact outputReference and messageId, obey its read-only permissions, use only scoped repository_read instead of native Read/Glob/Grep/shell tools, and submit the schema-valid object through submit_extension_output. Never use implementation/review/verification submission tools for extension output. Collect questions and undecided facts in the assigned output schema; human decisions stay with Runtime/Conversation. For a Coordinator delegation whose assignment_context includes extensionIntakes, use start_extension with its exact kind/packPin and the validated intake schema; never create Developer or no-op tasks.";
     if (provider === "agy") systemPrompt += "\n\nExact Bflow MCP tool definitions follow. Native file and shell tools are denied, including reads of MCP schema files or saved large outputs. Use these definitions directly with call_mcp_tool: ServerName=\"bflow\", ToolName=name, Arguments matching inputSchema. Do not guess parameter names. Request bounded repository_read output (limit at most 2048) to keep source observations inline.\n" + JSON.stringify(availableTools(role, provider));
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
   }
@@ -1611,6 +1613,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return json({ invocationId: expectedInvocationId, acknowledged: true, meaning: "Exact result evidence was acknowledged into this role's current task context; this is not semantic use or task acceptance." });
     });
   };
+  const extensionScope = async (binding: PaneBinding) => {
+    if (!workspace || binding.role === "conversation" || binding.role === "developer") return undefined;
+    const native = await workspace.extensionDelivery.snapshot();
+    if (!native.outbound.length) return undefined;
+    const ordinary = record(await workspace.runtime.inspect()).outbound;
+    return selectNativeExtensionScope(native.outbound, ordinary, binding);
+  };
+  const assertExtensionTool = async (binding: PaneBinding, tool: string, input: unknown) => {
+    const scope = await extensionScope(binding);
+    if (!scope) return;
+    const decision = guardExtensionTool(scope, tool, input);
+    if (!decision.permitted) throw new Error(decision.reason);
+    if (scope.state === "active" && !["mcp__bflow__host_status", "mcp__bflow__read_pinned_instructions", "mcp__bflow__submit_extension_output"].includes(tool))
+      await requireWorkspace().extensionDelivery.validatePrompt(scope.outbound.message, binding);
+    return scope;
+  };
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
@@ -1660,6 +1678,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       await nativeDeliver(priorBinding?.message ?? prepared.binding, prepared.bindingOperationId);
       return nativeDeliver(prepared.output, prepared.outputOperationId);
     }
+    await assertExtensionTool(binding, `mcp__bflow__${name}`, parameters);
     if (name === "invoke_tool_action") return invokeToolAction(role, binding, parameters, false);
     if (name === "reconcile_tool_action") return invokeToolAction(role, binding, parameters, true);
     if (name === "acknowledge_tool_action") return acknowledgeToolAction(role, binding, parameters);
@@ -1704,6 +1723,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           }
         }
       }
+      const narrowed = await assertExtensionTool(binding, "mcp__bflow__repository_read", parameters);
+      if (narrowed) return readNativeExtensionRepository(narrowed, configuration.repositoryPath, parameters,
+        () => host.extensionDelivery.validatePrompt(narrowed.outbound.message, binding));
       return repositoryRead(readRoot, RepositoryReadInputSchema.parse(parameters));
     }
     if (name === "read_pinned_instructions") {
@@ -1778,6 +1800,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           }
         }
       }
+      const narrowed = await assertExtensionTool(binding, "mcp__bflow__read_project_policy", parameters);
+      if (narrowed) policyRoot = configuration.repositoryPath;
       const isAgy = providerForRole(role) === "agy";
       return json(await readProjectPolicy(policyRoot, query, isAgy ? { maxTotalBytes: 16_384 } : undefined));
     }
@@ -2276,6 +2300,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
         const direct = guardDirectUserInteraction(role, tool);
         if (!direct.permitted) { if (!quietTool) await activityLog.record({ kind: "tool", role, action: `${tool}:denied`, ...activityContext, outcome: "policy" }); throw new Error(direct.reason); }
+        await assertExtensionTool(binding, tool, hook.tool_input ?? {});
         if (tool.startsWith("mcp__bflow__") || ["Read", "Glob", "Grep", "ToolSearch"].includes(tool)) { if (!quietTool) await activityLog.record({ kind: "tool", role, action: `${tool}:permitted`, ...activityContext }); return { permitted: true }; }
         if (NATIVE_SHELL_TOOLS.has(tool)) {
           // Claude Bash and Codex shell tools share one tokenized allowlist; the refusal names the exact command or token.

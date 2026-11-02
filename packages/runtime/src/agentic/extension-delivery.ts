@@ -367,3 +367,4 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
 export function createNativeExtensionRolePort(options: NativeExtensionDeliveryOptions): NativeExtensionRolePort {
   return new NativeExtensionDelivery(options);
 }
+export { IntentSchema as NativeExtensionIntentSchema };
