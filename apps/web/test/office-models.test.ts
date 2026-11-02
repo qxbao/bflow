@@ -40,4 +40,23 @@ describe('generated office models', () => {
     }
     expect(statSync(join(DIR, 'character.glb')).size + statSync(join(DIR, 'furniture.glb')).size).toBeLessThan(4 * 1024 * 1024);
   });
+
+  test('window panes and whiteboard notes are not buried inside the slab behind them', () => {
+    const buf = readFileSync(join(DIR, 'furniture.glb'));
+    const j = JSON.parse(buf.toString('utf8', 20, 20 + buf.readUInt32LE(12))) as GltfJson & {
+      meshes: { name: string; primitives: { attributes: { POSITION: number }; material: number }[] }[]; accessors: { min: number[]; max: number[] }[];
+    };
+    /** [min, max] of the POSITION bounds of one primitive. */
+    const bounds = (node: string, material: string) => {
+      const mesh = j.meshes.find(m => m.name === node)!;
+      const prim = mesh.primitives.find(p => j.materials[p.material]!.name === material);
+      expect(prim, `${node}/${material}`).toBeDefined();
+      const a = j.accessors[prim!.attributes.POSITION]!;
+      return { min: a.min, max: a.max };
+    };
+    expect(bounds('window', 'skyPane').max[2]!).toBeGreaterThan(bounds('window', 'wallTrim').max[2]!);
+    for (const m of ['lemon', 'sky', 'coral', 'mint']) expect(bounds('whiteboard', m).max[2]!, m).toBeGreaterThan(bounds('whiteboard', 'white').max[2]! + 0.005);
+    // Books rest on the first shelf top (0.04) or above, never inside a board.
+    for (const m of ['coral', 'bookBlue', 'lemon', 'bookGreen', 'lav', 'bookRed']) expect(bounds('bookshelf', m).min[1]!, m).toBeGreaterThanOrEqual(0.04 - 1e-4);
+  });
 });

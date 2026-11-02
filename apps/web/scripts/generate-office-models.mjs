@@ -334,7 +334,7 @@ function furniture() {
   const WALL_H = 3.6;
 
   add({ name: 'floor_tile', parts: [b(1, 0.1, 1, [0, -0.05, 0], 'floor', 0.001)] });
-  // Wall modules: dark panel with vertical slats; the front (+z) face is the room side.
+  // Wall modules: off-white panel with vertical slats; the front (+z) face is the room side.
   const slats = [-0.375, -0.125, 0.125, 0.375].map(x => b(0.18, WALL_H - 0.3, 0.05, [x, WALL_H / 2 + 0.1, 0.02], 'slat', 0.012));
   add({ name: 'wall', parts: [b(1, WALL_H, 0.2, [0, WALL_H / 2, -0.1], 'wall', 0.02), ...slats, b(1, 0.12, 0.26, [0, 0.06, -0.1], 'wallTrim', 0.012)] });
   add({ name: 'wall_led', parts: [b(1, WALL_H, 0.2, [0, WALL_H / 2, -0.1], 'wall', 0.02), ...slats.filter((_, i) => i !== 1 && i !== 2), b(0.04, WALL_H - 0.6, 0.04, [0, WALL_H / 2, 0.03], 'amberSoft', 0.01), b(1, 0.12, 0.26, [0, 0.06, -0.1], 'wallTrim', 0.012)] });
@@ -435,9 +435,9 @@ function furniture() {
   ] });
   add({ name: 'rug', parts: [b(3, 0.02, 2, [0, 0.01, 0], 'rug', 0.005), b(2.6, 0.024, 1.6, [0, 0.012, 0], 'rugInner', 0.004), b(1.8, 0.028, 0.9, [0, 0.014, 0], 'rug', 0.004)] });
   const books = [];
-  [0.25, 0.7, 1.15, 1.6].forEach((y, row) => {
+  [0.04, 0.47, 0.92, 1.37].forEach((y, row) => { // shelf tops; the gap above each is 0.39-0.41, so books (<= 0.36) stay inside it
     let x = -0.4;
-    for (let i = 0; i < 6 - (row % 2); i++) { const w = 0.07 + ((i * 3 + row) % 3) * 0.02, h = 0.26 + ((i + row * 2) % 3) * 0.05; x += w / 2; books.push(b(w, h, 0.26, [x, y + h / 2 + 0.02, 0.0], ['coral', 'bookBlue', 'lemon', 'bookGreen', 'lav', 'bookRed'][(i + row) % 6], 0.006)); x += w / 2 + 0.005; }
+    for (let i = 0; i < 6 - (row % 2); i++) { const w = 0.07 + ((i * 3 + row) % 3) * 0.02, h = 0.26 + ((i + row * 2) % 3) * 0.05; x += w / 2; books.push(b(w, h, 0.26, [x, y + h / 2, 0.0], ['coral', 'bookBlue', 'lemon', 'bookGreen', 'lav', 'bookRed'][(i + row) % 6], 0.006)); x += w / 2 + 0.005; }
   });
   add({ name: 'bookshelf', parts: [
     b(0.05, 2.1, 0.35, [-0.475, 1.05, 0], 'wood', 0.01), b(0.05, 2.1, 0.35, [0.475, 1.05, 0], 'wood', 0.01), b(1, 2.1, 0.03, [0, 1.05, -0.16], 'woodDark', 0.008),
@@ -452,11 +452,13 @@ function furniture() {
     b(0.8, 0.72, 0.5, [0, 0.36, 0], 'wood', 0.02), b(0.74, 0.3, 0.02, [0, 0.5, 0.255], 'woodDark', 0.006), b(0.74, 0.3, 0.02, [0, 0.18, 0.255], 'woodDark', 0.006), b(0.2, 0.025, 0.03, [0, 0.58, 0.275], 'metalDark', 0.006),
     b(0.7, 0.24, 0.42, [0, 0.84, 0], 'white', 0.03), b(0.5, 0.02, 0.3, [0, 0.97, -0.02], 'paper', 0.004), b(0.5, 0.03, 0.2, [0, 0.78, 0.26], 'paper', 0.004), b(0.2, 0.06, 0.02, [0.18, 0.88, 0.215], 'dark', 0.006), b(0.025, 0.025, 0.02, [0.28, 0.9, 0.215], 'ledGreen', 0.004),
   ] });
-  const notes = [['lemon', -0.7, 1.95], ['sky', -0.3, 1.9], ['coral', 0.1, 1.97], ['mint', 0.55, 1.92], ['lemon', -0.55, 1.55], ['mint', -0.15, 1.5], ['sky', 0.35, 1.55], ['coral', 0.75, 1.5]].map(([m, x, y]) => b(0.28, 0.24, 0.012, [x, y, 0.045], m, 0.004));
+  const notes = [['lemon', -0.7, 1.95], ['sky', -0.3, 1.9], ['coral', 0.1, 1.97], ['mint', 0.55, 1.92], ['lemon', -0.55, 1.55], ['mint', -0.15, 1.5], ['sky', 0.35, 1.55], ['coral', 0.75, 1.5]].map(([m, x, y]) => b(0.28, 0.24, 0.012, [x, y, 0.066], m, 0.004));
   add({ name: 'whiteboard', parts: [b(2, 1.2, 0.05, [0, 1.75, 0.025], 'metal', 0.015), b(1.9, 1.1, 0.02, [0, 1.75, 0.045], 'white', 0.006), b(1.6, 0.02, 0.01, [0, 2.1, 0.058], 'line', 0.003), b(1.2, 0.02, 0.01, [-0.2, 1.75, 0.058], 'line', 0.003), ...notes, b(1.9, 0.04, 0.08, [0, 1.13, 0.07], 'metal', 0.01), b(0.14, 0.03, 0.03, [-0.5, 1.165, 0.07], 'red', 0.006), b(0.14, 0.03, 0.03, [-0.3, 1.165, 0.07], 'bookBlue', 0.006)] });
   add({ name: 'window', parts: [
-    b(2, 1.7, 0.1, [0, 1.85, 0.05], 'wallTrim', 0.015), b(1.8, 1.5, 0.02, [0, 1.85, 0.08], 'skyPane', 0.004),
-    b(0.05, 1.5, 0.04, [0, 1.85, 0.1], 'wallTrim', 0.008), b(1.8, 0.05, 0.04, [0, 1.85, 0.1], 'wallTrim', 0.008), b(2.1, 0.05, 0.16, [0, 0.97, 0.1], 'wallTrim', 0.01),
+    // Frame as four border bars (z 0..0.06) so the pane is not buried; the pane (z 0.05..0.07) and thin mullions (z up to 0.065) sit inside the opening.
+    b(2, 0.1, 0.06, [0, 2.65, 0.03], 'wallTrim', 0.01), b(2, 0.1, 0.06, [0, 1.05, 0.03], 'wallTrim', 0.01), b(0.1, 1.5, 0.06, [-0.95, 1.85, 0.03], 'wallTrim', 0.01), b(0.1, 1.5, 0.06, [0.95, 1.85, 0.03], 'wallTrim', 0.01),
+    b(1.8, 1.5, 0.02, [0, 1.85, 0.06], 'skyPane', 0.004),
+    b(0.05, 1.5, 0.02, [0, 1.85, 0.055], 'wallTrim', 0.005), b(1.8, 0.05, 0.02, [0, 1.85, 0.055], 'wallTrim', 0.005), b(2.1, 0.05, 0.16, [0, 0.97, 0.08], 'wood', 0.01),
   ] });
   add({ name: 'pendant_lamp', parts: [c(0.1, 0.34, 0.24, [0, 0, 0], 'white', 14), c(0.1, 0.1, 0.02, [0, 0.12, 0], 'metalDark', 10), c(0.008, 0.008, 1.2, [0, 0.73, 0], 'dark', 4), bl(0.1, 0.1, 0.1, [0, -0.1, 0], 'lamp', 10, 6)] });
   add({ name: 'plant_tall', parts: [
