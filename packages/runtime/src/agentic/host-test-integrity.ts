@@ -70,16 +70,18 @@ export async function validateTestIntegrityEvidence(cwd: string, report: TestInt
   const sources = new Map<string, string[]>();
   let bytes = 0;
   for (const verdict of verdicts) for (const anchor of verdict.evidence) {
-    if (anchor.revision !== report.baseRevision && anchor.revision !== report.candidateRevision) {
+    // Git object names are case-insensitive hex; compare and resolve them in canonical lowercase form.
+    const canonical = (revision: string) => /^[a-fA-F0-9]{40,64}$/.test(revision) ? revision.toLowerCase() : revision;
+    if (canonical(anchor.revision) !== canonical(report.baseRevision) && canonical(anchor.revision) !== canonical(report.candidateRevision)) {
       throw new Error(
         `Test-integrity evidence revision '${anchor.revision}' for finding '${verdict.findingId}' differs from observed baseRevision (${report.baseRevision}) and candidateRevision (${report.candidateRevision})`
       );
     }
-    const key = JSON.stringify([anchor.revision, anchor.path]);
+    const key = JSON.stringify([canonical(anchor.revision), anchor.path]);
     let lines = sources.get(key);
     if (!lines) {
       if (sources.size >= 64) throw new Error("Test-integrity evidence file limit exceeded");
-      const entry = (await integrityGit(cwd, ["ls-tree", "-z", anchor.revision, "--", anchor.path])).split("\0").find(item => item.slice(item.indexOf("\t") + 1) === anchor.path);
+      const entry = (await integrityGit(cwd, ["ls-tree", "-z", canonical(anchor.revision), "--", anchor.path])).split("\0").find(item => item.slice(item.indexOf("\t") + 1) === anchor.path);
       const match = /^(100644|100755) blob ([a-f0-9]{40})\t/.exec(entry ?? "");
       if (!match) {
         throw new Error(`Test-integrity evidence for finding '${verdict.findingId}' requires an existing regular Git blob at ${anchor.revision}:${anchor.path}`);

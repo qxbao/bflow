@@ -177,7 +177,7 @@ export async function executeHostWatchdogPass(deps: {
   const manifestResult = await beforeManifest.workspace.runtime.ports.panes.getManifest();
   if (!activeState()) return;
   const current = SessionManifestSchema.parse(unwrap(manifestResult));
-  // An unreadable pane is "unavailable", which is not "not working": it never produces a stall.
+  // An unreadable (e.g. crashed) pane is "unavailable"; it counts as not working so a holder that vanished is reported as stalled.
   const panes = await Promise.all(current.panes.filter(pane => pane.role !== "conversation").map(async pane => ({
     role: pane.role,
     paneId: pane.paneId,

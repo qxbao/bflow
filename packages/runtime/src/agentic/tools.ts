@@ -71,38 +71,39 @@ export class CoordinatorTools {
         }
         return query.runId !== undefined ? summarizeInspectRun(raw, query) : summarizeInspectState(raw, query);
       }
-      case "report_progress": return this.runtime.reportProgress(textField(args.runId), textField(args.headline), args.questions === undefined || args.questions === null ? [] : strings(args.questions));
+      case "report_progress": return this.runtime.reportProgress(textField(args.runId ?? args.run_id), textField(args.headline), args.questions === undefined || args.questions === null ? [] : strings(args.questions));
       case "assess": {
         const { specification } = AssessArgumentsSchema.parse(args);
         try { return await this.runtime.assess(specification); }
         catch (error) { return assessmentErrorAt(error, ["specification"]); }
       }
-      case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId), textField(args.role), textField(args.objective),
+      case "request_specialist": return this.runtime.requestSpecialist(textField(args.runId ?? args.run_id), textField(args.role), textField(args.objective),
         args.requiredCapabilities === undefined || args.requiredCapabilities === null ? [] : strings(args.requiredCapabilities),
         args.roleProfile === undefined || args.roleProfile === null || (typeof args.roleProfile === "string" && args.roleProfile.trim() === "")
           ? undefined : RoleProfilePinSchema.parse(args.roleProfile));
-      case "propose_prototype": return this.runtime.proposePrototype(textField(args.runId), args.scope);
-      case "submit_prototype": return this.runtime.submitPrototype(textField(args.runId), args.submission);
-      case "propose_workflow": return this.runtime.proposeWorkflow(textField(args.runId), args.specification, args.definition,
+      case "propose_prototype": return this.runtime.proposePrototype(textField(args.runId ?? args.run_id), args.scope);
+      case "submit_prototype": return this.runtime.submitPrototype(textField(args.runId ?? args.run_id), args.submission);
+      case "propose_workflow": return this.runtime.proposeWorkflow(textField(args.runId ?? args.run_id), args.specification, args.definition,
         args.maxIterations === undefined || args.maxIterations === null || (typeof args.maxIterations === "string" && args.maxIterations.trim() === "") ? 3 : Number(args.maxIterations));
       case "tick": return this.scheduleTick();
       case "tick_status": return JsonValueSchema.parse({ running: !!this.pendingTick, error: this.tickError ?? null });
-      case "reconcile_delivery": return this.runtime.reconcileDelivery(textField(args.messageId));
-      case "retry_verification": return this.runtime.retryVerification(textField(args.runId));
+      case "reconcile_delivery": return this.runtime.reconcileDelivery(textField(args.messageId ?? args.message_id));
+      case "retry_verification": return this.runtime.retryVerification(textField(args.runId ?? args.run_id));
       case "resume_run": {
-        const runId = textField(args.runId);
-        if (args.actionId === undefined || args.actionId === null || (typeof args.actionId === "string" && args.actionId.trim() === "")) {
+        const runId = textField(args.runId ?? args.run_id);
+        const actionIdVal = args.actionId ?? args.action_id;
+        if (actionIdVal === undefined || actionIdVal === null || (typeof actionIdVal === "string" && actionIdVal.trim() === "")) {
           const inspected = record(await this.runtime.inspect(runId));
           const pending = inspected.pendingAction !== null && typeof inspected.pendingAction === "object"
             ? record(inspected.pendingAction)
             : undefined;
           return this.runtime.resumeBlockedRun(runId, pending?.actionId !== undefined ? textField(pending.actionId) : "");
         }
-        return this.runtime.resumeBlockedRun(runId, textField(args.actionId));
+        return this.runtime.resumeBlockedRun(runId, textField(actionIdVal));
       }
-      case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId), textField(args.taskId));
-      case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId), textField(args.taskKey), textField(args.resolutionCommitHash));
-      case "cancel": return this.runtime.cancel(textField(args.runId), textField(args.reason));
+      case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId ?? args.run_id), textField(args.taskId ?? args.task_id));
+      case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId ?? args.run_id), textField(args.taskKey ?? args.task_key), textField(args.resolutionCommitHash ?? args.resolution_commit_hash));
+      case "cancel": return this.runtime.cancel(textField(args.runId ?? args.run_id), textField(args.reason));
       default: throw new Error(`Unknown Coordinator tool: ${name}`);
     }
   }

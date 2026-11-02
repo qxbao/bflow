@@ -43,7 +43,8 @@ import {
 } from "./user-decision.js";
 import {
   formatCoordinatorMessageForUser,
-  formatStatusSummaryForUser
+  formatStatusSummaryForUser,
+  isSubstantiveCoordinatorUpdate
 } from "./response-formatter.js";
 import {
   assertConversationRoleBoundaries,
@@ -465,7 +466,7 @@ export class ConversationGateway {
         decision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: command.decisionId, runId: command.runId,
           sessionId: this.config.sessionId, target: version.target, revision: version.revision, generation: version.generation,
           decision: command.outcome, decidedBy: principal.principalId, decidedAt: now,
-          reason: trimmedReason && trimmedReason.length > 0 ? trimmedReason : (isUserDecisionRequest(pending) && command.selectedOption !== undefined ? command.selectedOption : "User approved"),
+          reason: trimmedReason && trimmedReason.length > 0 ? trimmedReason : (isUserDecisionRequest(pending) && command.selectedOption !== undefined ? command.selectedOption : command.outcome === "rejected" ? "User rejected" : "User approved"),
           feedbackArtifacts: [], idempotencyKey: `web-decision-${id}`,
           ...(command.selectedOption !== undefined ? { metadata: { selectedOption: command.selectedOption } } : {}) });
         result = { kind: "interaction", runId: command.runId, currentRunId: command.runId };
@@ -551,11 +552,19 @@ export class ConversationGateway {
     }
 
     if (loadResult.value !== null) {
-      this.snapshot = loadResult.value;
+      this.snapshot = {
+        ...loadResult.value,
+        agentBusy: false,
+        transportState: "idle"
+      };
       this.config.bridge.restoreDeliveryRecords(this.snapshot.deliveryRecords);
       // Questions about approvals that were decided or closed are answered; recovering them would re-ask a settled decision.
       const settled = closeSettledApprovalClarifications(this.snapshot, this.getNow());
-      if (settled !== this.snapshot) return this.persistUpdatedSnapshot(settled);
+      const saved = await this.persistUpdatedSnapshot(settled);
+      if (!saved.ok) return saved;
+      if (this.snapshot.pendingInboundQueue.length > 0) {
+        await this.flushPendingInboundQueue();
+      }
       return { ok: true, value: this.snapshot };
     }
 
@@ -693,7 +702,7 @@ export class ConversationGateway {
         }
       };
     }
-    input = parsedInput.data;
+    input = { ...parsedInput.data, content: parsedInput.data.content.normalize("NFC") };
     if (input.sessionId !== this.config.sessionId || (input.conversationDecision && !input.messageId)) {
       return { ok: false, error: { code: "validation", retryable: false,
         message: "Chat decisions require a user message ID in the current Conversation session" } };
@@ -897,6 +906,12 @@ export class ConversationGateway {
       if (correlationId !== undefined && correlationId !== classification.targetCorrelationId &&
           this.snapshot!.pendingClarifications[correlationId] !== undefined) {
         correlationId = undefined;
+      }
+      if (!correlationId && classification.intent === "approval_response" && classification.approvalInput?.approvalId) {
+        const targetReq = this.snapshot!.pendingApprovals[classification.approvalInput.approvalId];
+        if (targetReq?.runId && this.snapshot!.runIdToCorrelationId[targetReq.runId]) {
+          correlationId = this.snapshot!.runIdToCorrelationId[targetReq.runId];
+        }
       }
       if (!correlationId && (classification.intent === "status_query" || classification.intent === "approval_response") &&
           this.snapshot!.session.activeRunId) {
@@ -1377,6 +1392,10 @@ export class ConversationGateway {
 
           if (!targetApproval) {
             return this.answerWithNotice(input, correlationId, this.unknownApprovalNotice(undefined, false));
+          }
+
+          if (targetApproval.runId && this.snapshot!.runIdToCorrelationId[targetApproval.runId]) {
+            correlationId = this.snapshot!.runIdToCorrelationId[targetApproval.runId]!;
           }
 
           if (Object.values(this.snapshot!.structuredInteractions ?? {}).some(entry =>
@@ -1956,7 +1975,9 @@ export class ConversationGateway {
     const now = this.getNow();
 
     // Idempotency / Deduplication
-    if (this.snapshot!.processedMessageIds.includes(message.message_id)) {
+    if (this.snapshot!.processedMessageIds.includes(message.message_id) ||
+        (!this.isDrainingSingleQueueItem &&
+          this.snapshot!.pendingInboundQueue.some(item => item.kind === "coordinator_message" && item.message.message_id === message.message_id))) {
       return {
         ok: true,
         value: {
@@ -2018,6 +2039,24 @@ export class ConversationGateway {
       !this.isDrainingSingleQueueItem;
 
     if (shouldQueue) {
+      const targetCorrelationId = message.correlation_id ?? (message.run_id ? this.snapshot!.runIdToCorrelationId[message.run_id] : undefined);
+      const existingWorkflow = targetCorrelationId ? this.snapshot!.workflows[targetCorrelationId] : undefined;
+      if ((message.type === "conversation.progress" || message.type === "task.status") &&
+          !isSubstantiveCoordinatorUpdate(message, existingWorkflow?.lastProgress)) {
+        return {
+          ok: true,
+          value: {
+            sessionId: this.config.sessionId,
+            correlationId: message.correlation_id,
+            ...(message.run_id ? { runId: message.run_id } : {}),
+            sessionStatus: this.snapshot!.session.status,
+            queuedBecauseBusy: false,
+            duplicateIgnored: false,
+            substantiveUpdate: false
+          }
+        };
+      }
+
       const queueItem: PendingInboundItem = {
         queueId: this.generateId("queue-coord"),
         kind: "coordinator_message",

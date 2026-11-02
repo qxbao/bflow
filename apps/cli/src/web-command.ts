@@ -147,7 +147,17 @@ export async function startWebCommand(args: WebArgs, options: WebCommandOptions 
   ({ handle, bootstrap } = await withLifecycleLock(ownerDirectory, async () => {
     let existing: z.infer<typeof LocatorSchema> | undefined;
     try { existing = await readLocator(locatorPath); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        const free = await (await import('@bflow/local-server')).privateStateIsFree(join(stateDirectory, 'server')).catch(() => false);
+        if (free) {
+          await unlink(locatorPath).catch(() => {});
+          io.stderr('Đã dọn web instance locator cũ bị hỏng (không còn tiến trình sở hữu).');
+        } else {
+          throw new Error('Không xác minh được web instance. Dừng owner cũ và kiểm tra private web state/locks trước khi khôi phục; không takeover theo PID.');
+        }
+      }
+    }
     if (existing) {
       let secret: string | undefined;
       try { secret = await bootstrapFromOwner(existing); }

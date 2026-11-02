@@ -1867,7 +1867,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
       if (hasProgressableActive) target = "running";
       else if (hasBlocked || (hasFailure && aggregate.definition.failurePolicy === "block")) target = "blocked";
       else if (hasWaiting) target = "waiting";
-      else target = "running";
+      else target = activeCapacity === 0 ? "blocked" : "running";
     } else if (exhaustedRework.includes("require_human")) target = "blocked";
     else if (exhaustedRework.includes("fail")) target = "failed";
     else if (hasBlocked || (hasFailure && aggregate.definition.failurePolicy === "block")) target = "blocked";

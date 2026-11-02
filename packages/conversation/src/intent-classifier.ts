@@ -15,7 +15,7 @@ import { isExpiredUserDecision, isUserDecisionRequest, resolveUserDecisionReply 
 const ZERO_WIDTH_STRIP_REGEX = /[\u200B-\u200D\uFEFF\u00AD]/g;
 
 function sanitizeInputText(raw: string): string {
-  return raw.replace(ZERO_WIDTH_STRIP_REGEX, "").replace(/<\/?pasted_content\b[^>]*>/gi, "").trim();
+  return raw.normalize("NFC").replace(ZERO_WIDTH_STRIP_REGEX, "").replace(/<\/?pasted_content\b[^>]*>/gi, "").trim();
 }
 
 function normalizeForMatching(text: string): string {
@@ -48,7 +48,7 @@ const LEADING_APPROVAL_ID_REGEX =
  * A leading short card alias `#1: ...`, `#1 - ...`, or `#2 1` addressing a numbered card.
  */
 const LEADING_SHORT_ID_REGEX =
-  /^\s*(#[1-9]\d*)(?:\s*[:：)]\s*(?=\S)|(?:\s*[:：.,—–-]\s*|\s+)(?=\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|từ chối|không đồng ý|không duyệt|bác bỏ|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi|(?:đề xuất\s+)?(?:đổi|thay đổi|sửa)\s+yêu cầu|chọn|lựa chọn|option|choose))/iu;
+  /^\s*(#[1-9]\d*)(?:\s*[:：)]\s*(?=\S)|(?:\s*[:：.,—–-]\s*|\s+)(?=\d+(?!\p{L})|approve|approved|lgtm|reject|rejected|decline|changes_requested|request changes|phê duyệt|đồng ý|duyệt|chấp thuận|chấp nhận|ok duyệt|xác nhận duyệt|từ chối|không đồng ý|không duyệt|bác bỏ|cần sửa|yêu cầu chỉnh sửa|chỉnh sửa lại|cần thay đổi|(?:đề xuất\s+)?(?:đổi|thay đổi|sửa)\s+yêu cầu|chọn|lựa chọn|phương án(?:\s+số)?|pa|option|choose))/iu;
 
 function matchShortIdPrefix(text: string, context: ConversationContextSnapshot): string | undefined {
   const direct = LEADING_SHORT_ID_REGEX.exec(text)?.[1];
@@ -60,10 +60,15 @@ function matchShortIdPrefix(text: string, context: ConversationContextSnapshot):
   const pendingReq = mappedId ? context.pendingApprovals[mappedId] : undefined;
   if (!pendingReq || !isUserDecisionRequest(pendingReq)) return undefined;
   const remainder = normalizeForMatching(candidate[2]!).replace(/^[\s:：,.)—–-]+|[\s:,.!?—–-]+$/gu, "");
-  const matchesOption = (optionLabelsOf(pendingReq) ?? []).some(
+  const offered = optionLabelsOf(pendingReq);
+  if (!offered || offered.length === 0) {
+    return remainder.length > 0 ? candidate[1]! : undefined;
+  }
+  const matchesOption = offered.some(
     label => normalizeForMatching(label).replace(/[.!?]+$/u, "") === remainder
   );
-  return matchesOption ? candidate[1]! : undefined;
+  const matchesNumber = /^(?:(?:chọn|lựa chọn|phương án(?:\s+số)?|option|choose|pa)\s*)?\d{1,2}\s*[.)]?$/iu.test(remainder);
+  return matchesOption || matchesNumber ? candidate[1]! : undefined;
 }
 
 /**
@@ -873,7 +878,7 @@ export function classifyTrustedApprovalReply(
     if (!approval.approvalId) return undefined;
     const request = context.pendingApprovals[approval.approvalId];
     const answer = normalizeForMatching(approval.reason ?? "");
-    const exactNumber = /^(?:(?:chọn|lựa chọn|option|choose)\s*)?\d{1,2}\s*[.)]?$/iu.test(answer);
+    const exactNumber = /^(?:(?:chọn|lựa chọn|phương án(?:\s+số)?|option|choose|pa)\s*)?\d{1,2}\s*[.)]?$/iu.test(answer);
     const exactLabel = request && (optionLabelsOf(request) ?? []).some(label =>
       normalizeForMatching(label).replace(/[.!?]+$/u, "") === answer.replace(/[.!?]+$/u, ""));
     return exactNumber || exactLabel ? classified : undefined;

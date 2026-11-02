@@ -309,6 +309,25 @@ export class DeveloperProcessScopes {
       if (config.taskId === taskId && config.launchId === launchId) await this.seal(root, config);
     }
   }
+  async stopLaunch(taskId: string, launchId: string): Promise<void> {
+    let ids: string[];
+    try { ids = await readdir(this.directory); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    for (const id of ids) {
+      if (!z.string().uuid().safeParse(id).success) continue;
+      const root = join(this.directory, id);
+      const raw = await optionalPrivateJSON(join(root, "config.json"));
+      if (raw === undefined) continue;
+      const config = ConfigSchema.parse(raw);
+      if (config.taskId === taskId && config.launchId === launchId) {
+        await this.seal(root, config);
+        let witness;
+        try { witness = await this.signed(root, "witness.json", config, WitnessSchema); }
+        catch { continue; }
+        try { await this.exitScope(root, config, witness); }
+        catch { /* best effort stop on launch release */ }
+      }
+    }
+  }
   private async exitScope(root: string, config: z.infer<typeof ConfigSchema>, witness: z.infer<typeof WitnessSchema>): Promise<NamespaceExitProof> {
     if (witness.scopeId !== config.scopeId || witness.launchId !== config.launchId || witness.launchFingerprint !== config.launchFingerprint)
       throw new Error("Foreign namespace launch witness");

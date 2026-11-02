@@ -108,9 +108,9 @@ export function isConflictResolverAssignment(message: RoleMessage): boolean {
     (message.payload as Record<string, unknown>).kind === CONFLICT_RESOLUTION_KIND;
 }
 /** Read-only specialists the Coordinator may delegate to; each needs its own bound pane, or an explicit capable fallback. */
-const SPECIALIST_ROLES: readonly string[] = ["specifier", "architect", "planner", "security", "reviewer", "qa", "tester"];
+const SPECIALIST_ROLES: readonly string[] = ["analyst", "specifier", "architect", "planner", "security", "reviewer", "qa", "tester"];
 /** Used only when the requested role has no pane in this session and the fallback pane has every required capability. */
-const SPECIALIST_FALLBACKS: Readonly<Record<string, string>> = { security: "reviewer", tester: "qa" };
+const SPECIALIST_FALLBACKS: Readonly<Record<string, string>> = { analyst: "specifier", security: "reviewer", tester: "qa" };
 /** Synchronous refusal of a specialist request that could not be routed to any bound pane; the run itself is not changed. */
 export class SpecialistUnavailableError extends Error {
   readonly code = "specialist_unavailable";
@@ -2242,6 +2242,11 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
+      // A continuation blocked only because no candidate was eligible launched nothing; an explicit resume lets it re-evaluate candidates.
+      if (!options.automatic) for (const task of run.tasks) for (const failover of task.failovers ?? [])
+        if (failover.phase === "blocked" && failover.reason === "no_eligible_candidate" && failover.destination === undefined) {
+          failover.phase = "retired"; delete failover.reason;
+        }
       for (const item of state.outbound) {
         if (!item.phaseFailure || item.phaseFailure.retryAuthorized) continue;
         const matchesSource = item.message.message_id === action.sourceMessageId;
@@ -2676,8 +2681,9 @@ export class AgenticWorkflowRuntime {
       if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out)))
         throw new Error("Unknown delivery must be reconciled before requesting another specialist assignment");
       if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
-      const pin = profileInput === undefined ? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(requestedRole)] : RoleProfilePinSchema.parse(profileInput);
-      const selectedProfile = selectRoleProfile(this.ports.roleProfiles, requestedRole, pin, [...requiredCapabilities, "repository.read"]);
+      const governanceRole = requestedRole === "analyst" ? "specifier" : requestedRole;
+      const pin = profileInput === undefined ? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(governanceRole)] : RoleProfilePinSchema.parse(profileInput);
+      const selectedProfile = selectRoleProfile(this.ports.roleProfiles, governanceRole, pin, [...requiredCapabilities, "repository.read"]);
       if (selectedProfile && (!this.ports.panes.allocateSpecialist || !this.ports.preflightRoleProfile)) throw new Error("Profiled specialist allocation is unsupported by this host");
       if (selectedProfile) {
         for (const settledOut of state.outbound) {
@@ -2818,7 +2824,9 @@ export class AgenticWorkflowRuntime {
       return caps;
     };
     const proposalProfiles = [...new Map(originalProposal.tasks.flatMap(task => {
-      const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
+      const parsedRole = AgentRoleSchema.safeParse(task.role);
+      if (!parsedRole.success || task.role !== "developer") throw new Error(`Implementation DAG nodes must be Developer tasks; found invalid role '${task.role}' on task ${task.id}`);
+      const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[parsedRole.data];
       const profile = selectRoleProfile(this.ports.roleProfiles, task.role, pin, taskRequiredCapabilities(task));
       return profile ? [profile] : [];
     }).map(profile => [profile.pin.digest, profile])).values()];
@@ -2879,7 +2887,8 @@ export class AgenticWorkflowRuntime {
       if (proposed.tasks.some(task => task.role !== "developer")) throw new Error("Implementation DAG nodes must be Developer tasks; request read-only specialists through requestSpecialist");
       if (proposed.dependencies.some(dep => dep.condition !== "succeeded")) throw new Error("Dependencies must require verified success");
       const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
-      if (classification.level !== draft.level)
+      const sddLevelMandatedFull = run.delegation.sddLevel === "full" && draft.level === "full";
+      if (classification.level !== draft.level && !sddLevelMandatedFull)
         throw new Error(`SDD level conflicts with assessed policy (expected level ${classification.level}, complexity ${classification.complexity}, riskLevel ${classification.riskLevel}; got level ${draft.level})`);
       // An accepted prototype is input to the formal design, never its approval; an open prototype review blocks the design.
       const prototype = prototypeDesignInput(run.prototype, proposed);
@@ -3466,8 +3475,8 @@ export class AgenticWorkflowRuntime {
     const request = run.approval;
     if (!request || run.status !== "awaiting_approval" || decision.approvalId !== request.approvalId || decision.runId !== request.runId ||
         decision.sessionId !== request.sessionId || decision.revision !== request.revision || decision.generation !== request.generation ||
-        digest(decision.target) !== digest(request.target) || Date.parse(decision.decidedAt) < Date.parse(request.requestedAt) ||
-        Date.parse(decision.decidedAt) > Date.parse(this.now()) || request.expiresAt && Date.parse(this.now()) >= Date.parse(request.expiresAt))
+        digest(decision.target) !== digest(request.target) || Date.parse(decision.decidedAt) < Date.parse(request.requestedAt) - 30_000 ||
+        Date.parse(decision.decidedAt) > Date.parse(this.now()) + 30_000 || request.expiresAt && Date.parse(this.now()) >= Date.parse(request.expiresAt))
       throw new Error("Stale or mismatched approval decision");
     if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
     if (decision.decision === "changes_requested" && (run.approvalKind === "design" || run.approvalKind === "delivery") &&
@@ -3793,9 +3802,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         !existingOut.handle && !existingOut.request && !run.cancelled;
       if (existingOut && !recoverableCancelledOut) continue;
       const agentName = `dev-${digest([run.runId, taskState.attemptId]).slice(0, 20)}`;
-      const prior = task.changeSet;
+      const prior = task.changeSet ?? task.cycle?.history.at(-1)?.changeSet;
+      const priorHead = prior?.headCommitHash;
       // A dependent task starts from its verified dependencies' heads; a fallback attempt stays on the run base once its merge conflicted.
-      const dependencyHeads = prior || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
+      const dependencyHeads = priorHead || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
       const { tree, conflict } = await prepareDependencyBaseWorktree({ prepareTask: async request => {
         await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
         if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
@@ -3803,7 +3813,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       } }, { runId: run.runId, taskId: task.taskId,
         attemptId: taskState.attemptId!, ownedPaths: strings(record(definition.metadata).ownedPaths),
         forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName },
-      { runBaseRevision: run.baseRevision!, priorHead: prior?.headCommitHash, dependencyHeads });
+      { runBaseRevision: run.baseRevision!, priorHead, dependencyHeads });
       if (conflict !== undefined) {
         task.dependencyBaseFallback = taskState.attemptId!;
         this.progress(state, outbox, run, `Dependency outputs of ${task.taskId} overlap; starting from the run base and leaving the overlap to final integration. ${conflict}`);
@@ -4189,8 +4199,17 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         record(item.message.payload).phase === phase && record(item.message.payload).implementationAttemptId === current.attemptId &&
         !item.phaseRetirement && !item.error?.startsWith("policy_phase_failed:"));
       if (previous) {
-        if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
-        return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
+        const leaseExpired = Boolean(previous.lease && Date.parse(previous.lease.expiresAt) <= Date.parse(this.now()) && !previous.cancelRequested);
+        if (leaseExpired) {
+          previous.status = "released";
+          previous.error = `policy_phase_failed:${UNMEASURED_PHASE_SUMMARY}`;
+          previous.phaseFailure = { summary: UNMEASURED_PHASE_SUMMARY, repairable: false, applied: false, retryAuthorized: true };
+          await save();
+          await this.recoverPhaseFailures(state, save, outbox);
+        } else {
+          if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
+          return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
+        }
       }
       const failedHere = state.outbound.filter(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
           record(item.message.payload).taskId === taskId && record(item.message.payload).phase === phase &&
@@ -4830,8 +4849,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               await save();
             }
             const snapshot = await core.snapshot(run.runId);
-            if (snapshot.status === "blocked" && snapshot.tasks.some(task => ["failed", "blocked"].includes(task.status))) {
-              run.status = "escalated"; run.error = "Task blocked or implementation retry policy exhausted";
+            if (snapshot.status === "blocked") {
+              const blockedTask = snapshot.tasks.find(task => ["failed", "blocked", "cancelled"].includes(task.status));
+              run.status = "escalated";
+              run.error = blockedTask
+                ? (blockedTask.status === "failed" ? "Task blocked or implementation retry policy exhausted" : `Task ${blockedTask.taskId} is ${blockedTask.status}; workflow execution blocked`)
+                : "Workflow execution blocked by dependencies or exhausted retry policy";
               this.progress(state, outbox, run, run.error);
             }
             if (snapshot.status === "failed") { run.status = "failed"; delete run.pendingAction; this.progress(state, outbox, run, "Implementation retry policy exhausted"); }
@@ -5008,6 +5031,21 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   private recordRunStepFailure(state: JournalState, outbox: HerdrOutbox, run: RunRecord, error: unknown): void {
     const reason = redactString(String(error));
     run.error = `${RUN_STEP_FAILURE_PREFIX} ${reason}`;
+    if (error instanceof ExecutionPlanDriftError) {
+      run.status = "escalated";
+      const sourceMessageId = `plan-drift-${digest([run.runId, reason])}`;
+      run.pendingAction = {
+        actionId: `next-${digest([run.runId, sourceMessageId])}`,
+        kind: "resume_coordinator",
+        owner: "coordinator",
+        reason: run.error,
+        sourceMessageId,
+        createdAt: this.now(),
+        state: "pending",
+        previousStatus: "implementing",
+        recovery: "plan_drift_reconcile"
+      };
+    }
     this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, reason: run.error,
       options: error instanceof ExecutionPlanDriftError
         ? ["Run read-only task preview again, review the input diff and reconcile the accepted plan", "Cancel this run"]
@@ -5486,7 +5524,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save();
       // Safely queued work never reached the provider. Release its own durable lease, while a task notice retains its parent's lease.
       if (out.lease && !out.parentAssignmentId) {
-        try { await outbox.release(out); }
+        try {
+          await outbox.release(out);
+          // The message never reached a provider: it stays cancelled (not "released") and no longer owns the settled lease.
+          if (out.message.type === "task.assignment") { out.status = "cancelled"; delete out.lease; delete out.leaseRelease; await save(); }
+        }
         catch (error) {
           out.error = `Cancellation lease release unresolved: ${redactString(String(error))}`;
           await save(); failure ??= error;

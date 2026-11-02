@@ -127,8 +127,9 @@ export class TaskActivityLog {
     } catch { return { entries: [], hasMore: false, truncated: false }; }
     if (filter.afterId !== undefined && filter.afterId !== "none") {
       const idx = entries.findIndex(entry => entry.id === filter.afterId);
-      if (idx === -1) throw new Error("Task log cursor does not match any entry in the requested scope");
-      entries = entries.slice(idx + 1);
+      if (idx !== -1) {
+        entries = entries.slice(idx + 1);
+      }
     }
     const maxBytes = Math.min(this.maxBytes, filter.maxBytes ?? 16 * 1024), lines = Math.min(this.maxEntries, filter.lines ?? 100);
     const selected: TaskActivityEntry[] = [];

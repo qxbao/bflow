@@ -49,7 +49,7 @@ const PERMITTED_LEVELS = {
   integration: ["integration", "regression"]
 } as const;
 const SHELL_UNSAFE = /[;&|$`<>(){}*?!~'"\\\r\n\t\0]/;
-const SAFE_RELATIVE_PATH = /^[A-Za-z0-9_][A-Za-z0-9._-]*(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/;
+const SAFE_RELATIVE_PATH = /^[A-Za-z0-9_][A-Za-z0-9._ -]*(\/[A-Za-z0-9_][A-Za-z0-9._ -]*)*$/;
 
 const REMEDIATION = [
   "Coordinator thêm task thiết lập runner phù hợp hệ sinh thái và gửi qua review trước task chính"
@@ -102,15 +102,21 @@ function isSafeRelativePath(path: string): boolean {
  */
 export function parseTscBuildArgs(script: string): string[] | undefined {
   if (SHELL_UNSAFE.test(script)) return undefined;
-  const tokens = script.trim().split(/ +/);
-  if (tokens[0] !== "tsc") return undefined;
-  const rest = tokens.slice(1);
-  if (rest.length === 0) return [];
-  // `tsc -p <tsconfig>` is the common single-project form (e.g. the portable example); it takes exactly one path.
-  if ((rest[0] === "-p" || rest[0] === "--project") && rest.length === 2) return isSafeRelativePath(rest[1]!) ? rest : undefined;
-  if (rest[0] !== "-b" && rest[0] !== "--build") return undefined;
-  if (rest.slice(1).some(path => !isSafeRelativePath(path))) return undefined;
-  return rest;
+  const trimmed = script.trim();
+  if (trimmed === "tsc") return [];
+  const matchProject = /^tsc\s+(-p|--project)\s+(.+)$/.exec(trimmed);
+  if (matchProject) return isSafeRelativePath(matchProject[2]!.trim()) ? [matchProject[1]!, matchProject[2]!.trim()] : undefined;
+  const matchBuild = /^tsc\s+(-b|--build)(?:\s+(.+))?$/.exec(trimmed);
+  if (matchBuild) {
+    const flag = matchBuild[1]!;
+    const pathsStr = matchBuild[2]?.trim();
+    if (!pathsStr) return [flag];
+    if (isSafeRelativePath(pathsStr)) return [flag, pathsStr];
+    const tokens = pathsStr.split(/ +/);
+    if (tokens.every(path => isSafeRelativePath(path))) return [flag, ...tokens];
+    return undefined;
+  }
+  return undefined;
 }
 
 /** A workspace package whose entry points resolve into `dist/` needs a build before tests can import it. */
@@ -201,6 +207,9 @@ async function detect(repositoryRoot: string, nodeExecutable: string, fs: Detect
     const nodeFlags = typeof scripts.test === "string" ? parseNodeTestFlags(scripts.test) : undefined;
     if (nodeFlags !== undefined) {
       runner = { kind: "node_tap", args: [...nodeFlags, "--test", "--test-reporter=tap"] };
+      notes.push("node --test runner");
+    } else if (scripts.test === undefined || scripts.test === "") {
+      runner = { kind: "node_tap", args: ["--test", "--test-reporter=tap"] };
       notes.push("node --test runner");
     } else {
       return unsupported(vitestProblem ?? "Không phát hiện runner kiểm thử được hỗ trợ (vitest 2.x hoặc node --test) / No supported test runner detected (vitest 2.x or node --test)");
