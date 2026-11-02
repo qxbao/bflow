@@ -18,8 +18,8 @@ import { ANALYSIS_GATES, assertAnalysisOnlyWorkflow, planAnalysisWorkflow } from
 import { renderAnalysisDocument, renderVerificationSummary } from "./render.js";
 import { verifyAnalysisDocument, type AnalysisVerification } from "./verify.js";
 import { extensionDecisionRequest } from "../extension-decisions.js";
+import { analysisBusinessAnswers } from "./business-decision.js";
 import { canonicalReceiptJson } from "@bflow/contracts";
-import { z } from "zod";
 
 import { executeExtension, extensionIntent, nativeExecutionsIndependent, type ExtensionExecution } from "../extension-execution.js";
 import type { NativeExtensionRolePort } from "../agentic/extension-delivery.js";
@@ -552,8 +552,12 @@ export class AnalysisWorkflowRuntime {
         await this.mutate(run.runId, version => this.ports.engine.requestApproval({ expectedVersion: version, idempotencyKey: `analysis:approval:${approvalId}`,
           request: ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId, runId: run.runId, sessionId: run.intake.sessionId,
             target: { type: "task", taskId: "elicitation" }, revision: run.intake.revision, generation: elicitation.generation, requestedBy: "coordinator",
-            requestedAt: this.ports.now(), reason: "Business decisions and analysis scope must be confirmed by the user", evidence: [],
+            requestedAt: this.ports.now(), reason: "Xác nhận các quyết định nghiệp vụ và phạm vi phân tích; đây không phải nghiệm thu sản phẩm", evidence: [],
             idempotencyKey: `analysis:approval:${approvalId}`, metadata: { approvalScope: "business_decisions",
+              ...(run.questions.some(question => !Object.hasOwn(run.decisions, question.id)) ? { kind: "user_decision",
+                question: ["Vui lòng trả lời các câu hỏi nghiệp vụ sau:",
+                  ...run.questions.filter(question => !Object.hasOwn(run.decisions, question.id)).map(question => `${question.id}: ${question.question}${question.blocking ? " (cần trả lời)" : " (có thể để mở)"}`),
+                  "Trả lời theo mẫu D-1: nội dung trả lời; mỗi câu hỏi một dòng. Chỉ xác nhận phạm vi không thay cho câu trả lời còn thiếu."].join("\n") } : {}),
               questions: run.questions.map(item => ({ ...item })) } }) }));
         run.approvals.elicitation = { approvalId };
       }
@@ -636,13 +640,7 @@ export class AnalysisWorkflowRuntime {
       throw new Error("Analysis decision is not at its waiting phase");
     await this.restoreCore(run);
     const request = await extensionDecisionRequest(this.ports.runStore, decision, business ? "business_decisions" : "analysis_document", this.ports.now());
-    const answers = business ? z.record(z.string()).parse(decision.metadata?.answers ?? {}) : {};
-    if (business && decision.decision === "approved") {
-      const missing = run.questions.filter(item => item.blocking && !answers[item.id]?.trim() && !run.decisions[item.id]);
-      if (missing.length) throw new Error(`Required business decisions are missing: ${missing.map(item => item.id).join(", ")}`);
-      const unknown = Object.keys(answers).filter(id => !run.questions.some(item => item.id === id));
-      if (unknown.length) throw new Error(`Unknown business questions: ${unknown.join(", ")}`);
-    }
+    const answers = business ? analysisBusinessAnswers(decision, run.questions, run.decisions) : {};
     if (!business && (decision.metadata?.documentDigest !== run.approvals.document!.documentDigest ||
         request.metadata?.documentDigest !== run.approvals.document!.documentDigest)) throw new Error("Approval must name the exact reviewed document digest");
     await this.mutate(run.runId, version => this.ports.engine.applyApproval({ expectedVersion: version,

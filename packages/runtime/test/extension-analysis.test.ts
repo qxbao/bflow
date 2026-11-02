@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ApprovalDecisionSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema, type ApprovalRequest } from "@bflow/contracts";
@@ -6,12 +6,16 @@ import * as hostTools from "../src/agentic/host.js";
 import { buildAnalysisPack, openWorkflowExtensionRuntimes, type AnalysisDocument } from "../src/index.js";
 import { AppCheckBrowserLeases } from "../src/agentic/app-check-lease.js";
 import { nativeExtensionFixture } from "./helpers/native-extension.js";
+import { createAgenticConversationHost } from "../src/agentic/conversation.js";
+import { fixture as implementationFixture, cleanups, unwrap } from "./helpers/agentic-integration-fixture.js";
 
-async function nativeAnalysisFlow(sharedReviewerSession = false) {
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+async function nativeAnalysisFlow(sharedReviewerSession = false, conversationSessionId = "session-native") {
   const f = await nativeExtensionFixture("analysis"), { engine } = await f.open();
   if (sharedReviewerSession) f.panes.get("reviewer")!.session = structuredClone(f.panes.get("specifier")!.session);
   const pack = buildAnalysisPack({ id: "native-analysis-acceptance", version: "1" });
-  const intake = { schemaVersion: 1 as const, requestId: "health-analysis", sessionId: "session-native", title: "Health analysis",
+  const intake = { schemaVersion: 1 as const, requestId: "health-analysis", sessionId: conversationSessionId, title: "Health analysis",
     userStatements: [{ id: "U-1", text: "Specify the health flag and its owner without changing the source." },
       { id: "U-2", text: "Health checks should respond within100 ms at p95 for5 concurrent callers." }],
     deliverables: ["scope", "functional_requirements", "acceptance_criteria", "nfr", "business_flows", "glossary", "data_notes"] as const,
@@ -50,13 +54,13 @@ async function nativeAnalysisFlow(sharedReviewerSession = false) {
     return { document };
   });
   const notices: unknown[] = [];
-  const composed = await openWorkflowExtensionRuntimes({ repositoryPath: f.repo, sessionId: "session-native", directory: join(f.root, "host-sdk"),
+  const composed = await openWorkflowExtensionRuntimes({ repositoryPath: f.repo, sessionId: conversationSessionId, directory: join(f.root, "host-sdk"),
     engine, runStore: f.runStore, artifactStore: f.artifactStore, native: f.native, authorizeHuman: () => true,
     now: () => new Date().toISOString(), readPack: async () => pack, publishToConversation: async message => { notices.push(message); },
     qa: { tools: {}, grants: [], leases: new AppCheckBrowserLeases(join(f.root, "qa-leases")) } });
   f.setAuthorize((intent, binding) => composed.host.authorizeNative(intent, binding));
   const delegation = DelegationRequestSchema.parse({ schemaVersion: 2, delegationId: "health-ba", messageId: "health-ba-message", correlationId: "health-ba-correlation",
-    sessionId: "session-native", runId: "run-native", requestedBy: "conversation", targetRole: "coordinator", title: intake.title, objective: intake.userStatements[0]!.text,
+    sessionId: conversationSessionId, runId: "run-native", requestedBy: "conversation", targetRole: "coordinator", title: intake.title, objective: intake.userStatements[0]!.text,
     specificationId: "health-ba-spec", sddLevel: "lightweight", acceptanceCriteria: [{ id: "AAC-1", category: "functional", description: intake.acceptanceCriteria[0]!.description,
       verificationMethod: "manual_review", required: true, status: "pending", evidenceArtifactIds: [] }], inputArtifacts: [], priority: "normal",
     requestedAt: new Date().toISOString(), idempotencyKey: "health-ba" });
@@ -85,6 +89,34 @@ async function activeAssignment() {
 }
 
 describe("analysis host assignment permissions", () => {
+  it("collects a real trusted Conversation business answer while preserving its original human receipt", async () => {
+    const f = await nativeAnalysisFlow(false, "session-1"), implementation = await implementationFixture();
+    await f.host.drive("run-native"); const question = (await f.host.pendingApprovals())[0]!;
+    const receipts: unknown[] = [];
+    const chat = await createAgenticConversationHost({ runtime: implementation.runtime, extensions: f.host,
+      manifest: unwrap(await implementation.panes.getManifest()), contextDirectory: join(f.root, "conversation"),
+      onHumanDecision: async decision => { receipts.push(decision); } });
+    await chat.reconcileApprovals();
+    const answer = await chat.handleTrustedApproval({ sessionId: "session-1", messageId: "physical-business-answer",
+      content: `${question.approvalId}: D-1: Ops`, provenance: { origin: "user", authenticatedUser: true, userId: "owner",
+        paneId: "pane-conversation", channel: "herdr_attach" } }) as any;
+    expect(answer?.ok).toBe(true); expect(receipts).toHaveLength(1);
+    await f.host.drive("run-native");
+    expect((await f.host.pendingApprovals())[0]!.metadata?.approvalScope).toBe("analysis_document");
+    expect(f.document().functionalRequirements[0]!.text).toBe("Ops owns the health flag");
+    const page = await f.runStore.readEvents("run-native", { limit: 100 }); if (!page.ok) throw new Error(page.error.message);
+    expect(page.value.items.filter(event => event.type === "approval.decided").map(event => event.payload)).toEqual(receipts);
+    expect((receipts[0] as any).metadata.answers).toBeUndefined();
+    expect((receipts[0] as any).reason).toBe("D-1: Ops");
+  });
+
+  it("rejects incomplete or conflicting business answers before queuing a human receipt", async () => {
+    const f = await nativeAnalysisFlow(); await f.host.drive("run-native"); const question = (await f.host.pendingApprovals())[0]!;
+    for (const reason of ["continue", "D-1: Ops\nD-1: Other", "unknown-question: Ops"])
+      await expect(f.host.decide({ ...f.decision(question), reason })).rejects.toThrow(/answer|question|business|quyết định|câu hỏi/i);
+    expect((await f.host.inspect("run-native") as any).queuedDecisions).toEqual([]);
+    expect((await f.host.pendingApprovals()).map(request => request.approvalId)).toEqual([question.approvalId]);
+  });
   it("publishes only after four genuine native role bindings and two separate exact human decisions, preserving source and undecided facts", async () => {
     const f = await nativeAnalysisFlow(), before = await readFile(join(f.repo, "src/health.ts"));
     await f.host.drive("run-native");

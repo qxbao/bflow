@@ -86,6 +86,10 @@ export async function createAgenticConversationHost(options: {
     const decision = ApprovalDecisionSchema.parse(input);
     if (options.extensions && await options.extensions.owns(decision.runId) && await options.extensions.decisionRecorded(decision))
       return { ok: true, value: undefined };
+    if (options.extensions && await options.extensions.owns(decision.runId)) {
+      try { await options.extensions.validateDecision(decision); }
+      catch (error) { return validationError(error instanceof Error ? error.message : String(error)); }
+    }
     // Preserve the original envelope (including pane identity) if already queued or uncertain.
     const state = await inspectState();
     const messageId = `approval-${digest(decision)}`;

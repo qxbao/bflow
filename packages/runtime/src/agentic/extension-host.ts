@@ -5,6 +5,8 @@ import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema,
   type PaneBinding, type RoleMessage, type RunStore, type WorkflowEngine, type WorkflowPack } from "@bflow/contracts";
 import { AnalysisWorkflowRuntime } from "../analysis/workflow.js";
 import { AnalysisIntakeSchema, type AnalysisIntakeInput } from "../analysis/model.js";
+import { analysisBusinessAnswers } from "../analysis/business-decision.js";
+import { extensionDecisionRequest } from "../extension-decisions.js";
 import { ANALYSIS_WORKFLOW_ID, resolveAnalysisPack, type AnalysisPackPin } from "../analysis/pack.js";
 import { QaWorkflowRuntime } from "../qa/workflow.js";
 import { QaIntakeSchema, type QaIntakeInput } from "../qa/model.js";
@@ -32,6 +34,7 @@ export interface WorkflowExtensionHost {
   quiesce(): Promise<JsonValue>;
   receive(message: RoleMessage): Promise<void>;
   decide(decision: ApprovalDecision): Promise<void>;
+  validateDecision(decision: ApprovalDecision): Promise<void>;
   decisionRecorded(decision: ApprovalDecision): Promise<boolean>;
   authorizeNative(intent: NativeExtensionIntent, binding: PaneBinding): Promise<void>;
   pendingApprovals(): Promise<ApprovalRequest[]>;
@@ -202,12 +205,23 @@ export async function createWorkflowExtensionHost(options: {
       await currentPack(entry);
       const previous = entry.decisions.find(item => item.decision.approvalId === decision.approvalId);
       if (previous) { if (digest(previous.decision) !== digest(decision)) throw new Error("Conflicting queued human decision"); return; }
+      await host.validateDecision(decision);
+      entry.decisions.push({ decision, state: "queued" }); await saveRoute(entry); },
+    async validateDecision(input) {
+      assertActive(); const decision = ApprovalDecisionSchema.parse(input), entry = await route(decision.runId);
+      await currentPack(entry);
       const request = (await pending(entry)).find(item => item.approvalId === decision.approvalId);
       if (!request || request.sessionId !== decision.sessionId || request.revision !== decision.revision || request.generation !== decision.generation ||
           digest(request.target) !== digest(decision.target) || request.metadata?.approvalScope !== decision.metadata?.approvalScope ||
           ["documentDigest", "designDigest"].some(key => request.metadata?.[key] !== decision.metadata?.[key]))
         throw new Error("Human receipt does not match the current extension approval");
-      entry.decisions.push({ decision, state: "queued" }); await saveRoute(entry); },
+      const scope = z.string().min(1).parse(request.metadata?.approvalScope);
+      await extensionDecisionRequest(options.runStore, decision, scope, new Date().toISOString());
+      if (entry.kind === "analysis" && scope === "business_decisions") {
+        const state = options.analysis.status(entry.runId);
+        analysisBusinessAnswers(decision, state.questions, state.decisions);
+      }
+    },
     async decisionRecorded(input) {
       const decision = ApprovalDecisionSchema.parse(input), entry = await route(decision.runId);
       const prior = entry.decisions.find(item => item.decision.approvalId === decision.approvalId);
