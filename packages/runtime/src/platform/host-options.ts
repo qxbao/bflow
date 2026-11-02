@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ProviderFailoverPolicySchema } from "@bflow/contracts";
 import {
-  SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
+  WorkflowPackSchema, SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
   NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema,
   RepositoryToolPolicySchema, ResolvedToolGrantSchema, RoleProfilePinSchema, RoleProfileCatalogSchema, ROLE_PROFILE_FEATURE,
   sameRoleProfilePin
@@ -50,6 +50,8 @@ export type PlatformRoleOption = z.infer<typeof PlatformRoleOptionSchema>;
 
 export const AgenticHostPlatformOptionsSchema = z.object({
   schemaVersion: z.literal(3),
+  /** Exact selected pack snapshot. Workflow selectors grant no provider permissions. */
+  workflowPack: WorkflowPackSchema.optional(),
   machineId: IdentifierSchema,
   repositoryId: IdentifierSchema,
   roleProfiles: RoleProfileCatalogSchema.optional(),

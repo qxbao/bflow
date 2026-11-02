@@ -212,7 +212,7 @@ export class QaWorkflowRuntime {
     const run = this.run(runId);
     const exec = run.execution;
     const latest = run.designs.at(-1);
-    return structuredClone({ runId: run.runId, status: run.status, revision: run.intake.revision, blockers: run.blockers,
+    return structuredClone({ runId: run.runId, intakeDigest: run.intakeDigest, executionMode: this.ports.roles.native ? "native" : "local", status: run.status, revision: run.intake.revision, blockers: run.blockers,
       denials: run.denials, rejections: run.rejections, definition: run.definition,
       tdd: { mode: run.strategy.tddDecision.mode, alternativeVerification: alternativeMethods(run.strategy) },
       design: latest ? { version: latest.version, digest: latest.digest, artifactId: latest.artifact.artifactId } : undefined,

@@ -161,7 +161,7 @@ export class AnalysisWorkflowRuntime {
   /** Read-only public view of one run. */
   status(runId: string) {
     const run = this.run(runId);
-    return structuredClone({ runId: run.runId, status: run.status, revision: run.intake.revision, pack: run.policy.pack,
+    return structuredClone({ runId: run.runId, intakeDigest: run.intakeDigest, executionMode: this.ports.roles.native ? "native" : "local", status: run.status, revision: run.intake.revision, pack: run.policy.pack,
       tdd: { mode: run.strategy.tddDecision.mode, alternativeVerification: alternativeMethods(run.strategy) },
       blockers: run.blockers, questions: run.questions, decisions: run.decisions, denials: run.denials, rejections: run.rejections,
       documents: run.documents.map(item => ({ version: item.version, digest: item.digest, artifactId: item.artifact.artifactId })),

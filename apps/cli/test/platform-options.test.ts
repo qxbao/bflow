@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -40,6 +40,16 @@ function configure(edit: (environment: EnvironmentCompositionInput["config"]["en
 const absent = () => false;
 
 describe("buildHostPlatformOptions", () => {
+  it("carries the exact analysis pack to the host without treating workflow selectors as provider capabilities", async () => {
+    const { buildAnalysisPack } = await import("@bflow/runtime");
+    const pack = buildAnalysisPack({ id: "analysis-host", version: "1" });
+    await writeFile(join(dir, "analysis-pack.json"), JSON.stringify(pack));
+    const input = configure(environment => { environment.workflowPack = { path: "analysis-pack.json", id: pack.id,
+      version: pack.version, digest: pack.digest }; });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
+    expect(Reflect.get(options, "workflowPack")).toEqual(pack);
+    for (const role of options.roles) expect(role.capabilityIds).toEqual([]);
+  });
   it("resolves an explicitly scoped memory grant from a ready service before validating retrieved provenance", () => {
     const scope = { kind: "repository" as const, machineId: context.machineId, repositoryId: base.repository.id, workspaceRoot: base.repository.root };
     const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: base.repository.id, scope,

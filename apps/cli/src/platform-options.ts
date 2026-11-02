@@ -199,7 +199,7 @@ export function resolveCodexTrustPaths(input: {
  * provider names are only validated as configuration values.
  */
 export async function buildHostPlatformOptions(input: EnvironmentCompositionInput, deps: HostPlatformDeps): Promise<AgenticHostPlatformOptions> {
-  const { AgenticHostPlatformOptionsSchema } = await import("@bflow/runtime");
+  const { AgenticHostPlatformOptionsSchema, workflowPackFamily } = await import("@bflow/runtime");
   const resolution = await resolvePlatformConfiguration(input);
   if (resolution.blockers.length) throw new Error("Selected workflow pack is unavailable or invalid");
   input = resolution.input;
@@ -222,10 +222,14 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   const grantsByRole = new Map<string, ResolvedToolGrant[]>();
   for (const grant of toolGrants) grantsByRole.set(grant.role, [...(grantsByRole.get(grant.role) ?? []), grant]);
   const requiredCapabilities = resolution.decisions.find(decision => decision.field === 'capabilities.required')?.effective;
+  const family = workflowPackFamily(resolution.workflowPack);
+  const providerCapabilities = Array.isArray(requiredCapabilities) ? requiredCapabilities.filter((item): item is string =>
+    typeof item === 'string' && !(family === 'analysis' && (item === 'workflow.analysis_only' || item.startsWith('analysis.output.'))) &&
+    !(family === 'qa' && item === 'workflow.qa_only')) : undefined;
   const roles: PlatformRoleOption[] = configuredPlatformRoles(input).map(role => ({
     ...resolveRolePlatformOption(role, input, deps.context.skills, grantsByRole.get(role.role) ?? [], deps.warn),
     ...rolePreferenceConstraints(resolution.decisions, role),
-    ...(role.role !== 'conversation' && Array.isArray(requiredCapabilities) ? { capabilityIds: requiredCapabilities.filter((item): item is string => typeof item === 'string') } : {})
+    ...(role.role !== 'conversation' && providerCapabilities ? { capabilityIds: providerCapabilities } : {})
   }));
 
   const locatorPath = join(deps.context.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
@@ -234,6 +238,7 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     (!configured.has("developer") && selectedProfileName(coordinator, environment) !== undefined);
   return AgenticHostPlatformOptionsSchema.parse({
     schemaVersion: 3,
+    ...(resolution.workflowPack ? { workflowPack: resolution.workflowPack } : {}),
     machineId: deps.context.machineId,
     repositoryId: input.repository.id,
     roles,

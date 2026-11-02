@@ -247,7 +247,7 @@ export async function resolvePlatformConfiguration(input: EnvironmentComposition
             resolved = { ...resolved, toolPolicy: RepositoryToolPolicySchema.parse({ ...effective, digest: policyDigest(effective) }) };
         }
     }
-    return { ...resolution, roleProfiles, inheritedRoles, input: { ...input, config: { ...input.config, environment: resolved } } };
+    return { ...resolution, workflowPack: pack === undefined ? undefined : WorkflowPackSchema.parse(pack), roleProfiles, inheritedRoles, input: { ...input, config: { ...input.config, environment: resolved } } };
 }
 export function decisionFor(decisions: readonly PlanDecision[], field: string) { return decisions.find(item => item.field === field); }
 

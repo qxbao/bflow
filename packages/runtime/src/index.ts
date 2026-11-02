@@ -191,3 +191,5 @@ export { registerUserInteractionIssuer } from "./agentic/host-controller.js";
 // Opt-in, Runtime-owned data snapshot verification. No daemon/CLI configuration adapter.
 export { DataVerificationHost, specificationContent as dataSpecificationContent } from "./data/host.js";
 export { digest as dataVerificationDigest, contractDigest as dataContractDigest } from "./data/contract.js";
+export { createWorkflowExtensionHost, workflowPackFamily } from "./agentic/extension-host.js";
+export { openWorkflowExtensionRuntimes } from "./agentic/extension-composition.js";

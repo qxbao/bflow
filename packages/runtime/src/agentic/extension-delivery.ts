@@ -27,6 +27,9 @@ export type NativeExtensionReconciliation = { status: "not_delivered" } | { stat
   { status: "bound"; handle: AgentExecutionHandle } |
   { status: "completed"; outcome: NativeExtensionOutcome };
 export interface NativeExtensionRolePort {
+  /** Host-only read view; model tools receive a scope-filtered projection. */
+  snapshot(): Promise<{ outbound: Outbound[]; inbox: JournalState["inbox"] }>;
+  validatePrompt(message: RoleMessage, binding: PaneBinding): Promise<void>;
   prepare(intent: NativeExtensionIntent): Promise<AgentRequest>;
   dispatch(request: AgentRequest): Promise<AgentExecutionHandle>;
   receive(message: RoleMessage): Promise<void>;
@@ -98,6 +101,25 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
     const actual = entries.find(item => item.agentId === binding.agentId);
     if (!actual?.enabled || actual.role !== binding.role || actual.transport !== "herdr" ||
         capabilities.some(capability => !actual.capabilities.includes(capability))) throw new Error("Native role registration/capabilities are not current");
+  }
+  async snapshot(): Promise<{ outbound: Outbound[]; inbox: JournalState["inbox"] }> {
+    return this.journal.exclusive(async state => structuredClone({ outbound: state.outbound, inbox: state.inbox }));
+  }
+  async validatePrompt(input: RoleMessage, bindingInput: PaneBinding): Promise<void> {
+    const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    await this.journal.exclusive(async (state, save) => {
+      const out = state.outbound.find(item => item.message.message_id === message.message_id);
+      if (!out?.request || !["sending", "accepted"].includes(out.status)) throw new Error("Native assignment has not been dispatched or accepted");
+      if (!same(out.message, message)) throw new Error("Native assignment prompt changed");
+      const intent = this.intent(out), current = await this.binding(intent, false);
+      if (!same(this.target(binding), out.request.target) || !same(this.target(current), out.request.target) ||
+          binding.cwd !== out.request.workingDirectory || binding.role !== intent.message.recipient.role)
+        throw new Error("Native prompt target binding/session mismatch");
+      if (Date.parse(this.now()) >= Date.parse(out.request.createdAt) + out.request.timeout.executionTimeoutMs)
+        throw new Error("Native assignment prompt expired");
+      await this.registration(current, out.capabilities);
+      await this.renew(out, save);
+    });
   }
   async prepare(input: NativeExtensionIntent): Promise<AgentRequest> {
     const intent = IntentSchema.parse(input), key = `${intent.family}.${intent.taskId}`;

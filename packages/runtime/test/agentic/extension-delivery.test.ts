@@ -76,6 +76,20 @@ async function fixture() {
 }
 
 describe("native extension delivery", () => {
+  it("admits provider prompts only for the exact persisted native assignment and current pane/session", async () => {
+    const f = await fixture(), bridge = f.create(), request = await bridge.prepare(f.intent);
+    expect(bridge.validatePrompt).toBeTypeOf("function");
+    const original = await f.journal.exclusive(async state => structuredClone(state.outbound[0]!.message));
+    await expect(bridge.validatePrompt(original, f.binding)).rejects.toThrow(/accepted|dispatch/i);
+    await bridge.dispatch(request);
+    await expect(bridge.validatePrompt(original, f.binding)).resolves.toBeUndefined();
+    await expect(bridge.validatePrompt({ ...original, payload: { instruction: "different" } }, f.binding)).rejects.toThrow(/changed|match/i);
+    await expect(bridge.validatePrompt(original, { ...f.binding, session: { ...f.binding.session!, value: "another-native-session" } }))
+      .rejects.toThrow(/session|binding|target/i);
+    const snapshot = await bridge.snapshot();
+    expect(snapshot.outbound[0]).toMatchObject({ request, status: "accepted" });
+    expect(f.transport.sentRequests).toHaveLength(1);
+  });
   it("persists the actual prepared request and lease before send, then retains the immutable returned handle", async () => {
     const f = await fixture(), bridge = f.create(); const request = await bridge.prepare(f.intent);
     expect(f.transport.sentRequests).toHaveLength(0);
