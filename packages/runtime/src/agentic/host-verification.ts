@@ -1,3 +1,4 @@
+import { reviewCandidateEvidence } from "./review-candidate-evidence.js";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -43,7 +44,7 @@ import { TEST_INTEGRITY_CHECK, TestIntegrityObservationSchema, TestIntegrityGran
 const execFileAsync = promisify(execFile);
 function originalReviewContext(context: unknown) {
   const parsed = QualityGateContextSchema.parse(context);
-  const { hostQaBehavioralObservation: _measurement, hostReworkVerification: _rework, hostTestIntegrityObservation: _integrity, ...input } = record(parsed.input);
+  const { hostCandidateBehavioralEvidence: _candidate, hostQaBehavioralObservation: _measurement, hostReworkVerification: _rework, hostTestIntegrityObservation: _integrity, ...input } = record(parsed.input);
   return { ...parsed, input };
 }
 function staticGateId(command: string): string {
@@ -1409,6 +1410,9 @@ export class HostVerification {
       requiredTestIntegrityFindingIds: [...integrityIds],
       ...(integrityTotal !== integrityIds.length ? { requiredTestIntegrityFindingTotal: integrityTotal } : {})
     });
+    const candidateBehavioralEvidence = details.scope === "task" ? await reviewCandidateEvidence({ context, state, store: this.store(),
+      authenticateEvidence: value => this.authenticateEvidence(value), authenticateGate: value => this.authenticateGate(value) }) : undefined;
+    if (candidateBehavioralEvidence) context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostCandidateBehavioralEvidence: candidateBehavioralEvidence } });
     const sourceMessageId = textField(args.messageId);
     const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
       rev.sourceMessageId === sourceMessageId &&
@@ -1422,6 +1426,7 @@ export class HostVerification {
     const fullIntegrityIds = testIntegrityObservation ? testIntegrityObservation.report.findings.map(f => f.id) : [];
     const fullReply = {
       reviewId,
+      ...(candidateBehavioralEvidence ? { candidateBehavioralEvidence } : {}),
       reviewRequirements: buildRequirements(fullIntegrityIds, fullIntegrityIds.length),
       ...(testIntegrityObservation ? { testIntegrityObservation } : {}),
       ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
@@ -1509,6 +1514,7 @@ export class HostVerification {
       const pageIntegrityIds = boundedIntegrity ? boundedIntegrity.report.findings.map(f => f.id) : [];
       return {
         reviewId,
+        ...(candidateBehavioralEvidence ? { candidateBehavioralEvidence } : {}),
         reviewRequirements: buildRequirements(pageIntegrityIds, fullIntegrityIds.length),
         ...(boundedIntegrity ? { testIntegrityObservation: boundedIntegrity } : {}),
         ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
@@ -1544,7 +1550,8 @@ export class HostVerification {
     if (!observation.report.findings.some(finding => finding.id === args.findingId)) throw new Error("Unknown test-integrity finding ID");
     const current = await this.capture(pending.observation.cwd, pending.observation.base, pending.observation.revision);
     if (digest(current) !== digest(pending.observation)) throw new Error("Test-integrity exception source changed");
-    return this.runtime().requestTestIntegrityException(binding, { messageId: textField(pending.sourceMessageId), context,
+    const { hostCandidateBehavioralEvidence: _candidate, ...requestInput } = record(context.input);
+    return this.runtime().requestTestIntegrityException(binding, { messageId: textField(pending.sourceMessageId), context: { ...context, input: requestInput },
       findingId: args.findingId, reason: args.reason, evidence: observation.evidence });
   }
   async completeReview(binding: PaneBinding, input: unknown) {
