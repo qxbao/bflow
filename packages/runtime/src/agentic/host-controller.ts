@@ -1,4 +1,5 @@
 import { connectArtifact } from "../interaction/artifacts.js";
+import { openSqliteRunStore } from "@bflow/persistence";
 import { WebIssuerCredentialSchema } from "@bflow/contracts/web-host";
 import { createExecutionResolutionReader, readResolutionFile, type ExecutionResolutionReader } from "./execution-binding.js";
 import { buildExecutionPlan } from "../planning/index.js";
@@ -255,8 +256,7 @@ async function refreshEmptyStartupSources(configuration: HostConfiguration, conf
         const info = await lstat(database);
         if (!info.isFile() || info.isSymbolicLink() || await realpath(database) !== database)
           throw new Error("Startup refresh requires a safe existing RunStore");
-        const persistence = await import("@bflow/persistence");
-        const opened = persistence.openSqliteRunStore({ filename: database });
+        const opened = openSqliteRunStore({ filename: database });
         if (!opened.ok) throw new Error("Startup refresh cannot verify the existing RunStore");
         try {
           const found = await opened.value.find(RunQuerySchema.parse({ limit: 1 }));

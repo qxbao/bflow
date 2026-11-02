@@ -43,8 +43,9 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
   const requests = new Map<string, AgentRequest>(), handles = new Map<string, AgentExecutionHandle>();
   let loseAck = false, missingReceipt = false;
   transport.customSendHandler = request => {
+    const earlierTaskExecution = [...requests.values()].some(item => item.runId === request.runId && item.taskId === request.taskId && item.requestId !== request.requestId);
     requests.set(request.requestId, request);
-    const handle: AgentExecutionHandle = { executionId: `herdr-${request.taskId}`, requestId: request.requestId, attemptId: request.attemptId,
+    const handle: AgentExecutionHandle = { executionId: `herdr-${request.taskId}${earlierTaskExecution ? `-${request.attemptId}` : ""}`, requestId: request.requestId, attemptId: request.attemptId,
       runId: request.runId, taskId: request.taskId, idempotencyKey: request.idempotency.key, target: request.target,
       correlation: { token: request.requestId, provenance: "orchestrator", verified: false }, acceptedAt: new Date().toISOString() };
     handles.set(request.requestId, handle);

@@ -1175,6 +1175,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     workspace = await openAgenticWorkspace({
       ...(configuration.platform?.workflowPack ? { workflowPack: configuration.platform.workflowPack } : {}),
       qaGrants: configuration.platform?.toolGrants ?? [], qaLeaseDirectory: join(configuration.directory, "app-checks"),
+      ...(configuration.platform ? { runtimeHttpIdentity: { machineId: configuration.platform.machineId, repositoryId: configuration.platform.repositoryId },
+        ...(configuration.platform.runtimeHttpPolicy ? { runtimeHttpPolicy: configuration.platform.runtimeHttpPolicy } : {}),
+        runtimeHttpGrants: configuration.platform.runtimeHttpGrants ?? [] } : {}),
       assertExtensionDispatch: () => { if (quiesced || closing) throw new Error("Host is quiesced; native extension dispatch is disabled"); },
       storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),

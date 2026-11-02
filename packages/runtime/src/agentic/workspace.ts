@@ -2,7 +2,7 @@ import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type ContractError, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding, type WorkflowPack, type ResolvedToolGrant
+  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type RuntimeHttpPolicy, type RuntimeHttpGrant, type ApprovalDecision, type ContractError, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding, type WorkflowPack, type ResolvedToolGrant
 } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
@@ -15,12 +15,16 @@ import { openWorkflowExtensionRuntimes } from "./extension-composition.js";
 import type { WorkflowExtensionHost } from "./extension-host.js";
 import { AppCheckBrowserLeases } from "./app-check-lease.js";
 import { createHttpQaTool } from "../qa/tools.js";
+import { createRuntimeHttpAuthority } from "./runtime-http-authority.js";
 import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 
 export interface OpenAgenticWorkspaceOptions {
   workflowPack?: WorkflowPack;
   qaGrants?: readonly ResolvedToolGrant[];
+  runtimeHttpPolicy?: RuntimeHttpPolicy;
+  runtimeHttpGrants?: readonly RuntimeHttpGrant[];
+  runtimeHttpIdentity?: { machineId: string; repositoryId: string };
   qaLeaseDirectory?: string;
   assertExtensionDispatch?(): void;
   roleProfiles?: AgenticRuntimePorts["roleProfiles"];
@@ -472,6 +476,18 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
         if (!conversation) throw new Error("Conversation is not active");
         await conversation.receiveRuntime(message); await options.onConversationNotice?.(message);
       }, qa: { tools: { http: createHttpQaTool() }, grants: options.qaGrants ?? [],
+        runtimeHttpGrants: options.runtimeHttpGrants ?? [],
+        ...(options.runtimeHttpIdentity ? { runtimeHttpAuthority: createRuntimeHttpAuthority({ ...options.runtimeHttpIdentity,
+          workspaceRoot: repository, sessionId: options.sessionId, ...(options.runtimeHttpPolicy ? { policy: options.runtimeHttpPolicy } : {}),
+          grants: options.runtimeHttpGrants ?? [],
+          ...(options.readExecutionResolution ? { revalidate: async () => { await options.readExecutionResolution!(); } } : {}) }) } : {}),
+        grantScopeSessionId: options.sessionId,
+        beforeTargetAction: async ({ runId }) => {
+          options.assertExtensionDispatch?.();
+          await options.readExecutionResolution?.();
+          const parent = record(await runtime.inspect(runId));
+          if (parent.cancelled || parent.supersededBy) throw new Error("Extension parent is cancelled or superseded");
+        },
         leases: new AppCheckBrowserLeases(options.qaLeaseDirectory ?? resolve(directory, "qa-environment-leases")) }
     });
     extensions = extensionRuntimes.host;

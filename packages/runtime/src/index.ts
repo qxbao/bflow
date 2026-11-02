@@ -152,6 +152,7 @@ export { createNativeExtensionRolePort, type NativeExtensionRolePort, type Nativ
   type NativeExtensionOutcome, type NativeExtensionReconciliation, type NativeExtensionDeliveryOptions } from "./agentic/extension-delivery.js";
 export { parseNativeExtensionOutput } from "./agentic/extension-output.js";
 export * from "./qa/index.js";
+export { createRuntimeHttpAuthority, type RuntimeHttpAction } from "./agentic/runtime-http-authority.js";
 
 // Private state placement for the host and CLI recovery composition.
 export { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "./private-state.js";

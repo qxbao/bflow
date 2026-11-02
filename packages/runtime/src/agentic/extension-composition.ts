@@ -39,7 +39,7 @@ export async function openWorkflowExtensionRuntimes(options: {
   isLegacyImplementationRun?(runId: string): Promise<boolean>;
   readPack(): Promise<WorkflowPack | undefined>;
   publishToConversation(message: RoleMessage): Promise<void>;
-  qa: Pick<QaRuntimePorts, "tools" | "grants" | "leases" | "accounts" | "leaseTtlMs">;
+  qa: Pick<QaRuntimePorts, "tools" | "grants" | "leases" | "accounts" | "leaseTtlMs" | "grantScopeSessionId" | "beforeTargetAction" | "runtimeHttpGrants" | "runtimeHttpAuthority">;
 }) {
   const shared = { engine: options.engine, runStore: options.runStore, artifactStore: options.artifactStore,
     repositoryRoot: options.repositoryPath, authorizeHuman: options.authorizeHuman, now: options.now };

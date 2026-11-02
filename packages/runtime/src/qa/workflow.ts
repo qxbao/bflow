@@ -6,7 +6,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   hasAuthenticatedBindings, AgentBindingVerificationSchema, AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   ArtifactWriteOptionsSchema, DomainEventSchema, ResolvedToolGrantSchema, SpecificationSchema, StoredRunSchema, VerificationResultSchema,
-  WorkflowAdvanceResultSchema, type ApprovalDecision, type ArtifactReference, type ArtifactStore, type JsonValue, type OperationResult,
+  WorkflowAdvanceResultSchema, RuntimeHttpGrantSchema, type RuntimeHttpGrant, type ApprovalDecision, type ArtifactReference, type ArtifactStore, type JsonValue, type OperationResult,
   type ResolvedToolGrant, type RunStore, type TestStrategy, type WorkflowAdvanceResult, type WorkflowDefinition, type WorkflowEngine,
   type WorkflowRunSnapshot
 } from "@bflow/contracts";
@@ -24,7 +24,7 @@ import { QaScopeDenied, QaUnresolvedVariable, actionOf, resolveTargetUrl, substi
 import { QA_BROWSER_TOOL_ID, QA_HTTP_TOOL_ID, type QaBrowserTool, type QaHttpOutcome, type QaHttpTool } from "./tools.js";
 import { verifyQaDesign, type QaDesignVerification } from "./verify.js";
 
-import { executeExtension, extensionIntent, type ExtensionExecution } from "../extension-execution.js";
+import { executeExtension, extensionIntent, nativeExecutionsIndependent, type ExtensionExecution } from "../extension-execution.js";
 import type { NativeExtensionRolePort } from "../agentic/extension-delivery.js";
 /** One assignment to a standard role. Roles get context only: no write, command or network authority on the target. */
 export interface QaAssignment {
@@ -72,6 +72,13 @@ export interface QaRuntimePorts {
   readonly tools: { readonly http?: QaHttpTool; readonly browser?: QaBrowserTool };
   /** Host-resolved session grants; each action needs a grant for the QA role, the tool and that operation. */
   readonly grants: readonly ResolvedToolGrant[];
+  /** Host transport session differs from the Conversation session in the intake. Supplied by composition, never a role. */
+  readonly grantScopeSessionId?: string;
+  /** Revalidate host policy/cancellation before every target operation, including readiness and reconciliation. */
+  beforeTargetAction?(input: { runId: string; toolId: string; action: QaAction; origin: string }): Promise<void>;
+  /** Native host HTTP has its own real grant. CLI/MCP SDK fixtures cannot become native authority. */
+  readonly runtimeHttpGrants?: readonly RuntimeHttpGrant[];
+  runtimeHttpAuthority?(input: { runId: string; toolId: string; action: QaAction; origin: string }): Promise<void>;
   /** Host-local fenced lease over the target environment, held for the whole execution transaction. */
   readonly leases: AppCheckBrowserLeases;
   readonly leaseTtlMs?: number;
@@ -535,7 +542,9 @@ export class QaWorkflowRuntime {
     } else if (binding.gateId === QA_GATES.review) {
       const latest = run.designs.at(-1)!;
       const review = run.review!;
-      if (review.agentId === latest.authorAgentId) problems.push({ code: "review_not_independent", severity: "error", ids: [review.agentId], message: "The reviewer authored the test design" });
+      const author = run.executions.find(item => item.attemptId === latest.attemptId);
+      if (review.agentId === latest.authorAgentId || execution.native && !nativeExecutionsIndependent(author?.native, execution.native))
+        problems.push({ code: "review_not_independent", severity: "error", ids: [review.agentId], message: "The reviewer needs an independent authenticated actor, pane and native session" });
       if (review.designDigest !== latest.digest) problems.push({ code: "review_stale", severity: "error", ids: [review.designDigest], message: "Review is not pinned to the current design digest" });
       if (review.verdict !== "approved" || review.findings.some(item => item.severity === "blocking"))
         problems.push({ code: "review_changes_requested", severity: "error", ids: review.findings.map(item => item.id), message: "Independent review requested changes" });
@@ -576,7 +585,10 @@ export class QaWorkflowRuntime {
     const exec = run.execution!;
     const problems: QaFinding[] = [];
     const add = (code: QaFinding["code"], ids: string[], message: string) => problems.push({ code, severity: "error", ids, message });
-    if (adjudication.agentId === run.designs.at(-1)!.authorAgentId) add("adjudication_not_independent", [adjudication.agentId], "The test designer cannot adjudicate its own results");
+    const design = run.designs.at(-1)!, author = run.executions.find(item => item.attemptId === design.attemptId);
+    const judge = run.executions.find(item => item.attemptId === adjudication.attemptId);
+    if (adjudication.agentId === design.authorAgentId || judge?.native && !nativeExecutionsIndependent(author?.native, judge.native))
+      add("adjudication_not_independent", [adjudication.agentId], "The test designer cannot adjudicate through the same authenticated actor, pane or native session");
     if (adjudication.executionDigest !== exec.digest) add("adjudication_stale", [adjudication.executionDigest], "Adjudication is not pinned to the current execution digest");
     for (const outcome of Object.values(exec.cases)) {
       const verdicts = adjudication.verdicts.filter(item => item.caseId === outcome.caseId);
@@ -771,11 +783,37 @@ export class QaWorkflowRuntime {
   }
 
   private grantFor(run: RunRecord, toolId: string, action: QaAction): boolean {
+    if (this.ports.roles.native) {
+      if (toolId !== QA_HTTP_TOOL_ID || !this.ports.runtimeHttpAuthority) return false;
+      return (this.ports.runtimeHttpGrants ?? []).some(raw => {
+        const parsed = RuntimeHttpGrantSchema.safeParse(raw);
+        return parsed.success && parsed.data.operations.some(operation => operation === action) && parsed.data.scope.kind === "session" &&
+          parsed.data.scope.sessionId === (this.ports.grantScopeSessionId ?? run.intake.sessionId) &&
+          parsed.data.scope.workspaceRoot === this.ports.repositoryRoot;
+      });
+    }
     return this.ports.grants.some(raw => {
       const grant = ResolvedToolGrantSchema.safeParse(raw);
       return grant.success && grant.data.role === QA_EXECUTION_ROLE && grant.data.toolId === toolId && grant.data.operations.includes(action) &&
-        grant.data.scope.kind === "session" && grant.data.scope.sessionId === run.intake.sessionId && grant.data.scope.workspaceRoot === this.ports.repositoryRoot;
+        grant.data.scope.kind === "session" && grant.data.scope.sessionId === (this.ports.grantScopeSessionId ?? run.intake.sessionId) &&
+        grant.data.scope.workspaceRoot === this.ports.repositoryRoot;
     });
+  }
+  private async targetAuthority(run: RunRecord, toolId: string, action: QaAction, origin: string): Promise<void> {
+    await this.ports.beforeTargetAction?.({ runId: run.runId, toolId, action, origin });
+    if (!run.intake.allowedActions.includes(action) || !this.grantFor(run, toolId, action))
+      throw new QaScopeDenied("grant_unavailable", `No current grant for ${toolId}:${action}`);
+    if (!run.intake.target.origins.includes(origin)) throw new QaScopeDenied("origin_not_approved", "Target origin exceeds the approved QA intake");
+    if (this.ports.roles.native) await this.ports.runtimeHttpAuthority!({ runId: run.runId, toolId, action, origin });
+  }
+  private async recheckMutationIntent(run: RunRecord, exec: ExecutionState, mutation: QaMutationRecord, toolId: string, action: QaAction, origin: string) {
+    try {
+      await this.targetAuthority(run, toolId, action, origin);
+      await this.fence(exec);
+    } catch (error) {
+      // The write-ahead intent exists, but the tool has not been invoked. Preserve proof that nothing was delivered.
+      mutation.state = "not_delivered"; mutation.settledAt = this.ports.now(); await this.save(); throw error;
+    }
   }
   private prerequisiteGap(run: RunRecord, steps: readonly QaStep[], account?: string): string | undefined {
     for (const step of steps) {
@@ -833,6 +871,7 @@ export class QaWorkflowRuntime {
   /** One HTTP exchange through the granted tool, fence-checked; never follows redirects by itself. */
   private async request(run: RunRecord, exec: ExecutionState, url: URL, method: string, headers: Record<string, string>, body: string | undefined,
     timeoutMs: number): Promise<QaHttpOutcome> {
+    await this.targetAuthority(run, QA_HTTP_TOOL_ID, method === "GET" || method === "HEAD" ? "http_read" : "http_mutate", url.origin);
     await this.fence(exec);
     if (!run.intake.target.origins.includes(url.origin)) throw new QaScopeDenied("origin_not_approved", `Origin ${url.origin} is not approved`);
     return this.ports.tools.http!.request({ method, url: url.toString(), headers, ...(body !== undefined ? { body } : {}), timeoutMs });
@@ -970,7 +1009,7 @@ export class QaWorkflowRuntime {
       const request = `${method} ${sanitizer.text(url.toString())}`;
       const recordBase = { ...base, request, requestHeaders: sanitizer.headersOf(headers), ...(body !== undefined ? { requestBody: sanitizer.body(body) } : {}) };
       let lease: AppCheckLease;
-      try { lease = await this.fence(exec); }
+      try { await this.targetAuthority(run, QA_HTTP_TOOL_ID, action, url.origin); lease = await this.fence(exec); }
       catch (error) {
         if (error instanceof LeaseInterrupted) return { ...recordBase, outcome: "lease", findings: [{ code: error.code, message: `Environment lease ${error.code}; no further actions` }] };
         throw error;
@@ -983,6 +1022,11 @@ export class QaWorkflowRuntime {
           state: "intent", at: this.ports.now() };
         exec.mutations.push(mutation);
         await this.save();
+        try { await this.recheckMutationIntent(run, exec, mutation, QA_HTTP_TOOL_ID, action, url.origin); }
+        catch (error) {
+          if (error instanceof LeaseInterrupted) return { ...recordBase, outcome: "lease", findings: [{ code: error.code, message: "Environment lease lost before mutation delivery" }] };
+          throw error;
+        }
       }
       const response = await this.ports.tools.http!.request({ method, url: url.toString(), headers, ...(body !== undefined ? { body } : {}), timeoutMs: step.timeoutMs ?? 10_000 });
       if (mutation) {
@@ -1066,7 +1110,7 @@ export class QaWorkflowRuntime {
     }
     if (resolved.url) request = `browser ${step.op} ${sanitizer.text(resolved.url)}${resolved.selector ? ` ${resolved.selector}` : ""}`;
     let lease: AppCheckLease;
-    try { lease = await this.fence(exec); }
+    try { await this.targetAuthority(run, QA_BROWSER_TOOL_ID, base.action, resolved.url ? new URL(resolved.url).origin : run.intake.target.origins[0]!); lease = await this.fence(exec); }
     catch (error) {
       if (error instanceof LeaseInterrupted) return { ...base, request, outcome: "lease", findings: [{ code: error.code, message: `Environment lease ${error.code}; no further actions` }] };
       throw error;
@@ -1079,6 +1123,12 @@ export class QaWorkflowRuntime {
         state: "intent", at: this.ports.now() };
       exec.mutations.push(mutation);
       await this.save();
+      try { await this.recheckMutationIntent(run, exec, mutation, QA_BROWSER_TOOL_ID, base.action,
+        resolved.url ? new URL(resolved.url).origin : run.intake.target.origins[0]!); }
+      catch (error) {
+        if (error instanceof LeaseInterrupted) return { ...base, request, outcome: "lease", findings: [{ code: error.code, message: "Environment lease lost before browser mutation delivery" }] };
+        throw error;
+      }
     }
     const result = await this.ports.tools.browser!.perform(resolved, step.timeoutMs ?? 15_000);
     if (mutation) {
