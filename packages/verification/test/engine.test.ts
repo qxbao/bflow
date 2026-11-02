@@ -598,3 +598,18 @@ describe("verification planning", () => {
     expect(() => createVerificationPlan({ ...f.input, maxIterations: 11 })).toThrow();
   });
 });
+it('requires controller authority for an unchanged dispute and still consumes the normal bounded verification cycles',async()=>{
+ const f=await fixture();f.runners[0]!.mode='failed';const engine=new VerificationEngine(f.ports);const initial=await f.change();
+ const first=await engine.verify(f.plan,engine.start(f.plan,'unchanged-dispute-cycle'),initial);
+ const secondChange={...await f.change(2),headCommitHash:initial.headCommitHash,patchArtifact:initial.patchArtifact};
+ const repair={taskId:f.plan.taskId,role:'developer',changeSetId:secondChange.changeSetId,summary:'Dispute adjudication under existing candidate proof'};
+ await expect(engine.verify(f.plan,first.cycle,secondChange,{repair})).rejects.toThrow(/new attempt/);
+ await expect(engine.verify(f.plan,first.cycle,secondChange,{repair,authorizeUnchangedDispute:true})).rejects.toThrow();
+ await expect(engine.verify(f.plan,first.cycle,secondChange,{repair,authorizeUnchangedDispute:async()=>false})).rejects.toThrow(/new attempt/);
+ const second=await engine.verify(f.plan,first.cycle,secondChange,{repair,authorizeUnchangedDispute:async revision=>revision===initial.headCommitHash});
+ expect(second.result.status).toBe('failed');expect(second.cycle.currentIteration).toBe(2);expect(second.cycle.maxIterations).toBe(3);
+ const thirdChange={...await f.change(3),headCommitHash:initial.headCommitHash,patchArtifact:initial.patchArtifact};
+ const third=await engine.verify(f.plan,second.cycle,thirdChange,{repair:{...repair,changeSetId:thirdChange.changeSetId},authorizeUnchangedDispute:async()=>true});
+ expect(third.cycle.currentIteration).toBe(3);expect(third.cycle.status).toBe('escalated');expect(f.runners[0]!.calls).toHaveLength(3);
+ await expect(engine.verify(f.plan,third.cycle,{...await f.change(4),headCommitHash:initial.headCommitHash},{repair,authorizeUnchangedDispute:async()=>true})).rejects.toThrow();
+});

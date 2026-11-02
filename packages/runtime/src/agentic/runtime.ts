@@ -1,3 +1,4 @@
+import { reviewCandidateEvidence, candidateEvidenceContext, hasCandidateGateReceipt } from "./review-candidate-evidence.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -3919,6 +3920,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
                 ownedPaths,
                 forbiddenPaths,
                 expectedStatus: result.status,
+                authorizeVerifiedNoChangeDispute: revision => this.verifiedNoChangeDispute(run,task,result.attemptId,revision),
                 artifactStore: this.ports.artifactStore
               })
             : await validateAndStoreReworkResolution({
@@ -3930,6 +3932,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
                 submissionStatus: result.status,
                 submittedByAgentId: out.handle.target.agentId,
                 submittedAt: result.completedAt,
+                authorizeVerifiedNoChangeDispute: revision => this.verifiedNoChangeDispute(run,task,result.attemptId,revision),
                 artifactStore: this.ports.artifactStore
               });
           task.reworkResolutions ??= [];
@@ -3953,7 +3956,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (this.ports.automaticAlternativeEvidence && result.status === "succeeded" && !evidenceComplete && task.spec.strategy.tddDecision.mode !== "required") {
       const requestId = `alternative-${result.requestId}`;
       const behavioral = task.spec.strategy.targetCommands.length > 0;
-      const change = behavioral ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key)) : undefined;
+      const change = behavioral ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key,this.candidateCollectOptions(run,task,result.attemptId))) : undefined;
       if (change && (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== result.attemptId))
         throw new Error("Automatic policy verification source does not match the implementation attempt");
       const recipient = await this.profileEvidenceRecipient(run, "qa", requestId, ["testing"]);
@@ -4105,6 +4108,38 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       return json({ authorized: true, decisionId: task.spec.strategy.tddDecision.decisionId });
     });
   }
+  /** Admission of an unchanged all-disputed proposal still leaves every finding and gate to independent verification. */
+  private candidateCollectOptions(run:RunRecord,task:TaskRecord,attemptId:string) {
+    return {authorizeUnchangedDispute:(revision:string)=>this.isSubmittedUnchangedDispute(task,attemptId,revision)
+      ? this.verifiedNoChangeDispute(run,task,attemptId,revision) : Promise.resolve(false),comparisonBaseRevision:task.worktrees[0]!.baseCommitHash};
+  }
+  private isSubmittedUnchangedDispute(task:TaskRecord,attemptId:string,revision:string):boolean {
+    const dossier=task.reworkResolutions?.find(d=>d.attemptId===attemptId);
+    return task.cycle?.status==="rework_required"&&task.result?.status==="succeeded"&&task.result.attemptId===attemptId&&
+      !!dossier&&dossier.submittedRevision===revision&&dossier.failedRevision===revision&&dossier.findingResolutions.every(f=>f.disposition==="disputed");
+  }
+  private async authorizeUnchangedVerification(runId:string,taskId:string,attemptId:string,cycleId:string,revision:string):Promise<boolean> {
+    return this.transaction(async(state,_save,core)=>{
+      const run=this.run(state,runId),task=run.tasks.find(t=>t.taskId===taskId);
+      const dossier=task?.reworkResolutions?.find(d=>d.attemptId===attemptId);
+      if(run.cancelled||run.status!=="verifying"||!task?.writerReleased||task.result?.status!=="succeeded"||task.result.attemptId!==attemptId||task.cycle?.cycleId!==cycleId||
+        !dossier||!this.isSubmittedUnchangedDispute(task,attemptId,revision))return false;
+      const current=(await core.snapshot(runId)).tasks.find(t=>t.taskId===taskId);
+      if(current?.attemptId!==attemptId||current.status!=="waiting")return false;
+      return this.verifiedNoChangeDispute(run,task,attemptId,revision);
+    });
+  }
+  private async verifiedNoChangeDispute(run: RunRecord, task: TaskRecord, attemptId: string, revision: string): Promise<boolean> {
+    try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); } catch { return false; }
+    const packet=record(await reviewCandidateEvidence({context:candidateEvidenceContext({runId:run.runId,taskId:task.taskId,attemptId,sourceRevision:revision,specification:task.spec.specification,strategy:task.spec.strategy}),
+      state:{runs:[run]},store:this.ports.artifactStore,
+      authenticateEvidence:async value=>(await this.ports.authenticateStoredEvidence?.(value))===true,
+      authenticateGate:async value=>(await this.ports.authenticateStoredGate?.(value))===true}));
+    if(!hasCandidateGateReceipt(packet))return false;
+    await this.activityLog.record({kind:"verification",role:"runtime",action:"no_change_dispute_proposal_authorized",runId:run.runId,taskId:task.taskId,attemptId,
+      outcome:`source=${revision}; receipts=${(Array.isArray(packet.entries)?packet.entries:[]).map(entry=>record(entry).receiptId).join(",")}; independent finding verdicts remain required`});
+    return true;
+  }
   async prepareReworkSubmission(
     bindingInput: PaneBinding,
     runIdInput: string,
@@ -4149,6 +4184,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         submissionStatus,
         submittedByAgentId: binding.agentId,
         submittedAt: this.now(),
+        authorizeVerifiedNoChangeDispute: revision => this.verifiedNoChangeDispute(run,task,current.attemptId!,revision),
         artifactStore: this.ports.artifactStore
       });
     });
@@ -4638,7 +4674,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             const retryRequestId = `alternative-retry-${digest([run.runId, task.taskId, request.message.message_id, String(retryIndex)])}`;
             const behavioral = task.spec.strategy.targetCommands.length > 0;
             const change = behavioral && task.worktrees.at(-1)
-              ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key))
+              ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key,this.candidateCollectOptions(run,task,task.result.attemptId)))
               : undefined;
             const recipient = await this.profileEvidenceRecipient(run, "qa", retryRequestId, ["testing"]);
             const evidenceOut = outbox.enqueue(RoleMessageSchema.parse({
@@ -5059,7 +5095,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               }
               await outbox.release(out);
               await this.releaseChildNotices(state, outbox, out);
-              const change = GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key));
+              const change = GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key,this.candidateCollectOptions(run,task,current.attemptId!)));
               if (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== current.attemptId) throw new Error("Git task submission mismatch");
               task.changeSet = change;
               const plan = this.verificationPlan(state, run, task, undefined, outbox);
@@ -5134,7 +5170,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     for (const job of jobs) {
       // No Runtime lock is held: QA/Reviewer may reply through Herdr while verification awaits them.
       try {
-        const outcome = await this.ports.policies.verification.verify(job.plan, job.cycle, job.change, job.options);
+        const taskId=job.taskId;
+        const options=taskId!==undefined&&taskId!==FINAL_TASK ? {...record(job.options ?? {}),
+          authorizeUnchangedDispute:(revision:string)=>this.authorizeUnchangedVerification(job.runId,taskId,job.change.attemptId,job.cycle.cycleId,revision)} : job.options;
+        const outcome = await this.ports.policies.verification.verify(job.plan, job.cycle, job.change, options);
         await this.finishVerification(job, outcome);
       } catch (error) {
         await this.transaction(async (state, save, _core, outbox) => {

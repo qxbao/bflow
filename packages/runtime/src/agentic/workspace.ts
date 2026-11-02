@@ -50,6 +50,8 @@ export interface OpenAgenticWorkspaceOptions {
   /** Called after Conversation applied a Runtime outbox message; the host records it as a durable notice for the model. */
   onConversationNotice?: (message: RoleMessage) => Promise<void>;
   authenticateResult: AgenticRuntimePorts["authenticateResult"];
+  authenticateStoredGate?: AgenticRuntimePorts["authenticateStoredGate"];
+  authenticateStoredEvidence?: AgenticRuntimePorts["authenticateStoredEvidence"];
   authenticateEvidence: AgenticRuntimePorts["authenticateEvidence"];
   authenticateGateResult: AgenticRuntimePorts["authenticateGateResult"];
   authorizeHuman: AgenticRuntimePorts["authorizeHuman"];
@@ -429,6 +431,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
         if (!conversation) throw new Error("Conversation host is not ready");
         await conversation.receiveRuntime(message); await options.onConversationNotice?.(message);
       }, authenticateResult: options.authenticateResult,
+      ...(options.authenticateStoredGate ? {authenticateStoredGate:options.authenticateStoredGate} : {}),
+      ...(options.authenticateStoredEvidence ? {authenticateStoredEvidence:options.authenticateStoredEvidence} : {}),
       authenticateEvidence: options.authenticateEvidence, authenticateGateResult: options.authenticateGateResult,
       authorizeHuman: async decision => { const authorized = await options.authorizeHuman(decision);
         if (authorized) approvedBundles.set(decision.approvalId, decision); return authorized; },

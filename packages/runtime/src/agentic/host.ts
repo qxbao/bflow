@@ -1,3 +1,4 @@
+import { nativeImplementationResult } from "./native-implementation-result.js";
 import { encodeNativePluginSelection } from "./native-intent-selection.js";
 import { HostChat } from "../interaction/chat.js";
 import { registeredAssistantHistory, registeredChatAvailable, chatMessageId } from "../interaction/chat-history.js";
@@ -34,7 +35,7 @@ import { z } from "zod";
 import { classifyProviderFailure, codexStartupPrompt } from "@bflow/agent-providers";
 import { readCodexFailure } from "./provider-failure-reader.js";
 import {
-  AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema, DelegationRequestSchema,
+  AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentRoleSchema, ApprovalDecisionSchema, DelegationRequestSchema,
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, JsonValueSchema, MCPToolCallResultSchema, RepositoryToolPolicySchema,
   ResolvedToolGrantSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema, SpecificationSchema, ToolActionRequestSchema,
   ToolTriggerSchema, ToolUsageRecordSchema, WorkflowDefinitionSchema,
@@ -910,7 +911,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners, rtkUsageIntegration,
     { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex }, mutationChecks,
     { suites: appChecks, leaseDirectory: join(configuration.directory, "app-checks") }, hostReviewChecks);
-  const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration);
+  const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration, context => verification.candidateEvidenceForDeveloper(context));
   const activePolicyMeasurements = new Set<string>();
   const activeHostVerifications = new Map<string, number>();
   const withActiveHostVerification = async <T>(runId: string | undefined, action: () => Promise<T>): Promise<T> => {
@@ -1274,6 +1275,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       // Runtime outbox messages reach Conversation in-process; the model learns of them only through hook notices.
       onConversationNotice: async message => { await receipts.appendConversationNotice(message); },
       authenticateResult: async (result, handle, message) => await authenticateNativeHerdrMessage(message) && result.requestId === handle.requestId && result.executionId === handle.executionId,
+      authenticateStoredGate: result => verification.authenticateGate(result),
+      authenticateStoredEvidence: result => verification.authenticateEvidence(result),
       authenticateEvidence: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateEvidence(result),
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
@@ -1954,11 +1957,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const reworkArtifacts = reworkDossier
         ? [reworkDossier.artifactRef, ...reworkDossier.findingResolutions.map(item => item.evidence.artifactRef)]
         : [];
-      const result = AgentResultSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId: handle.runId, taskId: handle.taskId, executionId: handle.executionId,
-        status: submissionStatus, verification: { status: "verified", correlation: proof.receipt.correlation, evidence: "Native Herdr host checked the actual assignment/session binding; independent acceptance is pending" },
-        ...(reworkDossier ? { output: json({ reworkResolution: reworkDossier }) } : {}),
-        ...(submissionStatus === "blocked" ? { blockage: { code: "rework_finding_blocked", message: blockedFindings[0]?.blockerReason ?? blockedFindings[0]?.repairSummary ?? "Rework finding blocked", retryable: false } } : {}),
-        artifactProposals: [], retryable: false, startedAt: handle.acceptedAt, completedAt: new Date().toISOString() });
+      const result = nativeImplementationResult({handle,receipt:proof.receipt,status:submissionStatus,
+        ...(reworkDossier ? {output:json({reworkResolution:reworkDossier})} : {}),
+        ...(submissionStatus === "blocked" ? {blocked:{message:blockedFindings[0]?.blockerReason ?? blockedFindings[0]?.repairSummary ?? "Rework finding blocked or disputed",since:reworkDossier!.submittedAt}} : {}),
+        completedAt:new Date().toISOString()});
       return nativeDeliver(envelope("implementation.submitted", result, reworkArtifacts), `implementation:${handle.requestId}`);
     }
     const envelope = (source: RoleMessage, type: RoleMessage["type"], payload: unknown, artifacts: RoleMessage["artifact_references"] = []) => RoleMessageSchema.parse({ schema_version: 2,

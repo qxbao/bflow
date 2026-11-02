@@ -284,28 +284,54 @@ export class GitIntegrationEngine {
     await rm(path, { recursive: true, force: true });
   }
 
-  private async validateTaskHead(task: TaskRecord, expected?: string): Promise<{ head: string; files: GitChangeSet["filesChanged"]; patch: string; commits: string[] }> {
+  private storedUnchangedComparison(task:TaskRecord,head:string):string|undefined {
+    const stored=task.changeSet;
+    return stored?.metadata?.unchangedDisputeCandidate===true&&stored.headCommitHash===head&&head===task.baseCommitHash&&
+      stored.metadata.assignedBaseCommitHash===task.baseCommitHash&&stored.attemptId===task.request.attemptId&&
+      stored.runId===task.request.runId&&stored.taskId===task.request.taskId&&stored.worktreePath===task.worktreePath&&stored.branchName===task.branchName
+      ? stored.baseCommitHash : undefined;
+  }
+  private async validateTaskHead(task: TaskRecord, expected?: string, comparisonBase?: string): Promise<{ head: string; base: string; files: GitChangeSet["filesChanged"]; patch: string; commits: string[] }> {
     requireCondition(task.status === "active", "inactive_task", "Only active tasks may submit changes");
     const head = await this.assertBoundClean(task);
     requireCondition(!expected || head === expected, "stale_commit", "Task HEAD changed after submission");
-    requireCondition(head !== task.baseCommitHash, "missing_commit", "Task has no implementation commit");
-    requireCondition(await succeeds(task.worktreePath, ["merge-base", "--is-ancestor", task.baseCommitHash, head]), "unrelated_history", "Task history no longer descends from its recorded base");
-    requireCondition((await git(task.worktreePath, ["rev-list", "--min-parents=2", `${task.baseCommitHash}..${head}`])).trim() === "", "task_merge_commit", "Submit linear task history; integrate branches through the engine");
-    const commits = (await git(task.worktreePath, ["rev-list", "--reverse", `${task.baseCommitHash}..${head}`])).trim().split("\n");
-    let previous = task.baseCommitHash;
-    for (const commit of commits) {
-      scopeCheck(task, (await changedFiles(task.worktreePath, previous, commit)).map(file => file.path));
-      previous = commit;
+    let base=task.baseCommitHash;
+    if(head===base){
+      const stored=this.storedUnchangedComparison(task,head);
+      const original=comparisonBase??stored;
+      requireCondition(original&&original!==head,"missing_commit","Task has no implementation commit");
+      requireCondition(await succeeds(task.worktreePath,["merge-base","--is-ancestor",original!,task.baseCommitHash]),"unrelated_history","Candidate comparison baseline is not an ancestor of the assigned base");
+      base=original!;
     }
-    const files = await changedFiles(task.worktreePath, task.baseCommitHash, head);
+    requireCondition(await succeeds(task.worktreePath, ["merge-base", "--is-ancestor", base, head]), "unrelated_history", "Task history no longer descends from its recorded base");
+    requireCondition((await git(task.worktreePath, ["rev-list", "--min-parents=2", `${base}..${head}`])).trim() === "", "task_merge_commit", "Submit linear task history; integrate branches through the engine");
+    const commits = (await git(task.worktreePath, ["rev-list", "--reverse", `${base}..${head}`])).trim().split("\n");
+    let previous = base;
+    for (const commit of commits) {
+      scopeCheck(task, (await changedFiles(task.worktreePath, previous, commit)).map(file => file.path)); previous = commit;
+    }
+    const files = await changedFiles(task.worktreePath, base, head);
     requireCondition(files.length, "missing_changes", "Task has no net changes");
     scopeCheck(task, files.map(file => file.path));
-    return { head, files, patch: await patch(task.worktreePath, task.baseCommitHash, head), commits };
+    return { head,base, files, patch: await patch(task.worktreePath, base, head), commits };
   }
 
-  collectTask(key: string): Promise<GitChangeSet> {
+  collectTask(key: string, input: {authorizeUnchangedDispute?:(revision:string)=>Promise<boolean>;comparisonBaseRevision?:string} = {}): Promise<GitChangeSet> {
+    const continuation=z.object({authorizeUnchangedDispute:z.function().args(z.string()).returns(z.promise(z.boolean())).optional(),comparisonBaseRevision:CommitHashSchema.optional()}).strict().parse(input);
     return this.transaction(async state => {
-      const task = this.task(state, key), change = await this.validateTaskHead(task);
+      const task = this.task(state, key);requireCondition(task.status==="active","inactive_task","Only active tasks may submit changes");
+      const head=await this.assertBoundClean(task);
+      const unchanged=head===task.baseCommitHash;
+      let comparisonBase:string|undefined;
+      if(unchanged){
+        const stored=this.storedUnchangedComparison(task,head);
+        const authorized=continuation.authorizeUnchangedDispute ? await continuation.authorizeUnchangedDispute(head)===true : stored!==undefined;
+        requireCondition(authorized,"missing_commit","Task has no implementation commit");
+        const requested=continuation.comparisonBaseRevision??stored;
+        requireCondition(requested,"missing_commit","Task has no original candidate comparison baseline");
+        comparisonBase=await resolveCommit(this.repositoryPath,requested!);
+      }
+      const change = await this.validateTaskHead(task,undefined,comparisonBase);
       const bytes = Buffer.from(change.patch), hash = digest(bytes);
       const artifactId = `patch-${identity(key, change.head, hash)}`;
       const options = ArtifactWriteOptionsSchema.parse({ artifactId, runId: task.request.runId, taskId: task.request.taskId,
@@ -317,12 +343,13 @@ export class GitIntegrationEngine {
       requireCondition(reference.artifactId === artifactId && reference.runId === task.request.runId && reference.taskId === task.request.taskId &&
         reference.kind === "patch" && reference.checksum.algorithm === "sha256" && reference.checksum.value === hash &&
         (reference.sizeBytes === undefined || reference.sizeBytes === bytes.length), "artifact_mismatch", "ArtifactStore returned a mismatched patch reference");
-      await this.validateTaskHead(task, change.head);
+      await this.validateTaskHead(task, change.head, comparisonBase);
       const changeSet = GitChangeSetSchema.parse({ schemaVersion: 2, changeSetId: `change-${identity(key, change.head)}`,
         runId: task.request.runId, taskId: task.request.taskId, attemptId: task.request.attemptId,
-        worktreePath: task.worktreePath, branchName: task.branchName, baseCommitHash: task.baseCommitHash, headCommitHash: change.head,
+        worktreePath: task.worktreePath, branchName: task.branchName, baseCommitHash: change.base, headCommitHash: change.head,
         dirtyWorkingTree: false, filesChanged: change.files, patchArtifact: reference, createdAt: new Date().toISOString(),
-        metadata: { commits: change.commits, summary: `${change.commits.length} commits; ${change.files.length} files changed` } });
+        metadata: { commits: change.commits, summary: `${change.commits.length} commits; ${change.files.length} files changed`,
+          ...(unchanged ? {unchangedDisputeCandidate:true,assignedBaseCommitHash:task.baseCommitHash,comparisonPurpose:"unchanged-dispute-full-candidate",repairCommits:0} : {}) } });
       task.changeSet = changeSet; task.headCommitHash = change.head; await this.save(state); return changeSet;
     });
   }
@@ -344,7 +371,9 @@ export class GitIntegrationEngine {
   private async validateSubmission(task: TaskRecord, snapshot: GitChangeSet): Promise<void> {
     const changeSet = GitChangeSetSchema.parse(snapshot);
     requireCondition(changeSet.runId === task.request.runId && changeSet.taskId === task.request.taskId && changeSet.attemptId === task.request.attemptId &&
-      changeSet.worktreePath === task.worktreePath && changeSet.branchName === task.branchName && changeSet.baseCommitHash === task.baseCommitHash &&
+      changeSet.worktreePath === task.worktreePath && changeSet.branchName === task.branchName && (changeSet.baseCommitHash === task.baseCommitHash ||
+        task.changeSet?.metadata?.unchangedDisputeCandidate===true&&task.changeSet.metadata.assignedBaseCommitHash===task.baseCommitHash&&
+        task.changeSet.changeSetId===changeSet.changeSetId&&task.changeSet.baseCommitHash===changeSet.baseCommitHash&&changeSet.headCommitHash===task.baseCommitHash) &&
       !changeSet.dirtyWorkingTree, "submission_mismatch", "ChangeSet does not match the assigned task");
     const change = await this.validateTaskHead(task, changeSet.headCommitHash);
     requireCondition(JSON.stringify(change.files) === JSON.stringify(changeSet.filesChanged), "submission_mismatch", "Changed-file evidence differs from Git");
