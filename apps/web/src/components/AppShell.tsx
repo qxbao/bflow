@@ -1,12 +1,22 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router';
 import type { WebProject } from '@bflow/contracts/web';
 import { FieldHelp } from './FieldHelp';
 
-export type VisualShell={panelOpen:boolean;onClose:()=>void;hostRef:(element:HTMLElement|null)=>void};
+export type VisualShell={panelOpen:boolean;onClose:()=>void;onOverview:()=>void;hudRef:(element:HTMLElement|null)=>void;stageRef:(element:HTMLElement|null)=>void};
 export function AppShell({projects,projectId,visual,children}:{projects:WebProject[];projectId?:string;visual?:VisualShell|undefined;children:ReactNode}) {
   const navigate=useNavigate(), location=useLocation(), main=useRef<HTMLElement>(null);
   const [menuOpen,setMenuOpen]=useState(false);
+  const shell=useRef<HTMLDivElement>(null),hudEl=useRef<HTMLElement|null>(null),hudRef=visual?.hudRef;
+  // The HUD bar (project mark + operations dock) is pinned above the panel; the panel stops at its top edge.
+  const setHud=useCallback((element:HTMLElement|null)=>{hudEl.current=element;hudRef?.(element);},[hudRef]);
+  useEffect(()=>{
+    const bar=hudEl.current,root=shell.current;if(!visual || !bar || !root)return;
+    const measure=()=>root.style.setProperty('--hud-h',`${bar.offsetHeight}px`);measure();
+    if(typeof ResizeObserver==='undefined')return()=>root.style.removeProperty('--hud-h');
+    const observer=new ResizeObserver(measure);observer.observe(bar);
+    return()=>{observer.disconnect();root.style.removeProperty('--hud-h');};
+  },[Boolean(visual)]);
   const menuButton=useRef<HTMLButtonElement>(null),menu=useRef<HTMLElement>(null);
   const panelClosed=Boolean(visual && !visual.panelOpen),panelClosedRef=useRef(panelClosed);panelClosedRef.current=panelClosed;
   // A closed visual panel is hidden: focus stays with whatever OfficeFrame restores instead of being pulled to <main>.
@@ -14,7 +24,7 @@ export function AppShell({projects,projectId,visual,children}:{projects:WebProje
   const base=projectId?`/projects/${encodeURIComponent(projectId)}`:undefined;
   const project=projects.find(item=>item.projectId===projectId);
   function toggleMenu(){if(menuOpen && menu.current?.contains(document.activeElement))menuButton.current?.focus();setMenuOpen(value=>!value);}
-  return <div className="min-h-dvh">
+  return <div className="min-h-dvh" ref={shell}>
     <a className="sr-only absolute z-30 bg-surface p-3 focus:not-sr-only focus:top-2 focus:left-3" href="#main">Bỏ qua điều hướng</a>
     <header className="flex min-h-14 items-center justify-between gap-3 border-b border-line px-4 sm:px-6">
       <Link className="shrink-0 font-display text-xl font-extrabold tracking-[.2em] text-ink no-underline hover:no-underline" to="/">B<span className="text-accent">FLOW</span></Link>
@@ -35,13 +45,13 @@ export function AppShell({projects,projectId,visual,children}:{projects:WebProje
           <option value="">Chọn dự án</option>{projects.map(item=><option key={item.projectId} value={item.projectId}>{item.displayName}</option>)}
         </select>
         <nav aria-label="Điều hướng chính" className="grid gap-1 sm:grid-cols-2 lg:grid-cols-1">
-          {base && <>{[['','Tổng quan'],['/runs','Công việc'],['/chat','Trò chuyện'],['/review','Cần bạn quyết định'],['/settings','Cài đặt dự án']].map(([path,title])=><NavLink end={path===''} key={path} to={base+path} className="border-l-2 border-transparent px-3 py-2.5 font-data text-sm font-medium text-muted no-underline hover:bg-faint hover:no-underline aria-[current=page]:border-accent aria-[current=page]:bg-faint aria-[current=page]:text-ink lg:py-2">{title}</NavLink>)}</>}
+          {base && <>{[['','Tổng quan'],['/runs','Công việc'],['/chat','Trò chuyện'],['/review','Cần bạn quyết định'],['/settings','Cài đặt dự án']].map(([path,title])=><NavLink end={path===''} key={path} to={base+path} onClick={path===''&&visual?visual.onOverview:undefined} className="border-l-2 border-transparent px-3 py-2.5 font-data text-sm font-medium text-muted no-underline hover:bg-faint hover:no-underline aria-[current=page]:border-accent aria-[current=page]:bg-faint aria-[current=page]:text-ink lg:py-2">{title}</NavLink>)}</>}
           <NavLink end to="/" className="border-l-2 border-transparent px-3 py-2.5 font-data text-sm font-medium text-muted no-underline hover:bg-faint hover:no-underline aria-[current=page]:border-accent aria-[current=page]:bg-faint aria-[current=page]:text-ink lg:py-2">Quản lý dự án</NavLink>
         </nav>
         <p className="mt-6 border-t border-line pt-4 text-xs leading-relaxed text-muted">Đóng trình duyệt không dừng công việc. Trạng thái được đọc từ phiên dự án.</p>
       </aside>
-      {visual && <section ref={visual.hostRef} aria-label="Văn phòng" className="min-w-0 px-4 pt-5 pb-12 sm:px-6 lg:px-8"/>}
-      <main id="main" ref={main} tabIndex={-1} onKeyDown={visual?e=>{if(e.key==='Escape' && !e.defaultPrevented){e.preventDefault();visual.onClose();}}:undefined} className={visual?`min-w-0 overflow-y-auto border-l border-line bg-surface px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 fixed inset-y-0 right-0 z-20 w-full md:w-[720px] md:max-w-full ${visual.panelOpen?'':'hidden'}`:'min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-8'}>{visual && <div className="mb-3 flex justify-end"><button type="button" onClick={visual.onClose}>Đóng bảng</button></div>}{children}</main>
+      {visual && <><section ref={visual.stageRef} aria-label="Văn phòng" className="min-w-0 px-4 pt-5 pb-24 sm:px-6 lg:px-8"/><section ref={setHud} aria-label="Thanh điều khiển" onKeyDown={e=>{if(e.key==='Escape' && visual.panelOpen && !e.defaultPrevented){e.preventDefault();visual.onClose();}}} className="fixed inset-x-0 bottom-0 m-0 z-30 max-h-[40dvh] overflow-y-auto border-t border-line bg-surface px-4 py-2 sm:px-6"/></>}
+      <main id="main" ref={main} tabIndex={-1} onKeyDown={visual?e=>{if(e.key==='Escape' && !e.defaultPrevented){e.preventDefault();visual.onClose();}}:undefined} className={visual?`min-w-0 overflow-y-auto border-l border-line bg-surface px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 fixed top-0 right-0 bottom-[var(--hud-h,0px)] z-20 w-full md:w-[720px] md:max-w-full ${visual.panelOpen?'':'hidden'}`:'min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-8'}>{visual && <div className="mb-3 flex justify-end"><button type="button" onClick={visual.onClose}>Đóng bảng</button></div>}{children}</main>
     </div>
     <footer className="border-t border-line px-4 py-4 font-data text-xs text-muted sm:px-6">Bflow · Web cục bộ · Theo dõi và xem xét công việc</footer>
   </div>;
