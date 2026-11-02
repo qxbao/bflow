@@ -66,6 +66,7 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
     } } });
   bridge = createBridge();
   const native: NativeExtensionRolePort = {
+    cancel: request => bridge.cancel(request),
     snapshot: () => bridge.snapshot(), validatePrompt: (message, binding) => bridge.validatePrompt(message, binding),
     prepare: intent => bridge.prepare(intent), dispatch: request => bridge.dispatch(request), receive: message => bridge.receive(message),
     reconcile: id => bridge.reconcile(id),

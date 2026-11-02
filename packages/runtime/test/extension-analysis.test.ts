@@ -89,6 +89,26 @@ async function activeAssignment() {
 }
 
 describe("analysis host assignment permissions", () => {
+  it("fences publication when cancellation arrives after its internal evidence write", async () => {
+    const f = await nativeAnalysisFlow(); await f.host.drive("run-native");
+    await f.host.decide(f.decision((await f.host.pendingApprovals())[0]!, { "D-1": "Ops" }));
+    await f.host.drive("run-native");
+    await f.host.decide(f.decision((await f.host.pendingApprovals())[0]!));
+    const put = f.artifactStore.put.bind(f.artifactStore); let stopped = false;
+    f.artifactStore.put = async input => {
+      const result = await put(input);
+      if (!stopped && input.options.artifactId.includes("-tdd-evidence")) {
+        stopped = true;
+        expect(await f.host.cancel("run-native", "Stop publication")).toMatchObject({ extensionStatus: "cancelling" });
+      }
+      return result;
+    };
+    await expect(f.host.drive("run-native")).rejects.toThrow(/cancel/i);
+    expect(stopped).toBe(true);
+    await expect(readFile(join(f.repo, "docs/analysis/health-analysis/r1/analysis.md"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await f.host.cancel("run-native", "Stop publication")).toMatchObject({ extensionStatus: "cancelled" });
+  });
+
   it("collects a real trusted Conversation business answer while preserving its original human receipt", async () => {
     const f = await nativeAnalysisFlow(false, "session-1"), implementation = await implementationFixture();
     await f.host.drive("run-native"); const question = (await f.host.pendingApprovals())[0]!;

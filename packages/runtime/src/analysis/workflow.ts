@@ -17,6 +17,8 @@ import { resolveAnalysisPack, type AnalysisPackPin, type AnalysisPackPolicy } fr
 import { ANALYSIS_GATES, assertAnalysisOnlyWorkflow, planAnalysisWorkflow } from "./plan.js";
 import { renderAnalysisDocument, renderVerificationSummary } from "./render.js";
 import { verifyAnalysisDocument, type AnalysisVerification } from "./verify.js";
+import { cancelExtension } from "../extension-cancellation.js";
+import type { CancellationRequest } from "@bflow/contracts";
 import { extensionDecisionRequest } from "../extension-decisions.js";
 import { analysisBusinessAnswers } from "./business-decision.js";
 import { canonicalReceiptJson } from "@bflow/contracts";
@@ -71,7 +73,7 @@ export interface AnalysisRuntimePorts {
 }
 
 export type AnalysisRunStatus = "running" | "awaiting_business_decision" | "awaiting_document_approval" | "blocked" |
-  "needs_revision" | "published" | "superseded" | "failed";
+  "needs_revision" | "published" | "superseded" | "failed" | "cancelling" | "cancelled";
 
 interface ExecutionRecord {
   native?: ExtensionExecution;
@@ -82,6 +84,7 @@ interface ExecutionRecord {
 }
 interface DocumentRecord { version: number; digest: string; artifact: ArtifactReference; authorAgentId: string; attemptId: string; content: AnalysisDocument }
 interface RunRecord {
+  cancellation?: CancellationRequest;
   runId: string; intake: AnalysisIntake; intakeDigest: string; policy: AnalysisPackPolicy; definition: WorkflowDefinition;
   status: AnalysisRunStatus; createdAt: string; strategy: TestStrategy; coreCreated: boolean;
   executions: ExecutionRecord[]; observations: SurveyObservation[];
@@ -135,6 +138,7 @@ function relativeSafe(path: string): string {
  */
 export class AnalysisWorkflowRuntime {
   private saveTail: Promise<void> = Promise.resolve();
+  private readonly activeLocalTasks = new Set<string>();
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
   private constructor(private readonly ports: AnalysisRuntimePorts) {
@@ -221,13 +225,32 @@ export class AnalysisWorkflowRuntime {
     return [`${base}/analysis.md`, `${base}/handoff.md`];
   }
 
+  /** Stop this native workflow through Core and the bridge; an interrupt acknowledgement never proves stop. */
+  async cancel(runId: string, reason: string) {
+    const run = this.run(runId);
+    if (!this.ports.roles.native) throw new Error("Native cancellation requires native execution authority");
+    await this.restoreCore(run);
+    const snapshot = await cancelExtension({ runId, reason, native: this.ports.roles.native, now: this.ports.now,
+      ...(run.cancellation ? { cancellation: run.cancellation } : {}),
+      persist: async request => { run.cancellation = request; run.status = "cancelling"; await this.save(); },
+      localStopped: (taskId, transport) => taskId === "publication" && transport === "runtime-publication" && !this.activeLocalTasks.has(`${runId}:${taskId}`),
+      unresolvedLocalWork: () => [...this.activeLocalTasks].some(key => key.startsWith(`${runId}:`)),
+      snapshot: () => this.snapshot(runId), mutate: action => this.mutate(runId, action),
+      request: request => this.ports.engine.requestCancellation(request),
+      confirm: command => this.ports.engine.confirmCancellationStop(command) });
+    if (snapshot.status === "cancelled" || snapshot.status === "cancelling") run.status = snapshot.status;
+    await this.save(); return this.status(runId);
+  }
+
   /** Runs every step that needs no human input; returns at a human gate, a blocker or completion. */
   async drive(runId: string) {
     const run = this.run(runId);
     if (run.status === "superseded") throw new Error(`Analysis run ${runId} was superseded by ${run.supersededBy}`);
     await this.restoreCore(run);
+    if (run.cancellation) return this.cancel(runId, run.cancellation.reason ?? "Run cancelled");
     for (let guard = 0; guard < 200; guard++) {
       let snapshot = await this.snapshot(runId);
+      if (run.cancellation) return this.cancel(runId, "Run cancelled");
       if (TERMINAL.has(snapshot.status)) return this.finish(run, snapshot);
       for (const task of snapshot.tasks.filter(item => item.status === "retrying"))
         snapshot = await this.mutate(runId, version => this.ports.engine.transitionTask({ runId, taskId: task.taskId, from: "retrying", to: "ready",
@@ -236,7 +259,12 @@ export class AnalysisWorkflowRuntime {
       snapshot = await this.mutate(runId, version => this.ports.engine.advance({ runId, expectedVersion: version,
         idempotencyKey: `analysis:advance:${runId}:${version}`, occurredAt: this.ports.now() }));
       const active = snapshot.tasks.find(item => item.status === "running" || item.status === "waiting");
-      if (active) { await this.execute(run, active); continue; }
+      if (active) {
+        const key = `${runId}:${active.taskId}`;
+        if (active.taskId === "publication") this.activeLocalTasks.add(key);
+        try { await this.execute(run, active); } finally { this.activeLocalTasks.delete(key); }
+        continue;
+      }
       if (run.status !== "running") { await this.save(); return this.status(runId); }
       // A permanently failed or blocked task stops the run before any human is asked to decide for a doomed workflow.
       if (snapshot.tasks.some(item => item.status === "blocked" || item.status === "failed")) {
@@ -347,6 +375,7 @@ export class AnalysisWorkflowRuntime {
       await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
       await clearNativeBlocker();
     } catch (error) {
+      if (run.cancellation) { await this.save(); throw error; }
       run.status = "blocked";
       run.blockers = [...new Set([...run.blockers, blocker])];
       await this.save(); throw error;
@@ -384,6 +413,7 @@ export class AnalysisWorkflowRuntime {
   }
 
   private async complete(run: RunRecord, execution: ExecutionRecord, outcome: { agentId: string; output: unknown }) {
+    if (run.cancellation) throw new Error("Extension run is cancelled; late output cannot continue it");
     const kind = execution.taskId;
     let failure: { code: string; message: string } | undefined;
     try {
@@ -399,6 +429,7 @@ export class AnalysisWorkflowRuntime {
       else if (kind === "review") await this.acceptReview(run, outcome.agentId, RoleOutputSchemas.review.parse(outcome.output));
       else await this.publish(run);
     } catch (error) {
+      if (run.cancellation) throw error;
       if (error instanceof AnalysisPermissionDenied) {
         run.denials.push({ executionId: execution.executionId, taskId: kind, reason: error.message, at: this.ports.now() });
         failure = { code: "permission_denied", message: error.message };
@@ -408,6 +439,7 @@ export class AnalysisWorkflowRuntime {
     }
     if (failure && failure.code !== "permission_denied")
       run.rejections.push({ executionId: execution.executionId, taskId: kind, code: failure.code, message: failure.message, at: this.ports.now() });
+    if (run.cancellation) throw new Error("Extension run is cancelled");
     execution.state = "recorded";
     execution.agentId = outcome.agentId;
     execution.outputDigest = analysisDigest(outcome.output ?? null);
@@ -765,11 +797,16 @@ export class AnalysisWorkflowRuntime {
     if (!within(this.ports.repositoryRoot, absolute)) throw new AnalysisPermissionDenied(`Write escapes the repository: ${path}`);
     // Check existing ancestors before mkdir: a symlinked parent would otherwise create directories outside the repository.
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     await mkdir(dirname(absolute), { recursive: true });
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     try {
       const handle = await open(absolute, "wx", 0o644);
-      try { await handle.writeFile(content, "utf8"); } finally { await handle.close(); }
+      try {
+        if (run.cancellation) throw new Error("Extension run is cancelled before publication");
+        await handle.writeFile(content, "utf8");
+      } finally { await handle.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       // Idempotent republish after a restart; a different existing file or directory is never overwritten.
@@ -796,7 +833,7 @@ export class AnalysisWorkflowRuntime {
   }
 
   private finish(run: RunRecord, snapshot: WorkflowRunSnapshot) {
-    if (run.status !== "superseded") run.status = snapshot.status === "succeeded" && run.handoff ? "published" : "failed";
+    if (run.status !== "superseded") run.status = snapshot.status === "cancelled" ? "cancelled" : snapshot.status === "succeeded" && run.handoff ? "published" : "failed";
     return this.save().then(() => this.status(run.runId));
   }
 

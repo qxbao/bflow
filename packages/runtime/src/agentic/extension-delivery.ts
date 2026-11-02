@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   AcquireAgentLeaseRequestSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentRequestSchema, AgentExecutionHandleSchema, AgentBindingReceiptSchema,
-  ArtifactReferenceSchema, ArtifactWriteOptionsSchema, IdentifierSchema, PaneBindingSchema,
+  ArtifactReferenceSchema, ArtifactWriteOptionsSchema, IdentifierSchema, PaneBindingSchema, CancellationRequestSchema, AgentTransportObservationSchema,
   ReleaseAgentLeaseRequestSchema, RenewAgentLeaseRequestSchema, RoleMessageSchema, authenticateBindingReceipt, canonicalReceiptJson,
   type AgentBindingReceipt, type AgentExecutionHandle, type AgentRegistry, type AgentRequest, type AgentTransport,
-  type ArtifactReference, type ArtifactStore, type JsonValue, type OperationResult, type PaneBinding, type RoleMessage
+  type ArtifactReference, type ArtifactStore, type JsonValue, type OperationResult, type PaneBinding, type RoleMessage, type CancellationRequest
 } from "@bflow/contracts";
 import { AgenticJournal, digest, json, record, type JournalState, type Outbound } from "./journal.js";
 import { parseSubmissionForRequest, parseReconciliationForRequest } from "./delivery-receipts.js";
@@ -27,6 +27,7 @@ export type NativeExtensionReconciliation = { status: "not_delivered" } | { stat
   { status: "bound"; handle: AgentExecutionHandle } |
   { status: "completed"; outcome: NativeExtensionOutcome };
 export interface NativeExtensionRolePort {
+  cancel(request: CancellationRequest): Promise<{ stopped: { executionId: string; stoppedAt: string }[]; unresolvedRequestIds: string[] }>;
   /** Host-only read view; model tools receive a scope-filtered projection. */
   snapshot(): Promise<{ outbound: Outbound[]; inbox: JournalState["inbox"] }>;
   validatePrompt(message: RoleMessage, binding: PaneBinding): Promise<void>;
@@ -190,6 +191,7 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
     const request = AgentRequestSchema.parse(input);
     return this.journal.exclusive(async (state, save) => {
       const out = this.out(state, request.requestId), intent = this.intent(out);
+      if (out.cancelRequested || out.status === "cancelled") throw new Error("Native extension execution is cancelled");
       if (!same(out.request, request)) throw new Error("Prepared native request changed");
       if (out.handle && ["accepted", "released"].includes(out.status)) return AgentExecutionHandleSchema.parse(out.handle);
       if (["sending", "unknown_delivery"].includes(out.status)) throw new Error("Unknown native delivery requires reconciliation, never automatic resend");
@@ -245,7 +247,7 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
     if (!out.lease) throw new Error("Native output lost its lease record");
     if (out.leaseRenewal) await this.renew(out, save);
     out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({ leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken,
-      expectedVersion: out.lease.version, releasedAt: this.now(), idempotencyKey: `ext-release:${out.request!.requestId}` });
+      expectedVersion: out.lease.version, releasedAt: this.now(), idempotencyKey: `ext-release:${out.request?.requestId ?? out.message.message_id}` });
     await save(); value(await this.options.registry.releaseLease(out.leaseRelease)); delete out.leaseRelease;
     out.status = "released"; await save();
   }
@@ -273,7 +275,7 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
         if (prior.status === "applied") return undefined;
       }
       const out = state.outbound.find(item => item.message.message_id === message.causation_id);
-      if (!out?.request || !out.handle || out.status !== "accepted") throw new Error("Native binding is not settled for this result");
+      if (!out?.request || !out.handle || out.status !== "accepted" || out.cancelRequested) throw new Error("Native binding is not settled for this result");
       const intent = this.intent(out), binding = await this.binding(intent, false);
       if (message.correlation_id !== out.message.correlation_id || message.run_id !== out.request.runId ||
           message.sender.role !== binding.role || message.sender.agent_id !== out.handle.target.agentId ||
@@ -307,6 +309,7 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
     return this.journal.exclusive(async (state, save) => {
       const out = this.out(state, requestId), bound = this.projection(state, requestId, "extension.binding.recorded"),
         result = this.projection(state, requestId, "extension.output.recorded");
+      if (out.cancelRequested || out.status === "cancelled") throw new Error("Native extension execution is cancelled");
       if (!bound || !result || !out.handle) return undefined;
       const receipt = AgentBindingReceiptSchema.parse(record(bound.payload).data), key = this.options.bindingReceiptKeys[receipt.issuerId];
       if (!key || !authenticateBindingReceipt(receipt, key) || !same(receipt.handle, out.handle)) throw new Error("Stored native binding is not authentic");
@@ -360,6 +363,65 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
       else { out.status = "unknown_delivery"; await save(); }
       return { status: "unknown" };
     });
+  }
+
+  async cancel(input: CancellationRequest) {
+    const request = CancellationRequestSchema.parse(input);
+    const result = await this.journal.exclusive(async (state, save) => {
+      const stopped: { executionId: string; stoppedAt: string }[] = [], unresolvedRequestIds: string[] = [];
+      for (const out of state.outbound.filter(item => item.message.run_id === request.runId)) {
+        if (!out.request) {
+          if (out.status !== "queued" && out.status !== "cancelled") throw new Error("Interrupted native preparation has an uncertain state");
+          if (out.lease && out.status !== "cancelled") await this.release(out, save);
+          out.status = "cancelled"; await save(); continue;
+        }
+        const id = out.request.requestId;
+        const proof = this.projection(state, id, "extension.stop.recorded");
+        if (proof) {
+          const stop = z.object({ executionId: IdentifierSchema, stoppedAt: z.string().datetime({ offset: true }) }).strict().parse(record(proof.payload).data);
+          if (stop.executionId !== out.handle?.executionId) throw new Error("Native stop proof ownership mismatch");
+          stopped.push(stop);
+        }
+        if (out.status === "cancelled" || out.status === "released") continue;
+        if (["sending", "unknown_delivery"].includes(out.status)) {
+          const resolved = parseReconciliationForRequest(out.request!, value(await this.options.transport.reconcile({ requestId: id,
+            attemptId: out.attemptId, runId: request.runId, taskId: out.taskId, idempotencyKey: out.request!.idempotency.key,
+            target: out.request!.target, requestedAt: this.now() })));
+          if (resolved.status === "bound") { out.handle = resolved.handle; out.status = "accepted"; }
+          else out.status = resolved.status === "not_delivered" ? "queued" : "unknown_delivery";
+          await save();
+        }
+        if (out.status === "queued") {
+          if (out.lease) await this.release(out, save);
+          out.status = "cancelled"; await save(); continue;
+        }
+        if (out.status !== "accepted" || !out.handle) { unresolvedRequestIds.push(id); continue; }
+        if (!out.cancelRequested) {
+          // Stop only this still-owned target, never a replacement occupant after lease expiry.
+          const binding = value(await this.options.panes.getRoleBinding(this.intent(out).message.recipient.role));
+          if (!binding || !same(this.target(PaneBindingSchema.parse(binding)), out.handle.target)) { unresolvedRequestIds.push(id); continue; }
+          try { await this.renew(out, save); }
+          catch { unresolvedRequestIds.push(id); continue; }
+          out.cancelRequested = true; await save(); // At most one interrupt, including after restart.
+          const interrupt = await this.options.transport.cancel(out.handle, request);
+          if (!interrupt.ok) out.error = redactString(interrupt.error.message);
+          await save();
+        }
+        const observed = await this.options.transport.wait(out.handle, { until: ["idle"], timeoutMs: 1000 });
+        if (!observed.ok) { unresolvedRequestIds.push(id); continue; }
+        const observation = AgentTransportObservationSchema.parse(observed.value);
+        if (!["idle", "cancelled"].includes(observation.state) || observation.correlationVerified !== true ||
+            !same(observation.handle, out.handle) || Date.parse(observation.observedAt) < Date.parse(out.handle.acceptedAt) ||
+            Date.parse(observation.observedAt) > Date.parse(this.now())) { unresolvedRequestIds.push(id); continue; }
+        const stop = { executionId: out.handle.executionId, stoppedAt: observation.observedAt };
+        this.recordProjection(state, out, out.message, "extension.stop.recorded", stop, []); await save();
+        await this.release(out, save); out.status = "cancelled"; await save(); stopped.push(stop);
+      }
+      return { stopped, unresolvedRequestIds };
+    });
+    for (const out of (await this.snapshot()).outbound.filter(item => item.request?.runId === request.runId && item.cancelRequested))
+      for (const listener of this.listeners.get(out.request!.requestId) ?? []) listener();
+    return result;
   }
 }
 

@@ -5602,6 +5602,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   private async cancelRun(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, reason: string): Promise<void> {
+    if (await this.ports.workflowExtensionStarted?.(run.runId)) {
+      if (!this.ports.cancelWorkflowExtension) throw new Error("Native extension cancellation authority unavailable");
+      const extension = record(await this.ports.cancelWorkflowExtension(run.runId, reason));
+      // A completed document/report is retained; cancellation cannot rewrite its terminal outcome.
+      if (extension.cancelled !== true) return;
+    }
     // Completed and failed runs remain authoritative terminal outcomes; cancellation is a safe no-op.
     if (!run.cancelled && ["completed", "failed"].includes(run.status)) return;
     if (!run.cancelled) { run.cancelled = true; run.status = "cancelled"; run.error = textField(reason); await save(); }
@@ -5625,6 +5631,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   /** Repair the write-ahead cancellation-intent/Core crash gap without sending another transport interrupt. */
   private async requestCoreCancellation(run: RunRecord, core: CoreSession): Promise<void> {
+    if (await this.ports.workflowExtensionStarted?.(run.runId)) {
+      if (!this.ports.cancelWorkflowExtension) throw new Error("Native extension cancellation authority unavailable");
+      await this.ports.cancelWorkflowExtension(run.runId, run.error ?? "Run cancelled");
+      return;
+    }
     if (run.coreCreated) {
       const snapshot = await core.snapshot(run.runId);
       if (!["succeeded", "failed", "cancelled", "cancelling"].includes(snapshot.status)) {
@@ -5896,6 +5907,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     run: RunRecord, executions: Outbound[], explicit = false, allocationBlockers: string[] = []): Promise<CancellationReconciliationReport> {
     await this.cleanupProfileSpecialists(state, save, run.runId);
     const unresolved: string[] = [...allocationBlockers, ...(run.nativeDeliveries ?? []).map(item => `Native delivery ${item.operationId} is uncertain (${item.message.message_id}); no mutation was resent`)];
+    if (await this.ports.workflowExtensionStarted?.(run.runId)) {
+      const extension = this.ports.inspectWorkflowExtension ? record(await this.ports.inspectWorkflowExtension(run.runId)) : undefined;
+      if (extension?.extensionStatus !== "cancelled") unresolved.push("Native extension stop/Core cancellation is unresolved; execution authority is retained");
+    }
     for (const retired of state.outbound.filter(item => item.message.run_id === run.runId && item.phaseRetirement))
       unresolved.push(`Retired verifier phase ${retired.message.message_id}: measurement/remote outcome remains unclaimed; late results are fenced`);
     for (const replaced of state.outbound.filter(item => item.message.run_id === run.runId && item.reviewReplacement))

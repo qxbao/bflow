@@ -417,6 +417,14 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       registry, transport, panes, policies,
       workflowExtensionOwns: runId => extensions?.owns(runId) ?? Promise.resolve(false),
       workflowExtensionStarted: async runId => extensions !== undefined && await extensions.owns(runId) && record(await extensions.inspect(runId)).coreCreated === true,
+      cancelWorkflowExtension: async (runId, reason) => {
+        if (!extensions) throw new Error("Extension host is not active");
+        return extensions.cancel(runId, reason);
+      },
+      inspectWorkflowExtension: async runId => {
+        if (!extensions) throw new Error("Extension host is not active");
+        return extensions.inspect(runId);
+      },
       ...(options.pinDeveloperDispatch ? { pinDeveloperDispatch: options.pinDeveloperDispatch } : {}),
       ...(options.bindDeveloperExecutionScope ? { bindDeveloperExecutionScope: options.bindDeveloperExecutionScope } : {}),
       ...(options.stopDeveloperExecutionScope ? { stopDeveloperExecutionScope: options.stopDeveloperExecutionScope } : {}),

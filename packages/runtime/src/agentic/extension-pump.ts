@@ -3,7 +3,7 @@ import { IdentifierSchema } from "@bflow/contracts";
 import type { WorkflowExtensionHost } from "./extension-host.js";
 
 const WorkView = z.object({ runId: IdentifierSchema, coreCreated: z.boolean(), extensionStatus: z.string(),
-  queuedDecisions: z.array(IdentifierSchema).default([]) }).passthrough();
+  cancelled: z.boolean().default(false), queuedDecisions: z.array(IdentifierSchema).default([]) }).passthrough();
 
 /** Each SDK drives its existing Core DAG. This pump only owns the lifetime of the host's asynchronous calls. */
 export class WorkflowExtensionPump {
@@ -24,7 +24,7 @@ export class WorkflowExtensionPump {
     const state = z.object({ runs: z.array(WorkView) }).passthrough().parse(await this.host.inspect());
     if (this.quiesced) return;
     for (const run of state.runs) {
-      if (!run.coreCreated || this.active.has(run.runId) || this.held.has(run.runId) ||
+      if (!run.coreCreated || run.cancelled || this.active.has(run.runId) || this.held.has(run.runId) ||
           run.extensionStatus !== "running" && !run.queuedDecisions.length && !this.requested.has(run.runId)) continue;
       this.requested.delete(run.runId);
       const job = Promise.resolve().then(async () => {

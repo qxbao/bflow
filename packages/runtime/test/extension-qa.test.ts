@@ -11,7 +11,7 @@ const shutdown: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const stop of shutdown.splice(0)) await stop(); });
 
 async function qaFlow(options: { sharedSession?: "reviewer" | "qa"; hostSession?: string; revokeAfterReadiness?: boolean; legacyGrantOnly?: boolean;
-  interruptAfterIntent?: "policy" | "lease" } = {}) {
+  interruptAfterIntent?: "policy" | "lease"; cancelBeforeHttp?: boolean } = {}) {
   const f = await nativeExtensionFixture("qa", options.hostSession), { engine } = await f.open();
   if (options.sharedSession) f.panes.get(options.sharedSession)!.session = structuredClone(f.panes.get("tester")!.session);
   const calls: string[] = [], server = createServer((request, response) => {
@@ -61,7 +61,9 @@ async function qaFlow(options: { sharedSession?: "reviewer" | "qa"; hostSession?
     qa: { tools: { http: createHttpQaTool() }, grants: [grant], leases: new AppCheckBrowserLeases(join(f.root, "leases"), () => new Date(leaseNow)),
       runtimeHttpGrants: runtimeGrants,
       runtimeHttpAuthority: createRuntimeHttpAuthority({ policy: runtimePolicy, grants: runtimeGrants, machineId: "fixture-machine", repositoryId: "fixture-repo",
-        workspaceRoot: f.repo, sessionId: hostSession, revalidate: async () => {} }),
+        workspaceRoot: f.repo, sessionId: hostSession, revalidate: async () => {
+          if (options.cancelBeforeHttp) await composed.host.cancel("run-native", "Cancel before HTTP request");
+        } }),
       grantScopeSessionId: hostSession, beforeTargetAction: async () => {
         if (!current) throw new Error("execution_resolution_drift");
         if (options.revokeAfterReadiness) current = false;
@@ -89,6 +91,16 @@ async function qaFlow(options: { sharedSession?: "reviewer" | "qa"; hostSession?
 }
 
 describe("native QA host behavior (local transport fixture)", () => {
+  it("fences real HTTP when cancellation arrives during the final authority revalidation", async () => {
+    const f = await qaFlow({ cancelBeforeHttp: true }); await f.host.drive("run-native");
+    await f.host.decide(f.approve((await f.host.pendingApprovals())[0]!));
+    await expect(f.host.drive("run-native")).rejects.toThrow(/cancel/i);
+    expect(f.calls).toEqual([]);
+    expect(f.qa.status("run-native").report).toBeUndefined();
+    expect(await f.host.cancel("run-native", "Finish cancellation")).toMatchObject({ extensionStatus: "cancelled" });
+    expect(f.qa.status("run-native").execution?.leases.every(lease => lease.released)).toBe(true);
+  });
+
   it.each(["policy", "lease"] as const)("checks %s again after mutation intent is durable and never sends the mutation", async interruptAfterIntent => {
     const f = await qaFlow({ interruptAfterIntent }); await f.host.drive("run-native");
     await f.host.decide(f.approve((await f.host.pendingApprovals())[0]!));

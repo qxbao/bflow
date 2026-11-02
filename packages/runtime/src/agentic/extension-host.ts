@@ -32,6 +32,7 @@ export interface WorkflowExtensionHost {
   inspect(runId?: string): Promise<JsonValue>;
   recover(): Promise<JsonValue>;
   quiesce(): Promise<JsonValue>;
+  cancel(runId: string, reason: string): Promise<JsonValue>;
   receive(message: RoleMessage): Promise<void>;
   decide(decision: ApprovalDecision): Promise<void>;
   validateDecision(decision: ApprovalDecision): Promise<void>;
@@ -110,6 +111,7 @@ export async function createWorkflowExtensionHost(options: {
   };
   const pending = async (entry: Route): Promise<ApprovalRequest[]> => {
     if (!entry.started) return [];
+    if (["cancelling", "cancelled"].includes(runtime(entry).status(entry.runId).status)) return [];
     const requests = new Map<string, ApprovalRequest>(); let cursor: string | undefined;
     do {
       const page = await options.runStore.readEvents(entry.runId, { limit: 100, ...(cursor ? { cursor } : {}) });
@@ -130,9 +132,10 @@ export async function createWorkflowExtensionHost(options: {
     const state = entry.started ? runtime(entry).status(runId) : undefined;
     const status = state?.status;
     const sdlc = status === "published" || status === "reported" ? "completed" : status?.startsWith("awaiting_") ? "awaiting_approval"
-      : status === "failed" ? "failed" : status === "blocked" || status === "needs_revision" ? "escalated" : entry.kind === "analysis" ? "specifying" : "verifying";
+      : status === "cancelled" || status === "cancelling" ? "cancelled" : status === "failed" ? "failed" : status === "blocked" || status === "needs_revision" ? "escalated" : entry.kind === "analysis" ? "specifying" : "verifying";
     return json({ runId, kind: entry.kind, pack: entry.pack ? { id: entry.pack.id, version: entry.pack.version, digest: entry.pack.digest } : undefined,
-      delegation: entry.delegation, status: sdlc, extensionStatus: status ?? "admitted", coreCreated: entry.started, cancelled: false,
+      delegation: entry.delegation, status: sdlc, extensionStatus: status ?? "admitted", coreCreated: entry.started,
+      cancelled: status === "cancelled" || status === "cancelling",
       queuedDecisions: entry.decisions.filter(item => item.state === "queued").map(item => item.decision.approvalId),
       outputType: entry.kind === "analysis" ? "analysis_document" : "qa_report", ...(state ? { extension: state } : {}),
       approval: (await pending(entry))[0] });
@@ -186,6 +189,9 @@ export async function createWorkflowExtensionHost(options: {
     },
     async drive(runId) { assertActive(); const entry = await route(runId); await currentPack(entry);
       if (!entry.started) throw new Error("Coordinator has not started the admitted extension");
+      if (["cancelling", "cancelled"].includes(runtime(entry).status(runId).status)) {
+        await runtime(entry).cancel(runId, "Run cancelled"); return inspect(runId);
+      }
       for (const receipt of entry.decisions.filter(item => item.state === "queued")) {
         await runtime(entry).applyHumanDecision(receipt.decision);
         receipt.state = "applied"; await saveRoute(entry);
@@ -194,6 +200,12 @@ export async function createWorkflowExtensionHost(options: {
       if (status === "running" || status === "blocked") await runtime(entry).drive(runId);
       await publish(entry); return inspect(runId); },
     inspect,
+    async cancel(runId, reason) {
+      const entry = await route(runId);
+      if (!entry.started) throw new Error("Extension has not started; cancel its admitted intake instead");
+      await runtime(entry).cancel(runId, reason);
+      return inspect(runId);
+    },
     async recover() { assertActive(); const results: JsonValue[] = [];
       for (const entry of (await routes()).filter(item => item.kind !== "implementation" && item.started)) results.push(await host.drive(entry.runId));
       return json(results); },

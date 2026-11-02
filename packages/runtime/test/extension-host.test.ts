@@ -39,6 +39,22 @@ async function fixture(sessionId = "session-native") {
 }
 
 describe("workflow extension host routing", () => {
+  it("projects actual cancellation, closes its human gates and refuses late decisions after reopening the host", async () => {
+    const f = await fixture(), host = await f.create();
+    await host.admit(delegation()); await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,
+      packPin: { id: f.pack.id, version: f.pack.version, digest: f.pack.digest } });
+    await host.drive("run-native"); const question = (await host.pendingApprovals())[0]!;
+    const result = await host.cancel("run-native", "Owner stopped analysis");
+    expect(result).toMatchObject({ status: "cancelled", cancelled: true, extensionStatus: "cancelled" });
+    expect(await host.pendingApprovals()).toEqual([]);
+    const reopened = await f.create();
+    expect(await reopened.inspect("run-native")).toMatchObject({ status: "cancelled", cancelled: true });
+    await expect(reopened.decide(ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: question.approvalId,
+      runId: question.runId, sessionId: question.sessionId, target: question.target, revision: question.revision,
+      generation: question.generation, decision: "approved", decidedBy: "owner", decidedAt: new Date().toISOString(),
+      reason: "D-1: Ops", feedbackArtifacts: [], idempotencyKey: "late-cancel-answer", metadata: question.metadata }))).rejects.toThrow(/cancel|approval/i);
+  });
+
   it("refuses quiesce while a native job is active and keeps the scheduler resumable after refusal", async () => {
     const f = await fixture(), host = await f.create(), Pump = Reflect.get(runtime, "WorkflowExtensionPump");
     await host.admit(delegation()); await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,
@@ -127,6 +143,12 @@ describe("workflow extension host routing", () => {
     expect(await implementation.runtime.watchdogSnapshot("session-1")).toEqual([]);
     await expect(implementation.runtime.proposeWorkflow(request.runId, implementation.spec, implementation.def)).rejects.toThrow(/extension/i);
     expect(implementation.transport.sentRequests.some(item => item.role === "developer")).toBe(false);
+    implementation.ports.cancelWorkflowExtension = (runId, reason) => extension.cancel(runId, reason);
+    implementation.ports.inspectWorkflowExtension = runId => extension.inspect(runId);
+    await implementation.runtime.cancel(request.runId, "Owner stopped the native run");
+    expect(await extension.inspect(request.runId)).toMatchObject({ extensionStatus: "cancelled", cancelled: true });
+    expect(await implementation.runtime.reconcileCancellation(request.runId)).toMatchObject({ fullyStopped: true });
+    expect(await extension.pendingApprovals()).toEqual([]);
   });
   it("freezes exact family/pin at trusted intake and refuses configuration drift, ambiguous identity and conflicting replay", async () => {
     const f = await fixture(), host = await f.create(), request = delegation();

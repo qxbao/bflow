@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { canonicalReceiptJson } from "@bflow/contracts";
+import { cancelExtension } from "../extension-cancellation.js";
+import type { CancellationRequest } from "@bflow/contracts";
 import { extensionDecisionRequest } from "../extension-decisions.js";
 import { lstat, mkdir, open, readdir, readFile, readlink, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -85,7 +87,7 @@ export interface QaRuntimePorts {
   readonly accounts?: QaAccountPort;
 }
 
-export type QaRunStatus = "running" | "awaiting_design_approval" | "blocked" | "needs_revision" | "reported" | "failed";
+export type QaRunStatus = "running" | "awaiting_design_approval" | "blocked" | "needs_revision" | "reported" | "failed" | "cancelling" | "cancelled";
 export type QaCaseStatus = "passed" | "assertion_failed" | "environment_failure" | "blocked" | "inconclusive";
 export type QaBuildIdentity = { status: "identified"; value: string; source: string } | { status: "unknown"; limitation: string };
 export interface QaStepFinding { code: string; message: string; expected?: string; actual?: string }
@@ -135,6 +137,7 @@ interface AdjudicationRecord {
   verdicts: { caseId: string; classification: QaClassification; rationale: string }[]; problems?: QaFinding[];
 }
 interface RunRecord {
+  cancellation?: CancellationRequest;
   runId: string; intake: QaIntake; intakeDigest: string; definition: WorkflowDefinition; status: QaRunStatus; createdAt: string;
   strategy: TestStrategy; coreCreated: boolean; access?: { decidedBy: string; decidedAt: string };
   executions: ExecutionRecord[]; designs: DesignRecord[];
@@ -192,6 +195,7 @@ function alternativeMethods(strategy: TestStrategy): string[] {
  */
 export class QaWorkflowRuntime {
   private saveTail: Promise<void> = Promise.resolve();
+  private readonly activeLocalTasks = new Set<string>();
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
   private readonly sanitizers = new Map<string, QaSanitizer>();
@@ -290,6 +294,34 @@ export class QaWorkflowRuntime {
   }
 
   /** Runs every step that needs no human input; returns at the design approval, a blocker or completion. */
+  /** Stop this native workflow through Core and the bridge; an interrupt acknowledgement never proves stop. */
+  async cancel(runId: string, reason: string) {
+    const run = this.run(runId);
+    if (!this.ports.roles.native) throw new Error("Native cancellation requires native execution authority");
+    await this.restoreCore(run);
+    const snapshot = await cancelExtension({ runId, reason, native: this.ports.roles.native, now: this.ports.now,
+      ...(run.cancellation ? { cancellation: run.cancellation } : {}),
+      persist: async request => {
+        run.cancellation = request; run.status = "cancelling"; await this.save();
+        const exec = run.execution;
+        if (exec?.lease && ![...this.activeLocalTasks].some(key => key.startsWith(`${runId}:`)) &&
+            !exec.mutations.some(item => item.state === "intent" || item.state === "uncertain")) {
+          const lease = exec.leases.find(item => item.leaseId === exec.lease!.leaseId);
+          if (lease && !lease.released) { await this.ports.leases.release(exec.lease); lease.released = true; await this.save(); }
+        }
+      },
+      localStopped: (taskId, transport) => RUNTIME_TASKS.has(taskId as QaTaskKind) && transport === "runtime-qa" &&
+        !this.activeLocalTasks.has(`${runId}:${taskId}`) && !run.execution?.mutations.some(item => item.state === "intent" || item.state === "uncertain"),
+      unresolvedLocalWork: () => [...this.activeLocalTasks].some(key => key.startsWith(`${runId}:`)) ||
+        !!run.execution?.mutations.some(item => item.state === "intent" || item.state === "uncertain") ||
+        !!run.execution?.leases.some(lease => !lease.released),
+      snapshot: () => this.snapshot(runId), mutate: action => this.mutate(runId, action),
+      request: request => this.ports.engine.requestCancellation(request),
+      confirm: command => this.ports.engine.confirmCancellationStop(command) });
+    if (snapshot.status === "cancelled" || snapshot.status === "cancelling") run.status = snapshot.status;
+    await this.save(); return this.status(runId);
+  }
+
   async drive(runId: string) {
     const run = this.live(runId);
     // A whole-run precondition (busy lease) is re-evaluated on every drive; nothing happened while it was blocked.
@@ -297,8 +329,10 @@ export class QaWorkflowRuntime {
       run.blockers = []; run.status = "running";
     }
     await this.restoreCore(run);
+    if (run.cancellation) return this.cancel(runId, run.cancellation.reason ?? "Run cancelled");
     for (let guard = 0; guard < 200; guard++) {
       let snapshot = await this.snapshot(runId);
+      if (run.cancellation) return this.cancel(runId, "Run cancelled");
       if (TERMINAL.has(snapshot.status)) return this.finish(run, snapshot);
       for (const task of snapshot.tasks.filter(item => item.status === "retrying"))
         snapshot = await this.mutate(runId, version => this.ports.engine.transitionTask({ runId, taskId: task.taskId, from: "retrying", to: "ready",
@@ -308,7 +342,10 @@ export class QaWorkflowRuntime {
         idempotencyKey: `qa:advance:${runId}:${version}`, occurredAt: this.ports.now() }));
       const active = snapshot.tasks.find(item => item.status === "running" || item.status === "waiting");
       if (active) {
-        if (await this.execute(run, active) === "blocked") return this.status(runId);
+        const key = `${runId}:${active.taskId}`;
+        if (RUNTIME_TASKS.has(active.taskId as QaTaskKind)) this.activeLocalTasks.add(key);
+        try { if (await this.execute(run, active) === "blocked") return this.status(runId); }
+        finally { this.activeLocalTasks.delete(key); }
         continue;
       }
       if (run.status !== "running") { await this.save(); return this.status(runId); }
@@ -414,6 +451,7 @@ export class QaWorkflowRuntime {
       await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
       await clearNativeBlocker();
     } catch (error) {
+      if (run.cancellation) { await this.save(); throw error; }
       run.status = "blocked";
       run.blockers = [...new Set([...run.blockers, blocker])];
       await this.save(); throw error;
@@ -452,6 +490,7 @@ export class QaWorkflowRuntime {
   }
 
   private async complete(run: RunRecord, execution: ExecutionRecord, outcome: { agentId: string; output: unknown }) {
+    if (run.cancellation) throw new Error("Extension run is cancelled; late output cannot continue it");
     const kind = execution.taskId;
     let failure: { code: string; message: string } | undefined;
     try {
@@ -467,6 +506,7 @@ export class QaWorkflowRuntime {
       else if (kind === "execution") await this.runExecution(run);
       else await this.publishReport(run);
     } catch (error) {
+      if (run.cancellation) throw error;
       if (error instanceof QaScopeDenied) {
         run.denials.push({ executionId: execution.executionId, taskId: kind, reason: error.message, at: this.ports.now() });
         failure = { code: "permission_denied", message: error.message };
@@ -476,6 +516,7 @@ export class QaWorkflowRuntime {
     }
     if (failure && failure.code !== "permission_denied")
       run.rejections.push({ executionId: execution.executionId, taskId: kind, code: failure.code, message: failure.message, at: this.ports.now() });
+    if (run.cancellation) throw new Error("Extension run is cancelled");
     execution.state = "recorded";
     execution.agentId = outcome.agentId;
     execution.outputDigest = qaDigest(outcome.output ?? null);
@@ -801,11 +842,14 @@ export class QaWorkflowRuntime {
     });
   }
   private async targetAuthority(run: RunRecord, toolId: string, action: QaAction, origin: string): Promise<void> {
+    if (run.cancellation) throw new QaScopeDenied("cancelled", "QA run is cancelled");
     await this.ports.beforeTargetAction?.({ runId: run.runId, toolId, action, origin });
+    if (run.cancellation) throw new QaScopeDenied("cancelled", "QA run is cancelled");
     if (!run.intake.allowedActions.includes(action) || !this.grantFor(run, toolId, action))
       throw new QaScopeDenied("grant_unavailable", `No current grant for ${toolId}:${action}`);
     if (!run.intake.target.origins.includes(origin)) throw new QaScopeDenied("origin_not_approved", "Target origin exceeds the approved QA intake");
     if (this.ports.roles.native) await this.ports.runtimeHttpAuthority!({ runId: run.runId, toolId, action, origin });
+    if (run.cancellation) throw new QaScopeDenied("cancelled", "QA run is cancelled");
   }
   private async recheckMutationIntent(run: RunRecord, exec: ExecutionState, mutation: QaMutationRecord, toolId: string, action: QaAction, origin: string) {
     try {
@@ -1240,11 +1284,16 @@ export class QaWorkflowRuntime {
     for (const protectedPath of run.intake.protectedPaths)
       if (within(resolve(this.ports.repositoryRoot, protectedPath), absolute)) throw new QaScopeDenied("write_out_of_scope", `Write into protected product path denied: ${path}`);
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     await mkdir(dirname(absolute), { recursive: true });
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     try {
       const handle = await open(absolute, "wx", 0o644);
-      try { await handle.writeFile(content, "utf8"); } finally { await handle.close(); }
+      try {
+        if (run.cancellation) throw new Error("Extension run is cancelled before publication");
+        await handle.writeFile(content, "utf8");
+      } finally { await handle.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const existingStat = await lstat(absolute).catch(() => undefined);
@@ -1287,7 +1336,7 @@ export class QaWorkflowRuntime {
   }
 
   private finish(run: RunRecord, snapshot: WorkflowRunSnapshot) {
-    run.status = snapshot.status === "succeeded" && run.report ? "reported" : "failed";
+    run.status = snapshot.status === "cancelled" ? "cancelled" : snapshot.status === "succeeded" && run.report ? "reported" : "failed";
     return this.save().then(() => this.status(run.runId));
   }
 
