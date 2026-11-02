@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { expect, test } from 'vitest';
 
@@ -12,7 +12,38 @@ const contrast = (a: string, b: string): number => { const [hi, lo] = [luminance
 const token = (name: string): string => { const v = tokens.get(name); if (!v) throw new Error(`missing token ${name}`); return v; };
 
 test('the scoped dark tokens are all present', () => {
-  for (const name of ['canvas', 'ink', 'muted', 'faint', 'line', 'accent', 'steel', 'focus', 'surface', 'input', 'success', 'danger', 'warning', 'code']) expect(tokens.has(name), name).toBe(true);
+  for (const name of ['canvas', 'ink', 'muted', 'faint', 'line', 'accent', 'steel', 'focus', 'surface', 'input', 'success', 'danger', 'warning', 'code', 'brand', 'on-brand']) expect(tokens.has(name), name).toBe(true);
+});
+
+// Text on the brand fill (primary buttons): the fixed on-brand token, not the theme ink, which turns cream in dark mode.
+test('on-brand on brand is at least 4.5:1', () => { expect(contrast(token('on-brand'), token('brand'))).toBeGreaterThanOrEqual(4.5); });
+
+// A class list that puts bg-brand and a bare text-ink together gives cream text on yellow in dark mode.
+// Variants are compared within their own group: a hover: variant does not count, but aria-expanded:bg-brand with aria-expanded:text-ink does.
+const SRC = resolve(process.cwd(), 'src');
+const sourceFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? sourceFiles(resolve(dir, e.name)) : /\.tsx?$/.test(e.name) ? [resolve(dir, e.name)] : []);
+const brandTextClash = (text: string): boolean => {
+  for (const m of text.matchAll(/(["'`])((?:\\.|(?!\1)[^\n\\])*)\1/g)) {
+    const groups = new Map<string, Set<string>>();
+    for (const token of m[2]!.split(/\s+/)) {
+      const cut = token.lastIndexOf(':');
+      const variant = cut >= 0 ? token.slice(0, cut) : '';
+      const utility = token.slice(cut + 1);
+      if (utility !== 'bg-brand' && utility !== 'text-ink') continue;
+      groups.set(variant, (groups.get(variant) ?? new Set()).add(utility));
+    }
+    if ([...groups.values()].some(set => set.has('bg-brand') && set.has('text-ink'))) return true;
+  }
+  return false;
+};
+test('no source class list pairs bg-brand with text-ink in the same variant group', () => {
+  const offenders = sourceFiles(SRC).filter(file => brandTextClash(readFileSync(file, 'utf8'))).map(file => file.slice(SRC.length + 1));
+  expect(offenders).toEqual([]);
+});
+test('the brand clash scan flags a bare pair and an aria-expanded pair, but not a hover-only text-ink', () => {
+  expect(brandTextClash('<b className="bg-brand text-ink">')).toBe(true);
+  expect(brandTextClash('<b className="aria-expanded:bg-brand aria-expanded:text-ink">')).toBe(true);
+  expect(brandTextClash('<b className="bg-brand hover:text-ink">')).toBe(false);
 });
 
 // Text on the panel (surface), the page (canvas) and the pressed/hover fills (faint, code): WCAG AA 4.5:1.

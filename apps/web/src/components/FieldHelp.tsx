@@ -82,7 +82,7 @@ export function FieldHelp({ label, help, example }: FieldHelpProps) {
         data-field-help={label}
         aria-expanded={open}
         aria-describedby={open ? tipId : undefined}
-        className="relative inline-flex size-[18px] min-h-0 min-w-0 shrink-0 items-center justify-center rounded-full border border-input bg-surface p-0 font-data text-[11px] leading-none font-bold text-muted transition-colors after:absolute after:-inset-1.5 after:content-[''] hover:border-ink hover:bg-ink hover:text-surface focus-visible:border-ink focus-visible:bg-ink focus-visible:text-surface aria-expanded:border-ink aria-expanded:bg-brand aria-expanded:text-ink"
+        className="relative inline-flex size-[18px] min-h-0 min-w-0 shrink-0 items-center justify-center rounded-full border border-input bg-surface p-0 font-data text-[11px] leading-none font-bold text-muted transition-colors after:absolute after:-inset-1.5 after:content-[''] hover:border-ink hover:bg-ink hover:text-surface focus-visible:border-ink focus-visible:bg-ink focus-visible:text-surface aria-expanded:border-ink aria-expanded:bg-brand aria-expanded:text-on-brand"
         onFocus={() => {
           measure();
           setOpen(true);
