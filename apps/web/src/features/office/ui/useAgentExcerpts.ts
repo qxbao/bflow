@@ -14,22 +14,24 @@ const same = (a: ReadonlyMap<string, string>, b: ReadonlyMap<string, string>): b
  * last map for 30 s and then clears it. The returned Map is replaced only when its contents change.
  */
 export function useAgentExcerpts({ api, id, enabled }: { api: ApiClient; id: string; enabled: boolean }): ReadonlyMap<string, string> {
-  const [map, setMap] = useState<ReadonlyMap<string, string>>(EMPTY);
-  const current = useRef(map);
+  const [held, setHeld] = useState<{ id: string; map: ReadonlyMap<string, string> }>({ id, map: EMPTY });
+  const current = useRef<ReadonlyMap<string, string>>(EMPTY);
   useEffect(() => {
     // A map never outlives its project or its enabled state.
-    if (current.current.size > 0) { current.current = EMPTY; setMap(EMPTY); }
+    if (current.current.size > 0) { current.current = EMPTY; setHeld({ id, map: EMPTY }); }
     if (!enabled) return;
     let dead = false, stopped = false, busy = false, lastOk = Date.now();
     let timer: ReturnType<typeof setInterval> | undefined;
-    const put = (next: ReadonlyMap<string, string>): void => { if (!same(current.current, next)) { current.current = next; setMap(next); } };
+    const put = (next: ReadonlyMap<string, string>): void => { if (!dead && !same(current.current, next)) { current.current = next; setHeld({ id, map: next }); } };
     const read = (): void => {
       if (dead || stopped || busy || document.hidden) return;
       busy = true;
       api.readWorkforceExcerpts(id).then(view => {
+        if (dead) return;
         lastOk = Date.now();
         put(new Map(view.items.map(item => [item.instanceId, item.text] as const)));
       }, (error: unknown) => {
+        if (dead) return;
         if (error instanceof ApiError && UNSUPPORTED_CODES.has(error.code)) { stopped = true; put(EMPTY); stop(); return; }
         if (Date.now() - lastOk >= EXCERPT_KEEP_MS) put(EMPTY);
       }).finally(() => { busy = false; });
@@ -41,5 +43,6 @@ export function useAgentExcerpts({ api, id, enabled }: { api: ApiClient; id: str
     document.addEventListener('visibilitychange', onVisibility);
     return () => { dead = true; stop(); document.removeEventListener('visibilitychange', onVisibility); };
   }, [api, id, enabled]);
-  return enabled ? map : EMPTY;
+  // The first render after an id change must not show the old project's text.
+  return enabled && held.id === id ? held.map : EMPTY;
 }

@@ -102,6 +102,33 @@ describe('useAgentExcerpts lifecycle', () => {
   });
 });
 
+describe('stale responses', () => {
+  test.each([{ id: 'q', enabled: true }, { id: 'p', enabled: false }])('an old read resolving after %o leaves the map empty', async next => {
+    let release!: () => void;
+    const api = client(() => new Promise(r => { release = () => r(view(['a', 'old'])); }));
+    const { result, rerender } = renderHook(p => useAgentExcerpts({ api, id: p.id, enabled: p.enabled }), { initialProps: { id: 'p', enabled: true } });
+    await flush();
+    api.readWorkforceExcerpts.mockImplementation(() => new Promise(() => {}));
+    rerender(next);
+    expect(result.current.size).toBe(0);
+    release();
+    await flush();
+    expect(result.current.size).toBe(0);
+  });
+
+  test('an old failed read after a project change does nothing', async () => {
+    let fail!: () => void;
+    const api = client(() => new Promise((_r, rej) => { fail = () => rej(new ApiError('operation_not_allowed')); }));
+    const { result, rerender } = renderHook(p => useAgentExcerpts({ api, id: p.id, enabled: true }), { initialProps: { id: 'p' } });
+    await flush();
+    api.readWorkforceExcerpts.mockImplementation(async () => view(['a', 'new']));
+    rerender({ id: 'q' });
+    fail();
+    await flush();
+    expect(result.current.get('a')).toBe('new');
+  });
+});
+
 describe('poseLabel', () => {
   test('working poses get a message box, sleeping a Zzz, the rest nothing', () => {
     expect(['working', 'typing', 'preparing'].map(poseLabel)).toEqual(['bubble', 'bubble', 'bubble']);
