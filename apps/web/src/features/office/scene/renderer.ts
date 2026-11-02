@@ -1,12 +1,13 @@
-// Static office scene (V3.1). Reads an OfficeModel and draws it; emits selections and never writes anywhere else.
+// Office scene (V3.1 static, V3.2 animated). Reads an OfficeModel and draws it; emits selections and never writes anywhere else.
 // `pixi.js/unsafe-eval` swaps code generation for polyfills, so the CSP stays free of 'unsafe-eval'. It must load first.
 import 'pixi.js/unsafe-eval';
 import { Application, Container, Sprite, TextureStyle, type Spritesheet, type Texture } from 'pixi.js';
 import { acquireAtlas } from './atlas';
 import type { OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
-import type { VisualCue } from '../model/timeline';
+import { handoffMarks, type VisualCue } from '../model/timeline';
+import { Choreographer, frameName } from './actors';
 import { cameraKey, clampCamera, fitCamera, panBy, pinchStep, zoomBy, type Camera } from './camera';
-import { ATLAS_URL_PATH, DESK_CELLS, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, ROLE_FRAME, TILE_H, TILE_W, WORLD, cellCentre, depth, isRug, seatCell, type Cell, type Point } from './layers';
+import { ATLAS_URL_PATH, BUBBLE_FRAME, DESK_CELLS, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, TILE_H, TILE_W, WORLD, cellCentre, depth, isRug, type Cell, type Point } from './layers';
 
 export interface OfficeRenderer {
   apply(model: OfficeModel, cues: VisualCue[]): void;
@@ -20,8 +21,11 @@ const WHEEL_GAP_MS = 120;
 const atlasUrl = (): string => `${import.meta.env.BASE_URL}${ATLAS_URL_PATH}`;
 const alphaFor = (certainty: string, pose: string): number => (pose === 'ghost' ? 0.45 : certainty === 'confirmed' ? 1 : certainty === 'inferred' ? 0.85 : 0.55);
 
-/** `signal` lets the caller cancel a creation that is no longer wanted; a cancelled creation rejects without touching the page or the shared atlas. */
-export async function createOfficeRenderer(host: HTMLElement, onSelect: (target: OfficeTarget) => void, signal?: AbortSignal): Promise<OfficeRenderer> {
+/**
+ * `signal` lets the caller cancel a creation that is no longer wanted; a cancelled creation rejects without touching the page or the shared atlas.
+ * `onContextLost` fires once if the WebGL context is lost after creation. The renderer does not retry: the caller shows its fallback and destroys it.
+ */
+export async function createOfficeRenderer(host: HTMLElement, onSelect: (target: OfficeTarget) => void, signal?: AbortSignal, onContextLost?: () => void): Promise<OfficeRenderer> {
   const cancelled = (): Error => new DOMException('office renderer creation cancelled', 'AbortError');
   if (signal?.aborted) throw cancelled();
   const lease = await acquireAtlas(atlasUrl());
@@ -34,7 +38,7 @@ export async function createOfficeRenderer(host: HTMLElement, onSelect: (target:
       width: Math.max(1, host.clientWidth), height: Math.max(1, host.clientHeight), resolution: Math.max(1, Math.round(window.devicePixelRatio || 1)), autoDensity: true, autoStart: false,
     });
     if (signal?.aborted) throw cancelled();
-    return build(app, lease.sheet, lease.release, host, onSelect);
+    return build(app, lease.sheet, lease.release, host, onSelect, onContextLost);
   } catch (error) {
     // The atlas textures belong to the shared lease, never to this app.
     try { app.destroy(true, { children: true }); } catch { /* init may have failed before a renderer existed */ }
@@ -43,7 +47,7 @@ export async function createOfficeRenderer(host: HTMLElement, onSelect: (target:
   }
 }
 
-function build(app: Application, sheet: Spritesheet, release: () => void, host: HTMLElement, rawSelect: (target: OfficeTarget) => void): OfficeRenderer {
+function build(app: Application, sheet: Spritesheet, release: () => void, host: HTMLElement, rawSelect: (target: OfficeTarget) => void, onContextLost?: () => void): OfficeRenderer {
   const size = (): { w: number; h: number } => ({ w: Math.max(1, host.clientWidth), h: Math.max(1, host.clientHeight) });
   // A tap that ends a drag or a pinch is not a selection.
   let suppressTap = false;
@@ -97,6 +101,9 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
   }
 
   const agents = new Map<string, Sprite>();
+  const bubbles = new Map<string, Sprite>();
+  // Reduced motion also freezes the clip frames; the caller separately never sends walk cues.
+  const choreo = new Choreographer(!(typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches));
   let paused = false, dirty = true, destroyed = false, closed = false;
   // The first fit waits for a real size (a host laid out later reports 0x0) and happens once; after that only user gestures move the camera.
   const sized = (): boolean => host.clientWidth > 0 && host.clientHeight > 0;
@@ -110,7 +117,56 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
     app.render();
     if (host.dataset.officeRenderer !== 'ready') host.dataset.officeRenderer = 'ready';
   };
-  app.ticker.add(() => { if (dirty && !paused && !destroyed) { dirty = false; renderNow(); } });
+  // Actors: one sprite per view, textured by clip frame. Run on every change of a view, never on a timer of its own.
+  const syncActors = (): void => {
+    const keep = new Set<string>();
+    for (const view of choreo.views()) {
+      keep.add(view.instanceId);
+      let sprite = agents.get(view.instanceId);
+      if (!sprite) {
+        sprite = new Sprite();
+        sprite.anchor.set(0.5, 1);
+        sprite.eventMode = 'static';
+        sprite.cursor = 'pointer';
+        const instanceId = view.instanceId;
+        sprite.on('pointertap', () => onSelect({ kind: 'agent', instanceId }));
+        things.addChild(sprite);
+        agents.set(view.instanceId, sprite);
+      }
+      sprite.texture = tex(frameName(view.role, view.clip, view.frame));
+      sprite.position.set(view.point.x, view.point.y + TILE_H / 2 - 2);
+      sprite.zIndex = depth(view.cell, 'agent');
+      sprite.alpha = alphaFor(view.certainty, view.pose);
+    }
+    for (const [id, sprite] of agents) if (!keep.has(id)) { sprite.destroy(); agents.delete(id); }
+  };
+  // Desk indicators come from handoff state alone, so they are drawn on every apply (a first snapshot carries no cues).
+  const syncBubbles = (model: OfficeModel): void => {
+    const keep = new Set<string>();
+    const stacked = new Map<string, number>();
+    for (const mark of handoffMarks(model)) {
+      const cell = choreo.cellFor(mark.at);
+      if (!cell) continue;
+      keep.add(mark.handoffId);
+      let sprite = bubbles.get(mark.handoffId);
+      if (!sprite) { sprite = new Sprite(); sprite.anchor.set(0.5, 1); things.addChild(sprite); bubbles.set(mark.handoffId, sprite); }
+      const slot = `${cell.gx},${cell.gy}`, n = stacked.get(slot) ?? 0;
+      stacked.set(slot, n + 1);
+      const p = cellCentre(cell);
+      sprite.texture = tex(BUBBLE_FRAME[mark.mark]);
+      sprite.position.set(p.x + n * 9, p.y + TILE_H / 2 - 2 - 46);
+      sprite.zIndex = depth(cell, 'agent') + 2;
+    }
+    for (const [id, sprite] of bubbles) if (!keep.has(id)) { sprite.destroy(); bubbles.delete(id); }
+  };
+  // 30 fps while someone walks, 8 otherwise (§5.6); a frame is drawn only when something changed.
+  app.ticker.add(ticker => {
+    if (paused || destroyed) return;
+    const { moving, changed } = choreo.tick(ticker.deltaMS);
+    app.ticker.maxFPS = moving ? 30 : 8;
+    if (changed) { syncActors(); dirty = true; }
+    if (dirty) { dirty = false; renderNow(); }
+  });
   app.ticker.start();
 
   // --- camera input: user gestures only ---
@@ -195,43 +251,30 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
     place();
   });
   observer.observe(host);
-  const onLost = (e: Event): void => { e.preventDefault(); };
+  const onLost = (e: Event): void => { e.preventDefault(); if (!destroyed) onContextLost?.(); };
   const onRestored = (): void => { dirty = true; };
   canvas.addEventListener('webglcontextlost', onLost);
   canvas.addEventListener('webglcontextrestored', onRestored);
 
   return {
-    apply(model) {
+    apply(model, cues) {
       if (destroyed) return;
-      const keep = new Set<string>();
-      for (const agent of model.agents) {
-        const cell = agent.seat ? seatCell(agent.seat) : undefined;
-        if (!cell) continue;
-        keep.add(agent.instanceId);
-        let sprite = agents.get(agent.instanceId);
-        if (!sprite) {
-          sprite = new Sprite();
-          sprite.anchor.set(0.5, 1);
-          sprite.eventMode = 'static';
-          sprite.cursor = 'pointer';
-          const instanceId = agent.instanceId;
-          sprite.on('pointertap', () => onSelect({ kind: 'agent', instanceId }));
-          things.addChild(sprite);
-          agents.set(agent.instanceId, sprite);
-        }
-        sprite.texture = tex(ROLE_FRAME(agent.role));
-        at(sprite, cell, TILE_H / 2 - 2);
-        sprite.zIndex = depth(cell, 'agent');
-        sprite.alpha = alphaFor(agent.certainty, agent.pose);
-      }
-      for (const [id, sprite] of agents) if (!keep.has(id)) { sprite.destroy(); agents.delete(id); }
+      // Hidden tab: cues are dropped, only the latest pose matters.
+      choreo.apply(model, paused ? [] : cues);
+      syncActors();
+      syncBubbles(model);
       // Closed session: the office is dark. The last saved data stays visible.
       world.tint = model.tier === 'closed' ? 0x6a6a80 : 0xffffff;
       dirty = true;
     },
     setPaused(next) {
+      if (next === paused) return;
       paused = next;
-      if (!next) dirty = true;
+      if (next) { choreo.pause(); app.ticker.stop(); return; }
+      // Back from hidden: jump to the latest pose, no replay.
+      syncActors();
+      dirty = true;
+      app.ticker.start();
     },
     destroy() {
       if (closed) return;

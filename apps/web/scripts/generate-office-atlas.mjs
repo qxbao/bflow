@@ -122,23 +122,57 @@ sprite('door', 24, 40, s => {
   s.outline();
 });
 
-// --- characters: 32x48, one idle frame per role colour ---
+// --- characters: 32x48, one base frame per role colour plus the §5.2 clips ---
 const ROLES = {
   conversation: 0x3aa6a0, coordinator: 0xd8a02a, planner: 0x8a6ad0, architect: 0x5a7ad0, specifier: 0xc860a0,
   reviewer: 0xd86a3a, qa: 0x4aa860, tester: 0x7ab83a, security: 0xb83a3a, developer: 0x3a78c8,
 };
-for (const [role, color] of Object.entries(ROLES)) {
-  sprite(`agent_${role}`, 32, 48, s => {
-    const shade = hex(((color >> 1) & 0x7f7f7f));
-    s.rect(11, 34, 4, 10, hex(0x3a3a4a)); s.rect(17, 34, 4, 10, hex(0x3a3a4a)); // legs
-    s.rect(9, 18, 14, 18, hex(color)); s.rect(9, 30, 14, 6, shade); // torso
-    s.rect(6, 19, 3, 12, hex(color)); s.rect(23, 19, 3, 12, hex(color)); // arms
-    s.rect(11, 6, 10, 12, hex(0xf0c8a0)); // head
-    s.rect(11, 4, 10, 5, hex(0x4a3428)); // hair
-    s.rect(13, 12, 2, 2, OUTLINE); s.rect(17, 12, 2, 2, OUTLINE);
-    s.outline();
-  });
+/**
+ * Placeholder poses: one facing only (the 4 directions of §5.2 come with the final art). Offsets are pixels on the 32x48 frame:
+ * head/body shift down, leg lift, arm [y, height], sleepy eyes, a held document, a washed-out ghost.
+ */
+function drawAgent(s, color, p = {}) {
+  const { head = 0, body = 0, legL = 0, legR = 0, armL = [19, 12], armR = [19, 12], sleepy = false, hold = false, ghost = false } = p;
+  const main = hex(ghost ? 0x9a9ab0 : color);
+  const shade = hex(ghost ? 0x7a7a90 : (color >> 1) & 0x7f7f7f);
+  s.rect(11, 34 + body, 4, 10 - legL - body, hex(0x3a3a4a)); s.rect(17, 34 + body, 4, 10 - legR - body, hex(0x3a3a4a)); // legs
+  s.rect(9, 18 + body, 14, 18, main); s.rect(9, 30 + body, 14, 6, shade); // torso
+  s.rect(6, armL[0] + body, 3, armL[1], main); s.rect(23, armR[0] + body, 3, armR[1], main); // arms
+  if (hold) { s.rect(8, 24 + body, 16, 8, hex(0xf2f0ea)); s.rect(8, 24 + body, 16, 1, hex(0xb8b0a0)); }
+  s.rect(11, 6 + head + body, 10, 12, hex(0xf0c8a0)); // head
+  s.rect(11, 4 + head + body, 10, 5, hex(0x4a3428)); // hair
+  if (sleepy) { s.rect(13, 13 + head + body, 2, 1, OUTLINE); s.rect(17, 13 + head + body, 2, 1, OUTLINE); }
+  else { s.rect(13, 12 + head + body, 2, 2, OUTLINE); s.rect(17, 12 + head + body, 2, 2, OUTLINE); }
+  s.outline();
+  if (ghost) for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) if ((x * 3 + y * 5) % 7 === 0) s.px[(y * s.w + x) * 4 + 3] = 0;
 }
+/** Clip -> frames. Frame counts must equal CLIP_FRAMES in src/features/office/scene/actors.ts (a test compares them with the atlas). */
+const CLIPS = {
+  sleep: [{ head: 4, sleepy: true, armL: [24, 8], armR: [24, 8] }, { head: 5, sleepy: true, armL: [24, 8], armR: [24, 8] }],
+  idle: [{}, { body: 1 }],
+  type: [{ armL: [24, 7], armR: [22, 7] }, { armL: [22, 7], armR: [24, 7] }],
+  type_fast: [{ armL: [23, 8], armR: [21, 8], head: 1 }, { armL: [21, 8], armR: [23, 8], head: 1 }],
+  walk: [{ legL: 3, armR: [17, 10] }, {}, { legR: 3, armL: [17, 10] }, {}],
+  carry: [{ legL: 3, hold: true }, { hold: true }, { legR: 3, hold: true }, { hold: true }],
+  raise_hand: [{ armR: [0, 20] }, { armR: [2, 18] }],
+  blocked: [{ head: 2, armL: [22, 6], armR: [22, 6] }, { head: 3, armL: [22, 6], armR: [22, 6] }],
+  ghost: [{ ghost: true }, { ghost: true, body: 1 }],
+};
+for (const [role, color] of Object.entries(ROLES)) {
+  sprite(`agent_${role}`, 32, 48, s => drawAgent(s, color));
+  for (const [clip, list] of Object.entries(CLIPS)) list.forEach((p, i) => sprite(`agent_${role}_${clip}_${i}`, 32, 48, s => drawAgent(s, color, p)));
+}
+
+// --- handoff bubbles, 16x16, anchored at bottom centre; symbols only, no text ---
+const bubble = (name, draw) => sprite(name, 16, 16, s => {
+  s.poly([[1, 1], [15, 1], [15, 11], [1, 11]], hex(0xfdfcf6));
+  s.poly([[6, 11], [10, 11], [8, 15]], hex(0xfdfcf6));
+  draw(s);
+  s.outline();
+});
+bubble('bubble_waiting', s => { for (const x of [3, 7, 11]) s.rect(x, 5, 2, 2, hex(0x3a4a58)); });
+bubble('bubble_question', s => { s.rect(6, 2, 4, 2, hex(0x3a78c8)); s.rect(9, 4, 2, 2, hex(0x3a78c8)); s.rect(7, 6, 2, 2, hex(0x3a78c8)); s.rect(7, 9, 2, 1, hex(0x3a78c8)); });
+bubble('bubble_blocked', s => { s.poly([[3, 6], [8, 1], [13, 6], [8, 11]], hex(0xd8453a)); s.rect(5, 5, 6, 2, hex(0xfdfcf6)); });
 
 // --- pack (shelf) and encode ---
 const order = Object.keys(frames);

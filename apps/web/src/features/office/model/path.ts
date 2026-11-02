@@ -8,8 +8,8 @@ const DIRS: readonly Cell[] = [{ x: 0, y: -1 }, { x: -1, y: 0 }, { x: 1, y: 0 },
 /** Shortest path including both endpoints, or [] when either end is blocked/outside or unreachable. */
 export function findPath(grid: Grid, from: Cell, to: Cell): Cell[] {
   const h = grid.length;
-  const w = h > 0 ? grid[0].length : 0;
-  const ok = (c: Cell): boolean => c.x >= 0 && c.y >= 0 && c.x < w && c.y < h && grid[c.y][c.x] === true;
+  const w = grid[0]?.length ?? 0;
+  const ok = (c: Cell): boolean => c.x >= 0 && c.y >= 0 && c.x < w && c.y < h && grid[c.y]?.[c.x] === true;
   if (!ok(from) || !ok(to)) return [];
   const key = (c: Cell): number => c.y * w + c.x;
   const dist = (c: Cell): number => Math.abs(c.x - to.x) + Math.abs(c.y - to.y);
@@ -22,11 +22,11 @@ export function findPath(grid: Grid, from: Cell, to: Cell): Cell[] {
     // Tie-break on lower f, then lower h, then insertion order: deterministic for equal input.
     let best = 0;
     for (let i = 1; i < open.length; i++) {
-      const a = open[i];
-      const b = open[best];
+      const a = open[i] as (typeof open)[number];
+      const b = open[best] as (typeof open)[number];
       if (a.f < b.f || (a.f === b.f && (dist(a.c) < dist(b.c) || (dist(a.c) === dist(b.c) && a.n < b.n)))) best = i;
     }
-    const { c } = open.splice(best, 1)[0];
+    const { c } = open.splice(best, 1)[0] as (typeof open)[number];
     const ck = key(c);
     if (closed.has(ck)) continue;
     closed.add(ck);

@@ -1,5 +1,6 @@
 // Pure layout of the static office (§5.1): grid, isometric projection, seat cells, object cells and draw order.
 // No Pixi here, so the layout is unit-testable and the renderer stays a thin drawing layer.
+import { findPath } from '../model/path';
 import type { OfficeObjectId } from '../model/types';
 
 export const GRID_W = 28;
@@ -88,5 +89,19 @@ export function depth(c: Cell, layer: 'object' | 'agent'): number {
   return (c.gx + c.gy) * 10 + (layer === 'agent' ? 5 : 0);
 }
 
+/** Fixed walkable grid: every cell except desks, interactive objects and plants. Built once; never mutated. */
+const BLOCKED: ReadonlySet<string> = new Set([...DESK_CELLS, ...Object.values(OBJECT_CELLS), ...PLANT_CELLS].map(c => `${c.gx},${c.gy}`));
+
+/**
+ * Shortest 4-directional route between two cells (both included), or [] when unreachable. A seat or object cell is blocked for
+ * passers-by, but the two endpoints of a walk are opened for it: a character stands up from its desk and walks to the other desk.
+ */
+export function routeBetween(from: Cell, to: Cell): Cell[] {
+  const open = new Set([`${from.gx},${from.gy}`, `${to.gx},${to.gy}`]);
+  const grid = Array.from({ length: GRID_H }, (_, y) => Array.from({ length: GRID_W }, (_, x) => open.has(`${x},${y}`) || !BLOCKED.has(`${x},${y}`)));
+  return findPath(grid, { x: from.gx, y: from.gy }, { x: to.gx, y: to.gy }).map(c => ({ gx: c.x, gy: c.y }));
+}
+
 export const ATLAS_URL_PATH = 'office/atlas.json';
 export const ROLE_FRAME = (role: string): string => `agent_${role}`;
+export const BUBBLE_FRAME = { waiting: 'bubble_waiting', question: 'bubble_question', blocked: 'bubble_blocked' } as const;

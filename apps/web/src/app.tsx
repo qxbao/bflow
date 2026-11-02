@@ -98,5 +98,5 @@ function VisualOffice({api,id,session,connection,revision,list}:{api:ApiClient;i
     const derived=deriveOffice({session,runs:runs.data?.items??[],decisions:decisions.data?.items??[],connection,now:Date.now()});
     const seated=applySeats(seats.current,derived);seats.current=seated.seats;return seated.model;
   },[session,runs.data,decisions.data,connection]);
-  return office?<OfficeStage model={office} onSelect={target=>{void target;}} fallback={list}/>:<>{list}</>;
+  return office?<OfficeStage model={office} onSelect={target=>{void target;}} links={list}/>:<>{list}</>;
 }
