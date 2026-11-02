@@ -4,14 +4,14 @@ import {
   ACESFilmicToneMapping, BoxGeometry, Color, FogExp2, Group, Mesh, MeshBasicMaterial, PCFShadowMap, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, Vector2, WebGLRenderer, type Material, type Object3D,
 } from 'three';
 import { acquireModels, type ModelLease } from './assets';
-import type { OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
+import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
 import { Choreographer } from './actors';
 import { CameraMove, FOV, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
 import { BACKGROUND, Stage, setShadowCasting } from './stage';
-import { OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, deskPlan, type Vec2 } from './world';
+import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, deskPlan, type Vec2 } from './world';
 
 export interface OfficeRenderer {
   /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
@@ -19,6 +19,8 @@ export interface OfficeRenderer {
   setPaused(paused: boolean): void;
   /** Eases the camera to a target the user selected (also called for selections made in the DOM mirror). */
   focus?(target: OfficeTarget): void;
+  /** Eases the camera to a HUD preset: the whole office or one room. */
+  focusZone?(zone: OfficeFocusZone): void;
   destroy(): void;
 }
 
@@ -222,6 +224,12 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     move = new CameraMove(state, to, performance.now(), reduced());
     wake();
   };
+  const focusZone = (zone: OfficeFocusZone): void => {
+    if (destroyed) return;
+    const to = zone === 'overview' ? homeCamera(WORLD) : focusOn(FOCUS_POINTS[zone].at, WORLD, FOCUS_POINTS[zone].zoom);
+    move = new CameraMove(state, to, performance.now(), reduced());
+    wake();
+  };
   const select = (target: OfficeTarget): void => { if (!suppressTap) { focus(target); rawSelect(target); } };
 
   // ---- camera input: user gestures only ----
@@ -332,6 +340,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       schedule(true);
     },
     focus,
+    focusZone,
     destroy() {
       if (closed) return;
       closed = true;

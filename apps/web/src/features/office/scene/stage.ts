@@ -15,6 +15,8 @@ const FLOOR: Readonly<Record<string, string>> = {
 };
 /** Scale of the tall wall furniture (server, cabinet, mailbox, settings) against the 1.7 high characters. */
 const OBJECT_SCALE = 1.2;
+/** The mailbox is about 40% smaller than the other tall furniture. */
+const MAILBOX_SCALE = OBJECT_SCALE * 0.6;
 
 const m4 = (x: number, y: number, z: number, ry = 0, s = 1): Matrix4 =>
   new Matrix4().compose(new Vector3(x, y, z), new Quaternion().setFromEuler(new Euler(0, ry, 0)), new Vector3(s, s, s));
@@ -157,12 +159,13 @@ export class Stage {
     const flush = (depth: number): number => 0.07 + (depth * OBJECT_SCALE) / 2;
     place('counter', at('counter').x, at('counter').z, 0, 'counter', 1);
     place('board', BOARD_X, 0.07, 0, 'board', 1);
-    place('mailbox', at('mailbox').x, at('mailbox').z, 0.3, 'mailbox');
+    // The mailbox is small and stands against the west wall, facing into the room.
+    place('mailbox', 0.07 + (OBJECT_SIZES.mailbox.d * MAILBOX_SCALE) / 2, at('mailbox').z, Math.PI / 2, 'mailbox', MAILBOX_SCALE);
     place('cabinet', at('cabinet').x, flush(0.52), 0, 'cabinet');
     place('server', at('server').x, flush(0.7), 0, 'server');
     place('settings', at('settings').x, at('settings').z, 0, 'settings');
     place('door', 0.1, at('door').z, Math.PI / 2, 'door', 1);
-    place('table', 14.0, 4.5, 0, undefined, 1);
+    place('table', BOARD_X + 0.5, 4.5, 0, undefined, 1);
     for (const cell of PLANT_CELLS) { const p = cellCentre(cell); place('plant', p.x, p.z, (cell.gx * 7) % 6, undefined, 1); }
 
     // Lights: a dim warm key (shadows on the high tier), a cool fill, and warm spot pools over each room (high tier only).
@@ -172,7 +175,7 @@ export class Stage {
     key.shadow.mapSize.set(2048, 2048);
     Object.assign(key.shadow.camera, { left: -22, right: 22, top: 18, bottom: -18, near: 1, far: 70 });
     key.shadow.bias = -0.0004; key.shadow.normalBias = 0.04;
-    const accents = [[4.5, 4], [14, 5], [23.5, 4], [9, 13], [23.5, 13]].map(([x, z]) => {
+    const accents = [[4.5, 4], [13.5, 4], [23.5, 5], [9, 13], [23.5, 13]].map(([x, z]) => {
       const l = new SpotLight('#ffb766', 70, 16, 0.85, 0.9, 1.5);
       l.position.set(x as number, 5.2, (z as number) + 1.5); l.target.position.set(x as number, 0, z as number);
       this.group.add(l.target);
@@ -193,7 +196,7 @@ export class Stage {
     };
     glow('#6f9bd6', 0.55, 12.5, 5.2, new Vector3(BOARD_X, 2.05, 0.35), false);
     glow('#5d86c4', 0.3, 11, 5, new Vector3(BOARD_X, 0.02, 3.4), true);
-    for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 9, 7], ['coordination', 23.5, 4, 10, 7], ['verification', 23.5, 13, 10, 9]] as const) {
+    for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 8, 7], ['coordination', 13.5, 4, 10, 7], ['verification', 23.5, 13, 10, 9]] as const) {
       this.pools.push({ zone, mesh: glow('#ff9d4d', 0.2, w, h, new Vector3(x, 0.02, z), true) });
     }
     this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.18, 18, 9, new Vector3(9, 0.02, 13), true) });

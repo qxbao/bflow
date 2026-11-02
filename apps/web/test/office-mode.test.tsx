@@ -40,7 +40,7 @@ test('mode switch preserves in-memory decision draft',async()=>{
   fireEvent.click(screen.getByRole('button',{name:'Trực quan'}));
   expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
   expect(marker.isConnected).toBe(true);
-  fireEvent.click(screen.getByRole('button',{name:'Cổ điển'}));
+  fireEvent.click(screen.getByRole('button',{name:'Classic'}));
   expect((screen.getByLabelText(/Lý do/) as HTMLTextAreaElement).value).toBe('Nháp trong bộ nhớ');
 });
 test('classic mode renders no visual chrome',async()=>{
@@ -92,7 +92,7 @@ test('Esc closes the panel while focus is in the HUD, and the sidebar Tổng qua
   writeMode('visual');installApi({'/api/v1/projects/p/session':readySession});app('/projects/p/runs/run');
   const user=userEvent.setup(),main=()=>document.getElementById('main')!;
   await screen.findByRole('heading',{name:'Tìm sách nhanh hơn'});
-  screen.getByRole('button',{name:'Trực quan',pressed:true}).focus();
+  screen.getByRole('button',{name:'3D',pressed:true}).focus();
   await user.keyboard('{Escape}');
   await waitFor(()=>expect(main().classList.contains('hidden')).toBe(true));
   const nav=within(screen.getByRole('navigation',{name:'Điều hướng chính'}));

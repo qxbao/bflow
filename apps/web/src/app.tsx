@@ -1,5 +1,6 @@
 import { LoadingState } from './components/LoadingState';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, Route, Routes, useMatch, useNavigate, useParams } from 'react-router';
 import type { WebEvent, WebProject, WebProjectSession } from '@bflow/contracts/web';
 import { ApiClient, ApiError, consumeBootstrap } from './api/client';
@@ -14,15 +15,14 @@ import { ChatPage } from './features/chat/page';
 import { Review } from './features/review';
 import { Settings } from './features/settings';
 import { useRead } from './features/data';
-import { Operations } from './features/operations';
+import { Operations, OperationsDock } from './features/operations';
 import { Overview } from './features/overview';
 import { useUiMode, type UiMode } from './features/office/mode';
 import { OfficeFrame, OverviewOutlet } from './features/office/ui/OfficeFrame';
 import { ModeSwitch } from './features/office/ui/ModeSwitch';
-import { OfficeStage } from './features/office/ui/OfficeStage';
-import { deriveOffice } from './features/office/model/derive';
-import { applySeats } from './features/office/model/seats';
-import type { SeatMap } from './features/office/model/types';
+import { OfficeStage, type StageControl } from './features/office/ui/OfficeStage';
+import { OfficeHud } from './features/office/ui/OfficeHud';
+import { useOfficeModel } from './features/office/ui/useOfficeModel';
 
 export function App({api,bootstrap}:{api:ApiClient;bootstrap?:string|undefined}) {
   const [ready,setReady]=useState(false),[error,setError]=useState<unknown>(),[attempt,setAttempt]=useState(0),[revision,setRevision]=useState(0);
@@ -41,7 +41,7 @@ function Workspace({api,revision,refresh,onPair}:{api:ApiClient;revision:number;
 }
 function Project({api,projects,projectsLoading,projectsError,revision,refresh,onPair}:{api:ApiClient;projects:WebProject[];projectsLoading:boolean;projectsError:unknown;revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>}) {
   const {projectId=''}=useParams(); const project=projects.find(project=>project.projectId===projectId);
-  const [mode,setMode]=useUiMode(),[overviewOpen,setOverviewOpen]=useState(false),[host,setHost]=useState<HTMLElement|null>(null),[hud,setHud]=useState<HTMLElement|null>(null);
+  const [mode,setMode]=useUiMode(),[overviewOpen,setOverviewOpen]=useState(false),[host,setHost]=useState<HTMLElement|null>(null),[hud,setHud]=useState<HTMLElement|null>(null),[dockPx,setDockPx]=useState(0);
   const navigate=useNavigate(),isIndex=Boolean(useMatch({path:'/projects/:projectId',end:true})),base=`/projects/${encodeURIComponent(projectId)}`;
   useEffect(()=>setOverviewOpen(false),[projectId]);
   // Overview is only meaningful at the index path; leaving it forgets the HUD-opened state.
@@ -51,9 +51,9 @@ function Project({api,projects,projectsLoading,projectsError,revision,refresh,on
   const close=useCallback(()=>{setOverviewOpen(false);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
   const showOverview=useCallback(()=>setOverviewOpen(true),[]);
   const openOverview=useCallback(()=>{setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
-  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} revision={revision} refresh={refresh} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
+  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,dockPx,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} revision={revision} refresh={refresh} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,setDockPx}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
 }
-type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void};
+type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void;setDockPx:(px:number)=>void};
 function ProjectContent({api,project,revision,refresh,frame}:{api:ApiClient;project:WebProject;revision:number;refresh:()=>void;frame:Frame}) {
   const id=project.projectId;
   const [connection,setConnection]=useState<Connection>('connecting'),[events,setEvents]=useState<WebEvent[]>([]);
@@ -84,19 +84,23 @@ function ProjectContent({api,project,revision,refresh,frame}:{api:ApiClient;proj
   const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div>;
   const visual=frame.mode==='visual';
   const list=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['review','Cần bạn quyết định'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
-  const stage=<VisualOffice api={api} id={id} session={session.data} connection={connection} revision={revision} list={list}/>;
-  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':'inline'}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen} hud={frame.hud} host={frame.host} stage={stage} mark={<>{mark}<button type="button" onClick={refresh}>Tải lại dữ liệu</button></>} onMode={frame.setMode} onOverview={frame.openOverview}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame></Operations>;
+  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':'inline'}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame>{visual && <VisualOffice api={api} project={project} session={session.data} connection={connection} revision={revision} refresh={refresh} list={list} frame={frame}/>}</Operations>;
 }
 function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) { const {runId=''}=useParams();return <RunView key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh}/>; }
 
-/** Rendered only in visual mode, so Classic issues no extra reads. Degraded tier until useOfficeModel lands: no workforce view. */
-function VisualOffice({api,id,session,connection,revision,list}:{api:ApiClient;id:string;session:WebProjectSession|undefined;connection:Connection;revision:number;list:ReactNode}) {
-  const runs=useRead(`office-runs:${id}`,()=>api.runs(id),revision),decisions=useRead(`office-decisions:${id}`,()=>api.decisions(id),revision);
-  const seats=useRef<SeatMap>({entries:[],overflow:0});
-  const office=useMemo(()=>{
-    if(!session)return undefined;
-    const derived=deriveOffice({session,runs:runs.data?.items??[],decisions:decisions.data?.items??[],connection,now:Date.now()});
-    const seated=applySeats(seats.current,derived);seats.current=seated.seats;return seated.model;
-  },[session,runs.data,decisions.data,connection]);
-  return office?<OfficeStage model={office} onSelect={target=>{void target;}} links={list}/>:<>{list}</>;
+/**
+ * Rendered only in visual mode, so Classic issues no extra reads. Portals the scene into the full-screen stage node and the floating HUD
+ * into the HUD node; both come from one model. Read-only: the HUD only navigates and hands a chat draft to the chat page.
+ */
+function VisualOffice({api,project,session,connection,revision,refresh,list,frame}:{api:ApiClient;project:WebProject;session:WebProjectSession|undefined;connection:Connection;revision:number;refresh:()=>void;list:ReactNode;frame:Frame}) {
+  const id=project.projectId,base=`/projects/${encodeURIComponent(id)}`,navigate=useNavigate();
+  const {model,runs,stale,overflow}=useOfficeModel({api,id,session,connection,revision});
+  const control=useRef<StageControl|null>(null);
+  return <>
+    {frame.host && createPortal(<section aria-label="Danh sách công việc" className="m-0 h-full">{model?<OfficeStage model={model} onSelect={target=>{void target;}} links={list} control={control}/>:<>{list}</>}</section>,frame.host)}
+    {frame.hud && createPortal(<OfficeHud projectName={project.displayName} session={session} model={model} runs={runs} connection={connection} stale={stale} mode={frame.mode} onMode={frame.setMode} panelOpen={frame.panelOpen} overflow={overflow}
+      onOverview={frame.openOverview} onNavigate={path=>{if(path==='')frame.openOverview();else navigate(`${base}/${path}`);}} onRefresh={refresh}
+      onFocusZone={zone=>control.current?.focusZone(zone)} onAgentList={()=>control.current?.openList()}
+      onChatDraft={draft=>navigate(`${base}/chat`,{state:{draft}})} dock={<OperationsDock/>} onDockHeight={frame.setDockPx}/>,frame.hud)}
+  </>;
 }

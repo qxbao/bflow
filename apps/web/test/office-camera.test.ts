@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { CameraMove, FOCUS_MS, HOME_ZOOM, homeCamera, FOCUS_ZOOM, KEY_ZOOM, MAX_ZOOM, MIN_ZOOM, cameraKey, cameraPose, clampCamera, easeCamera, fitCamera, fitDistance, focusOn, panByPixels, pinchFactor, wheelFactor, zoomBy } from '../src/features/office/scene/camera';
-import { DEVELOPER_SEAT_COUNT, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, TABLE_CELLS, WORLD, cellCentre, deskPlan, developerRowsFor, routeBetween, seatCell, zoneAt, zones } from '../src/features/office/scene/world';
+import { BOARD_X, DEVELOPER_SEAT_COUNT, FOCUS_POINTS, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, TABLE_CELLS, WORLD, cellCentre, deskPlan, developerRowsFor, routeBetween, seatCell, zoneAt, zones } from '../src/features/office/scene/world';
 import { DEVELOPER_SEATS, applySeats } from '../src/features/office/model/seats';
 import type { OfficeModel } from '../src/features/office/model/types';
 
@@ -125,14 +125,34 @@ describe('layout', () => {
   });
   test('rooms follow the reference layout: back row above the front row, QA/Reviewer at the right', () => {
     const z = (id: string) => zones(4).find(q => q.id === id)!;
-    expect(z('conversation').x1).toBeLessThan(z('taskboard').x0);
-    expect(z('taskboard').x1).toBeLessThan(z('coordination').x0);
+    // Back row: Conversation, Coordination, Task Board (the board hangs above its own zone, at the right).
+    expect(z('conversation').x1).toBeLessThan(z('coordination').x0);
+    expect(z('coordination').x1).toBeLessThan(z('taskboard').x0);
     expect(z('developer').y0).toBeGreaterThan(z('coordination').y1);
+    expect(zoneAt({ gx: Math.round(BOARD_X - 0.5), gy: 1 })).toBe('taskboard');
     expect(z('verification').x0).toBeGreaterThan(z('developer').x1);
     for (const seat of ['coordination:coordinator', 'coordination:planner', 'coordination:architect', 'coordination:specifier']) expect(zoneAt(seatCell(seat)!)).toBe('coordination');
     for (const seat of ['verification:reviewer', 'verification:qa', 'verification:tester', 'verification:security']) expect(zoneAt(seatCell(seat)!)).toBe('verification');
     expect(zoneAt(seatCell('conversation:conversation')!)).toBe('conversation');
     expect(zoneAt({ gx: OBJECT_CELLS.board.gx, gy: 1 })).toBe('taskboard');
+  });
+  test('the mailbox and cabinet stand against walls, away from the board', () => {
+    expect(OBJECT_CELLS.mailbox.gx).toBe(0);
+    expect(OBJECT_CELLS.cabinet.gy).toBe(0);
+    expect(OBJECT_CELLS.server.gy).toBe(0);
+    // The board (8.4 wide) spans the Task Board zone; no wall object stands in front of it.
+    const board = { x0: BOARD_X - 4.2, x1: BOARD_X + 4.2 };
+    for (const o of [OBJECT_CELLS.cabinet, OBJECT_CELLS.server]) expect(o.gx + 0.5 < board.x0 || o.gx + 0.5 > board.x1, `${o.gx}`).toBe(true);
+  });
+  test('HUD camera presets point inside the world and at the right room', () => {
+    for (const [zone, f] of Object.entries(FOCUS_POINTS)) {
+      expect(f.at.x > 0 && f.at.x < WORLD.w && f.at.z > 0 && f.at.z < WORLD.d, zone).toBe(true);
+      expect(f.zoom).toBeGreaterThan(1);
+    }
+    expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.conversation.at.x), gy: Math.floor(FOCUS_POINTS.conversation.at.z) })).toBe('conversation');
+    expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.coordinator.at.x), gy: Math.floor(FOCUS_POINTS.coordinator.at.z) })).toBe('coordination');
+    expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.developer.at.x), gy: Math.floor(FOCUS_POINTS.developer.at.z) })).toBe('developer');
+    expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.qa.at.x), gy: Math.floor(FOCUS_POINTS.qa.at.z) })).toBe('verification');
   });
   test('objects, desks and plants do not collide and stay inside the world', () => {
     const everyDesk = deskPlan([...Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`), 'verification:reviewer:2', 'verification:qa:2', 'verification:tester:2', 'verification:security:2', 'coordination:coordinator:2', 'coordination:planner:2', 'coordination:architect:2', 'coordination:specifier:2', 'conversation:conversation:2', 'conversation:conversation:3']).desks;

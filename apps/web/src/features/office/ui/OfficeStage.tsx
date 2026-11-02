@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import { diffVisual } from '../model/timeline';
-import type { OfficeModel, OfficeTarget } from '../model/types';
+import type { OfficeFocusZone, OfficeModel, OfficeTarget } from '../model/types';
 // Type-only: erased at build, so three.js stays behind the dynamic import below.
 import type { OfficeRenderer } from '../scene/renderer';
 import { AccessibleOffice } from './AccessibleOffice';
@@ -18,8 +18,12 @@ const reducedMotion = (): boolean => typeof matchMedia === 'function' && matchMe
  * the visible list and nothing else in the panel is touched. There is no retry loop.
  * `links` is extra navigation shown with the mirror until the scene objects navigate (V7.2).
  */
-export function OfficeStage({ model, onSelect, links, createRenderer = lazyRenderer }: { model: OfficeModel; onSelect: (target: OfficeTarget) => void; links?: ReactNode; createRenderer?: CreateRenderer }) {
+/** What the HUD may ask of the scene. Present only while the stage is mounted; a missing or failed renderer ignores the call. */
+export interface StageControl { focusZone(zone: OfficeFocusZone): void; /** Moves focus into the agent list (the DOM mirror), which shows itself while focused. */ openList(): void }
+
+export function OfficeStage({ model, onSelect, links, control, createRenderer = lazyRenderer }: { model: OfficeModel; onSelect: (target: OfficeTarget) => void; links?: ReactNode; control?: MutableRefObject<StageControl | null>; createRenderer?: CreateRenderer }) {
   const host = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement>(null);
   const renderer = useRef<OfficeRenderer | undefined>(undefined);
   const latest = useRef({ model, onSelect, createRenderer });
   latest.current = { model, onSelect, createRenderer };
@@ -61,6 +65,12 @@ export function OfficeStage({ model, onSelect, links, createRenderer = lazyRende
   }, []);
 
   useEffect(() => {
+    if (!control) return;
+    control.current = { focusZone: zone => renderer.current?.focusZone?.(zone), openList: () => root.current?.querySelector<HTMLElement>('section[aria-label] button')?.focus() };
+    return () => { control.current = null; };
+  }, [control]);
+
+  useEffect(() => {
     const cues = diffVisual(previous.current, model, walked.current);
     previous.current = model;
     // Reduced motion: no walking at all, so the scene never sees a walk cue and poses change instantly.
@@ -74,8 +84,9 @@ export function OfficeStage({ model, onSelect, links, createRenderer = lazyRende
   }, [model]);
 
   const degraded = notice !== undefined;
-  return <div className="relative">
-    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-[min(60vh,520px)] min-h-64 w-full overflow-hidden bg-[#121418]" />}
+  // Degraded: the visible list scrolls inside the full-screen stage, clear of the floating HUD.
+  return <div ref={root} className={degraded ? 'relative h-full overflow-y-auto px-4 pt-32 pb-40 md:pr-24' : 'relative h-full'}>
+    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-full min-h-64 w-full overflow-hidden bg-[#121418]" />}
     <AccessibleOffice model={model} onSelect={target => { renderer.current?.focus?.(target); latest.current.onSelect(target); }} visible={degraded} notice={notice} extra={links} />
   </div>;
 }

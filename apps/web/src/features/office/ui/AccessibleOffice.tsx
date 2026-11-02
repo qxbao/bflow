@@ -56,7 +56,7 @@ export function AccessibleOffice({ model, onSelect, visible, notice, extra }: { 
   };
   return <>
     <div aria-live="polite" role="status" className="sr-only">{announced}</div>
-    <section aria-label="Bản văn bản của văn phòng" className={visible ? '' : 'sr-only focus-within:not-sr-only focus-within:absolute focus-within:inset-x-0 focus-within:top-0 focus-within:z-20 focus-within:max-h-full focus-within:overflow-auto focus-within:bg-surface'}>
+    <section aria-label="Bản văn bản của văn phòng" className={visible ? '' : 'sr-only focus-within:not-sr-only focus-within:absolute focus-within:inset-x-3 focus-within:top-28 focus-within:bottom-36 focus-within:z-20 focus-within:overflow-auto focus-within:rounded-xl focus-within:bg-surface md:focus-within:right-24'}>
       <div className="border border-line p-3">
         {notice && <p className="m-0 mb-2 font-semibold">{notice}</p>}
         {model.tier !== 'full' && <p className="m-0 mb-2">{model.statusText} ({CERTAINTY[model.certainty]})</p>}

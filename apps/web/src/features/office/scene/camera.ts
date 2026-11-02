@@ -47,7 +47,7 @@ export function clampCamera(cam: Camera, world: { w: number; d: number }): Camer
 /** The whole office in view. */
 export const fitCamera = (world: { w: number; d: number }): Camera => ({ x: world.w / 2, z: world.d / 2, zoom: MIN_ZOOM });
 /** The default view: closer than the whole office (the edges of the room may be cropped), looking at the middle of the floor. Initial state and the 0 key. */
-export const HOME_ZOOM = 1.22;
+export const HOME_ZOOM = 1.08;
 export const homeCamera = (world: { w: number; d: number }): Camera => clampCamera({ x: world.w / 2, z: world.d * 0.5, zoom: HOME_ZOOM }, world);
 
 /** Where the three.js camera stands and looks for a state. */

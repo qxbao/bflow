@@ -24,6 +24,31 @@
   --font-mono: 'JetBrains Mono', monospace;
 }
 
+/* 3D office scope (visual mode). The same tokens re-valued after the reference: charcoal translucent panels, thin olive border, cream text,
+   pale-lime accent. Classic components inside the overlay panel inherit them; outside this scope nothing changes. Text pairs are >= 4.5:1. */
+.office-3d {
+  color-scheme: dark;
+  color: var(--color-ink);
+  --color-canvas: #101210;
+  --color-ink: #f1ead8;
+  --color-muted: #c4c0ae;
+  --color-faint: #2a2d23;
+  --color-line: #4d5238;
+  --color-accent: #d6e58a;
+  --color-steel: #a9c2e0;
+  --color-brand: #ffc400;
+  --color-focus: #e6f08c;
+  --color-surface: #191b16;
+  --color-input: #8d9279;
+  --color-success: #92d3a0;
+  --color-danger: #ff9d9d;
+  --color-warning: #ecd48a;
+  --color-code: #20231a;
+  --color-code-line: #3b402d;
+}
+.office-3d button, .office-3d input, .office-3d select, .office-3d textarea { border-radius: .5rem; }
+.office-3d fieldset { border-radius: .5rem; }
+
 /* Shared document/control defaults; screen layouts live in Tailwind JSX utilities. */
 @layer base {
   :root { color-scheme: light; }

@@ -189,3 +189,25 @@ describe('AccessibleOffice mirror', () => {
     expect(live.textContent).toBe('Có 2 quyết định đang chờ bạn. Mất kết nối tới máy chủ, đang hiển thị dữ liệu cũ');
   });
 });
+
+describe('OfficeStage control', () => {
+  test('exposes focusZone to the HUD only while the renderer exists, and openList focuses the agent list', async () => {
+    const control: { current: import('../src/features/office/ui/OfficeStage').StageControl | null } = { current: null };
+    const factoryWithZone: CreateRenderer = async () => { const fake = newFake(); (fake as { focusZone?: unknown }).focusZone = vi.fn(); fakes.push(fake); return fake; };
+    const view = render(<OfficeStage model={model()} onSelect={noop} control={control} createRenderer={factoryWithZone} />);
+    await settle();
+    control.current!.focusZone('qa');
+    expect((fakes[0] as unknown as { focusZone: ReturnType<typeof vi.fn> }).focusZone).toHaveBeenCalledWith('qa');
+    control.current!.openList();
+    expect(document.activeElement?.tagName).toBe('BUTTON');
+    expect(document.activeElement?.closest('section')?.getAttribute('aria-label')).toBe('Bản văn bản của văn phòng');
+    view.unmount();
+    expect(control.current).toBeNull();
+  });
+  test('a renderer without focusZone ignores the call', async () => {
+    const control: { current: import('../src/features/office/ui/OfficeStage').StageControl | null } = { current: null };
+    render(<OfficeStage model={model()} onSelect={noop} control={control} createRenderer={factory} />);
+    await settle();
+    expect(() => control.current!.focusZone('developer')).not.toThrow();
+  });
+});
