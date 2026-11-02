@@ -960,6 +960,14 @@ export class HostReceiptJournal {
     }
     return notices.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.messageId.localeCompare(b.messageId));
   }
+  /** Runtime only knows approval ids; the user only sees #n, so a replacement notice must name the cards by their aliases. */
+  private async showCardReplacementAliases(message: RoleMessage): Promise<void> {
+    const payload = message.payload as Record<string, unknown> | null;
+    if (message.type !== "conversation.progress" || payload?.kind !== "approval_replaced" || typeof payload.replacedByApprovalId !== "string" || !Array.isArray(payload.approvalIds)) return;
+    const shortIds = new Map(Object.entries((await this.noticeAliases()).approvalShortIds).map(([shortId, approvalId]) => [approvalId, shortId]));
+    const replaced = payload.approvalIds.map(id => shortIds.get(String(id)) ?? "trước đó").join(", ");
+    payload.headline = `Thẻ ${replaced} đã được thay bằng thẻ ${shortIds.get(payload.replacedByApprovalId) ?? "mới"}; hãy trả lời thẻ mới`;
+  }
   /** Monotonic short aliases (#n -> approvalId, việc #k -> runId) persisted across notices. */
   async noticeAliases(): Promise<{ approvalShortIds: Record<string, string>; runShortIds: Record<string, string> }> {
     const notices = await this.allConversationNotices();
@@ -987,6 +995,7 @@ export class HostReceiptJournal {
   private async appendConversationNoticeNow(message: RoleMessage): Promise<boolean> {
     const parsed = RoleMessageSchema.parse(message);
     if (await this.read("conversation-notice", parsed.message_id) !== undefined) return false;
+    await this.showCardReplacementAliases(parsed);
     const text = JSON.stringify(parsed.payload) ?? "null", truncated = text.length > NOTICE_SUMMARY_LIMIT;
     const userDecision = parsed.type === "approval.request" ? userDecisionNoticeFields(parsed.payload) : undefined;
     const approval = parsed.type === "approval.request" && userDecision === undefined ? approvalNoticeFields(parsed.payload) : undefined;

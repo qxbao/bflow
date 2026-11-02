@@ -13,6 +13,7 @@ export const UserDecisionNoticeSchema = z.object({
   requestedByRole: z.string().min(1).max(64).optional(),
   question: z.string().min(1).max(2000),
   options: z.array(z.string().min(1).max(500)).max(10).optional(),
+  /** Accepted only so receipts persisted before reply deadlines were removed still parse; never rendered. */
   expiresAt: z.string().min(1).max(64).optional()
 }).strict();
 export type UserDecisionNotice = z.infer<typeof UserDecisionNoticeSchema>;
@@ -24,6 +25,7 @@ export const ApprovalNoticeSchema = z.object({
   target: z.string().min(1).max(300),
   reason: z.string().min(1).max(2000),
   requestedBy: z.string().min(1).max(200),
+  /** Accepted only so receipts persisted before reply deadlines were removed still parse; never rendered. */
   expiresAt: z.string().min(1).max(64).optional(),
   evidence: z.array(z.object({ kind: z.string().min(1).max(64), uri: z.string().min(1).max(300) }).strict()).max(10),
   evidenceCount: z.number().int().nonnegative()
@@ -63,7 +65,6 @@ export interface RenderedNotice {
   requestedByRole?: string | undefined;
   question?: string | undefined;
   options?: { number: number; text: string }[];
-  expiresAt?: string;
   /** Identity the displayed-acknowledgement check looks for in the Conversation transcript. */
   ackToken?: string;
   /** For updates and blocks: content that, shown together with the run id, also proves display after reformatting. */
@@ -78,7 +79,6 @@ export interface RenderedNotice {
 const APPROVAL_PAYLOAD = z.object({
   approvalId: z.string().min(1),
   runId: z.string().min(1).optional(),
-  expiresAt: z.string().min(1).optional(),
   // Design and task approvals carry no kind; only user decisions are marked.
   metadata: z.object({
     kind: z.string().optional(),
@@ -235,28 +235,6 @@ export function sanitizeCardProse(text: string, identity: CardIdentity = {}): st
   return cleaned.replace(/\s+/gu, " ").replace(/[\s:;,]+$/u, "").trim();
 }
 
-/** Wall-clock time in the host's local time zone (the user's machine); the date is added when it is not today. */
-function localClock(ms: number, nowMs: number, timeZone?: string): string {
-  const options: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit", hour12: false, ...(timeZone ? { timeZone } : {}) };
-  const day = (value: number) => new Intl.DateTimeFormat("en-CA", { dateStyle: "short", ...(timeZone ? { timeZone } : {}) }).format(value);
-  const time = new Intl.DateTimeFormat("vi-VN", options).format(ms);
-  if (day(ms) === day(nowMs)) return time;
-  const parts = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit", ...(timeZone ? { timeZone } : {}) }).formatToParts(ms);
-  const part = (type: string) => parts.find(item => item.type === type)?.value ?? "";
-  return `${time} ngày ${part("day")}/${part("month")}`;
-}
-
-/** Remaining time is measured at render time, so a reminder shown later never repeats the original countdown. */
-export function formatFriendlyExpiry(expiresAt: string | undefined, nowMs = Date.now(), timeZone?: string): string {
-  if (!expiresAt) return "chưa giới hạn thời gian — đang chờ bạn trả lời";
-  const expMs = Date.parse(expiresAt);
-  if (Number.isNaN(expMs)) return "đang chờ bạn trả lời";
-  const clock = localClock(expMs, nowMs, timeZone);
-  if (expMs <= nowMs) return `đã hết hạn lúc ${clock}`;
-  const mins = Math.max(1, Math.round((expMs - nowMs) / 60_000));
-  return mins <= 24 * 60 ? `còn ${mins} phút (hết hạn lúc ${clock})` : `hết hạn lúc ${clock}`;
-}
-
 /**
  * Work label of a run. Notices written before aliases existed have no runLabel: they keep the run id, because a guessed
  * `Việc #1` could name a different run whose alias really is #1.
@@ -286,8 +264,7 @@ export function userDecisionNoticeFields(payload: unknown): UserDecisionNotice |
     ...(parsed.data.runId === undefined ? {} : { runId: parsed.data.runId }),
     ...(metadata.requestedByRole === undefined ? {} : { requestedByRole: sliceUtf16Safe(metadata.requestedByRole, 64) }),
     question: sliceUtf16Safe(metadata.question, 2000),
-    ...(metadata.options === undefined ? {} : { options: metadata.options.filter(option => option.length > 0).slice(0, 10).map(option => sliceUtf16Safe(option, 500)) }),
-    ...(parsed.data.expiresAt === undefined ? {} : { expiresAt: sliceUtf16Safe(parsed.data.expiresAt, 64) })
+    ...(metadata.options === undefined ? {} : { options: metadata.options.filter(option => option.length > 0).slice(0, 10).map(option => sliceUtf16Safe(option, 500)) })
   });
   return fields.success ? fields.data : undefined;
 }
@@ -327,7 +304,6 @@ export function approvalNoticeFields(payload: unknown): ApprovalNotice | undefin
     target: sliceUtf16Safe(targetLabel, 300),
     reason: typeof raw.reason === "string" && raw.reason ? sliceUtf16Safe(raw.reason, 2000) : "Không có lý do được ghi",
     requestedBy: typeof raw.requestedBy === "string" && raw.requestedBy ? sliceUtf16Safe(raw.requestedBy, 200) : "runtime",
-    ...(parsed.data.expiresAt === undefined ? {} : { expiresAt: sliceUtf16Safe(parsed.data.expiresAt, 64) }),
     evidence: references.slice(0, 10), evidenceCount: references.length
   });
   return fields.success ? fields.data : undefined;
@@ -415,9 +391,8 @@ function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): Rendere
   const cleanQuestion = sanitizeCardProse(fields.question, identity);
   const options = (fields.options ?? []).map((text, index) => ({ number: index + 1, text: sanitizeCardProse(text, identity) }));
   const headline = `🔔 Cần bạn quyết định · ${shortId}`;
-  const expiryText = formatFriendlyExpiry(fields.expiresAt);
   const replySample = options.length ? `"${shortId}: 1"` : `"${shortId}: <nội dung trả lời>"`;
-  const reply = `Bạn trả lời: ${replySample} — ${expiryText}`;
+  const reply = `Bạn trả lời: ${replySample}`;
   const lines = [
     headline,
     ...(runLabel ? [runLabel] : []),
@@ -428,7 +403,7 @@ function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): Rendere
   return { messageId: notice.messageId, kind: "user_decision", shortId, ...(runLabel ? { runLabel } : {}),
     approvalId: fields.approvalId, ackToken: shortId,
     ...(runId ? { runId } : {}), requestedByRole: fields.requestedByRole, question: cleanQuestion,
-    options, ...(fields.expiresAt ? { expiresAt: fields.expiresAt } : {}), headline, reply, display: lines.join("\n") };
+    options, headline, reply, display: lines.join("\n") };
 }
 
 /** Full content of a design/task/gate approval: what is approved, why, by whom, on what evidence, and the numbered choices. */
@@ -448,14 +423,13 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype =
   ];
   const headline = `🔔 Cần bạn duyệt${prototype ? " prototype" : ""} · ${shortId}`;
   const evidenceLine = fields.evidenceCount > 0 ? `Kèm ${fields.evidenceCount} tài liệu (gõ "xem chi tiết ${shortId}" để xem)` : undefined;
-  const expiryText = formatFriendlyExpiry(fields.expiresAt);
   const workCommand = notice.runLabel ? (workTagOf(notice, runId) ?? "việc").toLowerCase() : runId ?? "việc";
   const reply = prototype
     ? `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt prototype, "${shortId}: cần sửa <góp ý>" để yêu cầu sửa prototype, ` +
-      `"${shortId}: đổi yêu cầu <nội dung>" nếu góp ý cần đổi yêu cầu đã chấp nhận, "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn, hoặc "hủy ${workCommand}" để hủy công việc — ${expiryText}`
+      `"${shortId}: đổi yêu cầu <nội dung>" nếu góp ý cần đổi yêu cầu đã chấp nhận, "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn, hoặc "hủy ${workCommand}" để hủy công việc`
     // "2"/"từ chối" records a final rejection that ends the work; a fix is requested with "cần sửa" (changes_requested).
     : `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, "${shortId}: cần sửa <góp ý>" để yêu cầu sửa và giữ công việc, ` +
-      `hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn và dừng công việc — ${expiryText}`;
+      `hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn và dừng công việc`;
   const lines = [
     headline,
     ...(runLabel ? [runLabel] : []),
@@ -466,7 +440,7 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype =
   ];
   return { messageId: notice.messageId, kind: "approval", shortId, ...(runLabel ? { runLabel } : {}),
     approvalId: fields.approvalId, ackToken: shortId,
-    ...(runId ? { runId } : {}), headline, reply, options, ...(fields.expiresAt ? { expiresAt: fields.expiresAt } : {}),
+    ...(runId ? { runId } : {}), headline, reply, options,
     display: lines.join("\n") };
 }
 
@@ -477,7 +451,7 @@ function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAY
     if (decisionFields) return decisionNotice(notice, decisionFields);
     return decisionNotice(notice, { approvalId: payload.approvalId, ...(payload.runId ? { runId: payload.runId } : {}),
       ...(metadata.requestedByRole ? { requestedByRole: sliceUtf16Safe(metadata.requestedByRole, 64) } : {}), question: sliceUtf16Safe(metadata.question, 2000),
-      ...(metadata.options ? { options: metadata.options.map(opt => sliceUtf16Safe(opt, 500)) } : {}), ...(payload.expiresAt ? { expiresAt: sliceUtf16Safe(payload.expiresAt, 64) } : {}) });
+      ...(metadata.options ? { options: metadata.options.map(opt => sliceUtf16Safe(opt, 500)) } : {}) });
   }
   const fields = approvalNoticeFields(payload);
   return fields === undefined ? undefined : approvalContent(notice, fields, metadata?.kind === "prototype_review");
@@ -511,7 +485,7 @@ function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLO
     : automatic && runId
       ? `Bạn cần làm gì: Hệ thống Bflow sẽ tự thử chạy lại ${workTag} (lần ${automatic.attempt}/${automatic.limit}), bạn chưa cần làm gì; hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
       : runId
-        ? `Bạn cần làm gì: Gõ "tiếp tục ${workCommand}" sau khi xử lý xong, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
+        ? `Bạn cần làm gì: Gõ "tiếp tục ${workCommand}" để Trưởng nhóm kỹ thuật kiểm tra và tự xử lý, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
         : "Bạn cần làm gì: Hãy cho biết bạn muốn xử lý tiếp như thế nào.";
   const nextSteps = (revision?.nextSteps ?? []).map(step => sanitizeCardProse(step, identity));
   return { messageId: notice.messageId, kind: "blocked", shortId, ...(runLabel ? { runLabel } : {}),

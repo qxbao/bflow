@@ -401,7 +401,7 @@ export class HostVerification {
     ...(this.appSuites.length ? ["e2e_test"] : [])])]; }
   /**
    * Fail closed at proposal ingress. Owner mode keeps the explicit owner checks. Automatic mode fails with structured
-   * rejections: `no_test_runner_detected` is reported to the user; the other codes are Coordinator-fixable and silent.
+   * rejections: runner and mapping codes are Coordinator-fixable and silent; policy and sandbox codes reach the user.
    */
   assertSupported(input: unknown, strategyInput?: unknown, definitionInput?: unknown) {
     const parsedSpec = SpecificationSchema.parse(normalizeSpecificationOptionals(input));
@@ -544,7 +544,7 @@ export class HostVerification {
     if (detection?.status !== "detected") {
       const reason = detection?.status === "unsupported" ? detection.reason : "Test runner detection has not run yet";
       throw new WorkflowProposalRejected({ code: detection?.status === "unsupported" && detection.agentFixable ? "runner_setup_required" : "no_test_runner_detected", reason, options: [
-        "Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"] });
+        "Coordinator tự thiết lập runner bằng repository_setup (npm_init, npm_install_dev, git_add, git_commit) rồi đề xuất lại workflow; không nhờ người dùng chạy lệnh", "Hủy run"] });
     }
     const reject = (code: WorkflowRejectionCode, reason: string): never => { throw new WorkflowProposalRejected({ code, reason, options: [] }); };
     const profiles = detection.profiles, labels = [...profiles.map(profile => profile.command), ...AUTOMATIC_STATIC_COMMANDS].join(", ");
@@ -555,7 +555,7 @@ export class HostVerification {
     for (const criterion of automated) {
       const candidates = profiles.filter(item => item.method === criterion.verificationMethod);
       const profile = candidates.find(item => strategy?.targetCommands.includes(item.command)) ?? candidates[0];
-      if (!profile) reject("unsupported_method", `Criterion ${criterion.id} uses ${criterion.verificationMethod}, which has no detected runner (detected: ${labels || "none"}). Coordinator must add a reviewed runner setup task without changing verificationMethod.`);
+      if (!profile) reject("unsupported_method", `Criterion ${criterion.id} uses ${criterion.verificationMethod}, which has no detected runner (detected: ${labels || "none"}). Coordinator must set the runner up with repository_setup before proposing again, without changing verificationMethod.`);
       if (!strategy) continue;
       const mapping = strategy.criterionMappings.find(item => item.criterionId === criterion.id);
       if (!mapping?.testNames.length) reject("missing_test_mapping", `Criterion ${criterion.id} has no criterionMappings entry with test names. Set criterionMappings to [{"criterionId":"${criterion.id}","testNames":[...]}] using the exact names the runner reports (vitest: describe titles plus the test title joined by one space; node --test: the test title).`);

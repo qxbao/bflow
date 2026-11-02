@@ -521,11 +521,9 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   in the same turn. On Coordinator STOP, the rejection becomes a durable manual blocker;
   restart/watchdog do not retry the unchanged configuration. Explicit resumes retain the existing
   limits and delivery/approval fences, with a distinct idempotent action per recurrence.
-  User-facing codes: `no_test_runner_detected` (unknown ecosystem found no
-  supported runner; options: the Coordinator adds a setup task, or the run is cancelled), plus
-  `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
+  User-facing codes: `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
   owner-configured runners. Coordinator-fixable codes are returned to the Coordinator as the tool error
-  and are never sent to Conversation: `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
+  and are never sent to Conversation: `no_test_runner_detected` (no supported runner yet; Coordinator installs one with `repository_setup`), `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
   `missing_test_mapping` (missing or ambiguous identities, owned test scope, or task execution budget), `unknown_test_command` (a target
   command is not a detected label, or the label is missing from `infrastructure.commands`) and
   `unsupported_method` (no runner for the criterion's method) and `invalid_specification` (the specification,
@@ -555,6 +553,13 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   falling back to the delegation time. Limits: an unreadable pane is treated as working, and a design
   approval that never reached Conversation is not reconciled by the watchdog. Resurfacing counts
   unsurfaced notices as well, so a busy Conversation pane can reach the blocked notice.
+- **Idle check** (`evaluateIdleCheck`, `executeHostIdleCheck`; host timer every 60 s). When no non-Conversation
+  pane is working and a live run has had no non-Conversation activity for 180 seconds, it writes a non-user-facing
+  `idle_check` notice, which the inbox uses to wake Conversation to read the panes and tell the user what it observed.
+  It also covers handoffs that never settle, which the stall report skips. It skips human gates, pending decisions,
+  Runtime-owned verification and blockers already reported (`pendingAction.state: pending`). Each idle episode gets
+  at most three pings, five minutes apart, and the notice ids are stable so a host restart cannot exceed that.
+  It only asks for a look: it changes no run state and resumes nothing.
 - **Not live-verified.** The host timer, the Herdr notifications and the Stop-hook display acknowledgement
   depend on a live Herdr and Claude Code session. Tests cover the pure logic, the receipt epochs, the Runtime
   reports and the Gateway wiring with a fake transport; the host closure itself is only type-checked.
@@ -1700,16 +1705,29 @@ idempotent launch revocation; dirty worktrees or a replaced binding stay blocked
 An expired Registry grant is reported separately from a successful release
 receipt. Core cancellation is confirmed only after the remaining blockers clear.
 
-**Current live limitation:** the Herdr adapter returns `correlationVerified:false`
-for lifecycle observations. Idle/done, an interrupt acknowledgement, lease expiry,
-a diagnostic note, or a cancellation-time `/proc`/shell snapshot cannot be
-promoted to authenticated process-exit evidence. This command therefore cannot
-clear a legacy Herdr writer solely because an operator has exited its CLI. It
-retains the blocker until a supported stop-evidence source exists. Tests of the
-positive recovery path use correlated fake-transport evidence, not live Herdr
-process-containment acceptance. A launch-bound process-supervision/stop-proof
-integration requires a separate architecture/contract decision; this change does
-not introduce one or claim the current live session is recovered.
+**Stop evidence without process supervision:** the Herdr adapter returns
+`correlationVerified:false` for lifecycle observations, so idle/done, an interrupt
+acknowledgement, lease expiry or a `/proc` snapshot never count as process-exit
+evidence. On a host without a process scope (macOS, for example) the exit is:
+
+- **Developer at rest (idle/done, or its pane already gone):** after the five
+  observations, or at once on an explicit reconcile, Runtime closes that exact pane
+  and proves it is gone (`pane_closed`). This ends the provider CLI, then the lease
+  and Core settle and the run finishes cancelling. The worktree stays on disk, dirty
+  or not.
+- **Still working, replaced binding or uncertain delivery:** nothing is closed and
+  the run stays blocked. The report says to wait until the execution is idle and
+  reconcile again.
+- **Specialist with an accepted request:** its shared pane is never closed and it
+  still needs correlated evidence, so it stays reported as an outstanding item.
+
+`pane_closed` is **not** proof that every descendant exited: a detached process can
+outlive its pane. The safety argument is containment. The lease is settled, the
+binding is gone, late results are fenced, and the worktree is never reused or
+integrated. Full process containment still needs the launch-bound scope in
+`CANCELLATION-RECOVERY-DESIGN.md`. A run whose final report already went out is not
+retried automatically: it needs an explicit reconcile. Tests use fake transports,
+not live Herdr process-containment acceptance.
 
 **Developer process supervision availability:** on a Linux host whose Bubblewrap
 user namespaces (including AppArmor `apparmor_restrict_unprivileged_userns`) and
@@ -1768,6 +1786,35 @@ Before an effect and after restart, changed observations require re-resolution; 
 metadata uses its separate explicit input watches. Legacy callers omitting `repositoryRoot` retain
 file-watch compatibility without claiming Git drift coverage. Git optional writes, fsmonitor,
 external diff and textconv are disabled; unsafe/oversized relevant files fail closed.
+
+Git moving no longer blocks work that has not accepted a plan. Host inputs (config, policy, skills,
+profiles) are still compared with the host's startup baseline, but the repository is read live and
+only a run's own accepted `executionSourceDigests` pin it. So a commit on main does not stop a new
+delegation or a pending design approval.
+
+For an accepted run, Coordinator's `reresolve_execution_plan` (also applied by `resume_run` on a
+plan-drift blocker) rebinds the pinned repository snapshot. A run with no Developer worktree moves
+`baseRevision` to the new HEAD, which must descend from the old base; a started run keeps its base.
+Approvals are never created or changed, and any other changed input stays blocked (EP-01 still
+applies to it).
+
+### Coordinator repository setup
+
+Coordinator stays read-only natively. `repository_setup` is a Runtime tool with no command string:
+`git_status`, `git_log`, `npm_init`, `npm_install_dev`, `gitignore_add`, `create_directories`, `git_add`,
+`git_commit`. Packages are registry names and ranges only, and installs run with `--ignore-scripts`
+after ignoring `node_modules/`. Paths are literal and repository-relative; `.git`, `.bflow`, credential
+files and symlinks are refused. Commits run no repository hooks and carry a `Bflow-Run:` trailer.
+Each mutation is journaled in `run.repositorySetupLog` before it starts and after it ends, and it is
+refused once this run or another live run has Developer work. `withdraw_workflow_proposal` retracts a
+design still awaiting approval; the next proposal gets a new approval id and a notice naming which
+card replaced which.
+
+`request_user_decision` and `report_progress` refuse text that hands the user a command these tools
+cover (a backstop on the prompts: a heuristic over the wording, not a proof). When the user really must
+act outside the chat, `request_user_decision` takes `userAction` (`why`, `steps`, `done`). It becomes part
+of the question, so the terminal and Web cards show it on first display. The host also retries a
+cancellation still blocked after its final report, once a minute for up to an hour per host process.
 
 Custom skill dependency receipts can be passed separately as `dependencySkillApprovals` in role
 platform options (`dependencyApprovals` on the SkillManager request). These exact pins and receipt

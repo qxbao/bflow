@@ -208,8 +208,8 @@ describe.skipIf(process.platform !== "linux")("Slice 6 outbox, leases, journal, 
     });
     expect(f.transport.sentRequests).toHaveLength(sentBefore);
 
-    // End-to-end runtime.tick() regression: unapplied phaseFailure (without implementationAttemptId) + expired pending user decision
-    // under an expired Developer assignment lease MUST settle cleanly on tick() instead of crashing 6,648x in a row!
+    // End-to-end runtime.tick() regression: unapplied phaseFailure (without implementationAttemptId) + pending user decision past a persisted deadline
+    // under an expired Developer assignment lease MUST settle cleanly on tick() instead of crashing 6,648x in a row! Deadlines no longer close a decision.
     await f.call(async (outbox, state, save) => {
       const failedPhase = outbox.enqueue(RoleMessageSchema.parse({
         ...f.message("failed-phase-no-attempt"),
@@ -227,9 +227,9 @@ describe.skipIf(process.platform !== "linux")("Slice 6 outbox, leases, journal, 
 
       state.runs[0]!.coreCreated = false;
       state.runs[0]!.userDecisions = {
-        "apr-expired-1": {
+        "apr-past-deadline-1": {
           request: ApprovalRequestSchema.parse({
-            schemaVersion: 2, approvalId: "apr-expired-1", runId: "run-1", target: { type: "task", taskId: "implement" },
+            schemaVersion: 2, approvalId: "apr-past-deadline-1", runId: "run-1", target: { type: "task", taskId: "implement" },
             revision: 1, generation: 0, requestedBy: "developer", requestedAt: "2026-10-31T06:00:00.000Z",
             expiresAt: "2026-10-31T06:01:00.000Z", reason: "Clarify edge case", evidence: [], idempotencyKey: "ud-1",
             metadata: { kind: "user_decision", question: "Use strict mode?", options: ["Yes", "No"], requestedByRole: "developer" }
@@ -249,7 +249,7 @@ describe.skipIf(process.platform !== "linux")("Slice 6 outbox, leases, journal, 
     await f.call(async (_outbox, state) => {
       const failedPhase = state.outbound.find(item => item.message.message_id === "failed-phase-no-attempt")!;
       expect(failedPhase.phaseFailure?.applied).toBe(true);
-      expect(state.runs[0]!.userDecisions?.["apr-expired-1"]?.status).toBe("expired");
+      expect(state.runs[0]!.userDecisions?.["apr-past-deadline-1"]?.status).toBe("pending");
     });
     expect(f.transport.sentRequests).toHaveLength(sentBefore);
   });

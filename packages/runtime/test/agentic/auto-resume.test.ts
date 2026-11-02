@@ -274,7 +274,7 @@ describe("bounded automatic resume", () => {
         await f.runtime.flushOutbound();
       }
       if (fence === "decision") await f.runtime.requestUserDecision(f.coordinator(), "coordinator", parseUserDecisionToolInput({
-        runId: "run-1", taskId: "planning", question: "Choose backend", options: ["SQLite", "Postgres"], expiresInMinutes: 60
+        runId: "run-1", taskId: "planning", question: "Choose backend", options: ["SQLite", "Postgres"]
       }));
       await f.journal.exclusive(async (state, save) => {
         const current = state.runs[0]!;
@@ -502,7 +502,7 @@ describe("bounded automatic resume", () => {
 
     const pendingDecision = await fixture();
     await pendingDecision.runtime.requestUserDecision(pendingDecision.coordinator(), "coordinator", parseUserDecisionToolInput({ runId: "run-1",
-      taskId: "planning", question: "Which storage backend?", options: ["SQLite", "Postgres"], expiresInMinutes: 60 }));
+      taskId: "planning", question: "Which storage backend?", options: ["SQLite", "Postgres"] }));
     await block(pendingDecision, () => undefined);
     await expectWaiting(pendingDecision);
     expect(Object.values((await pendingDecision.record()).userDecisions ?? {}).map(item => item.status)).toEqual(["pending"]);
@@ -531,6 +531,15 @@ describe("bounded automatic resume", () => {
     expect(await f.record()).toMatchObject({ pendingAction: { resumeAttempts: 0, state: "pending" } });
     f.panes.busy.delete("coordinator");
     expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
+  });
+
+  it("marks a blocker as reported only until its resume is queued", async () => {
+    const f = await fixture();
+    await f.runtime.observeCoordinatorOutcome(coordinatorBlocked("blocked-facts", "Transient planning blocker"));
+    expect((await f.runtime.watchdogSnapshot("session-1"))[0]).toMatchObject({ reportedBlocker: true });
+    f.advance(60 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
+    expect((await f.runtime.watchdogSnapshot("session-1"))[0]).toMatchObject({ reportedBlocker: false });
   });
 
   it("enqueues distinct resume_run wakes across recurring reportRunStalled episodes that share one actionId", async () => {

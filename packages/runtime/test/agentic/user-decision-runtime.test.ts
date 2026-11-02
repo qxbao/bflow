@@ -65,7 +65,7 @@ async function fixture(options: { humanId?: string } = {}) {
 
 const request = (runtime: AgenticWorkflowRuntime, pane: PaneBinding, input: Record<string, unknown> = {}) =>
   runtime.requestUserDecision(pane, pane.role, parseUserDecisionToolInput({ runId: "run-1", taskId: "task-implement",
-    question: "Which storage backend should we use?", options: ["SQLite", "Postgres"], expiresInMinutes: 30, ...input }));
+    question: "Which storage backend should we use?", options: ["SQLite", "Postgres"], ...input }));
 
 const answer = (approvalId: string, overrides: Record<string, unknown> = {}): ApprovalDecision => ApprovalDecisionSchema.parse({
   schemaVersion: 2, approvalId, runId: "run-1", sessionId: "session-1", target: { type: "task", taskId: "task-implement" },
@@ -180,15 +180,19 @@ describe.skipIf(process.platform !== "linux")("P30 T9b runtime user decisions", 
     await expect(deliver(f.runtime(), answer(approvalId, { metadata: { selectedOption: "Redis" } }))).rejects.toThrow("offered options");
   });
 
-  it("resumes the asker with outcome expired when the answer arrives after expiry", async () => {
-    const f = await fixture(); const receipt = await request(f.runtime(), developerPane(), { expiresInMinutes: 1 });
+  it("accepts a late answer, even to a decision persisted with a deadline", async () => {
+    const f = await fixture(); const receipt = await request(f.runtime(), developerPane());
     const approvalId = (receipt as unknown as { approvalId: string }).approvalId;
-    f.setNow("2026-10-18T10:03:00.000Z");
-    await deliver(f.runtime(), answer(approvalId, { decidedAt: "2026-10-18T10:03:00.000Z" }));
+    await f.journal.exclusive(async (state: JournalState, save) => {
+      (state.runs[0] as unknown as { userDecisions: Record<string, { request: { expiresAt?: string } }> }).userDecisions[approvalId]!.request.expiresAt = "2026-10-18T10:01:00.000Z";
+      await save();
+    });
+    f.setNow("2026-10-25T10:00:00.000Z");
+    await deliver(f.runtime(), answer(approvalId, { decidedAt: "2026-10-25T10:00:00.000Z" }));
     const full = await f.journal.exclusive(async s => s);
-    expect((full.runs[0] as unknown as { userDecisions: Record<string, { status: string }> }).userDecisions[approvalId]!.status).toBe("expired");
+    expect((full.runs[0] as unknown as { userDecisions: Record<string, { status: string }> }).userDecisions[approvalId]!.status).toBe("answered");
     const resume = full.outbound.find(out => out.message.type === "task.status")!;
-    expect(resume.message.payload).toMatchObject({ kind: "user_decision_answer", outcome: "expired" });
+    expect(resume.message.payload).toMatchObject({ kind: "user_decision_answer", outcome: "approved" });
   });
 
   it("keeps a pending decision across a new runtime instance on the same journal", async () => {

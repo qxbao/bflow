@@ -497,7 +497,7 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
     expect(nudgeUpdates.updates).toHaveLength(1);
     expect(nudgeUpdates.updates[0]!.messageId).toBe("codex-decision-1");
     expect(nudgeUpdates.updates[0]!.text).toContain("Chọn phương án cache nào?");
-    expect(nudgeUpdates.updates[0]!.text).toMatch(/còn \d+ phút \(hết hạn lúc /u);
+    expect(nudgeUpdates.updates[0]!.text).not.toMatch(/hết hạn/u);
     expect(nudgeUpdates.turnContext).toMatchObject({
       requiresConversationDecision: false,
       runtimeNudge: true,
@@ -587,7 +587,7 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
       idempotencyKey: "msg-codex-approval"
     });
     const reqA = buildUserDecisionRequest({
-      input: { runId, taskId: "task-a", question: "Câu hỏi A?", options: ["Phương án A", "Phương án B"], expiresInMinutes: 20 },
+      input: { runId, taskId: "task-a", question: "Câu hỏi A?", options: ["Phương án A", "Phương án B"] },
       role: "coordinator",
       sessionId: "chat-session",
       revision: 1,
@@ -595,7 +595,7 @@ describe.skipIf(process.platform === "win32")("Native role schemas and Conversat
       now: at
     });
     const reqB = buildUserDecisionRequest({
-      input: { runId, taskId: "task-b", question: "Câu hỏi B?", options: ["Phương án C", "Phương án D"], expiresInMinutes: 20 },
+      input: { runId, taskId: "task-b", question: "Câu hỏi B?", options: ["Phương án C", "Phương án D"] },
       role: "coordinator",
       sessionId: "chat-session",
       revision: 1,

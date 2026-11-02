@@ -98,11 +98,11 @@ it("Runtime web resume rechecks version inside its transaction and never fabrica
   expect(wake.message.payload).toMatchObject({ automatic: false, webCommandId: command.commandId });
   expect(wake.message.payload).not.toHaveProperty("conversationUserMessageId");
 });
-it.each(["revision", "generation", "evidence", "target", "expired", "superseded", "invalid_option", "missing_option"])("rejects %s decision review without admitting it", async kind => {
+it.each(["revision", "generation", "evidence", "target", "superseded", "invalid_option", "missing_option"])("rejects %s decision review without admitting it", async kind => {
   const f = await setup();
   const version = { revisionToken: "review-1", approvalId: "approval-1", target: { type: "run" as const }, revision: 2, generation: 1, evidenceDigest: "a".repeat(64) };
   const decision = { decisionId: "approval-1", runId: "run-1", kind: "user_decision" as const, status: kind === "superseded" ? "superseded" as const : "pending" as const,
-    question: "Choose", options: ["A", "B"], expectedVersion: version, evidence: [], ...(kind === "expired" ? { expiresAt: "2020-01-01T00:00:00.000Z" } : {}) };
+    question: "Choose", options: ["A", "B"], expectedVersion: version, evidence: [], };
   f.setView({ ...f.view, sdlcStatus: "awaiting_approval", decisions: [decision], availableActions: [{ kind: "answer_decision", actionId: "approval-1", enabled: true, expectedVersion: version }] });
   const expectedVersion = { ...version, ...(kind === "revision" ? { revision: 3 } : kind === "generation" ? { generation: 2 } :
     kind === "evidence" ? { evidenceDigest: "b".repeat(64) } : kind === "target" ? { target: { type: "task", taskId: "other" } } : {}) };

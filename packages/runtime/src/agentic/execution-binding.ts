@@ -64,7 +64,7 @@ const executeGit = promisify(execFile);
 const MAX_GIT_SNAPSHOT_BYTES = 2 * 1024 * 1024;
 
 /** Source/config watches cover managed metadata separately; never publish credential content hashes. */
-function repositorySnapshotPath(path: string): boolean {
+export function repositorySnapshotPath(path: string): boolean {
   return !path.startsWith('.bflow/') &&
     !/(^|\/)(?:\.ssh|\.aws|\.gnupg|\.codex|\.claude)(?:\/|$)/.test(path) &&
     !/(^|\/)(?:\.env(?:\..*)?|\.netrc|(?:credentials?|secrets?|tokens?|auth)\.(?:json|ya?ml|toml|env))$/i.test(path);
@@ -131,7 +131,14 @@ function privateSourceDrift(fingerprint: string, components: readonly string[]):
   }));
 }
 
-/** Private watches are conservative; non-JSON changes require a new read-only semantic resolution. */
+/** The only private source a run may rebind without a new semantic resolution: Git moving under a still-valid accepted design. */
+export const REPOSITORY_SNAPSHOT_COMPONENT = 'repository-snapshot';
+
+/**
+ * Private watches are conservative; non-JSON changes require a new read-only semantic resolution.
+ * Host inputs (config, policy, skills, profiles) are compared with the host baseline. The repository is live: a run pins its own
+ * snapshot when accepted (`executionSourceDigests`), so a commit never blocks runs that have not accepted a plan.
+ */
 export async function createExecutionResolutionReader(input: unknown): Promise<ExecutionResolutionReader> {
   const source = ExecutionResolutionSourcesSchema.parse(input);
   if (new Set(source.files.map(file => file.component)).size !== source.files.length ||
@@ -152,21 +159,25 @@ export async function createExecutionResolutionReader(input: unknown): Promise<E
       }
     }
     if (source.repositoryRoot !== undefined) {
-      try { snapshots['repository-snapshot'] = canonicalPlanDigest(await readExecutionRepositorySnapshot(source.repositoryRoot)); }
-      catch { throw privateSourceDrift(plan.fingerprint, ['repository-snapshot']); }
+      try { snapshots[REPOSITORY_SNAPSHOT_COMPONENT] = canonicalPlanDigest(await readExecutionRepositorySnapshot(source.repositoryRoot)); }
+      catch { throw privateSourceDrift(plan.fingerprint, [REPOSITORY_SNAPSHOT_COMPONENT]); }
     }
     return snapshots;
   };
   const baseline = await capture();
-  if (source.repositoryRoot !== undefined && baseline['repository-snapshot'] !== canonicalPlanDigest(source.plan.repository))
-    throw privateSourceDrift(plan.fingerprint, ['repository-snapshot']);
+  if (source.repositoryRoot !== undefined && baseline[REPOSITORY_SNAPSHOT_COMPONENT] !== canonicalPlanDigest(source.plan.repository))
+    throw privateSourceDrift(plan.fingerprint, [REPOSITORY_SNAPSHOT_COMPONENT]);
   const initialMismatch = source.files.filter(file => file.expectedDigest !== undefined && file.expectedDigest !== baseline[file.component]);
   if (initialMismatch.length) throw privateSourceDrift(plan.fingerprint, initialMismatch.map(file => file.component));
   const read: ExecutionResolutionReader = async () => {
     const current = await capture();
-    const changed = Object.keys(baseline).filter(key => current[key] !== baseline[key]);
+    const changed = Object.keys(baseline).filter(key => key !== REPOSITORY_SNAPSHOT_COMPONENT && current[key] !== baseline[key]);
     if (changed.length) throw privateSourceDrift(plan.fingerprint, changed);
-    return ExecutionPlanInputSchema.parse(source.plan);
+    if (source.repositoryRoot === undefined) return ExecutionPlanInputSchema.parse(source.plan);
+    let repository: ExecutionPlanInput['repository'];
+    try { repository = await readExecutionRepositorySnapshot(source.repositoryRoot); }
+    catch { throw privateSourceDrift(plan.fingerprint, [REPOSITORY_SNAPSHOT_COMPONENT]); }
+    return ExecutionPlanInputSchema.parse({ ...source.plan, repository });
   };
   read.readPrivateSources = capture;
   return read;

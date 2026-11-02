@@ -183,7 +183,7 @@ describe("notice receipts for the watchdog", () => {
     expect(rendered).toMatchObject({ approvalId: APPROVAL_ID, shortId: "#1" });
     expect(rendered.display).toContain('Bạn trả lời: "#1: 1"');
     expect(rendered.display).toContain("6. Lựa chọn 6");
-    expect(rendered.display).toContain("hết hạn lúc");
+    expect(rendered.display).not.toContain("hết hạn");
   });
 
   it("resurfaces a notice as a new epoch and stops once it is displayed", async () => {

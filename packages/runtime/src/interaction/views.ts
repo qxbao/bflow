@@ -56,14 +56,11 @@ export function projectDecision(
     checksum: e.checksum,
     ...(e.sizeBytes === undefined ? {} : { sizeBytes: e.sizeBytes }),
   }));
-  const expired =
-    request.expiresAt !== undefined &&
-    Date.parse(request.expiresAt) <= Date.parse(s.observedAt);
   return WebDecisionSchema.parse({
     decisionId: request.approvalId,
     runId: r.runId,
     kind,
-    status: expired ? "expired" : (request.status ?? "pending"),
+    status: request.status ?? "pending",
     question: safe(s, request.reason),
     options: Array.isArray(request.metadata?.options)
       ? request.metadata.options
@@ -80,7 +77,6 @@ export function projectDecision(
       evidenceDigest: digest(request.evidence),
     },
     evidence,
-    ...(request.expiresAt ? { expiresAt: request.expiresAt } : {}),
   });
 }
 function pendingActionBlocker(action: NonNullable<RunRecord["pendingAction"]>): string {
