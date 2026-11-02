@@ -10,6 +10,8 @@ import {
 import { AgenticJournal, digest, json, record, type JournalState, type Outbound } from "./journal.js";
 import { parseSubmissionForRequest, parseReconciliationForRequest } from "./delivery-receipts.js";
 import { parseNativeExtensionOutput } from "./extension-output.js";
+import { NATIVE_EXTENSION_OUTPUT_BYTES } from "./extension-output.js";
+import { redactString } from "../resilience/redaction.js";
 
 const RelativeRead = z.string().min(1).max(4096).refine(path => !path.startsWith("/") && !path.includes("\\") &&
   path.split("/").every(part => part !== ".." && part !== "." && part.length > 0), "Read scope must be relative and normalized");
@@ -147,7 +149,7 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
       await save(); return out.request;
     });
   }
-  private async renew(out: Outbound, save: () => Promise<void>): Promise<void> {
+  private async renew(out: Outbound, save: () => Promise<void>, persistAfter = true): Promise<void> {
     if (!out.lease || out.leaseRelease) throw new Error("Native execution has no renewable lease");
     const recovered = out.leaseRenewal !== undefined;
     out.leaseRenewal ??= RenewAgentLeaseRequestSchema.parse({ leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken,
@@ -155,9 +157,11 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
       idempotencyKey: `ext-renew:${out.message.message_id}:${out.lease.version}` });
     await save();
     out.lease = AgentLeaseSchema.parse(value(await this.options.registry.renewLease(out.leaseRenewal)));
-    delete out.leaseRenewal; await save();
+    delete out.leaseRenewal;
+    // Before send, the write-ahead renewal remains sufficient recovery state. Avoid an awaited file write after the final fence check.
+    if (persistAfter || recovered) await save();
     if (Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Expired native execution lease");
-    if (recovered) await this.renew(out, save);
+    if (recovered) await this.renew(out, save, persistAfter);
   }
   async dispatch(input: AgentRequest): Promise<AgentExecutionHandle> {
     const request = AgentRequestSchema.parse(input);
@@ -173,14 +177,21 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
       if (out.lease!.agentId !== binding.agentId || request.metadata?.leaseId !== out.lease!.leaseId ||
           request.metadata?.fencingToken !== out.lease!.fencingToken) throw new Error("Native request lease/fence changed");
       out.status = "sending"; await save();
-      await this.options.authorize(intent, binding);
+      try {
+        await this.options.authorize(intent, binding);
+        await this.registration(binding, out.capabilities);
+        await this.renew(out, save, false);
+      } catch (error) {
+        // No transport invocation has happened on this branch. Do not manufacture an unknown remote execution.
+        out.status = "queued"; out.error = redactString(String(error)); await save(); throw error;
+      }
       try {
         const receipt = parseSubmissionForRequest(request, value(await this.options.transport.send(request, { timeoutMs: 30_000 })));
         if (receipt.status === "accepted") {
           out.handle = receipt.handle; out.status = "accepted"; delete out.error; await save(); return receipt.handle;
         }
         out.status = receipt.status === "rejected" ? "queued" : "unknown_delivery"; out.error = receipt.reason; await save();
-      } catch (error) { out.status = "unknown_delivery"; out.error = String(error); await save(); }
+      } catch (error) { out.status = "unknown_delivery"; out.error = redactString(String(error)); await save(); }
       throw new Error("Native delivery is unknown or rejected; reconcile its persisted request before retry");
     });
   }
@@ -209,10 +220,25 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
   private async release(out: Outbound, save: () => Promise<void>) {
     if (out.status === "released") return;
     if (!out.lease) throw new Error("Native output lost its lease record");
+    if (out.leaseRenewal) await this.renew(out, save);
     out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({ leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken,
       expectedVersion: out.lease.version, releasedAt: this.now(), idempotencyKey: `ext-release:${out.request!.requestId}` });
     await save(); value(await this.options.registry.releaseLease(out.leaseRelease)); delete out.leaseRelease;
     out.status = "released"; await save();
+  }
+  private async stored(refInput: ArtifactReference, expected: unknown): Promise<void> {
+    const ref = ArtifactReferenceSchema.parse(refInput), size = ref.sizeBytes;
+    if (size === undefined || size > NATIVE_EXTENSION_OUTPUT_BYTES || ref.checksum.algorithm !== "sha256") throw new Error("Native evidence size/integrity bound is invalid");
+    const chunks: Buffer[] = []; let total = 0;
+    for await (const part of this.options.artifactStore.get(ref)) {
+      if (!part.ok) throw new Error("Native evidence integrity/read failed");
+      const bytes = Buffer.from(part.value); total += bytes.length;
+      if (total > size) throw new Error("Native evidence exceeds its stored size");
+      chunks.push(bytes);
+    }
+    const bytes = Buffer.concat(chunks);
+    if (total !== size || sha(bytes) !== ref.checksum.value || !same(JSON.parse(bytes.toString("utf8")), expected))
+      throw new Error("Native evidence no longer matches the recorded output");
   }
   async receive(input: RoleMessage): Promise<void> {
     const message = RoleMessageSchema.parse(input);
@@ -265,9 +291,15 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
       const output = parseNativeExtensionOutput(this.intent(out), data.output);
       const source = state.inbox.find(item => item.status === "applied" && item.message.message_id === result.causation_id)?.message;
       if (!source || !same(source.sender, data.sender)) throw new Error("Native output projection lost its actual sender");
+      const sourceBody = record(source.payload);
+      if (sourceBody.kind !== "extension.result" || sourceBody.requestId !== requestId ||
+          !same(parseNativeExtensionOutput(this.intent(out), sourceBody.output), output)) throw new Error("Native output projection differs from its actual message");
+      const receiptEvidence = ArtifactReferenceSchema.parse(bound.artifact_references[0]), evidence = ArtifactReferenceSchema.parse(result.artifact_references[0]);
+      if (receiptEvidence.runId !== out.request!.runId || evidence.runId !== out.request!.runId ||
+          receiptEvidence.taskId !== out.taskId || evidence.taskId !== out.taskId) throw new Error("Native evidence belongs to another task");
+      await this.stored(receiptEvidence, receipt); await this.stored(evidence, output);
       await this.release(out, save);
-      return { handle: AgentExecutionHandleSchema.parse(out.handle), receipt, receiptEvidence: ArtifactReferenceSchema.parse(bound.artifact_references[0]),
-        evidence: ArtifactReferenceSchema.parse(result.artifact_references[0]), output, sender: RoleMessageSchema.parse(source).sender };
+      return { handle: AgentExecutionHandleSchema.parse(out.handle), receipt, receiptEvidence, evidence, output, sender: RoleMessageSchema.parse(source).sender };
     });
   }
   async waitResult(requestId: string): Promise<NativeExtensionOutcome> {

@@ -1,5 +1,7 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +11,7 @@ import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { AgentBindingReceiptSchema, AgentConfigurationSchema, PaneBindingSchema, ReleaseAgentLeaseRequestSchema,
   RoleMessageSchema, receiptSigningBytes, type AgentExecutionHandle, type RoleMessage } from "@bflow/contracts";
 import * as runtime from "../../src/index.js";
-import { AgenticJournal, digest } from "../../src/agentic/journal.js";
+import { AgenticJournal, digest, record } from "../../src/agentic/journal.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -134,6 +136,20 @@ describe("native extension delivery", () => {
     f.revoke(); await expect(bridge.prepare({ ...f.intent, requestKey: "revoked" })).rejects.toThrow("authority");
   });
 
+  it("does not send if the fence is revoked during the last awaited authority check", async () => {
+    const f = await fixture(); let checks = 0;
+    f.options.authorize = async () => {
+      if (++checks !== 3) return;
+      const state = JSON.parse(readFileSync(join(f.root, "delivery/state.json"), "utf8")), lease = state.outbound[0].lease;
+      unwrap(await f.registry.releaseLease(ReleaseAgentLeaseRequestSchema.parse({ leaseId: lease.leaseId,
+        fencingToken: lease.fencingToken, expectedVersion: lease.version, releasedAt: new Date().toISOString(),
+        idempotencyKey: "revoke-during-authority-check" })));
+    };
+    const bridge = f.create(), request = await bridge.prepare(f.intent);
+    await expect(bridge.dispatch(request)).rejects.toThrow();
+    expect(f.transport.sentRequests).toHaveLength(0);
+  });
+
   it("accepts only authenticated correlated output with a genuine binding signature and stored evidence", async () => {
     const f = await fixture(), bridge = f.create(); const request = await bridge.prepare(f.intent), handle = await bridge.dispatch(request);
     const raw = RoleMessageSchema.parse({ schema_version: 2, message_id: "untrusted", correlation_id: "corr-native",
@@ -188,5 +204,83 @@ describe("native extension delivery", () => {
     await expect(bridge.prepare({ ...f.intent, taskId: "publication", outputKind: "analysis.publication" })).rejects.toThrow(/scope/i);
     await expect(bridge.prepare({ ...f.intent, allowedReadPaths: ["../private"] })).rejects.toThrow();
     expect(f.transport.sentRequests).toHaveLength(0);
+  });
+
+  it("recovers a real process exit after server acceptance but before the returned handle was persisted", async () => {
+    const f = await fixture(), bridge = f.create(); const request = await bridge.prepare(f.intent);
+    const worker = `
+      import {writeFile} from 'node:fs/promises'; import {join} from 'node:path';
+      import {createNativeExtensionRolePort} from '@bflow/runtime';
+      import {FileAgentRegistry} from '@bflow/agent-registry'; import {openFilesystemArtifactStore} from '@bflow/artifact-store';
+      import {AgentExecutionHandleSchema,AgentRequestSchema,AgentSubmissionReceiptSchema,PaneBindingSchema} from '@bflow/contracts';
+      const input=JSON.parse(process.argv[1]),binding=PaneBindingSchema.parse(input.binding);
+      const opened=await openFilesystemArtifactStore({root:join(input.root,'artifacts'),storeId:'native-extension'});
+      if(!opened.ok)throw new Error(opened.error.message);
+      const port=createNativeExtensionRolePort({repositoryPath:join(input.root,'repo'),journalDirectory:join(input.root,'delivery'),
+        sessionId:'session-native',registry:new FileAgentRegistry({stateFile:join(input.root,'registry.json')}),artifactStore:opened.value,
+        panes:{getRoleBinding:async()=>({ok:true,value:binding}),inspectRoleHealth:async()=>({ok:true,value:{readyForPrompt:true,
+          occupantMatches:true,paneId:binding.paneId,agentId:binding.agentId}})},authorize:async()=>{},preflight:async()=>{},
+        authenticateMessage:async()=>false,bindingReceiptKeys:input.keys,
+        transport:{send:async req=>{const handle=AgentExecutionHandleSchema.parse({executionId:'accepted-before-process-exit',
+          requestId:req.requestId,attemptId:req.attemptId,runId:req.runId,taskId:req.taskId,idempotencyKey:req.idempotency.key,
+          target:req.target,correlation:{token:req.requestId,provenance:'transport',verified:true},acceptedAt:new Date().toISOString()});
+          const receipt=AgentSubmissionReceiptSchema.parse({status:'accepted',requestId:req.requestId,attemptId:req.attemptId,
+            runId:req.runId,taskId:req.taskId,observedAt:new Date().toISOString(),handle});
+          await writeFile(join(input.root,'server-receipt.json'),JSON.stringify(receipt));process.exit(97);}}});
+      await port.dispatch(AgentRequestSchema.parse(input.request));process.exit(3);
+    `;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", worker, JSON.stringify({ root: f.root,
+      binding: f.binding, keys: f.options.bindingReceiptKeys, request })], { cwd: fileURLToPath(new URL("../../", import.meta.url)), stdio: ["ignore", "pipe", "pipe"] });
+    cleanups.push(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+    let stderr = ""; child.stderr.on("data", chunk => { stderr += String(chunk); });
+    const code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
+    expect(code, stderr).toBe(97);
+    expect(await f.journal.exclusive(async state => state.outbound[0]!.status)).toBe("sending");
+    await expect(f.create().dispatch(request)).rejects.toThrow(/unknown|reconcil/i);
+    const actual = JSON.parse(readFileSync(join(f.root, "server-receipt.json"), "utf8"));
+    f.transport.customReconcileHandler = () => ({ ok: true, value: { status: "bound", handle: actual.handle } });
+    expect(await f.create().reconcile(request.requestId)).toEqual({ status: "unknown" });
+    expect(await f.create().dispatch(request)).toEqual(actual.handle);
+    expect(f.transport.sentRequests).toHaveLength(0);
+    await f.deliver(bridge, actual.handle);
+    expect((await bridge.waitResult(request.requestId)).handle.executionId).toBe("accepted-before-process-exit");
+  });
+
+  it("refuses a corrupted output projection that no longer matches the native message and stored artifact", async () => {
+    const f = await fixture(), bridge = f.create(); const request = await bridge.prepare(f.intent), handle = await bridge.dispatch(request);
+    await f.deliver(bridge, handle);
+    await f.journal.exclusive(async (state, save) => {
+      const projection = state.inbox.find(item => item.message.sender.role === "runtime" &&
+        record(item.message.payload).kind === "extension.output.recorded")!;
+      projection.message = RoleMessageSchema.parse({ ...projection.message, payload: { kind: "extension.output.recorded",
+        requestId: request.requestId, data: { sender: { role: "specifier", agent_id: f.binding.agentId, pane_id: f.binding.paneId },
+          output: { questions: [{ id: "injected", question: "Not the actual native output", blocking: false }] } } } });
+      await save();
+    });
+    await expect(f.create().waitResult(request.requestId)).rejects.toThrow(/projection|evidence|integrity|output/i);
+  });
+
+  it("recovers result persistence when the lease-release acknowledgement is lost", async () => {
+    const f = await fixture(), bridge = f.create(); const request = await bridge.prepare(f.intent), handle = await bridge.dispatch(request);
+    const release = f.registry.releaseLease.bind(f.registry); let lose = true;
+    f.registry.releaseLease = async (input, operation) => {
+      const result = await release(input, operation);
+      if (lose) { lose = false; throw new Error("Release acknowledgement lost"); }
+      return result;
+    };
+    await expect(f.deliver(bridge, handle)).rejects.toThrow("Release acknowledgement lost");
+    const outcome = await f.create().waitResult(request.requestId);
+    expect(outcome.output).toEqual({ questions: [] });
+    expect(await f.journal.exclusive(async state => state.outbound[0]!.status)).toBe("released");
+    expect(f.transport.sentRequests).toHaveLength(1);
+  });
+
+  it("does not return native acceptance when its actual evidence is unavailable in ArtifactStore", async () => {
+    const f = await fixture(), bridge = f.create(); const request = await bridge.prepare(f.intent), handle = await bridge.dispatch(request);
+    await f.deliver(bridge, handle); const outcome = await bridge.waitResult(request.requestId);
+    const get = f.artifactStore.get.bind(f.artifactStore);
+    f.artifactStore.get = (reference, operation) => get(reference.artifactId === outcome.evidence.artifactId
+      ? { ...reference, artifactId: "absent-native-output", uri: reference.uri.replace(/[^/]+$/, "absent-native-output") } : reference, operation);
+    await expect(f.create().waitResult(request.requestId)).rejects.toThrow(/evidence|integrity/i);
   });
 });
