@@ -19,7 +19,7 @@ import { useCursorPagination } from './pagination';
 export function ago(iso:string){const minutes=Math.max(0,Math.round((Date.now()-Date.parse(iso))/60000));return minutes<1?'dưới 1 phút trước':minutes<60?`${minutes} phút trước`:minutes<1440?`${Math.round(minutes/60)} giờ trước`:`${Math.round(minutes/1440)} ngày trước`;}
 const activeWork:Record<string,string>={intake:'Hệ thống đang tiếp nhận yêu cầu của bạn.',clarifying:'Đang làm rõ thêm thông tin yêu cầu.',specifying:'Hệ thống đang biên soạn bản đặc tả kỹ thuật.',planning:'Hệ thống đang chia nhỏ kế hoạch thực hiện.',tdd_deciding:'Hệ thống đang xác định chiến lược kiểm thử.',implementing:'Hệ thống đang lập trình thay đổi theo kế hoạch.',verifying:'Hệ thống đang chạy các bước kiểm chứng độc lập.',reviewing:'Hệ thống đang rà soát chất lượng kết quả.'};
 /** "Who is it waiting on" from authoritative projection fields only; terminal idle/done is never used here. */
-function waitingOn(run:WebRunView):{title:string;detail:string}{
+export function waitingOn(run:WebRunView):{title:string;detail:string}{
   if(run.currentRunId!==run.runId)return {title:'Đây là bản lịch sử',detail:'Công việc đã được tiếp nối ở phiên bản khác.'};
   if(['completed','failed','cancelled'].includes(run.sdlcStatus))return {title:'Công việc đã kết thúc',detail:'Không còn bước tiếp theo.'};
   const required=run.blockers.find(item=>severity(item.code)==='action');
