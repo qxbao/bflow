@@ -37,7 +37,7 @@ export interface OfficeRenderer {
 export interface ProjectedLabel { id: string; kind: 'agent' | 'bubble' | 'sleep'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
-const BUBBLE_W = 224, BUBBLE_H = 72, SLEEP_HEAD_Y = 1.45;
+const BUBBLE_W = 224, BUBBLE_H = 72;
 const EXPOSURE_OPEN = 1, EXPOSURE_CLOSED = 0.6;
 const MOVING_MS = 1000 / 30;
 const IDLE_MS = 1000 / 8;
@@ -232,7 +232,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
         // Message box above the name tag; far out, one that would overlap an earlier tag or box is hidden.
         const by = tagY - 22, bx0 = tagX - BUBBLE_W / 2, bx1 = tagX + BUBBLE_W / 2, by0 = by - BUBBLE_H;
         if (!(far && hits(bx0, bx1, by0, by, r))) { rects[r++] = bx0; rects[r++] = bx1; rects[r++] = by0; rects[r++] = by; pt.y = by; slot(n++, tag.bubbleId, 'bubble', excerpts.get(a.instanceId) ?? a.statusText); }
-      } else if (extra === 'sleep' && project(view.point.x, SLEEP_HEAD_Y, view.point.z, v.w, v.h)) slot(n++, tag.sleepId, 'sleep', 'Zzz');
+      } else if (extra === 'sleep') { pt.y = tagY - 22; slot(n++, tag.sleepId, 'sleep', 'Zzz'); }
     }
     out.length = n;
     return out;

@@ -113,7 +113,6 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   const {model,runs,stale,overflow,workforce,decisions,authRequired,error}=state;
   const control=useRef<StageControl|null>(null);
   const excerpts=useAgentExcerpts({api,id,enabled:model?.tier==='full'});
-  useEffect(()=>{control.current?.setExcerpts(excerpts);},[excerpts,model!==undefined]);
   const {inspector,openInspector}=frame;
   // A refused session is never shown as stale data: the panel offers re-pairing, the same ErrorState Classic uses.
   useEffect(()=>{
@@ -172,7 +171,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     :inspector.kind==='cabinet'?<CabinetInspector api={api} projectId={id} run={run} evidence={runEvidence(run?.runId,decisions,handoffEvidence(workforce?.handoffs??[],undefined,run?.runId))}/>
     :<ServerInspector api={api} projectId={id} session={session} fresh={!stale&&!authRequired} refresh={refresh}/>,frame.inspectorHost):null;
   return <>
-    {frame.host && createPortal(<section aria-label="Danh sách công việc" className="m-0 h-full">{model?<OfficeStage model={model} onSelect={select} links={list} control={control}/>:<>{list}</>}</section>,frame.host)}
+    {frame.host && createPortal(<section aria-label="Danh sách công việc" className="m-0 h-full">{model?<OfficeStage model={model} onSelect={select} links={list} control={control} excerpts={excerpts}/>:<>{list}</>}</section>,frame.host)}
     {inspected}
     {frame.hud && createPortal(<OfficeHud projectName={project.displayName} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} session={session} model={model} runs={runs} connection={connection} stale={stale} failed={error!==undefined&&!authRequired&&!model} authRequired={authRequired} mode={frame.mode} onMode={frame.setMode} panelOpen={frame.panelOpen} overflow={overflow}
       onOverview={frame.openOverview} onNavigate={path=>{if(path==='')frame.openOverview();else go(`${base}/${path}`);}} onDocuments={()=>openInspector({kind:'cabinet'})} onRefresh={refresh}

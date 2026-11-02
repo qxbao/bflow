@@ -20,14 +20,15 @@ const reducedMotion = (): boolean => typeof matchMedia === 'function' && matchMe
  * `links` is extra navigation shown with the mirror until the scene objects navigate (V7.2).
  */
 /** What the HUD may ask of the scene. Present only while the stage is mounted; a missing or failed renderer ignores the call. */
-export interface StageControl { focusZone(zone: OfficeFocusZone): void; /** Pixels the HUD or panel covers; hides labels in it and centres selections in the rest. Never moves the camera. */ setInset(inset: { right: number; bottom: number; left: number }): void; /** Moves focus into the agent list (the DOM mirror), which shows itself while focused. */ openList(): void; /** Latest terminal text per agent, shown in the message box over working characters. Remembered for a renderer created later. */ setExcerpts(excerpts: ReadonlyMap<string, string>): void }
+export interface StageControl { focusZone(zone: OfficeFocusZone): void; /** Pixels the HUD or panel covers; hides labels in it and centres selections in the rest. Never moves the camera. */ setInset(inset: { right: number; bottom: number; left: number }): void; /** Moves focus into the agent list (the DOM mirror), which shows itself while focused. */ openList(): void }
 
-export function OfficeStage({ model, onSelect, links, control, createRenderer = lazyRenderer }: { model: OfficeModel; onSelect: (target: OfficeTarget) => void; links?: ReactNode; control?: MutableRefObject<StageControl | null>; createRenderer?: CreateRenderer }) {
+export function OfficeStage({ model, onSelect, links, control, excerpts: excerptMap, createRenderer = lazyRenderer }: { model: OfficeModel; /** Latest terminal text per agent for the message boxes; kept for a renderer created later. */ excerpts?: ReadonlyMap<string, string>; onSelect: (target: OfficeTarget) => void; links?: ReactNode; control?: MutableRefObject<StageControl | null>; createRenderer?: CreateRenderer }) {
   const host = useRef<HTMLDivElement>(null);
   const root = useRef<HTMLDivElement>(null);
   // Remembered so a renderer created after the first inset still receives it.
   const inset = useRef<{ right: number; bottom: number; left: number } | undefined>(undefined);
-  const excerpts = useRef<ReadonlyMap<string, string> | undefined>(undefined);
+  const excerpts = useRef<ReadonlyMap<string, string> | undefined>(excerptMap);
+  excerpts.current = excerptMap;
   const renderer = useRef<OfficeRenderer | undefined>(undefined);
   const latest = useRef({ model, onSelect, createRenderer });
   latest.current = { model, onSelect, createRenderer };
@@ -78,9 +79,11 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
     };
   }, []);
 
+  useEffect(() => { if (excerptMap) renderer.current?.setExcerpts?.(excerptMap); }, [excerptMap]);
+
   useEffect(() => {
     if (!control) return;
-    control.current = { focusZone: zone => renderer.current?.focusZone?.(zone), setInset: i => { inset.current = i; renderer.current?.setInset?.(i); }, setExcerpts: e => { excerpts.current = e; renderer.current?.setExcerpts?.(e); }, openList: () => root.current?.querySelector<HTMLElement>('section[aria-label] button')?.focus() };
+    control.current = { focusZone: zone => renderer.current?.focusZone?.(zone), setInset: i => { inset.current = i; renderer.current?.setInset?.(i); }, openList: () => root.current?.querySelector<HTMLElement>('section[aria-label] button')?.focus() };
     return () => { control.current = null; };
   }, [control]);
 

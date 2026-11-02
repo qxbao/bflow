@@ -212,6 +212,19 @@ describe('OfficeStage control', () => {
   });
 });
 
+describe('excerpts', () => {
+  test('a map present before the renderer exists reaches it, and later maps follow', async () => {
+    const first = new Map([['a', 'one']]);
+    const view = render(<OfficeStage model={model()} onSelect={noop} createRenderer={async (...args) => { const f = await factory(...args); (f as OfficeRenderer).setExcerpts = vi.fn(); return f; }} excerpts={first} />);
+    await settle();
+    const fake = fakes[0]!;
+    expect(fake.setExcerpts).toHaveBeenCalledWith(first);
+    const second = new Map([['a', 'two']]);
+    view.rerender(<OfficeStage model={model()} onSelect={noop} createRenderer={factory} excerpts={second} />);
+    expect(fake.setExcerpts).toHaveBeenLastCalledWith(second);
+  });
+});
+
 describe('label layer writes', () => {
   test('an unchanged label position writes no style', async () => {
     const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');

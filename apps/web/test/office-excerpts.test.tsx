@@ -74,6 +74,34 @@ describe('useAgentExcerpts', () => {
   });
 });
 
+describe('useAgentExcerpts lifecycle', () => {
+  test('a hidden document makes no calls', async () => {
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    const api = client(async () => view(['a', 'x']));
+    renderHook(() => useAgentExcerpts({ api, id: 'p', enabled: true }));
+    await flush(EXCERPT_POLL_MS * 3);
+    expect(api.readWorkforceExcerpts).not.toHaveBeenCalled();
+    hidden.mockRestore();
+  });
+
+  test('disabling or changing the project clears the map', async () => {
+    const api = client(async () => view(['a', 'one']));
+    const { result, rerender } = renderHook(p => useAgentExcerpts({ api, id: p.id, enabled: p.enabled }), { initialProps: { id: 'p', enabled: true } });
+    await flush();
+    expect(result.current.get('a')).toBe('one');
+    rerender({ id: 'p', enabled: false });
+    expect(result.current.size).toBe(0);
+    rerender({ id: 'p', enabled: true });
+    await flush();
+    expect(result.current.get('a')).toBe('one');
+    let release!: () => void;
+    api.readWorkforceExcerpts.mockImplementation(() => new Promise(r => { release = () => r(view()); }));
+    rerender({ id: 'q', enabled: true });
+    expect(result.current.size).toBe(0);
+    release();
+  });
+});
+
 describe('poseLabel', () => {
   test('working poses get a message box, sleeping a Zzz, the rest nothing', () => {
     expect(['working', 'typing', 'preparing'].map(poseLabel)).toEqual(['bubble', 'bubble', 'bubble']);

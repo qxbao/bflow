@@ -17,6 +17,8 @@ export function useAgentExcerpts({ api, id, enabled }: { api: ApiClient; id: str
   const [map, setMap] = useState<ReadonlyMap<string, string>>(EMPTY);
   const current = useRef(map);
   useEffect(() => {
+    // A map never outlives its project or its enabled state.
+    if (current.current.size > 0) { current.current = EMPTY; setMap(EMPTY); }
     if (!enabled) return;
     let dead = false, stopped = false, busy = false, lastOk = Date.now();
     let timer: ReturnType<typeof setInterval> | undefined;
