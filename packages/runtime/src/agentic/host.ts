@@ -2670,7 +2670,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await platformSession?.shutdown();
           quiesceCompleted = true; return null;
         }
-        await extensionPump?.quiesce(); await workspace.extensions.quiesce();
+        try { await extensionPump?.quiesce(); }
+        catch (error) { quiesced = false; throw error; }
+        await workspace.extensions.quiesce();
         if (extensionPump?.snapshot().activeRunIds.length) throw new Error("Native extension work is still draining; preserve the session and reconcile before shutdown");
         await workspace.runtime.quiesce();
         if (scheduler) await Promise.race([scheduler, new Promise((_, reject) => setTimeout(() => reject(new Error("Outstanding verification has not drained; preserve the live session and retry shutdown after reconciliation")), 15_000))]);

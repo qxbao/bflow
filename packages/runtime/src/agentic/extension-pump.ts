@@ -42,5 +42,8 @@ export class WorkflowExtensionPump {
     }
   }
   async drain(): Promise<void> { await Promise.allSettled([...this.active.values()]); }
-  async quiesce(): Promise<void> { this.quiesced = true; }
+  async quiesce(): Promise<void> {
+    if (this.active.size) throw new Error("Native extension work is active; let it drain before quiescing");
+    this.quiesced = true;
+  }
 }

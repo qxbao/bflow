@@ -39,6 +39,23 @@ async function fixture(sessionId = "session-native") {
 }
 
 describe("workflow extension host routing", () => {
+  it("refuses quiesce while a native job is active and keeps the scheduler resumable after refusal", async () => {
+    const f = await fixture(), host = await f.create(), Pump = Reflect.get(runtime, "WorkflowExtensionPump");
+    await host.admit(delegation()); await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,
+      packPin: { id: f.pack.id, version: f.pack.version, digest: f.pack.digest } });
+    let arrived!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { arrived = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
+    const receive = f.a.native.waitResult;
+    f.a.native.waitResult = async id => { arrived(); await wait; return receive(id); };
+    const failures: unknown[] = [], pump = new Pump(host, async (_id: string, error: unknown) => { failures.push(error); });
+    try {
+      await pump.tick(); await entered;
+      await expect(pump.quiesce()).rejects.toThrow(/active|drain|native/i);
+      expect(pump.snapshot()).toMatchObject({ quiesced: false, activeRunIds: ["run-native"] });
+    } finally { release(); await pump.drain(); }
+    expect(failures).toEqual([]); expect((await host.inspect("run-native")).extensionStatus).toBe("awaiting_business_decision");
+    await pump.quiesce(); expect(pump.snapshot().quiesced).toBe(true);
+  });
   it("drives one native job per run without blocking the host scheduler or re-dispatching at a human gate", async () => {
     const f = await fixture(), host = await f.create(), Pump = Reflect.get(runtime, "WorkflowExtensionPump");
     expect(Pump).toBeTypeOf("function");
