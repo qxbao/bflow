@@ -16,7 +16,7 @@ it('CLI public projection and private expected digest agree with the reader afte
  const top=await realpath(await mkdtemp('/tmp/cli-native-trust-'));roots.push(top);const root=join(top,'repo');await mkdir(root);
  const git=(args:string[])=>execFileSync('git',['-c','core.hooksPath=/dev/null','-c','user.name=Test','-c','user.email=test@localhost','-c','commit.gpgSign=false',...args],{cwd:root,encoding:'utf8'}).trim();
  git(['init','--quiet']);await writeFile(join(root,'README.md'),'baseline\n');git(['add','.']);git(['commit','--quiet','-m','baseline']);await initializeEnvironmentConfig({cwd:root});
- vi.stubEnv('BFLOW_HOME',join(top,'machine'));vi.stubEnv('AI_ISOLATOR_HOME',join(top,'native'));
+ vi.stubEnv('XDG_STATE_HOME',join(top,'xdg-state'));vi.stubEnv('BFLOW_HOME',join(top,'machine'));vi.stubEnv('AI_ISOLATOR_HOME',join(top,'native'));
  const profile=join(top,'native/profiles/codex--personal');const home=join(profile,'home/.codex');await mkdir(home,{recursive:true});
  await writeFile(join(profile,'profile.env'),'AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=personal\nAI_ISOLATOR_CREATED_AT=2026-11-02\n');
  const configFile=join(home,'config.toml');await writeFile(configFile,'model = "gpt-6-luna"\n');await ensureCodexWorkspaceTrust(root,configFile);
@@ -24,9 +24,9 @@ it('CLI public projection and private expected digest agree with the reader afte
  for(const role of config.environment.roles){role.cli='codex';role['profile-name']='personal';role.model='gpt-6-luna';}
  await writeFile(join(root,'.bflow/config.yml'),renderEnvironmentConfigYaml(config));git(['add','.bflow/config.yml','.bflow/.gitignore']);git(['commit','--quiet','-m','Configure roles']);
  const input={repository,config,env:process.env};const before=await loadHostExecutionResolution(input);
- const state=resolvePrivateRuntimeStateDirectory(root);const store=await openFilesystemArtifactStore({root:join(top,'artifacts'),storeId:'trust-test'});if(!store.ok)throw Error(store.error.message);
+ resolvePrivateRuntimeStateDirectory(root);const store=await openFilesystemArtifactStore({root:join(top,'artifacts'),storeId:'trust-test'});if(!store.ok)throw Error(store.error.message);
  try{
-  const engine=await GitIntegrationEngine.open({repositoryPath:root,artifactStore:store.value,worktreeRoot:join(state,'worktrees')});
+  const engine=await GitIntegrationEngine.open({repositoryPath:root,artifactStore:store.value,worktreeRoot:join(root,'.bflow/state/worktrees')});
   const tree=await engine.prepareTask({runId:'run',taskId:'task',attemptId:'attempt',baseRevision:git(['rev-parse','HEAD']),ownedPaths:['src/a.js'],developerId:'dev'});
   await ensureCodexWorkspaceTrust(tree.worktreePath,configFile);
   const after=await loadHostExecutionResolution(input);expect(after.plan.components.profiles).toBe(before.plan.components.profiles);

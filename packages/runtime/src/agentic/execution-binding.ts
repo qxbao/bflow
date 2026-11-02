@@ -6,6 +6,7 @@ import { dirname, join, parse, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { TaskRecordSchema, IntegrationRecordSchema } from '@bflow/git-orchestrator';
+import { stripCodexWorkspaceTrustForComparison } from '@bflow/agent-providers';
 import {
   ExecutionPlanInputSchema, ExecutionResolutionSourcesSchema, PlanDiffSchema, PlanPolicyExplanationSchema,
   type ExecutionPlanInput, type PlanDiff, type WorkflowDefinition
@@ -16,6 +17,7 @@ import {
 import { findPrivateRuntimeStateDirectory } from '../private-state.js';
 import { parseAgenticJournalState, type RunRecord } from './journal.js';
 import { runtimeGitDirectoryFlags } from './patch-paths.js';
+import { managedWorktreeRoot } from './worktree-root.js';
 
 /** Private file-watch evidence; it never enters public plan fingerprints or diagnostics. */
 export interface ExecutionResolutionReader {
@@ -133,18 +135,18 @@ function privateSourceDrift(fingerprint: string, components: readonly string[]):
   }));
 }
 
-/** Read-only normalization shared with CLI capture. No trust is granted here. */
+/** @internal Read-only normalization shared with CLI capture. No trust is granted here. */
 export async function normalizeManagedCodexWorkspaceTrust(text: string, repositoryRoot: string): Promise<string> {
   const table = (path: string) => `[projects.${JSON.stringify(path).replace(/\u007f/g, '\\u007f')}]\ntrust_level = "trusted"\n`;
   const atLine = (source: string, entry: string) => {
     const at = source.indexOf(entry);
     return at >= 0 && (at === 0 || source[at - 1] === '\n') ? at : -1;
   };
-  // The existing native root decision authorizes propagation; never ignore root trust changes themselves.
-  if (atLine(text, table(repositoryRoot)) < 0) return text;
+  const worktreeRoot = managedWorktreeRoot(repositoryRoot);
+  // No native worktree table means there is no exception to verify and no Git command to run.
+  if (!text.includes(`[projects.${JSON.stringify(worktreeRoot).replace(/\u007f/g, '\\u007f').slice(0, -1)}/`)) return text;
   try {
-    const stateRoot = findPrivateRuntimeStateDirectory(repositoryRoot);
-    if (!stateRoot || await realpath(repositoryRoot) !== repositoryRoot) return text;
+    if (await realpath(repositoryRoot) !== repositoryRoot) return text;
     const environment = { ...process.env };
     for (const key of Object.keys(environment)) if (key.startsWith('GIT_')) delete environment[key];
     environment.GIT_OPTIONAL_LOCKS = '0';
@@ -160,7 +162,7 @@ export async function normalizeManagedCodexWorkspaceTrust(text: string, reposito
     for (const [kind, records] of [['task', journal.tasks], ['integration', journal.integrations]] as const) {
       for (const [key, record] of Object.entries(records)) {
         if (!/^[a-f0-9]{64}$/.test(key) || record.key !== key ||
-          record.worktreePath !== join(stateRoot, 'worktrees', `${kind}-${key}`)) continue;
+          record.worktreePath !== join(worktreeRoot, `${kind}-${key}`)) continue;
         const entry = table(record.worktreePath), at = atLine(result, entry);
         if (at < 0 || result.indexOf(entry, at + entry.length) >= 0) continue;
         const rest = result.slice(at + entry.length);
@@ -182,8 +184,7 @@ export async function normalizeManagedCodexWorkspaceTrust(text: string, reposito
           if ((await readResolutionFile(join(gitDirectory, 'gitdir'), 4096)).toString('utf8').trim() !== marker ||
             resolve(gitDirectory, (await readResolutionFile(join(gitDirectory, 'commondir'), 4096)).toString('utf8').trim()) !== common) continue;
         }
-        // ensureCodexWorkspaceTrust appends exactly one separator newline before this table.
-        result = result.slice(0, at > 0 ? at - 1 : 0) + rest;
+        result = stripCodexWorkspaceTrustForComparison(result, repositoryRoot, record.worktreePath) ?? result;
       }
     }
     return result;

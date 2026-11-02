@@ -1,7 +1,8 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { openFilesystemArtifactStore } from '@bflow/artifact-store';
 import { GitIntegrationEngine } from '@bflow/git-orchestrator';
 import { ensureCodexWorkspaceTrust } from '@bflow/agent-providers';
@@ -9,16 +10,18 @@ import { createExecutionResolutionReader, readExecutionRepositorySnapshot } from
 import { resolvePrivateRuntimeStateDirectory } from '../../src/private-state.js';
 
 const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, {recursive:true,force:true}); });
-async function fixture(trusted = true) {
+afterEach(async () => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) await rm(root, {recursive:true,force:true}); });
+async function fixture(trusted = true, pinned = false) {
   const root = await realpath(await mkdtemp('/tmp/bflow-native-trust-')); roots.push(root);
   const repo = join(root,'repo'); await mkdir(repo);
   const git = (args:string[]) => execFileSync('git',['-c','core.hooksPath=/dev/null','-c','user.name=Test','-c','user.email=test@localhost','-c','commit.gpgSign=false',...args],{cwd:repo,encoding:'utf8'}).trim();
-  git(['init','--quiet']); await writeFile(join(repo,'README.md'),'baseline\n'); git(['add','.']);git(['commit','--quiet','-m','baseline']);
+  git(['init','--quiet']); await writeFile(join(repo,'.gitignore'),'.bflow/\n'); await writeFile(join(repo,'README.md'),'baseline\n'); git(['add','.']);git(['commit','--quiet','-m','baseline']);
+  vi.stubEnv('XDG_STATE_HOME',join(root,'xdg-state'));
+  if(pinned)await mkdir(join(root,'xdg-state/bflow/repositories',createHash('sha256').update(repo).digest('hex'),'state'),{recursive:true,mode:0o700});
   const state = resolvePrivateRuntimeStateDirectory(repo);
   const store = await openFilesystemArtifactStore({root:join(root,'artifacts'),storeId:'test-trust'});
   if (!store.ok) throw Error(store.error.message);
-  const engine = await GitIntegrationEngine.open({repositoryPath:repo,artifactStore:store.value,worktreeRoot:join(state,'worktrees')});
+  const engine = await GitIntegrationEngine.open({repositoryPath:repo,artifactStore:store.value,worktreeRoot:join(repo,'.bflow/state/worktrees')});
   store.value.close();
   const config = join(root,'profiles/codex--personal/home/.codex/config.toml'); await mkdir(join(config,'..'),{recursive:true});
   await writeFile(config,'model = "gpt-6-luna"\n');if(trusted)await ensureCodexWorkspaceTrust(repo,config);
@@ -83,4 +86,21 @@ it('keeps explicit untrusted decisions and foreign/malformed ownership proof gua
 it('keeps non-UTF8 native settings byte changes visible to the raw guard',async()=>{
  const f=await fixture();const suffix=Buffer.from(f.baseline);await writeFile(f.config,Buffer.concat([Buffer.from([0xff,10]),suffix]));const read=await f.reader();
  await writeFile(f.config,Buffer.concat([Buffer.from([0xfe,10]),suffix]));await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
+});
+
+it('uses the host worktree root when private runtime authority is pinned externally',async()=>{
+ const f=await fixture(true,true);expect(f.state).not.toBe(join(f.repo,'.bflow/state'));const read=await f.reader();const tree=await f.prepare();
+ expect(tree.worktreePath.startsWith(join(f.repo,'.bflow/state/worktrees')+'/')).toBe(true);
+ await ensureCodexWorkspaceTrust(tree.worktreePath,f.config);await expect(read()).resolves.toMatchObject({mode:'intake'});
+});
+it('never removes a trust-table-shaped fragment from a multiline native auth command',async()=>{
+ const f=await fixture();const tree=await f.prepare();const before=f.baseline+'\n[model_providers.local.auth]\ncommand = """\n[start]\n"""\n';await writeFile(f.config,before);const read=await f.reader();
+ const entry='[projects.'+JSON.stringify(tree.worktreePath)+']\ntrust_level = "trusted"\n';
+ await writeFile(f.config,before.replace('[start]', '\n'+entry+'[start]'));
+ await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
+});
+
+it('accepts the existing native root trust decision with a trailing slash',async()=>{
+ const f=await fixture();await writeFile(f.config,f.baseline.replace(JSON.stringify(f.repo),JSON.stringify(f.repo+'/')));const read=await f.reader();const tree=await f.prepare();
+ await ensureCodexWorkspaceTrust(tree.worktreePath,f.config);await expect(read()).resolves.toMatchObject({mode:'intake'});
 });
