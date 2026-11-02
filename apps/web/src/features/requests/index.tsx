@@ -60,7 +60,7 @@ export function RequestForm({api,id,sessionId,enabled,runId,action,refresh}:{api
     }
   }
   const criteriaLines=lines(draft.criteria);
-  return <section className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="mb-2 flex flex-wrap items-baseline justify-between gap-2"><h2 className="m-0 text-base">{runId?'Chỉnh yêu cầu':'Tạo công việc'}</h2><span className="text-xs text-muted">Bản nháp tự lưu trên trình duyệt này</span></div>
+  return <section data-component="RequestForm" className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="mb-2 flex flex-wrap items-baseline justify-between gap-2"><h2 className="m-0 text-base">{runId?'Chỉnh yêu cầu':'Tạo công việc'}</h2><span className="text-xs text-muted">Bản nháp tự lưu trên trình duyệt này</span></div>
     <p className="my-1.5 text-sm text-muted">{runId?'Nhập đầy đủ mục tiêu, tiêu chí và ràng buộc thay thế cho công việc này.':'Mô tả kết quả bạn mong muốn. Hệ thống sẽ phân tích, lập đặc tả và trình bạn duyệt khi cần.'}</p>
     <form noValidate onSubmit={e=>void submit(e)}>
       {Object.keys(errors).length>0 && <div role="alert" ref={summary} tabIndex={-1} className="my-2.5 border border-danger border-l-3 bg-canvas p-3"><h3 className="m-0 text-sm">Kiểm tra thông tin</h3>{Object.keys(errors).map(k=><p key={k} className="my-1 text-sm"><a href={'#'+uid+k}>{errors[k]}</a></p>)}</div>}

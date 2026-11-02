@@ -22,7 +22,7 @@ export function ChatPage({api,id,revision,refresh}:{api:ApiClient;id:string;revi
   const items=[...(runs.data?.items??[])].sort((a,b)=>Number(finished(a.sdlcStatus))-Number(finished(b.sdlcStatus))||b.updatedAt.localeCompare(a.updatedAt));
   return <><h1 className={runId?'sr-only':'lg:sr-only'}>Trò chuyện</h1>
     <div className="grid min-w-0 border border-line bg-surface lg:grid-cols-[280px_minmax(0,1fr)]">
-      <nav aria-label="Trò chuyện theo công việc" className={`${runId?'hidden lg:block':'block'} min-w-0 border-line lg:h-[calc(100dvh-15rem)] lg:min-h-[26rem] lg:overflow-y-auto lg:border-r`}>
+      <nav data-component="ChatPage" aria-label="Trò chuyện theo công việc" className={`${runId?'hidden lg:block':'block'} min-w-0 border-line lg:h-[calc(100dvh-15rem)] lg:min-h-[26rem] lg:overflow-y-auto lg:border-r`}>
         <LoadingState loading={runs.loading} initial={!runs.data} label="Đang tải công việc…"/>
         {Boolean(runs.error) && <ErrorState stale={Boolean(runs.data)} error={runs.error} retry={()=>{if(cursor && runs.error instanceof ApiError && runs.error.code==='stale_version')pagination.first?.();refresh();}}/>}
         {runs.data && !items.length && <p className="p-4 text-sm text-muted">Chưa có công việc để trò chuyện.</p>}

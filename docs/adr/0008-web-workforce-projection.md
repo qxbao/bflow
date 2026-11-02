@@ -151,45 +151,9 @@ it, a change in work assignment does not produce an `invalidate` event. Every
 time field that changes between snapshots must sit under `observedAt`, so the
 existing `stable()` normalization removes it from the fingerprint.
 
-## Decision: Pixi visualization dependency (amends ADR 0006) — SUPERSEDED
+## Decision: visualization dependency
 
-> Superseded the same day by the 3D direction. `pixi.js` was never shipped: the
-> amendment below replaces it with `three` 0.187.0. This section is kept as the
-> original decision record; none of its Pixi rules apply.
-
-ADR 0006 lists the pinned frontend set. This ADR adds one entry to it:
-
-| Package | Pin | Scope |
-| --- | --- | --- |
-| `pixi.js` | exact `8.22.0` in `apps/web/package.json` | Core package only (MIT). The integrator updates the lockfile. |
-
-Not added: `@pixi/tilemap` (the fixed small map can be flattened with
-`cacheAsTexture`) and `easystarjs` (pathfinding on a small grid is under 100
-lines of plain code).
-
-Isometric pixel art is a 2D sprite problem. Depth is draw order, so no 3D
-camera, lighting or mesh is needed. The choice of PixiJS over Three.js is
-recorded in `section-3.3-tech.md` §3.3.
-
-Mandatory settings and conditions:
-
-1. **`import 'pixi.js/unsafe-eval'`** must be imported before any Pixi use. The
-   name is misleading: this module replaces runtime code generation with a
-   polyfill. It does not require CSP `unsafe-eval`. The design reports a spike
-   with zero violations; that spike is not live-verified.
-2. **`Assets.init({preferences:{preferWorkers:false}})`** must run before any
-   asset is loaded.
-
-Further conditions:
-
-- `preference: 'webgl'`. WebGPU is not used in v1.
-- The Playwright test `csp-office` fails on any `securitypolicyviolation`. This
-  guards against regressions when Pixi is upgraded.
-- The Pixi code is loaded only with `import()` when Visualization Mode is
-  entered. A bundle test must prove that the Classic chunk does not contain Pixi.
-- Pixel-art styling is confined to the canvas. Surrounding UI keeps the regular
-  design system.
-- Classic remains the default view.
+Superseded by the 3D direction: see "Amendment 2026-11-02: 3D direction" below (`three` 0.187.0 replaces the originally proposed `pixi.js`, which was never shipped).
 
 ## Compatibility
 

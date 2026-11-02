@@ -82,3 +82,12 @@ export const recordWebGl = (): void => {
     return ctx;
   } as typeof original;
 };
+
+/** The scene (not only the mode flag) is live: used after a reload or a re-pair wherever the picture matters. */
+export const sceneReady = (page: Page) => expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
+/** "Exactly N effects": wait for N, then keep observing for longer than the fixture's 2000 ms hold so a late duplicate would show. */
+export async function stableCount(read: () => Promise<number>, expected: number, windowMs = 2400): Promise<void> {
+  await expect.poll(read, { timeout: 20000 }).toBe(expected);
+  const end = Date.now() + windowMs;
+  while (Date.now() < end) { expect(await read()).toBe(expected); await new Promise(r => setTimeout(r, 250)); }
+}

@@ -30,6 +30,8 @@ test('keyboard only: Tab reaches the HUD, the stage and every mirror object; arr
   test.setTimeout(90000);
   const errors: string[] = [];
   page.on('pageerror', e => errors.push(e.message));
+  // Reduced motion keeps the clips still, so the picture after `0` can be compared with the initial one exactly.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await open(page);
   // Tab order: collect until the cycle leaves the page or 80 stops.
   await page.locator('body').click({ position: { x: 1, y: 1 } });
@@ -50,6 +52,7 @@ test('keyboard only: Tab reaches the HUD, the stage and every mirror object; arr
   // Camera keys on the stage change the picture; 0 fits the view again.
   const stage = page.getByLabel('Cảnh văn phòng');
   await stage.focus();
+  await page.waitForTimeout(500);
   const before = await stageShot(page);
   await page.keyboard.press('+'); await page.waitForTimeout(700);
   const zoomed = await stageShot(page);
@@ -60,7 +63,7 @@ test('keyboard only: Tab reaches the HUD, the stage and every mirror object; arr
   await page.keyboard.press('-'); await page.waitForTimeout(700);
   expect(await stageShot(page)).not.toBe(panned);
   await page.keyboard.press('0'); await page.waitForTimeout(900);
-  expect(await stageShot(page)).not.toBe(panned);
+  expect(await stageShot(page)).toBe(before);
 
   // Enter on a mirror agent opens the inspector; Esc closes it and returns focus to that button.
   const agent = page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name: /Developer #1/ });
@@ -78,6 +81,12 @@ test('keyboard only: Tab reaches the HUD, the stage and every mirror object; arr
   await page.keyboard.press('Escape');
   await expect(page.locator('#main')).toBeHidden();
   await expect(rail(page, /^Tổng quan/)).toBeFocused();
+  // Esc pressed while focus is in the HUD (not in the panel) closes the panel too.
+  await rail(page, /^Tổng quan/).click();
+  await expect(page.locator('#main')).toBeVisible();
+  await page.getByRole('group', { name: 'Góc nhìn camera' }).getByRole('button', { name: 'Toàn cảnh' }).focus();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#main')).toBeHidden();
   // A mirror object opens its page and Esc comes back.
   await mirror(page, /Hộp thư/);
   await expect(page.locator('#main')).toBeVisible();

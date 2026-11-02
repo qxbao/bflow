@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test';
 import { startAcceptanceHost, type AcceptanceHost } from './acceptance-fixture';
-import { browserOptions, enterVisual, mirror, openProject, rail } from './office-fixture';
+import { browserOptions, enterVisual, mirror, openProject, rail, workforceBody } from './office-fixture';
 // V8.4: the W09 security acceptance rows through the 3D mode. Real Chrome (software GL), the real Local Server stack and the same deterministic host.
 test.use(browserOptions());
+expect.configure({ timeout: 15000 });
 let host: AcceptanceHost;
 test.beforeEach(async () => { host = await startAcceptanceHost(); });
 test.afterEach(async () => { await host?.close(); });
@@ -74,4 +75,44 @@ test('3D AC09 malicious HTML/SVG artifacts stay inert in the cabinet inspector; 
   expect(reads).toEqual(expect.arrayContaining(['artifact-html', 'artifact-svg', 'artifact-md']));
   expect(dialogs).toEqual([]);
   expect(violations).toEqual([]);
+});
+
+test('3D hostile project name, run title and agent name stay inert text in the scene labels, HUD, mirror and inspector', async ({ page }) => {
+  test.setTimeout(60000);
+  const dialogs: string[] = []; page.on('dialog', d => { dialogs.push(d.message()); void d.dismiss(); });
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
+  const violations: string[] = []; page.on('console', m => { if (/Content Security Policy/i.test(m.text())) violations.push(m.text()); });
+  const name = '<img src=x onerror=alert(1)>', title = '<script>alert(2)</script><b>run</b>';
+  // The host stays unchanged: the hostile strings are injected into its real responses.
+  await page.route(/\/api\/v1\/projects(\?.*)?$/, async route => {
+    if (route.request().method() !== 'GET') { await route.continue(); return; }
+    const response = await route.fetch(); const body = await response.json();
+    await route.fulfill({ response, json: { ...body, items: body.items.map((p: any) => ({ ...p, displayName: name })) } });
+  });
+  await page.route(/\/api\/v1\/projects\/[^/]+\/runs(\/run)?(\?.*)?$/, async route => {
+    const response = await route.fetch(); const body = await response.json();
+    await route.fulfill({ response, json: body.items ? { ...body, items: body.items.map((r: any) => ({ ...r, title })) } : { ...body, title } });
+  });
+  await page.route('**/api/v1/projects/*/workforce', route => route.fulfill({ json: (() => {
+    const view = workforceBody(new URL(route.request().url()).pathname.split('/')[4]!, { developers: 1 }) as any;
+    view.agents = view.agents.map((a: any) => ({ ...a, displayName: name }));
+    return view;
+  })() }));
+  await openProject(page, host.pairing, host.repository, /Xem dự án/);
+  await enterVisual(page);
+  const hud = page.getByRole('region', { name: 'Văn phòng Bflow' });
+  await expect(hud).toContainText(title);
+  await expect(hud.getByRole('option', { name })).toHaveCount(1);
+  const mirrorRegion = page.getByLabel('Bản văn bản của văn phòng');
+  await expect(mirrorRegion).toContainText(name);
+  // The labels over the characters are plain text nodes.
+  await expect(page.getByLabel('Cảnh văn phòng').locator('[data-kind]').first()).toBeVisible();
+  expect(await page.getByLabel('Cảnh văn phòng').locator('[data-kind] *').count()).toBe(0);
+  // Inspector: the agent display name and the run title on the task board are text too.
+  await mirrorRegion.getByRole('button', { name: /\(Điều phối viên\)/ }).focus(); await page.keyboard.press('Enter');
+  await expect(page.locator('#main')).toContainText(name);
+  await mirror(page, /Bảng nhiệm vụ/);
+  await expect(page.locator('#main')).toContainText(title);
+  expect(await page.locator('img[src="x"], b, [onerror], script:not([src])').count()).toBe(0);
+  expect(dialogs).toEqual([]); expect(errors).toEqual([]); expect(violations).toEqual([]);
 });

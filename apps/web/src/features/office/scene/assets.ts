@@ -13,7 +13,10 @@ let entry: Entry | undefined;
 async function fetchGlb(loader: GLTFLoader, url: string, signal: AbortSignal): Promise<GLTF> {
   const response = await fetch(url, { signal, credentials: 'same-origin' });
   if (!response.ok) throw new Error(`office model ${url} failed with ${response.status}`);
-  return loader.parseAsync(await response.arrayBuffer(), '');
+  const bytes = await response.arrayBuffer();
+  // Parse in its own task, after the network work, so the main thread can serve input between the two models.
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+  return loader.parseAsync(bytes, '');
 }
 
 /** Frees GPU resources held by the templates. Clones share them, so this runs only when no owner is left. */

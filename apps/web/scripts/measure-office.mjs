@@ -222,9 +222,11 @@ try {
   report.vsBudget = {
     graphicsChunkGzipKiB: `${report.sizes.graphicsChunkGzipKiB} of ${BUDGET.chunkGzipKiB}: ${verdict(report.sizes.graphicsChunkGzipKiB < BUDGET.chunkGzipKiB)}`,
     assetsTotalMiB: `${report.sizes.assetsTotalMiB} of ${BUDGET.assetsMiB}: ${verdict(report.sizes.assetsTotalMiB < BUDGET.assetsMiB)}`,
-    movingFpsWhileRunning: `${r.moving.fpsFastBursts} in consecutive moving frames, ${r.moving.fpsWhileRunning} including idle gaps (cap ${BUDGET.movingFps}, target ${BUDGET.movingFps}): ${verdict(r.moving.fastFrameShare >= 0.5 && r.moving.fpsFastBursts >= 27 && r.moving.fpsFastBursts <= BUDGET.movingFps + 1)}; ${Math.round(r.moving.fastFrameShare * 100)}% of frame gaps were consecutive moving frames`,
-    idleFpsOverWindow: `${r.idle.fpsOverWindow} (max ${BUDGET.idleFps}): ${verdict(r.idle.fpsOverWindow <= BUDGET.idleFps + 0.5)}`,
+    movingFps: `${r.moving.fpsOverWindow} over the whole window (target ${BUDGET.movingFps}, cap ${BUDGET.movingFps}): ${verdict(r.moving.fpsOverWindow >= BUDGET.movingFps && r.moving.fpsOverWindow <= BUDGET.movingFps)}`,
+    movingFpsBurstAdvisory: `advisory only, not a verdict: ${r.moving.fpsFastBursts} fps over consecutive moving frames (${Math.round(r.moving.fastFrameShare * 100)}% of frame gaps), median gap ${r.moving.medianGapMs} ms`,
+    idleFpsOverWindow: `${r.idle.fpsOverWindow} (max ${BUDGET.idleFps}; the 8 fps timer is the cap, so this is the same on any GPU): ${verdict(r.idle.fpsOverWindow <= BUDGET.idleFps)}`,
     hiddenFrames: `${r.hidden.frames} (max ${BUDGET.hiddenFrames}): ${verdict(r.hidden.frames === 0)}`,
+    sceneLoadLongTask: `longest ${r.sceneLoad.longestMs} ms in ${r.sceneLoad.longTasks} long task(s) while entering 3D (max ${BUDGET.longTaskMs} ms): ${verdict(r.sceneLoad.longestMs <= BUDGET.longTaskMs)}`,
     longTasks: `after load ${r.longTasksAfterLoad.count}; moving ${r.moving.longTasks}; idle ${r.idle.longTasks} (each over ${BUDGET.longTaskMs} ms by definition): ${verdict(r.longTasksAfterLoad.count === 0)}`,
   };
   const text = JSON.stringify(report, null, 2);

@@ -51,7 +51,22 @@ export async function createOfficeRenderer(host: HTMLElement, onSelect: (target:
   try {
     if (signal?.aborted) throw cancelled();
     gl = new WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    return build(gl, lease, host, onSelect, onContextLost);
+    // Each stage below runs in its own task, so input is not starved while the scene comes up.
+    await yieldToEventLoop();
+    if (signal?.aborted) throw cancelled();
+    const built = build(gl, lease, host, onSelect, onContextLost);
+    try {
+      await yieldToEventLoop();
+      if (signal?.aborted) throw cancelled();
+      // Shaders compile off the main thread (KHR_parallel_shader_compile) before the first render.
+      await built.warm();
+      if (signal?.aborted) throw cancelled();
+    } catch (error) {
+      // destroy() owns the context and the lease from here on.
+      built.renderer.destroy();
+      throw error;
+    }
+    return built.renderer;
   } catch (error) {
     if (gl) { gl.dispose(); gl.forceContextLoss(); }
     lease.release();
@@ -59,7 +74,9 @@ export async function createOfficeRenderer(host: HTMLElement, onSelect: (target:
   }
 }
 
-function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelect: (target: OfficeTarget) => void, onContextLost?: () => void): OfficeRenderer {
+const yieldToEventLoop = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
+
+function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelect: (target: OfficeTarget) => void, onContextLost?: () => void): { renderer: OfficeRenderer; warm(): Promise<void> } {
   const size = (): { w: number; h: number } => ({ w: Math.max(1, host.clientWidth), h: Math.max(1, host.clientHeight) });
   const reduced = (): boolean => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
   // A tap that ends a drag or a pinch is not a selection.
@@ -369,7 +386,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   aim();
   schedule(true);
 
-  return {
+  const renderer: OfficeRenderer = {
     apply(model, cues) {
       if (destroyed) return [];
       lastModel = model;
@@ -442,6 +459,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       lease.release();
     },
   };
+  return { renderer, warm: async () => { await gl.compileAsync(scene, cam); } };
 }
 
 function rendererName(gl: WebGLRenderer): string | undefined {
