@@ -72,25 +72,6 @@ function normalizeTestStrategyOptionals(value: unknown): unknown {
   return copy;
 }
 
-const ALLOWED_CRITERIA_KEYS = new Set([
-  "id", "description", "category", "verificationMethod", "required", "status", "evidenceArtifactIds", "waiverReason"
-]);
-const ALLOWED_ASSESSMENT_KEYS = new Set([
-  "kind", "behaviorChange", "modules", "securityImpact", "publicApiImpact",
-  "dataSchemaImpact", "architectureImpact", "migrationRequired", "risk", "unresolvedQuestions"
-]);
-const MISPLACED_SDD_KEYS = [
-  "functionalRequirements",
-  "nonFunctionalRequirements",
-  "proposedTestStrategy",
-  "designProposal",
-  "technicalConstraints",
-  "apiDataContracts",
-  "risksAndTradeoffs",
-  "migrationStrategy",
-  "revisionReason"
-] as const;
-
 export function normalizeSpecificationOptionals(value: unknown): unknown {
   if (!isObject(value)) return value;
   const copy = stripNullKeys(value, OPTIONAL_SPECIFICATION_KEYS);
@@ -100,84 +81,51 @@ export function normalizeSpecificationOptionals(value: unknown): unknown {
     "dataModelChanges",
     "securityConsiderations",
     "rollbackPlan",
-    "approvedBy",
-    "approvedAt"
+    "approvedBy"
   ]);
-  if (typeof copy.approvedAt === "string" && copy.approvedAt.trim() === "") delete copy.approvedAt;
-  if (typeof copy.affectedPaths === "string") {
-    copy.affectedPaths = [copy.affectedPaths.trim()].filter(Boolean);
-  }
-  if (copy.scope === undefined || copy.scope === null) {
-    copy.scope = { inScope: Array.isArray(copy.affectedPaths) && copy.affectedPaths.length ? copy.affectedPaths : ["."], outOfScope: [] };
-  } else if (typeof copy.scope === "string") {
-    copy.scope = { inScope: [copy.scope.trim()].filter(Boolean), outOfScope: [] };
-  } else if (isObject(copy.scope)) {
-    const rawScope = { ...copy.scope };
-    if (typeof rawScope.inScope === "string") rawScope.inScope = [rawScope.inScope.trim()].filter(Boolean);
-    if (rawScope.outOfScope === null || rawScope.outOfScope === undefined) rawScope.outOfScope = [];
-    else if (typeof rawScope.outOfScope === "string") rawScope.outOfScope = [rawScope.outOfScope.trim()].filter(Boolean);
-    for (const key of Object.keys(rawScope)) {
-      if (key !== "inScope" && key !== "outOfScope") delete rawScope[key];
-    }
-    copy.scope = rawScope;
+  if (isObject(copy.scope) && copy.scope.outOfScope === null) {
+    copy.scope = { ...copy.scope, outOfScope: [] };
   }
   if (Array.isArray(copy.acceptanceCriteria)) {
     copy.acceptanceCriteria = copy.acceptanceCriteria.map(item => {
       if (!isObject(item)) return item;
       const cleanedItem = stripNullKeys(item, ["waiverReason", "category", "status", "evidenceSummary", "verifiedBy", "notes"]);
       if (cleanedItem.status !== "waived") stripEmptyStringKeys(cleanedItem, ["waiverReason"]);
-      if (cleanedItem.evidenceArtifactIds === null || cleanedItem.evidenceArtifactIds === undefined) cleanedItem.evidenceArtifactIds = [];
-      cleanedItem.required ??= true;
-      cleanedItem.status ??= "pending";
-      cleanedItem.category ??= "functional";
-      cleanedItem.verificationMethod ??= "unit_test";
-      for (const k of Object.keys(cleanedItem)) {
-        if (!ALLOWED_CRITERIA_KEYS.has(k)) delete cleanedItem[k];
-      }
+      if (cleanedItem.evidenceArtifactIds === null) cleanedItem.evidenceArtifactIds = [];
       return cleanedItem;
     });
   }
   if (isObject(copy.tddDecision)) copy.tddDecision = normalizeTddDecisionOptionals(copy.tddDecision);
   if (isObject(copy.testStrategy)) copy.testStrategy = normalizeTestStrategyOptionals(copy.testStrategy);
-  let meta = isObject(copy.metadata) ? stripNullKeys(copy.metadata, ["conditionalTdd"]) : {};
-  if (isObject(meta.conditionalTdd)) {
-    meta.conditionalTdd = normalizeConditionalTddOptionals(meta.conditionalTdd);
-  }
-  let cleanedSdd = isObject(meta.sdd) ? stripNullKeys(meta.sdd, MISPLACED_SDD_KEYS) : {};
-  for (const misplaced of MISPLACED_SDD_KEYS) {
-    if (copy[misplaced] !== undefined) {
-      if (cleanedSdd[misplaced] === undefined && copy[misplaced] !== null) {
-        cleanedSdd[misplaced] = copy[misplaced];
+  if (isObject(copy.metadata)) {
+    const meta = stripNullKeys(copy.metadata, ["conditionalTdd"]);
+    if (isObject(meta.conditionalTdd)) {
+      meta.conditionalTdd = normalizeConditionalTddOptionals(meta.conditionalTdd);
+    }
+    if (isObject(meta.sdd)) {
+      const cleanedSdd = stripNullKeys(meta.sdd, [
+        "functionalRequirements",
+        "nonFunctionalRequirements",
+        "proposedTestStrategy",
+        "designProposal",
+        "technicalConstraints",
+        "apiDataContracts",
+        "risksAndTradeoffs",
+        "migrationStrategy",
+        "revisionReason"
+      ]);
+      stripEmptyStringKeys(cleanedSdd, [
+        "proposedTestStrategy",
+        "designProposal",
+        "migrationStrategy",
+        "revisionReason"
+      ]);
+      if (isObject(cleanedSdd.assessment) && cleanedSdd.assessment.unresolvedQuestions === null) {
+        cleanedSdd.assessment = { ...cleanedSdd.assessment, unresolvedQuestions: [] };
       }
-      delete copy[misplaced];
+      meta.sdd = cleanedSdd;
     }
-  }
-  stripEmptyStringKeys(cleanedSdd, [
-    "proposedTestStrategy",
-    "designProposal",
-    "migrationStrategy",
-    "revisionReason"
-  ]);
-  if (isObject(cleanedSdd.assessment)) {
-    const rawAss = { ...cleanedSdd.assessment };
-    for (const key of Object.keys(rawAss)) {
-      if (!ALLOWED_ASSESSMENT_KEYS.has(key)) delete rawAss[key];
-    }
-    if (typeof rawAss.modules === "string") rawAss.modules = [rawAss.modules.trim()].filter(Boolean);
-    if (rawAss.unresolvedQuestions === null || rawAss.unresolvedQuestions === undefined) {
-      rawAss.unresolvedQuestions = [];
-    } else if (Array.isArray(rawAss.unresolvedQuestions)) {
-      rawAss.unresolvedQuestions = rawAss.unresolvedQuestions.filter(q => q !== null && typeof q === "string" && q.trim().length > 0);
-    }
-    cleanedSdd.assessment = rawAss;
-  }
-  meta.sdd = cleanedSdd;
-  copy.metadata = meta;
-
-  if (!Array.isArray(copy.traceabilityTaskIds) || copy.traceabilityTaskIds.length === 0) {
-    if (Array.isArray(cleanedSdd.traceability)) {
-      copy.traceabilityTaskIds = [...new Set(cleanedSdd.traceability.flatMap((t: any) => Array.isArray(t?.taskIds) ? t.taskIds : [t?.taskIds]).filter(Boolean))];
-    }
+    copy.metadata = meta;
   }
   return copy;
 }
@@ -186,26 +134,8 @@ export function normalizeWorkflowDefinitionOptionals(value: unknown): unknown {
   if (!isObject(value)) return value;
   const copy = stripNullKeys(value, ["description", "maxConcurrency", "recoveryPolicy", "gates", "metadata"]);
   stripEmptyStringKeys(copy, ["description"]);
-  if (copy.schemaVersion === undefined || copy.schemaVersion === 1) copy.schemaVersion = "1";
-  copy.version = typeof copy.version === "string" && copy.version.trim() !== "" ? copy.version.trim() : "1";
-  copy.name = typeof copy.name === "string" && copy.name.trim() !== "" ? copy.name.trim() : String(copy.id ?? "workflow");
-  if (typeof copy.maxConcurrency !== "number" || copy.maxConcurrency < 1) copy.maxConcurrency = 2;
-  if (!["fail-fast", "continue-independent", "block"].includes(String(copy.failurePolicy))) copy.failurePolicy = "fail-fast";
-  if (!isObject(copy.recovery)) {
-    copy.recovery = { checkpoint: "task-boundary", resumeStrategy: "replay", staleExecution: "reconcile" };
-  } else {
-    copy.recovery = {
-      checkpoint: ["disabled", "task-boundary", "event-interval"].includes(String(copy.recovery.checkpoint)) ? copy.recovery.checkpoint : "task-boundary",
-      resumeStrategy: ["replay", "checkpoint-then-replay"].includes(String(copy.recovery.resumeStrategy)) ? copy.recovery.resumeStrategy : "replay",
-      staleExecution: ["reconcile", "retry", "block"].includes(String(copy.recovery.staleExecution)) ? copy.recovery.staleExecution : "reconcile",
-      ...(typeof copy.recovery.eventInterval === "number" ? { eventInterval: copy.recovery.eventInterval } : {})
-    };
-  }
-  if (!Array.isArray(copy.dependencies)) copy.dependencies = [];
-  if (!Array.isArray(copy.qualityGates)) copy.qualityGates = [];
-  delete copy.recoveryPolicy;
-  delete copy.gates;
-
+  if (copy.dependencies === null) copy.dependencies = [];
+  if (copy.qualityGates === null) copy.qualityGates = [];
   if (Array.isArray(copy.tasks)) {
     copy.tasks = copy.tasks.map(task => {
       if (!isObject(task)) return task;
@@ -226,56 +156,19 @@ export function normalizeWorkflowDefinitionOptionals(value: unknown): unknown {
         "metadata"
       ]);
       stripEmptyStringKeys(cleaned, ["description", "roleProfile"]);
-      cleaned.title = typeof cleaned.title === "string" && cleaned.title.trim() !== "" ? cleaned.title.trim() : String(cleaned.id);
-      cleaned.role = typeof cleaned.role === "string" && cleaned.role.trim() !== "" ? cleaned.role.trim() : "developer";
-      cleaned.instruction = typeof cleaned.instruction === "string" && cleaned.instruction.trim() !== ""
-        ? cleaned.instruction.trim()
-        : (typeof cleaned.description === "string" && cleaned.description.trim() !== "" ? cleaned.description.trim() : cleaned.title);
-      cleaned.requiresApproval = typeof cleaned.requiresApproval === "boolean" ? cleaned.requiresApproval : false;
-      if (!Array.isArray(cleaned.qualityGates)) cleaned.qualityGates = [];
-      if (typeof cleaned.acceptanceCriteria === "string") cleaned.acceptanceCriteria = [cleaned.acceptanceCriteria];
-      else if (!Array.isArray(cleaned.acceptanceCriteria)) cleaned.acceptanceCriteria = [];
-
-      const rawTimeout = isObject(cleaned.timeout) ? cleaned.timeout : undefined;
-      const execMs = typeof cleaned.timeout === "number"
-        ? cleaned.timeout
-        : (typeof rawTimeout?.executionTimeoutMs === "number"
-          ? (rawTimeout.executionTimeoutMs as number)
-          : (typeof (task as Record<string, unknown>).timeoutMs === "number" ? ((task as Record<string, unknown>).timeoutMs as number) : 300_000));
-      cleaned.timeout = {
-        ...(rawTimeout ?? {}),
-        executionTimeoutMs: execMs,
-        onTimeout: ["fail", "retry", "block"].includes(String(rawTimeout?.onTimeout)) ? (rawTimeout!.onTimeout as string) : "fail"
-      };
-
-      // Keep a contract-shaped RetryPolicy intact; only fill missing fields with contract defaults.
-      const rawRetry = isObject(cleaned.retry) ? cleaned.retry : undefined;
-      const maxAtt = typeof cleaned.retry === "number"
-        ? cleaned.retry
-        : (typeof rawRetry?.maxAttempts === "number"
-          ? (rawRetry.maxAttempts as number)
-          : (typeof (task as Record<string, unknown>).maxAttempts === "number" ? ((task as Record<string, unknown>).maxAttempts as number) : 3));
-      const initialDelay = typeof rawRetry?.initialDelayMs === "number" ? (rawRetry.initialDelayMs as number)
-        : typeof rawRetry?.backoffMs === "number" ? (rawRetry.backoffMs as number) : 1000;
-      const { backoffMs: _legacyBackoff, ...retryRest } = rawRetry ?? {};
-      cleaned.retry = {
-        ...retryRest,
-        maxAttempts: maxAtt,
-        strategy: ["fixed", "linear", "exponential"].includes(String(rawRetry?.strategy)) ? rawRetry!.strategy : "fixed",
-        initialDelayMs: initialDelay,
-        maxDelayMs: typeof rawRetry?.maxDelayMs === "number" ? rawRetry.maxDelayMs : Math.max(initialDelay, 60_000),
-        jitter: typeof rawRetry?.jitter === "boolean" ? rawRetry.jitter : false,
-        ...(typeof rawRetry?.multiplier === "number" ? { multiplier: rawRetry.multiplier as number } : {}),
-        ...(Array.isArray(rawRetry?.retryableErrorCodes) ? { retryableErrorCodes: rawRetry.retryableErrorCodes } : {})
-      };
-
+      if (cleaned.qualityGates === null) cleaned.qualityGates = [];
       if (isObject(cleaned.metadata)) {
         const taskMeta = stripNullKeys(cleaned.metadata, ["conditionalTdd", "forbiddenPaths", "requiredCapabilities"]);
-        if (typeof taskMeta.ownedPaths === "string") taskMeta.ownedPaths = [taskMeta.ownedPaths.trim()].filter(Boolean);
         if (isObject(taskMeta.conditionalTdd)) {
           taskMeta.conditionalTdd = normalizeConditionalTddOptionals(taskMeta.conditionalTdd);
         }
         cleaned.metadata = taskMeta;
+      }
+      if (isObject(cleaned.retry)) {
+        cleaned.retry = stripNullKeys(cleaned.retry, ["multiplier", "retryableErrorCodes"]);
+      }
+      if (isObject(cleaned.timeout)) {
+        cleaned.timeout = stripNullKeys(cleaned.timeout, ["heartbeatTimeoutMs", "deadline"]);
       }
       return cleaned;
     });
@@ -287,6 +180,14 @@ export function normalizeWorkflowDefinitionOptionals(value: unknown): unknown {
       stripEmptyStringKeys(cleanedGate, ["description"]);
       return cleanedGate;
     });
+  }
+  if (Array.isArray(copy.gates)) {
+    copy.gates = copy.gates.map(gate =>
+      isObject(gate) ? stripNullKeys(gate, ["description", "taskId", "configuration", "metadata"]) : gate
+    );
+  }
+  if (isObject(copy.recovery)) {
+    copy.recovery = stripNullKeys(copy.recovery, ["eventInterval"]);
   }
   if (isObject(copy.recoveryPolicy)) {
     copy.recoveryPolicy = stripNullKeys(copy.recoveryPolicy, ["maxReworkIterations", "reconcileTimeoutMs", "metadata"]);

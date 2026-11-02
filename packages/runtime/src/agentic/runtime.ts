@@ -108,9 +108,9 @@ export function isConflictResolverAssignment(message: RoleMessage): boolean {
     (message.payload as Record<string, unknown>).kind === CONFLICT_RESOLUTION_KIND;
 }
 /** Read-only specialists the Coordinator may delegate to; each needs its own bound pane, or an explicit capable fallback. */
-const SPECIALIST_ROLES: readonly string[] = ["analyst", "specifier", "architect", "planner", "security", "reviewer", "qa", "tester"];
+const SPECIALIST_ROLES: readonly string[] = ["specifier", "architect", "planner", "security", "reviewer", "qa", "tester"];
 /** Used only when the requested role has no pane in this session and the fallback pane has every required capability. */
-const SPECIALIST_FALLBACKS: Readonly<Record<string, string>> = { analyst: "specifier", security: "reviewer", tester: "qa" };
+const SPECIALIST_FALLBACKS: Readonly<Record<string, string>> = { security: "reviewer", tester: "qa" };
 /** Synchronous refusal of a specialist request that could not be routed to any bound pane; the run itself is not changed. */
 export class SpecialistUnavailableError extends Error {
   readonly code = "specialist_unavailable";
@@ -2681,7 +2681,7 @@ export class AgenticWorkflowRuntime {
       if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out)))
         throw new Error("Unknown delivery must be reconciled before requesting another specialist assignment");
       if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
-      const governanceRole = requestedRole === "analyst" ? "specifier" : requestedRole;
+      const governanceRole = requestedRole;
       const pin = profileInput === undefined ? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(governanceRole)] : RoleProfilePinSchema.parse(profileInput);
       const selectedProfile = selectRoleProfile(this.ports.roleProfiles, governanceRole, pin, [...requiredCapabilities, "repository.read"]);
       if (selectedProfile && (!this.ports.panes.allocateSpecialist || !this.ports.preflightRoleProfile)) throw new Error("Profiled specialist allocation is unsupported by this host");

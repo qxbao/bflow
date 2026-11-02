@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readFile, realpath, lstat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { buildRunnerNamePattern } from "./node-tap.js";
 import { parseNodeTestFlags, type AdapterContext, type AdapterDetection, type AdapterRunner, type RunnerAdapter } from "./runner-adapter.js";
@@ -7,11 +7,6 @@ export const javascriptAdapter: RunnerAdapter = {
   id: "javascript",
   async detect(context: AdapterContext): Promise<AdapterDetection> {
     const runners: AdapterRunner[] = [], notes: string[] = [];
-    let rootDeps: Record<string, string> | undefined;
-    try {
-      const rootPkg = JSON.parse(await readFile(join(context.root, "package.json"), "utf8"));
-      rootDeps = { ...rootPkg?.dependencies, ...rootPkg?.devDependencies };
-    } catch {}
     for (const manifest of context.files.filter(file => /(^|\/)package\.json$/.test(file))) {
       const directory = dirname(manifest), absolute = join(context.root, directory);
       let pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string>; scripts?: Record<string, string> };
@@ -23,33 +18,18 @@ export const javascriptAdapter: RunnerAdapter = {
         if (directory !== "." && !file.startsWith(directory + "/")) throw new Error("Test file belongs to another JavaScript project");
         return directory === "." ? file : file.slice(directory.length + 1);
       });
-      const nodeFlags = typeof pkg.scripts?.test === "string" ? parseNodeTestFlags(pkg.scripts.test) : [];
+      const nodeFlags = typeof pkg.scripts?.test === "string" ? parseNodeTestFlags(pkg.scripts.test) : undefined;
       if (nodeFlags !== undefined) {
         runners.push({ ...base, adapterId: "node", version: process.version, format: "node_tap", nameRule: "node --test test title only",
           bind(identities) { return { args: [...nodeFlags, "--test", "--test-reporter=tap", "--test-name-pattern=" + buildRunnerNamePattern(identities.testNames, "node"), ...selectedFiles(identities.testPaths)] }; } });
       }
       for (const [id, entry, format] of [["vitest", "vitest/vitest.mjs", "vitest_json"], ["jest", "jest/bin/jest.js", "jest_json"], ["mocha", "mocha/bin/mocha.js", "mocha_json"]] as const) {
-        if (!deps[id] && !rootDeps?.[id]) continue;
+        if (!deps[id]) continue;
         try {
-          let dependencyRoot = directory === "." ? context.dependencySource ?? absolute : absolute;
-          let modules = join(dependencyRoot, "node_modules");
-          let entryFile = join(modules, entry);
-          let foundEntry = false;
-          try {
-            if ((await stat(entryFile)).isFile()) foundEntry = true;
-          } catch {}
-          if (!foundEntry && directory !== ".") {
-            const rootModules = join(context.dependencySource ?? context.root, "node_modules");
-            try {
-              if ((await stat(join(rootModules, entry))).isFile()) {
-                dependencyRoot = context.dependencySource ?? context.root;
-                modules = rootModules;
-                entryFile = join(modules, entry);
-                foundEntry = true;
-              }
-            } catch {}
-          }
-          if (!foundEntry) continue;
+          const dependencyRoot = directory === "." ? context.dependencySource ?? absolute : absolute;
+          const modules = join(dependencyRoot, "node_modules");
+          if (!(await lstat(modules)).isDirectory() || await realpath(modules) !== modules) throw new Error("dependency root is not a canonical directory");
+          if (!(await lstat(join(modules, entry))).isFile()) continue;
           const installed = JSON.parse(await readFile(join(modules, id, "package.json"), "utf8")) as { version?: string };
           if (!installed.version || !/^\d+\.\d+\.\d+/.test(installed.version)) throw new Error("missing installed runner version");
           if (id === "vitest" && ![1, 2, 3].includes(Number(installed.version.split(".")[0]))) throw new Error("unsupported Vitest major version");

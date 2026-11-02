@@ -27,47 +27,6 @@ async function createFixture(files: Record<string, string> = {}): Promise<string
 }
 
 describe("Flow 06 Round 4 — Developer execution, tools & runner hardening", () => {
-  describe("Vector 1: Runner detection on realistic repos", () => {
-    it("1.1 detects node --test runner when package.json has NO scripts field or scripts.test is missing", async () => {
-      const root = await createFixture({
-        "package.json": JSON.stringify({ name: "no-scripts-repo", version: "1.0.0" }),
-        "test/example.test.js": "const test = require('node:test'); test('ok', () => {});"
-      });
-      const result = await detectTestRunners(root, { nodeExecutable: process.execPath });
-      expect(result.status).toBe("detected");
-      if (result.status === "detected") {
-        expect(result.profiles.some(p => p.command.includes("auto:unit"))).toBe(true);
-      }
-    });
-
-    it("1.2 detects vitest in pnpm monorepo workspace subpackages when vitest is hoisted to root", async () => {
-      const root = await createFixture({
-        "package.json": JSON.stringify({
-          name: "monorepo-root",
-          devDependencies: { vitest: "^2.1.8" }
-        }),
-        "pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n",
-        "node_modules/vitest/package.json": JSON.stringify({ version: "2.1.9" }),
-        "node_modules/vitest/vitest.mjs": "// vitest binary",
-        "packages/app/package.json": JSON.stringify({
-          name: "@mono/app",
-          devDependencies: { vitest: "^2.1.8" }
-        }),
-        "packages/app/test/app.test.ts": "import { test } from 'vitest'; test('ok', () => {});"
-      });
-      const result = await detectTestRunners(root, { nodeExecutable: process.execPath });
-      expect(result.status).toBe("detected");
-      if (result.status === "detected") {
-        expect(result.profiles.some(p => p.adapter?.adapterId === "vitest" || p.id.includes("vitest"))).toBe(true);
-      }
-    });
-
-    it("1.3 accepts relative paths with spaces in tsc build args", () => {
-      const parsed = parseTscBuildArgs("tsc -b packages/my app");
-      expect(parsed).toEqual(["-b", "packages/my app"]);
-    });
-  });
-
   describe("Vector 2: Red evidence recognized for valid failing tests", () => {
     it("recognizes modern assertion failure message variants without rejecting as testCodeFailure", () => {
       const validAssertionErrors = [
@@ -124,20 +83,6 @@ describe("Flow 06 Round 4 — Developer execution, tools & runner hardening", ()
   });
 
   describe("Vector 4: Tool inputs from model with nulls, extra fields, and aliases", () => {
-    it("InspectInputSchema accepts run_id, task_id, and extra fields without throwing strict error", () => {
-      const input = {
-        run_id: "run-123",
-        task_id: "task-456",
-        extraField: "ignored-model-output"
-      };
-      const parsed = InspectInputSchema.safeParse(input);
-      expect(parsed.success).toBe(true);
-      if (parsed.success) {
-        expect(parsed.data.runId).toBe("run-123");
-        expect(parsed.data.taskId).toBe("task-456");
-      }
-    });
-
     it("ReadTaskLogInputSchema accepts snake_case aliases and extra fields", () => {
       const input = {
         run_id: "run-123",

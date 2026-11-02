@@ -53,7 +53,7 @@ const workspaceReadSchema = z.object({
   run_id: optionalNonEmptyId,
   taskId: optionalNonEmptyId,
   task_id: optionalNonEmptyId
-}).passthrough().transform(data => ({
+}).strict().transform(data => ({
   path: normalizeFilePath(data as Record<string, unknown>),
   runId: data.runId ?? data.run_id,
   taskId: data.taskId ?? data.task_id
@@ -67,13 +67,13 @@ const workspaceWriteSchema = z.object({
   taskId: optionalNonEmptyId,
   task_id: optionalNonEmptyId,
   content: z.string().max(FILE_BYTES),
-  expectedSha256: z.preprocess((v: unknown) => v === undefined || v === "" ? null : v, z.string().regex(/^[a-f0-9]{64}$/).nullable().optional())
-}).passthrough().transform(data => ({
+  expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable()
+}).strict().transform(data => ({
   path: normalizeFilePath(data as Record<string, unknown>),
   runId: data.runId ?? data.run_id,
   taskId: data.taskId ?? data.task_id,
   content: data.content,
-  expectedSha256: data.expectedSha256 ?? null
+  expectedSha256: data.expectedSha256
 }));
 const SUPPLEMENTAL_RED_TEST_OR_FIXTURE_PATTERN =
   /\.(?:test|spec)\.[cm]?[jt]sx?$|(?<=^|\/)(?:test_[^/]+\.py|[^/]+_test\.py)$|_test\.(?:go|rb|dart|exs)$|Spec\.rb$|(?:Test|Tests|Spec)\.(?:java|kt|cs|php|swift|cpp|cc|cxx)$|(?<=^|\/)tests\/[^/]+\.rs$|(?<=^|\/)tests\.rs$|_tests?\.rs$|(?<=^|\/)(?:__fixtures__|__mocks__|__snapshots__|testdata)\/|(?<=^|\/)(?:test|tests|__tests__|spec|Specs|Tests)\/(?:fixtures|helpers|support|mocks|snapshots|common|testutils|util|utils)\//;
