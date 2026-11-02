@@ -3,7 +3,8 @@ import { join, resolve } from 'node:path';
 import { ExecutionPlanInputSchema, SkillManifestSchema, sameRoleProfilePin, type ExecutionPlanInput, type PlanDecision, type PlanObservation,
     type SkillDefinition, type TrustScope, type AgentRole, type AgentProviderId } from '@bflow/contracts';
 import { defaultHostChecks, hostRoleCapabilities, buildExecutionPlan, canonicalPlanDigest, resolvePlanField, readSkillApproval,
-    parseBehavioralCommands, parseMutationChecks, parseAppChecks, redactSecrets, isSensitiveKey, readExecutionRepositorySnapshot, resolveRoleProfile } from '@bflow/runtime';
+    parseBehavioralCommands, parseMutationChecks, parseAppChecks, redactSecrets, isSensitiveKey, readExecutionRepositorySnapshot, resolveRoleProfile,
+    normalizeManagedCodexWorkspaceTrust } from '@bflow/runtime';
 import { defaultHostEnvironment, detectPlatform, isolatedPlatformProfile, MachineConfigSchema } from '@bflow/machine-setup';
 import type { EnvironmentCompositionInput } from './environment.js';
 import { identifyRepository } from './repository.js';
@@ -18,7 +19,7 @@ import { readGatewayReadiness } from './gateway-readiness.js';
 import { readGatewayRepositoriesState } from './gateway-repositories.js';
 import { specialistProfilePath } from './specialist-profiles.js';
 import { resolveHostRepositoryRoot } from './docs-gateway.js';
-export const EXECUTION_RESOLVER_VERSION = 'cli-platform-1';
+export const EXECUTION_RESOLVER_VERSION = 'cli-platform-2';
 /** Reads desired configuration and existing observations. No readiness inspector or mutable store is opened. */
 export async function loadExecutionResolution(original: EnvironmentCompositionInput, actualPlatform?: AgenticHostPlatformOptions): Promise<ExecutionPlanInput> {
     const resolution = await resolvePlatformConfiguration(original);
@@ -98,7 +99,8 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
                 const settings: Record<string, unknown> = {};
                 for (const relative of ['home/.codex/config.toml', 'home/.claude/settings.json', 'codex-backend.mode', 'codex-lb.url']) {
                     try {
-                        const content = await readPreviewFile(join(profileRoot, relative));
+                        let content = await readPreviewFile(join(profileRoot, relative));
+                        if (relative === 'home/.codex/config.toml') content = await normalizeManagedCodexWorkspaceTrust(content, input.repository.root);
                         settings[relative] = redactSecrets(relative.endsWith('.json') ? JSON.parse(content) : content);
                     } catch (error) {
                         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -357,7 +359,9 @@ export async function loadHostExecutionResolution(input: EnvironmentCompositionI
         .map((file, index) => ({ ...file, component: `${file.component}-${index}` }));
     const digest = async (file: typeof files[number]) => {
         try {
-            const text = await readPreviewFile(file.path);
+            let text = await readPreviewFile(file.path);
+            if (/^native-profile-settings-\d+$/.test(file.component) && file.path.endsWith('/home/.codex/config.toml'))
+                text = await normalizeManagedCodexWorkspaceTrust(text, input.repository.root);
             return file.format === 'json' ? canonicalPlanDigest(JSON.parse(text)) : createHash('sha256').update(text).digest('hex');
         }
         catch (error) {

@@ -4,6 +4,8 @@ import { promisify } from 'node:util';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { dirname, join, parse, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import { TaskRecordSchema, IntegrationRecordSchema } from '@bflow/git-orchestrator';
 import {
   ExecutionPlanInputSchema, ExecutionResolutionSourcesSchema, PlanDiffSchema, PlanPolicyExplanationSchema,
   type ExecutionPlanInput, type PlanDiff, type WorkflowDefinition
@@ -131,6 +133,66 @@ function privateSourceDrift(fingerprint: string, components: readonly string[]):
   }));
 }
 
+/** Read-only normalization shared with CLI capture. No trust is granted here. */
+export async function normalizeManagedCodexWorkspaceTrust(text: string, repositoryRoot: string): Promise<string> {
+  const table = (path: string) => `[projects.${JSON.stringify(path).replace(/\u007f/g, '\\u007f')}]\ntrust_level = "trusted"\n`;
+  const atLine = (source: string, entry: string) => {
+    const at = source.indexOf(entry);
+    return at >= 0 && (at === 0 || source[at - 1] === '\n') ? at : -1;
+  };
+  // The existing native root decision authorizes propagation; never ignore root trust changes themselves.
+  if (atLine(text, table(repositoryRoot)) < 0) return text;
+  try {
+    const stateRoot = findPrivateRuntimeStateDirectory(repositoryRoot);
+    if (!stateRoot || await realpath(repositoryRoot) !== repositoryRoot) return text;
+    const environment = { ...process.env };
+    for (const key of Object.keys(environment)) if (key.startsWith('GIT_')) delete environment[key];
+    environment.GIT_OPTIONAL_LOCKS = '0';
+    const flags = await runtimeGitDirectoryFlags(repositoryRoot);
+    const git = async (args: string[]) => (await executeGit('git', [...flags, '--no-optional-locks', '-c', 'core.fsmonitor=false',
+      '-c', 'core.hooksPath=/dev/null', ...args], { cwd: repositoryRoot, env: environment, encoding: 'utf8', timeout: 10_000,
+      maxBuffer: MAX_GIT_SNAPSHOT_BYTES })).stdout;
+    const common = await realpath((await git(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim());
+    const journal = z.object({ version: z.literal(1), repository: z.literal(common), tasks: z.record(TaskRecordSchema),
+      integrations: z.record(IntegrationRecordSchema) }).strict().parse(JSON.parse((await readResolutionFile(join(common, 'bflow-git/state.json'), 32 * 1024 * 1024)).toString('utf8')));
+    const registered = (await git(['worktree', 'list', '--porcelain', '-z'])).split('\0\0').map(block => block.split('\0'));
+    let result = text;
+    for (const [kind, records] of [['task', journal.tasks], ['integration', journal.integrations]] as const) {
+      for (const [key, record] of Object.entries(records)) {
+        if (!/^[a-f0-9]{64}$/.test(key) || record.key !== key ||
+          record.worktreePath !== join(stateRoot, 'worktrees', `${kind}-${key}`)) continue;
+        const entry = table(record.worktreePath), at = atLine(result, entry);
+        if (at < 0 || result.indexOf(entry, at + entry.length) >= 0) continue;
+        const rest = result.slice(at + entry.length);
+        // Any additional property/comment in this project table stays guarded byte-for-byte.
+        if (rest !== '' && !/^\n?\[/.test(rest)) continue;
+        let missing = false;
+        try { await lstat(record.worktreePath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; missing = true; }
+        if (missing) {
+          if (record.status !== 'cleaned') continue;
+        } else {
+          if (await realpath(record.worktreePath) !== record.worktreePath) continue;
+          const binding = registered.find(lines => lines.includes(`worktree ${record.worktreePath}`));
+          if (!binding?.includes(`branch refs/heads/${record.branchName}`)) continue;
+          const marker = join(record.worktreePath, '.git');
+          const raw = (await readResolutionFile(marker, 4096)).toString('utf8').trim();
+          if (!raw.startsWith('gitdir: ')) continue;
+          const gitDirectory = resolve(record.worktreePath, raw.slice(8));
+          if (dirname(gitDirectory) !== join(common, 'worktrees') || await realpath(gitDirectory) !== gitDirectory) continue;
+          if ((await readResolutionFile(join(gitDirectory, 'gitdir'), 4096)).toString('utf8').trim() !== marker ||
+            resolve(gitDirectory, (await readResolutionFile(join(gitDirectory, 'commondir'), 4096)).toString('utf8').trim()) !== common) continue;
+        }
+        // ensureCodexWorkspaceTrust appends exactly one separator newline before this table.
+        result = result.slice(0, at > 0 ? at - 1 : 0) + rest;
+      }
+    }
+    return result;
+  } catch {
+    // Missing, malformed, foreign or unsafe proof cannot create an exception to the drift guard.
+    return text;
+  }
+}
+
 /** Private watches are conservative; non-JSON changes require a new read-only semantic resolution. */
 export async function createExecutionResolutionReader(input: unknown): Promise<ExecutionResolutionReader> {
   const source = ExecutionResolutionSourcesSchema.parse(input);
@@ -142,7 +204,13 @@ export async function createExecutionResolutionReader(input: unknown): Promise<E
     const snapshots: Record<string, string> = {};
     for (const file of source.files) {
       try {
-        const bytes = await readResolutionFile(file.path);
+        let bytes = await readResolutionFile(file.path);
+        if (source.repositoryRoot && /^native-profile-settings-\d+$/.test(file.component) &&
+          file.path.endsWith('/home/.codex/config.toml')) {
+          const text = bytes.toString('utf8');
+          // Invalid encodings must retain their original bytes, not collapse to replacement characters.
+          if (Buffer.from(text).equals(bytes)) bytes = Buffer.from(await normalizeManagedCodexWorkspaceTrust(text, source.repositoryRoot));
+        }
         snapshots[file.component] = file.format === 'json'
           ? canonicalPlanDigest(JSON.parse(bytes.toString('utf8')))
           : createHash('sha256').update(bytes).digest('hex');
