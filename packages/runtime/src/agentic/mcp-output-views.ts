@@ -6,12 +6,38 @@ import { z } from "zod";
 import type { AgentProviderId, AgentRole, JsonValue } from "@bflow/contracts";
 import { digest, json, record } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
+import { VerificationResultSchema, type Specification, type TestStrategy } from "@bflow/contracts";
+
+/** Keep every unique accepted requirement; prior measurement logs stay in authenticated host receipts. */
+export function compactPolicyReviewDossier(specification: Specification, strategy: TestStrategy) {
+  const { testStrategy: _duplicateStrategy, tddDecision: _duplicateDecision, ...specificationView } = specification;
+  const { tddEvidence, conditionalTdd, ...otherMetadata } = strategy.metadata ?? {};
+  const policy = record(conditionalTdd);
+  const { assessment: _assessmentInSpec, acceptanceCriteria: _criteriaInSpec, affectedPaths: _pathsInSpec,
+    riskLevel: _riskInSpec, ...policyRules } = policy;
+  const priorEvidence = Array.isArray(tddEvidence) ? tddEvidence.map(value => {
+    const result = VerificationResultSchema.parse(value), details = record(result.metadata?.conditionalTdd);
+    return { verificationId: result.verificationId, phase: details.phase, sourceRevision: details.sourceRevision,
+      artifactReferences: result.evidenceArtifacts };
+  }) : [];
+  return json({ specification: specificationView,
+    strategy: { ...strategy, metadata: { ...otherMetadata, conditionalTdd: policyRules } },
+    priorEvidence,
+    presentation: "Duplicate strategy/policy inputs are in specification. Prior raw measurement payloads remain in immutable host receipts and are authenticated again before a phase is accepted. No verification requirement is omitted." });
+}
+
+const emptyOrNullToUndefined = (value: unknown) =>
+  value === null || (typeof value === "string" && value.trim() === "") ? undefined : value;
+const nullToUndefined = (value: unknown) => (value === null ? undefined : value);
 
 export const PlanningReferenceInputSchema = z
   .object({
-    section: z.enum(["specification", "test_strategy", "workflow", "all"]),
-    view: z.enum(["full", "compact", "schema_only"]).optional(),
-    includeRunners: z.boolean().optional()
+    section: z.preprocess(
+      value => (value === null || value === undefined || (typeof value === "string" && value.trim() === "") ? "all" : value),
+      z.enum(["specification", "test_strategy", "workflow", "all"])
+    ),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "compact", "schema_only"]).optional()),
+    includeRunners: z.preprocess(nullToUndefined, z.boolean().optional())
   })
   .strict();
 
@@ -62,7 +88,7 @@ const COMPACT_PLANNING_SECTIONS = {
       superRefineRules: [
         "strict schemaVersion=2; status='draft' for propose_workflow",
         "metadata.sdd (policyVersion=1) requires assessment & traceability; level/complexity/riskLevel must match classifyChange",
-        "level='full' requires architectureNotes, securityConsiderations, rollbackPlan; non-trivial requires functionalRequirements & proposedTestStrategy",
+        "level='full' requires architectureNotes, securityConsiderations, rollbackPlan, testStrategy & tddDecision; non-trivial requires functionalRequirements & proposedTestStrategy",
         "traceabilityTaskIds must equal sorted taskIds in metadata.sdd.traceability"
       ]
     },
@@ -339,10 +365,10 @@ export async function planningReferenceView(
 
 export const InspectInputSchema = z
   .object({
-    runId: z.string().min(1).optional(),
-    view: z.enum(["full", "summary", "status", "tasks", "blockers"]).optional(),
-    taskId: z.string().min(1).optional(),
-    cursor: z.string().min(1).max(128).optional()
+    runId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "status", "tasks", "blockers"]).optional()),
+    taskId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+    cursor: z.preprocess(emptyOrNullToUndefined, z.string().min(1).max(128).optional())
   })
   .strict();
 
@@ -425,11 +451,16 @@ function projectRunByView(
   }
 
   if (view === "status") {
+    const isVerifiedComplete = (t: Record<string, unknown>) =>
+      record(t.result ?? {}).status === "succeeded" && record(t.cycle ?? {}).status === "passed";
     const completedTaskIds = selectedTasks
-      .filter(t => record(t.result ?? {}).status === "succeeded")
+      .filter(isVerifiedComplete)
+      .map(t => String(t.taskId));
+    const submittedUnverifiedTaskIds = selectedTasks
+      .filter(t => record(t.result ?? {}).status === "succeeded" && record(t.cycle ?? {}).status !== "passed")
       .map(t => String(t.taskId));
     const pendingTaskIds = selectedTasks
-      .filter(t => record(t.result ?? {}).status !== "succeeded")
+      .filter(t => !isVerifiedComplete(t))
       .map(t => String(t.taskId));
     return {
       runId: runInput.runId,
@@ -440,9 +471,12 @@ function projectRunByView(
       ...(runInput.supersededBy !== undefined ? { supersededBy: runInput.supersededBy } : {}),
       ...(runInput.error !== undefined ? { error: runInput.error } : {}),
       ...(runInput.approvalKind !== undefined ? { approvalKind: runInput.approvalKind } : {}),
+      ...(runInput.fastPath !== undefined ? { fastPath: runInput.fastPath } : {}),
+      ...(runInput.executionPlanDrift !== undefined ? { executionPlanDrift: runInput.executionPlanDrift } : {}),
       pendingAction: runInput.pendingAction ?? null,
       taskCount: selectedTasks.length,
       completedTaskIds,
+      submittedUnverifiedTaskIds,
       pendingTaskIds
     };
   }
@@ -465,6 +499,8 @@ function projectRunByView(
           res.status === "blocked" ||
           cyc.status === "failed" ||
           cyc.status === "blocked" ||
+          cyc.status === "rework_required" ||
+          cyc.status === "aborted" ||
           cyc.status === "escalated" ||
           t.reworkResolutions !== undefined
         );
@@ -477,6 +513,11 @@ function projectRunByView(
       pendingAction: runInput.pendingAction ?? null,
       ...(runInput.lastWorkflowRejection !== undefined
         ? { lastWorkflowRejection: runInput.lastWorkflowRejection }
+        : {}),
+      ...(runInput.executionPlanDrift !== undefined ? { executionPlanDrift: runInput.executionPlanDrift } : {}),
+      ...(runInput.prototype !== undefined ? { prototype: runInput.prototype } : {}),
+      ...(runInput.fastPath !== undefined && record(runInput.fastPath).status === "downgraded"
+        ? { fastPath: runInput.fastPath }
         : {}),
       ...(runInput.conflictResolution !== undefined ? { conflictResolution: runInput.conflictResolution } : {}),
       ...(runInput.approvalKind !== undefined ? { approvalKind: runInput.approvalKind } : {}),
@@ -538,6 +579,10 @@ function projectRunByView(
     ...(runInput.lastWorkflowRejection !== undefined
       ? { lastWorkflowRejection: runInput.lastWorkflowRejection }
       : {}),
+    ...(runInput.executionPlanDrift !== undefined ? { executionPlanDrift: runInput.executionPlanDrift } : {}),
+    ...(runInput.prototype !== undefined ? { prototype: runInput.prototype } : {}),
+    ...(runInput.fastPath !== undefined ? { fastPath: runInput.fastPath } : {}),
+    ...(runInput.roleProfileDefaults !== undefined ? { roleProfileDefaults: runInput.roleProfileDefaults } : {}),
     ...(runInput.conflictResolution !== undefined ? { conflictResolution: runInput.conflictResolution } : {}),
     ...(runInput.approvalKind !== undefined ? { approvalKind: runInput.approvalKind } : {}),
     ...(runInput.approval !== undefined ? { approval: runInput.approval } : {}),
@@ -703,9 +748,9 @@ export function summarizeInspectState(stateInput: unknown, rawQuery: InspectInpu
 
 export const AssignmentContextInputSchema = z
   .object({
-    view: z.enum(["full", "compact", "active_only"]).optional(),
-    surveyView: z.enum(["full", "summary", "anchors_only"]).optional(),
-    includeReleased: z.boolean().optional(),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "compact", "active_only"]).optional()),
+    surveyView: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "anchors_only"]).optional()),
+    includeReleased: z.preprocess(nullToUndefined, z.boolean().optional()),
     paths: z.unknown().optional()
   })
   .strict();
@@ -959,6 +1004,10 @@ export function compactAssignmentContext(
             ...(run.lastWorkflowRejection !== undefined
               ? { lastWorkflowRejection: run.lastWorkflowRejection }
               : {}),
+            ...(run.executionPlanDrift !== undefined ? { executionPlanDrift: run.executionPlanDrift } : {}),
+            ...(run.prototype !== undefined ? { prototype: run.prototype } : {}),
+            ...(run.fastPath !== undefined ? { fastPath: run.fastPath } : {}),
+            ...(run.roleProfileDefaults !== undefined ? { roleProfileDefaults: run.roleProfileDefaults } : {}),
             ...(run.conflictResolution !== undefined ? { conflictResolution: run.conflictResolution } : {}),
             ...(run.workflowCycle !== undefined ? { workflowCycle: run.workflowCycle } : {}),
             ...(run.workflowChange !== undefined ? { workflowChange: run.workflowChange } : {}),
@@ -1022,10 +1071,13 @@ export function compactAssignmentContext(
 
 export const ReadProjectPolicyInputSchema = z
   .object({
-    filePath: z.string().min(1).max(512).optional(),
-    view: z.enum(["full", "toc", "section", "digests"]).optional(),
-    heading: z.string().min(1).max(200).optional(),
-    knownDigests: z.record(z.string().min(1).max(512), z.string().regex(/^[a-f0-9]{64}$/)).optional()
+    filePath: z.preprocess(emptyOrNullToUndefined, z.string().min(1).max(512).optional()),
+    view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "toc", "section", "digests"]).optional()),
+    heading: z.preprocess(emptyOrNullToUndefined, z.string().min(1).max(200).optional()),
+    knownDigests: z.preprocess(
+      nullToUndefined,
+      z.record(z.string().min(1).max(512), z.string().regex(/^[a-f0-9]{64}$/)).optional()
+    )
   })
   .strict()
   .superRefine((value, ctx) => {

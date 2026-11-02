@@ -1,7 +1,7 @@
 import type { GatewayToolOperationOptions } from "./browser-resource-transactions.js";
-import { lstat, mkdir } from "node:fs/promises";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import {
   AgentHealthCheckSchema, RepositoryToolPolicySchema, ResolvedToolGrantSchema, ROLE_PROFILE_FEATURE,
   canonicalReceiptJson,
@@ -19,7 +19,16 @@ import {
   type OperationResult,
   type RoleProfilePin
 } from "@bflow/contracts";
-import { computeFileSha256, defaultRolePrompt, providerSessionEnvironment, resolveAndVerifyExecutable, type LiveReadinessObservation } from "@bflow/agent-providers";
+import {
+  computeFileSha256,
+  defaultRolePrompt,
+  propagateClaudeWorktreeTrustIfRootTrusted,
+  propagateCodexWorktreeTrustIfRootTrusted,
+  providerLaunchEnvironment,
+  providerSessionEnvironment,
+  resolveAndVerifyExecutable,
+  type LiveReadinessObservation
+} from "@bflow/agent-providers";
 import { appendRoleProfileInstructions, assertRoleProfilePin, loadRoleProfileSnapshot, persistRoleProfileSnapshot, resolveRoleProfile } from "./role-profiles.js";
 import {
   preparePrivateCodexHome,
@@ -505,7 +514,13 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       if (attempt.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
       return failWith(attempt.error);
     }
-    const launched = await this.launchRole(attempt, options);
+    let launched: OperationResult<PreparedRoleLaunch>;
+    try {
+      launched = await this.launchRole(attempt, options);
+    } catch (error) {
+      if (attempt.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
+      throw error;
+    }
     if (!launched.ok) {
       if (attempt.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
       return launched;
@@ -743,7 +758,13 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     options?: OperationOptions
   ): Promise<RoleAttempt> {
     const prepared = await this.prepareRoleEnvironment(identity, requirement, options);
-    return prepared.ready ? this.checkPreparedRole(prepared, options) : prepared;
+    if (!prepared.ready) return prepared;
+    try {
+      return await this.checkPreparedRole(prepared, options);
+    } catch (error) {
+      if (prepared.gatewayTouched) await this.revokeRoleGateway(identity, requirement, options);
+      throw error;
+    }
   }
 
   private async prepareRoleEnvironment(
@@ -947,6 +968,29 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
           "environment"
         )
       );
+      if (
+        preparedCodexHome.mode === "native_auth_compatible" &&
+        resolve(preliminaryEnvironment.value.cwd) !== resolve(identity.workspaceRoot)
+      ) {
+        await propagateCodexWorktreeTrustIfRootTrusted({
+          workspaceRoot: identity.workspaceRoot,
+          worktreePath: preliminaryEnvironment.value.cwd,
+          configFile: join(preparedCodexHome.CODEX_HOME, "config.toml")
+        });
+      }
+    } else if (
+      requirement.provider === "codex" &&
+      isolatorProfile !== undefined &&
+      resolve(preliminaryEnvironment.value.cwd) !== resolve(identity.workspaceRoot)
+    ) {
+      const isolatorCodexHome =
+        isolatorProfile.environment["CODEX_HOME"] ??
+        join(isolatorProfile.environment["HOME"] ?? homedir(), ".codex");
+      await propagateCodexWorktreeTrustIfRootTrusted({
+        workspaceRoot: identity.workspaceRoot,
+        worktreePath: preliminaryEnvironment.value.cwd,
+        configFile: join(isolatorCodexHome, "config.toml")
+      });
     }
 
     const environmentRequirement = preparedCodexHome === undefined
@@ -979,6 +1023,12 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       ? undefined
       : { ...isolatorProfile.environment };
     const launchEnvironmentValues: Record<string, string> = {
+      // Native Claude otherwise inherits these selectors from Herdr's host process.
+      // Pin the same effective locations so transcript registration uses validated launch material.
+      ...(requirement.provider === "claude" && isolatorProfile === undefined ? {
+        HOME: process.env["HOME"] ?? homedir(),
+        CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] ?? join(process.env["HOME"] ?? homedir(), ".claude")
+      } : {}),
       ...(codexLaunchEnvironment ?? {}),
       ...(preparedCodexHome !== undefined
         ? {
@@ -1006,6 +1056,20 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       launchEnvironmentValues["XDG_STATE_HOME"] = join(privateHome, ".local", "state");
       launchEnvironmentValues["XDG_CACHE_HOME"] = join(privateHome, ".cache");
       launchEnvironmentValues["PATH"] = `${join(privateHome, "bin")}:${process.env["PATH"] ?? "/usr/bin:/bin"}`;
+    }
+    if (
+      requirement.provider === "claude" &&
+      resolve(environment.value.cwd) !== resolve(identity.workspaceRoot)
+    ) {
+      await propagateClaudeWorktreeTrustIfRootTrusted({
+        workspaceRoot: identity.workspaceRoot,
+        worktreePath: environment.value.cwd,
+        env: {
+          ...process.env,
+          ...(requirement.environmentVariables ?? {}),
+          ...launchEnvironmentValues
+        }
+      });
     }
     const launchEnvironment = Object.keys(launchEnvironmentValues).length > 0 ? launchEnvironmentValues : undefined;
     const context: ProviderAdapterContext = {
@@ -1047,7 +1111,16 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
 
   private async checkPreparedRole(prepared: RoleEnvironmentReady, options?: OperationOptions): Promise<RoleAttempt> {
     await this.deps.beforeSideEffect?.();
-    const preflight = await this.deps.providers.preflight(prepared.environment, prepared.context, options);
+    let preflight: OperationResult<AgentHealthResult>;
+    try {
+      preflight = await this.deps.providers.preflight(prepared.environment, prepared.context, options);
+    } catch (error) {
+      return this.blockedRole(prepared, {
+        code: "validation",
+        retryable: false,
+        message: `Provider preflight failed before returning a health verdict: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
     return preflight.ok ? { ...prepared, preflight: preflight.value,
       summary: summaryOf(prepared.requirement, "ready", [...preflight.value.checks, ...prepared.toolChecks]) } : this.blockedRole(prepared, preflight.error);
   }
@@ -1065,8 +1138,31 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
         assertRoleProfilePin(requirement.roleProfile.pin, attempt.environment.roleProfile);
       } catch { return fail("conflict", "Role profile snapshot missing, corrupted or mismatched before launch"); }
     }
-    const profile = await this.deps.providers.prepareLaunch(attempt.environment, attempt.context, identity.generation, options);
+    let profile: OperationResult<AgentLaunchProfile>;
+    try {
+      profile = await this.deps.providers.prepareLaunch(attempt.environment, attempt.context, identity.generation, options);
+    } catch (error) {
+      return fail(
+        "validation",
+        `Provider launch preparation failed before returning launch material: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
     if (!profile.ok) return failWith(profile.error);
+
+    const sanitizedPath = await sanitizeLaunchPathForProvider(
+      attempt.context.launchEnvironment?.["PATH"],
+      requirement.provider,
+      profile.value
+    );
+    const hasConfiguredMcpServers =
+      (attempt.context.mcpRegistrations?.length ?? 0) > 0 ||
+      Object.keys(attempt.context.hostMcpServers ?? {}).length > 0;
+    const providerEnvDefaults = hasConfiguredMcpServers
+      ? providerLaunchEnvironment(requirement.provider)
+      : providerSessionEnvironment(requirement.provider);
+    const explicitToolTimeout =
+      requirement.environmentVariables?.["MCP_TOOL_TIMEOUT"] ??
+      attempt.context.launchEnvironment?.["MCP_TOOL_TIMEOUT"];
 
     const prepared: PreparedRoleLaunch = {
       role: requirement.role,
@@ -1082,8 +1178,10 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       launch: {
         argv: profile.value.argv,
         env: { ...(attempt.context.launchEnvironment ?? {}),
+          ...(sanitizedPath !== undefined ? { PATH: sanitizedPath } : {}),
           ...(attempt.requirement.toolGrants === undefined ? attempt.gateway.tokenEnvironment : {}),
-          ...providerSessionEnvironment(requirement.provider) },
+          ...providerEnvDefaults,
+          ...(explicitToolTimeout !== undefined ? { MCP_TOOL_TIMEOUT: explicitToolTimeout } : {}) },
         launchId: profile.value.launchId,
         launchFingerprint: profile.value.launchFingerprint,
         ...(requirement.roleProfile ? { roleProfile: requirement.roleProfile.pin, features: [ROLE_PROFILE_FEATURE],
@@ -1149,4 +1247,67 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
       if (!bestEffort) throw error;
     }
   }
+}
+
+/**
+ * Removes PATH segments where `<segment>/<providerCommand>` exists on disk as a non-regular file
+ * (such as Bflow's managed `tools/superpowers/{claude,codex,agy}` directories) when the verified
+ * provider executable (or shim config file) was resolved from PATH or an explicit launch PATH was
+ * supplied. Prevents downstream PATH walkers and shells from colliding on `+x` directories (EISDIR).
+ */
+async function sanitizeLaunchPathForProvider(
+  explicitLaunchPath: string | undefined,
+  provider: AgentProviderId,
+  profile: AgentLaunchProfile
+): Promise<string | undefined> {
+  const providerCommand = provider === "claude" ? "claude" : provider === "agy" ? "agy" : "codex";
+  const effectivePath = explicitLaunchPath ?? process.env["PATH"] ?? "/usr/bin:/bin";
+  const segments = effectivePath.split(delimiter);
+  let targetCanonical: string | undefined;
+  try {
+    targetCanonical = await realpath(profile.executable);
+  } catch {
+    targetCanonical = undefined;
+  }
+  const allowedTargets = new Set<string>([
+    profile.executable,
+    ...(targetCanonical !== undefined ? [targetCanonical] : []),
+    ...profile.configFiles.map(file => file.path)
+  ]);
+
+  let hasShadowingNonRegular = false;
+  let targetReachableOnEffectivePath = false;
+  const kept: string[] = [];
+  const cwdsToCheck = [...new Set([process.cwd(), profile.environment.cwd])];
+
+  for (const segment of segments) {
+    const dir = segment.length === 0 ? "." : segment;
+    const baseDirs = isAbsolute(dir) ? [dir] : cwdsToCheck.map(base => resolve(base, dir));
+    let shadowedByNonRegular = false;
+    for (const baseDir of baseDirs) {
+      const candidate = join(baseDir, providerCommand);
+      try {
+        const resolved = await realpath(candidate);
+        const info = await stat(resolved);
+        if (!info.isFile()) {
+          hasShadowingNonRegular = true;
+          shadowedByNonRegular = true;
+          break;
+        }
+        if (allowedTargets.has(resolved) || allowedTargets.has(candidate)) {
+          targetReachableOnEffectivePath = true;
+        }
+      } catch {
+        // Missing or broken entry in this segment: retain segment unchanged.
+      }
+    }
+    if (shadowedByNonRegular) continue;
+    kept.push(segment);
+  }
+
+  if (!hasShadowingNonRegular) return explicitLaunchPath;
+  if (explicitLaunchPath === undefined && !targetReachableOnEffectivePath) {
+    return undefined;
+  }
+  return kept.join(delimiter);
 }

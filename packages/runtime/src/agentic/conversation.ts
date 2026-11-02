@@ -57,7 +57,15 @@ export async function createAgenticConversationHost(options: {
       return { ok: false, error: { code: refused ? "validation" : "corruption", retryable: false, message: String(error) } };
     }
   };
-  const enqueueDecision = async (input: unknown): Promise<OperationResult<void>> => {
+  const conflictError = (message: string): OperationResult<never> => ({
+    ok: false,
+    error: { code: "conflict", retryable: true, message }
+  });
+  const validationError = (message: string): OperationResult<never> => ({
+    ok: false,
+    error: { code: "validation", retryable: false, message }
+  });
+  const prepareDecisionEnvelope = async (input: unknown): Promise<OperationResult<RoleMessage | undefined>> => {
     const decision = ApprovalDecisionSchema.parse(input);
     // Preserve the original envelope (including pane identity) if already queued or uncertain.
     const state = record(await runtime.inspect());
@@ -65,36 +73,68 @@ export async function createAgenticConversationHost(options: {
     const existing = (state.outbound as { message: unknown }[]).find(item => record(item.message).message_id === messageId);
     if (existing) {
       const message = RoleMessageSchema.parse(existing.message);
-      if (message.type !== "approval.decision" || digest(message.payload) !== digest(decision)) throw new Error("Conflicting recovered human decision");
+      if (message.type !== "approval.decision" || digest(message.payload) !== digest(decision)) {
+        return conflictError("Conflicting recovered human decision");
+      }
       return { ok: true, value: undefined };
     }
-    const run = record(await runtime.inspect(decision.runId));
-    if (run.cancelled === true || ["completed", "failed", "cancelled"].includes(String(run.status)))
-      throw new Error("Run is terminal; approval cannot continue it");
+    let run: Record<string, unknown>;
+    try {
+      run = record(await runtime.inspect(decision.runId));
+    } catch (error) {
+      return { ok: false, error: { code: "not_found", retryable: false, message: error instanceof Error ? error.message : String(error) } };
+    }
+    if (run.cancelled === true || ["completed", "failed", "cancelled"].includes(String(run.status))) {
+      return conflictError("Run is terminal; approval cannot continue it");
+    }
     const userDecision = (run.userDecisions as Record<string, { request: unknown; status?: string } | undefined> | undefined)?.[decision.approvalId];
     if (userDecision) {
       // Specialist user decisions have their own record; they never occupy the single design/task approval slot.
       // A reply for an already answered/expired request is refused here, not queued for Runtime to reject later.
-      if (userDecision.status !== "pending") throw new Error("User decision is no longer pending");
-      validateUserDecisionAnswer(ApprovalRequestSchema.parse(userDecision.request), decision, new Date().toISOString());
+      if (userDecision.status !== "pending") {
+        return conflictError("User decision is no longer pending");
+      }
+      try {
+        validateUserDecisionAnswer(ApprovalRequestSchema.parse(userDecision.request), decision, new Date().toISOString());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return /expired/i.test(message) ? conflictError(message) : validationError(message);
+      }
     } else if (prototypeApproval(run.prototype as PrototypeRecord | undefined, decision.approvalId)) {
       // Prototype reviews have their own approvals; one is never matched against the design/task/delivery slot.
       const entry = prototypeApproval(run.prototype as PrototypeRecord, decision.approvalId)!;
-      if (entry.status !== "pending") throw new Error("Prototype approval is no longer pending");
-      assertPrototypeDecision(entry, decision, new Date().toISOString());
+      if (entry.status !== "pending") {
+        return conflictError("Prototype approval is no longer pending");
+      }
+      try {
+        assertPrototypeDecision(entry, decision, new Date().toISOString());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return /expired/i.test(message) ? conflictError(message) : validationError(message);
+      }
     } else {
-      const request = ApprovalRequestSchema.parse(run.approval);
+      const parsedApproval = ApprovalRequestSchema.safeParse(run.approval);
+      if (!parsedApproval.success) {
+        return conflictError("Recovered decision does not match the exact approval request");
+      }
+      const request = parsedApproval.data;
       if (request.approvalId !== decision.approvalId || request.runId !== decision.runId || request.sessionId !== decision.sessionId ||
-          request.revision !== decision.revision || request.generation !== decision.generation || digest(request.target) !== digest(decision.target))
-        throw new Error("Recovered decision does not match the exact approval request");
+          request.revision !== decision.revision || request.generation !== decision.generation || digest(request.target) !== digest(decision.target)) {
+        return conflictError("Recovered decision does not match the exact approval request");
+      }
     }
     const correlationId = textField(record(run.delegation).correlationId);
-    return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
+    return { ok: true, value: RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
       correlation_id: correlationId, run_id: decision.runId,
       sender: { role: "conversation", agent_id: conversation!.agentId, pane_id: conversation!.paneId },
       recipient: { role: "coordinator", agent_id: coordinator!.agentId, pane_id: coordinator!.paneId },
       type: "approval.decision", payload: json(decision), artifact_references: decision.feedbackArtifacts,
-      occurred_at: decision.decidedAt, idempotency_key: decision.idempotencyKey }));
+      occurred_at: decision.decidedAt, idempotency_key: decision.idempotencyKey }) };
+  };
+  const enqueueDecision = async (input: unknown): Promise<OperationResult<void>> => {
+    const prepared = await prepareDecisionEnvelope(input);
+    if (!prepared.ok) return prepared;
+    return prepared.value ? enqueue(prepared.value) : { ok: true, value: undefined };
   };
   class DurableBridge extends module.HerdrConversationBridge {
     constructor(config: unknown) { super(config); }
@@ -109,8 +149,15 @@ export async function createAgenticConversationHost(options: {
     }
     async receiveApprovalDecision(input: unknown): Promise<OperationResult<void>> {
       const decision = ApprovalDecisionSchema.parse(input);
-      await options.onHumanDecision?.(decision);
-      return enqueueDecision(decision);
+      const prepared = await prepareDecisionEnvelope(decision);
+      if (!prepared.ok) return prepared;
+      try {
+        await options.onHumanDecision?.(decision);
+      } catch (error) {
+        if (String(error).includes("Human approval requires physical user input hook")) throw error;
+        return conflictError(error instanceof Error ? error.message : String(error));
+      }
+      return prepared.value ? enqueue(prepared.value) : { ok: true, value: undefined };
     }
     async reportProgressToConversation(): Promise<OperationResult<void>> {
       throw new Error("Runtime must queue a RoleMessage through Herdr; local progress callbacks are disabled");
@@ -132,8 +179,10 @@ export async function createAgenticConversationHost(options: {
     onStructuredApproval: async (decision: unknown, command: WebCommand, principal: WebPrincipal) => {
       if (!structured) throw new Error("Structured web authority is not configured");
       const parsed = ApprovalDecisionSchema.parse(decision);
+      const prepared = await prepareDecisionEnvelope(parsed);
+      if (!prepared.ok) return prepared;
       await structured.approval(parsed, command, principal);
-      return enqueueDecision(parsed);
+      return prepared.value ? enqueue(prepared.value) : { ok: true, value: undefined };
     },
     onStructuredResume: async (command: Extract<WebCommand, { kind: "resume" }>, principal: WebPrincipal) => {
       if (!structured) throw new Error("Structured web authority is not configured");
@@ -173,23 +222,55 @@ export async function createAgenticConversationHost(options: {
   // Runtime journal is authoritative for status, including cancellation. This is local projection reconciliation,
   // never a fabricated Herdr receipt or a human decision; the Gateway validates the exported nested contracts.
   let runtimeRunIds: string[] = [];
+  let runtimeRunMeta = new Map<string, { status: string; cancelled: boolean; coreCreated: boolean; hasNativeDeliveries: boolean; supersededBy?: string }>();
   let projectionWarnings: string[] = [];
-  const syncAliases = async () => {
-    if (!options.noticeAliases) return;
-    const aliases = await options.noticeAliases().catch(() => undefined);
-    if (aliases) gateway.syncNoticeAliases(aliases);
-  };
   const reconcileRuns = async () => {
-    await syncAliases();
+    const baseAliases = options.noticeAliases ? await options.noticeAliases().catch(() => undefined) : undefined;
     const state = record(await runtime.inspect());
     if (!Array.isArray(state.runs)) throw new Error("Runtime returned invalid run status snapshot");
+    const nextMeta = new Map<string, { status: string; cancelled: boolean; coreCreated: boolean; hasNativeDeliveries: boolean; supersededBy?: string }>();
     const entries = state.runs.map(input => {
       const run = record(input), delegation = DelegationRequestSchema.parse(run.delegation);
-      return { runId: run.runId, delegation, status: run.status, cancelled: run.cancelled };
+      const runId = String(run.runId ?? delegation.runId ?? "");
+      nextMeta.set(runId, {
+        status: String(run.status ?? "intake"),
+        cancelled: run.cancelled === true,
+        coreCreated: run.coreCreated === true,
+        hasNativeDeliveries: Array.isArray(run.nativeDeliveries) && run.nativeDeliveries.length > 0,
+        ...(typeof run.supersededBy === "string" && run.supersededBy.length > 0 ? { supersededBy: run.supersededBy } : {})
+      });
+      return {
+        runId: run.runId,
+        delegation,
+        status: run.status,
+        cancelled: run.cancelled,
+        ...(typeof run.supersededBy === "string" && run.supersededBy.length > 0 ? { supersededBy: run.supersededBy } : {})
+      };
     }).filter(run => run.delegation.sessionId === manifest.conversationSessionId);
+    runtimeRunMeta = nextMeta;
+    const runShortIds: Record<string, string> = { ...(baseAliases?.runShortIds ?? {}) };
+    const aliasedRuns = new Set(Object.values(runShortIds));
+    let nextIndex =
+      Math.max(
+        0,
+        ...Object.keys(runShortIds).map(key => Number(/^việc\s*#([1-9]\d*)$/iu.exec(key)?.[1] ?? 0))
+      ) + 1;
+    for (const entry of entries) {
+      const id = String(entry.runId ?? entry.delegation.runId ?? "");
+      if (!id || aliasedRuns.has(id)) continue;
+      while (runShortIds[`việc #${nextIndex}`] !== undefined) nextIndex++;
+      runShortIds[`việc #${nextIndex}`] = id;
+      aliasedRuns.add(id);
+      nextIndex++;
+    }
+    if (options.noticeAliases || Object.keys(runShortIds).length > 0) {
+      gateway.syncNoticeAliases({
+        approvalShortIds: baseAliases?.approvalShortIds ?? {},
+        runShortIds
+      });
+    }
     const result = await gateway.reconcileRuntimeRuns(entries);
     if (!result.ok) throw new Error(result.error.message);
-    await syncAliases();
     projectionWarnings = result.value.rejected.map((reason: string) => `Runtime projection could not be reconciled: ${reason}`);
     runtimeRunIds = entries.map(run => run.delegation.runId!);
   };
@@ -202,18 +283,21 @@ export async function createAgenticConversationHost(options: {
   };
   /** Asks Runtime what is pending for this session and registers what Conversation lacks. Warnings stay until a later reconcile clears them. */
   let approvalWarnings: string[] = [];
+  const reconcilePendingOnly = async () => {
+    const pending = await runtime.pendingApprovals({ sessionId: manifest.conversationSessionId });
+    const result = await gateway.reconcilePendingApprovals(pending);
+    if (!result.ok) throw new Error(result.error.message);
+    if (result.value.busy) return result.value;
+    const runOf = new Map(pending.map(item => [item.request.approvalId, item.request.runId]));
+    approvalWarnings = result.value.rejected.map((item: { approvalId: string; reason: string }) =>
+      `Runtime đang chờ quyết định của người dùng (${item.approvalId}${runOf.has(item.approvalId) ? `, run ${runOf.get(item.approvalId)}` : ""}) ` +
+      `nhưng Conversation không đăng ký được: ${item.reason}.`);
+    return result.value;
+  };
   const reconcileApprovals = async () => {
     try {
       await reconcileRuns();
-      const pending = await runtime.pendingApprovals({ sessionId: manifest.conversationSessionId });
-      const result = await gateway.reconcilePendingApprovals(pending);
-      if (!result.ok) throw new Error(result.error.message);
-      if (result.value.busy) return result.value;
-      const runOf = new Map(pending.map(item => [item.request.approvalId, item.request.runId]));
-      approvalWarnings = result.value.rejected.map((item: { approvalId: string; reason: string }) =>
-        `Runtime đang chờ quyết định của người dùng (${item.approvalId}${runOf.has(item.approvalId) ? `, run ${runOf.get(item.approvalId)}` : ""}) ` +
-        `nhưng Conversation không đăng ký được: ${item.reason}.`);
-      return result.value;
+      return await reconcilePendingOnly();
     } catch (error) {
       approvalWarnings = [`Không truy vấn được approval đang chờ từ Runtime: ${error instanceof Error ? error.message : String(error)}.`];
       throw error;
@@ -226,97 +310,139 @@ export async function createAgenticConversationHost(options: {
     return result && typeof result === "object" ? { ...(result as object), runtimeStatus: runtimeStatus(),
       ...(warnings.length ? { approvalWarnings: warnings } : {}) } : result;
   };
+  // Serialize all Gateway reads/mutations across chatPump (receiveRuntime), Herdr ingress (receiveHerdr),
+  // Web UI structured actions, and physical/MCP Conversation turns so concurrent background progress saves
+  // cannot cause reconcilePendingApprovals/handleStructuredInteraction to skip or conflict on isProcessingTurn.
+  let pendingGate: Promise<unknown> = Promise.resolve();
+  const exclusive = <T>(work: () => Promise<T>): Promise<T> => {
+    const next = pendingGate.catch(() => undefined).then(work);
+    pendingGate = next;
+    return next;
+  };
   return {
     configureStructuredInteraction(callbacks) { structured = callbacks; },
-    async handleStructuredInteraction(command, principal) {
-      await reconcileApprovals();
-      return gateway.handleStructuredInteraction(WebCommandSchema.parse(command), WebPrincipalSchema.parse(principal));
+    handleStructuredInteraction(command, principal) {
+      return exclusive(async () => {
+        await reconcileApprovals();
+        return gateway.handleStructuredInteraction(WebCommandSchema.parse(command), WebPrincipalSchema.parse(principal));
+      });
     },
-    readStructuredInteraction: commandId => gateway.readStructuredInteraction(commandId),
-    reconcileApprovals,
-    async handleUserTurn(input) {
-      await reconcileApprovals().catch(() => undefined);
-      return withWarnings(await gateway.handleUserTurn(input));
+    readStructuredInteraction: commandId => exclusive(async () => gateway.readStructuredInteraction(commandId)),
+    reconcileApprovals: () => exclusive(reconcileApprovals),
+    handleUserTurn(input) {
+      return exclusive(async () => {
+        await reconcileApprovals().catch(() => undefined);
+        return withWarnings(await gateway.handleUserTurn(input));
+      });
     },
-    async getContext() {
-      await reconcileRuns().catch(error => { projectionWarnings = [`Runtime status unavailable: ${redactString(String(error))}`]; });
-      const context = gateway.getContextSnapshot();
-      return json({ session: context.session, pendingClarifications: context.pendingClarifications,
-        pendingApprovals: context.pendingApprovals, approvalWarnings: [...turnWarnings, ...approvalWarnings, ...projectionWarnings], workflows: context.workflows,
-        runIdToCorrelationId: context.runIdToCorrelationId, agentBusy: context.agentBusy, runtimeStatus: runtimeStatus(),
-        messages: context.messages.slice(-20).map((input: unknown) => {
-          const { metadata: _metadata, ...message } = ConversationMessageSchema.parse(input); return message;
-        }) });
+    getContext() {
+      return exclusive(async () => {
+        await reconcileRuns().catch(error => { projectionWarnings = [`Runtime status unavailable: ${redactString(String(error))}`]; });
+        const context = gateway.getContextSnapshot();
+        return json({ session: context.session, pendingClarifications: context.pendingClarifications,
+          pendingApprovals: context.pendingApprovals, approvalWarnings: [...turnWarnings, ...approvalWarnings, ...projectionWarnings], workflows: context.workflows,
+          runIdToCorrelationId: context.runIdToCorrelationId,
+          ...(context.approvalShortIds && Object.keys(context.approvalShortIds).length ? { approvalShortIds: context.approvalShortIds } : {}),
+          ...(context.runShortIds && Object.keys(context.runShortIds).length ? { runShortIds: context.runShortIds } : {}),
+          agentBusy: context.agentBusy, runtimeStatus: runtimeStatus(),
+          messages: context.messages.slice(-20).map((input: unknown) => {
+            const { metadata: _metadata, ...message } = ConversationMessageSchema.parse(input); return message;
+          }) });
+      });
     },
     async parseDecision(input) { return module.ChatDecisionSchema.parse(input); },
-    async validateDecision(input) {
-      await reconcileRuns();
-      const result = module.resolveChatDecision(module.ChatDecisionSchema.parse(input), gateway.getContextSnapshot());
-      if (!result.ok) throw new Error(result.error.message);
+    validateDecision(input) {
+      return exclusive(async () => {
+        await reconcileRuns();
+        const parsed = module.ChatDecisionSchema.parse(input);
+        const result = module.resolveChatDecision(parsed, gateway.getContextSnapshot());
+        if (!result.ok) throw new Error(result.error.message);
+        const resolved = result.value;
+        if (resolved.intent === "workflow_request" && resolved.requirementDraft?.isRequirementChange && resolved.targetRunId) {
+          const meta = runtimeRunMeta.get(resolved.targetRunId);
+          if (meta?.hasNativeDeliveries) {
+            throw new Error("Unknown native delivery must be reconciled before changing this run's requirements.");
+          }
+          if (meta?.cancelled || ["completed", "failed", "cancelled"].includes(meta?.status ?? "")) {
+            throw new Error(`Run ${resolved.targetRunId} is ${meta?.cancelled ? "cancelled" : meta?.status}; requirement revisions are not accepted.`);
+          }
+          if (meta?.supersededBy) {
+            throw new Error(`Run ${resolved.targetRunId} was already superseded by ${meta.supersededBy}; revise ${meta.supersededBy} or start a new run.`);
+          }
+          if (meta?.coreCreated) {
+            throw new Error(`Run ${resolved.targetRunId} is already executing tasks in Core; cancel it and start a new run instead of revising in place.`);
+          }
+        }
+      });
     },
-    async handleTrustedApproval(input) {
-      await reconcileRuns();
-      turnWarnings = [];
-      const context = gateway.getContextSnapshot();
-      const parsed = module.UserTurnInputSchema.parse(input);
-      // Resume the same hook turn from Gateway state; reapplying could misroute an already-decided approval.
-      const committed = parsed.messageId === undefined ? -1 : context.messages.findIndex((message: { sender: string; messageId: string }) =>
-        message.sender === "user" && message.messageId === parsed.messageId);
-      if (committed >= 0) {
-        const userMessage = ConversationMessageSchema.parse(context.messages[committed]);
-        const agentReply = context.messages[committed + 1] ? ConversationMessageSchema.parse(context.messages[committed + 1]) : undefined;
-        if (userMessage.intent !== "approval_response" || userMessage.content !== parsed.content || agentReply?.sender !== "conversation")
-          throw new Error("Trusted approval message ID conflicts with a committed Conversation turn");
-        return { ok: true, value: { sessionId: context.session.sessionId, correlationId: userMessage.correlationId,
-          ...(userMessage.runId ? { runId: userMessage.runId } : {}), recognizedIntent: "approval_response",
-          sessionStatus: context.session.status, userMessage, agentReply, queuedBecauseBusy: false, substantiveUpdate: true } };
-      }
-      const queued = parsed.messageId !== undefined && context.pendingInboundQueue.some((item: { kind: string; input?: { messageId?: string } }) =>
-        item.kind === "user_turn" && item.input?.messageId === parsed.messageId);
-      if (queued) return { ok: true, value: { sessionId: context.session.sessionId, recognizedIntent: "approval_response",
-        sessionStatus: context.session.status, queuedBecauseBusy: true, substantiveUpdate: false } };
-      // A lost approval.request must not strand the user's answer: ask Runtime what is pending before classifying.
-      const named: string | undefined = module.namedApprovalId(parsed.content, context);
-      let current = context;
-      if (named !== undefined || Object.keys(context.pendingApprovals).length === 0) {
-        await reconcileApprovals().catch(() => undefined);
-        await syncAliases();
-        current = gateway.getContextSnapshot();
-      }
-      if (named !== undefined && !current.pendingApprovals[named]) {
-        const rest = parsed.content.replace(named, "").replace(/^[\s:,-]+|[\s:,.!?-]+$/gu, "");
-        // Only a short reply shaped like "apr-...: answer" is an approval attempt; longer text is ordinary discussion for Chat.
-        if (rest.length > 0 && rest.length <= 40) return { ok: false, error: { code: "not_found", retryable: false,
-          message: `Không tìm thấy approval ${named} đang chờ trong session này${current.session.activeRunId ? ` (run ${current.session.activeRunId})` : ""}; câu trả lời chưa được ghi nhận.` +
-            (approvalWarnings.length ? ` ${approvalWarnings.join(" ")}` : "") } };
-      }
-      if (Object.keys(current.pendingApprovals).length === 0) return undefined;
-      const classified = module.classifyTrustedApprovalReply(parsed, current);
-      if (!classified?.ok) {
-        // Not recorded: say why in this turn's context so the Conversation model never drops the reply silently.
-        const unrecorded: string | undefined = module.explainUnrecordedApprovalReply(parsed, current);
-        if (unrecorded !== undefined) turnWarnings = [unrecorded];
-        return undefined;
-      }
-      return gateway.handleUserTurn(parsed);
+    handleTrustedApproval(input) {
+      return exclusive(async () => {
+        await reconcileRuns();
+        turnWarnings = [];
+        const context = gateway.getContextSnapshot();
+        const parsed = module.UserTurnInputSchema.parse(input);
+        // Resume the same hook turn from Gateway state; reapplying could misroute an already-decided approval.
+        const committed = parsed.messageId === undefined ? -1 : context.messages.findIndex((message: { sender: string; messageId: string }) =>
+          message.sender === "user" && message.messageId === parsed.messageId);
+        if (committed >= 0) {
+          const userMessage = ConversationMessageSchema.parse(context.messages[committed]);
+          const agentReply = context.messages[committed + 1] ? ConversationMessageSchema.parse(context.messages[committed + 1]) : undefined;
+          if (userMessage.intent !== "approval_response" || userMessage.content !== parsed.content || agentReply?.sender !== "conversation")
+            throw new Error("Trusted approval message ID conflicts with a committed Conversation turn");
+          return { ok: true, value: { sessionId: context.session.sessionId, correlationId: userMessage.correlationId,
+            ...(userMessage.runId ? { runId: userMessage.runId } : {}), recognizedIntent: "approval_response",
+            sessionStatus: context.session.status, userMessage, agentReply, queuedBecauseBusy: false, substantiveUpdate: true } };
+        }
+        const queued = parsed.messageId !== undefined && context.pendingInboundQueue.some((item: { kind: string; input?: { messageId?: string } }) =>
+          item.kind === "user_turn" && item.input?.messageId === parsed.messageId);
+        if (queued) return { ok: true, value: { sessionId: context.session.sessionId, recognizedIntent: "approval_response",
+          sessionStatus: context.session.status, queuedBecauseBusy: true, substantiveUpdate: false } };
+        // Always reconcile Runtime-pending approvals before classifying (even if Conversation already knows one approval),
+        // so a second newly-opened Runtime approval prevents an untargeted bare "1"/"approve" from auto-committing ambiguously.
+        await reconcilePendingOnly().catch(error => {
+          approvalWarnings = [`Không truy vấn được approval đang chờ từ Runtime: ${error instanceof Error ? error.message : String(error)}.`];
+        });
+        const current = gateway.getContextSnapshot();
+        const named: string | undefined = module.namedApprovalId(parsed.content, current);
+        if (named !== undefined && !current.pendingApprovals[named]) {
+          const rest = parsed.content.replace(named, "").replace(/^[\s:,-]+|[\s:,.!?-]+$/gu, "");
+          // Only a short reply shaped like "apr-...: answer" is an approval attempt; longer text is ordinary discussion for Chat.
+          if (rest.length > 0 && rest.length <= 40) return { ok: false, error: { code: "not_found", retryable: false,
+            message: `Không tìm thấy approval ${named} đang chờ trong session này${current.session.activeRunId ? ` (run ${current.session.activeRunId})` : ""}; câu trả lời chưa được ghi nhận.` +
+              (approvalWarnings.length ? ` ${approvalWarnings.join(" ")}` : "") } };
+        }
+        if (Object.keys(current.pendingApprovals).length === 0) return undefined;
+        const classified = module.classifyTrustedApprovalReply(parsed, current);
+        if (!classified?.ok) {
+          // Not recorded: say why in this turn's context so the Conversation model never drops the reply silently.
+          const unrecorded: string | undefined = module.explainUnrecordedApprovalReply(parsed, current);
+          if (unrecorded !== undefined) turnWarnings = [unrecorded];
+          return undefined;
+        }
+        return gateway.handleUserTurn(parsed);
+      });
     },
-    async receiveHerdr(input) {
-      const message = RoleMessageSchema.parse(input);
-      if (!await runtime.ports.authenticateMessage(message) || message.recipient.role !== "conversation") throw new Error("Unauthenticated Conversation delivery");
-      const result = await gateway.handleCoordinatorRoleMessage(message);
-      if (!result.ok) throw new Error(result.error.message);
-      return result;
+    receiveHerdr(input) {
+      return exclusive(async () => {
+        const message = RoleMessageSchema.parse(input);
+        if (!await runtime.ports.authenticateMessage(message) || message.recipient.role !== "conversation") throw new Error("Unauthenticated Conversation delivery");
+        const result = await gateway.handleCoordinatorRoleMessage(message);
+        if (!result.ok) throw new Error(result.error.message);
+        return result;
+      });
     },
-    async receiveRuntime(input) {
-      const message = RoleMessageSchema.parse(input);
-      if (message.recipient.role !== "conversation") throw new Error("Wrong Conversation inbox recipient");
-      // Gateway drops an already processed message_id, so a redelivery after a crash is harmless.
-      const result = await gateway.handleCoordinatorRoleMessage(message);
-      if (!result.ok) throw new Error(result.error.message);
-      return result;
+    receiveRuntime(input) {
+      return exclusive(async () => {
+        const message = RoleMessageSchema.parse(input);
+        if (message.recipient.role !== "conversation") throw new Error("Wrong Conversation inbox recipient");
+        // Gateway drops an already processed message_id, so a redelivery after a crash is harmless.
+        const result = await gateway.handleCoordinatorRoleMessage(message);
+        if (!result.ok) throw new Error(result.error.message);
+        return result;
+      });
     },
-    setBusy: busy => gateway.setAgentBusyState(busy),
-    flush: () => gateway.flushPendingInboundQueue()
+    setBusy: busy => exclusive(() => gateway.setAgentBusyState(busy)),
+    flush: () => exclusive(() => gateway.flushPendingInboundQueue())
   };
 }
 

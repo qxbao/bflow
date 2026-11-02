@@ -23,7 +23,8 @@ import {
 import { GATEWAY_CONTROL_LOCATOR_FILE, registerGatewayRepositoryService, removeGatewayRepositoryService } from "./gateway-control.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
 import type { RepositoryIdentity } from "./repository.js";
-import { approvedGitNexusExecutable, repositoryHasCommits } from "./setup-gateway.js";
+import { approvedGitNexusExecutable, repositoryHasCommits } from "./setup-gateway-config.js";
+import { fsyncTolerant, reclaimStaleLockFile } from "./fs-resilience.js";
 import type { CliContext } from "./types.js";
 
 export const GATEWAY_REPOSITORIES_FILE = "gateway-repositories.json";
@@ -74,15 +75,6 @@ async function readRegularJson(file: string): Promise<unknown> {
   return JSON.parse(await readFile(file, "utf8"));
 }
 
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 async function ensurePrivateStateDir(directory: string): Promise<void> {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const info = await lstat(directory);
@@ -111,21 +103,15 @@ async function withGatewayRepositoriesLock<T>(
       const handle = await open(lockPath, "wx", 0o600);
       try {
         await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`);
-        await handle.sync();
+        await fsyncTolerant(handle);
       } finally {
         await handle.close();
       }
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        const raw = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
-        if (typeof raw.pid === "number" && Number.isInteger(raw.pid) && raw.pid > 0 && !processAlive(raw.pid)) {
-          await rm(lockPath, { force: true });
-          continue;
-        }
-      } catch {
-        // Concurrent writer may still be initializing or removing the lock file.
+      if (await reclaimStaleLockFile(lockPath, { checkHost: false })) {
+        continue;
       }
       if (Date.now() >= deadline) {
         throw new Error(`Timed out acquiring lock for ${GATEWAY_REPOSITORIES_FILE}`);
@@ -158,7 +144,7 @@ async function writeGatewayRepositoriesStateAtomic(
     const handle = await open(temporary, "wx", 0o600);
     try {
       await handle.writeFile(`${JSON.stringify(parsed, null, 2)}\n`);
-      await handle.sync();
+      await fsyncTolerant(handle);
     } finally {
       await handle.close();
     }

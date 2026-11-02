@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { AgentExecutionHandleSchema, ArtifactReferenceSchema, ArtifactWriteOptionsSchema, PaneBindingSchema, RoleMessageSchema, type PaneBinding } from "@bflow/contracts";
 import { measureBehavior, parseBehavioralCommands, type BehavioralCommand, type RtkOutputIntegration } from "./behavioral-runner.js";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
+import { runnerDefinitionPattern } from "./runner-provenance.js";
 import { TestRunnerSource, resolveTaskCommands } from "./task-commands.js";
 import { isConflictResolverAssignment, type AgenticWorkflowRuntime } from "./runtime.js";
 import { digest, json, record, strings, textField } from "./journal.js";
@@ -35,10 +37,25 @@ const workspacePathKey = (path: string) => process.platform === "darwin" ? darwi
 const safe = (path: string) => !isAbsolute(path) && !path.includes("\\") && !path.includes("\0") &&
   path.split("/").every(segment => segment !== "" && segment !== "." && segment !== "..");
 const FILE_BYTES = 128 * 1024;
-const workspaceReadSchema = z.object({ path: z.string().min(1).max(4096), runId: z.string().min(1).optional(), taskId: z.string().min(1).optional() }).strict();
+const normalizeOptionalId = (value: unknown): unknown =>
+  value === null || (typeof value === "string" && value.trim() === "") ? undefined : value;
+const optionalNonEmptyId = z.preprocess(normalizeOptionalId, z.string().min(1).optional());
+const workspaceReadSchema = z.object({ path: z.string().min(1).max(4096), runId: optionalNonEmptyId, taskId: optionalNonEmptyId }).strict();
 const workspaceWriteSchema = workspaceReadSchema.extend({ content: z.string().max(FILE_BYTES), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }).strict();
+const SUPPLEMENTAL_RED_TEST_OR_FIXTURE_PATTERN =
+  /\.(?:test|spec)\.[cm]?[jt]sx?$|(?<=^|\/)(?:test_[^/]+\.py|[^/]+_test\.py)$|_test\.(?:go|rb|dart|exs)$|Spec\.rb$|(?:Test|Tests|Spec)\.(?:java|kt|cs|php|swift|cpp|cc|cxx)$|(?<=^|\/)tests\/[^/]+\.rs$|(?<=^|\/)tests\.rs$|_tests?\.rs$|(?<=^|\/)(?:__fixtures__|__mocks__|__snapshots__|testdata)\/|(?<=^|\/)(?:test|tests|__tests__|spec|Specs|Tests)\/(?:fixtures|helpers|support|mocks|snapshots|common|testutils|util|utils)\//;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const utf8 = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+const BENIGN_FILE_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EROFS", "EPERM", "EACCES"]);
+
+export async function syncFileHandle(handle: Pick<FileHandle, "sync">): Promise<void> {
+  try {
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_FILE_SYNC_CODES.has(code)) throw error;
+  }
+}
 
 /** Developer mutations remain inside the current leased task, accepted scope,
  * and TDD phase. Git commits are structured host operations, never shell input. */
@@ -50,16 +67,18 @@ export class HostDevelopment {
   }
   /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
   private commandsFor(task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] }, ownedPaths: string[]) {
-    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.at(-1)?.baseCommitHash), strategy: task.spec.strategy,
+    return resolveTaskCommands({ owner: this.runners.owner, profiles: this.runners.profilesForRevision(task.worktrees?.[0]?.baseCommitHash), strategy: task.spec.strategy,
       specification: task.spec.specification, ownedPaths });
   }
   private async git(cwd: string, args: string[]) {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
-    return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", ...args],
+    const dirFlags = await runtimeGitDirectoryFlags(cwd);
+    return (await execute("git", [...dirFlags, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", ...args],
       { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
   }
   private async identity(bindingInput: PaneBinding, input: unknown) {
     const binding = PaneBindingSchema.parse(bindingInput), args = record(input);
+    const requestedRunId = normalizeOptionalId(args.runId), requestedTaskId = normalizeOptionalId(args.taskId);
     if (binding.role !== "developer" || !binding.worktreePath) throw new Error("An assigned Developer worktree is required");
     const state = record(await this.runtime().inspect());
     if (!Array.isArray(state.outbound)) throw new Error("Invalid Runtime assignment state");
@@ -69,8 +88,8 @@ export class HostDevelopment {
       RoleMessageSchema.parse(out.message).type === "task.assignment" &&
       AgentExecutionHandleSchema.parse(out.handle).target.paneId === binding.paneId &&
       AgentExecutionHandleSchema.parse(out.handle).target.agentId === binding.agentId &&
-      (args.runId === undefined || AgentExecutionHandleSchema.parse(out.handle).runId === args.runId) &&
-      (args.taskId === undefined || AgentExecutionHandleSchema.parse(out.handle).taskId === args.taskId));
+      (requestedRunId === undefined || AgentExecutionHandleSchema.parse(out.handle).runId === requestedRunId) &&
+      (requestedTaskId === undefined || AgentExecutionHandleSchema.parse(out.handle).taskId === requestedTaskId));
     if (candidates.length !== 1) throw new Error("No unique current task assignment for this Developer pane");
     const handle = AgentExecutionHandleSchema.parse(candidates[0]!.handle);
     const message = RoleMessageSchema.parse(candidates[0]!.message);
@@ -142,6 +161,51 @@ export class HostDevelopment {
     if (await this.resolverIdentity(binding))
       throw new Error(`${tool} is not used for a conflict resolution assignment; edit only the conflicted files, commit the resolution with commit_changes, then end your turn`);
   }
+  private async existedAtRevision(cwd: string, revision: string | undefined, path: string): Promise<boolean> {
+    if (!revision || !/^[a-f0-9]{40}$/.test(revision)) return false;
+    try { await this.git(cwd, ["cat-file", "-e", `${revision}:${path}`]); return true; }
+    catch { return false; }
+  }
+  private async authorizeTddPaths(cwd: string, task: { spec: { specification: Specification; strategy: TestStrategy }; worktrees?: { baseCommitHash: string }[] },
+    ownedPaths: string[], paths: readonly string[]): Promise<void> {
+    const strategy = task.spec.strategy;
+    if (strategy.tddDecision.mode !== "required") {
+      this.runtime().ports.policies.assertReadyToImplement(strategy);
+      return;
+    }
+    const commands = this.commandsFor(task, ownedPaths);
+    const configuredTests = commands.flatMap(command => command.testPaths);
+    const definitionPaths = commands.flatMap(command => Object.keys(command.definitionBlobs ?? {}))
+      .filter(candidate => !configuredTests.includes(candidate));
+    const hasAutomaticRunner = commands.some(command => command.checkoutDependencyRoots !== undefined);
+    const evidence = strategy.metadata?.tddEvidence;
+    const hasRedEvidence = Array.isArray(evidence) && evidence.length > 0;
+    const firstReceipt = hasRedEvidence && evidence[0] !== null && typeof evidence[0] === "object" && !Array.isArray(evidence[0])
+      ? (evidence[0] as Record<string, unknown>) : undefined;
+    const receiptMeta = firstReceipt?.metadata !== null && typeof firstReceipt?.metadata === "object" && !Array.isArray(firstReceipt.metadata)
+      ? (firstReceipt.metadata as Record<string, unknown>) : undefined;
+    const redDetails = receiptMeta?.conditionalTdd !== null && typeof receiptMeta?.conditionalTdd === "object" && !Array.isArray(receiptMeta.conditionalTdd)
+      ? (receiptMeta.conditionalTdd as Record<string, unknown>) : undefined;
+    const redSourceRevision = typeof redDetails?.sourceRevision === "string" ? redDetails.sourceRevision : undefined;
+    let requiresImplementationAuth = false;
+    for (const path of paths) {
+      const isConfiguredTest = await this.isTestPath(cwd, path, configuredTests);
+      const isDefinition = await this.isTestPath(cwd, path, definitionPaths);
+      const isSupplementalTest = !isConfiguredTest && !isDefinition &&
+        SUPPLEMENTAL_RED_TEST_OR_FIXTURE_PATTERN.test(path) &&
+        (!hasAutomaticRunner || !runnerDefinitionPattern.test(path));
+      if (hasRedEvidence) {
+        const frozenSupplemental = isSupplementalTest && await this.existedAtRevision(cwd, redSourceRevision, path);
+        if (isConfiguredTest || isDefinition || frozenSupplemental) {
+          throw new Error("Red test files are frozen after independent Red measurement");
+        }
+        requiresImplementationAuth = true;
+      } else if (!isConfiguredTest && !isSupplementalTest) {
+        requiresImplementationAuth = true;
+      }
+    }
+    if (requiresImplementationAuth) this.runtime().ports.policies.assertReadyToImplement(strategy);
+  }
   async authorizeFileEdit(binding: PaneBinding, input: unknown): Promise<void> {
     const context = await this.identity(binding, {}), hook = record(input), toolInput = record(hook.tool_input);
     if (context.binding.readOnlyWorkspace) throw new Error("Developer workspace is read-only");
@@ -155,14 +219,9 @@ export class HostDevelopment {
       return;
     }
     await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
-      this.scope(path, strings(record(definition.metadata).ownedPaths), strings(record(definition.metadata).forbiddenPaths ?? []));
-      const strategy = task.spec.strategy;
-      const tests = this.commandsFor(task, strings(record(definition.metadata).ownedPaths)).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
-      const isTest = await this.isTestPath(context.cwd, path, tests);
-      const evidence = strategy.metadata?.tddEvidence;
-      if (strategy.tddDecision.mode === "required" && Array.isArray(evidence) && evidence.length && isTest)
-        throw new Error("Red test files are frozen after independent Red measurement");
-      if (!(strategy.tddDecision.mode === "required" && isTest)) this.runtime().ports.policies.assertReadyToImplement(strategy);
+      const owned = strings(record(definition.metadata).ownedPaths);
+      this.scope(path, owned, strings(record(definition.metadata).forbiddenPaths ?? []));
+      await this.authorizeTddPaths(context.cwd, task, owned, [path]);
     });
   }
   /** Entire read/write executes inside the Runtime transaction that renews the current lease/fence. */
@@ -180,14 +239,7 @@ export class HostDevelopment {
     return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => {
       const owned = strings(record(definition.metadata).ownedPaths);
       this.scope(path, owned, strings(record(definition.metadata).forbiddenPaths ?? []));
-      if (writing) {
-        const strategy = task.spec.strategy;
-        const tests = this.commandsFor(task, owned).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
-        const isTest = await this.isTestPath(context.cwd, path, tests), evidence = strategy.metadata?.tddEvidence;
-        if (strategy.tddDecision.mode === "required" && isTest && Array.isArray(evidence) && evidence.length)
-          throw new Error("Red test files are frozen after independent Red measurement");
-        if (!(strategy.tddDecision.mode === "required" && isTest)) this.runtime().ports.policies.assertReadyToImplement(strategy);
-      }
+      if (writing) await this.authorizeTddPaths(context.cwd, task, owned, [path]);
       return use(context.cwd, path);
     });
   }
@@ -277,7 +329,7 @@ export class HostDevelopment {
           written += bytesWritten;
         }
         await handle.truncate(bytes.length);
-        await handle.sync();
+        await syncFileHandle(handle);
         return json({ path, written: true, created: creating, bytes: bytes.length, sha256: sha256(bytes) });
       } finally { await handle.close(); }
       });
@@ -333,7 +385,7 @@ export class HostDevelopment {
     const selected = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async (task, definition) => ({
       commands: this.commandsFor(task, strings(record(definition.metadata).ownedPaths)),
       head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
-      originalRevision: task.worktrees.at(-1)!.baseCommitHash
+      originalRevision: (task.worktrees[0] ?? task.worktrees.at(-1))!.baseCommitHash
     }));
     if (!selected.commands.length) throw new Error("No automated checks for this task: configure an owner command or make the accepted criteria and test files resolvable");
     const measurements = [];
@@ -374,14 +426,28 @@ export class HostDevelopment {
       if (line[1] !== " " || line.slice(0, 2).includes("U") || ["AA", "DD"].includes(line.slice(0, 2)))
         throw new Error(`Path '${path}' is outside the conflicted files: ${resolution.conflictPaths.join(", ")}`);
     }
+    const indexOrUntracked = new Set(
+      (await this.git(cwd, ["ls-files", "--cached", "--others", "--unmerged", "-z"])).split("\0").filter(Boolean)
+    );
+    const pathsToStage: string[] = [];
     for (const path of resolution.conflictPaths) {
       const local = await this.relativePath(cwd, path);
+      let existsOnDisk = true;
       let content: string | undefined;
       try { content = await readFile(resolve(cwd, local), "utf8"); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") existsOnDisk = false;
+        else if (code !== "EISDIR") throw error;
+      }
       if (content !== undefined && /^(<{7}|={7}|>{7}|\|{7})( |$)/m.test(content)) throw new Error(`Conflict markers remain in '${path}'`);
+      if (existsOnDisk || indexOrUntracked.has(path) || [...indexOrUntracked].some(entry => entry.startsWith(`${path}/`))) {
+        pathsToStage.push(path);
+      }
     }
-    await this.git(cwd, ["add", "--all", "--", ...resolution.conflictPaths]);
+    if (pathsToStage.length > 0) {
+      await this.git(cwd, ["add", "--all", "--", ...pathsToStage]);
+    }
     if ((await this.git(cwd, ["diff", "--name-only", "--diff-filter=U", "-z"])).split("\0").some(Boolean))
       throw new Error("Unmerged paths remain; resolve every conflicted file before committing");
     await this.git(cwd, ["commit", "-m", message]);
@@ -406,14 +472,7 @@ export class HostDevelopment {
         const path = line.slice(3); this.scope(path, owned, forbidden); return path;
       });
       if (!paths.length) return json({ committed: false, head: expected });
-      const tests = this.commandsFor(task, owned).flatMap(command => [...command.testPaths, ...Object.keys(command.definitionBlobs ?? {})]);
-      if (task.spec.strategy.tddDecision.mode === "required") {
-        const evidence = task.spec.strategy.metadata?.tddEvidence;
-        const testPaths = await Promise.all(paths.map(path => this.isTestPath(context.cwd, path, tests)));
-        if (Array.isArray(evidence) && evidence.length && testPaths.some(Boolean))
-          throw new Error("Red test files are frozen after independent Red measurement");
-        if (!testPaths.every(Boolean)) this.runtime().ports.policies.assertReadyToImplement(task.spec.strategy);
-      } else this.runtime().ports.policies.assertReadyToImplement(task.spec.strategy);
+      await this.authorizeTddPaths(context.cwd, task, owned, paths);
       await this.git(context.cwd, ["add", "--all", "--", ...paths]);
       await this.git(context.cwd, ["commit", "-m", message]);
       return json({ committed: true, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim() });

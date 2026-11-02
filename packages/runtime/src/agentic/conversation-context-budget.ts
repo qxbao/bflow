@@ -10,9 +10,19 @@ const sizeOf = (value: unknown): number => Buffer.byteLength(JSON.stringify(valu
 const fieldsOf = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed"]);
 
+function sliceUtf16Safe(text: string, max: number): string {
+  if (max <= 0) return "";
+  if (text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
 /** Caps long text and marks the cut, so the model knows the text is incomplete. */
-const capText = (value: unknown, max: number): unknown => typeof value === "string" && value.length > max
-  ? `${value.slice(0, max)}…[truncated ${value.length - max} chars]` : value;
+const capText = (value: unknown, max: number): unknown => {
+  if (typeof value !== "string" || value.length <= max) return value;
+  const head = sliceUtf16Safe(value, max);
+  return `${head}…[truncated ${value.length - head.length} chars]`;
+};
 const capFields = (value: unknown, max: number) => Object.fromEntries(Object.entries(fieldsOf(value)).map(([key, item]) => [key, capText(item, max)]));
 const pick = (value: Record<string, unknown>, keys: string[]) => Object.fromEntries(keys.filter(key => key in value).map(key => [key, value[key]]));
 const isTerminal = (workflow: Record<string, unknown>) => TERMINAL_STATUSES.has(String(workflow.sdlcStatus));
@@ -59,7 +69,8 @@ const compactWorkflow = (workflow: unknown, brief: boolean) => {
  * never truncated, even when they alone exceed the budget, because the model must act on them. Each trim is counted.
  */
 export function boundConversationContext(result: unknown, budget = CONVERSATION_CONTEXT_BUDGET): unknown {
-  if (sizeOf(result) <= budget) return result;
+  const effectiveBudget = Number.isFinite(budget) ? Math.max(0, budget) : CONVERSATION_CONTEXT_BUDGET;
+  if (sizeOf(result) <= effectiveBudget) return result;
   const whole = record(result), context = record(whole.context ?? {});
   if (!Array.isArray(context.messages)) return result;
   const messages = context.messages, clarifications = record(context.pendingClarifications ?? {});
@@ -85,17 +96,17 @@ export function boundConversationContext(result: unknown, budget = CONVERSATION_
   const ladder: [number, boolean][] = [...Array.from({ length: terminal.length + 1 }, (_, dropped): [number, boolean] => [dropped, false]), [terminal.length, true]];
   for (const [dropped, brief] of ladder) {
     const candidate = render(messages.length, clarifications, dropped, brief);
-    if (sizeOf(candidate) <= budget) return candidate;
+    if (sizeOf(candidate) <= effectiveBudget) return candidate;
   }
   const dropped = terminal.length;
   // Keep as much history as fits with clarifications; drop clarifications only when history alone cannot fit.
   for (let keep = messages.length; keep >= 0; keep--) {
     const candidate = render(keep, clarifications, dropped, true);
-    if (sizeOf(candidate) <= budget) return candidate;
+    if (sizeOf(candidate) <= effectiveBudget) return candidate;
   }
   for (let keep = messages.length; keep >= 0; keep--) {
     const candidate = render(keep, {}, dropped, true);
-    if (sizeOf(candidate) <= budget) return candidate;
+    if (sizeOf(candidate) <= effectiveBudget) return candidate;
   }
   return render(0, {}, dropped, true);
 }

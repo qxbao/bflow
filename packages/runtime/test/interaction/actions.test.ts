@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { projectRun } from "../../src/interaction/views.js";
+import { availableActions } from "../../src/interaction/actions.js";
 import { run, state, pending, at } from "./fixtures.js";
 function view(r = run(), ready = true) {
   return projectRun(
@@ -93,4 +94,25 @@ it("retains the existing follow-up exhaustion bound instead of offering another 
     pendingAction: pending,
   });
   expect(view(parent).availableActions).toEqual([]);
+});
+
+import { RoleMessageSchema } from "@bflow/contracts";
+import { availableActions } from "../../src/interaction/actions.js";
+it.each([true, false])("offers a distinct owner resume after automatic=%s wake without resetting bounds", automatic => {
+  const r = run("r", { status: "implementing", pendingAction: { ...pending, state: "queued" },
+    resumeReceipts: [{ actionId: pending.actionId, messageId: "wake-1" }] });
+  const journal = state([r]);
+  journal.outbound.push({ message: RoleMessageSchema.parse({ schema_version: 2, message_id: "wake-1", correlation_id: "c-r",
+    run_id: "r", sender: { role: "runtime" }, recipient: { role: "coordinator" }, type: "task.status",
+    payload: { kind: "resume_run", actionId: pending.actionId, automatic }, artifact_references: [],
+    occurred_at: at, idempotency_key: "wake-1" }), status: "released", selector: "coordinator", taskId: "t", attemptId: "attempt-1", capabilities: [] });
+  const resume = () => availableActions(r, journal, [], true, true).find(a => a.kind === "resume")!;
+  expect(resume().enabled).toBe(automatic);
+  r.pendingAction!.manualResumeAttempts = 3;
+  expect(resume()).toMatchObject({ enabled: false, disabledReason: "resume_budget_exhausted" });
+});
+it("disables requirement revision once tasks are in Core, matching Runtime admission", () => {
+  const revise = (r: ReturnType<typeof run>) => availableActions(r, state([r]), [], true, true, false).find((a) => a.kind === "revise_request")!;
+  expect(revise(run("r", { status: "implementing" })).enabled).toBe(true);
+  expect(revise(run("r", { status: "implementing", coreCreated: true }))).toMatchObject({ enabled: false, disabledReason: "core_execution_started" });
 });

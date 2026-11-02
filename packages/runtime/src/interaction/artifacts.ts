@@ -21,7 +21,7 @@ export async function readScopedArtifact(store: ArtifactStore, projectId: string
     if(ref.artifactId!==artifactId || !await ownsRun(ref.runId))throw Error('scope');
     if(ref.sizeBytes===undefined || ref.sizeBytes>ARTIFACT_TRANSFER_BYTES)throw Error('quota');
     const mediaType=ref.mediaType.toLowerCase().trim();
-    const inline=['text/plain','application/json','text/markdown'].includes(mediaType) && ref.sizeBytes<=WEB_LIMITS.previewBytes;
+    const inline=['text/plain','application/json','text/markdown','text/x-patch','text/diff'].includes(mediaType) && ref.sizeBytes<=WEB_LIMITS.previewBytes;
     const metadata=WebArtifactMetadataSchema.parse({apiVersion:1,artifactId,runId:ref.runId,mediaType:ref.mediaType,
       checksum:ref.checksum,sizeBytes:ref.sizeBytes,disposition:inline?'inline':'attachment',previewLimitBytes:WEB_LIMITS.previewBytes});
     return {ok:true,value:{metadata,chunks:(async function*(){

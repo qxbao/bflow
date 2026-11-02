@@ -1,0 +1,11 @@
+state/
+logs/
+secrets/
+.env
+.env.*
+data/
+artifacts/
+registry/
+*.db
+*.db-*
+*.log

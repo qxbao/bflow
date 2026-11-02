@@ -6,6 +6,9 @@ shows a pairing error; there is no production mock mode, proxy or security bypas
 Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 `@bflow/web/assets` remains the separate Node asset resolver.
 
+- Step-by-step end-user guide (Vietnamese with screenshots): [`docs/guide/web-manual.md`](../../docs/guide/web-manual.md)
+- UX/CLS stabilization & live single-provider Web SDLC evidence (`run-web-c72842ea-a325-4305-833e-760d560e095b`): [`docs/reliability/web-ux-stabilization.md`](../../docs/reliability/web-ux-stabilization.md)
+
 ## Screen and state mapping
 
 | Screen | Components / data | States |
@@ -15,7 +18,7 @@ Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 | Công việc | Search/phase URL filters, cursor pages, run detail, tasks/blockers, lineage links | Pre-Core null, all engine/task statuses, unknown/done terminal observations, historical continuation, empty/error/stale |
 | Cần bạn quyết định | DecisionCard, revision/status/expiry, safe evidence | Pending/expired/superseded etc. as returned; view-only, no approval inferred from phase |
 | Cài đặt dự án | Explicit init/update/GitNexus repair, readiness inspection, role/provider/model forms, policy/tool/MCP/skills groups, full YAML, confirmed unregister | Durable initialization ID/progress/recovery, revision conflict and validation errors; config changes apply after session restart |
-| Trò chuyện | Run detail panel on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
+| Trò chuyện | Own project tab (`/chat`, `/chat/:runId`): one thread per run on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
 
 Workflow create/revise/clarification/approval/resume/cancel and lifecycle start/stop
 controls belong to W07. The registry form and read-only inspect call the frozen
@@ -165,7 +168,7 @@ See W07-HANDOFF.md for measured results and integration-owned runner proposal.
 
 ## W08 optional chat
 
-Run detail includes normalized session history and a bounded text composer. It uses
+The Trò chuyện tab shows normalized session history and a bounded text composer. It uses
 the same authenticated HTTP origin and run/session as direct actions. The host
 rechecks readiness and native binding; successful history alone grants no authority.
 Claude/Codex adapters use correlated real native hooks and provider transcript IDs.
@@ -256,3 +259,19 @@ data and disable actions through the existing freshness/authority checks.
 
 See [approved scope](UX-IMPROVEMENTS.md), [implementation plan](UX-PLAN.md) and
 `test/ux.test.tsx` / `e2e/ux.spec.ts` for interaction and responsive checks.
+
+## Operational UX handoff (UX-01..UX-28)
+
+Source plus local tests; not live acceptance. Behaviour added on top of the frozen web contract:
+
+- Run page: "Bước hiện tại" states who the run is waiting on from projection fields only, never terminal idle/done. The elapsed text is time since the last change, not processing time.
+- Blockers are classified as required, in-progress check or optional degradation. Unknown codes stay required. Several reads failing for one cause on the overview render one notice.
+- Settled approvals are read from the run page under "Đã có hiệu lực". The review inbox stays a to-do list. Runtime keeps only the run's latest approval, so an earlier design approval is replaced once a task or delivery approval is issued.
+- A request form still tracking an operation says so, disables sending and offers a new intent only after the outcome is known.
+- Chat is a messenger-style tab with one thread per run, reading at most 20 pages. It hides other runs' messages but keeps those without a `runId`, because Conversation replies and terminal turns carry none yet.
+- "Đang soạn tin" is inferred, not a provider signal: the user's last message is `delivered`, the session is ready, no reply has arrived and the message is under five minutes old. The thread re-reads history every five seconds during that window.
+- Operations settled over ten minutes ago and unrelated to the open run move to a collapsed history.
+- Each acceptance criterion carries its own verification method; the default applies only until changed.
+- Background refreshes render a zero-height screen-reader status (`CLS = 0.00000`) while keeping visible panels, focus and drafts mounted; settled operations recorded in local storage automatically unlock action slots on reload/reread, SSE cursors deduplicate delivered events, and `Settings` provides a 1-click bulk Provider/Model bar across all configured roles plus plain-Vietnamese readiness/decision disclosures and route-aligned timeouts (`40s`/`50s`).
+
+Not implementable without an additive contract decision (`WebRunView`/`WebTransportSummary` are strict): per-task Red/Green/Refactor phase and owner (UX-05), QA progress (UX-20), role per transport state (UX-16), notice feed grouping (UX-11), checked model catalog (UX-25) and provider onboarding by role with a pane link (UX-26).

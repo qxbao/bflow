@@ -19,7 +19,7 @@ export const TestIntegrityObservationSchema = z.object({
 export type TestIntegrityObservation = z.infer<typeof TestIntegrityObservationSchema>;
 export const TestIntegrityVerdictSchema = z.object({
   findingId: z.string().min(1), verdict: z.enum(["equivalent", "confirmed_violation"]), reason: z.string().trim().min(10).max(4000),
-  evidence: z.array(z.object({ revision: z.string().regex(/^[a-f0-9]{40}$/),
+  evidence: z.array(z.object({ revision: z.string().regex(/^[a-fA-F0-9]{40}$/).transform(value => value.toLowerCase()),
     path: z.string().min(1).max(4096).refine(path => !path.startsWith("/") && !path.includes("\\") && !path.includes("\0") && path.split("/").every(part => part && part !== "." && part !== "..")),
     line: z.number().int().positive(), excerpt: z.string().trim().min(1).max(4096) }).strict()).min(1).max(8)
 }).strict();
@@ -70,21 +70,38 @@ export async function validateTestIntegrityEvidence(cwd: string, report: TestInt
   const sources = new Map<string, string[]>();
   let bytes = 0;
   for (const verdict of verdicts) for (const anchor of verdict.evidence) {
-    if (anchor.revision !== report.baseRevision && anchor.revision !== report.candidateRevision) throw new Error("Test-integrity evidence revision differs from observed base/candidate");
+    if (anchor.revision !== report.baseRevision && anchor.revision !== report.candidateRevision) {
+      throw new Error(
+        `Test-integrity evidence revision '${anchor.revision}' for finding '${verdict.findingId}' differs from observed baseRevision (${report.baseRevision}) and candidateRevision (${report.candidateRevision})`
+      );
+    }
     const key = JSON.stringify([anchor.revision, anchor.path]);
     let lines = sources.get(key);
     if (!lines) {
       if (sources.size >= 64) throw new Error("Test-integrity evidence file limit exceeded");
       const entry = (await integrityGit(cwd, ["ls-tree", "-z", anchor.revision, "--", anchor.path])).split("\0").find(item => item.slice(item.indexOf("\t") + 1) === anchor.path);
       const match = /^(100644|100755) blob ([a-f0-9]{40})\t/.exec(entry ?? "");
-      if (!match) throw new Error("Test-integrity evidence requires an existing regular Git blob");
+      if (!match) {
+        throw new Error(`Test-integrity evidence for finding '${verdict.findingId}' requires an existing regular Git blob at ${anchor.revision}:${anchor.path}`);
+      }
       const size = Number((await integrityGit(cwd, ["cat-file", "-s", match[2]!])).trim());
       if (!Number.isSafeInteger(size) || size < 0 || size > 1_048_576 || bytes + size > 8_388_608) throw new Error("Test-integrity evidence blob bounds exceeded");
       bytes += size;
       lines = (await integrityGit(cwd, ["cat-file", "blob", match[2]!])).split(/\r?\n/);
       sources.set(key, lines);
     }
-    if (lines[anchor.line - 1]?.trim() !== anchor.excerpt) throw new Error("Test-integrity evidence excerpt does not match the exact committed line");
+    const excerptLines = anchor.excerpt.split(/\r?\n/);
+    const matchesCommitted = excerptLines.every(
+      (expectedLine, offset) =>
+        anchor.line - 1 + offset < lines.length &&
+        lines[anchor.line - 1 + offset]?.trim() === expectedLine.trim()
+    );
+    if (!matchesCommitted) {
+      const committedPreview = lines.slice(Math.max(0, anchor.line - 1), anchor.line - 1 + excerptLines.length).join("\n");
+      throw new Error(
+        `Test-integrity evidence excerpt does not match the exact committed line for finding '${verdict.findingId}' at ${anchor.revision}:${anchor.path}:${anchor.line} (committed: ${JSON.stringify(committedPreview)})`
+      );
+    }
   }
 }
 /** Every suspicion is explicitly adjudicated; a syntactic fact is never silently upgraded to a semantic violation. */
@@ -93,10 +110,24 @@ export function adjudicateTestIntegrity(report: TestIntegrityReport, rawVerdicts
   const grants = z.array(TestIntegrityGrantSchema).parse(rawGrants);
   if (new Set(verdicts.map(item => item.findingId)).size !== verdicts.length) throw new Error("Duplicate test-integrity verdict ID");
   const ids = report.findings.map(item => item.id).sort();
-  if (JSON.stringify(verdicts.map(item => item.findingId).sort()) !== JSON.stringify(ids)) throw new Error("Test-integrity verdicts must cover exactly every observed finding ID");
+  const expectedSet = new Set(ids);
+  const submittedSet = new Set(verdicts.map(item => item.findingId));
+  const unknownIds = verdicts.map(item => item.findingId).filter(id => !expectedSet.has(id));
+  const missingIds = ids.filter(id => !submittedSet.has(id));
+  if (unknownIds.length > 0 || missingIds.length > 0) {
+    const details = [
+      ...(missingIds.length > 0 ? [`missing findingId(s): ${missingIds.join(", ")}`] : []),
+      ...(unknownIds.length > 0 ? [`unknown findingId(s): ${unknownIds.join(", ")}`] : [])
+    ].join("; ");
+    throw new Error(`Test-integrity verdicts must cover exactly every observed finding ID (${details})`);
+  }
   for (const verdict of verdicts) {
     const finding = report.findings.find(item => item.id === verdict.findingId)!;
-    if (finding.classification === "proven_violation" && verdict.verdict === "equivalent") throw new Error("Proven test-integrity violation requires owner exception, not equivalent verdict");
+    if (finding.classification === "proven_violation" && verdict.verdict === "equivalent") {
+      throw new Error(
+        `Proven test-integrity violation '${verdict.findingId}' (${finding.ruleId}) requires owner exception via request_test_integrity_exception and verdict 'confirmed_violation', not equivalent verdict`
+      );
+    }
   }
   const unresolved = verdicts.filter(item => item.verdict === "confirmed_violation" && !grants.some(grant => grant.findingId === item.findingId));
   return { verdicts, grants: grants.filter(grant => ids.includes(grant.findingId)), unresolved };

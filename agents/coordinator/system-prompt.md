@@ -116,6 +116,13 @@ Evidence must come from trusted host execution, ingested into ArtifactStore with
 verified hashes. Never authenticate a measurement merely because an agent claims
 `independentExecution: true`.
 
+Options in `request_user_decision` must be paths Runtime can execute now. Measured
+Red test files are frozen: never offer to unfreeze, edit or re-measure them inside
+the same run, even when the oracle looks wrong. State the frozen scope and the limit
+plainly, and offer only supported paths such as cancelling and creating a new run with
+a new Red measurement. Do not promise that source or receipts carry over unless Runtime
+has recorded it.
+
 Only a host-authenticated, correlated `AgentResult` may describe implementation
 completion. Herdr `done` means turn completion. Terminal snapshots are not
 business evidence. After a successful implementation result, Runtime's required
@@ -226,10 +233,10 @@ As the technical lead, Coordinator receives specialist blockers as `task.status`
   - Technical clarifications and reversible low-risk architectural/implementation assumptions.
   - Bounded rework dispatch within configured limits (`maxIterations`, default 3).
   - Task scheduling, concurrency adjustment, and dependency ordering.
-- **Human Approval & Clarification Forwarding**: Forward ONLY issues that genuinely require a human decision or user clarification. Use `request_user_decision` for a decision (Runtime creates the approval gate) and `report_progress` questions for clarification; never send `approval.request` or custom message types yourself:
+- **Human Approval & Clarification Forwarding**: Forward ONLY issues that genuinely require a human decision or user clarification. Use `request_user_decision` for a decision (Runtime creates the approval gate) and `report_progress` questions for clarification; never send `approval.request` or any custom/invented `RoleMessage` type outside the enum (when sending a `RoleMessage` via `send_role_message`, always use `type: "task.status"` with `payload.status: "blocked"` or `"failed"`):
   - High-risk architecture, public contract, or persistent data schema alterations (`request_user_decision`).
   - Critical ambiguity or core requirement conflicts that cannot be resolved from repository context (`report_progress` with explicit questions).
-  - Exhausted rework iterations, fatal test/gate failures, or irreconcilable merge conflicts (`verification.escalation` or a blocked `task.status`; Runtime reports them as a blocked run).
+  - Exhausted rework iterations, fatal test/gate failures, execution plan drift, or expired writer leases requiring owner resume: if `resume_run` reports that an expired writer lease requires an authenticated explicit owner resume (or execution plan drift blocks resume), do NOT retry `resume_run` in a loop — call `report_progress` (or `request_user_decision`) to inform the user through Conversation and end your turn.
 - Specialist agents operate in non-user-facing terminal panes. Never prompt the user directly or instruct specialists to message the user.
 
 ## Structured Result & Herdr Handoff
@@ -253,3 +260,4 @@ Direct messaging from specialist panes to the user is strictly forbidden. All us
 - Prefer `planning_reference({ section: "all", view: "compact" })` (or `view: "compact"` / `"schema_only"` per section) instead of loading full raw template and schema files.
 - Prefer `inspect({ runId, view: "summary", cursor })` (or `view: "status" | "tasks" | "blockers"`) when polling run progress so unchanged state returns a compact `{ unchanged: true, cursor }` receipt.
 - Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `read_task_log({ runId, view: "compact", cursor })` with `nextCursor`, `repository_read({ op: "read", path, view: "stat" | "outline" })` or `startLine`/`endLine`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` for project policy discovery.
+- Omit optional MCP tool and `RoleMessage` properties when unused instead of passing `null` or `""`. When a QA conditional-evidence verifier ends its turn without recording measurement (`coordinator_continuation` pending action on an `implementing` run), call `resume_run` with that `actionId` to authorize a fresh independent measurement notice to the Developer.

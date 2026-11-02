@@ -74,7 +74,7 @@ is source plus local tests; full live Chrome/provider SDLC acceptance remains op
 real-app gate (`appChecks`) runs its own sandboxed Chrome under a host-local fenced lease instead of the
 Gateway profile.
 
-GitNexus, Context7 and browser operations require their own policy requirements,
+GitNexus, DeepWiki and browser operations require their own policy requirements,
 task triggers and current readiness. A small arithmetic task does not itself
 justify indexing, external documentation or browser access. Missing or unsupported
 optional services must remain visible as degraded; skills cannot enable them.
@@ -83,14 +83,15 @@ optional services must remain visible as degraded; skills cannot enable them.
 
 The new strict version-3 schemas are additive exports. Existing RoleMessage,
 SessionManifest, Core checkpoints and SQL formats retain their contracts. New
-host fields are optional. CLI composition now derives optional requirements for Context7, RTK, GitNexus,
+host fields are optional. CLI composition now derives optional requirements for DeepWiki, RTK, GitNexus,
 MemPalace and Chrome when their toggles are absent or enabled. Set `enabled: false`
 to omit one. An explicit `toolPolicy` uses its own strict scope/digest and requirements.
 Derived requirements still need independently resolved machine inventory, service mapping,
 role/operation/scope authority and readiness before becoming grants. Direct legacy host
 compositions without a policy do not acquire new grants.
 
-Legacy `environment.context7` is translated to its explicit service, operations
+Legacy `environment.context7` (the service DeepWiki replaced) is read as `environment.deepwiki`
+and migrated with a backup; `bflow init --update` rewrites it. `environment.deepwiki` is translated to its explicit service, operations
 and role set; conflicting explicit policy is rejected. Ambiguous legacy
 `requiredTools`/`requiredMcpServices` requires migration to role requirements.
 Custom `skills.catalogDir`/`bindingsPath` is explicitly unsupported by this startup

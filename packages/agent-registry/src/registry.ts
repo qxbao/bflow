@@ -20,10 +20,63 @@ function parse<T>(schema: { safeParse(value: unknown): { success: true; data: T 
   return result.success ? ok(result.data) : fail(validation(result.error.message));
 }
 
-function clockMs(state: RegistryState, clock: () => Date): number {
-  const time = Math.max(clock().getTime(), Date.parse(state.lastNow));
-  state.lastNow = new Date(time).toISOString();
-  return time;
+function pruneStaleRenewReceipts(state: RegistryState): boolean {
+  let pruned = false;
+  for (const [key, item] of Object.entries(state.receipts)) {
+    if (!key.startsWith("renew:")) continue;
+    const current = item.kind === "lease" && item.lease ? state.leases[item.lease.leaseId] : undefined;
+    if (current && (!current.active || item.lease!.version < current.lease.version)) {
+      delete state.receipts[key];
+      pruned = true;
+    }
+  }
+  return pruned;
+}
+
+function reconcileLeases(state: RegistryState, clock: () => Date, advanceClock: boolean): OperationResult<number> {
+  const rawMs = clock().getTime();
+  if (!Number.isFinite(rawMs)) {
+    return fail(validation("Registry clock returned an invalid timestamp"));
+  }
+  const lastNowMs = Date.parse(state.lastNow);
+  const backwardSkew = Number.isFinite(lastNowMs) && rawMs < lastNowMs;
+  const sweepWatermark = backwardSkew ? lastNowMs : rawMs;
+  let swept = backwardSkew;
+  for (const entry of Object.values(state.leases)) {
+    if (!entry.active) continue;
+    const expiresMs = Date.parse(entry.lease.expiresAt);
+    if (expiresMs <= sweepWatermark || expiresMs <= rawMs) {
+      entry.active = false;
+      swept = true;
+    } else if (backwardSkew) {
+      // Heal persisted future clock skew without extending any active lease beyond its pre-rollback remaining TTL
+      const remainingMs = Math.max(0, expiresMs - lastNowMs);
+      if (remainingMs <= 0) {
+        entry.active = false;
+        swept = true;
+      } else {
+        const clampedExpiresAt = new Date(rawMs + remainingMs).toISOString();
+        const clampedAcquiredAt = Date.parse(entry.lease.acquiredAt) > rawMs
+          ? new Date(rawMs).toISOString()
+          : entry.lease.acquiredAt;
+        if (clampedExpiresAt !== entry.lease.expiresAt || clampedAcquiredAt !== entry.lease.acquiredAt) {
+          entry.lease = AgentLeaseSchema.parse({
+            ...entry.lease,
+            acquiredAt: clampedAcquiredAt,
+            expiresAt: clampedExpiresAt
+          });
+          swept = true;
+        }
+      }
+    }
+  }
+  if (pruneStaleRenewReceipts(state)) {
+    swept = true;
+  }
+  if (advanceClock || swept) {
+    state.lastNow = new Date(rawMs).toISOString();
+  }
+  return ok(rawMs);
 }
 
 function active(entry: { lease: AgentLease; active: boolean }, time: number): boolean {
@@ -68,6 +121,8 @@ export class FileAgentRegistry implements AgentRegistry {
     if (!input.ok) return input;
     context = input.value;
     return this.#operate((state) => {
+      const now = reconcileLeases(state, this.#clock, false);
+      if (!now.ok) return now;
       const candidates = Object.values(state.configurations).filter((agent) => agent.enabled && agent.role === role &&
         context.requiredCapabilities.every((capability) => agent.capabilities.includes(capability)) &&
         (context.preferredAgentId === undefined || agent.agentId === context.preferredAgentId));
@@ -81,11 +136,13 @@ export class FileAgentRegistry implements AgentRegistry {
     if (!input.ok) return input;
     request = input.value;
     return this.#operate((state) => {
+      const now = reconcileLeases(state, this.#clock, true);
+      if (!now.ok) return now;
+      const time = now.value;
       const fingerprint = JSON.stringify(input.value);
       const prior = receipt(state, request.idempotencyKey, fingerprint);
       if (!prior.ok) return prior;
       if (prior.value) return prior.value.lease ? ok(prior.value.lease) : fail(conflict("Incompatible registry receipt"));
-      const time = clockMs(state, this.#clock);
       const config = state.configurations[request.agentId];
       if (!config || !config.enabled) return fail(notFound("Agent is not configured or disabled"));
       if (state.leases[request.leaseId]) return fail(conflict("Lease ID already used"));
@@ -108,11 +165,13 @@ export class FileAgentRegistry implements AgentRegistry {
     if (!input.ok) return input;
     request = input.value;
     return this.#operate((state) => {
+      const now = reconcileLeases(state, this.#clock, true);
+      if (!now.ok) return now;
+      const time = now.value;
       const fingerprint = JSON.stringify(input.value);
       const prior = receipt(state, request.idempotencyKey, fingerprint);
       if (!prior.ok) return prior;
       if (prior.value) return prior.value.lease ? ok(prior.value.lease) : fail(conflict("Incompatible registry receipt"));
-      const time = clockMs(state, this.#clock);
       const entry = state.leases[request.leaseId];
       if (!entry) return fail(notFound("Lease not found"));
       if (!active(entry, time)) return fail(conflict("Lease expired or released"));
@@ -120,10 +179,7 @@ export class FileAgentRegistry implements AgentRegistry {
       if (!Number.isFinite(time + request.ttlMs) || time + request.ttlMs > 8.64e15) return fail(validation("Lease TTL exceeds supported date range"));
       const lease = AgentLeaseSchema.parse({ ...entry.lease, version: entry.lease.version + 1, expiresAt: new Date(time + request.ttlMs).toISOString() });
       entry.lease = lease;
-      for (const [key, item] of Object.entries(state.receipts)) {
-        const current = item.kind === "lease" && item.lease ? state.leases[item.lease.leaseId] : undefined;
-        if (key.startsWith("renew:") && current && item.lease!.version < current.lease.version) delete state.receipts[key];
-      }
+      pruneStaleRenewReceipts(state);
       state.receipts[request.idempotencyKey] = { fingerprint, kind: "lease", lease };
       return ok(lease);
     }, options);
@@ -134,27 +190,30 @@ export class FileAgentRegistry implements AgentRegistry {
     if (!input.ok) return input;
     request = input.value;
     return this.#operate((state) => {
+      const now = reconcileLeases(state, this.#clock, true);
+      if (!now.ok) return now;
+      const time = now.value;
       const fingerprint = JSON.stringify(input.value);
       const prior = receipt(state, request.idempotencyKey, fingerprint);
       if (!prior.ok) return prior;
       if (prior.value) return prior.value.kind === "void" ? ok(undefined) : fail(conflict("Incompatible registry receipt"));
-      const time = clockMs(state, this.#clock);
       const entry = state.leases[request.leaseId];
       if (!entry) return fail(notFound("Lease not found"));
       if (!active(entry, time)) return fail(conflict("Lease expired or already released"));
       if (entry.lease.fencingToken !== request.fencingToken || entry.lease.version !== request.expectedVersion) return fail(conflict("Stale fencing token or lease version"));
       entry.active = false;
-      for (const [key, item] of Object.entries(state.receipts)) {
-        const current = item.kind === "lease" && item.lease ? state.leases[item.lease.leaseId] : undefined;
-        if (key.startsWith("renew:") && current && item.lease!.version < current.lease.version) delete state.receipts[key];
-      }
+      pruneStaleRenewReceipts(state);
       state.receipts[request.idempotencyKey] = { fingerprint, kind: "void" };
       return ok(undefined);
     }, options);
   }
 
   async list(role?: string, options?: OperationOptions): Promise<OperationResult<readonly AgentConfiguration[]>> {
-    return this.#operate((state) => ok(Object.values(state.configurations).filter((agent) => role === undefined || agent.role === role).sort((a, b) => a.agentId.localeCompare(b.agentId))), options);
+    return this.#operate((state) => {
+      const now = reconcileLeases(state, this.#clock, false);
+      if (!now.ok) return now;
+      return ok(Object.values(state.configurations).filter((agent) => role === undefined || agent.role === role).sort((a, b) => a.agentId.localeCompare(b.agentId)));
+    }, options);
   }
 
   async upsert(configuration: AgentConfiguration, options?: OperationOptions): Promise<OperationResult<void>> {
@@ -162,7 +221,9 @@ export class FileAgentRegistry implements AgentRegistry {
     if (!input.ok) return input;
     configuration = input.value;
     return this.#operate((state) => {
-      const time = clockMs(state, this.#clock);
+      const now = reconcileLeases(state, this.#clock, true);
+      if (!now.ok) return now;
+      const time = now.value;
       const occupied = Object.values(state.leases).filter((entry) => entry.lease.agentId === configuration.agentId && active(entry, time)).length;
       if (occupied > configuration.maxConcurrentTasks) return fail(conflict("Cannot lower capacity below active leases"));
       if (occupied > 0 && state.configurations[configuration.agentId] && JSON.stringify(state.configurations[configuration.agentId]) !== JSON.stringify(input.value)) return fail(conflict("Cannot change agent configuration while leases are active"));
@@ -176,7 +237,9 @@ export class FileAgentRegistry implements AgentRegistry {
     if (!identifier.ok) return identifier;
     agentId = identifier.value;
     return this.#operate((state) => {
-      const time = clockMs(state, this.#clock);
+      const now = reconcileLeases(state, this.#clock, true);
+      if (!now.ok) return now;
+      const time = now.value;
       if (Object.values(state.leases).some((entry) => entry.lease.agentId === agentId && active(entry, time))) return fail(conflict("Cannot remove agent with active leases"));
       if (!state.configurations[agentId]) return ok(false);
       delete state.configurations[agentId];

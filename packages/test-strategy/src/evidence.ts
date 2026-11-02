@@ -35,14 +35,15 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
     if (previous && record.cycleNumber !== previous.cycleNumber) {
       throw new Error("Evidence phases must belong to the same verification cycle");
     }
-    if (Date.parse(record.startedAt) < Date.parse(strategy.createdAt) ||
+    if (Date.parse(record.completedAt) < Date.parse(record.startedAt) ||
+        Date.parse(record.startedAt) < Date.parse(strategy.createdAt) ||
         (previous && Date.parse(record.startedAt) < Date.parse(previous.completedAt))) {
-      throw new Error("Evidence phase times must follow the decision and previous phase");
+      throw new Error("Evidence phase times must be monotonic and follow the decision and previous phase");
     }
     if (record.evidenceArtifacts.some(a => a.taskId !== record.taskId || Date.parse(a.createdAt) < Date.parse(record.startedAt))) {
       throw new Error("Evidence artifacts must belong to this task and observation");
     }
-    const phase = required ? ["red", "green", "refactor"][index] : "verification";
+    const phase = required ? ["red", "green", "refactor"][index] : index === 0 ? "verification" : undefined;
     if (details.phase !== phase) throw new Error(`Expected ${phase ?? "no further"} evidence phase`);
     const isRed = details.phase === "red";
     if (isRed ? record.status !== "failed" || details.failureKind !== "target_behavior" : record.status !== "passed" || details.failureKind !== undefined) {
@@ -80,13 +81,16 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
         o.evidenceArtifactId === evaluated.evidenceArtifactId &&
         (o.method === "manual_review" || (
           (evaluated.command === undefined || o.command === evaluated.command) &&
-          (evaluated.exitCode === undefined || o.exitCode === evaluated.exitCode)
+          (evaluated.exitCode === undefined || o.exitCode === evaluated.exitCode) &&
+          (o.exitCode === undefined || evaluated.passed === (o.exitCode === 0))
         ))
       );
       if (!matching) {
         throw new Error("Observation must agree with the evaluated criterion command and exit code");
       }
-      if (matching.method !== "manual_review" && matching.exitCode !== undefined && evaluated.passed !== (matching.exitCode === 0)) {
+      if (evaluated.passed && details.observations.some(o =>
+        o.criterionId === evaluated.criterionId && o.exitCode !== undefined && o.exitCode !== 0
+      )) {
         throw new Error("Observation must agree with the evaluated criterion command and exit code");
       }
     }
@@ -99,8 +103,9 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
           behavioralCriteria.some(c => !details.observations.some(o => o.criterionId === c.id && o.method === c.verificationMethod))) {
         throw new Error("Red must cover required behavioral acceptance criteria");
       }
-      const names = strategy.criterionMappings.filter(m => observedCriteria.has(m.criterionId)).flatMap(m => m.testNames);
-      if (!names.every(name => details.testNames.includes(name))) throw new Error("Red tests must derive from the mapped spec criteria");
+      const normalizedRecordNames = details.testNames.map(name => name.trim().normalize("NFC"));
+      const names = strategy.criterionMappings.filter(m => observedCriteria.has(m.criterionId)).flatMap(m => m.testNames.map(name => name.trim().normalize("NFC")));
+      if (!names.every(name => normalizedRecordNames.includes(name))) throw new Error("Red tests must derive from the mapped spec criteria");
       redDetails = details;
     } else {
       if (criteria.some(c => !observedCriteria.has(c.id) || !details.observations.some(o => o.criterionId === c.id && o.method === c.verificationMethod)) ||
@@ -109,7 +114,9 @@ function validateSequence(strategy: TestStrategy, records: VerificationResult[])
         throw new Error("Successful evidence must cover every required criterion, verification method and target command");
       }
       if (redDetails) {
-        if (details.testRevision !== redDetails.testRevision || canonical([...details.testNames].sort()) !== canonical([...redDetails.testNames].sort()) ||
+        const normCurrent = details.testNames.map(n => n.trim().normalize("NFC")).sort();
+        const normRed = redDetails.testNames.map(n => n.trim().normalize("NFC")).sort();
+        if (details.testRevision !== redDetails.testRevision || canonical(normCurrent) !== canonical(normRed) ||
             details.sourceRevision === redDetails.sourceRevision) throw new Error("Green/refactor must preserve Red tests on the implementation revision");
         for (const observation of redDetails.observations) {
           if (!details.observations.some(o => o.method === observation.method && o.criterionId === observation.criterionId && o.command === observation.command)) {

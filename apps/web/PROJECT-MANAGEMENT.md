@@ -89,9 +89,9 @@ direct process-kill substitute was introduced. Confirmed real recovery stop pass
 Final UI added a separately confirmed recovery-stop intent. Local API/CLI
 regressions: 26 passed; web UI: 60 passed. Canonical entry-name supervision
 regression: 11 passed. The live probe also exercised the existing plan-drift
-gate when Context7 readiness changed the resolved skill list across restart.
+gate when the documentation service's readiness (Context7 at the time, since replaced by DeepWiki) changed the resolved skill list across restart.
 No plan check was weakened: the un-dispatched run was cancelled through web,
-optional Context7 was disabled through the form, config committed (`5d425a1`),
+the optional documentation service (formerly Context7, now DeepWiki) was disabled through the form, config committed (`5d425a1`),
 and the project restarted before admitting a new test run.
 
 A subsequent live run revealed a Core recovery collision: two generated workflows

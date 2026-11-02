@@ -86,6 +86,14 @@ describe('W09 lifecycle settlement and readiness',()=>{
   expect(await s.inspectProject(p.projectId)).toMatchObject({ok:true,value:{ready:false,checks:[{id:'repository-config',state:'failed'}]}});
   expect(doctor).not.toHaveBeenCalled();expect(await readdir(p.canonicalPath)).toEqual(before);
  });
+ it('reports a missing repository configuration in preview as available: false without writing files',async()=>{
+  const p=await project(false),before=await readdir(p.canonicalPath);
+  const s=createWebWorkspaceServices({resolveProject:async()=>p});
+  const result=await s.preview(p.projectId);
+  expect(result).toMatchObject({ok:true,value:{projectId:p.projectId,available:false,blockers:[]}});
+  if(result.ok)expect(result.value.summary).toMatch(/Cài đặt dự án|\.bflow\/config\.yml/);
+  expect(await readdir(p.canonicalPath)).toEqual(before);
+ });
  it('real EnvironmentLifecycle marks a provider preflight refusal as leaving the session unchanged',async()=>{
   const p=await project();
   const life=new EnvironmentLifecycle(p.canonicalPath,{providerOverrides:{codex:{available:false},claude:{available:false},agy:{available:false}}} as any);

@@ -748,7 +748,12 @@
         "observedAt": "2026-10-28T00:00:00.000Z"
       },
       "tasks": [],
-      "blockers": [],
+      "blockers": [
+        {
+          "code": "manual_resume_required",
+          "message": "Runtime is waiting on a recorded recovery action."
+        }
+      ],
       "decisions": [],
       "clarifications": [],
       "availableActions": [
@@ -794,7 +799,12 @@
         "observedAt": "2026-10-28T00:00:00.000Z"
       },
       "tasks": [],
-      "blockers": [],
+      "blockers": [
+        {
+          "code": "manual_resume_required",
+          "message": "Runtime is waiting on a recorded recovery action."
+        }
+      ],
       "decisions": [],
       "clarifications": [],
       "availableActions": [

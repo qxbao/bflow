@@ -26,11 +26,17 @@ export const AssessmentSchema = z.object({
   }).strict(),
   infrastructure: z.object({
     readiness: z.enum(["ready", "partial", "absent"]),
-    commands: z.array(z.object({
+    commands: z.array(z.preprocess((entry) => {
+      if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && (entry as Record<string, unknown>).level === null) {
+        const { level: _nullLevel, ...rest } = entry as Record<string, unknown>;
+        return rest;
+      }
+      return entry;
+    }, z.object({
       method: VerificationMethodSchema,
       command: Text,
       level: TestLevelSchema.optional()
-    }).strict())
+    }).strict()))
   }).strict(),
   testability: z.object({
     level: z.enum(["automated", "partial", "none"]),
@@ -39,8 +45,8 @@ export const AssessmentSchema = z.object({
   riskClassification: RiskLevelSchema,
   conventions: z.object({
     tdd: z.enum(["contextual", "preferred", "required"]),
-    requiredMethods: z.array(VerificationMethodSchema),
-    suggestedLevels: z.array(TestLevelSchema)
+    requiredMethods: z.preprocess(v => v === null ? [] : v, z.array(VerificationMethodSchema)),
+    suggestedLevels: z.preprocess(v => v === null ? [] : v, z.array(TestLevelSchema))
   }).strict()
 }).strict();
 export type Assessment = z.infer<typeof AssessmentSchema>;

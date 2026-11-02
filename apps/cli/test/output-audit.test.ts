@@ -40,11 +40,11 @@ describe("CLI output audit", () => {
   });
 
   it("retains every skipped doctor check identity, reason and action", () => {
-    const checks = Array.from({ length: 10 }, (_, i) => ({ checkId: `context7-check-${i}`, component: "context7", status: "skipped",
+    const checks = Array.from({ length: 10 }, (_, i) => ({ checkId: `deepwiki-check-${i}`, component: "deepwiki", status: "skipped",
       reason: `Documentation check ${i} was not requested`, remediation: `Inspect documentation setting ${i}` }));
-    checks[0] = { checkId: "context7-enabled", component: "context7", status: "skipped",
-      reason: "Context7 is not enabled for this repository (environment.context7.enabled).",
-      remediation: "Set environment.context7.enabled: true in .bflow/config.yml to let granted roles look documentation up." };
+    checks[0] = { checkId: "deepwiki-enabled", component: "deepwiki", status: "skipped",
+      reason: "DeepWiki is not enabled for this repository (environment.deepwiki.enabled).",
+      remediation: "Set environment.deepwiki.enabled: true in .bflow/config.yml to let granted roles read public repository documentation." };
     const report = EnvironmentDoctorReportSchema.parse({ schemaVersion: 2, workspaceRoot: "/work/shop", healthy: true,
       checkedAt: "2026-10-20T00:00:00.000Z", checks: [{ checkId: "node", name: "Node", status: "passed", message: "Node available" }], metadata: { groups: { mcp: checks } } });
     const output = formatCommandSuccess("doctor", report, false);
@@ -53,16 +53,16 @@ describe("CLI output audit", () => {
   });
 
   it.each([
-    ["auth_invalid", "context7-api-key-stdin"],
-    ["auth_missing", "context7-api-key-stdin"],
-    ["version_not_found", "--version"],
-    ["library_not_found", "bflow docs search"],
+    ["auth_invalid", "needs no credential"],
+    ["auth_missing", "needs no credential"],
+    ["version_not_found", "bflow docs structure"],
+    ["library_not_found", "bflow docs structure"],
     ["permission_denied", "grant"],
     ["network", "bflow docs status"],
     ["protocol", "bflow docs status"],
     ["rate_limited", "wait"]
   ] as const)("offers a specific next step for docs %s without changing JSON", (kind: DocsFailureKind, next) => {
-    const output = { docs: true as const, action: "lookup" as const, ok: false, access: { mode: "none" as const, reason: "Documentation access unavailable" }, warnings: [],
+    const output = { docs: true as const, action: "ask" as const, ok: false, access: { mode: "none" as const, reason: "Documentation access unavailable" }, warnings: [],
       failure: { kind, message: "Documentation request failed", retryable: false, retryAfterMs: kind === "rate_limited" ? 5000 : undefined, availableVersions: kind === "version_not_found" ? ["v1", "v2"] : undefined } };
     const text = formatCommandSuccess("docs", output, false);
     expect(text).toContain("Next:");

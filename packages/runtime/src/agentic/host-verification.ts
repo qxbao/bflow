@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -10,18 +11,22 @@ import {
   type ArtifactReference, type ArtifactStore, type JsonValue, type PaneBinding, type QualityGate, type QualityGateDefinition, type QualityGateResult, type Specification, type TestStrategy, type VerificationResult
 } from "@bflow/contracts";
 import { digest, json, record, strings, textField } from "./journal.js";
-import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
+import { ReworkFindingVerdictSchema, ReworkResolutionDossierSchema, reworkVerificationBinding, parseRequiredFindingVerdicts, requiredReworkFindingIdsForGate, hasReworkAssignment, type ReworkResolutionDossier } from "./rework-causality.js";
 import { unwrap } from "./outbox.js";
 import { BehavioralMeasurementError, behavioralChecks, bindRegressionProfile, verificationGit, measureBehavior, measureRegression, parseBehavioralCommands, testFilePattern,
   type BehavioralCommand, type BoundBehavioralCommand, type RegressionFailure, type RegressionMeasurement, type RtkOutputIntegration, type RunnerProfile } from "./behavioral-runner.js";
 import { RtkRequiredToolUnavailable } from "./behavioral-runner.js";
 import { assessMutation, createMutatedRevision, measureMutation, mutationChecks as mutationCheckDefinitions, type MutationCheck } from "./mutation-check.js";
-import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { AUTOMATIC_STATIC_COMMANDS, TestRunnerSource, automaticChecks, automaticCheckMethod, isAutomaticStaticCommand, regressionChecks, resolveTaskCommands, type AutomaticRunner } from "./task-commands.js";
+import { captureTypecheck, captureTypeScriptSyntax } from "./typecheck.js";
+import { PolicyReviewPages, PolicyReviewPageInputSchema } from "./policy-review-pages.js";
+import { compactPolicyReviewDossier } from "./mcp-output-views.js";
 import { unconfiguredImpactIndex, type ImpactIndex } from "./impact-index.js";
 import { selectRegressionTests } from "./regression-selection.js";
 import { pinRunnerDefinitions } from "./runner-provenance.js";
 import type { RegressionScope } from "./host-controller.js";
 import { WorkflowProposalRejected, type WorkflowRejectionCode } from "./workflow-rejection.js";
+import { normalizeSpecificationOptionals, normalizeWorkflowDefinitionOptionals } from "./assessment-input.js";
 import { BehavioralIdentityRepair, NodeTapTestCodeFailure } from "./node-tap.js";
 import { VitestTestCodeFailure } from "./vitest-json.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
@@ -47,11 +52,12 @@ function staticGateId(command: string): string {
 function staticAnalysisCheckDefinition(command: string) {
   return QualityGateDefinitionSchema.parse({
     id: staticGateId(command),
-    name: `Host syntax check of changed JavaScript/JSON files (${command})`,
+    name: automaticCheckMethod(command) === "typecheck" ? "Independent TypeScript compiler" : `Host syntax check of changed JavaScript/TypeScript/JSON files (${command})`,
     evaluator: "host-static-analysis",
     required: true,
-    timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
-    configuration: { kind: "deterministic", method: "static_analysis", command, criterionIds: [], testNames: [], role: "quality_gate", levels: [] }
+    timeout: { executionTimeoutMs: automaticCheckMethod(command) === "typecheck" ? 390_000 : 120_000, onTimeout: "block" },
+    metadata: { bindAcceptedCriteria: true },
+    configuration: { kind: "deterministic", method: automaticCheckMethod(command), command, criterionIds: [], testNames: [], role: "quality_gate", levels: [] }
   });
 }
 export function boundQaReviewCommands(commands: readonly BoundBehavioralCommand[], budgetMs: number): BoundBehavioralCommand[] {
@@ -108,6 +114,11 @@ export class HostBehavioralFailure extends Error {
   constructor(message: string, readonly evidence: import("@bflow/contracts").ArtifactReference,
     readonly rtkOutputs: readonly JsonValue[] = []) { super(message); }
 }
+const includesTestIdentity = (names: readonly string[], target: string): boolean => {
+  const normalizedTarget = target.normalize("NFC");
+  return names.some(item => item.normalize("NFC") === normalizedTarget);
+};
+
 export class HostVerification {
   private readonly gateReceipts = new Map<string, string>();
   private readonly gateRecords = new Map<string, QualityGateResult>();
@@ -137,27 +148,38 @@ export class HostVerification {
         config.method === "manual_review" && config.role === "qa";
     });
   }
+  private readonly policyReviewPages = new PolicyReviewPages();
   private readonly policyReviews = new Map<string, { binding: PaneBinding; observation: JsonValue }>();
   private async policyReviewAssignment(binding: PaneBinding, runId: string, taskId: string, phase: string) {
     return policyPhaseReviewAssignment(await this.runtime().inspect(), await this.runtime().inspect(runId), binding, runId, taskId, phase);
   }
   private async inspectPolicyReview(binding: PaneBinding, input: unknown) {
-    const args = z.object({ runId: z.string().min(1), taskId: z.string().min(1),
-      phase: z.enum(["green", "refactor", "verification"]) }).strict().parse(input);
+    const args = PolicyReviewPageInputSchema.parse(input);
     const assignment = await this.policyReviewAssignment(binding, args.runId, args.taskId, args.phase);
     if (!this.hasReviewCapability() || assignment.requestStatus !== "accepted") throw new Error("No active independent policy review capability/assignment");
     const prior = assignment.strategy.metadata?.tddEvidence;
     const expected = assignment.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][Array.isArray(prior) ? prior.length : 0] : "verification";
     if (args.phase !== expected) throw new Error(`Policy review requires the current ${expected} phase`);
+    const scope = { binding: digest(this.bindingIdentity(binding)), runId: args.runId, taskId: args.taskId,
+      phase: args.phase, stamp: assignment.stamp };
+    if (args.cursor !== undefined) {
+      if ((await this.git(assignment.cwd, ["rev-parse", "HEAD"])).trim() !== assignment.revision ||
+          await this.git(assignment.cwd, ["status", "--porcelain=v1", "-z"])) throw new Error("policy_review_source_changed: inspect the current committed revision again");
+      const current = await this.policyReviewAssignment(binding, args.runId, args.taskId, args.phase);
+      if (current.stamp !== assignment.stamp || current.requestStatus !== "accepted") throw new Error("Policy review assignment changed during paging");
+      return this.policyReviewPages.read(scope, args.cursor, args.offset ?? 0);
+    }
+    if ((args.offset ?? 0) !== 0) throw new Error("policy_review_cursor_required");
     const captured = await this.capture(assignment.cwd, assignment.base, assignment.revision);
     const current = await this.policyReviewAssignment(binding, args.runId, args.taskId, args.phase);
-    if (current.stamp !== assignment.stamp) throw new Error("Policy review assignment changed during inspection");
+    if (current.stamp !== assignment.stamp || current.requestStatus !== "accepted") throw new Error("Policy review assignment changed during inspection");
     const observationId = randomUUID(), observation = json({ kind: "policy-phase-review", stamp: assignment.stamp, captured });
     await this.receipts?.putObservation("alternative", observationId, { binding, runId: args.runId, taskId: args.taskId,
       sourceMessageId: assignment.requestId, observation });
     this.policyReviews.set(observationId, { binding: PaneBindingSchema.parse(binding), observation });
-    return json({ observationId, observation: captured, phase: args.phase, requestId: assignment.requestId,
-      dossier: { specification: assignment.specification, strategy: assignment.strategy } });
+    return this.policyReviewPages.open(scope, json({ observationId, observation: captured, phase: args.phase, requestId: assignment.requestId,
+      dossier: compactPolicyReviewDossier(assignment.specification, assignment.strategy) }),
+      binding.provider === "agy" || binding.agentKind === "agy", args.view === "page");
   }
   /** Runner-based ingress only sees criteria that no real-app gate verifies. */
   private splitApp(specification: Specification, strategy: TestStrategy): { specification: Specification; strategy: TestStrategy } {
@@ -187,7 +209,8 @@ export class HostVerification {
     const task = taskId === undefined ? undefined : tasks.find(item => item.taskId === taskId);
     if (taskId !== undefined && !task) throw new Error("Unknown task");
     const dossier = record(task ? task.spec : run.workflowSpec);
-    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) };
+    // Keep the initial trusted task baseline across rework attempts so rejected attempt-1 commits never become the baseline.
+    return { run, specification: SpecificationSchema.parse(dossier.specification), strategy: TestStrategySchema.parse(dossier.strategy), ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: task && Array.isArray(task.worktrees) && task.worktrees.length > 0 ? textField(record(task.worktrees[0]).baseCommitHash) : textField(run.baseRevision) };
   }
   private resolve(input: { specification: Specification; strategy: TestStrategy; ownedPaths?: readonly string[] | undefined; originalRevision?: string }): BoundBehavioralCommand[] {
     const rest = this.splitApp(input.specification, input.strategy);
@@ -216,16 +239,37 @@ export class HostVerification {
    * `auto:static` is only a syntax check: `git diff --check`, `node --check` for changed JavaScript and JSON parsing.
    * A changed file it cannot analyze fails the check instead of passing unexamined; such repositories need an owner-configured analyzer.
    */
-  private async captureStaticAnalysis(cwd: string, base: string, revision: string, command: string) {
+  private async captureStaticAnalysis(cwd: string, base: string, revision: string, command: string, deadlineAt?: number, testPaths: string[] = []) {
     const baseCapture = await this.capture(cwd, base, revision);
     if (baseCapture.exitCode !== 0) return { ...baseCapture, command };
+    const compile = async () => {
+      const profile = this.runners.typecheckForRevision(base);
+      if (!profile) throw new Error("No detected TypeScript compiler for the original revision; provision typecheck before proposing work");
+      const timeoutMs = Math.min(profile.runner.timeoutMs, deadlineAt === undefined ? profile.runner.timeoutMs : deadlineAt - Date.now() - 90000);
+      if (timeoutMs < 1) throw new Error("Independent compiler phase budget exhausted");
+      const result = await captureTypecheck({ ...profile, runner: { ...profile.runner, timeoutMs } }, cwd, revision, base, testPaths);
+      await this.capture(cwd, base, revision);
+      return { ...baseCapture, command, ...result, output: result.output || "TypeScript compiler passed" };
+    };
+    if (automaticCheckMethod(command) === "typecheck") return compile();
     const changed = (await this.git(cwd, ["diff", "--name-only", "--diff-filter=ACMR", base, revision, "--"]))
       .split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0 && !/\.(md|txt|rst)$/i.test(line));
-    const unsupported = changed.filter(file => !/\.([cm]?js|json)$/i.test(file));
+    const typescript = changed.filter(file => /\.[cm]?tsx?$/i.test(file));
+    if (typescript.length) {
+      const profile = this.runners.typecheckForRevision(base);
+      if (!profile) return { ...baseCapture, command, exitCode: 1,
+        output: `${command} cannot analyze ${typescript.join(", ")}; configure a TypeScript analyzer for these files` };
+      const timeoutMs = Math.min(30000, deadlineAt === undefined ? 30000 : deadlineAt - Date.now() - 90000);
+      if (timeoutMs < 1) throw new Error("Independent syntax phase budget exhausted");
+      const result = await captureTypeScriptSyntax({ ...profile, runner: { ...profile.runner, timeoutMs } }, cwd, revision, typescript, base, testPaths);
+      if (result.exitCode !== 0) return { ...baseCapture, command, ...result };
+    }
+    const unsupported = changed.filter(file => !/\.([cm]?js|[cm]?ts|tsx|json)$/i.test(file));
     if (unsupported.length) return { ...baseCapture, command, exitCode: 1,
       output: `${command} cannot analyze ${unsupported.join(", ")}; configure an owner static_analysis runner for these files` };
     const checked: string[] = [];
     for (const file of changed) {
+      if (/\.[cm]?tsx?$/i.test(file)) { checked.push(file); continue; }
       try {
         if (/\.json$/i.test(file)) JSON.parse(await readFile(join(cwd, file), "utf8"));
         else await execFileAsync(process.execPath, ["--check", file], { cwd, timeout: 15_000 });
@@ -245,9 +289,9 @@ export class HostVerification {
     return { cwd: textField(value.cwd), base: textField(value.base), revision: textField(value.revision), command: whitespaceCommand,
       exitCode: Number(value.exitCode), output: value.output, diff: value.diff };
   }
-  private async artifact(runId: string, taskId: string, body: unknown, artifactId?: string) {
+  private async artifact(runId: string, taskId: string | undefined, body: unknown, artifactId?: string) {
     const bytes = Buffer.from(JSON.stringify(body)); const id = artifactId ?? `host-observation-${randomUUID()}`;
-    return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: id, runId, taskId, kind: "test-result", mediaType: "application/json",
+    return ArtifactReferenceSchema.parse(unwrap(await this.store().put({ options: ArtifactWriteOptionsSchema.parse({ artifactId: id, runId, ...(taskId ? { taskId } : {}), kind: "test-result", mediaType: "application/json",
       expectedIntegrity: { checksum: { algorithm: "sha256", value: createHash("sha256").update(bytes).digest("hex") }, sizeBytes: bytes.length }, idempotencyKey: id }),
       content: (async function* () { yield bytes; })() })));
   }
@@ -310,14 +354,16 @@ export class HostVerification {
     return { id, evaluate: async raw => {
       try {
         const context = QualityGateContextSchema.parse(raw), input = record(context.input), config = record(context.definition.configuration);
-        if (context.definition.id !== id || config.command !== expectedCommand) throw new Error("Policy deterministic check does not match host configuration");
-        const observed = await this.captureStaticAnalysis(textField(input.sourceWorktreePath), textField(input.baseRevision), textField(input.sourceRevision), expectedCommand);
+        if (context.definition.id !== id || config.command !== expectedCommand || config.method !== automaticCheckMethod(expectedCommand)) throw new Error("Policy deterministic check does not match host configuration");
+        const dossier = typeof config.method === "string" && this.runners.typecheck ? await this.dossierFor(context.runId, context.taskId).catch(() => undefined) : undefined;
+        const testPaths = dossier ? this.resolve(dossier).flatMap(command => command.testPaths) : [];
+        const observed = await this.captureStaticAnalysis(textField(input.sourceWorktreePath), dossier?.originalRevision ?? textField(input.baseRevision), textField(input.sourceRevision), expectedCommand, undefined, [...new Set(testPaths)]);
         const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId,
           evaluationId: randomUUID(), status: observed.exitCode === 0 ? "passed" : "failed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
           metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
             sourceRevision: observed.revision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
             executorId: "bflow-host-git-check", role: "quality_gate", method: config.method, command: expectedCommand, exitCode: observed.exitCode,
-            testNames: [], criteria: [], summary: observed.output },
+            testNames: strings(config.testNames), criteria: strings(config.criterionIds).map(criterionId => ({ criterionId, passed: observed.exitCode === 0, summary: observed.output })), summary: observed.output },
             hostExecution: json(observed) } });
         await this.trustGate(result);
         return { ok: true, value: result };
@@ -340,11 +386,17 @@ export class HostVerification {
       return { ...check, metadata: { ...check.metadata, boundRunnerIdentities: true },
         configuration: json({ ...record(check.configuration), testNames: command.testNames }) };
     });
-    const policyChecks = strategy.targetCommands.filter(isAutomaticStaticCommand).map(staticAnalysisCheckDefinition);
+    const policyChecks = strategy.targetCommands.filter(isAutomaticStaticCommand).map(command => {
+      const check = staticAnalysisCheckDefinition(command), method = automaticCheckMethod(command);
+      const names = strategy.criterionMappings.filter(mapping => specification.acceptanceCriteria.some(criterion => criterion.id === mapping.criterionId &&
+        criterion.required !== false && criterion.status !== "waived" && criterion.verificationMethod === method)).flatMap(mapping => mapping.testNames);
+      return { ...check, configuration: json({ ...record(check.configuration), testNames: names }) };
+    });
     return [...owner, ...boundChecks, ...policyChecks, ...regression];
   }
   /** Methods with a runner: owner-configured, or Runtime-detected. Fixed per owner configuration; detection may refresh. */
   configuredMethods(): string[] { return [...new Set([...this.runners.owner.map(command => command.method), ...this.runners.profiles.map(profile => profile.method),
+    ...(this.runners.typecheck ? ["typecheck"] : []),
     // Owner real-app suites are the runner for e2e_test criteria (see appGate).
     ...(this.appSuites.length ? ["e2e_test"] : [])])]; }
   /**
@@ -352,8 +404,8 @@ export class HostVerification {
    * rejections: `no_test_runner_detected` is reported to the user; the other codes are Coordinator-fixable and silent.
    */
   assertSupported(input: unknown, strategyInput?: unknown, definitionInput?: unknown) {
-    const parsedSpec = SpecificationSchema.parse(input);
-    if (definitionInput !== undefined) WorkflowDefinitionSchema.parse(definitionInput);
+    const parsedSpec = SpecificationSchema.parse(normalizeSpecificationOptionals(input));
+    if (definitionInput !== undefined) WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
     const parsedStrategy = strategyInput === undefined ? undefined : TestStrategySchema.parse(strategyInput);
     // Real-app criteria are verified by their own gate; the runner rules below apply to the remaining criteria only.
     const split = parsedStrategy ? splitAppCriteria(parsedSpec, parsedStrategy, this.appSuites) : undefined;
@@ -361,8 +413,20 @@ export class HostVerification {
     const strategy = split?.rest.strategy ?? parsedStrategy;
     const realAppEvidence = (split?.app.length ?? 0) > 0;
     const active = spec.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
-    const automated = active.filter(criterion => criterion.verificationMethod !== "manual_review");
+    const deterministic = this.runners.automatic ? active.filter(criterion => ["typecheck", "static_analysis"].includes(criterion.verificationMethod)) : [];
+    const automated = active.filter(criterion => criterion.verificationMethod !== "manual_review" && !deterministic.includes(criterion));
+    if (deterministic.length) {
+      if (!strategy) throw new Error("Compiler/static criteria require an accepted strategy and host-selected command");
+      for (const criterion of deterministic) {
+        const selected = strategy.targetCommands.filter(command => isAutomaticStaticCommand(command) && automaticCheckMethod(command) === criterion.verificationMethod);
+        if (!selected.length || criterion.verificationMethod === "typecheck" && !this.runners.typecheck)
+          throw new WorkflowProposalRejected({ code: "unsupported_method", reason: `Criterion ${criterion.id} needs a detected ${criterion.verificationMethod} capability and its matching auto:typecheck or auto:static target command.`, methods: [criterion.verificationMethod], options: [] });
+      }
+      this.assertPolicyMethods(strategy, spec);
+    }
     if (!automated.length) {
+      if (deterministic.length) throw new WorkflowProposalRejected({ code: "missing_test_mapping",
+        reason: "Compiler and static checks supplement behavioral acceptance; include mapped independent behavioral criteria for executable development.", options: [] });
       if (spec.affectedPaths.some(path => !/\.(md|txt|rst)$/i.test(path)) && !realAppEvidence) throw new Error("Behavioral development requires configured independent behavioral acceptance checks");
       return;
     }
@@ -376,7 +440,7 @@ export class HostVerification {
     if (strategy !== undefined) {
       for (const criterion of automated) {
         const mapping = strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id);
-        if (!mapping?.testNames.length || !this.runners.owner.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => command.testNames.includes(name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
+        if (!mapping?.testNames.length || !this.runners.owner.some(command => strategy.targetCommands.includes(command.command) && command.method === criterion.verificationMethod && mapping.testNames.every(name => includesTestIdentity(command.testNames, name)))) throw new Error(`No complete owner-configured test mapping for ${criterion.id}`);
       }
       for (const command of strategy.targetCommands) if (!this.runners.owner.some(config => config.command === command)) throw new Error(`No owner-configured argv for ${command}`);
       if (strategy.coverageThresholdPercent !== undefined) throw new Error("Configured behavioral reporters do not measure aggregate coverage");
@@ -386,7 +450,8 @@ export class HostVerification {
     this.assertSupported(taskSpecInput, strategyInput);
     const rest = this.splitApp(taskSpecInput, strategyInput);
     const taskSpec = rest.specification, strategy = rest.strategy;
-    const automated = taskSpec.acceptanceCriteria.filter(c => c.required !== false && c.status !== "waived" && c.verificationMethod !== "manual_review");
+    const automated = taskSpec.acceptanceCriteria.filter(c => c.required !== false && c.status !== "waived" && c.verificationMethod !== "manual_review" &&
+      !(this.runners.automatic && ["typecheck", "static_analysis"].includes(c.verificationMethod)));
     if (!automated.length) return;
     const profiles = this.runners.automatic ? (this.runners.current?.status === "detected" ? this.runners.current.profiles : []) : [];
     let commands: BoundBehavioralCommand[];
@@ -426,7 +491,7 @@ export class HostVerification {
       }
       const bound = commands.some(cmd => {
         if (cmd.method !== criterion.verificationMethod) return false;
-        return mapping.testNames.every(name => cmd.testNames.includes(name));
+        return mapping.testNames.every(name => includesTestIdentity(cmd.testNames, name));
       });
       if (!bound) {
         throw new WorkflowProposalRejected({
@@ -459,8 +524,10 @@ export class HostVerification {
       // A method verified by an owner real-app gate has its runner: the gate binds the accepted criteria of that method.
       if (realAppMethods.has(method)) return true;
       if (this.runners.automatic && method === "static_analysis") {
-        return infraCommands.some(cmd => cmd.method === "static_analysis" && isAutomaticStaticCommand(textField(cmd.command)));
+        return infraCommands.some(cmd => cmd.method === "static_analysis" && isAutomaticStaticCommand(textField(cmd.command)) && automaticCheckMethod(textField(cmd.command)) === "static_analysis");
       }
+      if (this.runners.automatic && method === "typecheck") return Boolean(this.runners.typecheck) &&
+        infraCommands.some(cmd => cmd.method === "typecheck" && cmd.command === "auto:typecheck");
       if (!configured.includes(method)) return false;
       // Detected runners only execute test identities mapped from accepted criteria; a method without such a criterion has no evidence.
       return !this.runners.automatic || infraCommands.some(cmd => cmd.method === method) && criterionMethods.has(method as never);
@@ -468,7 +535,7 @@ export class HostVerification {
     // Behavioral evidence records manual_review only when review checks are configured and completed.
     const missing = required.filter(method => method === "manual_review" ? !this.hasReviewCapability() : !hasRunnerFor(method));
     if (missing.length) throw new WorkflowProposalRejected({ code: "unsupported_method",
-      reason: `Test strategy policy requires independent ${missing.join(", ")} checks with configured verification capabilities before design approval. Preserve the assessed policy and accepted criteria; provision the missing checks before proposing executable work. In automatic mode, static_analysis uses {"method":"static_analysis","command":"auto:static"} in metadata.conditionalTdd.infrastructure.commands (a syntax check of changed JavaScript/JSON files only), and each behavioral method needs an accepted criterion with that verificationMethod mapped to committed tests.` +
+      reason: `Test strategy policy requires independent ${missing.join(", ")} checks with configured verification capabilities before design approval. Preserve the assessed policy and accepted criteria; provision the missing checks before proposing executable work. A detected TypeScript compiler provides {"method":"typecheck","command":"auto:typecheck"}; static_analysis uses {"method":"static_analysis","command":"auto:static"} (changed JavaScript/JSON syntax, plus TypeScript syntax when a compiler is detected). Declare these in metadata.conditionalTdd.infrastructure.commands. Behavioral methods still require accepted criteria mapped to committed tests.` +
         (missing.includes("manual_review") ? " Configure the required native QA review check and its independent phase-review path; a command runner cannot replace manual review." : ""),
       methods: missing, options: [] });
   }
@@ -692,14 +759,17 @@ export class HostVerification {
       const effectiveTaskId = taskId === "workflow-verification" ? undefined : taskId;
       try {
         const inspected = record(await this.runtime().inspect(runId));
-        const runObj = inspected.run !== null && typeof inspected.run === "object" ? record(inspected.run) : inspected;
+        const fromRuns = Array.isArray(inspected.runs)
+          ? inspected.runs.filter(item => item !== null && typeof item === "object").map(record).find(item => item.runId === runId)
+          : undefined;
+        const runObj = inspected.run !== null && typeof inspected.run === "object" ? record(inspected.run) : (fromRuns ?? inspected);
         if (effectiveTaskId !== undefined && Array.isArray(runObj.tasks)) {
           const task = runObj.tasks
             .filter(item => item !== null && typeof item === "object")
             .map(record)
             .find(item => item.taskId === effectiveTaskId);
           if (task && Array.isArray(task.worktrees) && task.worktrees.length > 0) {
-            const baseCommit = record(task.worktrees.at(-1)).baseCommitHash;
+            const baseCommit = record(task.worktrees[0]).baseCommitHash;
             if (typeof baseCommit === "string" && baseCommit.trim().length > 0) return baseCommit.trim();
           }
         }
@@ -853,13 +923,14 @@ export class HostVerification {
           }
 
           const budgetMs = Math.min(540_000, profile.timeoutMs * 3);
-          const bindAtCurrentCheckout = async (testPaths: string[]) => {
-            const pinned = await pinRunnerDefinitions(cwd, {
+          const bindAtCheckout = async (checkoutDir: string, testPaths: string[]) => {
+            const baseProfile = profile.dependencySource ? profile : { ...profile, dependencySource: repositoryRoot };
+            const pinned = await pinRunnerDefinitions(checkoutDir, {
               status: "detected",
-              profiles: [profile],
+              profiles: [baseProfile],
               notes: []
             });
-            const activeProfile = pinned.status === "detected" ? pinned.profiles[0]! : profile;
+            const activeProfile = pinned.status === "detected" ? pinned.profiles[0]! : baseProfile;
             return bindRegressionProfile(activeProfile, testPaths, budgetMs);
           };
 
@@ -887,7 +958,7 @@ export class HostVerification {
 
           let headMeasured: RegressionMeasurement;
           try {
-            const headCommand = await bindAtCurrentCheckout([...selection.testPaths]);
+            const headCommand = await bindAtCheckout(cwd, [...selection.testPaths]);
             headMeasured = await measureRegression(headCommand, cwd, head);
           } catch (error) {
             return await handleInfraFailure(error);
@@ -923,24 +994,22 @@ export class HostVerification {
 
           let baseFailures: RegressionFailure[] = [];
           if (baseTestPaths.length > 0) {
-            const symbolicBranch = (
-              await this.git(cwd, ["symbolic-ref", "-q", "--short", "HEAD"]).catch(() => "")
-            ).trim();
+            const tempRoot = await mkdtemp(join(tmpdir(), "bflow-regression-base-"));
+            const baseCheckout = join(tempRoot, "checkout");
+            let worktreeAdded = false;
             try {
-              await this.git(cwd, ["checkout", "--detach", "--force", base]);
-              const baseCommand = await bindAtCurrentCheckout(baseTestPaths);
-              const baseMeasured = await measureRegression(baseCommand, cwd, base);
+              await this.git(cwd, ["worktree", "add", "--detach", baseCheckout, base]);
+              worktreeAdded = true;
+              const baseCommand = await bindAtCheckout(baseCheckout, baseTestPaths);
+              const baseMeasured = await measureRegression(baseCommand, baseCheckout, base);
               baseFailures = baseMeasured.observation.failures;
             } catch (error) {
               return await handleInfraFailure(error);
             } finally {
-              if (symbolicBranch) {
-                await this.git(cwd, ["checkout", "--force", symbolicBranch]).catch(async () => {
-                  await this.git(cwd, ["checkout", "--detach", "--force", head]);
-                });
-              } else {
-                await this.git(cwd, ["checkout", "--detach", "--force", head]);
+              if (worktreeAdded) {
+                await this.git(cwd, ["worktree", "remove", "--force", baseCheckout]).catch(() => undefined);
               }
+              await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
             }
           }
 
@@ -1002,7 +1071,7 @@ export class HostVerification {
         if (context.definition.id !== id) throw new Error("Behavioral check does not match owner configuration");
         const command = await resolveCommand(context);
         if (config.command !== command.command || config.method !== command.method ||
-            !Array.isArray(config.testNames) || config.testNames.some(name => !command.testNames.includes(String(name)))) throw new Error("Behavioral check does not match owner configuration");
+            !Array.isArray(config.testNames) || config.testNames.some(name => !includesTestIdentity(command.testNames, String(name)))) throw new Error("Behavioral check does not match owner configuration");
         const measured = await measureBehavior(command, textField(input.sourceWorktreePath), textField(input.sourceRevision));
         const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId: randomUUID(),
           status: measured.failed ? "failed" : "passed", findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
@@ -1049,11 +1118,18 @@ export class HostVerification {
     const reviewAssignment = needsReview ? await this.policyReviewAssignment(binding, runId, taskId, phase) : undefined;
     if (reviewAssignment && (reviewAssignment.revision !== revision || reviewAssignment.cwd !== cwd)) throw new Error("Policy review source revision changed");
     const startedAt = new Date().toISOString();
+    const phaseDeadline = Date.parse(startedAt) + 540000;
     const split = splitAppCriteria(spec, strategy, this.appSuites), appBindings = split.app;
     const criteria = split.rest.specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived");
     const allCriteria = [...criteria, ...appBindings.map(binding => binding.criterion)], attemptId = randomUUID();
-    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: Array.isArray(task.worktrees) && task.worktrees.length ? textField(record(task.worktrees.at(-1)).baseCommitHash) : textField(run.baseRevision) });
+    const taskBase = Array.isArray(task.worktrees) && task.worktrees.length &&
+      typeof record(task.worktrees[0]).baseCommitHash === "string" &&
+      String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
+        ? textField(record(task.worktrees[0]).baseCommitHash)
+        : textField(run.baseRevision);
+    const commands = this.resolve({ specification: spec, strategy, ownedPaths: this.ownedPathsOf(run, taskId), originalRevision: taskBase });
     // Real-app criteria need no runner command; a runner-verified criterion still does.
+    const compilerCriteria = this.runners.automatic ? criteria.filter(criterion => ["typecheck", "static_analysis"].includes(criterion.verificationMethod)) : [];
     if (criteria.some(criterion => criterion.verificationMethod === "manual_review") || (!commands.length && (criteria.length > 0 || appBindings.length === 0))) throw new Error("This strategy requires independent alternative evidence");
     const verificationId = `host-behavioral-${digest([runId, taskId, strategy.tddDecision.decisionId, phase, revision, commands, ...(reviewAssignment ? [reviewAssignment.stamp] : [])])}`;
     const replay = this.receipts ? await this.receipts.getEvidence(verificationId) : this.evidenceRecords.get(verificationId);
@@ -1061,7 +1137,7 @@ export class HostVerification {
       const parsed = VerificationResultSchema.parse(replay);
       if (digest(this.bindingIdentity(PaneBindingSchema.parse(parsed.metadata?.hostVerifierBinding))) !== digest(this.bindingIdentity(binding)) || !await this.authenticateEvidence(parsed)) throw new Error("Behavioral phase receipt belongs to another verifier binding");
       if (review && parsed.metadata?.hostPolicyReviewSubmission !== digest(review)) throw new Error("Conflicting immutable policy review judgment");
-      await this.capture(cwd, textField(run.baseRevision), revision);
+      await this.capture(cwd, taskBase, revision);
       return { result: parsed, assignment: assignment.message };
     }
     if (phase !== expected) throw new Error(`Expected ${expected ?? "no further"} behavioral phase`);
@@ -1072,7 +1148,7 @@ export class HostVerification {
       if (!stored || digest(this.bindingIdentity(stored.binding)) !== digest(this.bindingIdentity(binding))) throw new Error("Policy review observation belongs to another verifier or is missing");
       const observation = z.object({ kind: z.literal("policy-phase-review"), stamp: z.string(), captured: z.unknown() }).strict().parse(stored.observation);
       if (observation.stamp !== reviewAssignment.stamp) throw new Error("Policy review observation has a stale assignment, attempt, phase or specification");
-      const captured = this.parseCapture(observation.captured), current = await this.capture(cwd, textField(run.baseRevision), revision);
+      const captured = this.parseCapture(observation.captured), current = await this.capture(cwd, taskBase, revision);
       if (digest(current) !== digest(captured)) throw new Error("Policy review source changed after inspection");
       const judgments = this.judgments(review.criteria, allCriteria.map(c => c.id));
       if (!judgments.every(c => c.passed)) {
@@ -1087,11 +1163,13 @@ export class HostVerification {
         const rtk = await this.rtk?.resolve({ role: binding.role, runId, taskId,
           ...(typeof assignment.attemptId === "string" ? { attemptId: assignment.attemptId } : {}),
           commandId: command.id, revision });
-        measured.push(await measureBehavior(command, cwd, revision, rtk ? { rtk } : {}));
+        const remaining = phaseDeadline - Date.now() - 90000;
+        if (remaining < 1) throw new Error("Independent behavioral phase budget exhausted");
+        measured.push(await measureBehavior({ ...command, timeoutMs: Math.min(command.timeoutMs, remaining) }, cwd, revision, rtk ? { rtk } : {}));
       }
       catch (error) {
         if (!(error instanceof NodeTapTestCodeFailure) && !(error instanceof RtkRequiredToolUnavailable && error.originalOutcome)) throw error;
-        const observation = await this.capture(cwd, textField(run.baseRevision), revision);
+        const observation = await this.capture(cwd, taskBase, revision);
         const originalOutcome = error instanceof NodeTapTestCodeFailure ? error.outcome : error.originalOutcome!;
         const evidence = await this.artifact(runId, taskId, { phase, observation, verifiedBy: binding.agentId, accepted: false,
           measurementFailure: { protocol: error instanceof BehavioralIdentityRepair ? error.protocol : error instanceof VitestTestCodeFailure ? "vitest_json" : error instanceof NodeTapTestCodeFailure ? "node_tap" : "rtk_required", summary: error.message,
@@ -1102,7 +1180,7 @@ export class HostVerification {
           ? [json({ commandId: command.id, exitCode: error.outcome.exitCode, compressedOutput: error.rtk.compressedOutput })] : []);
       }
     }
-    const observation = await this.capture(cwd, textField(run.baseRevision), revision);
+    const observation = await this.capture(cwd, taskBase, revision);
     if (observation.exitCode !== 0) throw new Error("Committed diff integrity check failed");
     // Real-app criteria are measured on the same committed revision. A blocked prerequisite throws before any evidence is recorded.
     const appSuites: Extract<AppSuiteOutcome, { status: "completed" }>[] = [];
@@ -1135,7 +1213,7 @@ export class HostVerification {
     // Static target commands are measured here; every other target command must come from a measured runner above.
     const staticAnalyses = [];
     if (phase !== "red") for (const command of strategy.targetCommands.filter(isAutomaticStaticCommand)) {
-      const analysis = await this.captureStaticAnalysis(cwd, textField(run.baseRevision), revision, command);
+      const analysis = await this.captureStaticAnalysis(cwd, taskBase, revision, command, phaseDeadline, [...new Set(commands.flatMap(item => item.testPaths))]);
       staticAnalyses.push({ command, exitCode: analysis.exitCode, output: analysis.output });
     }
     if (staticAnalyses.some(item => item.exitCode !== 0)) {
@@ -1146,7 +1224,7 @@ export class HostVerification {
     if (manual && reviewAssignment) {
       const current = await this.policyReviewAssignment(binding, runId, taskId, phase);
       if (current.stamp !== reviewAssignment.stamp || current.requestStatus !== "accepted" ||
-          digest(await this.capture(cwd, textField(run.baseRevision), revision)) !== digest(manual.captured))
+          digest(await this.capture(cwd, taskBase, revision)) !== digest(manual.captured))
         throw new Error("Policy review assignment or source changed during independent measurement");
     }
     const artifact = await this.artifact(runId, taskId, { phase, observation, measurements: measured,
@@ -1154,19 +1232,22 @@ export class HostVerification {
       ...(staticAnalyses.length ? { staticAnalyses } : {}), verifiedBy: binding.agentId });
     for (const item of measured) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
     const observations: Array<{ method: string; criterionId: string; evidenceArtifactId: string; command?: string; exitCode?: number; summary: string }> = measured.flatMap(item => criteria.filter(criterion => criterion.verificationMethod === item.method &&
-      strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => item.testNames.includes(name)))
+      strategy.criterionMappings.find(mapping => mapping.criterionId === criterion.id)?.testNames.every(name => includesTestIdentity(item.testNames, name)))
       .map(criterion => ({ method: item.method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` })));
     // Commands without a primary criterion still produce evidence for the strategy's required methods/commands.
     for (const item of measured) if (!observations.some(observation => observation.command === item.command)) observations.push({ method: item.method, criterionId: allCriteria[0]!.id,
       evidenceArtifactId: artifact.artifactId, command: item.command, exitCode: item.outcome.exitCode!, summary: `${item.passed}/${item.tests} observed tests passed` });
     for (const suite of appSuites) for (const criterion of suite.criteria) observations.push({ method: "e2e_test", criterionId: criterion.criterionId,
       evidenceArtifactId: suite.evidence.artifactId, command: `app:${suite.suiteId}`, exitCode: criterion.passed ? 0 : 1, summary: criterion.summary });
-    for (const item of staticAnalyses) observations.push({ method: "static_analysis", criterionId: allCriteria[0]!.id, evidenceArtifactId: artifact.artifactId,
-      command: item.command, exitCode: item.exitCode, summary: item.output });
+    for (const item of staticAnalyses) {
+      const method = automaticCheckMethod(item.command), matching = allCriteria.filter(criterion => criterion.verificationMethod === method);
+      for (const criterion of matching.length ? matching : [allCriteria[0]!]) observations.push({ method, criterionId: criterion.id, evidenceArtifactId: artifact.artifactId,
+        command: item.command, exitCode: item.exitCode, summary: item.output });
+    }
     if (manual) for (const judgment of manual.criteria) observations.push({ method: "manual_review", criterionId: judgment.criterionId,
       evidenceArtifactId: artifact.artifactId, summary: judgment.summary });
     const result = VerificationResultSchema.parse({ schemaVersion: 2, verificationId, runId, taskId, cycleNumber: prior[0]?.cycleNumber ?? 1, attemptId,
-      status: phase === "red" ? "failed" : "passed", independentExecution: true, evaluatedCriteria: allCriteria.map(criterion => {
+      status: phase === "red" ? "failed" : "passed", independentExecution: true, evaluatedCriteria: allCriteria.filter(criterion => phase !== "red" || !compilerCriteria.includes(criterion)).map(criterion => {
         const matching = observations.find(observation => observation.criterionId === criterion.id && observation.method === criterion.verificationMethod && observation.command !== undefined && observation.exitCode !== undefined);
         if (!matching) throw new Error(`No measured evidence for ${criterion.id}`);
         return { criterionId: criterion.id, passed: matching.exitCode === 0, evidenceArtifactId: matching.evidenceArtifactId, command: matching.command, exitCode: matching.exitCode, summary: matching.summary };
@@ -1180,11 +1261,72 @@ export class HostVerification {
       ? [json({ commandId: item.commandId, exitCode: item.outcome.exitCode, compressedOutput: item.rtk.compressedOutput })] : []) };
   }
   private judgments(input: unknown, ids: string[]) {
-    if (!Array.isArray(input)) throw new Error("Independent criterion judgments are required");
+    if (!Array.isArray(input)) {
+      throw new Error(`Independent criterion judgments are required; submit criteria covering criterionId(s): ${ids.join(", ") || "none"}`);
+    }
     const values = input.map(value => { const item = record(value); if (typeof item.passed !== "boolean") throw new Error("Criterion verdict must be boolean");
       return { criterionId: textField(item.criterionId), passed: item.passed, summary: textField(item.summary) }; });
-    if (new Set(values.map(value => value.criterionId)).size !== values.length || digest(values.map(value => value.criterionId).sort()) !== digest([...ids].sort())) throw new Error("Review must cover exactly the assigned criteria");
+    const expectedSet = new Set(ids);
+    const seen = new Set<string>();
+    const duplicates: string[] = [];
+    for (const value of values) {
+      if (seen.has(value.criterionId)) duplicates.push(value.criterionId);
+      seen.add(value.criterionId);
+    }
+    const missing = ids.filter(id => !seen.has(id));
+    const unexpected = values.map(v => v.criterionId).filter(id => !expectedSet.has(id));
+    if (duplicates.length > 0 || missing.length > 0 || unexpected.length > 0) {
+      const details = [
+        ...(missing.length > 0 ? [`missing criterionId(s): ${missing.join(", ")}`] : []),
+        ...(unexpected.length > 0 ? [`unexpected criterionId(s): ${unexpected.join(", ")}`] : []),
+        ...(duplicates.length > 0 ? [`duplicate criterionId(s): ${[...new Set(duplicates)].join(", ")}`] : [])
+      ].join("; ");
+      throw new Error(`Review must cover exactly the assigned criteria (${details}; expected: ${ids.join(", ") || "none"})`);
+    }
     return values;
+  }
+  private reviewGateScope(state: Record<string, unknown>, context: import("@bflow/contracts").QualityGateContext, role: string) {
+    const run = Array.isArray(state.runs) ? state.runs.map(record).find(item => item.runId === context.runId) : undefined;
+    const task = context.taskId && context.taskId !== "workflow-verification" && Array.isArray(run?.tasks)
+      ? run!.tasks.map(record).find(item => item.taskId === context.taskId)
+      : undefined;
+    const planObj = task?.verificationPlan ?? (!task && run?.workflowVerificationPlan ? run.workflowVerificationPlan : undefined);
+    const planChecks = planObj && typeof planObj === "object" && Array.isArray(record(planObj).checks)
+      ? (record(planObj).checks as unknown[]).filter(c => c !== null && typeof c === "object").map(record)
+      : [];
+    const reviewDefs: { id: string; role: string }[] = [];
+    for (const check of planChecks) {
+      const cfg = check.configuration && typeof check.configuration === "object" ? record(check.configuration) : undefined;
+      if (cfg?.kind === "review" && cfg.method === "manual_review" && ["reviewer", "qa", "tester"].includes(String(cfg.role)) && typeof check.id === "string") {
+        if (!reviewDefs.some(item => item.id === check.id)) reviewDefs.push({ id: check.id, role: String(cfg.role) });
+      }
+    }
+    if (reviewDefs.length === 0) {
+      const sourceRev = record(context.input).sourceRevision;
+      const outbound = Array.isArray(state.outbound) ? (state.outbound as Record<string, unknown>[]) : [];
+      for (const out of outbound) {
+        if (out.reviewReplacement || !["accepted", "released"].includes(String(out.status))) continue;
+        const msg = out.message && typeof out.message === "object" ? record(out.message) : undefined;
+        if (msg?.type !== "verification.requested" || !msg.payload || typeof msg.payload !== "object") continue;
+        const payload = record(msg.payload);
+        if (payload.runId !== context.runId || payload.taskId !== context.taskId || payload.attemptId !== context.attemptId) continue;
+        if (record(payload.input).sourceRevision !== sourceRev) continue;
+        const def = payload.definition && typeof payload.definition === "object" ? record(payload.definition) : undefined;
+        const cfg = def?.configuration && typeof def.configuration === "object" ? record(def.configuration) : undefined;
+        if (cfg?.kind === "review" && cfg.method === "manual_review" && ["reviewer", "qa", "tester"].includes(String(cfg.role)) && typeof def?.id === "string") {
+          if (!reviewDefs.some(item => item.id === def.id)) reviewDefs.push({ id: def.id, role: String(cfg.role) });
+        }
+      }
+    }
+    if (!reviewDefs.some(item => item.id === context.definition.id)) {
+      reviewDefs.push({ id: context.definition.id, role });
+    }
+    return {
+      gateId: context.definition.id,
+      role,
+      siblingReviewGateIds: reviewDefs.map(item => item.id),
+      hasReviewerGate: reviewDefs.some(item => item.role === "reviewer")
+    };
   }
   private reworkDossierFor(state: Record<string, unknown>, runId: string, taskId?: string, attemptId?: string): ReworkResolutionDossier | undefined {
     if (!taskId || !attemptId || !Array.isArray(state.runs)) return undefined;
@@ -1214,14 +1356,16 @@ export class HostVerification {
     const details = record(context.input), config = record(context.definition.configuration);
     if (config.kind !== "review" || config.role !== binding.role) throw new Error("Review role mismatch");
     const observation = await this.capture(textField(details.sourceWorktreePath), textField(details.baseRevision), textField(details.sourceRevision));
-    const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
-    const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
-    if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
     let testIntegrityObservation: TestIntegrityObservation | undefined;
-    if (integrityReport.findings.length) {
-      const evidence = await this.artifact(context.runId, context.taskId!, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
-      testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
-      context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+    if (binding.role === "reviewer") {
+      const integrityReport = await this.measureIntegrity(context, observation.cwd, observation.base, observation.revision);
+      const integrityAfter = await this.capture(observation.cwd, observation.base, observation.revision);
+      if (digest(integrityAfter) !== digest(observation)) throw new Error("Review source changed during test integrity capture");
+      if (integrityReport.findings.length) {
+        const evidence = await this.artifact(context.runId, context.taskId, { report: integrityReport }, `test-integrity-${digest([context, integrityReport])}`);
+        testIntegrityObservation = TestIntegrityObservationSchema.parse({ report: integrityReport, evidence });
+        context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostTestIntegrityObservation: json(testIntegrityObservation) } });
+      }
     }
     let qaBehavioralObservation: JsonValue | undefined;
     if (binding.role === "qa" && details.scope === "workflow") {
@@ -1238,7 +1382,7 @@ export class HostVerification {
         }
         const after = await this.capture(observation.cwd, observation.base, observation.revision);
         if (digest(after) !== digest(observation)) throw new Error("QA source changed during independent measurement");
-        const artifact = await this.artifact(context.runId, context.taskId!, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
+        const artifact = await this.artifact(context.runId, context.taskId, { scope: "workflow", sourceRevision: observation.revision, measurements, verifiedBy: binding.agentId });
         for (const item of measurements) if ((item.rtk?.status === "compressed" || item.rtk?.status === "passthrough") && item.rtk.invocationId) await this.rtk?.consume(item.rtk.invocationId, artifact);
         qaBehavioralObservation = json({ sourceRevision: observation.revision, passed: measurements.every(item => item.failed === 0 && item.outcome.exitCode === 0),
           evidenceArtifact: artifact, measurements: measurements.map(item => ({ command: item.command, method: item.method, testNames: item.testNames,
@@ -1252,6 +1396,19 @@ export class HostVerification {
       if (reworkResolution.submittedRevision !== observation.revision) throw new Error("Rework dossier revision mismatch");
       context = QualityGateContextSchema.parse({ ...context, input: { ...record(context.input), hostReworkVerification: reworkVerificationBinding(reworkResolution) } });
     }
+    const gateScope = this.reviewGateScope(state, context, binding.role);
+    const reworkScope = reworkResolution
+      ? requiredReworkFindingIdsForGate(reworkResolution, gateScope)
+      : { requiredFindingIds: [] as string[], optionalFindingIds: [] as string[] };
+    const requiredCriterionIds = strings(config.criterionIds);
+    const buildRequirements = (integrityIds: readonly string[], integrityTotal: number) => ({
+      role: binding.role,
+      requiredCriterionIds,
+      requiredFindingVerdictIds: reworkScope.requiredFindingIds,
+      ...(reworkScope.optionalFindingIds.length > 0 ? { optionalFindingVerdictIds: reworkScope.optionalFindingIds } : {}),
+      requiredTestIntegrityFindingIds: [...integrityIds],
+      ...(integrityTotal !== integrityIds.length ? { requiredTestIntegrityFindingTotal: integrityTotal } : {})
+    });
     const sourceMessageId = textField(args.messageId);
     const existingReviewId = [...this.reviews.entries()].find(([, rev]) =>
       rev.sourceMessageId === sourceMessageId &&
@@ -1262,7 +1419,16 @@ export class HostVerification {
     const reviewId = existingReviewId ?? randomUUID();
     await this.receipts?.putObservation("review", reviewId, { binding, sourceMessageId, context, observation: json(observation) });
     this.reviews.set(reviewId, { binding, sourceMessageId, context, observation });
-    const fullReply = { reviewId, ...(testIntegrityObservation ? { testIntegrityObservation } : {}), ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}), ...(reworkResolution ? { reworkResolution } : {}), context, observation };
+    const fullIntegrityIds = testIntegrityObservation ? testIntegrityObservation.report.findings.map(f => f.id) : [];
+    const fullReply = {
+      reviewId,
+      reviewRequirements: buildRequirements(fullIntegrityIds, fullIntegrityIds.length),
+      ...(testIntegrityObservation ? { testIntegrityObservation } : {}),
+      ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
+      ...(reworkResolution ? { reworkResolution } : {}),
+      context,
+      observation
+    };
     const isAgy = binding.provider === "agy" || binding.agentKind === "agy";
     const hasDiffPagination = typeof args.diffOffset === "number" || typeof args.diffLimit === "number" || typeof args.integrityOffset === "number";
     const oversizedReply = isAgy ? exceedsAgyInlineReply(fullReply) : Buffer.byteLength(JSON.stringify(fullReply)) > 65_536;
@@ -1340,8 +1506,10 @@ export class HostVerification {
       // The complete observation remains immutable in the receipt journal and ArtifactStore; response pages carry its digest.
       const boundedContext = testIntegrityObservation ? { ...dossierContext, input: { ...record(context.input),
         hostTestIntegrityObservation: { evidence: testIntegrityObservation.evidence, reportDigest: digest(testIntegrityObservation.report), findingTotal: testIntegrityObservation.report.findings.length } } } : dossierContext;
+      const pageIntegrityIds = boundedIntegrity ? boundedIntegrity.report.findings.map(f => f.id) : [];
       return {
         reviewId,
+        reviewRequirements: buildRequirements(pageIntegrityIds, fullIntegrityIds.length),
         ...(boundedIntegrity ? { testIntegrityObservation: boundedIntegrity } : {}),
         ...(qaBehavioralObservation ? { qaBehavioralObservation } : {}),
         ...(boundedRework ? { reworkResolution: boundedRework } : {}),
@@ -1380,7 +1548,16 @@ export class HostVerification {
       findingId: args.findingId, reason: args.reason, evidence: observation.evidence });
   }
   async completeReview(binding: PaneBinding, input: unknown) {
-    const args = record(input), id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
+    const rawArgs = record(input);
+    const args: Record<string, unknown> = {
+      ...rawArgs,
+      messageId: rawArgs.messageId === null || (typeof rawArgs.messageId === "string" && rawArgs.messageId.trim() === "")
+        ? undefined : rawArgs.messageId,
+      testIntegrityVerdicts: rawArgs.testIntegrityVerdicts === null ? undefined : rawArgs.testIntegrityVerdicts,
+      findingVerdicts: rawArgs.findingVerdicts === null ? undefined : rawArgs.findingVerdicts,
+      findings: rawArgs.findings === null ? undefined : rawArgs.findings
+    };
+    const id = textField(args.reviewId), stored = await this.receipts?.getObservation("review", id);
     const pending = stored ? { binding: stored.binding, sourceMessageId: stored.sourceMessageId, context: stored.context, observation: this.parseCapture(stored.observation) } : this.reviews.get(id);
     if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding))) {
       // Guidance never selects an observation or submits a judgment on the caller's behalf.
@@ -1406,14 +1583,24 @@ export class HostVerification {
         (record(out.message).message_id === pending.sourceMessageId || digest(originalReviewContext(record(out.message).payload)) === digest(originalReviewContext(context)))))
       throw new Error("Replaced workflow review cannot complete a stored observation");
     if (configuration.kind !== "review" || configuration.role !== binding.role) throw new Error("Review role mismatch");
-    const integrityReport = await this.measureIntegrity(context, pending.observation.cwd, pending.observation.base, pending.observation.revision);
-    const integrityObservation = details.hostTestIntegrityObservation === undefined ? undefined : TestIntegrityObservationSchema.parse(details.hostTestIntegrityObservation);
-    if (integrityReport.findings.length && !integrityObservation) throw new Error("Test-integrity verdict requires a new inspect_review observation");
-    if (integrityObservation && digest(integrityObservation.report) !== digest(integrityReport)) throw new Error("Test-integrity report changed since review observation");
-    if (binding.role !== "reviewer" && args.testIntegrityVerdicts !== undefined) throw new Error("Only Reviewer may submit test-integrity verdicts");
-    const integrityJudgment = binding.role === "reviewer"
-      ? adjudicateTestIntegrity(integrityReport, args.testIntegrityVerdicts, await this.integrityGrants(context)) : undefined;
-    if (integrityJudgment) await validateTestIntegrityEvidence(pending.observation.cwd, integrityReport, integrityJudgment.verdicts);
+    if (binding.role !== "reviewer") {
+      if (Array.isArray(args.testIntegrityVerdicts) && args.testIntegrityVerdicts.length === 0) {
+        args.testIntegrityVerdicts = undefined;
+      } else if (args.testIntegrityVerdicts !== undefined) {
+        throw new Error("Only Reviewer may submit test-integrity verdicts; omit testIntegrityVerdicts when completing a QA or Tester review");
+      }
+    }
+    let integrityReport: Awaited<ReturnType<HostVerification["measureIntegrity"]>> | undefined;
+    let integrityObservation: TestIntegrityObservation | undefined;
+    let integrityJudgment: ReturnType<typeof adjudicateTestIntegrity> | undefined;
+    if (binding.role === "reviewer") {
+      integrityReport = await this.measureIntegrity(context, pending.observation.cwd, pending.observation.base, pending.observation.revision);
+      integrityObservation = details.hostTestIntegrityObservation === undefined ? undefined : TestIntegrityObservationSchema.parse(details.hostTestIntegrityObservation);
+      if (integrityReport.findings.length && !integrityObservation) throw new Error("Test-integrity verdict requires a new inspect_review observation");
+      if (integrityObservation && digest(integrityObservation.report) !== digest(integrityReport)) throw new Error("Test-integrity report changed since review observation");
+      integrityJudgment = adjudicateTestIntegrity(integrityReport, args.testIntegrityVerdicts, await this.integrityGrants(context));
+      await validateTestIntegrityEvidence(pending.observation.cwd, integrityReport, integrityJudgment.verdicts);
+    }
     const criteria = this.judgments(args.criteria, configuration.criterionIds as string[]);
     const reworkResolution = this.reworkDossierFor(state, context.runId, context.taskId, context.attemptId);
     const pinnedRework = details.hostReworkVerification;
@@ -1424,46 +1611,59 @@ export class HostVerification {
         throw new Error("Missing or stale rework observation binding");
       }
     }
-    const findingVerdicts = reworkResolution ? parseRequiredFindingVerdicts(reworkResolution, args.findingVerdicts) : args.findingVerdicts === undefined ? [] : (() => {
+    const gateScope = this.reviewGateScope(state, context, binding.role);
+    const findingVerdicts = reworkResolution ? parseRequiredFindingVerdicts(reworkResolution, args.findingVerdicts, gateScope) : args.findingVerdicts === undefined ? [] : (() => {
       if (!Array.isArray(args.findingVerdicts)) throw new Error("findingVerdicts must be an array");
       const parsed = args.findingVerdicts.map(item => ReworkFindingVerdictSchema.parse(item));
       if (new Set(parsed.map(item => item.findingId)).size !== parsed.length) throw new Error("Duplicate findingId in findingVerdicts");
       if (parsed.length > 0) throw new Error("findingVerdicts cannot be submitted for an initial non-rework review");
       return parsed;
     })();
+    const nonEmptyStr = (v: unknown): string | undefined => typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+    const parseLineNum = (v: unknown): number | undefined => {
+      if (typeof v === "number" && Number.isInteger(v) && v >= 1) return v;
+      if (typeof v === "string") {
+        const m = /^\s*(\d+)(?:\s*-\s*\d+)?\s*$/.exec(v);
+        if (m) {
+          const n = Number.parseInt(m[1]!, 10);
+          if (n >= 1) return n;
+        }
+      }
+      return undefined;
+    };
     const explicitFindings = args.findings === undefined ? [] : (() => {
       if (!Array.isArray(args.findings)) throw new Error("findings must be an array");
-      return args.findings.map(value => {
+      return args.findings.map((value, idx) => {
         const item = record(value);
         const locObj = item.location !== null && typeof item.location === "object" && !Array.isArray(item.location)
           ? (item.location as Record<string, unknown>) : undefined;
-        const filePath = typeof item.filePath === "string" && item.filePath.trim()
-          ? item.filePath.trim()
-          : typeof locObj?.path === "string" && locObj.path.trim()
-            ? locObj.path.trim()
-            : undefined;
-        const line = typeof item.line === "number"
-          ? item.line
-          : typeof locObj?.line === "number"
-            ? locObj.line
-            : undefined;
-        const location = typeof item.location === "string" && item.location.trim()
-          ? item.location.trim()
-          : filePath !== undefined
-            ? (line !== undefined ? `${filePath}:${line}` : filePath)
-            : undefined;
+        const filePath = nonEmptyStr(item.filePath) ?? nonEmptyStr(item.file) ?? nonEmptyStr(locObj?.path);
+        const line = parseLineNum(item.line) ?? parseLineNum(locObj?.line) ?? parseLineNum(locObj?.startLine);
+        const location = nonEmptyStr(item.location)
+          ?? (filePath !== undefined ? (line !== undefined ? `${filePath}:${line}` : filePath) : undefined);
+        const code = nonEmptyStr(item.code) ?? nonEmptyStr(item.category);
+        if (!code) throw new Error(`Finding at index ${idx} in complete_review findings requires a non-empty 'code' string`);
+        const evidenceText = nonEmptyStr(item.evidence);
+        const remediationText = nonEmptyStr(item.suggestedRemediation);
+        const message = nonEmptyStr(item.message)
+          ?? (evidenceText && remediationText ? `${evidenceText} (Remediation: ${remediationText})` : evidenceText ?? remediationText);
+        if (!message) throw new Error(`Finding '${code}' at index ${idx} in complete_review findings requires a non-empty 'message' string`);
+        const rawSeverity = nonEmptyStr(item.severity);
         return QualityFindingSchema.parse({
-          code: textField(item.code),
-          severity: item.severity === undefined ? "error" : textField(item.severity),
-          message: textField(item.message),
+          code,
+          severity: rawSeverity ?? "error",
+          message,
           ...(location !== undefined ? { location } : {}),
-          ...(typeof item.artifactId === "string" && item.artifactId.trim() ? { artifactId: item.artifactId.trim() } : {}),
+          ...(nonEmptyStr(item.artifactId) !== undefined ? { artifactId: nonEmptyStr(item.artifactId) } : {}),
           details: json({
             ...(item.details !== null && typeof item.details === "object" && !Array.isArray(item.details) ? item.details : {}),
+            checkId: context.definition.id,
             ...(filePath !== undefined ? { filePath } : {}),
             ...(line !== undefined ? { line } : {}),
-            ...(typeof item.criterionId === "string" && item.criterionId.trim() ? { criterionId: item.criterionId.trim() } : {}),
-            ...(typeof item.priorFindingId === "string" && item.priorFindingId.trim() ? { priorFindingId: item.priorFindingId.trim() } : {})
+            ...(nonEmptyStr(item.criterionId) !== undefined ? { criterionId: nonEmptyStr(item.criterionId) } : {}),
+            ...(nonEmptyStr(item.priorFindingId) !== undefined ? { priorFindingId: nonEmptyStr(item.priorFindingId) } : {}),
+            ...(nonEmptyStr(item.category) !== undefined && nonEmptyStr(item.code) !== undefined ? { category: nonEmptyStr(item.category) } : {}),
+            ...(remediationText !== undefined && nonEmptyStr(item.message) !== undefined ? { suggestedRemediation: remediationText } : {})
           })
         });
       });
@@ -1490,18 +1690,18 @@ export class HostVerification {
         })
       });
     });
-    const integrityFindings = integrityJudgment?.unresolved.map(verdict => {
+    const integrityFindings = integrityJudgment && integrityReport ? integrityJudgment.unresolved.map(verdict => {
       const finding = integrityReport.findings.find(item => item.id === verdict.findingId)!;
       return QualityFindingSchema.parse({ code: finding.ruleId, severity: "error", message: `Reviewer confirmed test weakening: ${verdict.reason}; owner exception required`,
         details: json(finding), location: `${finding.path}:${finding.line}:${finding.column}` });
-    }) ?? [];
+    }) : [];
     const allFindings = [...verdictFindings, ...explicitFindings, ...integrityFindings];
     const evaluationId = `host-review-${digest([id, this.bindingIdentity(binding), context])}`;
     const submission = digest({
       criteria,
       summary: textField(args.summary),
       ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts } : {}),
-      ...(findingVerdicts.length ? { findingVerdicts } : {}),
+      ...(reworkResolution || findingVerdicts.length ? { findingVerdicts } : {}),
       ...(explicitFindings.length ? { findings: explicitFindings } : {})
     });
     const replay = this.receipts ? await this.receipts.getGate(evaluationId) : this.gateRecords.get(evaluationId);
@@ -1516,14 +1716,14 @@ export class HostVerification {
       throw new Error("Workflow QA needs a new inspect_review observation with owner-run measurements; no old diff-only observation is upgraded into test evidence");
     const qaPassed = qaBehavioralObservation === undefined || record(qaBehavioralObservation).passed === true;
     const reworkRejected = findingVerdicts.some(item => item.verdict === "rejected") || allFindings.some(item => item.severity === "error");
-    const evidence = await this.artifact(context.runId, context.taskId!, {
+    const evidence = await this.artifact(context.runId, context.taskId, {
       observation: observed,
       criteria,
       reviewedBy: binding.agentId,
       ...(integrityObservation ? { testIntegrityObservation: integrityObservation } : {}),
       ...(integrityJudgment ? { testIntegrityVerdicts: integrityJudgment.verdicts, testIntegrityExceptions: integrityJudgment.grants } : {}),
       ...(qaBehavioralObservation === undefined ? {} : { qaBehavioralObservation }),
-      ...(findingVerdicts.length ? { findingVerdicts } : {}),
+      ...(reworkResolution || findingVerdicts.length ? { findingVerdicts } : {}),
       ...(allFindings.length ? { findings: allFindings } : {})
     });
     const result = QualityGateResultSchema.parse({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId, evaluationId,
@@ -1532,7 +1732,7 @@ export class HostVerification {
       metadata: {
         ...(integrityJudgment ? { testIntegrityVerdicts: json(integrityJudgment.verdicts), testIntegrityExceptions: json(integrityJudgment.grants) } : {}),
         ...(qaBehavioralObservation === undefined ? {} : { hostQaBehavioralObservation: qaBehavioralObservation }),
-        ...(findingVerdicts.length ? { findingVerdicts: json(findingVerdicts), reworkVerification: pinnedRework } : {}),
+        ...(reworkResolution || findingVerdicts.length ? { findingVerdicts: json(findingVerdicts), reworkVerification: pinnedRework, reworkGateScope: json(gateScope) } : {}),
         verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
           sourceRevision: observed.revision, specFingerprint: details.specFingerprint, scope: details.scope, independentExecution: true, isolated: true, executorId: binding.agentId,
           role: binding.role, method: "manual_review", testNames: configuration.testNames, criteria, summary: textField(args.summary) },
@@ -1546,17 +1746,23 @@ export class HostVerification {
   private readonly alternatives = new Map<string, { binding: PaneBinding; runId: string; taskId: string; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();
   async inspectAlternative(binding: PaneBinding, input: unknown) {
     if (record(input).phase !== undefined) return this.inspectPolicyReview(binding, input);
+    if (record(input).cursor !== undefined || record(input).offset !== undefined || record(input).view === "page") throw new Error("policy_review_paging_requires_phase");
     if (!["tester", "qa"].includes(binding.role)) throw new Error("Independent Tester or QA required");
     const args = record(input), runId = textField(args.runId), taskId = textField(args.taskId), state = record(await this.runtime().inspect());
     const run = record(await this.runtime().inspect(runId));
     const assignment = [...state.outbound as Record<string, unknown>[]].reverse().find(item => item.taskId === taskId && record(item.message).run_id === runId && record(item.message).type === "task.assignment" && item.handle);
     if (!assignment) throw new Error("Implementation assignment unavailable");
     const target = record(record(assignment.handle).target); if (target.agentId === binding.agentId) throw new Error("Implementer cannot verify its own change");
+    const task = (run.tasks as Record<string, unknown>[]).find(item => item.taskId === taskId); if (!task) throw new Error("Unknown task");
+    const taskBase = Array.isArray(task.worktrees) && task.worktrees.length &&
+      typeof record(task.worktrees[0]).baseCommitHash === "string" &&
+      String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
+        ? textField(record(task.worktrees[0]).baseCommitHash)
+        : textField(run.baseRevision);
     const cwd = textField(target.worktreePath), revision = (await this.git(cwd, ["rev-parse", "HEAD"])).trim();
-    const observation = await this.capture(cwd, textField(run.baseRevision), revision), observationId = randomUUID();
+    const observation = await this.capture(cwd, taskBase, revision), observationId = randomUUID();
     await this.receipts?.putObservation("alternative", observationId, { binding, runId, taskId, observation: json(observation) });
     this.alternatives.set(observationId, { binding, runId, taskId, observation });
-    const task = (run.tasks as Record<string, unknown>[]).find(item => item.taskId === taskId); if (!task) throw new Error("Unknown task");
     return json({ observationId, observation, dossier: task.spec });
   }
   async alternativeEvidence(binding: PaneBinding, input: unknown) {
@@ -1564,6 +1770,11 @@ export class HostVerification {
     const args = record(input), runId = textField(args.runId), taskId = textField(args.taskId);
     const run = record(await this.runtime().inspect(runId));
     const task = (run.tasks as Record<string, unknown>[]).find(item => item.taskId === taskId); if (!task) throw new Error("Unknown task");
+    const taskBase = Array.isArray(task.worktrees) && task.worktrees.length &&
+      typeof record(task.worktrees[0]).baseCommitHash === "string" &&
+      String(record(task.worktrees[0]).baseCommitHash).trim().length > 0
+        ? textField(record(task.worktrees[0]).baseCommitHash)
+        : textField(run.baseRevision);
     const dossier = record(task.spec), specification = SpecificationSchema.parse(dossier.specification), strategy = TestStrategySchema.parse(dossier.strategy);
     if (strategy.tddDecision.mode === "required" || strategy.targetCommands.length || specification.acceptanceCriteria.some(criterion => criterion.verificationMethod !== "manual_review")) throw new Error("Configured behavioral measurement runner required for this strategy");
     const state = record(await this.runtime().inspect());
@@ -1575,7 +1786,7 @@ export class HostVerification {
     const observationId = textField(args.observationId), stored = await this.receipts?.getObservation("alternative", observationId);
     const pending = stored ? { binding: stored.binding, runId: stored.runId, taskId: stored.taskId, observation: this.parseCapture(stored.observation) } : this.alternatives.get(observationId);
     if (!pending || digest(this.bindingIdentity(pending.binding)) !== digest(this.bindingIdentity(binding)) || pending.runId !== runId || pending.taskId !== taskId) throw new Error("Inspect the assigned alternative evidence before submitting a judgment");
-    const startedAt = new Date().toISOString(), observed = await this.capture(cwd, textField(run.baseRevision), revision);
+    const startedAt = new Date().toISOString(), observed = await this.capture(cwd, taskBase, revision);
     if (digest(observed) !== digest(pending.observation)) throw new Error("Alternative evidence source changed after inspection");
     const criteria = this.judgments(args.criteria, specification.acceptanceCriteria.filter(criterion => criterion.required !== false && criterion.status !== "waived").map(criterion => criterion.id));
     if (!criteria.every(criterion => criterion.passed) || observed.exitCode !== 0) throw new Error("Alternative acceptance evidence failed; request repairs instead");

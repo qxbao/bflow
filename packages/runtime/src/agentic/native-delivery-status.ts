@@ -6,18 +6,34 @@ import type { HostReceiptJournal } from "./host-receipts.js";
 
 /** Recheck owned ACK evidence around a stale timeout report; never send the envelope again. */
 export async function reportNativeDeliveryUncertainty(
-  receipts: Pick<HostReceiptJournal, "nativeDelivery">,
+  receipts: Pick<HostReceiptJournal, "nativeDelivery"> & Partial<Pick<HostReceiptJournal, "nativeRejection" | "recordNativeAcknowledgement">>,
   runtime: { reportUncertainNativeDelivery(message: RoleMessage, operationId: string, reason: string): Promise<void>;
-    reconcileNativeDelivery(messageId: string): Promise<boolean> },
+    reconcileNativeDelivery(messageId: string): Promise<boolean>;
+    nativeDeliveryInbox?(): Promise<unknown> },
   message: RoleMessage, operationId: string, reason: string
 ): Promise<boolean> {
   const acknowledged = async () => {
     const delivery = await receipts.nativeDelivery(operationId);
     if (!delivery || nativeMessageFingerprint(delivery.message) !== nativeMessageFingerprint(message))
       throw new Error("Native uncertainty report does not match its immutable intent");
-    if (delivery.status !== "acknowledged") return false;
-    await runtime.reconcileNativeDelivery(message.message_id);
-    return true;
+    if (delivery.status === "acknowledged") {
+      await runtime.reconcileNativeDelivery(delivery.message.message_id);
+      return true;
+    }
+    if (typeof runtime.nativeDeliveryInbox === "function" && typeof receipts.nativeRejection === "function" &&
+        typeof receipts.recordNativeAcknowledgement === "function") {
+      const inspection = await inspectNativeDelivery(
+        { nativeDelivery: async () => delivery, nativeRejection: id => receipts.nativeRejection!(id) },
+        operationId,
+        await runtime.nativeDeliveryInbox()
+      );
+      if (inspection.delivery === "applied") {
+        await receipts.recordNativeAcknowledgement(delivery.message);
+        await runtime.reconcileNativeDelivery(delivery.message.message_id);
+        return true;
+      }
+    }
+    return false;
   };
   if (await acknowledged()) return true;
   await runtime.reportUncertainNativeDelivery(message, operationId, reason);
@@ -79,6 +95,33 @@ export const NativeRejectionSchema = z.object({ code: z.literal("native_envelope
   });
 
 const InboxRowsSchema = z.array(z.object({ message: RoleMessageSchema, status: z.enum(["received", "applied", "rejected"]), reason: z.string().optional() }).strict());
+/**
+ * Matches a queued inbound provider prompt against Runtime's durable inbox even when `nativeDeliver` enriched
+ * omitted `sender.pane_id` / `sender.agent_id` fields at delivery time, while keeping role, supplied IDs, and payload strict.
+ */
+export function matchInboundPromptInboxStatus(
+  inboxInput: unknown,
+  incoming: RoleMessage
+): { status: "absent" | "applied" | "rejected"; reason?: string } {
+  const rows = InboxRowsSchema.parse(inboxInput).filter(row => row.message.message_id === incoming.message_id);
+  if (!rows.length) return { status: "absent" };
+  const matchesIncoming = (stored: RoleMessage): boolean => {
+    const normalizedStored: RoleMessage = {
+      ...stored,
+      sender: {
+        ...stored.sender,
+        ...(incoming.sender.pane_id === undefined ? { pane_id: undefined } : {}),
+        ...(incoming.sender.agent_id === undefined ? { agent_id: undefined } : {})
+      }
+    };
+    return nativeMessageFingerprint(normalizedStored) === nativeMessageFingerprint(incoming);
+  };
+  const applied = rows.find(row => row.status === "applied" && matchesIncoming(row.message));
+  if (applied) return { status: "applied" };
+  const rejected = rows.find(row => row.status === "rejected" && matchesIncoming(row.message));
+  if (rejected) return { status: "rejected", ...(rejected.reason !== undefined ? { reason: rejected.reason } : {}) };
+  return { status: "absent" };
+}
 /** Read-only diagnostics. Absence, timeout, provider done and invalid legacy fields never grant resend authority. */
 export async function inspectNativeDelivery(receipts: Pick<HostReceiptJournal, "nativeDelivery" | "nativeRejection">,
   operationIdInput: string, inboxInput: unknown) {

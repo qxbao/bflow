@@ -12,9 +12,12 @@ import {
 import {
   EnvironmentDoctorReportSchema,
   EnvironmentDoctorCheckSchema,
+  SessionManifestSchema,
   type EnvironmentDoctorCheck,
-  type EnvironmentDoctorReport
+  type EnvironmentDoctorReport,
+  type SessionManifest
 } from "@bflow/contracts";
+import { observeAuthoritativeRuntime } from "./runtime-observation.js";
 import type { EnvironmentConfig } from "./environment-config.js";
 import { namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import type { RepositoryIdentity } from "./repository.js";
@@ -501,8 +504,64 @@ export async function runDoctorDiagnostics(
 
   // lifecycle-lock
   const stateRoot = options.statePath ? options.statePath(".") : resolve(repository.root, ".bflow/state");
+
+  // Authoritative RunStore vs session.json projection drift & Gate B loaded-host build skew (read-only; never spawns a host daemon)
+  let savedManifest: SessionManifest | null = null;
+  try {
+    const manifestPath = resolve(stateRoot, "session.json");
+    if (existsSync(manifestPath)) {
+      const parsed = SessionManifestSchema.safeParse(JSON.parse(await readFile(manifestPath, "utf8")));
+      if (
+        parsed.success &&
+        parsed.data.workspaceRoot === repository.root &&
+        parsed.data.sessionId === repository.sessionName
+      ) {
+        savedManifest = parsed.data;
+      }
+    }
+  } catch {
+    savedManifest = null;
+  }
+  const observedServer: "running" | "stopped" | "unknown" =
+    sessionVersion === "running" ? "running" : sessionVersion === "stopped" ? "stopped" : "unknown";
+  const runtimeObservation = await observeAuthoritativeRuntime({
+    repositoryRoot: repository.root,
+    sessionName: repository.sessionName,
+    server: observedServer,
+    manifest: savedManifest,
+    injectedRuntime: dependencies?.integration?.runtime
+  });
+  runtimeChecks.push({
+    checkId: "runtime-active-runs",
+    group: "runtime",
+    component: "run-store",
+    status: runtimeObservation.activeRunsCheck.status,
+    detected_version: null,
+    reason: runtimeObservation.activeRunsCheck.reason,
+    remediation: runtimeObservation.activeRunsCheck.remediation
+  });
+  runtimeChecks.push({
+    checkId: "runtime-host-build",
+    group: "runtime",
+    component: "host",
+    status: runtimeObservation.hostBuildCheck.status,
+    detected_version: null,
+    reason: runtimeObservation.hostBuildCheck.reason,
+    remediation: runtimeObservation.hostBuildCheck.remediation
+  });
+  runtimeChecks.push({
+    checkId: "runtime-managed-worktrees",
+    group: "runtime",
+    component: "worktrees",
+    status: runtimeObservation.managedWorktreesCheck.status,
+    detected_version: null,
+    reason: runtimeObservation.managedWorktreesCheck.reason,
+    remediation: runtimeObservation.managedWorktreesCheck.remediation
+  });
+  let lifecycleOperationActive = false;
   try {
     const lockStatus = await lifecycleLockStatus(stateRoot);
+    lifecycleOperationActive = lockStatus.startsWith("Lifecycle operation is active");
     if (lockStatus.startsWith("Legacy")) {
       legacyChecks.push({
         checkId: "lifecycle-lock",
@@ -544,13 +603,22 @@ export async function runDoctorDiagnostics(
       }
     }
     if (intentPhase && ["server_starting", "manager_pending", "stopping"].includes(intentPhase)) {
-      legacyChecks.push({
-        checkId: "operation-recovery",
-        name: "operation-recovery",
-        status: "failed",
-        message: `Environment operation '${intentPhase}' is unresolved. ${intentPhase === "stopping" ? "Run bflow down --yes to resume checked shutdown." : "Run bflow up to reconcile existing panes; resolve interactive dialogs in the named session, or bflow down --yes to stop safely."} Do not delete .bflow.`,
-        remediation: intentPhase === "stopping" ? "Run bflow down --yes" : "Run bflow up or bflow down --yes"
-      });
+      if (lifecycleOperationActive) {
+        legacyChecks.push({
+          checkId: "operation-recovery",
+          name: "operation-recovery",
+          status: "passed",
+          message: `Environment operation '${intentPhase}' is currently active under the lifecycle lock; wait for it to finish.`
+        });
+      } else {
+        legacyChecks.push({
+          checkId: "operation-recovery",
+          name: "operation-recovery",
+          status: "failed",
+          message: `Environment operation '${intentPhase}' is unresolved. ${intentPhase === "stopping" ? "Run bflow down --yes to resume checked shutdown." : "Run bflow up to reconcile existing panes; resolve interactive dialogs in the named session, or bflow down --yes to stop safely."} Do not delete .bflow.`,
+          remediation: intentPhase === "stopping" ? "Run bflow down --yes" : "Run bflow up or bflow down --yes"
+        });
+      }
     } else {
       legacyChecks.push({
         checkId: "operation-recovery",
@@ -1084,17 +1152,17 @@ export async function runDoctorDiagnostics(
     remediation: ""
   });
 
-  // context7: the shared documentation service. Required: failures fail the doctor. Optional: failures are warnings (degraded).
-  if ((config?.environment && config.environment.context7?.enabled !== false) || dependencies?.context7Health !== undefined) {
-    const required = config?.environment?.context7?.required === true;
+  // deepwiki: the shared documentation service. Required: failures fail the doctor. Optional: failures are warnings (degraded).
+  if ((config?.environment && config.environment.deepwiki?.enabled !== false) || dependencies?.deepwikiHealth !== undefined) {
+    const required = config?.environment?.deepwiki?.required === true;
     try {
-      const { collectContext7Health } = await import("./docs-command.js");
-      const health = await (dependencies?.context7Health?.() ?? collectContext7Health({ repository, config: config ?? undefined, env: options.env ?? process.env, probe: true, timeoutMs: 8000 }));
+      const { collectDeepWikiHealth } = await import("./docs-command.js");
+      const health = await (dependencies?.deepwikiHealth?.() ?? collectDeepWikiHealth({ repository, config: config ?? undefined, env: options.env ?? process.env, probe: true, timeoutMs: 8000 }));
       for (const check of health.checks) {
         mcpChecks.push({
-          checkId: `context7-${check.id}`,
+          checkId: `deepwiki-${check.id}`,
           group: "mcp",
-          component: "context7",
+          component: "deepwiki",
           status: check.status === "pass" ? "pass" : check.status === "skipped" ? "skipped" : check.status === "warn" ? "warning" : required ? "fail" : "warning",
           detected_version: null,
           reason: check.message,
@@ -1103,13 +1171,13 @@ export async function runDoctorDiagnostics(
         });
       }
       if (health.state === "degraded") {
-        mcpChecks.push({ checkId: "context7-degraded", group: "mcp", component: "context7", status: "warning", detected_version: null,
-          reason: "Context7 is optional and not healthy: roles run without documentation lookup (degraded mode).",
-          remediation: "Fix the failing Context7 checks above, or set environment.context7.required to refuse to start without it." });
+        mcpChecks.push({ checkId: "deepwiki-degraded", group: "mcp", component: "deepwiki", status: "warning", detected_version: null,
+          reason: "DeepWiki is optional and not healthy: roles run without documentation lookup (degraded mode).",
+          remediation: "Fix the failing DeepWiki checks above, or set environment.deepwiki.required to refuse to start without it." });
       }
     } catch (error) {
-      mcpChecks.push({ checkId: "context7-evaluation", group: "mcp", component: "context7", status: required ? "fail" : "warning", detected_version: null,
-        reason: `Context7 health could not be evaluated: ${error instanceof Error ? error.message : String(error)}`, remediation: "Run 'bflow docs status' for details." });
+      mcpChecks.push({ checkId: "deepwiki-evaluation", group: "mcp", component: "deepwiki", status: required ? "fail" : "warning", detected_version: null,
+        reason: `DeepWiki health could not be evaluated: ${error instanceof Error ? error.message : String(error)}`, remediation: "Run 'bflow docs status' for details." });
     }
   }
 

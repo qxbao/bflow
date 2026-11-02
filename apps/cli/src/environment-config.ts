@@ -4,6 +4,7 @@ import { lstatSync } from "node:fs";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema, RoleProfilePinSchema } from "@bflow/contracts";
+import { migrateLegacyContext7Config } from "./deepwiki-migration.js";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, parseRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
@@ -152,21 +153,12 @@ export const EnvironmentConfigEnvironmentSchema = z
     requiredTools: z.array(z.string().trim().min(1)).optional(),
     tools: EnvironmentToolsConfigSchema.optional(),
     toolPolicy: RepositoryToolPolicySchema.optional(),
-    /** Context7 documentation lookups through the shared Gateway. Enabled by default unless explicitly set to enabled: false. */
-    context7: z
+    /** DeepWiki public-repository documentation through the shared Gateway. Enabled by default unless explicitly set to enabled: false. */
+    deepwiki: z
       .object({
         enabled: z.boolean().optional(),
-        /** True: `bflow up` fails and `doctor` fails when Context7 is not ready. False (default): a warning, and roles start without it. */
-        required: z.boolean().optional(),
-        cache: z
-          .object({
-            enabled: z.boolean().optional(),
-            ttlSeconds: z.number().int().min(60).max(604_800).optional(),
-            /** Cache answers obtained with an API key. Off by default: such answers can come from libraries only the key's owner may read. */
-            allowAuthenticated: z.boolean().optional()
-          })
-          .strict()
-          .optional()
+        /** True: `bflow up` fails and `doctor` fails when DeepWiki is not ready. False (default): a warning, and roles start without it. */
+        required: z.boolean().optional()
       })
       .strict()
       .optional(),
@@ -244,14 +236,9 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
         mempalace: { enabled: true, required: false },
         "chrome-devtools-mcp": { enabled: true, required: false }
       },
-      context7: {
+      deepwiki: {
         enabled: true,
-        required: false,
-        cache: {
-          enabled: false,
-          ttlSeconds: 3_600,
-          allowAuthenticated: false
-        }
+        required: false
       },
       skills: {
         required: false,
@@ -329,13 +316,9 @@ export function upsertEnvironmentConfig(
       mempalace: { ...baseEnv.tools?.mempalace, ...savedEnv.tools?.mempalace },
       "chrome-devtools-mcp": { ...baseEnv.tools?.["chrome-devtools-mcp"], ...savedEnv.tools?.["chrome-devtools-mcp"] }
     },
-    context7: {
-      ...baseEnv.context7,
-      ...savedEnv.context7,
-      cache: {
-        ...baseEnv.context7?.cache,
-        ...savedEnv.context7?.cache
-      }
+    deepwiki: {
+      ...baseEnv.deepwiki,
+      ...savedEnv.deepwiki
     },
     skills: {
       ...baseEnv.skills,
@@ -364,6 +347,21 @@ function record(value: unknown): Record<string, unknown> {
 function integer(value: unknown, max: number): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= max;
 }
+/**
+ * A configuration written by an earlier release carries `environment.context7`. It is read as `environment.deepwiki` with only
+ * `enabled` and `required` carried over (cache settings and any key-related field are dropped); an explicit `deepwiki` block wins.
+ * Nothing is written here: `bflow init --update` and `migrateLegacyContext7Config` rewrite the file with a backup.
+ */
+function withLegacyContext7Read(env: Record<string, unknown>): Record<string, unknown> {
+  if (!("context7" in env)) return env;
+  const { context7, ...rest } = env;
+  if (rest["deepwiki"] !== undefined) return rest;
+  const legacy = typeof context7 === "object" && context7 !== null && !Array.isArray(context7) ? context7 as Record<string, unknown> : {};
+  const carried: Record<string, boolean> = {};
+  for (const key of ["enabled", "required"]) if (typeof legacy[key] === "boolean") carried[key] = legacy[key] as boolean;
+  return { ...rest, deepwiki: carried };
+}
+
 /** Value-free diagnostic, safe to show verbatim. */
 export const CONFIG_REPOSITORY_IDENTITY_MISMATCH = "Configuration belongs to another repository or was moved. Reconcile its repository identity before use.";
 export async function readEnvironmentConfig(repository: RepositoryIdentity, content?: string): Promise<EnvironmentConfig> {
@@ -373,7 +371,7 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity, cont
     const base = parseRepositoryConfig(source, path);
     if (!base.ok) throw new Error(base.error.message);
     const raw: unknown = parseConfigYaml(source);
-    const env = record(record(raw)["environment"]);
+    const env = withLegacyContext7Read(record(record(raw)["environment"]));
     if (env["repositoryId"] !== repository.id || env["workspaceRoot"] !== repository.root || env["sessionName"] !== repository.sessionName)
       throw new Error(CONFIG_REPOSITORY_IDENTITY_MISMATCH);
     if (typeof env["herdrBinary"] !== "string" || !env["herdrBinary"].trim()) throw new Error("Invalid Herdr executable");
@@ -450,11 +448,13 @@ export async function initializeEnvironmentConfig(options: {
   if (options.update) {
     let mergedConfig = config;
     if (configExists) {
+      // 0. A configuration from an earlier release is migrated first: a timestamped backup, then context7 becomes deepwiki.
+      await migrateLegacyContext7Config(repository.root);
       // 1. Lưu tạm các giá trị config hiện tại trong bộ nhớ (validate trước khi xoá).
       const savedBase = await loadRepositoryConfig(configPath);
       if (!savedBase.ok) throw new Error(`Cannot update invalid configuration: ${savedBase.error.message}`);
       const raw = record(parseConfigYaml(await readFile(configPath, "utf8")));
-      const rawEnv = record(raw["environment"]);
+      const rawEnv = withLegacyContext7Read(record(raw["environment"]));
       const savedConfig = EnvironmentConfigSchema.parse({
         ...savedBase.value,
         environment: {

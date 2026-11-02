@@ -95,6 +95,44 @@ function versionError(raw: unknown, what: string): ContractError | null {
   return null;
 }
 
+const FSYNC_TOLERATED_CODES = new Set([
+  "EINVAL",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "ENOSYS",
+  "EPERM",
+  "EACCES",
+  "EBADF",
+  "EISDIR",
+  "EROFS"
+]);
+
+async function fsyncTolerant(fh: { sync(): Promise<void> }): Promise<void> {
+  try {
+    await fh.sync();
+  } catch (e) {
+    const c = code(e);
+    if (c !== undefined && FSYNC_TOLERATED_CODES.has(c)) return;
+    throw e;
+  }
+}
+
+const STALE_INCOMPLETE_LOCK_MS = 10_000;
+
+async function isRecycledNonNodePid(pid: number): Promise<boolean> {
+  if (process.platform !== "linux" || pid === process.pid) return false;
+  try {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
+    if (!cmdline) return false;
+    const exeBase = path.basename(cmdline.split("\0")[0] ?? "");
+    if (/^(node|nodejs|bflow|tsx|vitest|bun|deno)($|[-.])/i.test(exeBase)) return false;
+    if (cmdline.includes("bflow") || cmdline.includes("vitest")) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class SetupStateStore {
   private readonly uid: number | null;
   private readonly now: () => Date;
@@ -196,7 +234,7 @@ export class SetupStateStore {
       try {
         await fh.writeFile(data);
         await fh.chmod(mode);
-        await fh.sync();
+        await fsyncTolerant(fh);
       } finally {
         await fh.close();
       }
@@ -215,7 +253,7 @@ export class SetupStateStore {
       const fh = await open(file, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND, 0o600);
       try {
         await fh.writeFile(`${line}\n`);
-        await fh.sync();
+        await fsyncTolerant(fh);
       } finally {
         await fh.close();
       }
@@ -277,11 +315,14 @@ export class SetupStateStore {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const fh = await open(lockPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+        let written = false;
         try {
           await fh.writeFile(content);
-          await fh.sync();
+          await fsyncTolerant(fh);
+          written = true;
         } finally {
           await fh.close();
+          if (!written) await rm(lockPath, { force: true }).catch(() => undefined);
         }
         return okr({
           release: async () => {
@@ -302,11 +343,15 @@ export class SetupStateStore {
         if (code(e) === "ENOENT") continue;
         return fail(validationError(`cannot read lock: ${errMsg(e)}`));
       }
-      if (attempt === 0 && this.isStale(existing)) {
+      if (attempt === 0 && (await this.isStale(lockPath, existing))) {
+        const reclaimTmp = `${lockPath}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
         try {
-          if ((await readFile(lockPath, "utf8")) === existing) await rm(lockPath, { force: true });
+          if ((await readFile(lockPath, "utf8")) === existing) {
+            await rename(lockPath, reclaimTmp);
+            await rm(reclaimTmp, { force: true });
+          }
         } catch {
-          // raced; retry
+          await rm(reclaimTmp, { force: true }).catch(() => undefined);
         }
         continue;
       }
@@ -315,18 +360,31 @@ export class SetupStateStore {
     return fail(conflictError(`another setup operation holds ${lockPath}`));
   }
 
-  private isStale(raw: string): boolean {
+  private async isStale(lockPath: string, raw: string): Promise<boolean> {
     let info: { pid?: unknown; hostname?: unknown };
     try {
       info = JSON.parse(raw) as typeof info;
     } catch {
-      return false;
+      try {
+        const st = await stat(lockPath);
+        return Date.now() - st.mtimeMs >= STALE_INCOMPLETE_LOCK_MS;
+      } catch {
+        return false;
+      }
     }
-    if (typeof info.pid !== "number" || !Number.isInteger(info.pid) || info.pid <= 0) return false;
+    if (typeof info.pid !== "number" || !Number.isInteger(info.pid) || info.pid <= 0) {
+      try {
+        const st = await stat(lockPath);
+        return Date.now() - st.mtimeMs >= STALE_INCOMPLETE_LOCK_MS;
+      } catch {
+        return false;
+      }
+    }
     if (info.hostname !== this.hostname) return false;
+    if (info.pid === this.pid || info.pid === process.pid) return false;
     try {
       process.kill(info.pid, 0);
-      return false;
+      return await isRecycledNonNodePid(info.pid);
     } catch (e) {
       return code(e) === "ESRCH";
     }

@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { ContractErrorSchema, IdentifierSchema, MCPClientRegistrationSchema, MCPEndpointSchema, MCPResourceLeaseSchema,
   MCPResourceRenewRequestSchema, MCPResourceRequestSchema, MCPServiceObservationSchema, MCPToolCallSchema, MCPToolCallResultSchema,
   ScopedOperationSchema, TrustScopeSchema, ResolvedToolGrantSchema } from "@bflow/contracts";
@@ -12,7 +14,8 @@ import { fail, failWith, ok } from "./errors.js";
 import type { GatewayControlPort, GatewayRegistrationGrant } from "./ports.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
-const MAX_FRAME_BYTES = 1024 * 1024;
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const MAX_SAFE_TIMEOUT_MS = 2147483647;
 const MAX_LOCATOR_BYTES = 4096;
 const MAX_SOCKET_PATH_BYTES = 100;
 const LOCATOR_KEYS = ["socketPath", "token", "generation", "endpoint"] as const;
@@ -48,7 +51,19 @@ export class GatewayControlClient implements GatewayControlPort {
       const uid = process.getuid?.();
       if (uid !== undefined && info.uid !== uid) return fail("validation", "Gateway control locator must be owned by the current user");
       if (info.size > MAX_LOCATOR_BYTES) return fail("validation", "Gateway control locator is too large");
-      const locator = parseLocator(JSON.parse(await readFile(path, "utf8")));
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      let rawText: string;
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile()) return fail("validation", "Gateway control locator must be a regular file");
+        if ((opened.mode & 0o077) !== 0) return fail("validation", "Gateway control locator must not be readable by group or others");
+        if (uid !== undefined && opened.uid !== uid) return fail("validation", "Gateway control locator must be owned by the current user");
+        if (opened.size > MAX_LOCATOR_BYTES) return fail("validation", "Gateway control locator is too large");
+        rawText = await handle.readFile("utf8");
+      } finally {
+        await handle.close();
+      }
+      const locator = parseLocator(JSON.parse(rawText));
       if (!locator) return fail("corruption", "Gateway control locator is malformed");
       return ok(new GatewayControlClient(locator));
     } catch (error) {
@@ -184,9 +199,31 @@ export class GatewayControlClient implements GatewayControlPort {
         resolve(fail("cancelled", "Gateway control call was cancelled"));
         return;
       }
+      if (options?.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
+        resolve(failWith({ code: "timeout", retryable: true, retrySafety: "not_started", message: "Gateway control timeout budget exhausted before dispatch" }));
+        return;
+      }
+      let effectiveTimeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      if (options?.deadline !== undefined) {
+        const deadlineMs = Date.parse(options.deadline);
+        if (!Number.isFinite(deadlineMs)) {
+          resolve(fail("validation", "Invalid Gateway control operation deadline"));
+          return;
+        }
+        const remaining = deadlineMs - Date.now();
+        if (remaining <= 0) {
+          resolve(failWith({ code: "timeout", retryable: true, retrySafety: "not_started", message: "Gateway control deadline exceeded before dispatch" }));
+          return;
+        }
+        effectiveTimeoutMs = Math.min(effectiveTimeoutMs, remaining);
+      }
+      const clampedTimeoutMs = Math.min(Math.max(1, effectiveTimeoutMs), MAX_SAFE_TIMEOUT_MS);
+
       let written = false;
       let settled = false;
       let buffer = "";
+      let receivedBytes = 0;
+      const decoder = new StringDecoder("utf8");
       let timer: ReturnType<typeof setTimeout> | undefined;
       let socket: Socket | undefined;
       const finish = (result: OperationResult<unknown>): void => {
@@ -202,28 +239,34 @@ export class GatewayControlClient implements GatewayControlPort {
       const onAbort = (): void => finish(fail("cancelled", "Gateway control call was cancelled"));
 
       timer = setTimeout(() => finish(written ? uncertain("Gateway control call timed out after the request was sent")
-        : fail("transport_unavailable", "Gateway control connection timed out")), options?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        : fail("transport_unavailable", "Gateway control connection timed out")), clampedTimeoutMs);
       options?.signal?.addEventListener("abort", onAbort, { once: true });
 
       socket = createConnection(this.locator.socketPath);
-      socket.setEncoding("utf8");
       socket.once("connect", () => {
         written = true;
         socket?.write(`${JSON.stringify(request)}\n`);
       });
-      socket.on("data", (chunk: string) => {
-        buffer += chunk;
-        const newline = buffer.indexOf("\n");
-        if (newline === -1) {
-          if (buffer.length > MAX_FRAME_BYTES) finish(fail("corruption", "Gateway control reply exceeds 1 MiB"));
+      socket.on("data", (rawChunk: Buffer | string) => {
+        const chunkBytes = typeof rawChunk === "string" ? Buffer.from(rawChunk, "utf8") : rawChunk;
+        const newlineByteIdx = chunkBytes.indexOf(0x0a);
+        if (newlineByteIdx === -1) {
+          receivedBytes += chunkBytes.byteLength;
+          if (receivedBytes > MAX_FRAME_BYTES) {
+            finish(fail("corruption", "Gateway control reply exceeds 4 MiB"));
+            return;
+          }
+          buffer += decoder.write(chunkBytes);
           return;
         }
-        if (newline > MAX_FRAME_BYTES) {
-          finish(fail("corruption", "Gateway control reply exceeds 1 MiB"));
+        const frameBytes = receivedBytes + newlineByteIdx;
+        if (frameBytes > MAX_FRAME_BYTES) {
+          finish(fail("corruption", "Gateway control reply exceeds 4 MiB"));
           return;
         }
+        buffer += decoder.write(chunkBytes.subarray(0, newlineByteIdx)) + decoder.end();
         try {
-          finish(ok(JSON.parse(buffer.slice(0, newline))));
+          finish(ok(JSON.parse(buffer)));
         } catch {
           finish(fail("corruption", "Gateway control reply is not JSON"));
         }

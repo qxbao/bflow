@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import type { MCPToolCall, OperationOptions } from "@bflow/contracts";
 import { DEFAULT_MCP_PROTOCOL_VERSION } from "./types.js";
-import { validateLoopbackHost, validateRequestOrigin } from "./security.js";
+import { computePartitionKey, validateLoopbackHost, validateRequestOrigin } from "./security.js";
 import type { BflowSharedMCPGateway } from "./gateway.js";
 
 export interface StreamableHttpGatewayServerOptions {
@@ -29,6 +29,11 @@ export class StreamableHttpGatewayServer {
   private server?: Server | undefined;
   private readonly inFlightRequests = new Map<string, AbortController>();
   private readonly sockets = new Set<Socket>();
+  private readonly sseStreams = new Map<
+    string,
+    Set<{ res: ServerResponse; heartbeat: ReturnType<typeof setInterval> }>
+  >();
+  private unsubscribeSessionDisconnect?: (() => void) | undefined;
 
   constructor(options: StreamableHttpGatewayServerOptions) {
     this.gateway = options.gateway;
@@ -72,6 +77,9 @@ export class StreamableHttpGatewayServer {
         });
       });
 
+      srv.keepAliveTimeout = 5_000;
+      srv.headersTimeout = 15_000;
+
       srv.on("connection", socket => {
         this.sockets.add(socket);
         socket.on("close", () => {
@@ -82,6 +90,9 @@ export class StreamableHttpGatewayServer {
       srv.on("error", reject);
       srv.listen(this.port, this.host, () => {
         this.server = srv;
+        this.unsubscribeSessionDisconnect = this.gateway.onSessionDisconnect(sessionId => {
+          this.closeSseStreamsForSession(sessionId);
+        });
         const addr = srv.address();
         if (typeof addr === "object" && addr !== null) {
           this.port = addr.port;
@@ -91,8 +102,33 @@ export class StreamableHttpGatewayServer {
     });
   }
 
+  private closeSseStreamsForSession(sessionId: string): void {
+    const entries = this.sseStreams.get(sessionId);
+    if (!entries) return;
+    this.sseStreams.delete(sessionId);
+    for (const entry of entries) {
+      clearInterval(entry.heartbeat);
+      if (!entry.res.writableEnded && !entry.res.destroyed) {
+        entry.res.end();
+      }
+    }
+  }
+
+  private scopedRequestKey(registrationId: string, requestId: unknown): string {
+    return `${registrationId}:${String(requestId)}`;
+  }
+
   async stop(): Promise<void> {
     if (!this.server) return;
+    this.unsubscribeSessionDisconnect?.();
+    this.unsubscribeSessionDisconnect = undefined;
+    for (const sessionId of [...this.sseStreams.keys()]) {
+      this.closeSseStreamsForSession(sessionId);
+    }
+    for (const ctrl of this.inFlightRequests.values()) {
+      ctrl.abort(new Error("Gateway HTTP server stopping"));
+    }
+    this.inFlightRequests.clear();
     for (const socket of this.sockets) {
       socket.destroy();
     }
@@ -264,9 +300,39 @@ export class StreamableHttpGatewayServer {
         });
         res.write(": keepalive\n\n");
 
-        req.on("close", () => {
-          this.gateway.disconnectSession(sessionId);
-        });
+        const heartbeat = setInterval(() => {
+          if (!res.writableEnded && !res.destroyed) {
+            res.write(": keepalive\n\n");
+          }
+        }, 15_000);
+        heartbeat.unref?.();
+
+        let sessionStreams = this.sseStreams.get(sessionId);
+        if (!sessionStreams) {
+          sessionStreams = new Set();
+          this.sseStreams.set(sessionId, sessionStreams);
+        }
+        const streamEntry = { res, heartbeat };
+        sessionStreams.add(streamEntry);
+
+        let closed = false;
+        const onStreamClose = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(heartbeat);
+          const current = this.sseStreams.get(sessionId);
+          if (current) {
+            current.delete(streamEntry);
+            if (current.size === 0) {
+              this.sseStreams.delete(sessionId);
+            }
+          }
+          if ((!current || current.size === 0) && this.gateway.getSession(sessionId)) {
+            this.gateway.disconnectSession(sessionId);
+          }
+        };
+        req.on("close", onStreamClose);
+        res.on("close", onStreamClose);
         return;
       }
 
@@ -360,10 +426,44 @@ export class StreamableHttpGatewayServer {
         }
 
         if (jsonrpcMethod === "tools/list") {
-          const listRes = await this.gateway.listToolsForClient(
+          const reqKey = this.scopedRequestKey(
             clientReg.registrationId,
-            sessionId
+            id ?? `list-${randomUUID()}`
           );
+          const abortCtrl = new AbortController();
+          this.inFlightRequests.set(reqKey, abortCtrl);
+
+          const socket = req.socket;
+          const onDisconnect = () => {
+            if (!res.writableEnded && !res.writableFinished) {
+              abortCtrl.abort(new Error("HTTP client disconnected"));
+            }
+          };
+          req.on("aborted", onDisconnect);
+          res.on("close", onDisconnect);
+          socket?.on("close", onDisconnect);
+          if ((res.destroyed || socket?.destroyed) && !res.writableEnded) {
+            abortCtrl.abort(new Error("HTTP client disconnected"));
+          }
+
+          let listRes: Awaited<ReturnType<BflowSharedMCPGateway["listToolsForClient"]>>;
+          try {
+            listRes = await this.gateway.listToolsForClient(
+              clientReg.registrationId,
+              sessionId,
+              { signal: abortCtrl.signal }
+            );
+          } finally {
+            this.inFlightRequests.delete(reqKey);
+            req.removeListener("aborted", onDisconnect);
+            res.removeListener("close", onDisconnect);
+            socket?.removeListener("close", onDisconnect);
+          }
+
+          if (res.destroyed || res.writableEnded) {
+            return;
+          }
+
           if (!listRes.ok) {
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(
@@ -394,7 +494,34 @@ export class StreamableHttpGatewayServer {
           let serviceId = params?.serviceId as string | undefined;
 
           if (!serviceId) {
-            serviceId = clientReg.serviceIds[0];
+            if (clientReg.serviceIds.length > 1 && typeof toolName === "string" && toolName.length > 0) {
+              const matchingServices = clientReg.serviceIds.filter(sid => {
+                const svc = this.gateway.registry.getService(sid);
+                if (!svc) return false;
+                if (svc.definition.tool.operations.includes(toolName)) return true;
+                const partRes = computePartitionKey(svc.definition, svc.policy, clientReg.scope);
+                if (!partRes.ok) return false;
+                const part = this.gateway.serviceManager.getPartitionState(partRes.value);
+                return part?.discoveredTools.includes(toolName) ?? false;
+              });
+              if (matchingServices.length > 1) {
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(
+                  JSON.stringify({
+                    jsonrpc: "2.0",
+                    id,
+                    error: {
+                      code: -32602,
+                      message: `Ambiguous tool '${toolName}' across multiple registered services; specify serviceId explicitly`
+                    }
+                  })
+                );
+                return;
+              }
+              serviceId = matchingServices[0] ?? clientReg.serviceIds[0];
+            } else {
+              serviceId = clientReg.serviceIds[0];
+            }
           }
 
           const callId = (params?.callId as string) ?? `call-${randomUUID()}`;
@@ -414,23 +541,40 @@ export class StreamableHttpGatewayServer {
             idempotencyKey
           };
 
-          const reqKey = String(id ?? callId);
+          const reqKey = this.scopedRequestKey(clientReg.registrationId, id ?? callId);
           const abortCtrl = new AbortController();
           this.inFlightRequests.set(reqKey, abortCtrl);
 
-          const onClose = () => {
-            abortCtrl.abort();
+          const socket = req.socket;
+          const onDisconnect = () => {
+            if (!res.writableEnded && !res.writableFinished) {
+              abortCtrl.abort(new Error("HTTP client disconnected"));
+            }
           };
-          req.on("close", onClose);
+          req.on("aborted", onDisconnect);
+          res.on("close", onDisconnect);
+          socket?.on("close", onDisconnect);
+          if ((res.destroyed || socket?.destroyed) && !res.writableEnded) {
+            abortCtrl.abort(new Error("HTTP client disconnected"));
+          }
 
           const callOptions: OperationOptions = {
             ...(timeoutMs !== undefined ? { timeoutMs } : {}),
             signal: abortCtrl.signal
           };
-          const callRes = await this.gateway.call(toolCall, callOptions);
+          let callRes: Awaited<ReturnType<BflowSharedMCPGateway["call"]>>;
+          try {
+            callRes = await this.gateway.call(toolCall, callOptions);
+          } finally {
+            this.inFlightRequests.delete(reqKey);
+            req.removeListener("aborted", onDisconnect);
+            res.removeListener("close", onDisconnect);
+            socket?.removeListener("close", onDisconnect);
+          }
 
-          this.inFlightRequests.delete(reqKey);
-          req.removeListener("close", onClose);
+          if (res.destroyed || res.writableEnded) {
+            return;
+          }
 
           const acceptHeader = req.headers.accept ?? "";
           if (acceptHeader.includes("text/event-stream")) {
@@ -466,8 +610,11 @@ export class StreamableHttpGatewayServer {
         }
 
         if (jsonrpcMethod === "notifications/cancelled") {
-          const cancelReqId = String(body.params?.requestId ?? "");
-          const ctrl = this.inFlightRequests.get(cancelReqId);
+          const cancelReqKey = this.scopedRequestKey(
+            clientReg.registrationId,
+            body.params?.requestId ?? ""
+          );
+          const ctrl = this.inFlightRequests.get(cancelReqKey);
           if (ctrl) {
             ctrl.abort();
           }

@@ -1,4 +1,86 @@
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
+
+function trimSafeDir(dir: string): string {
+  return dir.length > 1 ? dir.replace(/\/+$/, "") : dir;
+}
+
+/**
+ * Resolves exact `safe.directory` entries for `cwd`, its enclosing worktree root, and any linked `.git` / common
+ * repository directories (never wildcard `*`), and disables `core.fileMode` when the filesystem forces executable
+ * bits on non-executable Git metadata (e.g. FUSE/NTFS `fuseblk`).
+ */
+export async function runtimeGitDirectoryFlags(
+  cwd: string,
+  options: { readonly resetSafeDirectory?: boolean } = {}
+): Promise<string[]> {
+  const resolvedCwd = trimSafeDir(resolve(cwd));
+  const canonicalCwd = trimSafeDir(await realpath(cwd).catch(() => resolvedCwd));
+  const safeDirs = new Set<string>([resolvedCwd, canonicalCwd]);
+  let forceFileModeFalse = false;
+  let current = canonicalCwd;
+  for (;;) {
+    const dotGit = join(current, ".git");
+    const dotGitStat = await lstat(dotGit).catch(() => undefined);
+    if (dotGitStat) {
+      safeDirs.add(trimSafeDir(current));
+      if (dotGitStat.isDirectory()) {
+        const gitDir = trimSafeDir(await realpath(dotGit).catch(() => dotGit));
+        safeDirs.add(trimSafeDir(dotGit));
+        safeDirs.add(gitDir);
+        const headStat = await lstat(join(gitDir, "HEAD")).catch(() => undefined);
+        forceFileModeFalse = Boolean(headStat?.isFile() && (headStat.mode & 0o111) !== 0);
+      } else if (dotGitStat.isFile()) {
+        forceFileModeFalse = (dotGitStat.mode & 0o111) !== 0;
+        const raw = await readFile(dotGit, "utf8").catch(() => "");
+        const match = /^gitdir:\s*([^\r\n]+)/.exec(raw);
+        if (match) {
+          const rawGitDir = trimSafeDir(resolve(current, match[1]!.trim()));
+          const gitDir = trimSafeDir(await realpath(rawGitDir).catch(() => rawGitDir));
+          safeDirs.add(rawGitDir);
+          safeDirs.add(gitDir);
+          const gitDirHead = await lstat(join(gitDir, "HEAD")).catch(() => undefined);
+          if (gitDirHead?.isFile() && (gitDirHead.mode & 0o111) !== 0) {
+            forceFileModeFalse = true;
+          }
+          const commonRel = (await readFile(join(gitDir, "commondir"), "utf8").catch(() => "")).trim();
+          const rawCommonDir = commonRel ? trimSafeDir(resolve(gitDir, commonRel)) : gitDir;
+          const commonDir = commonRel
+            ? trimSafeDir(await realpath(rawCommonDir).catch(() => rawCommonDir))
+            : gitDir;
+          safeDirs.add(rawCommonDir);
+          safeDirs.add(commonDir);
+          const commonHead = await lstat(join(commonDir, "HEAD")).catch(() => undefined);
+          if (commonHead?.isFile() && (commonHead.mode & 0o111) !== 0) {
+            forceFileModeFalse = true;
+          }
+          if (basename(rawCommonDir) === ".git") {
+            safeDirs.add(trimSafeDir(dirname(rawCommonDir)));
+          }
+          if (basename(commonDir) === ".git") {
+            safeDirs.add(trimSafeDir(dirname(commonDir)));
+          }
+        }
+      }
+      break;
+    }
+    const bareHead = await lstat(join(current, "HEAD")).catch(() => undefined);
+    const bareObjects = bareHead?.isFile() ? await lstat(join(current, "objects")).catch(() => undefined) : undefined;
+    if (bareHead?.isFile() && bareObjects?.isDirectory()) {
+      safeDirs.add(trimSafeDir(current));
+      forceFileModeFalse = (bareHead.mode & 0o111) !== 0;
+      break;
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  const flags: string[] = options.resetSafeDirectory ? ["-c", "safe.directory="] : [];
+  for (const dir of safeDirs) flags.push("-c", `safe.directory=${dir}`);
+  if (forceFileModeFalse) flags.push("-c", "core.fileMode=false");
+  return flags;
+}
 
 const PatchInput = z.union([z.string(), z.object({ input: z.string() }).strict(), z.object({ patch: z.string() }).strict(),
   z.object({ command: z.string() }).strict()]);

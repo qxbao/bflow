@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -251,8 +253,12 @@ export interface Outbound {
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
   error?: string; cancelRequested?: boolean;
+  /** Audit only: exact request proven not invoked before a reopened host rebinds the QA pane. */
+  prelaunchFailure?: { request: AgentRequest; reconciledAt: string; executorLineage?: ExecutorLineage; lease?: AgentLease };
   /** Host-observed terminal turn for this exact pinned specialist execution; never task success. */
   stopObservedAt?: string;
+  /** First time Herdr observed the recipient pane leave prompt-ready state after accepting this delivery. */
+  turnObservedWorkingAt?: string;
   /** Stop observations made for a cancelled execution; bounded so an unresponsive pane is reported instead of polled forever. */
   cancelObservations?: number;
   /** Private v6 write-ahead proof; never inferred from legacy cancellation flags. */
@@ -265,7 +271,7 @@ export interface Outbound {
     contextDigest: string; replacementMessageId: string; disposition: "replaced_without_verdict_claim" };
   phaseFailureEvidence?: ArtifactReference;
   /** `retryAuthorized`: an explicit resume allows re-measuring the same revision after a non-repairable (infrastructure) failure. */
-  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean };
+  phaseFailure?: { summary: string; repairable: boolean; applied: boolean; retryAuthorized?: boolean; leaseRecoveryRequired?: boolean };
   /** A control notice borrows its task assignment's lease; it never owns capacity. */
   parentAssignmentId?: string;
   /** Private outbox position captured before this Coordinator turn is physically dispatched. */
@@ -458,6 +464,14 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (state.version < 7 && (out.roleProfile || out.executorLineage || out.profileAllocationTaskId))
       throw new Error("Profile authority requires private journal v7");
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
+    if (out.prelaunchFailure) {
+      out.prelaunchFailure = { request: AgentRequestSchema.parse(out.prelaunchFailure.request), reconciledAt: IsoDateTimeSchema.parse(out.prelaunchFailure.reconciledAt),
+        ...(out.prelaunchFailure.executorLineage ? {executorLineage:ExecutorLineageSchema.parse(out.prelaunchFailure.executorLineage)} : {}),
+        ...(out.prelaunchFailure.lease ? {lease:AgentLeaseSchema.parse(out.prelaunchFailure.lease)} : {}) };
+      if (out.prelaunchFailure.request.context === undefined || digest(out.prelaunchFailure.request.context) !== digest(out.message) ||
+          out.prelaunchFailure.request.attemptId !== out.attemptId || out.prelaunchFailure.request.taskId !== out.taskId)
+        throw new Error("Invalid prelaunch failure audit binding");
+    }
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
     const profileRun = state.runs.find(run => run.runId === out.message.run_id);
@@ -484,6 +498,11 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       if (!out.handle || out.message.type !== "delegation.request" || Date.parse(out.stopObservedAt) < Date.parse(out.handle.acceptedAt))
         throw new Error("Invalid specialist Stop observation");
     }
+    if (out.turnObservedWorkingAt !== undefined) {
+      IsoDateTimeSchema.parse(out.turnObservedWorkingAt);
+      if (!out.handle || Date.parse(out.turnObservedWorkingAt) < Date.parse(out.handle.acceptedAt))
+        throw new Error("Invalid turn working observation");
+    }
     if (out.phaseRetirement) {
       const retirement = z.object({ operationId: z.string().min(1), sessionId: z.string().min(1), userMessageId: z.string().min(1), userId: z.string().min(1),
         blockedReplyId: z.string().min(1), decidedAt: IsoDateTimeSchema, resumeAuthorizedBy: z.string().min(1).optional(), disposition: z.literal("retired_without_measurement_claim") }).strict().parse(out.phaseRetirement);
@@ -508,7 +527,8 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (out.phaseFailure) {
       textField(out.phaseFailure.summary);
       if (typeof out.phaseFailure.repairable !== "boolean" || typeof out.phaseFailure.applied !== "boolean" ||
-          out.phaseFailure.retryAuthorized !== undefined && (out.phaseFailure.retryAuthorized !== true || out.phaseFailure.repairable) ||
+          out.phaseFailure.retryAuthorized !== undefined && (out.phaseFailure.retryAuthorized !== true || out.phaseFailure.repairable && !out.phaseFailure.leaseRecoveryRequired) ||
+          out.phaseFailure.leaseRecoveryRequired !== undefined && (out.phaseFailure.leaseRecoveryRequired !== true || !out.phaseFailure.repairable || !out.phaseFailure.applied) ||
           out.message.type !== "verification.requested" || record(out.message.payload).kind !== "conditional_evidence")
         throw new Error("Invalid private policy failure outcome");
     }
@@ -595,32 +615,66 @@ function parseSpec(value: SpecRecord): void {
   if (value.decision) value.decision = ApprovalDecisionSchema.parse(value.decision);
 }
 /** Linux flock + fsync/rename. A crashed process releases its lock; stale PID files are never stolen. */
+export const JOURNAL_LOCK_WAIT_MS = 5_000;
+export const JOURNAL_LOCK_SPAWN_TIMEOUT_MS = 15_000;
 export class AgenticJournal {
   readonly directory: string;
+  private readonly lockWaitMs: number;
+  private readonly spawnTimeoutMs: number;
   private validatedSnapshot?: { bytes: Buffer; value: JournalState };
-  constructor(directory: string, readonly repository: string) { this.directory = resolve(directory); }
+  constructor(directory: string, readonly repository: string, options: { lockWaitMs?: number; spawnTimeoutMs?: number } = {}) {
+    this.directory = resolve(directory);
+    this.lockWaitMs = options.lockWaitMs ?? JOURNAL_LOCK_WAIT_MS;
+    this.spawnTimeoutMs = options.spawnTimeoutMs ?? JOURNAL_LOCK_SPAWN_TIMEOUT_MS;
+  }
   private static readonly queues = new Map<string, Promise<unknown>>();
+  private static readonly heldDirectories = new AsyncLocalStorage<ReadonlySet<string>>();
   async exclusive<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+    const active = AgenticJournal.heldDirectories.getStore();
+    if (active?.has(this.directory)) {
+      throw new Error(`Re-entrant AgenticJournal lock acquisition on ${this.directory}`);
+    }
+    const nextHeld = new Set(active);
+    nextHeld.add(this.directory);
     const previous = AgenticJournal.queues.get(this.directory) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => this.locked(action));
+    const next = previous.catch(() => undefined).then(() =>
+      AgenticJournal.heldDirectories.run(nextHeld, async () => {
+        try { return await this.locked(action); }
+        finally { nextHeld.delete(this.directory); }
+      })
+    );
     AgenticJournal.queues.set(this.directory, next);
     try { return await next; }
     finally { if (AgenticJournal.queues.get(this.directory) === next) AgenticJournal.queues.delete(this.directory); }
   }
+  private async acquireFlock(fd: number): Promise<void> {
+    const deadline = Date.now() + Math.max(0, this.lockWaitMs);
+    let backoffMs = 15;
+    while (true) {
+      const acquired = await new Promise<boolean>((accept, reject) => {
+        const child = spawn("flock", ["--nonblock", "3"], { stdio: ["ignore", "ignore", "ignore", fd] });
+        const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Journal lock timeout")); }, this.spawnTimeoutMs);
+        child.once("error", e => { clearTimeout(timer); reject(e); });
+        child.once("close", code => { clearTimeout(timer); accept(code === 0); });
+      });
+      if (acquired) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Agentic runtime busy");
+      const jitter = Math.floor(Math.random() * Math.max(5, Math.floor(backoffMs * 0.35)));
+      await new Promise(resolve => setTimeout(resolve, Math.min(remaining, backoffMs + jitter)));
+      backoffMs = Math.min(250, backoffMs * 2);
+    }
+  }
   private async locked<T>(action: (state: JournalState, save: () => Promise<void>) => Promise<T>): Promise<T> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
-    const lock = await open(join(this.directory, "lock"), "a+", 0o600);
+    const lock = await open(join(this.directory, "lock"), constants.O_CREAT | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0), 0o600);
     try {
-      await new Promise<void>((accept, reject) => {
-        const child = spawn("flock", ["--nonblock", "3"], { stdio: ["ignore", "ignore", "ignore", lock.fd] });
-        const timer = setTimeout(() => { child.kill(); reject(new Error("Journal lock timeout")); }, 5000);
-        child.once("error", e => { clearTimeout(timer); reject(e); });
-        child.once("close", code => { clearTimeout(timer); code === 0 ? accept() : reject(new Error("Agentic runtime busy")); });
-      });
+      if (!(await lock.stat()).isFile()) throw Object.assign(new Error(`Journal lock is not a regular file: ${this.directory}`), { code: "EISDIR" });
+      await this.acquireFlock(lock.fd);
       let state: JournalState, baseline: JournalState | undefined, durableBytes: Buffer | undefined;
       const statePath = join(this.directory, "state.json");
       try {
-        const bytes = await readFile(statePath);
+        const bytes = await readRegularJournalFile(statePath);
         if (this.validatedSnapshot?.bytes.equals(bytes)) state = structuredClone(this.validatedSnapshot.value);
         else {
           state = parseAgenticJournalState(JSON.parse(bytes.toString("utf8")), this.repository);
@@ -637,22 +691,46 @@ export class AgenticJournal {
             state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId)) state.version = 7;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
-          try { if ((await readFile(statePath)).equals(durableBytes)) return; }
+          try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         }
         parseAgenticJournalState(state, this.repository);
         const serialized = JSON.stringify(state), normalized = parseAgenticJournalState(JSON.parse(serialized), this.repository);
         const path = join(this.directory, `state-${randomUUID()}.tmp`);
-        const file = await open(path, "wx", 0o600);
-        try { await file.writeFile(serialized); await file.sync(); } finally { await file.close(); }
         try {
+          const file = await open(path, "wx", 0o600);
+          try { await file.writeFile(serialized); await syncFileHandle(file); } finally { await file.close(); }
           await rename(path, statePath);
           const dir = await open(this.directory, "r");
-          try { await dir.sync(); } finally { await dir.close(); }
+          try {
+            try { await dir.sync(); }
+            catch (error) {
+              const code = (error as NodeJS.ErrnoException | undefined)?.code;
+              if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+            }
+          } finally { await dir.close(); }
         } finally { await rm(path, { force: true }); }
         this.validatedSnapshot = { bytes: Buffer.from(serialized, "utf8"), value: normalized };
         baseline = normalized; durableBytes = this.validatedSnapshot.bytes;
       });
     } finally { await lock.close(); }
+  }
+}
+
+const IGNORED_REGULAR_FSYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"]);
+export async function syncFileHandle(file: { sync(): Promise<void> }): Promise<void> {
+  try { await file.sync(); }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !IGNORED_REGULAR_FSYNC_CODES.has(code)) throw error;
+  }
+}
+async function readRegularJournalFile(path: string): Promise<Buffer> {
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) throw Object.assign(new Error(`Journal state is not a regular file: ${path}`), { code: "EISDIR" });
+    return await handle.readFile();
+  } finally {
+    await handle.close();
   }
 }

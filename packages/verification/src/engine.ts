@@ -162,8 +162,12 @@ export class VerificationEngine {
         obs.specFingerprint !== plan.specFingerprint || obs.scope !== plan.scope || obs.method !== config.method ||
         obs.role !== config.role || plan.implementerIds.includes(obs.executorId)) throw new Error("Uncorrelated or non-independent observation");
     const ids = obs.criteria.map(c => c.criterionId);
+    const hasObservedTestName = (target: string): boolean => {
+      const canonical = target.trim().normalize("NFC");
+      return obs.testNames.some(candidate => candidate.trim().normalize("NFC") === canonical);
+    };
     if (new Set(ids).size !== ids.length || digest([...ids].sort()) !== digest([...config.criterionIds].sort()) ||
-        config.testNames.some(name => !obs.testNames.includes(name))) throw new Error("Missing or conflicting criterion/test evidence");
+        config.testNames.some(name => !hasObservedTestName(name))) throw new Error("Missing or conflicting criterion/test evidence");
     if (config.kind === "deterministic" && (obs.command !== config.command || obs.exitCode === undefined))
       throw new Error("Automated evidence requires exact command and integer exit code");
     if (config.measuresCoverage && plan.strategy.coverageThresholdPercent !== undefined && obs.coveragePercent === undefined)
@@ -327,7 +331,7 @@ export class VerificationEngine {
           }
           receipts.push(receipt);
           gateResults.push(receipt.gate);
-          findings.push(...receipt.gate.findings.map(f => ({ ...f, details: { original: f.details ?? null, taskId: plan.taskId, responsibleRole: "developer", requiresNewTaskIfOutsideScope: true } })));
+          findings.push(...receipt.gate.findings.map(f => ({ ...f, details: { original: f.details ?? null, taskId: plan.taskId, checkId: definition.id, responsibleRole: "developer", requiresNewTaskIfOutsideScope: true } })));
           if (receipt.gate.status === "blocked" || receipt.gate.status === "error") {
             blocked = true;
             findings.push(this.finding(plan, "environment_blocked", `${definition.id}: ${receipt.gate.error?.message ?? "Independent check blocked"}`, "coordinator"));
@@ -346,15 +350,25 @@ export class VerificationEngine {
           }
           if (checkItselfFailed || failedCriteria.length > 0) {
             const targets = failedCriteria.length ? failedCriteria : [{ criterionId: undefined, summary: receipt.observation.summary }];
+            let emittedErrorForCheck = false;
             for (const target of targets) {
               const specCrit = target.criterionId ? plan.specification.acceptanceCriteria.find(ac => ac.id === target.criterionId) : undefined;
-              const isOptional = specCrit && (specCrit.required === false || specCrit.status === "waived");
+              const isOptional = Boolean(specCrit && (specCrit.required === false || specCrit.status === "waived"));
+              if (!isOptional) emittedErrorForCheck = true;
               findings.push({
                 ...this.finding(plan, "check_failed", `${definition.id}: ${target.summary}`),
                 severity: isOptional ? "warning" : "error",
                 artifactId: receipt.evidence.artifactId,
                 details: { taskId: plan.taskId, responsibleRole: "developer", checkId: definition.id,
                   ...(target.criterionId ? { criterionId: target.criterionId } : {}), requiresNewTaskIfOutsideScope: true }
+              });
+            }
+            if (checkItselfFailed && !emittedErrorForCheck) {
+              findings.push({
+                ...this.finding(plan, "check_failed", `${definition.id}: ${receipt.observation.summary}`),
+                severity: "error",
+                artifactId: receipt.evidence.artifactId,
+                details: { taskId: plan.taskId, responsibleRole: "developer", checkId: definition.id, requiresNewTaskIfOutsideScope: true }
               });
             }
           }
@@ -393,7 +407,7 @@ export class VerificationEngine {
       if ((isWaived || isWaivedByIdenticalTree) && expectedChecks.length === 0) {
         return {
           criterionId: criterion.id,
-          passed: isWaived ? true : (!conflict && !blocked && !failed),
+          passed: isWaived ? true : (!conflict && !blocked && !inconclusive && !failed),
           evidenceArtifactId: audit.artifactId,
           summary: isWaived
             ? (criterion.waiverReason ? `Waived: ${criterion.waiverReason}` : "Criterion waived")
@@ -406,7 +420,7 @@ export class VerificationEngine {
         const definition = expectedChecks.find(check => check.id === receipt.gate.gateId)!;
         return this.checkPassed(plan, CheckConfigurationSchema.parse(definition.configuration), receipt, criterion.id);
       }));
-      return { criterionId: criterion.id, passed: !conflict && !blocked && (isWaived || passed || (!failed && isOptional)),
+      return { criterionId: criterion.id, passed: !conflict && !blocked && !inconclusive && (isWaived || passed || (!failed && isOptional)),
         ...(primary?.observation.command !== undefined ? { command: primary.observation.command } : {}),
         ...(primary?.observation.exitCode !== undefined ? { exitCode: primary.observation.exitCode } : {}),
         evidenceArtifactId: primary?.evidence.artifactId ?? audit.artifactId,

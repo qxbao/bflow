@@ -72,6 +72,22 @@ async function resolveSocketPath(
   return { ok: true, value: socket };
 }
 
+function remainingBudgetMs(
+  timeoutMs: number,
+  startedAtMs: number,
+  deadline: string | undefined
+): number | null {
+  const elapsedMs = performance.now() - startedAtMs;
+  let budgetMs = timeoutMs - elapsedMs;
+  if (deadline !== undefined) {
+    const deadlineMs = Date.parse(deadline);
+    if (!Number.isFinite(deadlineMs)) return null;
+    budgetMs = Math.min(budgetMs, deadlineMs - Date.now());
+  }
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) return null;
+  return Math.max(1, Math.floor(Math.min(budgetMs, 2_147_483_647)));
+}
+
 function sendOneRequest(
   socketPath: string,
   method: string,
@@ -81,14 +97,26 @@ function sendOneRequest(
   signal: AbortSignal | undefined
 ): Promise<OperationResult<unknown>> {
   const id = `bflow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  let payload: string;
+  try {
+    payload = `${JSON.stringify({ id, method, params })}\n`;
+  } catch {
+    return Promise.resolve(failure({ code: "validation", retryable: false, message: `Herdr ${method} request parameters are not JSON-serializable` }));
+  }
   return new Promise((resolve) => {
     if (signal?.aborted) {
       resolve(failure({ code: "cancelled", retryable: false, message: "Herdr socket request was cancelled before sending" }));
       return;
     }
-    const socket = connect({ path: socketPath });
+    let socket: ReturnType<typeof connect>;
+    try {
+      socket = connect({ path: socketPath });
+    } catch {
+      resolve(failure(transportError(`Herdr ${method} socket connection failed; reconcile before retry`)));
+      return;
+    }
     const chunks: Buffer[] = [];
-    let received = 0;
+    let receivedBeforeNewline = 0;
     let settled = false;
     const finish = (value: OperationResult<unknown>): void => {
       if (settled) return;
@@ -113,21 +141,32 @@ function sendOneRequest(
       finish(failure(transportError(`Herdr ${method} socket closed before a response; reconcile before retry`)));
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ id, method, params })}\n`);
+      socket.write(payload);
     });
     socket.on("data", (chunk: Buffer) => {
-      received += chunk.length;
-      if (received > responseLimitBytes) {
+      if (settled) return;
+      const chunkNewline = chunk.indexOf(0x0a);
+      if (chunkNewline < 0) {
+        receivedBeforeNewline += chunk.length;
+        if (receivedBeforeNewline > responseLimitBytes) {
+          finish({ ok: false, error: { code: "corruption", retryable: false, message: `Herdr ${method} response exceeded the ${responseLimitBytes}-byte limit` } });
+          return;
+        }
+        chunks.push(chunk);
+        return;
+      }
+      const frameLength = receivedBeforeNewline + chunkNewline;
+      if (frameLength > responseLimitBytes) {
         finish({ ok: false, error: { code: "corruption", retryable: false, message: `Herdr ${method} response exceeded the ${responseLimitBytes}-byte limit` } });
         return;
       }
-      chunks.push(chunk);
-      const buffered = Buffer.concat(chunks);
-      const newline = buffered.indexOf(0x0a);
-      if (newline < 0) return;
+      const lineBuffer =
+        chunks.length === 0
+          ? chunk.subarray(0, chunkNewline)
+          : Buffer.concat([...chunks, chunk.subarray(0, chunkNewline)], frameLength);
       let response: unknown;
       try {
-        response = JSON.parse(buffered.subarray(0, newline).toString("utf8"));
+        response = JSON.parse(lineBuffer.toString("utf8"));
       } catch {
         finish({ ok: false, error: { code: "corruption", retryable: false, message: `Herdr ${method} returned malformed JSON` } });
         return;
@@ -169,10 +208,19 @@ export function createHerdrSocketPort(options: HerdrSocketPortOptions): HerdrSoc
       if (requestOptions?.signal?.aborted) {
         return failure({ code: "cancelled", retryable: false, message: "Herdr socket request was cancelled before sending" });
       }
+      const startedAtMs = performance.now();
       const timeoutMs = requestOptions?.timeoutMs ?? defaultTimeoutMs;
-      const socketPath = await resolveSocketPath(options.runner, options.sessionId, requestOptions, timeoutMs);
+      const resolveBudget = remainingBudgetMs(timeoutMs, startedAtMs, requestOptions?.deadline);
+      if (resolveBudget === null) {
+        return failure(transportError(`Herdr ${method} deadline expired before sending`));
+      }
+      const socketPath = await resolveSocketPath(options.runner, options.sessionId, requestOptions, resolveBudget);
       if (!socketPath.ok) return socketPath;
-      return sendOneRequest(socketPath.value, method, params, timeoutMs, responseLimitBytes, requestOptions?.signal);
+      const socketBudget = remainingBudgetMs(timeoutMs, startedAtMs, requestOptions?.deadline);
+      if (socketBudget === null) {
+        return failure(transportError(`Herdr ${method} deadline expired before socket request`));
+      }
+      return sendOneRequest(socketPath.value, method, params, socketBudget, responseLimitBytes, requestOptions?.signal);
     }
   };
 }

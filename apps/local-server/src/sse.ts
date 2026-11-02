@@ -7,11 +7,22 @@ export function upstreamCursor(epoch: string, cursor?: string): string | undefin
   if(!WebEventCursorSchema.safeParse(cursor).success)throw new HttpError('invalid_request');
   return cursor.startsWith(epoch+'_') ? cursor.slice(epoch.length+1) : undefined;
 }
+function parseUpstreamCursor(cursor: string): { epoch: string; seq: number } | undefined {
+  if (!WebEventCursorSchema.safeParse(cursor).success) return undefined;
+  const split = cursor.lastIndexOf(':');
+  if (split <= 0) return undefined;
+  const seq = Number(cursor.slice(split + 1));
+  return Number.isSafeInteger(seq) && seq >= 0 ? { epoch: cursor.slice(0, split), seq } : undefined;
+}
 export async function streamEvents(req: IncomingMessage, res: ServerResponse, source: AsyncIterable<WebEvent>, projectId: string,
-  epoch: string, authenticate: ()=>void, expiresAt: number): Promise<{maxQueued:number}> {
+  epoch: string, authenticate: ()=>void, expiresAt: number, resumedUpstreamCursor?: string): Promise<{maxQueued:number}> {
   const iterator=source[Symbol.asyncIterator]();
   const queue:WebEvent[]=[];let stopped=false,maxQueued=0,wake:(()=>void)|undefined;
   let cancelRead:(()=>void)|undefined;
+  const initialParsed = resumedUpstreamCursor !== undefined ? parseUpstreamCursor(resumedUpstreamCursor) : undefined;
+  let lastUpstream: { epoch: string; seq: number; resumed: boolean } | undefined = initialParsed
+    ? { ...initialParsed, resumed: true }
+    : undefined;
   const stop=()=>{if(stopped)return;stopped=true;cancelRead?.();wake?.();};
   const readNext=()=>new Promise<IteratorResult<WebEvent>|undefined>((resolve,reject)=>{
     const clear=()=>{res.off('close',cancel);req.off('aborted',cancel);if(cancelRead===cancel)cancelRead=undefined;};
@@ -20,18 +31,31 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
     if(stopped || res.destroyed){cancel();return;}
     Promise.resolve().then(()=>iterator.next()).then(value=>{clear();resolve(value);},error=>{clear();reject(error);});
   });
-  const frame=(input:unknown)=>{const event=WebEventSchema.parse(input);if(event.projectId!==projectId)throw new HttpError('unavailable');
-    return WebEventSchema.parse({...event,cursor:`${epoch}_${event.cursor}`});};
+  const frame=(input:unknown)=>{
+    const event=WebEventSchema.parse(input);
+    if(event.projectId!==projectId)throw new HttpError('unavailable');
+    const parsed=parseUpstreamCursor(event.cursor);
+    const discontinuous=parsed!==undefined && lastUpstream!==undefined && (
+      parsed.epoch!==lastUpstream.epoch ||
+      parsed.seq<lastUpstream.seq ||
+      (!lastUpstream.resumed && parsed.seq===lastUpstream.seq)
+    );
+    if(parsed!==undefined)lastUpstream={...parsed,resumed:false};
+    return WebEventSchema.parse(discontinuous && event.type!=='reset'
+      ? {...event,type:'reset',resourceIds:[],cursor:`${epoch}_${event.cursor}`}
+      : {...event,cursor:`${epoch}_${event.cursor}`});
+  };
   const close=()=>{stop();};res.once('close',close);req.once('aborted',close);
   const expiry=setTimeout(()=>res.destroy(),Math.max(0,Math.min(2147483647,expiresAt-Date.now())));
   let heartbeat:ReturnType<typeof setInterval>|undefined;
   const write=async(text:string)=>{
-    if(stopped || res.destroyed)return;
+    if(stopped || res.destroyed || res.writableEnded)return;
     if(res.write(text))return;
     await new Promise<void>((resolve,reject)=>{
-      const clear=()=>{res.off('drain',drain);res.off('close',done);res.off('error',error);};
-      const drain=()=>{clear();resolve();},done=()=>{clear();stop();resolve();},error=(e:Error)=>{clear();reject(e);};
-      res.once('drain',drain);res.once('close',done);res.once('error',error);
+      const clear=()=>{res.off('drain',drain);res.off('close',done);res.off('error',error);req.off('aborted',done);};
+      const drain=()=>{clear();resolve();},done=()=>{clear();stop();resolve();},error=(e:Error)=>{clear();stop();reject(e);};
+      res.once('drain',drain);res.once('close',done);res.once('error',error);req.once('aborted',done);
+      if(stopped || res.destroyed || res.writableEnded)done();
     });
   };
   try {
@@ -53,7 +77,7 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
     res.statusCode=200;res.setHeader('Content-Type','text/event-stream; charset=utf-8');res.setHeader('Cache-Control','no-store');
     res.setHeader('X-Accel-Buffering','no');res.setTimeout(0);res.flushHeaders();
     heartbeat=setInterval(()=>{
-      try{authenticate();if(!stopped && res.writableLength===0)res.write(': heartbeat\n\n');}catch{res.destroy();}
+      try{authenticate();if(!stopped && !res.destroyed && !res.writableEnded && res.writableLength===0)res.write(': heartbeat\n\n');}catch{res.destroy();}
     },WEB_LIMITS.heartbeatSeconds*1000);
     const produce=(async()=>{
       try {while(!stopped){const next=carried?await carried:await readNext();carried=undefined;if(!next || stopped)break;
@@ -64,10 +88,11 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
       }}catch{res.destroy();stop();}
     })();
     while(!stopped){const event=queue.shift();if(!event){await new Promise<void>(resolve=>{wake=resolve;if(stopped)resolve();});continue;}
-      await write(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      const payload=JSON.stringify(event).replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');
+      await write(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${payload}\n\n`);
     }
     await produce;
-    if(!res.destroyed)res.end();
+    if(!res.destroyed && !res.writableEnded)res.end();
     return {maxQueued};
   } finally {
     stop();clearTimeout(expiry);if(heartbeat)clearInterval(heartbeat);res.off('close',close);req.off('aborted',close);

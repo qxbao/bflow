@@ -1,9 +1,31 @@
 import { execFile } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { constants } from "node:fs";
+import { access, lstat, readFile, realpath } from "node:fs/promises";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import type { RunnerAdapter, AdapterRunner } from "./runner-adapter.js";
 const execute = promisify(execFile);
+
+async function resolveSystemTool(name: string, repositoryRoot: string): Promise<string | undefined> {
+  const canonicalRepo = await realpath(repositoryRoot).catch(() => repositoryRoot);
+  for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
+    if (!directory) continue;
+    try {
+      const candidate = await realpath(join(directory, name));
+      if (!isAbsolute(candidate) || candidate === repositoryRoot || candidate.startsWith(repositoryRoot + "/") ||
+          candidate === canonicalRepo || candidate.startsWith(canonicalRepo + "/")) {
+        continue;
+      }
+      if (!(await lstat(candidate)).isFile()) continue;
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      /* continue installed PATH discovery */
+    }
+  }
+  return undefined;
+}
+
 /** Generic targets need a selection/report protocol; guessing arbitrary project CLI flags could run an unrelated suite. */
 const protocol = ["BFLOW_TEST_NAMES", "BFLOW_TEST_FILES", "BFLOW_JUNIT_OUTPUT"];
 export const declaredRunnerAdapter: RunnerAdapter = {
@@ -19,9 +41,8 @@ export const declaredRunnerAdapter: RunnerAdapter = {
       const kind = file.endsWith("Makefile") ? "make" : file.endsWith("justfile") ? "just" : /Taskfile\.ya?ml$/.test(file) ? "task" : undefined;
       if (!kind || !/(?:^|\n)\s*test\s*:/.test(source)) continue;
       try {
-        const found = await execute("/bin/sh", ["-c", `command -v ${kind}`], { cwd: "/", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeout: 5000, maxBuffer: 16384 });
-        const executable = await realpath(found.stdout.trim());
-        if (executable === context.root || executable.startsWith(context.root + "/")) continue;
+        const executable = await resolveSystemTool(kind, context.root);
+        if (!executable) { notes.push(`${file}: runner_toolchain_unavailable: ${kind}`); continue; }
         const checked = await execute(executable, ["--version"], { cwd: "/", env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, timeout: 5000, maxBuffer: 16384 });
         if (!/\d+\.\d+/.test(checked.stdout)) continue;
         runners.push({ adapterId: `declared-${kind}`, version: /\d+\.\d+(?:\.\d+)?/.exec(checked.stdout)![0], executable, projectDirectory: project,

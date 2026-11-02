@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -58,12 +58,38 @@ async function probeFileSnapshot(paths: readonly string[], required: ReadonlySet
   } catch { return undefined; }
 }
 
+function tomlString(value: string): string {
+  return JSON.stringify(value).replace(/\x7f/g, "\\u007f");
+}
+
 function tomlValue(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(tomlValue).join(",")}]`;
+  if (typeof value === "string") return tomlString(value);
+  if (Array.isArray(value)) return `[${value.map(item => tomlValue(item ?? null)).join(",")}]`;
   if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${tomlValue(item)}`).join(",")}}`;
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => `${tomlString(key)}=${tomlValue(item)}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+async function readBoundedRegularUtf8(path: string, maxBytes = 4 * 1024 * 1024): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      const err = new Error(`Path '${path}' is not a regular file`) as NodeJS.ErrnoException;
+      err.code = "EISDIR";
+      throw err;
+    }
+    if (info.size > maxBytes) {
+      throw new Error(`File '${path}' exceeds ${maxBytes}-byte limit`);
+    }
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -71,12 +97,30 @@ function tomlValue(value: unknown): string {
  * reach a server only when named in its `env_vars`; the Bflow role MCP server needs these two (verified against codex-cli 0.162.0).
  */
 export const CODEX_MCP_FORWARDED_ENV = ["HERDR_PANE_ID", "BFLOW_LAUNCH_ID"] as const;
+/** Cold multi-pane Node MCP startup on FUSE/NTFS (~25–31s) exceeds Codex's 10s default handshake budget. */
+export const CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC = 120;
+/** Long-running host MCP tools (`check_work`, `submit_implementation`, `propose_workflow`) exceed Codex's 60s default tool budget. */
+export const CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC = 600;
 
 /** Adds the forwarded env names to a stdio server (keeps existing `env_vars` first); URL servers are unchanged. */
 function withForwardedMcpEnv(server: Record<string, unknown>): Record<string, unknown> {
   if (typeof server["command"] !== "string") return server;
   const existing = Array.isArray(server["env_vars"]) ? server["env_vars"].filter((name): name is string => typeof name === "string") : [];
   return { ...server, env_vars: [...new Set([...existing, ...CODEX_MCP_FORWARDED_ENV])] };
+}
+
+function withCodexMcpTimeouts(server: Record<string, unknown>): Record<string, unknown> {
+  const configuredStartup = typeof server["startup_timeout_sec"] === "number" && Number.isFinite(server["startup_timeout_sec"])
+    ? server["startup_timeout_sec"]
+    : undefined;
+  const configuredTool = typeof server["tool_timeout_sec"] === "number" && Number.isFinite(server["tool_timeout_sec"])
+    ? server["tool_timeout_sec"]
+    : undefined;
+  return {
+    ...server,
+    startup_timeout_sec: Math.max(CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC, configuredStartup ?? 0),
+    tool_timeout_sec: Math.max(CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC, configuredTool ?? 0)
+  };
 }
 
 /** Environment-bound local bootstrap. The host UserPromptSubmit hook must block it before inference. */
@@ -345,7 +389,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
   /** `[mcp_servers.<name>]` table names of the user's Codex config.toml (missing file = none). */
   private async configTableNames(home: string): Promise<{ readonly names: string[]; readonly error?: string }> {
     try {
-      return { names: parseCodexConfigMcpServerNames(await readFile(join(home, "config.toml"), "utf8")) };
+      return { names: parseCodexConfigMcpServerNames(await readBoundedRegularUtf8(join(home, "config.toml"))) };
     } catch (err) {
       if (isNotFound(err)) return { names: [] };
       return { names: [], error: `config.toml unreadable: ${err instanceof Error ? err.message : String(err)}` };
@@ -390,7 +434,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     }
 
     try {
-      const text = await readFile(join(home, "config.toml"), "utf8");
+      const text = await readBoundedRegularUtf8(join(home, "config.toml"));
       return { names: parseCodexConfigMcpServerNames(text) };
     } catch (err) {
       if (isNotFound(err)) return { names: [] };
@@ -403,7 +447,7 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
 
   private async unpinnedEnabledPlugins(home: string): Promise<string[]> {
     try {
-      const text = await readFile(join(home, "config.toml"), "utf8");
+      const text = await readBoundedRegularUtf8(join(home, "config.toml"));
       return parseCodexEnabledPlugins(text);
     } catch {
       return [];
@@ -661,25 +705,42 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
     ];
 
     try {
-      const mcpContent = await readFile(configFiles.mcpConfigFile, "utf8");
+      const mcpContent = await readBoundedRegularUtf8(configFiles.mcpConfigFile);
       const mcpParsed = JSON.parse(mcpContent) as { mcpServers?: Record<string, unknown> };
       if (mcpParsed.mcpServers && Object.keys(mcpParsed.mcpServers).length > 0) {
         // `--ask-for-approval never` auto-rejects every MCP call Codex would prompt for ("MCP tool call
         // requires approval, but approval policy is never"), so the trusted host/Gateway servers are
         // pre-approved like Claude's `--allowedTools mcp__<server>__*`; the host still guards each call.
-        const approved = Object.fromEntries(Object.entries(mcpParsed.mcpServers).map(([name, server]) =>
-          [name, { ...withForwardedMcpEnv(server as Record<string, unknown>), default_tools_approval_mode: "approve" }]));
+        const approved = Object.fromEntries(Object.entries(mcpParsed.mcpServers).map(([name, server]) => {
+          const hostServerOverride = this.options.hostMcpServers?.[name];
+          const mergedServer: Record<string, unknown> = {
+            ...(server as Record<string, unknown>),
+            ...(hostServerOverride?.startup_timeout_sec !== undefined
+              ? { startup_timeout_sec: hostServerOverride.startup_timeout_sec }
+              : {}),
+            ...(hostServerOverride?.tool_timeout_sec !== undefined
+              ? { tool_timeout_sec: hostServerOverride.tool_timeout_sec }
+              : {})
+          };
+          return [name, { ...withCodexMcpTimeouts(withForwardedMcpEnv(mergedServer)), default_tools_approval_mode: "approve" }];
+        }));
         argv.push("-c", `mcp_servers=${tomlValue(approved)}`);
       }
-    } catch {
-      // Ignore reading error if missing
+    } catch (err) {
+      if (!isNotFound(err)) {
+        return {
+          argv: [],
+          unsupportedCode: "unreadable_launch_config",
+          unsupportedMessage: `Codex MCP launch configuration is unreadable: ${err instanceof Error ? err.message : String(err)}`
+        };
+      }
     }
 
     // Disables must follow the Bflow mcp_servers= table override (verified: an earlier override is reset by it).
     argv.push(...inherited.argv);
 
     try {
-      const settingsContent = await readFile(configFiles.settingsFile, "utf8");
+      const settingsContent = await readBoundedRegularUtf8(configFiles.settingsFile);
       const settingsParsed = JSON.parse(settingsContent) as { hooks?: Record<string, unknown> };
       if (settingsParsed.hooks && Object.keys(settingsParsed.hooks).length > 0) {
         if (
@@ -700,8 +761,14 @@ export class CodexProviderAdapter extends BaseProviderAdapter {
           `hooks=${tomlValue(settingsParsed.hooks)}`
         );
       }
-    } catch {
-      // Ignore reading error if missing
+    } catch (err) {
+      if (!isNotFound(err)) {
+        return {
+          argv: [],
+          unsupportedCode: "unreadable_launch_config",
+          unsupportedMessage: `Codex launch settings configuration is unreadable: ${err instanceof Error ? err.message : String(err)}`
+        };
+      }
     }
 
     if (this.options.model) {

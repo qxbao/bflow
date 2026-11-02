@@ -44,6 +44,7 @@ import { renderPreview } from "@bflow/machine-setup";
 import { boundReadinessReport, summarizeReadinessReport } from "./readiness-output.js";
 import { formatDoctorReport } from "./doctor-output.js";
 import { docsFailureRemediation } from "./docs-output.js";
+import { formatDeepWikiProbe } from "./docs-probe.js";
 
 export interface FormatterOptions {
   readonly color?: boolean | undefined;
@@ -90,7 +91,7 @@ function formatDocsOutput(output: import("./docs-command.js").DocsCommandOutput,
     status === "pass" ? (useColor ? green(bold("[OK]"), true) : "[OK]") : status === "fail" ? "[FAIL]" : status === "warn" ? "[WARN]" : "[SKIP]";
   if (output.action === "status" && output.health) {
     const health = output.health;
-    lines.push(`Context7: ${health.state}${health.enabled ? (health.required ? " (required)" : " (optional)") : ""}`);
+    lines.push(`DeepWiki: ${health.state}${health.enabled ? (health.required ? " (required)" : " (optional)") : ""}`);
     for (const check of health.checks) {
       lines.push(`  ${mark(check.status)} ${check.id}: ${sanitizeIdentifier(check.message)}`);
       if (check.remediation && check.status !== "pass" && check.status !== "skipped") lines.push(`        Fix: ${sanitizeIdentifier(check.remediation)}`);
@@ -99,6 +100,7 @@ function formatDocsOutput(output: import("./docs-command.js").DocsCommandOutput,
     lines.push(`  Live probe: ${health.probe.mode === "none" ? `not run${health.probe.reason ? ` (${sanitizeIdentifier(health.probe.reason)})` : ""}` : `through the Gateway as ${health.probe.mode}`}`);
     return lines.join("\n");
   }
+  if (output.probe) return formatDeepWikiProbe(output.probe);
   if (output.failure) {
     const failure = output.failure;
     lines.push(`[FAIL] docs ${output.action}${failure.stage ? ` (${failure.stage})` : ""}: ${failure.kind}${failure.retryable ? " (retryable)" : ""}`);
@@ -110,27 +112,14 @@ function formatDocsOutput(output: import("./docs-command.js").DocsCommandOutput,
     lines.push(`  Next: ${docsFailureRemediation(failure)}`);
     return lines.join("\n");
   }
-  if (output.search) {
-    const search = output.search;
-    lines.push(`Library search: ${sanitizeIdentifier(search.library)} (${search.selection})`);
-    if (search.installed) lines.push(`  Project uses ${sanitizeIdentifier(search.installed.dependency)} ${sanitizeIdentifier(search.installed.version)} (${search.installed.exact ? "exact" : "lowest of range"}, from ${sanitizeIdentifier(search.installed.source)})`);
-    if (search.version) lines.push(`  Documentation choice: ${search.version.versionUsed ? `${sanitizeIdentifier(search.version.libraryId)} (${search.version.match})` : `${sanitizeIdentifier(search.version.libraryId)} (no matching version)`}`);
-    for (const candidate of search.candidates.slice(0, 8)) {
-      const versions = candidate.versions.length ? ` versions: ${candidate.versions.slice(0, 6).map(sanitizeIdentifier).join(", ")}${candidate.versions.length > 6 ? ", ..." : ""}` : "";
-      lines.push(`  - ${sanitizeIdentifier(candidate.id)}  ${sanitizeIdentifier(candidate.title)}${candidate.reputation ? `  [${sanitizeIdentifier(candidate.reputation)}]` : ""}${versions}`);
-    }
-    for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
-    if (search.selection !== "no_match") lines.push("Next: Use 'bflow docs lookup --library-id <id> --query <question>' with a listed library ID.");
-    return lines.join("\n");
-  }
-  if (output.lookup) {
-    const lookup = output.lookup;
-    lines.push(`Documentation for ${sanitizeIdentifier(lookup.libraryTitle ?? lookup.libraryId)} (${sanitizeIdentifier(lookup.libraryId)})`);
-    lines.push(`  Version: requested ${lookup.requestedVersion ? sanitizeIdentifier(lookup.requestedVersion) : "none"} (${lookup.versionSource}), documentation ${lookup.versionUsed ? sanitizeIdentifier(lookup.versionUsed) : "unversioned"} (${lookup.versionMatch})`);
-    lines.push("  Source: Context7 via the shared Gateway");
+  if (output.answer) {
+    const answer = output.answer;
+    lines.push(`DeepWiki answer for ${sanitizeIdentifier(answer.repoName)}`);
+    lines.push(`  Tool: ${sanitizeIdentifier(answer.tool)}, retrieved ${sanitizeIdentifier(answer.retrievedAt)}`);
+    lines.push("  Source: DeepWiki via the shared Gateway");
     for (const warning of output.warnings) lines.push(`  Warning: ${sanitizeIdentifier(warning)}`);
     // Retrieved text is untrusted: drop terminal control characters (including escape sequences) before it reaches a terminal.
-    lines.push("", lookup.content.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""));
+    lines.push("", answer.content.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""));
     return lines.join("\n");
   }
   return JSON.stringify(output, null, 2);

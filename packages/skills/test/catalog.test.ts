@@ -37,7 +37,7 @@ const shared = [
   "use-gitnexus",
   "use-rtk",
   "use-mempalace",
-  "use-context7",
+  "use-deepwiki",
   "browser-inspection",
   "mcp-tool-discovery",
   "report-task-result",

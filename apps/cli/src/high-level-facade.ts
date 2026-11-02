@@ -26,6 +26,7 @@ import {
 import { ProjectContextService } from "@bflow/runtime";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import { environmentProcessRunner } from "./environment-process.js";
+import { gitSafeDirectoryFlags, sanitizedGitEnv } from "./git-safe-directory.js";
 import type {
   HighLevelCommandName,
   HighLevelCommandOutput,
@@ -227,12 +228,15 @@ export class HighLevelCliFacade {
       statusLines = gitData.statusLines ?? [];
       worktrees = gitData.worktrees ?? [];
     } else {
+      const safeFlags = gitSafeDirectoryFlags(repo.root);
+      const cleanEnv = sanitizedGitEnv();
       const runGit = async (gitArgs: string[]): Promise<string> => {
         try {
           const res = await environmentProcessRunner.run({
             executable: "git",
-            args: gitArgs,
+            args: [...safeFlags, "--no-optional-locks", ...gitArgs],
             cwd: repo.root,
+            env: cleanEnv,
             timeoutMs: 5000
           });
           return res.exitCode === 0 ? res.stdout.trim() : "";

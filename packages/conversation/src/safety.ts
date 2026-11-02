@@ -322,6 +322,14 @@ const SECRET_TOKEN_PATTERNS: readonly RegExp[] = [
   /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi
 ];
 
+function sliceUtf16Safe(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  const code = text.charCodeAt(maxUnits - 1);
+  const end = code >= 0xd800 && code <= 0xdbff ? maxUnits - 1 : maxUnits;
+  return text.slice(0, end);
+}
+
 /**
  * Makes raw Runtime/Coordinator reason text safe to show in a user-facing notice: strips invisible
  * characters, neutralizes closing isolation tags, redacts secret-shaped values, collapses whitespace
@@ -337,7 +345,7 @@ export function sanitizeReasonForUser(raw: string | undefined, maxLength = 400):
   }
   text = text.replace(/\s+/g, " ").trim();
   if (text.length === 0) return "(không có mô tả)";
-  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+  return text.length > maxLength ? `${sliceUtf16Safe(text, Math.max(0, maxLength - 1))}…` : text;
 }
 
 /**

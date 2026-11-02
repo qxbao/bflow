@@ -31,11 +31,18 @@ describe("per-task specification projection", () => {
     }
   });
 
-  it("still rejects a task whose own mapping is duplicated", () => {
+  it("never lets a task's duplicated mapping reach the specification", () => {
     const criteria = draft.acceptanceCriteria.filter(criterion => criterion.id === "ac-2");
     const mapping = draft.testStrategy!.criterionMappings.find(item => item.criterionId === "ac-2")!;
     const duplicated = { ...draft, testStrategy: { ...draft.testStrategy!, criterionMappings: [mapping, mapping] } };
-    expect(() => reviewed(projectTaskSpecificationInput(duplicated, "integration", criteria, "abc123")))
-      .toThrow("unknown or duplicate test criterion");
+    const projected = projectTaskSpecificationInput(duplicated, "integration", criteria, "abc123");
+    // The resolver regenerates a duplicated submission, so the reviewed strategy maps each criterion once.
+    const { strategy } = reviewed(projected);
+    expect(strategy.criterionMappings.map(item => item.criterionId)).toEqual(["ac-2"]);
+    // The specification schema still rejects a duplicate that bypasses the resolver.
+    const engine = new SpecificationEngine({ artifactStore: undefined as never, authorizeApprover: () => true });
+    expect(() => engine.createDraft({ ...SpecificationSchema.innerType().parse(projected),
+      testStrategy: { ...strategy, criterionMappings: [strategy.criterionMappings[0], strategy.criterionMappings[0]] },
+      tddDecision: strategy.tddDecision })).toThrow("unknown or duplicate test criterion");
   });
 });

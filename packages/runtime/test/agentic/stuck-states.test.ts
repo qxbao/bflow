@@ -218,6 +218,33 @@ describe("run watchdog facts", () => {
     expect(await f.runtime.inspect("run-1")).toMatchObject({ status: "escalated", pendingAction: { recovery: "auto_resume", sourceMessageId: "assign-dev" } });
   });
 
+  it("treats a Developer yielding for its requested phase measurement as waiting, and reports the stop once that wait is gone", async () => {
+    const f = await fixture(), strategy = specification.testStrategy!;
+    await f.runtime.queueHerdr(message("assign-dev", { type: "delegation.request", payload: { objective: "Inspect" }, recipient: { role: "developer" } }));
+    await f.runtime.flushOutbound();
+    await f.journal.exclusive(async (state: JournalState, save) => {
+      const run = state.runs.find(item => item.runId === "run-1")!;
+      run.tasks.push({ taskId: "task-1", spec: { specification, strategy, request: ApprovalRequestSchema.parse({
+        schemaVersion: 2, approvalId: "approval-task-1", runId: "run-1", target: { type: "run" }, revision: 1, generation: 0,
+        requestedBy: "coordinator", requestedAt: T0, reason: "Accept design", evidence: [], idempotencyKey: "approve-task-1" }) },
+      worktrees: [], outboundIds: ["assign-dev"] } as never);
+      const assignment = state.outbound.find(item => item.message.message_id === "assign-dev")!;
+      assignment.taskId = "task-1"; assignment.attemptId = "attempt-1";
+      state.outbound.push({ ...assignment, handle: undefined, status: "released", message: message("phase-red", { type: "verification.requested", recipient: { role: "qa" },
+        payload: { kind: "conditional_evidence", phase: strategy.tddDecision.mode === "required" ? "red" : "verification", taskId: "task-1", implementationAttemptId: "attempt-1" } }) } as never);
+      await save();
+    });
+    const developer = f.panes.bindings.find(pane => pane.role === "developer")!;
+    await f.runtime.specialistTurnStopped(developer, "developer");
+    expect(await f.notices("developer_no_response")).toHaveLength(0);
+    await f.journal.exclusive(async (state: JournalState, save) => {
+      state.outbound.find(item => item.message.message_id === "phase-red")!.error = "policy_phase_failed:test";
+      await save();
+    });
+    await f.runtime.specialistTurnStopped(developer, "developer");
+    expect(await f.notices("developer_no_response")).toHaveLength(1);
+  });
+
   it("does not count a queued handoff as activity once its recipient has been not-ready past the window", async () => {
     const f = await fixture();
     f.panes.busy.add("coordinator");
@@ -608,5 +635,88 @@ describe("escalated verification retry and design approval", () => {
     await core.checkpoint("run-1");
     expect(createCalls).toBe(2);
     expect(saveCalls).toBe(2);
+  });
+
+  it("holds conditional_evidence verifier lease during pre-turn prompt readiness lag until specialist stop or 45s grace", async () => {
+    const f = await fixture();
+    f.panes.bindings.push(PaneBindingSchema.parse({
+      schemaVersion: 2, bindingId: "binding-qa", sessionId: "session-1", role: "qa", paneGroup: "verification", agentId: "qa-agent",
+      workspaceId: "workspace-1", tabId: "tab-1", paneId: "pane-qa", provider: "test", agentKind: "test", cwd: "/tmp",
+      isolationMode: "dedicated_pane", readOnlyWorkspace: true, session: { source: "test", kind: "id", value: "session-qa" },
+      transportState: "idle", boundAt: T0
+    }));
+    await f.registry.upsert({ agentId: "qa-agent", role: "qa", transport: "herdr", enabled: true,
+      priority: 1, maxConcurrentTasks: 1, capabilities: ["testing"], settings: {} });
+    await f.journal.exclusive(async (state: JournalState, save: () => Promise<void>) => {
+      const leaseRes = await f.ports.registry.acquireLease({
+        leaseId: "lease-qa-1",
+        agentId: "qa-agent",
+        runId: "run-1",
+        taskId: "task-1",
+        attemptId: "attempt-red-1",
+        ttlMs: 300_000,
+        requestedAt: T0,
+        idempotencyKey: "lease-qa-1"
+      });
+      if (!leaseRes.ok) throw new Error("failed to acquire qa lease");
+      const phaseMsg = message("phase-red-1", {
+        recipient: { role: "qa" },
+        type: "verification.requested",
+        payload: { kind: "conditional_evidence", taskId: "task-1", phase: "red", sourceRevision: "abc1234" }
+      });
+      state.outbound.push({
+        message: phaseMsg,
+        status: "accepted",
+        selector: "binding-qa",
+        taskId: "task-1",
+        attemptId: "attempt-red-1",
+        capabilities: ["testing"],
+        lease: leaseRes.value,
+        request: {
+          requestId: "req-qa-1",
+          attemptId: "attempt-red-1",
+          runId: "run-1",
+          taskId: "task-1",
+          role: "qa",
+          target: { transport: "herdr", agentId: "qa-agent", paneId: "pane-qa", workspaceId: "workspace-1", tabId: "tab-1" },
+          instruction: JSON.stringify(phaseMsg),
+          workingDirectory: "/tmp",
+          inputs: [],
+          context: phaseMsg,
+          attempt: 1,
+          retry: { maxAttempts: 1, strategy: "fixed", initialDelayMs: 0, maxDelayMs: 0, jitter: false },
+          timeout: { executionTimeoutMs: 60_000, onTimeout: "block" },
+          idempotency: { key: "phase-red-1", scope: "agent-request", fingerprint: digest(phaseMsg) },
+          createdAt: T0
+        },
+        handle: {
+          executionId: "exec-qa-1",
+          requestId: "req-qa-1",
+          attemptId: "attempt-red-1",
+          runId: "run-1",
+          taskId: "task-1",
+          idempotencyKey: "phase-red-1",
+          target: { transport: "herdr", agentId: "qa-agent", paneId: "pane-qa", workspaceId: "workspace-1", tabId: "tab-1", session: { source: "test", kind: "id", value: "session-qa" } },
+          correlation: { token: "corr-qa-1", provenance: "transport", verified: true },
+          acceptedAt: T0
+        }
+      });
+      await save();
+    });
+
+    // 2s after herdr send: QA TUI still reports readyForPrompt=true before streaming starts; lease MUST stay accepted.
+    f.advance(2_000);
+    await f.journal.exclusive(async (state: JournalState, save: () => Promise<void>) =>
+      new HerdrOutbox(f.ports, state, save).flush(async () => {}));
+    let state = await f.runtime.inspect() as unknown as JournalState;
+    expect(state.outbound.find(item => item.message.message_id === "phase-red-1")!.status).toBe("accepted");
+
+    // Once specialist Stop records specialist_no_response (or >= 45s elapses), readyForPrompt=true releases the verifier lease.
+    await f.runtime.specialistTurnStopped(f.panes.bindings.find(b => b.role === "qa")!, "qa", new Date(Date.parse(T0) + 10_000).toISOString(), "phase-red-1");
+    f.advance(8_000);
+    await f.journal.exclusive(async (s: JournalState, save: () => Promise<void>) =>
+      new HerdrOutbox(f.ports, s, save).flush(async () => {}));
+    state = await f.runtime.inspect() as unknown as JournalState;
+    expect(state.outbound.find(item => item.message.message_id === "phase-red-1")!.status).toBe("released");
   });
 });

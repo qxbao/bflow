@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { findExecutable, McpConfigFileSchema } from "@bflow/machine-setup";
 import type { JsonValue, MCPServiceDefinition } from "@bflow/contracts";
@@ -25,10 +26,13 @@ async function localCheck(service: MCPServiceDefinition, pathEntries: readonly s
     : await findExecutable(connection.executable, pathEntries, process.platform);
   if (path === null) return { state: "unavailable", detail: `Executable '${connection.executable}' not found` };
   try {
+    const info = await stat(path);
+    if (!info.isFile()) return { state: "unavailable", detail: `Executable '${path}' is not a regular file` };
+    if (process.platform !== "win32") await access(path, constants.X_OK);
     const digest = createHash("sha256").update(await readFile(path)).digest("hex");
     if (digest !== connection.executableDigest) return { state: "invalid", detail: `Executable digest of ${path} does not match the pinned digest` };
   } catch (error) {
-    return { state: "unavailable", detail: `Cannot read ${path}: ${describeError(error)}` };
+    return { state: "unavailable", detail: `Cannot execute or read ${path}: ${describeError(error)}` };
   }
   return { state: "unknown", detail: `Pinned executable present at ${path}; liveness requires the Gateway bridge` };
 }
@@ -42,7 +46,9 @@ export const mcpStatus: HighLevelHandler = async (args, ctx) => {
     const config = await log.check("read-mcp-config", async () => {
       let text: string;
       try { text = await readFile(file, "utf8"); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "absent" as const, services: [] as MCPServiceDefinition[] };
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return { state: "absent" as const, services: [] as MCPServiceDefinition[] };
+        if (code === "EISDIR" || code === "ENOTDIR") return { state: "invalid" as const, reason: "path is not a regular file", services: [] as MCPServiceDefinition[] };
         throw error;
       }
       let raw: unknown;

@@ -50,7 +50,7 @@ bflow doctor
 
 Standalone `bflow agent check codex` là diagnostic riêng: adapter có thể chạy model probe và dùng account mặc định, không chọn role/profile/model từ `.bflow/config.yml`. `doctor`/`up` là đường kiểm tra cấu hình host thực tế.
 
-`bflow setup` có phạm vi cấp máy (`setup --check` cho cùng kết quả từ mọi thư mục); trong khi đó `bflow init` chuẩn bị chỉ mục GitNexus và đăng ký `gitnexus-<repo>` cho từng repository (`--check`, `--remove`, `--no-gitnexus`). Context7 và MemPalace (phân vùng theo `wing` mặc định là repository ID) được dùng chung giữa các repository/worktree; GitNexus và Chrome profile vẫn gắn riêng theo từng repository/session. Herdr phải đáp ứng protocol 22/schema 1 và hành vi thực tế; release label chỉ phục vụ chẩn đoán.
+`bflow setup` có phạm vi cấp máy (`setup --check` cho cùng kết quả từ mọi thư mục); trong khi đó `bflow init` chuẩn bị chỉ mục GitNexus và đăng ký `gitnexus-<repo>` cho từng repository (`--check`, `--remove`, `--no-gitnexus`). DeepWiki và MemPalace (phân vùng theo `wing` mặc định là repository ID) được dùng chung giữa các repository/worktree; GitNexus và Chrome profile vẫn gắn riêng theo từng repository/session. Herdr phải đáp ứng protocol 22/schema 1 và hành vi thực tế; release label chỉ phục vụ chẩn đoán.
 
 Với Agy specialist, cấu hình Conversation bằng Claude/Codex; Agy Conversation và unattended hiện unsupported. Profile riêng phải được tạo/đăng nhập trước qua `bflow iso`, rồi chọn `profile-name` trong config. [Cấu hình](configuration-reference.md) · [Provider adapters](../../packages/agent-providers/README.md).
 

@@ -1968,9 +1968,11 @@ describe("@bflow/agent-providers", () => {
         `mcp_servers={${quote("bflow")}={${quote("command")}=${quote(HOST_COMMAND)},` +
         `${quote("args")}=[${["/opt/bflow/host.js", "mcp", "/opt/bflow/developer.json"].map(quote).join(",")}],` +
         `${quote("env_vars")}=[${["HERDR_PANE_ID", "BFLOW_LAUNCH_ID"].map(quote).join(",")}],` +
+        `${quote("startup_timeout_sec")}=120,${quote("tool_timeout_sec")}=600,` +
         `${quote("default_tools_approval_mode")}=${quote("approve")}},` +
         `${quote("gateway-dev")}={${quote("url")}=${quote("http://127.0.0.1:4317/mcp")},` +
         `${quote("bearer_token_env_var")}=${quote("BFLOW_GATEWAY_TOKEN")},` +
+        `${quote("startup_timeout_sec")}=120,${quote("tool_timeout_sec")}=600,` +
         `${quote("default_tools_approval_mode")}=${quote("approve")}}}`;
       expect(argv).toContain(expectedMcp);
       // Only the stdio host server forwards env; the URL gateway entry above carries no env_vars.

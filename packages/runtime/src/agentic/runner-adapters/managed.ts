@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { access, lstat, mkdtemp, open, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { AdapterContext, AdapterDetection, AdapterRunner, RunnerAdapter, RunnerIdentities, RunnerMount } from "../runner-adapter.js";
 
@@ -94,12 +94,24 @@ const systemHost: ManagedAdapterHost = {
     if (!/^[a-z][a-z0-9-]*$/.test(name)) return undefined;
     let probeHome: string | undefined;
     try {
-      const found = await runFile("/bin/sh", ["-c", `command -v ${name}`], {
-        cwd: "/", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, timeout: VERSION_TIMEOUT_MS, maxBuffer: 16_384
-      });
-      const executable = await realpath(found.stdout.trim());
-      if (repositoryRoot && (executable === repositoryRoot || executable.startsWith(repositoryRoot + "/"))) return undefined;
-      if (!isAbsolute(executable) || !(await lstat(executable)).isFile()) return undefined;
+      const canonicalRepo = repositoryRoot ? await realpath(repositoryRoot).catch(() => repositoryRoot) : undefined;
+      let executable: string | undefined;
+      for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
+        if (!directory) continue;
+        try {
+          const candidate = await realpath(join(directory, name));
+          if (!isAbsolute(candidate)) continue;
+          if (repositoryRoot && (candidate === repositoryRoot || candidate.startsWith(repositoryRoot + "/"))) continue;
+          if (canonicalRepo && (candidate === canonicalRepo || candidate.startsWith(canonicalRepo + "/"))) continue;
+          if (!(await lstat(candidate)).isFile()) continue;
+          await access(candidate, constants.X_OK);
+          executable = candidate;
+          break;
+        } catch {
+          /* continue installed PATH discovery */
+        }
+      }
+      if (!executable) return undefined;
       // A fresh SDK may create first-use sentinels even for --version. Never point that
       // initialization at the user's home or an unwritable/nonexistent directory.
       if (["dotnet", "gradle"].includes(name)) probeHome = await mkdtemp(join(tmpdir(), `bflow-${name}-probe-`));

@@ -1,36 +1,39 @@
 import { describe, expect, it } from "vitest";
 import { MCPServiceDefinitionSchema } from "@bflow/contracts";
-import { CONTEXT7_API_KEY_SECRET_REF, CONTEXT7_MCP_ENDPOINT, CONTEXT7_SERVICE_ID, createContext7RemoteService, trustedGatewayPolicy } from "../src/services.js";
+import { DEEPWIKI_MCP_ENDPOINT, DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS, createDeepWikiRemoteService, trustedGatewayPolicy } from "../src/services.js";
 import { createToolCapability } from "../src/installer.js";
 
-const operation = { schemaVersion: 3 as const, scope: { kind: "machine" as const, machineId: "machine-1" }, idempotencyKey: "context7-remote-test" };
+const operation = { schemaVersion: 3 as const, scope: { kind: "machine" as const, machineId: "machine-1" }, idempotencyKey: "deepwiki-remote-legacy-test" };
+const TOOLS = ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"];
 
-describe("hosted Context7 service definition", () => {
+// File name kept from the Context7 era: this suite carries the legacy hosted-service regression coverage over to DeepWiki.
+describe("hosted DeepWiki service definition (migrated from Context7)", () => {
   it("is a remote, shared, concurrent service on the fixed hosted endpoint with no local process", () => {
-    const service = createContext7RemoteService({ operation, authenticated: false });
+    const service = createDeepWikiRemoteService({ operation });
     expect(MCPServiceDefinitionSchema.safeParse(service).success).toBe(true);
-    expect(service).toMatchObject({ serviceId: CONTEXT7_SERVICE_ID, connection: { kind: "native_remote_mcp", endpoint: CONTEXT7_MCP_ENDPOINT, ownership: "external" },
-      authentication: { mode: "none" }, tool: { toolId: "context7", kind: "native_remote_mcp", operations: ["resolve-library-id", "query-docs"],
+    expect(service).toMatchObject({ serviceId: DEEPWIKI_SERVICE_ID, connection: { kind: "native_remote_mcp", endpoint: DEEPWIKI_MCP_ENDPOINT, ownership: "external" },
+      authentication: { mode: "none" }, tool: { toolId: "deepwiki", kind: "native_remote_mcp", operations: TOOLS,
         resource: { sharing: "concurrent", maxConcurrency: 16 }, required: false } });
-    expect(CONTEXT7_MCP_ENDPOINT).toBe("https://mcp.context7.com/mcp");
+    expect(DEEPWIKI_MCP_ENDPOINT).toBe("https://mcp.deepwiki.com/mcp");
+    expect([...DEEPWIKI_TOOLS]).toEqual(TOOLS);
   });
 
-  it("authenticates with a secret reference, never a value", () => {
-    const service = createContext7RemoteService({ operation, authenticated: true });
-    expect(service.authentication).toEqual({ mode: "bearer", credential: CONTEXT7_API_KEY_SECRET_REF });
-    expect(JSON.stringify(service)).not.toMatch(/ctx7sk/);
-    expect(createContext7RemoteService({ operation, authenticated: true, required: true }).tool.required).toBe(true);
+  it("never carries a credential reference or key material and honours required", () => {
+    const service = createDeepWikiRemoteService({ operation, required: true });
+    expect(service.authentication).toEqual({ mode: "none" });
+    expect(JSON.stringify(service)).not.toMatch(/ctx7sk|secret:\/\/|bearer/i);
+    expect(service.tool.required).toBe(true);
   });
 
-  it("declares the two tools read-only only for the exact hosted endpoint", () => {
-    const hosted = createContext7RemoteService({ operation, authenticated: false });
-    expect(trustedGatewayPolicy(hosted)).toEqual({ readOnlyTools: ["resolve-library-id", "query-docs"] });
+  it("declares the three tools read-only only for the exact hosted endpoint", () => {
+    const hosted = createDeepWikiRemoteService({ operation });
+    expect(trustedGatewayPolicy(hosted)).toEqual({ readOnlyTools: TOOLS });
     expect(trustedGatewayPolicy({ ...hosted, connection: { kind: "native_remote_mcp", endpoint: "https://evil.example.com/mcp", ownership: "external" } })).toBeUndefined();
     expect(trustedGatewayPolicy({ ...hosted, tool: { ...hosted.tool, toolId: "other" } })).toBeUndefined();
     expect(trustedGatewayPolicy({ ...hosted, connection: { kind: "native_remote_mcp", endpoint: "http://127.0.0.1:1/mcp", ownership: "external" } })).toBeUndefined();
   });
 
   it("describes the capability for catalogs and inventories", () => {
-    expect(createToolCapability("context7", "hosted", "machine-1")).toMatchObject({ kind: "native_remote_mcp", operations: ["resolve-library-id", "query-docs"] });
+    expect(createToolCapability("deepwiki", "hosted", "machine-1")).toMatchObject({ kind: "native_remote_mcp", operations: TOOLS });
   });
 });

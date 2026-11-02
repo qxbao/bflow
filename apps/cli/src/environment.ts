@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import {
   ContractErrorSchema, CreateCheckpointCommandSchema,
   PaneBindingSchema, WorkflowRunSnapshotSchema, RecoveryCheckpointSchema, SessionManifestSchema, WorkflowAggregateCheckpointStateSchema,
-  type ContractError, type CreateCheckpointCommand, type EnvironmentDoctorReport,
+  type CreateCheckpointCommand, type EnvironmentDoctorReport,
   type OperationOptions, type OperationResult, type RecoveryCheckpoint, type RuntimeService,
   type SessionLifecycleManager, type SessionManifest, type PaneBinding, type ExecutionPlanInput
 } from "@bflow/contracts";
@@ -21,14 +21,21 @@ import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConf
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
 import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
-import { withLifecycleLock } from "./lifecycle-lock.js";
+import { lifecycleLockStatus, withLifecycleLock } from "./lifecycle-lock.js";
 import { runDoctorDiagnostics } from "./doctor-integration.js";
+import { observeAuthoritativeRuntime } from "./runtime-observation.js";
+import { EnvironmentError } from "./environment-error.js";
+import { fsyncTolerant } from "./fs-resilience.js";
+import { gitSafeDirectoryFlags } from "./git-safe-directory.js";
+export { EnvironmentError };
 
 /** CLI composition seam. The provider owns P13 bootstrap/reconciliation and Runtime checkpoint persistence. */
 export interface EnvironmentIntegration {
   readonly requiresNativeSession?: boolean;
   /** Provider checks and launch material only. Must not create panes or dispatch roles. */
   readonly prepareRoles?: (options: OperationOptions) => Promise<void>;
+  /** Startup-only: a surviving pane is not proof of prepared launch material in the current host. */
+  readonly rolesNeedPreparation?: (options: OperationOptions) => Promise<boolean>;
   readonly manager: SessionLifecycleManager;
   readonly runtime?: Pick<RuntimeService, "findRuns" | "getRun">;
   /** Establish a shutdown barrier: stop intake/dispatch and drain in-flight state writes. */
@@ -89,8 +96,8 @@ export interface EnvironmentDependencies {
   readonly openIntegration?: (input: EnvironmentCompositionInput) => Promise<EnvironmentIntegration>;
   readonly env?: NodeJS.ProcessEnv;
   readonly mcpState?: McpLifecycleState;
-  /** Test seam for the Context7 health check used by `up` and `doctor`. */
-  readonly context7Health?: () => Promise<import("./docs-health.js").Context7Health>;
+  /** Test seam for the DeepWiki health check used by `up` and `doctor`. */
+  readonly deepwikiHealth?: () => Promise<import("./docs-health.js").DeepWikiHealth>;
   readonly providerOverrides?: Partial<Record<"claude" | "codex" | "agy", ProviderProbeOverride>>;
   readonly toolOverrides?: Record<string, { installed: boolean; version?: string }>;
   readonly skillsOverride?: {
@@ -112,9 +119,6 @@ export interface EnvironmentStatus {
   readonly issues: readonly string[];
 }
 
-export class EnvironmentError extends Error {
-  constructor(readonly contractError: ContractError) { super(contractError.message); }
-}
 // Startup failures raised before any session/pane side effect. Callers that keep their own
 // operation receipts (Local Web) may settle these as definitive failures instead of uncertain.
 const unchangedStartupFailures = new WeakSet<object>();
@@ -222,7 +226,7 @@ export class EnvironmentLifecycle {
     const target = this.statePath(repository, name);
     const temp = `${target}.${randomUUID()}.tmp`;
     const file = await open(temp, "wx", 0o600);
-    try { await file.writeFile(JSON.stringify(value, null, 2) + "\n"); await file.sync(); }
+    try { await file.writeFile(JSON.stringify(value, null, 2) + "\n"); await fsyncTolerant(file); }
     finally { await file.close(); }
     try { await rename(temp, target); } finally { await rm(temp, { force: true }); }
   }
@@ -294,10 +298,15 @@ export class EnvironmentLifecycle {
     // Interfaces are checked structurally here; all exchanged payloads are parsed at each call below.
     return integration as EnvironmentIntegration;
   }
-  private async command(repository: RepositoryIdentity, binary: string, args: readonly string[], deadline?: Deadline) {
+  private async command(repository: RepositoryIdentity, binary: string, args: readonly string[], deadline?: Deadline, cwdOverride?: string) {
     const env = namedSessionEnvironment(repository.sessionName);
-    if (binary === "git") for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
-    const result = await this.runner.run({ executable: binary, args, cwd: repository.root,
+    const targetCwd = cwdOverride ?? repository.root;
+    let effectiveArgs = args;
+    if (binary === "git") {
+      for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+      effectiveArgs = [...gitSafeDirectoryFlags(targetCwd), ...args];
+    }
+    const result = await this.runner.run({ executable: binary, args: effectiveArgs, cwd: targetCwd,
       env, ...(deadline ? { signal: deadline.options().signal } : {}), timeoutMs: Math.min(5000, deadline?.remaining() ?? 5000) });
     if (result.exitCode !== 0) fail(`${binary} ${args.join(" ")} failed: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
     return result.stdout;
@@ -489,9 +498,32 @@ export class EnvironmentLifecycle {
       // integrations) never writes into the account's provider configuration.
       const defaultComposition = !this.dependencies.integration && !this.dependencies.openIntegration && !process.env.BFLOW_ENVIRONMENT_MODULE;
       // Explicit opt-in only: pre-accept Claude Code's per-project trust dialog so headless panes are not stuck on it.
-      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true && distinctRequiredClis.includes("claude")) {
-        const { claudeConfigFile, ensureClaudeWorkspaceTrust } = await import("./claude-trust.js");
-        await ensureClaudeWorkspaceTrust(repository.root, claudeConfigFile(this.env));
+      // Check rolesToRun directly (distinctRequiredClis omits profile-selected roles) and cover both ~/.claude.json,
+      // ~/.claude/.claude.json (Claude Code 2.x / Orca interactive shells), and any selected isolator profile home.
+      if (defaultComposition && config.environment.permissions?.trustedWorkspace === true &&
+          rolesToRun.some(role => (role.required ?? true) && role.cli === "claude")) {
+        const { claudeConfigFiles, ensureClaudeWorkspaceTrust } = await import("./claude-trust.js");
+        const files = new Set<string>();
+        const baseHome = this.env.HOME?.trim() || homedir();
+        for (const role of rolesToRun.filter(item => (item.required ?? true) && item.cli === "claude")) {
+          const profileName = role["profile-name"] ?? selectedProfiles?.claude?.["profile-name"];
+          if (profileName === undefined) {
+            for (const f of await claudeConfigFiles(this.env, baseHome)) files.add(f);
+            continue;
+          }
+          try {
+            const { resolveIsolatorStateRoot } = await import("./platform-options.js");
+            const profiles = await import("@bflow/runtime/platform/isolator-profile");
+            const resolved = await new profiles.IsolatorProfileResolver({
+              stateRoot: resolveIsolatorStateRoot(this.env, baseHome), environment: this.env
+            }).resolve("claude", profileName, { timeoutMs: Math.min(8000, deadline.remaining()) });
+            const env = resolved.ok ? resolved.value.environment : undefined;
+            if (env) {
+              for (const f of await claudeConfigFiles(env, env.HOME?.trim() || baseHome)) files.add(f);
+            }
+          } catch { /* Profile readiness is reported by provider preflight; trust stays a dialog. */ }
+        }
+        for (const file of files) await ensureClaudeWorkspaceTrust(repository.root, file);
       }
       // Same opt-in for Codex: headless panes otherwise stop on "Trust this folder?". Record the answer
       // in each Codex home a required role will use (selected isolator profile, or the account's own).
@@ -559,15 +591,15 @@ export class EnvironmentLifecycle {
         }
       }
 
-      // Context7 is a hosted documentation service. When the repository marks it required, `up` refuses to start without a
+      // DeepWiki is a hosted documentation service. When the repository marks it required, `up` refuses to start without a
       // Gateway-confirmed service; when optional, roles start without it and a warning is raised when roles are prepared.
-      const context7 = config.environment.context7;
-      if (context7?.enabled === true && context7.required === true) {
-        const { collectContext7Health } = await import("./docs-command.js");
-        const health = await (this.dependencies.context7Health?.() ?? collectContext7Health({ repository, config, env: this.env, probe: false }));
-        const { requiredContext7Refusal } = await import("./docs-health.js");
-        const refusal = requiredContext7Refusal(health);
-        if (refusal) fail(refusal, { component: "mcp:context7" });
+      const deepwiki = config.environment.deepwiki;
+      if (deepwiki?.enabled === true && deepwiki.required === true) {
+        const { collectDeepWikiHealth } = await import("./docs-command.js");
+        const health = await (this.dependencies.deepwikiHealth?.() ?? collectDeepWikiHealth({ repository, config, env: this.env, probe: false }));
+        const { requiredDeepWikiRefusal } = await import("./docs-health.js");
+        const refusal = requiredDeepWikiRefusal(health);
+        if (refusal) fail(refusal, { component: "mcp:deepwiki" });
       }
 
       // Step 6: validate_skills
@@ -662,7 +694,9 @@ export class EnvironmentLifecycle {
         let manifestRaw = unwrap(await deadline.call((opts) => integration.manager.getManifest(repository.sessionName, opts)));
         let manifest = manifestRaw === null ? null : this.validateManifest(manifestRaw, repository);
         if (running && previous?.phase === "manager_pending" && (manifest !== null || saved !== null)) cleanupEligible = true;
-        const needsRoleStartup = !running || manifest === null || manifest.status === "down" || manifest.status === "degraded" ||
+        const hostNeedsPreparation = running && integration.rolesNeedPreparation
+          ? await deadline.call(opts => integration.rolesNeedPreparation!(opts)) : false;
+        const needsRoleStartup = hostNeedsPreparation || !running || manifest === null || manifest.status === "down" || manifest.status === "degraded" ||
           manifest.metadata?.["panePresentationVersion"] !== 1 || previous?.phase === "manager_pending";
         let roleStartupPrepared = false;
         if (!running) {
@@ -911,13 +945,17 @@ export class EnvironmentLifecycle {
     try {
       return await this.locked(repository, () => this.downLocked(repository, config, confirmed || force, timeoutMs, this.dependencies.signal, undefined, force));
     } catch (error) {
-      // Only a host that cannot run the barrier at all is bypassed: an incompatible build, or an unactivated host that
-      // refuses to quiesce over persisted journal work or Core runs. Journal/run store stay on disk and the next `up` reconciles them.
-      // Genuine barrier/checkpoint failures on an active host still abort a forced stop.
-      const unactivated = /requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(error instanceof Error ? error.message : String(error));
+      // Only a host that cannot run the barrier at all is bypassed: an incompatible build, an unreachable dead-socket owner,
+      // or an unactivated host that refuses to quiesce over persisted journal work or Core runs. Journal/run store stay on disk
+      // and the next `up` reconciles them. Genuine barrier/checkpoint failures on an active host still abort a forced stop.
+      const msg = error instanceof Error ? error.message : String(error);
+      const unactivated = /requires activation\/(?:reconciliation|recovery) before safe shutdown/.test(msg);
+      const unreachableOwner = /Host owner is still alive but unreachable/.test(msg);
       if (!force && unactivated && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
         message: error.message + " Run bflow up to resume/reconcile the persisted workflows, or bflow down --force to stop now; durable state is preserved and the next bflow up reconciles it." });
-      if (!force || !(unactivated || /Unknown host operation/.test(error instanceof Error ? error.message : String(error)))) throw error;
+      if (!force && unreachableOwner && error instanceof EnvironmentError) throw new EnvironmentError({ ...error.contractError,
+        message: error.message + " Run bflow down --force to stop the unreachable host owner and session; durable state is preserved." });
+      if (!force || !(unactivated || unreachableOwner || /Unknown host operation/.test(msg))) throw error;
     }
     this.progress("Tiến trình nền không thể chạy rào chắn dừng an toàn; đang buộc dừng. Trạng thái bền vững được giữ nguyên và sẽ được đối soát ở lần 'bflow up' tiếp theo.");
     return this.locked(repository, () => this.forceStopIncompatibleHost(repository, config, timeoutMs));
@@ -1058,7 +1096,12 @@ export class EnvironmentLifecycle {
             }
             await this.checkpointRuns(offline, active, deadline);
             this.progress("Đang tắt tiến trình Runtime nền...");
-            await deadline.call(() => offline.shutdownHost!());
+            try {
+              await deadline.call(() => offline.shutdownHost!());
+            } catch (shutdownError) {
+              if (!force || !offline.terminateIncompatibleHost) throw shutdownError;
+              await deadline.call(() => offline.terminateIncompatibleHost!());
+            }
           }
           await this.writeIntent(repository, "down");
           this.cleanupMcpSession(repository);
@@ -1116,11 +1159,40 @@ export class EnvironmentLifecycle {
         };
         await collectActiveRuns();
         const changes = await this.command(repository, "git", ["status", "--porcelain=v1", "--untracked-files=normal"], deadline);
+        const dirtyWorktrees: string[] = [];
+        const managedWorktreesDir = resolve(repository.root, ".bflow/state/worktrees");
+        if (existsSync(managedWorktreesDir)) {
+          try {
+            for (const entry of readdirSync(managedWorktreesDir, { withFileTypes: true })) {
+              if (!entry.isDirectory()) continue;
+              const wtPath = join(managedWorktreesDir, entry.name);
+              if (!existsSync(join(wtPath, ".git"))) continue;
+              const wtChanges = await this.command(
+                repository,
+                "git",
+                ["status", "--porcelain=v1", "--untracked-files=normal"],
+                deadline,
+                wtPath
+              );
+              if (wtChanges.trim()) dirtyWorktrees.push(entry.name);
+            }
+          } catch {
+            // Observational fallback; do not block down on unreadable directory metadata
+          }
+        }
+        const hasUncommittedChanges = Boolean(changes.trim()) || dirtyWorktrees.length > 0;
         const busy = manifest.panes.some((p) => ["working", "starting", "accepted", "unknown", "disconnected", "blocked"].includes(p.transportState));
         // --yes confirms an orderly checkpointed stop; it cannot accept losing an unverified Developer attempt. Only --force can.
         const writerBlocker = force ? undefined : unverifiedWriterBlocker(unverifiedWriters(activeSnapshots));
         if (writerBlocker) fail(writerBlocker);
-        if ((changes.trim() || activeRuns.size || busy) && !confirmed) fail(`Unsafe shutdown: ${activeRuns.size} active runs${changes.trim() ? ", uncommitted changes" : ""}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
+        if ((hasUncommittedChanges || activeRuns.size || busy) && !confirmed) {
+          const dirtySuffix = dirtyWorktrees.length > 0
+            ? `, uncommitted changes in Developer worktree(s) (${dirtyWorktrees.join(", ")})`
+            : changes.trim()
+              ? ", uncommitted changes"
+              : "";
+          fail(`Unsafe shutdown: ${activeRuns.size} active runs${dirtySuffix}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
+        }
         if (activeRuns.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
         if (!integration.quiesce) fail("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
         await this.writeIntent(repository, "stopping");
@@ -1168,7 +1240,14 @@ export class EnvironmentLifecycle {
         }
         await this.saveManifest(repository, { ...stopped, status: "stopping" });
         this.progress("Đang tắt tiến trình Runtime nền...");
-        if (integration.shutdownHost) await deadline.call(() => integration.shutdownHost!());
+        if (integration.shutdownHost) {
+          try {
+            await deadline.call(() => integration.shutdownHost!());
+          } catch (shutdownError) {
+            if (!force || !integration.terminateIncompatibleHost) throw shutdownError;
+            await deadline.call(() => integration.terminateIncompatibleHost!());
+          }
+        }
         await this.writeIntent(repository, "down");
         const finalManifest = await this.saveManifest(repository, stopped);
         if (force) {
@@ -1192,8 +1271,12 @@ export class EnvironmentLifecycle {
     try { manifest = await this.savedManifest(repository); } catch (error) { issues.push(String(error)); }
     try {
       const intent = await this.intent(repository);
-      if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase))
-        issues.push(`Environment operation '${intent.phase}' was interrupted. ${intent.phase === 'stopping' ? 'Run bflow down --yes to finish shutdown, then bflow up.' : 'Run bflow up to reconcile existing panes; if there is no recoverable receipt, bflow down --yes stops the partial startup.'} Preserve .bflow.`);
+      if (intent && ["server_starting", "manager_pending", "stopping"].includes(intent.phase)) {
+        const lockState = await lifecycleLockStatus(resolve(repository.root, ".bflow/state")).catch(() => "");
+        if (!lockState.startsWith("Lifecycle operation is active")) {
+          issues.push(`Environment operation '${intent.phase}' was interrupted. ${intent.phase === 'stopping' ? 'Run bflow down --yes to finish shutdown, then bflow up.' : 'Run bflow up to reconcile existing panes; if there is no recoverable receipt, bflow down --yes stops the partial startup.'} Preserve .bflow.`);
+        }
+      }
     } catch (error) { issues.push(String(error)); }
     this.progress("Đang kiểm tra máy chủ phiên và các phụ thuộc...");
     try { server = await this.probe(repository, config) ? "running" : "stopped"; } catch (error) { issues.push(String(error)); }
@@ -1212,6 +1295,23 @@ export class EnvironmentLifecycle {
       } catch (error) { issues.push(String(error)); } finally { await integration.close?.(); }
       else issues.push("P13 manager unavailable; pane/agent state is the last persisted observation");
     }
+    if (server === "running" && manifest !== null) {
+      for (const pane of manifest.panes) {
+        if (pane.transportState === "disconnected" || pane.transportState === "blocked") {
+          issues.push(
+            `Pane '${pane.paneId}' for role '${pane.role}' is ${pane.transportState}. Inspect with 'bflow doctor' or reconcile active runs.`
+          );
+        }
+      }
+    }
+    const runtimeObs = await observeAuthoritativeRuntime({
+      repositoryRoot: repository.root,
+      sessionName: repository.sessionName,
+      server,
+      manifest,
+      injectedRuntime: this.dependencies.integration?.runtime
+    });
+    for (const issue of runtimeObs.issues) issues.push(issue);
     return { workspaceRoot: repository.root, sessionName: repository.sessionName, server, configuration: "valid", manifest, liveObservation, issues };
   }
   async doctor(deep = false): Promise<EnvironmentDoctorReport> {

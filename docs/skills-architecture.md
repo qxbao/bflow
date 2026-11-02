@@ -87,7 +87,7 @@ Bảng dưới mô tả trách nhiệm capability; lựa chọn skill thực t�
 | reviewer | review độc lập và phát hiện sửa chữa có giới hạn | Verdict là bằng chứng đã xác thực, không phải transition thành công trực tiếp |
 | security | phân tích mối đe dọa, phát hiện về chính sách | Role không ngầm cấp thêm quyền filesystem/network/secret |
 
-`use-context7` áp dụng cho specifier, architect, planner, developer, reviewer và qa khi đủ grant tài liệu ngoài repo. Catalog tool ID, service ID và upstream operation là namespace riêng theo [D-TOOLS-01](tools-sdlc-integration.md); không còn dùng workaround overload `toolIds` làm thiết kế hiện tại. Conversation không nhận tool Gateway. `docs status` chỉ probe service/config, không chứng minh provider consumption.
+`use-deepwiki` (replaced the legacy `use-context7`) áp dụng cho specifier, architect, planner, developer, reviewer và qa khi đủ grant tài liệu ngoài repo. Catalog tool ID, service ID và upstream operation là namespace riêng theo [D-TOOLS-01](tools-sdlc-integration.md); không còn dùng workaround overload `toolIds` làm thiết kế hiện tại. Conversation không nhận tool Gateway. `docs status` chỉ probe service/config, không chứng minh provider consumption.
 
 ## Provider rendering và readiness
 

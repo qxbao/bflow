@@ -316,6 +316,25 @@ export async function readBundle(root: string): Promise<BundleFiles> {
   return (await scanBundle(root)).files;
 }
 
+const BENIGN_FILE_SYNC_CODES = new Set([
+  "EINVAL",
+  "ENOSYS",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "EROFS",
+  "EPERM",
+  "EACCES",
+]);
+
+async function safeFileSync(handle: { sync: () => Promise<void> }): Promise<void> {
+  try {
+    await handle.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_FILE_SYNC_CODES.has(code)) throw error;
+  }
+}
+
 /** Private local-filesystem storage. This is not protection against a hostile same-UID process. */
 export class SkillFileStore {
   readonly root: string;
@@ -352,7 +371,7 @@ export class SkillFileStore {
     );
     try {
       await handle.writeFile(String(process.pid), "utf8");
-      await handle.sync();
+      await safeFileSync(handle);
       return await action();
     } finally {
       await handle.close();
@@ -400,7 +419,7 @@ export class SkillFileStore {
         );
         try {
           await handle.writeFile(snapshot[name]!, "utf8");
-          await handle.sync();
+          await safeFileSync(handle);
         } finally {
           await handle.close();
         }
@@ -481,7 +500,7 @@ export class SkillFileStore {
     try {
       try {
         await handle.writeFile(content, "utf8");
-        await handle.sync();
+        await safeFileSync(handle);
       } finally {
         await handle.close();
       }

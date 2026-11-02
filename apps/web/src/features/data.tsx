@@ -13,12 +13,13 @@ export function useRead<T>(key:string, load:()=>Promise<T>, revision:number) {
       void loader.current().then(data=>{
         if(active)setResult({key,data,loading:false});
       },error=>{
-        if(active)setResult(old=>({...old,key,error,loading:false}));
+        if(active)setResult(old=>old.key===key?{...old,key,error,loading:false}:{key,error,loading:false});
       }).finally(()=>{
         running=false;
         if(active && dirty){dirty=false;read();}
       });
     };
+    lastRevision.current=revision;
     trigger.current=read;read();
     return()=>{active=false;};
   },[key]);

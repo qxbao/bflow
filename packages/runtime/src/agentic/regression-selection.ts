@@ -11,6 +11,8 @@ import {
 
 const SHA40_PATTERN = /^[a-f0-9]{40}$/;
 const JS_EXT_PATTERN = /\.[cm]?[jt]sx?$/;
+const DECLARATION_EXT_PATTERN = /\.d\.[cm]?ts$/i;
+const VITEST_SUITE_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?$|(^|\/)__tests__\/.*\.[cm]?[jt]sx?$/i;
 const MAX_CHANGED_FILES = 200;
 
 export interface RegressionSelection {
@@ -51,8 +53,17 @@ export async function selectRegressionTests(input: {
     input.head
   ]);
   const headFiles = lsTreeOut.split("\0").filter(Boolean);
+  const isRunnableRegressionTest = (filePath: string): boolean => {
+    if (!testFilePattern.test(filePath) || !JS_EXT_PATTERN.test(filePath) || DECLARATION_EXT_PATTERN.test(filePath)) {
+      return false;
+    }
+    if (input.profile.reporter === "vitest_json") {
+      return VITEST_SUITE_PATTERN.test(filePath);
+    }
+    return true;
+  };
   const candidateTests = [
-    ...new Set(headFiles.filter(p => testFilePattern.test(p) && JS_EXT_PATTERN.test(p)))
+    ...new Set(headFiles.filter(isRunnableRegressionTest))
   ].sort();
   const candidateTestsSet = new Set(candidateTests);
 
@@ -67,19 +78,13 @@ export async function selectRegressionTests(input: {
   ]);
   const changes: ChangedFile[] = parseNameStatus(diffOut);
 
+  // Only packages surviving at head can bound regression tests to a package directory;
+  // a deleted workspace package has zero tests at head and must widen to full to verify surviving consumers.
   const knownPackageRoots = new Set<string>();
   for (const file of headFiles) {
     if (file.endsWith("/package.json")) {
       const dir = file.slice(0, -"/package.json".length);
       if (dir) knownPackageRoots.add(dir);
-    }
-  }
-  for (const change of changes) {
-    for (const candidate of [change.path, change.previousPath]) {
-      if (candidate && candidate.endsWith("/package.json")) {
-        const dir = candidate.slice(0, -"/package.json".length);
-        if (dir) knownPackageRoots.add(dir);
-      }
     }
   }
 

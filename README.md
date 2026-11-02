@@ -23,10 +23,11 @@ Bạn mô tả công việc trong một cuộc hội thoại. Bflow đưa yêu c
 | Phân công nhiều agent | Coordinator lập DAG; Runtime quản lý phụ thuộc, concurrency và quyền thực thi |
 | Kết quả có thể kiểm tra | Đặc tả và tiêu chí nghiệm thu, Conditional TDD, Reviewer/QA độc lập, kiểm tra sau tích hợp |
 | Chọn provider theo vai trò | Claude Code, Codex và Agy qua adapter; model, effort và profile riêng cho từng role |
-| Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho Context7, GitNexus, MemPalace và browser; RTK xử lý output CLI |
+| Dùng lại công cụ đã thiết lập | Shared MCP Gateway cho DeepWiki, GitNexus, MemPalace và browser; RTK xử lý output CLI |
 | Tiếp tục sau gián đoạn | SQLite event log, checkpoint, artifact có checksum và đối soát delivery |
+| Làm việc trên trình duyệt | `bflow web`: UI tiếng Việt cục bộ để quản lý dự án, theo dõi công việc, trả lời quyết định và chat với Conversation ([cẩm nang có ảnh hướng dẫn](docs/guide/web-manual.md)) |
 
-**Trạng thái:** đã có mã nguồn và kiểm thử tích hợp cục bộ cho Runtime/platform (bao gồm GitNexus và browser MCP resource transactions, regression scope, test-integrity gate, task handovers và read-only telemetry). Các báo cáo probe thật có phạm vi riêng; nghiệm thu đầy đủ SDLC với provider/Chrome thật và chiến dịch lỗi khi đang chạy vẫn còn mở. Xem [trạng thái triển khai](docs/implementation-status.md). Agy hiện chưa dùng được cho vai trò Conversation hoặc chế độ unattended.
+**Trạng thái:** đã có mã nguồn và kiểm thử tích hợp cục bộ cho Runtime/platform (bao gồm GitNexus và browser MCP resource transactions, regression scope, test-integrity gate, task handovers, read-only telemetry, local web, execution preview, specialist profiles, provider failover có phê duyệt, custom skill import, gói bàn giao offline, agent cứu hộ `BFLOWSOS` và các đợt hardening Slices 1–8 / UX ổn định giao diện web). Đã có bằng chứng live SDLC đơn provider qua `bflow web` trên repo độc lập (`completed`/`succeeded`, [báo cáo](docs/reliability/web-ux-stabilization.md)) cùng các báo cáo probe có phạm vi riêng; nghiệm thu đầy đủ ma trận SDLC đa provider/Chrome thật và chiến dịch lỗi khi đang chạy vẫn còn mở. Xem [trạng thái triển khai](docs/implementation-status.md). Agy hiện chưa dùng được cho vai trò Conversation hoặc chế độ unattended.
 
 ## Bắt đầu
 
@@ -87,14 +88,19 @@ Conversation sẽ làm rõ yêu cầu khi cần và trình các quyết định 
 bflow status                           # Môi trường và trạng thái host hiện tại
 bflow status <run-id> --telemetry      # Báo cáo metric chỉ đọc của lượt chạy qua host đang hoạt động
 bflow doctor                           # Chẩn đoán cấu hình, provider, công cụ và verification sandbox
-bflow mcp status                       # Inventory MCP; giới hạn live port được ghi bên dưới
+bflow mcp status                       # Inventory MCP và health Gateway cấp máy (khi đã setup)
 bflow tool status                      # Công cụ đã cài
+bflow task preview                     # Xem trước provider/gate/approval sẽ áp dụng, không side effect
+bflow web                              # UI web cục bộ tại http://127.0.0.1:4317
+bflow handover export --run <id> --revision <commit> --out <dir>  # Gói bàn giao offline
 bflow down                             # Dừng an toàn khi không còn công việc active
 ```
 
-`mcp status` hiện đọc cấu hình nhưng chưa có kết nối kiểm tra health mặc định, nên có thể báo `configured: false` dù Gateway đang chạy. Dùng `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe Context7; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
+`mcp status` đọc `$XDG_CONFIG_HOME/bflow/mcp.json` và tự dò Gateway cấp máy khi `setup-gateway.json` cùng `setup-gateway-ready.json` tươi (≤ 60 giây) và tiến trình daemon đang sống; chỉ báo `configured: false` khi máy chưa cấu hình Gateway qua `bflow setup`. Dùng thêm `bflow doctor` để chẩn đoán platform và `bflow docs status` để probe DeepWiki; xem [giới hạn lệnh](apps/cli/docs/command-reference.md#tích-hợp-và-giới-hạn-hiện-tại).
 
-Nếu cần dừng khi còn công việc, `bflow down --yes` xác nhận việc dừng có checkpoint; Runtime vẫn thực thi shutdown barrier. Với run bị chặn, đọc hướng dẫn trong Conversation trước khi trả lời `tiếp tục việc #2` theo nhãn đang hiển thị. [Khôi phục phiên →](docs/guide/session-recovery.md)
+`bflow web` mở UI tiếng Việt trên localhost (ghép nối qua URL dùng một lần; `--port N`, `--no-open`). Form và nút trong web đi qua cùng Conversation/Runtime như khi chat, nên vẫn giữ đủ approval và gate; Ctrl-C chỉ đóng web, phiên dự án tiếp tục chạy. [Cẩm nang Bflow Web →](docs/guide/web-manual.md) · [Web README](apps/web/README.md)
+
+Nếu cần dừng khi còn công việc, `bflow down --yes` xác nhận việc dừng có checkpoint; Runtime vẫn thực thi shutdown barrier. Với run bị chặn, đọc hướng dẫn trong Conversation trước khi trả lời `tiếp tục việc #2` theo nhãn đang hiển thị. Khi phiên bị kẹt và bạn cần tự can thiệp, gõ chính xác `BFLOWSOS` trong Conversation để mở agent cứu hộ ở tab Herdr "SOS"; agent này có quyền provider đầy đủ, chỉ dùng khi bạn giám sát. [Khôi phục phiên →](docs/guide/session-recovery.md)
 
 ## Luồng thực thi
 
@@ -134,22 +140,24 @@ Herdr quản lý tiến trình và các pane; Runtime quyết định điều g�
 - **NFR, test design và bàn giao tác vụ:** chỉ làm rõ metric/oracle, workload và góc nhìn rủi ro liên quan; thiếu ngưỡng hay evidence vẫn chưa được pass. Tác vụ bị dừng giữa chừng có thể lưu và đọc lại biên bản bàn giao có giới hạn (`propose_task_handover` / `read_task_handover`). [Hướng dẫn NFR](docs/nfr-and-test-design.md) · [Runtime README](packages/runtime/README.md)
 - **Rework có dẫn chứng:** mỗi finding cần giải trình gắn với source/revision và verification độc lập; xem [cơ chế và giới hạn enforcement](docs/rework-causality.md).
 
+- **Specialist profile và failover:** `environment.specialistProfiles` cho phép Coordinator giao task cho specialist được ghim phiên bản; `failover` theo role khai báo chuỗi provider/model/profile dự phòng đã duyệt (không khai thì không tự chuyển). Skill/rule có sẵn của IDE có thể nhập qua `bflow skills scan`/`import`/`approve`. [Cấu hình](docs/guide/configuration-reference.md#specialist-profiles-rp-01)
+- **Xem trước và bàn giao:** `bflow task preview` cho biết những gì sẽ áp dụng kèm nguồn gốc; `bflow up --expect-plan <file>` dừng nếu cấu hình đã lệch. `bflow handover export` xuất gói bàn giao offline có manifest SHA-256. [ADR 0005](docs/adr/0005-execution-preview.md) · [CLI reference](apps/cli/COMMAND_REFERENCE.md)
 - **Nâng cấp cấu hình:** dùng `bflow init --update` để bổ sung defaults/comment và giữ giá trị đã có; dùng `bflow config-migrate` cho file `.yaml`/`.json` cũ. [Hướng dẫn init](docs/guide/bflow-init.md)
 
 ## Tài liệu
 
 | Mục tiêu | Đọc tại |
 | --- | --- |
-| Cài đặt và chạy phiên đầu tiên | [Installation](docs/guide/installation.md) · [Getting started](docs/guide/getting-started.md) |
+| Cài đặt và chạy phiên đầu tiên | [Installation](docs/guide/installation.md) · [Getting started](docs/guide/getting-started.md) · [Cẩm nang Bflow Web](docs/guide/web-manual.md) |
 | Tra cứu lệnh | `bflow --help` · [CLI reference](apps/cli/COMMAND_REFERENCE.md) |
 | Vận hành và xử lý lỗi | [Runbook](docs/operations-runbook.md) · [Troubleshooting](docs/guide/troubleshooting.md) |
 | Hiểu cơ chế hoạt động | [Architecture overview](docs/guide/architecture-overview.md) · [Runtime v3](docs/runtime-architecture-v3.md) |
-| Kiểm tra mức hỗ trợ | [Implementation status](docs/implementation-status.md) · [Compatibility](docs/compatibility-matrix.md) · [Known limitations](docs/known-limitations-v3.md) · [Các commit mới đã đối chiếu](docs/main-updates-2026-10-25.md) |
+| Kiểm tra mức hỗ trợ | [Implementation status](docs/implementation-status.md) · [Compatibility](docs/compatibility-matrix.md) · [Known limitations](docs/known-limitations-v3.md) · Các commit mới đã đối chiếu: [đến 2026-10-27](docs/main-updates-2026-10-25.md), [đến 2026-10-29](docs/main-updates-2026-10-29.md), [đến 2026-10-31](docs/main-updates-2026-10-31.md) |
 | Phát triển Bflow | [Documentation index](docs/README.md) · [AGENTS.md](AGENTS.md) |
 
 ## Phát triển từ source
 
-Workspace gồm CLI và các package cho Core, Runtime, provider, transport, storage, specification, verification, Git, Gateway và skills. Xem [bản đồ package](docs/implementation-status.md#bản-đồ-package).
+Workspace gồm CLI, Local Server, web UI và các package cho Core, Runtime, provider, transport, storage, specification, verification, Git, Gateway và skills. Xem [bản đồ package](docs/implementation-status.md#bản-đồ-package).
 
 ```bash
 pnpm check:deps

@@ -12,7 +12,7 @@ export function installApi(overrides:Record<string,unknown>={}) {
   class Source { constructor(){ } addEventListener(kind:string,fn:EventListener){handlers.set(kind,fn);}close=vi.fn(); }
   vi.stubGlobal('EventSource',Source);
   const responses:Record<string,unknown>={
-    '/api/v1/session':{apiVersion:1,sessionId:'browser',expiresAt:'2026-10-30T00:00:00Z',csrfToken:'csrf'},
+    '/api/v1/session':{apiVersion:1,sessionId:'browser',expiresAt:new Date(Date.now()+3600000).toISOString(),csrfToken:'csrf'},
     '/api/v1/projects':{apiVersion:1,items:projects},
     '/api/v1/projects/p/session':session,'/api/v1/projects/p/preview':preview,
     '/api/v1/projects/p/runs?limit=25':{apiVersion:1,items:[run]},

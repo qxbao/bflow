@@ -18,22 +18,22 @@ const policy = {
   repositoryId: "repo-1",
   scope: { kind: "repository", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo" },
   digest: "a".repeat(64),
-  requirements: [{ toolId: "context7", kind: "native_remote_mcp", serviceId: "context7", operations: ["query_docs"], requiredness: "optional",
+  requirements: [{ toolId: "deepwiki", kind: "native_remote_mcp", serviceId: "deepwiki", operations: ["ask_wiki_question"], requiredness: "optional",
     roles: ["coordinator"], triggers: ["external_documentation"] }]
 } as const;
 
 const grant = {
   schemaVersion: 3,
-  grantId: "grant-context7",
+  grantId: "grant-deepwiki",
   policyDigest: "a".repeat(64),
-  toolId: "context7",
+  toolId: "deepwiki",
   kind: "native_remote_mcp",
   requiredness: "optional",
   role: "coordinator",
   scope: { kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "session-1" },
   triggers: ["external_documentation"],
-  serviceId: "context7",
-  operations: ["query_docs"]
+  serviceId: "deepwiki",
+  operations: ["ask_wiki_question"]
 } as const;
 
 describe("Runtime host tool-policy wire fields", () => {

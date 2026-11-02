@@ -7,10 +7,34 @@ import { redactString } from "../resilience/redaction.js";
 export const INVALID_ROLE_MESSAGE_LIMIT = 3;
 const MAX_FEEDBACK_LENGTH = 1500;
 
-interface IssueLike { path?: unknown; message?: unknown }
+interface IssueLike { path?: unknown; message?: unknown; received?: unknown }
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+function appendRoleMessageHint(fieldPath: string, message: string, received?: unknown): string {
+  if (fieldPath === "type") {
+    const inventedTaskStatus = /received ['"]task\.(blocked|failed|completed|inconclusive|progress)['"]/i.exec(message);
+    if (inventedTaskStatus) {
+      const mapped = inventedTaskStatus[1]!.toLowerCase() === "progress" ? "blocked" : inventedTaskStatus[1]!.toLowerCase();
+      return `${message} (hint: RoleMessage has no 'task.${inventedTaskStatus[1]}' type; use type 'task.status' with payload.status '${mapped}', or call report_progress / request_user_decision for user communication)`;
+    }
+  }
+  if (received === "null" || /\breceived null\b/i.test(message)) {
+    return `${message} (hint: omit optional fields like '${fieldPath}' instead of passing null)`;
+  }
+  return message;
+}
 function issueText(issues: readonly IssueLike[]): string | undefined {
-  const parts = issues.flatMap(issue => typeof issue?.message === "string"
-    ? [`${Array.isArray(issue.path) && issue.path.length ? issue.path.map(String).join(".") : "(message)"}: ${issue.message}`] : []);
+  const parts = issues.flatMap(issue => {
+    if (typeof issue?.message !== "string") return [];
+    const fieldPath = Array.isArray(issue.path) && issue.path.length ? issue.path.map(String).join(".") : "(message)";
+    return [`${fieldPath}: ${appendRoleMessageHint(fieldPath, issue.message, issue.received)}`];
+  });
   return parts.length ? parts.join("; ") : undefined;
 }
 /** Zod issues embedded in an error's text (String(ZodError) is the JSON issue list), when present. */
@@ -34,7 +58,7 @@ export function describeValidationError(error: unknown): string {
     ? issueText((error as { issues: IssueLike[] }).issues) : undefined;
   const text = issues ?? embeddedIssues(String(error)) ?? String(error);
   const clean = redactString(text).replace(/\s+/g, " ").trim();
-  return clean.length > MAX_FEEDBACK_LENGTH ? `${clean.slice(0, MAX_FEEDBACK_LENGTH - 1)}…` : clean;
+  return clean.length > MAX_FEEDBACK_LENGTH ? `${sliceUtf16(clean, MAX_FEEDBACK_LENGTH - 1)}…` : clean;
 }
 /** An inbound failure caused by the message's own content (schema/unsupported type), not by transport or Runtime state. */
 export function isMessageContentFailure(reason: string): boolean {

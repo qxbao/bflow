@@ -81,32 +81,30 @@ export async function createMemPalaceService(input: {
       argv: [], cwd: state, environment: {} } });
 }
 
-/** The hosted Context7 MCP endpoint. Fixed: a configuration file cannot redirect queries to another host. */
-export const CONTEXT7_MCP_ENDPOINT = "https://mcp.context7.com/mcp";
-export const CONTEXT7_SERVICE_ID = "context7";
-/** Secret reference the Gateway resolves to the API key; the value lives only in a private file and Gateway memory. */
-export const CONTEXT7_API_KEY_SECRET_REF = "secret://bflow/context7/api-key";
-export const CONTEXT7_TOOLS = ["resolve-library-id", "query-docs"] as const;
+/** The hosted DeepWiki MCP endpoint. Fixed: a configuration file cannot redirect queries to another host. */
+export const DEEPWIKI_MCP_ENDPOINT = "https://mcp.deepwiki.com/mcp";
+export const DEEPWIKI_SERVICE_ID = "deepwiki";
+export const DEEPWIKI_TOOLS = ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"] as const;
 
 /**
- * Context7 as a remote MCP service shared through the Gateway: no local process, one upstream for every agent.
- * Authentication is `bearer` only when an API key is configured; without one the hosted server answers anonymously.
+ * DeepWiki as a remote MCP service shared through the Gateway: no local process, no credential, one upstream for every agent.
+ * Neither the endpoint nor an authentication mode is a parameter.
  */
-export function createContext7RemoteService(input: {
-  operation: ScopedOperation; authenticated: boolean; revision?: number; required?: boolean;
+export function createDeepWikiRemoteService(input: {
+  operation: ScopedOperation; revision?: number; required?: boolean;
 }): MCPServiceDefinition {
   const operation = ScopedOperationSchema.parse(input.operation);
-  const base = createToolCapability("context7", "hosted", operation.scope.kind === "machine" ? operation.scope.machineId : operation.scope.repositoryId);
-  return MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: CONTEXT7_SERVICE_ID, revision: input.revision ?? 1, scope: operation.scope,
-    tool: { ...base, operations: [...CONTEXT7_TOOLS], required: input.required ?? false },
-    connection: { kind: "native_remote_mcp", endpoint: CONTEXT7_MCP_ENDPOINT, ownership: "external" },
-    authentication: input.authenticated ? { mode: "bearer", credential: CONTEXT7_API_KEY_SECRET_REF } : { mode: "none" },
+  const base = createToolCapability("deepwiki", "hosted", operation.scope.kind === "machine" ? operation.scope.machineId : operation.scope.repositoryId);
+  return MCPServiceDefinitionSchema.parse({ schemaVersion: 3, serviceId: DEEPWIKI_SERVICE_ID, revision: input.revision ?? 1, scope: operation.scope,
+    tool: { ...base, operations: [...DEEPWIKI_TOOLS], required: input.required ?? false },
+    connection: { kind: "native_remote_mcp", endpoint: DEEPWIKI_MCP_ENDPOINT, ownership: "external" },
+    authentication: { mode: "none" },
     healthTimeoutMs: 20_000, idleTimeoutMs: 60_000, restartLimit: 3 });
 }
 
 /**
  * Sharing-policy declarations Bflow itself makes about services it knows. Matching is by the exact hosted endpoint, so a
- * different server cannot inherit it by naming its tool `context7`. Context7's two tools only read documentation, which lets
+ * different server cannot inherit it by naming its tool `deepwiki`. DeepWiki's three tools only read documentation, which lets
  * the Gateway report a failure with its cause and lets the upstream driver retry safely instead of treating each failure as
  * an uncertain write.
  */
@@ -115,8 +113,8 @@ export function trustedGatewayPolicy(service: MCPServiceDefinition): { readOnlyT
       service.connection.executable === process.execPath && service.connection.argv.length === 4 &&
       service.connection.argv[0] === resolveLocalOrDist("./service-launcher.js"))
     return { readOnlyTools: ["mempalace_search"] };
-  return service.connection.kind === "native_remote_mcp" && service.connection.endpoint === CONTEXT7_MCP_ENDPOINT && service.tool.toolId === "context7"
-    ? { readOnlyTools: [...CONTEXT7_TOOLS] } : undefined;
+  return service.connection.kind === "native_remote_mcp" && service.connection.endpoint === DEEPWIKI_MCP_ENDPOINT && service.tool.toolId === "deepwiki"
+    ? { readOnlyTools: [...DEEPWIKI_TOOLS] } : undefined;
 }
 
 export async function createChromeService(input: {

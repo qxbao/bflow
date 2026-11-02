@@ -4,10 +4,16 @@ import { AGY_INLINE_REPLY_BYTES } from "./agy-assignment-admission.js";
 import { digest, json, record } from "./journal.js";
 import { HANDOVER_WARNING } from "./task-handover.js";
 
+const emptyOrNullToUndefined = (value: unknown) =>
+  value === null || (typeof value === "string" && value.trim() === "") ? undefined : value;
+const nullToUndefined = (value: unknown) => (value === null ? undefined : value);
+
 export const TaskHandoverReadInputSchema = z.object({
-  runId: z.string().min(1).optional(), taskId: z.string().min(1).optional(),
-  view: z.enum(["full", "page"]).optional(), cursor: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  offset: z.number().int().nonnegative().safe().optional()
+  runId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+  taskId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+  view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "page"]).optional()),
+  cursor: z.preprocess(emptyOrNullToUndefined, z.string().regex(/^[a-f0-9]{64}$/).optional()),
+  offset: z.preprocess(nullToUndefined, z.number().int().nonnegative().safe().optional())
 }).strict();
 const pageInstruction = "Reassemble page strings in offset order and parse the complete JSON before continuing. Fetch every nextOffset with the same cursor using read_task_handover. Pages retain exact host requirements, approvals and blockers; no partial page grants authority. On stale cursor restart at offset 0.";
 
@@ -35,6 +41,7 @@ export function deferredTaskHandover(value: unknown): JsonValue {
 /** Acknowledgement is not a context reload; avoid echoing the entire stored body. */
 export function taskHandoverAcknowledgement(value: unknown): JsonValue {
   const context = record(value), result = record(context.handover);
-  return json({ binding: context.binding, handover: { status: result.status, code: result.code, warning: result.warning },
+  return json({ binding: context.binding, handover: { status: result.status, code: result.code, warning: result.warning,
+    ...(typeof result.reason === "string" ? { reason: result.reason } : {}) },
     instruction: "Read read_task_handover for the host-selected context and current authority. This receipt is not approval or success evidence." });
 }

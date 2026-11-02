@@ -415,7 +415,21 @@ export async function preparePrivateCodexHome(
     await rm(join(privateCodexHome, forbidden), { recursive: true, force: true }).catch(() => undefined);
   }
 
-  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig, options.trustedProjects, resolvedSourceProcessHome);
+  const expandedTrustedProjects: string[] = [];
+  for (const rawPath of options.trustedProjects ?? []) {
+    if (!isAbsolute(rawPath)) continue;
+    const resolvedPath = resolve(rawPath);
+    expandedTrustedProjects.push(resolvedPath);
+    try {
+      const canonicalPath = await realpath(resolvedPath);
+      if (canonicalPath !== resolvedPath) {
+        expandedTrustedProjects.push(canonicalPath);
+      }
+    } catch {
+      // Retain lexical path when directory is not materialized yet.
+    }
+  }
+  const sanitizedConfigText = buildSanitizedCodexConfig(parsedConfig, expandedTrustedProjects, resolvedSourceProcessHome);
   const configFilePath = join(privateCodexHome, "config.toml");
   await writePrivateRegularFile(configFilePath, sanitizedConfigText);
   const configDigest = createHash("sha256").update(sanitizedConfigText, "utf8").digest("hex");

@@ -56,9 +56,9 @@ describe("High-Level CLI Argument Parser & Command Reference", () => {
       expect(SUPPORTED_CLI_COMMANDS).toContain("skills sync");
       expect(SUPPORTED_CLI_COMMANDS).toContain("skills list");
       expect(SUPPORTED_CLI_COMMANDS).toContain("agent check");
-      expect(SUPPORTED_CLI_COMMANDS).toContain("docs search");
-      expect(SUPPORTED_CLI_COMMANDS).toContain("docs lookup");
-      expect(SUPPORTED_CLI_COMMANDS).toContain("docs status");
+      for (const subcommand of ["ask", "structure", "contents", "status", "probe"]) expect(SUPPORTED_CLI_COMMANDS).toContain(`docs ${subcommand}`);
+      expect(SUPPORTED_CLI_COMMANDS).not.toContain("docs search");
+      expect(SUPPORTED_CLI_COMMANDS).not.toContain("docs lookup");
       expect(SUPPORTED_CLI_COMMANDS).toContain("task preview");
     });
 

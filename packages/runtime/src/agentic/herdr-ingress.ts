@@ -26,13 +26,18 @@ export async function startHerdrReceiptIngress(options: {
   failed?(message: RoleMessage, error: unknown): Promise<void>;
   /** Only after signature verification, and before Runtime receive or any business write. */
   rejected?(message: RoleMessage): Promise<void>;
+  readTimeoutMs?: number;
 }): Promise<{ close(): Promise<void> }> {
   // Refuse to steal an existing socket, including a potentially live host's endpoint.
   try { await lstat(options.socketPath); throw new Error("Herdr receipt endpoint already exists; reconcile its owner"); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  const readTimeoutMs = options.readTimeoutMs ?? 30_000;
   const sockets = new Set<Socket>();
+  const reply = (socket: Socket, payload: string) => {
+    if (!socket.destroyed && socket.writable) socket.end(payload);
+  };
   const server = createServer(socket => {
-    sockets.add(socket); socket.setTimeout(15_000, () => socket.destroy());
+    sockets.add(socket); socket.setTimeout(readTimeoutMs, () => socket.destroy());
     let buffer = Buffer.alloc(0), started = false;
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => undefined);
@@ -42,6 +47,7 @@ export async function startHerdrReceiptIngress(options: {
       if (buffer.length > 1024 * 1024) { socket.destroy(); return; }
       const end = buffer.indexOf(10); if (end < 0) return;
       started = true;
+      socket.setTimeout(0);
       void (async () => {
         const packet = record(JSON.parse(buffer.subarray(0, end).toString("utf8")));
         const issuer = textField(packet.issuerId), signature = textField(packet.signature);
@@ -55,13 +61,13 @@ export async function startHerdrReceiptIngress(options: {
         if (issues.length) {
           // Keep native-required fields strict. Persist the observed refusal before responding, never promote a timeout to refusal.
           await options.rejected?.(message);
-          socket.end(JSON.stringify({ ok: false, code: "native_envelope_rejected", issues }) + "\n");
+          reply(socket, JSON.stringify({ ok: false, code: "native_envelope_rejected", issues }) + "\n");
           return;
         }
         try { await authenticated.run(canonicalReceiptJson(message), () => options.receive(message)); }
         catch (error) { await options.failed?.(message, error).catch(() => undefined); throw error; }
-        socket.end(JSON.stringify({ ok: true, messageId: message.message_id }) + "\n");
-      })().catch(() => { socket.end(JSON.stringify({ ok: false, error: "Herdr message authentication or processing failed" }) + "\n"); });
+        reply(socket, JSON.stringify({ ok: true, messageId: message.message_id }) + "\n");
+      })().catch(() => { reply(socket, JSON.stringify({ ok: false, error: "Herdr message authentication or processing failed" }) + "\n"); });
     });
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(options.socketPath, resolve); });

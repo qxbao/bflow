@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./quiet-sqlite-warning.js";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,6 +139,7 @@ export async function main(
             ...(context?.cwd !== undefined ? { cwd: context.cwd } : {}),
             ...(configPath !== undefined ? { configPath } : {}),
             ...(context?.clock !== undefined ? { clock: context.clock } : {}),
+            ...(parseRes.value.command === "status" ? { readOnly: true } : {}),
             ...(context?.operationOptions !== undefined
               ? { operationOptions: context.operationOptions }
               : {})

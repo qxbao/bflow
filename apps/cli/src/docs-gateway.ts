@@ -1,19 +1,20 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { GatewayControlClient, resolvePrivateRuntimeStateDirectory } from "@bflow/runtime";
 import type { MCPClientRegistration, ResolvedToolGrant } from "@bflow/contracts";
 import type { DocsTool, DocsToolCaller, ToolCallOutcome } from "@bflow/docs-retrieval";
 import { GATEWAY_CONTROL_LOCATOR_FILE } from "./gateway-control.js";
 import { readGatewayReadiness } from "./gateway-readiness.js";
+import { gitSafeDirectoryFlags, sanitizedGitEnv } from "./git-safe-directory.js";
 import type { RepositoryIdentity } from "./repository.js";
 
-import { CONTEXT7_SERVICE_ID, CONTEXT7_TOOLS } from "./context7-constants.js";
+import { DEEPWIKI_SERVICE_ID, DEEPWIKI_TOOLS } from "./deepwiki-constants.js";
 
-export const CONTEXT7_SERVICE = CONTEXT7_SERVICE_ID;
-const CONTEXT7_TOOL_NAMES = CONTEXT7_TOOLS;
+export const DEEPWIKI_SERVICE = DEEPWIKI_SERVICE_ID;
+const DEEPWIKI_TOOL_NAMES = DEEPWIKI_TOOLS;
 const LAUNCH_ID_ENV = "BFLOW_LAUNCH_ID";
 const TOKEN_ENV = /^BFLOW_MCP_TOKEN_[A-Z0-9_]{1,50}$/;
 const LAUNCH_ID = /^[A-Za-z0-9_-]{1,200}$/;
@@ -24,17 +25,19 @@ const LAUNCH_ID = /^[A-Za-z0-9_-]{1,200}$/;
  * git directory. Returns undefined outside git.
  */
 export async function resolveHostRepositoryRoot(cwd: string): Promise<string | undefined> {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+  const env = sanitizedGitEnv();
+  const safeFlags = gitSafeDirectoryFlags(cwd);
   const query = (flag: string) => new Promise<string | undefined>(done => {
-    execFile("git", ["rev-parse", flag], { cwd, env, timeout: 5000 }, (error, stdout) => done(error ? undefined : stdout.trim() || undefined));
+    execFile("git", [...safeFlags, "rev-parse", flag], { cwd, env, timeout: 5000 }, (error, stdout) => done(error ? undefined : stdout.trim() || undefined));
   });
   const common = await query("--git-common-dir");
   if (common) {
     const absolute = isAbsolute(common) ? common : resolve(cwd, common);
-    if (basename(absolute) === ".git") return dirname(absolute);
+    const canonical = await realpath(absolute).catch(() => absolute);
+    if (basename(canonical) === ".git") return dirname(canonical);
   }
-  return query("--show-toplevel");
+  const top = await query("--show-toplevel");
+  return top ? await realpath(top).catch(() => top) : undefined;
 }
 
 export interface GatewayTarget {
@@ -81,7 +84,7 @@ export async function discoverAgentAccess(env: Readonly<Record<string, string | 
       if (typeof entry.envName !== "string" || !TOKEN_ENV.test(entry.envName) || typeof entry.registrationId !== "string") continue;
       const tools = Array.isArray(entry.allowedTools) ? entry.allowedTools : [];
       const token = env[entry.envName];
-      if (token && CONTEXT7_TOOL_NAMES.every(name => tools.includes(name))) return { endpoint: record.endpoint, token, registrationId: entry.registrationId };
+      if (token && DEEPWIKI_TOOL_NAMES.every(name => tools.includes(name))) return { endpoint: record.endpoint, token, registrationId: entry.registrationId };
     }
   }
   return undefined;
@@ -104,7 +107,7 @@ export async function enrollOperatorAccess(options: OperatorAccessOptions): Prom
   const locator = join(options.stateDirectory, GATEWAY_CONTROL_LOCATOR_FILE);
   const client = await GatewayControlClient.fromLocator(locator);
   if (!client.ok) return { mode: "none", kind: "no_gateway", reason: client.error.message };
-  const readiness = await readGatewayReadiness(options.stateDirectory, CONTEXT7_SERVICE);
+  const readiness = await readGatewayReadiness(options.stateDirectory, DEEPWIKI_SERVICE);
   if (!readiness.endpoint) return { mode: "none", kind: "no_gateway", reason: "The Gateway has not published its endpoint; run 'bflow setup'." };
   const now = (options.now ?? (() => new Date()))();
   const sessionId = `docs-${randomUUID().slice(0, 12)}`;
@@ -112,7 +115,7 @@ export async function enrollOperatorAccess(options: OperatorAccessOptions): Prom
   const scope = { kind: "session" as const, machineId: options.machineId, repositoryId: options.repository.id, workspaceRoot: options.repository.root, sessionId };
   const registration = {
     schemaVersion: 3 as const, registrationId, provider: "claude" as const, role: options.role as MCPClientRegistration["role"], scope,
-    environmentId: "docs-cli", serviceIds: [CONTEXT7_SERVICE], allowedTools: [...CONTEXT7_TOOL_NAMES],
+    environmentId: "docs-cli", serviceIds: [DEEPWIKI_SERVICE], allowedTools: [...DEEPWIKI_TOOL_NAMES],
     connection: { transport: "streamable_http" as const, endpoint: readiness.endpoint, token: `secret://bflow/docs-cli/${registrationId}` },
     configDigest: "0".repeat(64), expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString(), idempotencyKey: `${registrationId}:${randomUUID()}`
   };
@@ -120,13 +123,13 @@ export async function enrollOperatorAccess(options: OperatorAccessOptions): Prom
     schemaVersion: 3,
     grantId: `grant-${registrationId}`,
     policyDigest: "0".repeat(64),
-    toolId: "context7",
+    toolId: "deepwiki",
     kind: "native_remote_mcp",
     requiredness: "optional",
     role: options.role as ResolvedToolGrant["role"],
     scope,
-    serviceId: CONTEXT7_SERVICE,
-    operations: [...CONTEXT7_TOOL_NAMES],
+    serviceId: DEEPWIKI_SERVICE,
+    operations: [...DEEPWIKI_TOOL_NAMES],
     triggers: ["external_documentation"]
   };
   const granted = await client.value.register(registration as MCPClientRegistration, undefined, [grant]);
@@ -145,18 +148,37 @@ export async function readEvent(body: ReadableStream<Uint8Array>, id: number): P
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let pendingCr = false;
+  const appendNormalized = (chunk: string, final: boolean): void => {
+    let text = pendingCr ? `\r${chunk}` : chunk;
+    pendingCr = false;
+    if (!final && text.endsWith("\r")) {
+      pendingCr = true;
+      text = text.slice(0, -1);
+    }
+    if (text) buffer += text.replace(/\r\n|\r/g, "\n");
+  };
+  const matchMessage = (parsed: unknown): unknown => {
+    const items = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of items) {
+      if (!item || typeof item !== "object") continue;
+      const message = item as { id?: unknown; result?: unknown; error?: unknown };
+      if (message.id === id && (message.result !== undefined || message.error !== undefined)) return message;
+    }
+    return undefined;
+  };
   const parse = (event: string): unknown => {
     const data = event.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).replace(/^ /, "")).join("\n");
     if (!data) return undefined;
     try {
-      const message = JSON.parse(data) as { id?: unknown; result?: unknown; error?: unknown };
-      return message && message.id === id && (message.result !== undefined || message.error !== undefined) ? message : undefined;
+      return matchMessage(JSON.parse(data));
     } catch { return undefined; }
   };
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (value) buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      if (value) appendNormalized(decoder.decode(value, { stream: true }), false);
+      if (done) appendNormalized(decoder.decode(), true);
       if (buffer.length > 8 * 1024 * 1024) throw new Error("Response exceeded the size limit");
       let boundary: number;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
@@ -172,7 +194,7 @@ export async function readEvent(body: ReadableStream<Uint8Array>, id: number): P
 type RpcOutcome = { readonly ok: true; readonly result: any } | { readonly ok: false; readonly error: { code: string; message: string; retryable?: boolean; details?: unknown } };
 
 /**
- * Calls Context7 through the shared Gateway with one registration's bearer token. One upstream session serves every agent;
+ * Calls DeepWiki through the shared Gateway with one registration's bearer token. One upstream session serves every agent;
  * this client only holds its own Gateway session and never starts a documentation process.
  */
 export class GatewayDocsCaller implements DocsToolCaller {
@@ -204,6 +226,10 @@ export class GatewayDocsCaller implements DocsToolCaller {
     let message: any;
     try {
       message = (response.headers.get("content-type") ?? "").includes("text/event-stream") && response.body ? await readEvent(response.body, id) : await response.json();
+      if (Array.isArray(message)) {
+        message = message.find((item: unknown) => item && typeof item === "object" && (item as { id?: unknown }).id === id &&
+          ((item as { result?: unknown }).result !== undefined || (item as { error?: unknown }).error !== undefined));
+      }
     } catch { return { ok: false, error: { code: "corruption", message: "The Gateway sent an unreadable response." } }; }
     if (!response.ok || !message) return { ok: false, error: { code: "transport_unavailable", retryable: true, message: `The Gateway answered HTTP ${response.status}.`, details: { kind: "upstream_http", status: response.status } } };
     if (message.error) {
@@ -224,15 +250,38 @@ export class GatewayDocsCaller implements DocsToolCaller {
     const timeoutMs = options?.timeoutMs ?? 30_000;
     const failed = await this.ensureSession(timeoutMs, options?.signal);
     if (failed && !failed.ok) return { ok: false, error: failed.error };
-    const reply = await this.rpc("tools/call", { name: tool, arguments: args, serviceId: CONTEXT7_SERVICE, timeoutMs }, timeoutMs, options?.signal);
+    const reply = await this.rpc("tools/call", { name: tool, arguments: args, serviceId: DEEPWIKI_SERVICE, timeoutMs }, timeoutMs, options?.signal);
     if (!reply.ok) return { ok: false, error: reply.error };
-    const result = reply.result as { status?: string; output?: unknown } | undefined;
-    const output = result?.output;
-    const text = Array.isArray(output)
-      ? output.map(part => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")).join("")
-      : typeof output === "string" ? output : "";
+    const result = reply.result as { status?: string; output?: unknown; content?: unknown; structuredContent?: unknown; isError?: unknown; error?: unknown } | undefined;
     if (result?.status === "unknown") return { ok: false, error: { code: "unknown_delivery", message: "The outcome of the lookup could not be confirmed.", retryable: false } };
-    return { ok: true, isError: result?.status === "failed", text };
+    const joinParts = (parts: unknown[]): string => parts.map(part => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")).join("");
+    const extractStructuredText = (value: unknown): string | undefined => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+      const record = value as Record<string, unknown>;
+      for (const key of ["result", "text", "answer", "markdown", "content"]) {
+        if (typeof record[key] === "string") return record[key] as string;
+      }
+      return Object.keys(record).length > 0 ? JSON.stringify(record) : undefined;
+    };
+    // Supported shapes: string/array output, the MCP envelope {content:[{type:"text",text}], structuredContent:{...}} either
+    // direct or nested under `output` (the Gateway's {status, output:{content, structuredContent}} form).
+    const rawOutput = result?.output;
+    const inner = rawOutput && typeof rawOutput === "object" && !Array.isArray(rawOutput)
+      ? rawOutput as { content?: unknown; structuredContent?: unknown; isError?: unknown; error?: unknown }
+      : undefined;
+    const envelope = inner ?? result;
+    if (envelope?.content !== undefined && !Array.isArray(envelope.content)) {
+      return { ok: false, error: { code: "corruption", message: "The Gateway sent a documentation result in an unsupported shape.", details: { kind: "unsupported_result" } } };
+    }
+    const structuredText = extractStructuredText(envelope?.structuredContent);
+    let text: string | undefined;
+    if (typeof rawOutput === "string") text = rawOutput;
+    else if (Array.isArray(rawOutput)) text = joinParts(rawOutput);
+    else if (Array.isArray(envelope?.content)) text = joinParts(envelope.content);
+    else if (structuredText !== undefined) text = structuredText;
+    if (text === undefined || result?.error !== undefined || inner?.error !== undefined) return { ok: false, error: { code: "corruption", message: "The Gateway sent a documentation result in an unsupported shape.", details: { kind: "unsupported_result" } } };
+    if (text === "" && structuredText !== undefined) text = structuredText;
+    return { ok: true, isError: result?.status === "failed" || result?.isError === true || inner?.isError === true, text };
   }
 
   async listTools(options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<{ ok: true; tools: readonly string[] } | { ok: false; error: { code: string; message: string; details?: unknown } }> {
@@ -242,6 +291,6 @@ export class GatewayDocsCaller implements DocsToolCaller {
     const reply = await this.rpc("tools/list", {}, timeoutMs, options?.signal);
     if (!reply.ok) return { ok: false, error: reply.error };
     const tools = Array.isArray(reply.result?.tools) ? reply.result.tools as Array<{ name?: unknown; serviceId?: unknown }> : [];
-    return { ok: true, tools: tools.filter(tool => tool.serviceId === CONTEXT7_SERVICE && typeof tool.name === "string").map(tool => tool.name as string) };
+    return { ok: true, tools: tools.filter(tool => tool.serviceId === DEEPWIKI_SERVICE && typeof tool.name === "string").map(tool => tool.name as string) };
   }
 }

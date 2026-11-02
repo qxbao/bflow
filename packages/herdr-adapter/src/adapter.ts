@@ -53,8 +53,37 @@ function parseInput<T>(schema: { safeParse(value: unknown): { success: true; dat
   return parsed.success ? ok(parsed.data) : fail(validation(parsed.error.message));
 }
 
+const REMOTE_NOT_FOUND_CODES = new Set([
+  "not_found",
+  "invalid_target",
+  "target_not_found",
+  "agent_not_found",
+  "pane_not_found",
+  "session_not_found",
+  "workspace_not_found",
+  "tab_not_found",
+  "terminal_not_found",
+  "agent_not_running"
+]);
+
+function isRemoteNotFoundError(remote: HerdrProtocolError): boolean {
+  if (remote.code !== undefined) {
+    if (REMOTE_NOT_FOUND_CODES.has(remote.code)) return true;
+    if (
+      remote.code.endsWith("_not_found") &&
+      remote.code !== "command_not_found" &&
+      remote.code !== "method_not_found"
+    ) {
+      return true;
+    }
+  }
+  return /\b(?:agent\s+target|target|pane|agent|session|workspace|tab|terminal)\b[^\r\n]*?\b(?:not\s+found|does\s+not\s+exist|no\s+longer\s+exists)\b/i.test(
+    remote.message
+  );
+}
+
 function mapFailure(outcome: CommandOutcome): ContractError | null {
-  if (outcome.failure === "invalid_arguments") return validation("CLI arguments must be strings without NUL characters");
+  if (outcome.failure === "invalid_arguments") return validation(outcome.cause ?? "CLI arguments must be strings without NUL characters");
   if (outcome.failure === "runner") return { code: "corruption", retryable: false, message: "Herdr runner failed unexpectedly" };
   if (outcome.failure === "aborted") return { code: "cancelled", retryable: false, message: "Herdr operation aborted" };
   if (outcome.failure === "timeout") return { code: "timeout", retryable: true, retrySafety: outcome.started === false ? "not_started" : "observation_only", message: "Herdr operation timed out" };
@@ -65,7 +94,7 @@ function mapFailure(outcome: CommandOutcome): ContractError | null {
   if (remote.kind === "malformed") return { code: "corruption", retryable: false, message: remote.message };
   if (remote.code === "agent_blocked" || remote.code === "agent_not_ready") return conflict("Herdr agent is blocked or not ready");
   if (remote.code === "timeout") return { code: "timeout", retryable: true, retrySafety: "observation_only", message: remote.message };
-  if (remote.code === "invalid_target" || remote.code === "agent_not_found" || remote.code === "pane_not_found" || remote.code === "agent_not_running") return { code: "not_found", retryable: false, message: remote.message };
+  if (isRemoteNotFoundError(remote)) return { code: "not_found", retryable: false, message: remote.message };
   if (remote.code === "unsupported_version") return { code: "unsupported_version", retryable: false, supportedVersions: [22], receivedVersion: 0, message: remote.message };
   return unavailable(`Herdr ${remote.code ?? "error"}: ${remote.message}`);
 }
@@ -100,7 +129,10 @@ function continuity(target: AgentTargetLocator, info: HerdrAgentInfo): "match" |
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value !== null && typeof value === "object") return Object.fromEntries(
-    Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])
+    Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, item]) => [key, canonical(item)])
   );
   return value;
 }
@@ -132,7 +164,7 @@ export class HerdrCliTransport implements AgentTransport {
     if (!validArguments(args)) return { exitCode: null, stdout: "", stderr: "", failure: "invalid_arguments", started: false };
     if (options?.signal?.aborted) return { exitCode: null, stdout: "", stderr: "", failure: "aborted", started: false };
     const timeoutMs = this.#timeout(options);
-    if (timeoutMs <= 0) return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: false };
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return { exitCode: null, stdout: "", stderr: "", failure: "timeout", started: false };
     try { return await this.#runner.run({ args, ...(options?.signal && { signal: options.signal }), timeoutMs }); }
     catch { return { exitCode: null, stdout: "", stderr: "", failure: "runner" }; }
   }
@@ -276,16 +308,17 @@ export class HerdrCliTransport implements AgentTransport {
     const cachedEntry = this.#receipts.get(request.idempotencyKey);
     const cached = cachedEntry?.receipt;
     if (cached && (cached.requestId !== request.requestId || cached.attemptId !== request.attemptId || cached.runId !== request.runId || cached.taskId !== request.taskId)) return fail(conflict("Reconciliation identity differs from recorded submission"));
-    if (cachedEntry && JSON.stringify(cachedEntry.target) !== JSON.stringify(request.target)) return fail(conflict("Reconciliation target differs from recorded submission"));
+    if (cachedEntry && JSON.stringify(canonical(cachedEntry.target)) !== JSON.stringify(canonical(request.target))) return fail(conflict("Reconciliation target differs from recorded submission"));
     if (cached && cached.status === "accepted" && (
       cached.handle.target.agentId !== request.target.agentId || cached.handle.target.paneId !== request.target.paneId ||
-      (request.target.session !== undefined && JSON.stringify(cached.handle.target.session) !== JSON.stringify(request.target.session))
+      (request.target.session !== undefined && JSON.stringify(canonical(cached.handle.target.session)) !== JSON.stringify(canonical(request.target.session)))
     )) return fail(conflict("Reconciliation target differs from bound execution"));
     if (cached?.status === "accepted" && cached.requestId === request.requestId && cached.attemptId === request.attemptId && cached.runId === request.runId && cached.taskId === request.taskId) {
-      return ok(AgentReconciliationResultSchema.parse({ status: "bound", handle: cached.handle }));
+      return ok(AgentReconciliationResultSchema.parse({ status: "bound", handle: structuredClone(cached.handle) }));
     }
     if (cached?.status === "rejected") return ok(AgentReconciliationResultSchema.parse({ status: "not_delivered", requestId: request.requestId, retrySafe: true, observedAt: now(this.#clock) }));
     const inspected = await this.#inspect(request.target, options);
+    if (!inspected.ok && (inspected.error.code === "validation" || inspected.error.code === "cancelled")) return inspected;
     const reason = inspected.ok ? "Herdr exposes no prompt-specific receipt" : inspected.error.message;
     return ok(AgentReconciliationResultSchema.parse({ status: "unknown_delivery", requestId: request.requestId, retrySafe: false, observedAt: now(this.#clock), reason, manualInterventionRequired: true }));
   }
@@ -298,13 +331,18 @@ export class HerdrCliTransport implements AgentTransport {
     options = budget.value;
     handle = input.value;
     if (options.until !== undefined && !Array.isArray(options.until)) return fail(validation("Wait states must be an array"));
-    const inspected = await this.#inspect(handle.target, options, true);
-    if (!inspected.ok) return inspected;
-    const args = ["agent", "wait", handle.target.paneId!, "--timeout", String(this.#timeout(options))];
+    const waitArgs: string[] = [];
     for (const state of options?.until ?? []) {
       if (!["idle", "working", "blocked", "done", "unknown"].includes(state)) return fail(validation(`Herdr cannot wait for state ${state}`));
-      args.push("--until", state);
+      waitArgs.push("--until", state);
     }
+    const inspected = await this.#inspect(handle.target, options, true);
+    if (!inspected.ok) return inspected;
+    const remainingWaitMs = this.#timeout(options);
+    if (!Number.isFinite(remainingWaitMs) || remainingWaitMs <= 0) {
+      return fail({ code: "timeout", retryable: true, retrySafety: "observation_only", message: "Herdr operation timed out" });
+    }
+    const args = ["agent", "wait", handle.target.paneId!, "--timeout", String(Math.max(1, Math.ceil(remainingWaitMs))), ...waitArgs];
     const outcome = await this.#run(args, options);
     const error = mapFailure(outcome);
     if (error) return fail(error);
@@ -364,7 +402,7 @@ export class HerdrCliTransport implements AgentTransport {
     const outcome = await this.#run(["agent", "send-keys", handle.target.paneId!, "ctrl+c"], options);
     const error = mapFailure(outcome);
     let result: OperationResult<CancellationResult>;
-    if (error) result = outcome.started === false ? fail(error) : fail({ code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: `Cancellation command outcome is uncertain: ${error.message}` });
+    if (error) result = (outcome.started === false || error.code === "not_found") ? fail(error) : fail({ code: "unknown_delivery", retryable: false, manualInterventionRequired: true, message: `Cancellation command outcome is uncertain: ${error.message}` });
     else {
       try {
         if (parseHerdrResponse(outcome).type !== "ok") throw new HerdrProtocolError("Unexpected cancellation acknowledgement", "malformed");

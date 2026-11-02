@@ -421,38 +421,38 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
       expect(unsupported?.remediation).not.toContain("Run 'bflow setup --apply'");
     });
 
-    describe("Context7", () => {
+    describe("DeepWiki", () => {
       const health = (state: "healthy" | "degraded" | "unavailable", failing: boolean) => async () => ({
         enabled: true, required: state === "unavailable", state, probe: { mode: "agent" as const }, providers: [],
-        serviceReadiness: { gateway: "running" as const, status: "ready" as const, discoveredTools: ["resolve-library-id", "query-docs"] },
+        serviceReadiness: { gateway: "running" as const, status: "ready" as const, discoveredTools: ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"] },
         checks: [
           { id: "gateway" as const, status: "pass" as const, message: "The Gateway is running." },
-          { id: "service" as const, status: failing ? "fail" as const : "pass" as const, message: failing ? "The Gateway reports Context7 blocked." : "ready", ...(failing ? { remediation: "Run 'bflow setup --repair'." } : {}) },
-          { id: "query-docs" as const, status: failing ? "skipped" as const : "pass" as const, message: "query-docs works." }
+          { id: "service" as const, status: failing ? "fail" as const : "pass" as const, message: failing ? "The Gateway reports DeepWiki blocked." : "ready", ...(failing ? { remediation: "Run 'bflow setup --repair'." } : {}) },
+          { id: "read_wiki_structure" as const, status: failing ? "skipped" as const : "pass" as const, message: "read_wiki_structure works." }
         ] });
       const run = (required: boolean, state: "healthy" | "degraded" | "unavailable", failing: boolean) => runDoctorDiagnostics({
-        repository, config: JSON.parse(makeConfig(repository, { context7: { enabled: true, required } })), runner, env: process.env,
-        dependencies: { context7Health: health(state, failing) }, probeSession: async () => false, intent: async () => null, statePath: (n) => resolve(dir, ".bflow/state", n) });
+        repository, config: JSON.parse(makeConfig(repository, { deepwiki: { enabled: true, required } })), runner, env: process.env,
+        dependencies: { deepwikiHealth: health(state, failing) }, probeSession: async () => false, intent: async () => null, statePath: (n) => resolve(dir, ".bflow/state", n) });
 
-      it("reports every Context7 check, and a failing optional service as a warning with a degraded notice", async () => {
+      it("reports every DeepWiki check, and a failing optional service as a warning with a degraded notice", async () => {
         const report = await run(false, "degraded", true);
-        const service = report.checks.find((check) => check.checkId === "context7-service");
+        const service = report.checks.find((check) => check.checkId === "deepwiki-service");
         expect(service?.status).toBe("warn");
         expect(service?.remediation).toContain("bflow setup --repair");
-        expect(report.checks.find((check) => check.checkId === "context7-degraded")?.message).toMatch(/degraded mode/);
-        expect(report.checks.filter((check) => check.checkId.startsWith("context7-") && check.status === "failed")).toEqual([]);
+        expect(report.checks.find((check) => check.checkId === "deepwiki-degraded")?.message).toMatch(/degraded mode/);
+        expect(report.checks.filter((check) => check.checkId.startsWith("deepwiki-") && check.status === "failed")).toEqual([]);
       });
 
-      it("fails the doctor when Context7 is required and not ready", async () => {
+      it("fails the doctor when DeepWiki is required and not ready", async () => {
         const report = await run(true, "unavailable", true);
-        expect(report.checks.find((check) => check.checkId === "context7-service")?.status).toBe("failed");
+        expect(report.checks.find((check) => check.checkId === "deepwiki-service")?.status).toBe("failed");
         expect(report.healthy).toBe(false);
       });
 
-      it("adds nothing when Context7 is not enabled", async () => {
-        const report = await runDoctorDiagnostics({ repository, config: JSON.parse(makeConfig(repository, { context7: { enabled: false } })), runner, env: process.env, dependencies: {},
+      it("adds nothing when DeepWiki is not enabled", async () => {
+        const report = await runDoctorDiagnostics({ repository, config: JSON.parse(makeConfig(repository, { deepwiki: { enabled: false } })), runner, env: process.env, dependencies: {},
           probeSession: async () => false, intent: async () => null, statePath: (n) => resolve(dir, ".bflow/state", n) });
-        expect(report.checks.some((check) => check.checkId.startsWith("context7-"))).toBe(false);
+        expect(report.checks.some((check) => check.checkId.startsWith("deepwiki-"))).toBe(false);
       });
     });
 
@@ -685,16 +685,16 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
       await expect(lifecycle.up()).rejects.toThrow("MCP Gateway service is unavailable");
     });
 
-    it("refuses to start when Context7 is required and not ready, but starts when it is optional", async () => {
+    it("refuses to start when DeepWiki is required and not ready, but starts when it is optional", async () => {
       const unhealthy = async () => ({ enabled: true, required: true, state: "unavailable" as const, probe: { mode: "none" as const }, providers: [],
         serviceReadiness: { gateway: "absent" as const, status: "unknown" as const, discoveredTools: [] },
         checks: [{ id: "gateway" as const, status: "fail" as const, message: "The Gateway has never published readiness.", remediation: "Run 'bflow setup --apply'." }] });
-      await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, { context7: { enabled: true, required: true } }));
-      const required = new EnvironmentLifecycle(dir, { runner, context7Health: unhealthy, providerOverrides: { claude: { available: true, authenticated: true } } });
-      await expect(required.up()).rejects.toThrow("Required Context7 documentation service is not ready");
-      await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, { context7: { enabled: true, required: false } }));
+      await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, { deepwiki: { enabled: true, required: true } }));
+      const required = new EnvironmentLifecycle(dir, { runner, deepwikiHealth: unhealthy, providerOverrides: { claude: { available: true, authenticated: true } } });
+      await expect(required.up()).rejects.toThrow("Required DeepWiki documentation service is not ready");
+      await writeFile(join(dir, ".bflow/config.yaml"), makeConfig(repository, { deepwiki: { enabled: true, required: false } }));
       const fixture = createMockManager(repository);
-      const optional = new EnvironmentLifecycle(dir, { runner, context7Health: unhealthy, providerOverrides: { claude: { available: true, authenticated: true } },
+      const optional = new EnvironmentLifecycle(dir, { runner, deepwikiHealth: unhealthy, providerOverrides: { claude: { available: true, authenticated: true } },
         openIntegration: async () => ({ manager: fixture.manager }) });
       await expect(optional.up()).resolves.toBeDefined();
     });

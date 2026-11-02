@@ -29,6 +29,7 @@ import {
 import { recoverWorkflowRun, type RecoveryPorts } from "../recovery.js";
 import type { JournalState, Outbound } from "../agentic/journal.js";
 import { digest } from "../agentic/journal.js";
+import { runtimeGitDirectoryFlags } from "../agentic/patch-paths.js";
 import type { PanePolicy, TaskWorktree } from "../agentic/ports.js";
 import type { StructuredLogger } from "../resilience/structured-logger.js";
 import type { ObservabilityTracker } from "../observability/metrics.js";
@@ -47,7 +48,8 @@ async function execGit(cwd: string, args: readonly string[]): Promise<string> {
       env[key] = value;
     }
   }
-  const { stdout } = await execFileAsync("git", [...args], { cwd, env });
+  const dirFlags = await runtimeGitDirectoryFlags(cwd);
+  const { stdout } = await execFileAsync("git", [...dirFlags, ...args], { cwd, env });
   return stdout;
 }
 
@@ -1025,7 +1027,11 @@ export class SessionRecoveryService {
     const file = await open(temp, "wx", 0o600);
     try {
       await file.writeFile(JSON.stringify(receipt, null, 2) + "\n");
-      await file.sync();
+      try { await file.sync(); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"].includes(code)) throw error;
+      }
     } finally {
       await file.close();
     }

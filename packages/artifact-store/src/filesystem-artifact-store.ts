@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
-import { rename, unlink } from "node:fs/promises";
+import { lstat, readdir, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import {
@@ -12,21 +12,50 @@ import { openCatalog } from "./catalog.js";
 import { SafeRoot } from "./filesystem.js";
 import { Budget, afterCursor, conflict, cursor, digest, fail, failure, fingerprint, parse, storedJson } from "./support.js";
 
+const UNSUPPORTED_FILE_FSYNC_CODES = new Set([
+  "EINVAL",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "ENOSYS",
+  "EPERM",
+  "EACCES",
+  "EROFS"
+]);
+
+const ORPHAN_STAGING_NAME_RE = /^(?:stage|read)-[a-f0-9-]{36}$/;
+
 export interface FilesystemArtifactStoreOptions {
   readonly root: string;
   readonly storeId: string;
   readonly busyTimeoutMs?: number;
   readonly clock?: () => number;
+  readonly orphanStagingMaxAgeMs?: number;
 }
 export async function openFilesystemArtifactStore(options: FilesystemArtifactStoreOptions): Promise<OperationResult<FilesystemArtifactStore>> {
   try {
     const busy = options.busyTimeoutMs ?? 5_000;
+    const orphanMaxAge = options.orphanStagingMaxAgeMs ?? 3_600_000;
+    const clock = options.clock ?? Date.now;
     if (!options.root || !/^[A-Za-z0-9._-]+$/.test(options.storeId) || [".", ".."].includes(options.storeId) ||
-      !Number.isSafeInteger(busy) || busy < 0 || busy > 2_147_483_647) fail("validation", "Invalid artifact store configuration");
+      !Number.isSafeInteger(busy) || busy < 0 || busy > 2_147_483_647 ||
+      !Number.isSafeInteger(orphanMaxAge) || orphanMaxAge < 0) fail("validation", "Invalid artifact store configuration");
     const root = await SafeRoot.create(options.root);
     await root.check();
+    const nowMs = clock();
+    for (const entry of await readdir(root.path)) {
+      if (!ORPHAN_STAGING_NAME_RE.test(entry)) continue;
+      const target = root.file(entry);
+      try {
+        const info = await lstat(target);
+        if (info.isFile() && !info.isSymbolicLink() && nowMs - info.mtimeMs >= orphanMaxAge) {
+          await unlink(target);
+        }
+      } catch (error) {
+        if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) throw error;
+      }
+    }
     return { ok: true, value: new FilesystemArtifactStore(root, openCatalog(root.file("catalog.sqlite"), options.storeId, busy),
-      options.storeId, busy, options.clock ?? Date.now) };
+      options.storeId, busy, clock) };
   } catch (error) { return failure(error); }
 }
 
@@ -50,24 +79,43 @@ export class FilesystemArtifactStore implements ArtifactStore {
   private transaction<T>(budget: Budget, work: () => T): T {
     budget.check();
     this.db.exec(`PRAGMA busy_timeout=${budget.remaining(this.busy)}`);
-    try { this.db.exec("BEGIN IMMEDIATE"); }
-    catch (error) { budget.check(); throw error; }
-    try { budget.check(); const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
-    catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    try {
+      try { this.db.exec("BEGIN IMMEDIATE"); }
+      catch (error) { budget.check(); throw error; }
+      try { budget.check(); const result = work(); budget.check(); this.db.exec("COMMIT"); return result; }
+      catch (error) {
+        try { this.db.exec("ROLLBACK"); } catch { /* already auto-rolled back by SQLite */ }
+        throw error;
+      }
+    } finally {
+      if (!this.closed) {
+        try { this.db.exec(`PRAGMA busy_timeout=${this.busy}`); } catch { /* preserve primary failure */ }
+      }
+    }
   }
   private observation<T>(options: OperationOptions | undefined, work: () => T): Promise<OperationResult<T>> {
     return this.execute(options, async (budget) => {
       budget.check(true);
-      this.db.exec("BEGIN DEFERRED");
-      let value: T;
+      this.db.exec(`PRAGMA busy_timeout=${budget.remaining(this.busy)}`);
       try {
-        value = work();
+        this.db.exec("BEGIN DEFERRED");
+        let value: T;
+        try {
+          value = work();
+          budget.check(true);
+          this.db.exec("COMMIT");
+        } catch (error) {
+          try { this.db.exec("ROLLBACK"); } catch { /* already auto-rolled back by SQLite */ }
+          throw error;
+        }
+        // Read-only COMMIT has no business mutation; do not apply this post-check to put/delete.
         budget.check(true);
-        this.db.exec("COMMIT");
-      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-      // Read-only COMMIT has no business mutation; do not apply this post-check to put/delete.
-      budget.check(true);
-      return value;
+        return value;
+      } finally {
+        if (!this.closed) {
+          try { this.db.exec(`PRAGMA busy_timeout=${this.busy}`); } catch { /* preserve primary failure */ }
+        }
+      }
     }, true);
   }
   private record(id: string, includeDeleted = false): { reference: ArtifactReference; blob: string; deleted: boolean } | null {
@@ -91,6 +139,7 @@ export class FilesystemArtifactStore implements ArtifactStore {
       while (true) {
         budget.check();
         const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
+        budget.check();
         if (bytesRead === 0) break;
         size += bytesRead;
         if (reference.sizeBytes === undefined || size > reference.sizeBytes) fail("corruption", "Cached artifact exceeds catalog size");
@@ -143,7 +192,14 @@ export class FilesystemArtifactStore implements ArtifactStore {
         }
         if (hash.digest("hex") !== input.expectedIntegrity.checksum.value.toLowerCase() ||
           input.expectedIntegrity.sizeBytes !== undefined && size !== input.expectedIntegrity.sizeBytes) fail("corruption", "Artifact integrity mismatch");
-        await handle.sync();
+        try {
+          await handle.sync();
+        } catch (error) {
+          const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+            ? error.code
+            : undefined;
+          if (code === undefined || !UNSUPPORTED_FILE_FSYNC_CODES.has(code)) throw error;
+        }
         const final = await handle.stat();
         if (!final.isFile() || final.nlink !== 1 || final.size !== size) fail("corruption", "Staged artifact size or file identity is inconsistent");
         const reference = parse(ArtifactReferenceSchema, { trust: "stored", artifactId: input.artifactId, runId: input.runId,
@@ -213,9 +269,9 @@ export class FilesystemArtifactStore implements ArtifactStore {
     let created = false;
     try {
       if (this.closed) fail("validation", "Store is closed");
-      const budget = new Budget(options, this.clock);
+      const budget = new Budget(options, this.clock, true);
       const reference = parse(ArtifactReferenceSchema, input);
-      await this.root.check(); budget.check();
+      await this.root.check(); budget.check(true);
       const record = this.record(reference.artifactId) ?? fail("not_found", "Artifact does not exist");
       if (fingerprint(reference) !== fingerprint(record.reference)) fail("validation", "Reference does not match trusted catalog");
       source = await this.root.open(record.blob);
@@ -226,10 +282,13 @@ export class FilesystemArtifactStore implements ArtifactStore {
       while (true) {
         budget.check(true);
         const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
+        budget.check(true);
         if (!bytesRead) break;
         if (record.reference.sizeBytes === undefined || size + bytesRead > record.reference.sizeBytes) fail("corruption", "Stored artifact exceeds catalog size");
         hash.update(buffer.subarray(0, bytesRead));
-        await snapshot.writeFile(buffer.subarray(0, bytesRead)); size += bytesRead;
+        await snapshot.writeFile(buffer.subarray(0, bytesRead));
+        budget.check(true);
+        size += bytesRead;
       }
       if (hash.digest("hex") !== reference.checksum.value.toLowerCase() || size !== record.reference.sizeBytes) fail("corruption", "Stored artifact integrity mismatch");
       // Yield only after a private snapshot is completely verified. No bytes from a corrupt blob escape.
@@ -240,6 +299,7 @@ export class FilesystemArtifactStore implements ArtifactStore {
         const read = await snapshot.read(bytes, 0, bytes.length, offset);
         if (read.bytesRead !== bytes.length) fail("corruption", "Verified read snapshot changed");
         offset += read.bytesRead;
+        budget.check(true);
         yield { ok: true, value: bytes };
       }
       if (size === 0) { budget.check(true); yield { ok: true, value: new Uint8Array() }; }

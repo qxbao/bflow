@@ -1,15 +1,14 @@
-import { cachePermitted, DEFAULT_CACHE_POLICY, type CacheKeyParts, type CachePolicy, type DocsCache } from "./cache.js";
-import { parseResolveResult, selectLibrary, selectVersion, type LibraryCandidate, type VersionChoice } from "./context7.js";
+import { cachePermitted, DEFAULT_CACHE_POLICY, type CachePolicy, type DocsCache } from "./cache.js";
+import { checkQuestion, DEEPWIKI_PROBE_REPO, DEEPWIKI_TOOL_NAMES, resolveRepository } from "./deepwiki.js";
 import { classifyGatewayError, classifyToolError, failure, type DocsFailure, type GatewayErrorLike } from "./failures.js";
-import { detectInstalledVersion, type DetectedVersion } from "./versions.js";
 
-export type DocsTool = "resolve-library-id" | "query-docs";
+export type DocsTool = "ask_wiki_question" | "read_wiki_contents" | "read_wiki_structure";
 
 export type ToolCallOutcome =
   | { readonly ok: true; readonly isError: boolean; readonly text: string }
   | { readonly ok: false; readonly error: GatewayErrorLike };
 
-/** How the client reaches Context7. The production adapter goes through the shared Gateway with the caller's own registration. */
+/** How the client reaches DeepWiki. The production adapter goes through the shared Gateway with the caller's own registration. */
 export interface DocsToolCaller {
   callTool(tool: DocsTool, args: Readonly<Record<string, unknown>>, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<ToolCallOutcome>;
   /** Names the upstream advertises; used by `probe`. Optional because a caller may not be able to list. */
@@ -20,106 +19,268 @@ export interface DocsClientOptions {
   readonly caller: DocsToolCaller;
   readonly cache?: DocsCache;
   readonly cachePolicy?: CachePolicy;
-  /** True when the Gateway talks to Context7 with an API key; gates caching (see `CachePolicy.allowAuthenticated`). */
-  readonly authenticated?: boolean;
   readonly timeoutMs?: number;
-  readonly detect?: (root: string, library: string, from?: string) => Promise<DetectedVersion | null>;
   readonly now?: () => Date;
 }
 
 export interface DocsMetricsSnapshot {
-  readonly searches: number;
   readonly lookups: number;
-  readonly resolveCalls: number;
-  readonly queryCalls: number;
+  readonly toolCalls: number;
+  readonly refused: number;
   readonly cacheHits: number;
   readonly cacheMisses: number;
   readonly cacheStores: number;
-  readonly cacheSkippedByPolicy: number;
   readonly failures: Readonly<Record<string, number>>;
 }
 
-export interface SearchInput { readonly library: string; readonly query?: string; readonly projectRoot?: string; /** Where the search for the project's dependency starts (inside `projectRoot`). */ readonly startDir?: string; readonly version?: string }
-export interface SearchSuccess {
-  readonly ok: true;
-  readonly library: string;
-  readonly candidates: readonly LibraryCandidate[];
-  readonly selection: "selected" | "ambiguous" | "no_match";
-  readonly selected?: LibraryCandidate;
-  readonly installed?: DetectedVersion;
-  readonly version?: VersionChoice;
-  readonly warnings: readonly string[];
-}
+/**
+ * `visibility` is a local declaration by the operator; it is checked here and never forwarded. `library` is accepted only when
+ * it exactly matches the built-in public mapping.
+ */
+export interface RepoInput { readonly repoName?: unknown; readonly library?: string; readonly visibility?: unknown }
+export interface AskInput extends RepoInput { readonly question: unknown; readonly noCache?: boolean }
 
-export interface LookupInput {
-  /** A library name such as `react`. Either this or `libraryId` is required. */
-  readonly library?: string;
-  /** A Context7 id such as `/reactjs/react.dev`, optionally with a version suffix. */
-  readonly libraryId?: string;
-  readonly query: string;
-  readonly language?: string;
-  /** Overrides the version detected from the project. */
-  readonly version?: string;
-  readonly projectRoot?: string;
-  readonly startDir?: string;
-  readonly noCache?: boolean;
-}
-
-export interface LookupSuccess {
+export interface DocsSuccess {
   readonly ok: true;
-  readonly libraryId: string;
-  readonly libraryTitle?: string;
-  /** The version the project uses (or the caller gave) and the version whose documentation was actually returned. */
-  readonly requestedVersion: string | null;
-  readonly versionUsed: string | null;
-  readonly versionSource: "explicit" | "installed" | "none";
-  readonly versionMatch: VersionChoice["match"];
-  readonly installed?: DetectedVersion;
+  readonly repoName: string;
+  readonly tool: DocsTool;
   readonly content: string;
   readonly cache: { readonly hit: boolean; readonly stored: boolean };
-  readonly warnings: readonly string[];
   readonly retrievedAt: string;
 }
 
-export type DocsStage = "detect" | "resolve" | "query";
+export type DocsStage = "validate" | "query";
 export interface DocsFailureResult { readonly ok: false; readonly stage: DocsStage; readonly failure: DocsFailure }
 
 export interface ProbeCheck {
-  readonly name: "discovery" | "resolve-library-id" | "query-docs";
+  readonly name: "discovery" | "read_wiki_structure";
   readonly status: "ok" | "failed" | "skipped";
   readonly latencyMs: number;
   readonly failure?: DocsFailure;
   readonly detail?: string;
 }
 
-const REQUIRED_TOOLS: readonly DocsTool[] = ["resolve-library-id", "query-docs"];
+const LEGACY_ASK_TOOL_ALIAS = "ask_question";
+const MCP_ENVELOPE_KEYS = new Set(["content", "structuredContent", "isError", "_meta"]);
+const MAX_TIMEOUT_SLICE_MS = 2_147_483_647;
+
+function scheduleSafeTimeout(callback: () => void, delayMs: number): () => void {
+  if (!Number.isFinite(delayMs)) return () => {};
+  let cancelled = false;
+  let remaining = Math.max(1, Math.ceil(delayMs));
+  let timer: NodeJS.Timeout | undefined;
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_TIMEOUT_SLICE_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (cancelled) return;
+      if (remaining > 0) arm();
+      else callback();
+    }, slice);
+    timer.unref?.();
+  };
+  arm();
+  return () => {
+    cancelled = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
+}
+
+function looksLikeHtmlErrorPage(text: string): boolean {
+  return /^\s*(?:<!doctype\s+html\b|<html[\s>])/i.test(text);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function extractTextFromItems(items: readonly unknown[]): string | undefined {
+  const texts: string[] = [];
+  for (const item of items) {
+    if (typeof item === "string") {
+      texts.push(item);
+    } else if (isPlainRecord(item) && typeof item.text === "string") {
+      texts.push(item.text);
+    }
+  }
+  return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
+function extractTextFromStructured(structured: Record<string, unknown>): string {
+  for (const field of ["result", "answer", "content", "text", "message"]) {
+    if (typeof structured[field] === "string") {
+      return structured[field] as string;
+    }
+  }
+  return JSON.stringify(structured);
+}
+
+function decodeEnvelopeValue(value: unknown, depth = 0): { unwrapped: boolean; isError: boolean; text: string } {
+  if (depth > 4) {
+    return { unwrapped: false, isError: false, text: typeof value === "string" ? value : JSON.stringify(value) ?? "" };
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+      return { unwrapped: false, isError: false, text: value };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return { unwrapped: false, isError: false, text: value };
+    }
+    if (Array.isArray(parsed)) {
+      const fromArray = extractTextFromItems(parsed);
+      if (fromArray !== undefined) {
+        const nested = decodeEnvelopeValue(fromArray, depth + 1);
+        return { unwrapped: true, isError: nested.isError, text: nested.text };
+      }
+      return { unwrapped: false, isError: false, text: value };
+    }
+    if (!isPlainRecord(parsed)) {
+      return { unwrapped: false, isError: false, text: value };
+    }
+    const inner = decodeEnvelopeRecord(parsed, depth + 1);
+    return inner ?? { unwrapped: false, isError: false, text: value };
+  }
+  if (Array.isArray(value)) {
+    const fromArray = extractTextFromItems(value);
+    if (fromArray !== undefined) {
+      const nested = decodeEnvelopeValue(fromArray, depth + 1);
+      return { unwrapped: true, isError: nested.isError, text: nested.text };
+    }
+    return { unwrapped: true, isError: false, text: JSON.stringify(value) };
+  }
+  if (isPlainRecord(value)) {
+    const inner = decodeEnvelopeRecord(value, depth + 1);
+    if (inner) return inner;
+    return { unwrapped: true, isError: false, text: extractTextFromStructured(value) };
+  }
+  return { unwrapped: true, isError: false, text: value === null || value === undefined ? "" : String(value) };
+}
+
+function decodeEnvelopeRecord(
+  record: Record<string, unknown>,
+  depth: number
+): { unwrapped: boolean; isError: boolean; text: string } | undefined {
+  // 1. Gateway MCPToolCallResult envelope: { schemaVersion: 3, callId, status: "completed"|"failed"|"unknown", output, observedAt }
+  if (
+    typeof record.status === "string" &&
+    (record.status === "completed" || record.status === "failed" || record.status === "unknown") &&
+    ("output" in record || "callId" in record)
+  ) {
+    const inner = decodeEnvelopeValue(record.output, depth + 1);
+    const failed = record.status !== "completed" || inner.isError;
+    return { unwrapped: true, isError: failed, text: inner.text };
+  }
+
+  // 2. JSON-RPC 2.0 response envelope: { jsonrpc: "2.0", id, result?, error? }
+  if (record.jsonrpc === "2.0" && ("result" in record || "error" in record)) {
+    if (record.error !== undefined && record.error !== null) {
+      const errMsg =
+        isPlainRecord(record.error) && typeof record.error.message === "string"
+          ? record.error.message
+          : JSON.stringify(record.error);
+      return { unwrapped: true, isError: true, text: errMsg };
+    }
+    const inner = decodeEnvelopeValue(record.result, depth + 1);
+    return { unwrapped: true, isError: inner.isError, text: inner.text };
+  }
+
+  // 3. MCP CallToolResult / preserveStructuredToolOutput envelope: { content?, structuredContent?, isError? }
+  const keys = Object.keys(record);
+  const hasMcpPayloadKey = Array.isArray(record.content) || isPlainRecord(record.structuredContent) || typeof record.isError === "boolean";
+  if (hasMcpPayloadKey && keys.length > 0 && keys.every((k) => MCP_ENVELOPE_KEYS.has(k))) {
+    const flaggedError = record.isError === true;
+    if (Array.isArray(record.content)) {
+      const fromContent = extractTextFromItems(record.content);
+      if (fromContent !== undefined) {
+        const nested = decodeEnvelopeValue(fromContent, depth + 1);
+        return { unwrapped: true, isError: flaggedError || nested.isError, text: nested.text };
+      }
+    }
+    if (isPlainRecord(record.structuredContent)) {
+      const text = extractTextFromStructured(record.structuredContent);
+      return { unwrapped: true, isError: flaggedError, text };
+    }
+    return { unwrapped: true, isError: flaggedError, text: "" };
+  }
+
+  // 4. Plain JSON error payload: { error: { code?, message? } | string } without content/result/answer
+  if (
+    "error" in record &&
+    record.error !== undefined &&
+    record.error !== null &&
+    !("result" in record) &&
+    !("content" in record) &&
+    !("answer" in record)
+  ) {
+    let errMsg: string;
+    if (typeof record.error === "string") {
+      errMsg = record.error;
+    } else if (isPlainRecord(record.error)) {
+      const codePrefix =
+        typeof record.error.code === "number" || typeof record.error.code === "string"
+          ? `${String(record.error.code)} `
+          : "";
+      const msgPart =
+        typeof record.error.message === "string" ? record.error.message : JSON.stringify(record.error);
+      errMsg = `${codePrefix}${msgPart}`.trim();
+    } else {
+      errMsg = JSON.stringify(record.error);
+    }
+    return { unwrapped: true, isError: true, text: errMsg };
+  }
+
+  return undefined;
+}
+
+function isUnknownAskWikiToolFailure(outcome: ToolCallOutcome): boolean {
+  if (!outcome.ok) {
+    return (
+      outcome.error.code === "validation" &&
+      /ask_wiki_question/i.test(outcome.error.message) &&
+      /(not part of|unknown tool|not found|unrecognized)/i.test(outcome.error.message)
+    );
+  }
+  return (
+    outcome.isError &&
+    /ask_wiki_question/i.test(outcome.text) &&
+    /(unknown tool|tool .* not found|unrecognized tool)/i.test(outcome.text)
+  );
+}
 
 /**
- * Looks documentation up through Context7: resolve the library, pick the version the project uses, query, and report
- * exactly what came back. It never invents documentation: when the library, the version or the content is missing it
- * says so with a typed failure, and when it falls back (for example to the unversioned library) it says that too.
+ * Reads public repository documentation through DeepWiki. Only an explicitly named, explicitly public `owner/repo` (or an exact
+ * entry of the built-in mapping) and a short question leave the machine; anything else is refused before any call is made.
+ * It never invents documentation: a missing wiki, an empty answer or a transport problem is reported as a typed failure.
  */
 export class DocsClient {
   private readonly caller: DocsToolCaller;
   private readonly policy: CachePolicy;
   private readonly timeoutMs: number;
-  private readonly detect: (root: string, library: string, from?: string) => Promise<DetectedVersion | null>;
   private readonly now: () => Date;
-  private searches = 0; private lookups = 0; private resolveCalls = 0; private queryCalls = 0;
-  private cacheStores = 0; private cacheHits = 0; private cacheMisses = 0; private skipped = 0;
+  private lookups = 0; private toolCalls = 0; private refused = 0;
+  private cacheHits = 0; private cacheMisses = 0; private cacheStores = 0;
   private readonly failures: Record<string, number> = {};
+  private askToolWireName: DocsTool = "ask_wiki_question";
 
   constructor(private readonly options: DocsClientOptions) {
     this.caller = options.caller;
     this.policy = options.cachePolicy ?? DEFAULT_CACHE_POLICY;
     this.timeoutMs = options.timeoutMs ?? 30_000;
-    this.detect = options.detect ?? ((root, library, from) => detectInstalledVersion(root, library, from === undefined ? {} : { from }));
     this.now = options.now ?? (() => new Date());
   }
 
   metrics(): DocsMetricsSnapshot {
-    return { searches: this.searches, lookups: this.lookups, resolveCalls: this.resolveCalls, queryCalls: this.queryCalls,
-      cacheHits: this.cacheHits, cacheMisses: this.cacheMisses, cacheStores: this.cacheStores, cacheSkippedByPolicy: this.skipped, failures: { ...this.failures } };
+    return { lookups: this.lookups, toolCalls: this.toolCalls, refused: this.refused, cacheHits: this.cacheHits, cacheMisses: this.cacheMisses,
+      cacheStores: this.cacheStores, failures: { ...this.failures } };
   }
 
   private fail(stage: DocsStage, value: DocsFailure): DocsFailureResult {
@@ -127,119 +288,130 @@ export class DocsClient {
     return { ok: false, stage, failure: value };
   }
 
-  private async call(tool: DocsTool, args: Record<string, unknown>, signal?: AbortSignal): Promise<{ ok: true; text: string } | { ok: false; failure: DocsFailure }> {
-    if (tool === "resolve-library-id") this.resolveCalls++; else this.queryCalls++;
-    const outcome = await this.caller.callTool(tool, args, { timeoutMs: this.timeoutMs, ...(signal ? { signal } : {}) });
-    if (!outcome.ok) return { ok: false, failure: classifyGatewayError(outcome.error) };
-    if (outcome.isError) return { ok: false, failure: classifyToolError(outcome.text) };
-    return { ok: true, text: outcome.text };
+  private refuse(message: string, kind: "invalid_arguments" | "library_not_found" = "invalid_arguments"): DocsFailureResult {
+    this.refused++;
+    return this.fail("validate", failure(kind, message));
   }
 
-  async search(input: SearchInput, signal?: AbortSignal): Promise<SearchSuccess | DocsFailureResult> {
-    this.searches++;
-    const resolved = await this.call("resolve-library-id", { query: input.query?.trim() || input.library, libraryName: input.library }, signal);
-    if (!resolved.ok) return this.fail("resolve", resolved.failure);
-    const candidates = parseResolveResult(resolved.text);
-    const detected = input.version ? null : input.projectRoot ? await this.detect(input.projectRoot, input.library, input.startDir).catch(() => null) : null;
-    const requested = input.version ?? detected?.version ?? null;
-    const selection = selectLibrary(candidates, input.library, requested);
-    const warnings: string[] = [];
-    if (selection.status === "no_match") warnings.push(`Context7 returned ${candidates.length} libraries, none matching "${input.library}".`);
-    if (selection.status === "ambiguous") warnings.push(`More than one library matches "${input.library}" equally well; the first is shown.`);
-    let installed: DetectedVersion | undefined;
-    let version: VersionChoice | undefined;
-    if (selection.library) {
-      if (detected) installed = detected;
-      version = selectVersion(selection.library, requested);
-      if (requested && version.match === "none") warnings.push(versionWarning(requested, version));
+  private resolve(input: RepoInput): { repoName: string } | DocsFailureResult {
+    const resolved = resolveRepository(input);
+    if (resolved.status === "refused") return this.refuse(resolved.message);
+    if (resolved.status === "no_match") return this.refuse(resolved.message, "library_not_found");
+    return { repoName: resolved.repoName };
+  }
+
+  private async invokeWithDeadline<T>(
+    signal: AbortSignal | undefined,
+    invoke: (combinedSignal: AbortSignal) => Promise<T>,
+    onAbort: (error: GatewayErrorLike) => T
+  ): Promise<T> {
+    if (signal?.aborted) {
+      return onAbort({ code: "cancelled", message: "The request was cancelled.", details: { kind: "cancelled" } });
     }
-    return { ok: true, library: input.library, candidates, selection: selection.status,
-      ...(selection.library ? { selected: selection.library } : {}), ...(installed ? { installed } : {}), ...(version ? { version } : {}), warnings };
+    const controller = new AbortController();
+    let cancelTimer: (() => void) | undefined;
+    let onCallerAbort: (() => void) | undefined;
+    const abortOutcome = new Promise<T>((resolve) => {
+      if (signal) {
+        onCallerAbort = () => {
+          controller.abort(signal.reason ?? new Error("Docs request cancelled"));
+          resolve(onAbort({ code: "cancelled", message: "The request was cancelled.", details: { kind: "cancelled" } }));
+        };
+        signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+      if (Number.isFinite(this.timeoutMs) && this.timeoutMs > 0) {
+        cancelTimer = scheduleSafeTimeout(() => {
+          controller.abort(new Error(`Docs request timed out after ${this.timeoutMs}ms`));
+          resolve(
+            onAbort({
+              code: "timeout",
+              message: `DeepWiki request timed out after ${this.timeoutMs}ms.`,
+              details: { kind: "timeout" }
+            })
+          );
+        }, this.timeoutMs);
+      }
+    });
+
+    try {
+      return await Promise.race([invoke(controller.signal), abortOutcome]);
+    } finally {
+      cancelTimer?.();
+      if (signal && onCallerAbort) {
+        signal.removeEventListener("abort", onCallerAbort);
+      }
+    }
   }
 
-  async lookup(input: LookupInput, signal?: AbortSignal): Promise<LookupSuccess | DocsFailureResult> {
+  private async run(tool: DocsTool, args: Record<string, unknown>, repoName: string, signal?: AbortSignal): Promise<{ content: string } | DocsFailureResult> {
+    this.toolCalls++;
+    let outcome = await this.invokeWithDeadline(
+      signal,
+      (combinedSignal) => this.caller.callTool(tool, args, { timeoutMs: this.timeoutMs, signal: combinedSignal }),
+      (error): ToolCallOutcome => ({ ok: false, error })
+    );
+    if (tool === "ask_wiki_question" && isUnknownAskWikiToolFailure(outcome)) {
+      this.askToolWireName = LEGACY_ASK_TOOL_ALIAS as DocsTool;
+      this.toolCalls++;
+      outcome = await this.invokeWithDeadline(
+        signal,
+        (combinedSignal) =>
+          this.caller.callTool(this.askToolWireName, args, { timeoutMs: this.timeoutMs, signal: combinedSignal }),
+        (error): ToolCallOutcome => ({ ok: false, error })
+      );
+    }
+    if (!outcome.ok) return this.fail("query", classifyGatewayError(outcome.error));
+    const decoded = decodeEnvelopeValue(outcome.text);
+    if (outcome.isError || decoded.isError || looksLikeHtmlErrorPage(decoded.text)) {
+      return this.fail("query", classifyToolError(decoded.text));
+    }
+    if (!decoded.text.trim()) return this.fail("query", failure("no_documentation", `DeepWiki returned no documentation for ${repoName}.`));
+    return { content: decoded.text };
+  }
+
+  private success(repoName: string, tool: DocsTool, content: string, hit = false, stored = false): DocsSuccess {
+    return { ok: true, repoName, tool, content, cache: { hit, stored }, retrievedAt: this.now().toISOString() };
+  }
+
+  /** `ask_wiki_question`: a question about one public repository. */
+  async ask(input: AskInput, signal?: AbortSignal): Promise<DocsSuccess | DocsFailureResult> {
     this.lookups++;
-    const query = input.query.trim();
-    if (!query) return this.fail("query", failure("invalid_arguments", "A non-empty query is required."));
-    if (!input.library && !input.libraryId) return this.fail("resolve", failure("invalid_arguments", "Give a library name or a library id."));
-    const warnings: string[] = [];
-    let installed: DetectedVersion | undefined;
-    let versionSource: LookupSuccess["versionSource"] = "none";
-    let requested: string | null = input.version ?? null;
-    if (input.version) versionSource = "explicit";
-
-    let libraryId: string;
-    let title: string | undefined;
-    let versionUsed: string | null = null;
-    let match: VersionChoice["match"] = requested ? "none" : "unrequested";
-
-    if (input.libraryId) {
-      libraryId = input.libraryId.trim();
-      if (requested) { libraryId = `${libraryId.replace(/\/+$/, "")}/${requested}`; versionUsed = requested; match = "exact"; }
-    } else {
-      const library = input.library!.trim();
-      if (!input.version && input.projectRoot) {
-        const detected = await this.detect(input.projectRoot, library, input.startDir).catch(() => null);
-        if (detected) { installed = detected; requested = detected.version; versionSource = "installed"; if (!detected.exact) warnings.push(`The project declares ${detected.dependency} as "${detected.range ?? detected.version}" without a lockfile entry; ${detected.version} is the lowest version that range allows.`); }
-        else warnings.push(`No dependency named "${library}" was found in the project, so no version was selected.`);
-      }
-      const resolved = await this.call("resolve-library-id", { query, libraryName: library }, signal);
-      if (!resolved.ok) return this.fail("resolve", resolved.failure);
-      const candidates = parseResolveResult(resolved.text);
-      const selection = selectLibrary(candidates, library, requested);
-      if (!selection.library) return this.fail("resolve", failure("library_not_found", `Context7 has no library matching "${library}".`));
-      if (selection.status === "ambiguous") warnings.push(`More than one library matches "${library}" equally well; using ${selection.library.id}.`);
-      title = selection.library.title;
-      const choice = selectVersion(selection.library, requested);
-      libraryId = choice.libraryId; versionUsed = choice.versionUsed; match = choice.match;
-      if (requested && choice.match === "none") warnings.push(versionWarning(requested, choice));
-      else if (requested && choice.match !== "exact") warnings.push(`Documentation for ${requested} is not offered; using ${choice.versionUsed}, the nearest version at or below it.`);
-    }
-
-    const language = input.language?.trim() || null;
-    const keyParts: CacheKeyParts = { libraryId, version: versionUsed, query, language };
-    const authenticated = this.options.authenticated === true;
-    const cacheUsable = this.options.cache !== undefined && !input.noCache;
-    const permitted = cachePermitted(this.policy, authenticated);
-    if (cacheUsable && !permitted && this.policy.enabled) this.skipped++;
-    if (cacheUsable && permitted) {
+    const target = this.resolve(input);
+    if ("ok" in target) return target;
+    const question = checkQuestion(input.question);
+    if (!question.ok) return this.refuse(question.message);
+    const text = input.question as string;
+    const keyParts = { libraryId: target.repoName, version: null, query: text, language: null };
+    const usable = this.options.cache !== undefined && !input.noCache && cachePermitted(this.policy, false);
+    if (usable) {
       const hit = await this.options.cache!.get(keyParts);
-      if (hit) {
-        this.cacheHits++;
-        return this.success({ libraryId, title, requested, versionUsed, versionSource, match, installed, content: hit.content, hit: true, stored: false, warnings });
-      }
+      if (hit) { this.cacheHits++; return this.success(target.repoName, "ask_wiki_question", hit.content, true, false); }
       this.cacheMisses++;
     }
-
-    let queried = await this.call("query-docs", { libraryId, query, ...(language ? { language } : {}) }, signal);
-    if (!queried.ok && queried.failure.kind === "version_not_found" && queried.failure.availableVersions?.length && requested) {
-      // The id was built from a version spelled differently than the server lists it; retry once from the server's list.
-      const retry = selectVersion({ id: stripVersion(libraryId), versions: queried.failure.availableVersions }, requested);
-      if (retry.versionUsed && retry.libraryId !== libraryId) {
-        libraryId = retry.libraryId; versionUsed = retry.versionUsed; match = retry.match;
-        warnings.push(`Version ${requested} is not offered; used ${retry.versionUsed}.`);
-        queried = await this.call("query-docs", { libraryId, query, ...(language ? { language } : {}) }, signal);
-      }
-    }
-    if (!queried.ok) return this.fail("query", queried.failure);
-    const content = queried.text;
-    if (!content.trim()) return this.fail("query", failure("no_documentation", `Context7 returned no documentation for ${libraryId}.`, { libraryId }));
+    const result = await this.run(this.askToolWireName, { repoName: target.repoName, question: text }, target.repoName, signal);
+    if ("ok" in result) return result;
     let stored = false;
-    if (cacheUsable && permitted) {
-      try { await this.options.cache!.set({ ...keyParts, libraryId, version: versionUsed }, content, this.policy.ttlSeconds); this.cacheStores++; stored = true; } catch { /* a cache fault never fails a lookup */ }
+    if (usable) {
+      try { await this.options.cache!.set(keyParts, result.content, this.policy.ttlSeconds); this.cacheStores++; stored = true; } catch { /* a cache fault never fails a lookup */ }
     }
-    return this.success({ libraryId, title, requested, versionUsed, versionSource, match, installed, content, hit: false, stored, warnings });
+    return this.success(target.repoName, "ask_wiki_question", result.content, false, stored);
   }
 
-  private success(parts: { libraryId: string; title: string | undefined; requested: string | null; versionUsed: string | null;
-    versionSource: LookupSuccess["versionSource"]; match: VersionChoice["match"]; installed: DetectedVersion | undefined; content: string;
-    hit: boolean; stored: boolean; warnings: string[] }): LookupSuccess {
-    return { ok: true, libraryId: parts.libraryId, ...(parts.title ? { libraryTitle: parts.title } : {}), requestedVersion: parts.requested,
-      versionUsed: parts.versionUsed, versionSource: parts.versionSource, versionMatch: parts.match, ...(parts.installed ? { installed: parts.installed } : {}),
-      content: parts.content, cache: { hit: parts.hit, stored: parts.stored }, warnings: parts.warnings, retrievedAt: this.now().toISOString() };
+  private async read(tool: "read_wiki_structure" | "read_wiki_contents", input: RepoInput, signal?: AbortSignal): Promise<DocsSuccess | DocsFailureResult> {
+    this.lookups++;
+    const target = this.resolve(input);
+    if ("ok" in target) return target;
+    const result = await this.run(tool, { repoName: target.repoName }, target.repoName, signal);
+    return "ok" in result ? result : this.success(target.repoName, tool, result.content);
   }
 
-  /** Exercises discovery and both tools with public, side-effect-free queries. Used by `docs status` and `doctor`. */
+  /** `read_wiki_structure`: the topic outline of one public repository's wiki. */
+  structure(input: RepoInput, signal?: AbortSignal) { return this.read("read_wiki_structure", input, signal); }
+
+  /** `read_wiki_contents`: the wiki pages of one public repository. */
+  contents(input: RepoInput, signal?: AbortSignal) { return this.read("read_wiki_contents", input, signal); }
+
+  /** Exercises discovery and one read-only call about a well-known public repository. Used by `docs status`, `doctor` and the live probe. */
   async probe(signal?: AbortSignal): Promise<readonly ProbeCheck[]> {
     const checks: ProbeCheck[] = [];
     const timed = async <T>(run: () => Promise<T>): Promise<{ value: T; latencyMs: number }> => {
@@ -249,40 +421,32 @@ export class DocsClient {
     };
     let discoveryOk = true;
     if (this.caller.listTools) {
-      const { value, latencyMs } = await timed(() => this.caller.listTools!({ timeoutMs: this.timeoutMs, ...(signal ? { signal } : {}) }));
+      const { value, latencyMs } = await timed(() =>
+        this.invokeWithDeadline(
+          signal,
+          (combinedSignal) => this.caller.listTools!({ timeoutMs: this.timeoutMs, signal: combinedSignal }),
+          (error) => ({ ok: false as const, error })
+        )
+      );
       if (!value.ok) { discoveryOk = false; checks.push({ name: "discovery", status: "failed", latencyMs, failure: classifyGatewayError(value.error) }); }
       else {
-        const missing = REQUIRED_TOOLS.filter(tool => !value.tools.includes(tool));
+        if (!value.tools.includes("ask_wiki_question") && value.tools.includes(LEGACY_ASK_TOOL_ALIAS)) {
+          this.askToolWireName = LEGACY_ASK_TOOL_ALIAS as DocsTool;
+        }
+        const missing = DEEPWIKI_TOOL_NAMES.filter(
+          tool =>
+            !value.tools.includes(tool) &&
+            !(tool === "ask_wiki_question" && value.tools.includes(LEGACY_ASK_TOOL_ALIAS))
+        );
         discoveryOk = missing.length === 0;
         checks.push(missing.length === 0 ? { name: "discovery", status: "ok", latencyMs, detail: value.tools.join(", ") }
           : { name: "discovery", status: "failed", latencyMs, failure: failure("protocol", `The service does not offer: ${missing.join(", ")}.`), detail: value.tools.join(", ") });
       }
     } else checks.push({ name: "discovery", status: "skipped", latencyMs: 0, detail: "The caller cannot list tools." });
-    if (!discoveryOk) {
-      checks.push({ name: "resolve-library-id", status: "skipped", latencyMs: 0 }, { name: "query-docs", status: "skipped", latencyMs: 0 });
-      return checks;
-    }
-    const resolved = await timed(() => this.call("resolve-library-id", { query: "state management hooks", libraryName: "react" }, signal));
-    let probeId: string | undefined;
-    if (!resolved.value.ok) checks.push({ name: "resolve-library-id", status: "failed", latencyMs: resolved.latencyMs, failure: resolved.value.failure });
-    else {
-      const selected = selectLibrary(parseResolveResult(resolved.value.text), "react").library;
-      if (!selected) checks.push({ name: "resolve-library-id", status: "failed", latencyMs: resolved.latencyMs, failure: failure("protocol", "resolve-library-id answered but returned no parsable library.") });
-      else { probeId = selected.id; checks.push({ name: "resolve-library-id", status: "ok", latencyMs: resolved.latencyMs, detail: selected.id }); }
-    }
-    if (!probeId) { checks.push({ name: "query-docs", status: "skipped", latencyMs: 0, detail: "No library id to query." }); return checks; }
-    const queried = await timed(() => this.call("query-docs", { libraryId: probeId, query: "useState" }, signal));
-    if (!queried.value.ok) checks.push({ name: "query-docs", status: "failed", latencyMs: queried.latencyMs, failure: queried.value.failure });
-    else if (!queried.value.text.trim()) checks.push({ name: "query-docs", status: "failed", latencyMs: queried.latencyMs, failure: failure("no_documentation", "query-docs answered with an empty body.") });
-    else checks.push({ name: "query-docs", status: "ok", latencyMs: queried.latencyMs, detail: `${queried.value.text.length} characters` });
-    for (const check of checks) if (check.failure) this.failures[check.failure.kind] = (this.failures[check.failure.kind] ?? 0) + 1;
+    if (!discoveryOk) { checks.push({ name: "read_wiki_structure", status: "skipped", latencyMs: 0 }); return checks; }
+    const read = await timed(() => this.structure({ repoName: DEEPWIKI_PROBE_REPO, visibility: "public" }, signal));
+    if (!read.value.ok) checks.push({ name: "read_wiki_structure", status: "failed", latencyMs: read.latencyMs, failure: read.value.failure });
+    else checks.push({ name: "read_wiki_structure", status: "ok", latencyMs: read.latencyMs, detail: `${read.value.content.length} characters` });
     return checks;
   }
-}
-
-const stripVersion = (id: string) => id.split("/").slice(0, 3).join("/");
-
-function versionWarning(requested: string, choice: VersionChoice): string {
-  const offered = choice.availableVersions.length ? ` Offered versions: ${choice.availableVersions.join(", ")}.` : " The library lists no versions.";
-  return `No documentation matches version ${requested}; the unversioned library id is used, which may describe a different release.${offered}`;
 }
