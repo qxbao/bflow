@@ -512,7 +512,7 @@ export class AgenticWorkflowRuntime {
     if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}`);
   }
   /** Exact non-throwing mirror of HerdrOutbox.noticeParent preconditions so expired/released writer leases never throw uncaught. */
-  private canEnqueueTaskNotice(state: JournalState, parent: Outbound | undefined): boolean {
+  private canEnqueueTaskNotice(state: JournalState, parent: Outbound | undefined, allowExpired = false): boolean {
     if (!parent || !state.outbound.includes(parent) || parent.parentAssignmentId || parent.message.type !== "task.assignment" ||
         parent.status !== "accepted" || parent.cancelRequested || parent.leaseRelease || !parent.assignment || !parent.handle ||
         !parent.request || !parent.lease) return false;
@@ -520,7 +520,7 @@ export class AgenticWorkflowRuntime {
     if (parent.lease.agentId !== parent.handle.target.agentId || parent.lease.runId !== parent.message.run_id ||
         parent.lease.taskId !== parent.taskId || parent.lease.attemptId !== parent.attemptId ||
         parent.assignment.leaseId !== initial.leaseId || parent.assignment.fencingToken !== initial.fencingToken ||
-        Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) return false;
+        !allowExpired && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) return false;
     const run = state.runs.find(item => item.runId === parent.message.run_id);
     const task = run?.tasks.find(item => item.taskId === parent.taskId);
     return !!run && !run.cancelled && !["completed", "failed", "cancelled", "escalated"].includes(run.status) && !!task && !task.writerReleased && !task.result;
@@ -2084,27 +2084,55 @@ export class AgenticWorkflowRuntime {
   }
 
   /** Resume only a recorded recoverable Coordinator blocker. The stable action identity prevents duplicate wakeups on retry/restart. */
-  private async resumeAcceptedRedDeveloper(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox, run: RunRecord, messageId: string): Promise<void> {
+  /** An authenticated owner resume may wake the exact existing holder; it never reassigns work or grants evidence. */
+  private async resumeAcceptedDeveloper(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox, run: RunRecord, messageId: string): Promise<void> {
     if (run.status !== "implementing" || run.cancelled || run.nativeDeliveries?.length ||
         run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status))) return;
-        const snapshot = await core.snapshot(run.runId);
-        for (const task of run.tasks) {
-          const evidence = task.spec.strategy.metadata?.tddEvidence;
-          if (task.writerReleased || task.result || !Array.isArray(evidence) || evidence.length !== 1 || task.spec.strategy.tddDecision.mode !== "required") continue;
-          const red = VerificationResultSchema.parse(evidence[0]);
-          if (record(red.metadata?.conditionalTdd).phase !== "red") continue;
-          const current = snapshot.tasks.find(item => item.taskId === task.taskId);
-          const parent = state.outbound.find(item => item.message.type === "task.assignment" && item.message.run_id === run.runId &&
-            item.taskId === task.taskId && item.status === "accepted" && item.handle?.requestId === current?.agentExecution?.requestId);
-          if (current?.status !== "running" || !this.canEnqueueTaskNotice(state, parent)) continue;
-          this.ports.policies.assertReadyToImplement(task.spec.strategy);
-          const outcomeId = `resume:${messageId}:${red.verificationId}`;
-          if (state.outbound.some(item => item.message.message_id === `phase-notice-${digest([run.runId, task.taskId, "red", outcomeId])}`)) continue;
-          this.phaseNotice(state, outbox, run, task, "red", "passed",
-            `Runtime resumed this same assignment after a verified Red receipt (${red.verificationId}). Inspect workspace status and continue the accepted TDD sequence; do not modify frozen tests. No new approval or measurement is granted.`,
-            outcomeId);
-        }
+    const snapshot = await core.snapshot(run.runId);
+    for (const task of run.tasks) {
+      if (task.writerReleased || task.result) continue;
+      const current = snapshot.tasks.find(item => item.taskId === task.taskId);
+      const parent = state.outbound.find(item => item.message.type === "task.assignment" && item.message.run_id === run.runId &&
+        item.taskId === task.taskId && item.status === "accepted" && item.handle?.requestId === current?.agentExecution?.requestId);
+      if (current?.status !== "running" || !parent?.handle) continue;
+      const evidence = task.spec.strategy.metadata?.tddEvidence;
+      if (task.spec.strategy.tddDecision.mode === "required" && Array.isArray(evidence) && evidence.length === 1 &&
+          record(VerificationResultSchema.parse(evidence[0]).metadata?.conditionalTdd).phase === "red") {
+        if (!this.canEnqueueTaskNotice(state, parent)) continue;
+        this.ports.policies.assertReadyToImplement(task.spec.strategy);
+        const red = VerificationResultSchema.parse(evidence[0]);
+        const outcomeId = `resume:${messageId}:${red.verificationId}`;
+        if (state.outbound.some(item => item.message.message_id === `phase-notice-${digest([run.runId, task.taskId, "red", outcomeId])}`)) continue;
+        this.phaseNotice(state, outbox, run, task, "red", "passed",
+          `Runtime resumed this same assignment after a verified Red receipt (${red.verificationId}). Inspect workspace status and continue the accepted TDD sequence; do not modify frozen tests. No new approval or measurement is granted.`, outcomeId);
+        continue;
+      }
+      // Incomplete policy phases keep their existing recovery/notice path; do not create a second continuation.
+      try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); } catch { continue; }
+      // Only the holder of this blocker is resumed; unrelated accepted Developers may still be doing useful work.
+      const sourceIds = [run.pendingAction?.sourceMessageId, ...(run.pendingAction?.relatedMessageIds ?? [])];
+      const related = sourceIds.includes(parent.message.message_id) || state.outbound.some(item => sourceIds.includes(item.message.message_id) &&
+        (item.parentAssignmentId === parent.message.message_id || item.message.run_id === run.runId && item.message.type === "verification.requested" &&
+          record(item.message.payload).taskId === task.taskId && record(item.message.payload).implementationAttemptId === current.attemptId));
+      if (!related || !this.canEnqueueTaskNotice(state, parent, true)) continue;
+      const id = `owner-resume-notice-${digest([run.runId, task.taskId, parent.message.message_id, messageId])}`;
+      if (state.outbound.some(item => item.message.message_id === id)) continue;
+      const authorization = state.outbound.find(item => item.message.message_id === messageId);
+      if (!authorization) continue;
+      try { await outbox.recoverTaskLease(parent, authorization); }
+      catch (error) {
+        parent.error = `Owner resume could not reach the existing writer: ${String(error)}`;
+        await save(); continue;
+      }
+      if (!this.canEnqueueTaskNotice(state, parent)) continue;
+      outbox.enqueueTaskNotice(RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: run.delegation.correlationId,
+        causation_id: parent.message.message_id, run_id: run.runId, sender: { role: "coordinator" },
+        recipient: { role: "developer", agent_id: parent.handle.target.agentId, pane_id: parent.handle.target.paneId }, type: "task.status",
+        payload: json({ kind: "assignment_resume", runId: run.runId, taskId: task.taskId, sourceMessageId: parent.message.message_id,
+          ownerResumeMessageId: messageId, summary: "The owner explicitly resumed this same assignment. Read assignment_context and workspace_status for current authority, recorded phases and every rework finding. Continue the accepted work and submit a structured result with findingResolutions when required. Existing measurements retain their original revisions/attempts; do not request an additional TDD phase when all required phases exist. If disputing a finding, provide the required evidence and rationale; independent Reviewer/QA still decide. No new approval, measurement, assignment or verification-budget reset is granted." }),
+        artifact_references: [], occurred_at: this.now(), idempotency_key: id }), parent);
+    }
     await save();
   }
   async resumeBlockedRun(runIdInput: string, actionIdInput: string, options: { automatic?: boolean; conversationUserMessageId?: string; webCommand?: Extract<WebCommand, { kind: "resume" }> } = {}): Promise<JsonValue> {
@@ -2146,7 +2174,7 @@ export class AgenticWorkflowRuntime {
       const repeatedPhysicalTurn = explicitId !== undefined && priorWake !== undefined &&
         (options.webCommand ? record(priorWake.message.payload).webCommandId : record(priorWake.message.payload).conversationUserMessageId) === explicitId;
       if (priorResume && (repeatedPhysicalTurn || !retryUnsent && !recurred && !explicitAfterAutomatic)) {
-        if (!options.automatic && explicitId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
+        if (!options.automatic && explicitId) await this.resumeAcceptedDeveloper(state, save, _core, outbox, run, priorResume.messageId);
         return json({ queued: true, messageId: priorResume.messageId, actionId });
       }
       // A still-unknown native delivery (legacy escalated record) resumes by waking the Coordinator to reconcile; it is never resent.
@@ -2281,7 +2309,7 @@ export class AgenticWorkflowRuntime {
       else run.resumeReceipts.push({ actionId, messageId });
       if (run.resumeReceipts.length > 50) run.resumeReceipts.shift();
       for (const retired of retiredToResume) retired.phaseRetirement!.resumeAuthorizedBy = textField(explicitId);
-      if (!options.automatic && explicitId) await this.resumeAcceptedRedDeveloper(state, save, _core, outbox, run, messageId);
+      if (!options.automatic && explicitId) await this.resumeAcceptedDeveloper(state, save, _core, outbox, run, messageId);
       await this.recoverPhaseFailures(state, save, outbox);
       await save();
       return json({ queued: true, messageId, actionId: action.actionId });
