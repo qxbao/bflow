@@ -112,4 +112,3 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
   };
   return { root, repo, runStore, artifactStore, native, open, start, transport, handles, journalPath, loseAck: () => { loseAck = true; }, omitReceipt: () => { missingReceipt = true; } };
 }
-

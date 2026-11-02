@@ -36,6 +36,7 @@ export async function openWorkflowExtensionRuntimes(options: {
   engine: WorkflowEngine; runStore: RunStore; artifactStore: ArtifactStore; native: NativeExtensionRolePort;
   authorizeHuman(decision: ApprovalDecision): boolean | Promise<boolean>;
   now(): string;
+  isLegacyImplementationRun?(runId: string): Promise<boolean>;
   readPack(): Promise<WorkflowPack | undefined>;
   publishToConversation(message: RoleMessage): Promise<void>;
   qa: Pick<QaRuntimePorts, "tools" | "grants" | "leases" | "accounts" | "leaseTtlMs">;
@@ -48,6 +49,7 @@ export async function openWorkflowExtensionRuntimes(options: {
     journalPath: join(options.directory, "native-qa-v2.json") });
   const host = await createWorkflowExtensionHost({ repositoryPath: options.repositoryPath, sessionId: options.sessionId,
     journalDirectory: join(options.directory, "routes"), analysis, qa, native: options.native, runStore: options.runStore,
+    ...(options.isLegacyImplementationRun ? { isLegacyImplementationRun: options.isLegacyImplementationRun } : {}),
     readPack: options.readPack, publishToConversation: options.publishToConversation });
   return { host, analysis, qa };
 }

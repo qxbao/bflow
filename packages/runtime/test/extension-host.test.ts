@@ -23,12 +23,12 @@ async function fixture(sessionId = "session-native") {
   const analysis = (await a.open()).sdk, qa = (await q.open()).sdk;
   const notices: unknown[] = [];
   let pack: WorkflowPack | undefined = runtime.buildAnalysisPack({ id: "host-analysis", version: "1" });
-  const create = async () => {
+  const create = async (extra: Record<string, unknown> = {}) => {
     const factory = Reflect.get(runtime, "createWorkflowExtensionHost");
     expect(factory, "host must freeze exact pack identity before dispatch, then compose the existing SDKs").toBeTypeOf("function");
     return factory({ repositoryPath: a.repo, sessionId, journalDirectory: join(a.root, "routes"),
       analysis, qa, native: a.native, runStore: a.runStore, readPack: async () => pack,
-      publishToConversation: async (message: unknown) => { notices.push(message); } });
+      publishToConversation: async (message: unknown) => { notices.push(message); }, ...extra });
   };
   const intake = { schemaVersion: 1, requestId: "host-ba", sessionId, title: "Health analysis",
     userStatements: [{ id: "U-1", text: "Specify health without changing the product" }],
@@ -39,6 +39,37 @@ async function fixture(sessionId = "session-native") {
 }
 
 describe("workflow extension host routing", () => {
+  it("drives one native job per run without blocking the host scheduler or re-dispatching at a human gate", async () => {
+    const f = await fixture(), host = await f.create(), Pump = Reflect.get(runtime, "WorkflowExtensionPump");
+    expect(Pump).toBeTypeOf("function");
+    await host.admit(delegation()); await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,
+      packPin: { id: f.pack.id, version: f.pack.version, digest: f.pack.digest } });
+    const failures: unknown[] = [], pump = new Pump(host, async (_runId: string, error: unknown) => { failures.push(error); });
+    await Promise.all([pump.tick(), pump.tick()]);
+    expect(pump.snapshot().activeRunIds).toEqual(["run-native"]);
+    await pump.drain(); await pump.tick(); await pump.drain();
+    expect((await host.inspect("run-native")).extensionStatus).toBe("awaiting_business_decision");
+    expect(f.a.transport.sentRequests).toHaveLength(2); expect(failures).toEqual([]);
+    await pump.quiesce(); await pump.tick();
+    expect(pump.snapshot().quiesced).toBe(true);
+  });
+
+  it("holds an unresolved native job after its first failure until an explicit wake reconciles it", async () => {
+    const f = await fixture(), host = await f.create(), Pump = Reflect.get(runtime, "WorkflowExtensionPump");
+    expect(Pump).toBeTypeOf("function");
+    await host.admit(delegation()); await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,
+      packPin: { id: f.pack.id, version: f.pack.version, digest: f.pack.digest } });
+    f.a.loseAck(); const failures: unknown[] = [], pump = new Pump(host, async (_runId: string, error: unknown) => { failures.push(error); });
+    await pump.tick(); await pump.drain(); await pump.tick(); await pump.drain();
+    expect(pump.snapshot().heldRunIds).toEqual(["run-native"]);
+    expect((await host.inspect("run-native")).extensionStatus).toBe("blocked");
+    expect(f.a.transport.sentRequests).toHaveLength(1); expect(failures).toHaveLength(1);
+    pump.wake("run-native"); await pump.tick(); await pump.drain();
+    expect(pump.snapshot().heldRunIds).toEqual([]);
+    expect((await host.inspect("run-native")).extensionStatus).toBe("awaiting_business_decision");
+    expect(f.a.transport.sentRequests).toHaveLength(2);
+    expect(f.a.transport.reconciledRequests).toHaveLength(1);
+  });
   it("composes both native SDKs from the host's existing Core and stores without allocating a Developer", async () => {
     const f = await fixture(), { engine } = await f.a.open();
     const factory = Reflect.get(runtime, "openWorkflowExtensionRuntimes");
@@ -74,6 +105,10 @@ describe("workflow extension host routing", () => {
     const view = await extension.drive(request.runId);
     await chat.reconcileApprovals();
     expect((await chat.getContext() as any).pendingApprovals[view.approval.approvalId]).toEqual(view.approval);
+    implementation.ports.workflowExtensionOwns = (runId: string) => extension.owns(runId);
+    implementation.ports.workflowExtensionStarted = async (runId: string) => await extension.owns(runId) && (await extension.inspect(runId)).coreCreated === true;
+    expect(await implementation.runtime.watchdogSnapshot("session-1")).toEqual([]);
+    await expect(implementation.runtime.proposeWorkflow(request.runId, implementation.spec, implementation.def)).rejects.toThrow(/extension/i);
     expect(implementation.transport.sentRequests.some(item => item.role === "developer")).toBe(false);
   });
   it("freezes exact family/pin at trusted intake and refuses configuration drift, ambiguous identity and conflicting replay", async () => {
@@ -88,7 +123,8 @@ describe("workflow extension host routing", () => {
     const bad = runtime.buildAnalysisPack({ id: "bad", version: "1" }); bad.defaults["workflow.id"] = "bflow.unknown";
     const { digest: _digest, ...body } = bad;
     f.setPack(WorkflowPackSchema.parse({ ...body, digest: runtime.workflowPackDigest(bad) }));
-    await expect(host.admit(delegation("other"))).rejects.toThrow(/workflow|unsupported/i);
+    expect(await host.admit(delegation("other"))).toBe("implementation");
+    await expect(host.start({ kind: "unknown", runId: "other", intake: {}, packPin: {} })).rejects.toThrow();
   });
 
   it("starts only an admitted matching family, publishes the authoritative scoped approval and inspects without provider activity", async () => {
@@ -115,6 +151,28 @@ describe("workflow extension host routing", () => {
     f.setPack(runtime.buildAnalysisPack({ id: "later", version: "2" }));
     expect(await (await f.create()).admit(request)).toBe("implementation");
     expect(await host.owns("run-native")).toBe(false);
+    expect(f.a.transport.sentRequests).toHaveLength(0);
+    expect(await host.admit({ ...request, objective: "A later requirement revision" })).toBe("implementation");
+  });
+
+  it("preserves existing custom implementation pack identities without selecting an extension", async () => {
+    const f = await fixture(), pack = structuredClone(f.pack);
+    pack.defaults["workflow.id"] = "custom-delivery";
+    pack.lockedFields = pack.lockedFields.filter(field => field !== "workflow.id");
+    pack.digest = runtime.workflowPackDigest(pack); f.setPack(pack);
+    const host = await f.create();
+    expect(await host.admit(delegation())).toBe("implementation");
+    expect(await host.owns("run-native")).toBe(false);
+  });
+
+  it("keeps pre-existing implementation runs on their original path when a new extension pack is configured", async () => {
+    const f = await fixture("session-1"), implementation = await implementationFixture();
+    const host = await f.create({ isLegacyImplementationRun: async (runId: string) => {
+      try { await implementation.runtime.inspect(runId); return true; } catch { return false; }
+    } });
+    const original = await implementation.runtime.inspect("run-1") as any;
+    expect(await host.admit(original.delegation)).toBe("implementation");
+    expect(await host.owns("run-1")).toBe(false);
     expect(f.a.transport.sentRequests).toHaveLength(0);
   });
 

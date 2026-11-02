@@ -1519,10 +1519,16 @@ export class AgenticWorkflowRuntime {
    * then calls the report methods below one at a time.
    */
   async watchdogSnapshot(sessionId: string): Promise<(RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[]> {
-    return this.transaction(async state => state.runs.filter(run => run.delegation.sessionId === sessionId).flatMap(run => {
-      try { return [this.runFacts(state, run)]; }
-      catch { return []; }
-    }));
+    return this.transaction(async state => {
+      const facts: (RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[] = [];
+      for (const run of state.runs.filter(item => item.delegation.sessionId === sessionId)) {
+        try {
+          if (await this.ports.workflowExtensionStarted?.(run.runId)) continue;
+          facts.push(this.runFacts(state, run));
+        } catch { /* Unreadable state is not evidence of a stall. */ }
+      }
+      return facts;
+    });
   }
   /** Cache a typed refusal while the Coordinator can still correct its proposal in the same turn. */
   private recordProposalRejection(state: JournalState, outbox: HerdrOutbox, run: RunRecord, input: WorkflowRejection): boolean {
@@ -2515,6 +2521,7 @@ export class AgenticWorkflowRuntime {
   /** An authenticated Stop is operational evidence only. It never applies ingress, retries delivery or changes business state. */
   async coordinatorTurnStopped(input: unknown, bindingInput: unknown): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    const extensionStarted = message.run_id ? await this.ports.workflowExtensionStarted?.(message.run_id) : false;
     await this.transaction(async (state, save, _core, outbox) => {
       const delivery = this.providerDelivery(state, message, binding);
       if (binding.role !== "coordinator" || message.type !== "delegation.request" || message.sender.role !== "conversation")
@@ -2533,7 +2540,7 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
         await save(); return;
       }
-      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
+      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || extensionStarted || this.hasSemanticNextAction(state, run)) return;
       if (!state.inbox.some(item => item.message.message_id === message.message_id && item.status === "applied"))
         run.error = "The delivered delegation has no durable ingress in Runtime; authorized intake is retained. Reconcile the delivery or resume the same run.";
       this.recordCoordinatorNoNextAction(state, outbox, run, message, delivery);
@@ -2822,6 +2829,7 @@ export class AgenticWorkflowRuntime {
 
   async proposeWorkflow(runId: string, specificationInput: unknown, definitionInput: unknown, maxIterations = 3): Promise<JsonValue> {
     if (this.quiesced) throw new Error("Runtime is quiesced");
+    if (await this.ports.workflowExtensionOwns?.(runId)) throw new Error("Extension workflow must use its pinned SDK family, never the Developer DAG");
     const draft = SpecificationSchema.parse(normalizeSpecificationOptionals(specificationInput));
     const originalProposal = WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
     const taskRequiredCapabilities = (task: TaskDefinition): string[] => {
@@ -5977,12 +5985,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    */
   async coordinatorStopWithoutResponse(input: unknown, bindingInput: unknown, reason?: string): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    const extensionStarted = message.run_id ? await this.ports.workflowExtensionStarted?.(message.run_id) : false;
     await this.transaction(async (state, save, _core, outbox) => {
       const delivery = this.providerDelivery(state, message, binding);
       if (binding.role !== "coordinator" || message.recipient.role !== "coordinator") throw new Error("Coordinator Stop requires a Coordinator delivery");
       if (isConversationContextWake(message)) return; // An informational turn owes no business next action.
       const run = state.runs.find(item => item.runId === message.run_id);
-      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || extensionStarted || this.hasSemanticNextAction(state, run)) return;
       if (reason) run.error = redactString(reason).slice(0, 2000);
       this.recordCoordinatorNoNextAction(state, outbox, run, message, delivery);
       await save();

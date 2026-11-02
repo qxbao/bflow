@@ -320,22 +320,36 @@ export class AnalysisWorkflowRuntime {
       execution.native = { intent: extensionIntent("analysis", run.intake.sessionId, assignment, assignment, execution.startedAt), phase: "prepared" };
       run.executions.push(execution); await this.save();
     }
-    if (task.status === "waiting") { await this.evaluateGates(run, task, execution); return; }
-    if (execution.state === "recorded") { await this.recordResult(run, execution); return; }
-    const record = execution;
-    const outcome = await executeExtension({ execution: record.native!, port: this.ports.roles.native!, save: () => this.save(),
-      bind: async handle => {
-        record.executionId = handle.executionId; await this.save();
-        await this.mutate(run.runId, version => engine.bindAgentExecution({ runId: run.runId, taskId: kind, attempt: task.attempt,
-          handle, expectedVersion: version, idempotencyKey: `analysis:bind:${handle.executionId}`, occurredAt: handle.acceptedAt }));
-      } });
-    record.native!.verification ??= AgentBindingVerificationSchema.parse({ receipt: outcome.receipt, evidence: outcome.receiptEvidence,
-      verifiedAt: this.ports.now() });
-    await this.save();
-    const proof = AgentBindingVerificationSchema.parse(record.native!.verification);
-    await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
-      verification: proof, occurredAt: proof.verifiedAt, idempotencyKey: `analysis:verify-binding:${outcome.handle.executionId}` }));
-    await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
+    const blocker = `native_execution_unresolved:${task.attemptId}`;
+    const clearNativeBlocker = async () => {
+      if (!run.blockers.includes(blocker)) return;
+      run.blockers = run.blockers.filter(item => item !== blocker);
+      if (run.status === "blocked" && !run.blockers.length) run.status = "running";
+      await this.save();
+    };
+    try {
+      if (task.status === "waiting") { await this.evaluateGates(run, task, execution); await clearNativeBlocker(); return; }
+      if (execution.state === "recorded") { await this.recordResult(run, execution); await clearNativeBlocker(); return; }
+      const record = execution;
+      const outcome = await executeExtension({ execution: record.native!, port: this.ports.roles.native!, save: () => this.save(),
+        bind: async handle => {
+          record.executionId = handle.executionId; await this.save();
+          await this.mutate(run.runId, version => engine.bindAgentExecution({ runId: run.runId, taskId: kind, attempt: task.attempt,
+            handle, expectedVersion: version, idempotencyKey: `analysis:bind:${handle.executionId}`, occurredAt: handle.acceptedAt }));
+        } });
+      record.native!.verification ??= AgentBindingVerificationSchema.parse({ receipt: outcome.receipt, evidence: outcome.receiptEvidence,
+        verifiedAt: this.ports.now() });
+      await this.save();
+      const proof = AgentBindingVerificationSchema.parse(record.native!.verification);
+      await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
+        verification: proof, occurredAt: proof.verifiedAt, idempotencyKey: `analysis:verify-binding:${outcome.handle.executionId}` }));
+      await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
+      await clearNativeBlocker();
+    } catch (error) {
+      run.status = "blocked";
+      run.blockers = [...new Set([...run.blockers, blocker])];
+      await this.save(); throw error;
+    }
   }
 
   private handle(run: RunRecord, execution: ExecutionRecord) {

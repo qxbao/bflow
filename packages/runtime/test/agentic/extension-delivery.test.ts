@@ -11,6 +11,7 @@ import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { AgentBindingReceiptSchema, AgentConfigurationSchema, PaneBindingSchema, ReleaseAgentLeaseRequestSchema,
   RoleMessageSchema, receiptSigningBytes, type AgentExecutionHandle, type RoleMessage } from "@bflow/contracts";
 import * as runtime from "../../src/index.js";
+import * as hostTools from "../../src/agentic/host.js";
 import { AgenticJournal, digest, record } from "../../src/agentic/journal.js";
 import { FakeAgentTransport } from "../helpers/fake-transport.js";
 
@@ -76,6 +77,21 @@ async function fixture() {
 }
 
 describe("native extension delivery", () => {
+  it("prepares dedicated output envelopes from the actual native handle and refuses another pane or semantic scope", async () => {
+    const f = await fixture(), bridge = f.create(), request = await bridge.prepare(f.intent), handle = await bridge.dispatch(request);
+    const out = await f.journal.exclusive(async state => structuredClone(state.outbound[0]!));
+    const prepare = Reflect.get(hostTools, "prepareNativeExtensionOutput");
+    expect(prepare).toBeTypeOf("function");
+    const prepared = prepare(f.binding, out, { questions: [] }, "native-host");
+    expect(prepared.binding).toMatchObject({ type: "execution.receipt", causation_id: out.message.message_id,
+      payload: { handle, correlation: { token: out.message.message_id, verified: true } } });
+    expect(prepared.output).toMatchObject({ type: "spec.draft", causation_id: out.message.message_id,
+      sender: { role: "specifier", agent_id: f.binding.agentId, pane_id: f.binding.paneId },
+      payload: { kind: "extension.result", requestId: request.requestId, output: { questions: [] } } });
+    expect(() => prepare({ ...f.binding, agentId: "another-agent" }, out, { questions: [] }, "native-host")).toThrow(/actor|binding|pane/i);
+    expect(() => prepare(f.binding, out, { patch: "invented write" }, "native-host")).toThrow();
+    expect(() => prepare(f.binding, { ...out, status: "released" }, { questions: [] }, "native-host")).toThrow(/accepted|released/i);
+  });
   it("admits provider prompts only for the exact persisted native assignment and current pane/session", async () => {
     const f = await fixture(), bridge = f.create(), request = await bridge.prepare(f.intent);
     expect(bridge.validatePrompt).toBeTypeOf("function");

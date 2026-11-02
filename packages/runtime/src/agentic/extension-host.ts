@@ -44,9 +44,9 @@ export function workflowPackFamily(input: unknown): WorkflowFamily {
   if (!verifyWorkflowPackDigest(pack)) throw new Error("Workflow pack digest mismatch");
   const id = pack.defaults["workflow.id"];
   if (id === undefined) return "implementation";
-  if (!pack.lockedFields.includes("workflow.id")) throw new Error("Workflow family identity must be locked");
   if (id === ANALYSIS_WORKFLOW_ID) { resolveAnalysisPack(pack, pack); return "analysis"; }
   if (id === QA_WORKFLOW_ID) {
+    if (!pack.lockedFields.includes("workflow.id")) throw new Error("QA workflow family identity must be locked");
     if (pack.defaults["workflow.version"] !== QA_WORKFLOW_VERSION || !pack.lockedFields.includes("capabilities.required") ||
         !Array.isArray(pack.defaults["capabilities.required"]) || !pack.defaults["capabilities.required"].includes("workflow.qa_only"))
       throw new Error("Unsupported QA workflow policy/version");
@@ -54,12 +54,13 @@ export function workflowPackFamily(input: unknown): WorkflowFamily {
     if (resolution.blockers.length) throw new Error("QA workflow pack is blocked");
     return "qa";
   }
-  throw new Error("Unsupported workflow family identity");
+  return "implementation";
 }
 
 export async function createWorkflowExtensionHost(options: {
   repositoryPath: string; sessionId: string; journalDirectory: string;
   analysis: AnalysisWorkflowRuntime; qa: QaWorkflowRuntime; native: NativeExtensionRolePort; runStore: RunStore;
+  isLegacyImplementationRun?(runId: string): Promise<boolean>;
   readPack(): Promise<WorkflowPack | undefined>;
   publishToConversation(message: RoleMessage): Promise<void>;
 }): Promise<WorkflowExtensionHost> {
@@ -129,6 +130,7 @@ export async function createWorkflowExtensionHost(options: {
       : status === "failed" ? "failed" : status === "blocked" || status === "needs_revision" ? "escalated" : entry.kind === "analysis" ? "specifying" : "verifying";
     return json({ runId, kind: entry.kind, pack: entry.pack ? { id: entry.pack.id, version: entry.pack.version, digest: entry.pack.digest } : undefined,
       delegation: entry.delegation, status: sdlc, extensionStatus: status ?? "admitted", coreCreated: entry.started, cancelled: false,
+      queuedDecisions: entry.decisions.filter(item => item.state === "queued").map(item => item.decision.approvalId),
       outputType: entry.kind === "analysis" ? "analysis_document" : "qa_report", ...(state ? { extension: state } : {}),
       approval: (await pending(entry))[0] });
   };
@@ -146,14 +148,16 @@ export async function createWorkflowExtensionHost(options: {
       if (delegation.sessionId !== options.sessionId || delegation.requestedBy !== "conversation" || delegation.targetRole !== "coordinator" || !delegation.runId)
         throw new Error("Extension admission requires its actual Conversation delegation");
       const prior = (await routes()).find(item => item.runId === delegation.runId);
-      if (prior) { if (digest(prior.delegation) !== digest(delegation)) throw new Error("Conflicting frozen delegation"); return prior.kind; }
-      const inputPack = await options.readPack(), pack = inputPack === undefined ? undefined : WorkflowPackSchema.parse(inputPack);
+      if (prior) { if (prior.kind === "implementation") return "implementation"; if (digest(prior.delegation) !== digest(delegation)) throw new Error("Conflicting frozen delegation"); return prior.kind; }
+      const legacy = await options.isLegacyImplementationRun?.(delegation.runId) ?? false;
+      const inputPack = legacy ? undefined : await options.readPack(), pack = inputPack === undefined ? undefined : WorkflowPackSchema.parse(inputPack);
       const kind = workflowPackFamily(pack);
       await saveRoute({ schemaVersion: 1, runId: delegation.runId, kind, delegation, ...(pack ? { pack } : {}), started: false, decisions: [] }); return kind;
     },
     async owns(runId) { return (await routes()).some(item => item.runId === runId && item.kind !== "implementation"); },
     async start(input) {
-      assertActive(); const entry = await route(IdentifierSchema.parse(input.runId));
+      assertActive(); z.enum(["analysis", "qa"]).parse(input.kind);
+      const entry = await route(IdentifierSchema.parse(input.runId));
       if (input.kind !== entry.kind) throw new Error("Extension kind/family does not match admitted intake");
       const pack = await currentPack(entry), pin = PinSchema.parse(input.packPin);
       if (pin.id !== pack.id || pin.version !== pack.version || pin.digest !== pack.digest) throw new Error("Extension start pin mismatch");

@@ -193,3 +193,4 @@ export { DataVerificationHost, specificationContent as dataSpecificationContent 
 export { digest as dataVerificationDigest, contractDigest as dataContractDigest } from "./data/contract.js";
 export { createWorkflowExtensionHost, workflowPackFamily } from "./agentic/extension-host.js";
 export { openWorkflowExtensionRuntimes } from "./agentic/extension-composition.js";
+export { WorkflowExtensionPump } from "./agentic/extension-pump.js";
