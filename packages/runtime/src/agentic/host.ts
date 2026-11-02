@@ -2,6 +2,7 @@ import { encodeNativePluginSelection } from "./native-intent-selection.js";
 import { HostChat } from "../interaction/chat.js";
 import { registeredAssistantHistory, registeredChatAvailable, chatMessageId } from "../interaction/chat-history.js";
 import { ProjectionFeed } from "../interaction/events.js";
+import { projectionFingerprint } from "../interaction/fingerprint.js";
 import { readScopedArtifact, serveArtifact } from "../interaction/artifacts.js";
 import { acknowledgeDisplayedNotice } from "../interaction/notices.js";
 import { WebEventsQuerySchema, WebHttpPathParamsSchema, WebChatSendSchema, WebChatMessageSchema, WebMessagesQuerySchema } from "@bflow/contracts/web";
@@ -543,17 +544,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   let webFeedObservedAt = 0;
   let webFeedFingerprint: string | undefined;
   const webFeedNotices = new Set<string>();
-  // Observation timestamps change on every read; they are not projection changes.
-  const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable)
-    : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => key !== "updatedAt" && key !== "observedAt").map(([key, item]) => [key, stable(item)])) : value;
   const webProjectionFingerprint = async (): Promise<string> => {
     const views = await Promise.all([
       readWebQuery({ kind: "session", projectId: webProjectId }),
       readWebQuery({ kind: "runs", projectId: webProjectId, query: { limit: 100 } }),
-      readWebQuery({ kind: "decisions", projectId: webProjectId })
+      readWebQuery({ kind: "decisions", projectId: webProjectId }),
+      // Without this a change of assignment or handoff never publishes `invalidate`. Time-like keys are stripped by projectionFingerprint.
+      readWebQuery({ kind: "workforce", projectId: webProjectId })
     ].map(view => view.catch(() => "unavailable")));
-    return digest(JSON.stringify(stable(views)));
+    return projectionFingerprint(views);
   };
   let webFeedQueue: Promise<unknown> = Promise.resolve();
   const readWebEvents = (params: unknown) => {

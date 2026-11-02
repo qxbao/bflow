@@ -13,8 +13,8 @@ function belongsToHistory(item:Observation,runId:string|undefined){
   if(runId && (item.record.slot.endsWith(`:${runId}`) || (result?.kind==='interaction' && (result.runId===runId || result.currentRunId===runId))))return false;
   return Date.now()-Date.parse(item.operation!.updatedAt)>RECENT_MS;
 }
-const Context=createContext<{store:CommandStore;refresh:()=>void;ingest:(observation:Observation)=>void;online:boolean;observations:Observation[];notify:(message:string)=>void;startNew:(slot:string,superseded?:string)=>Promise<void>}|null>(null);
-export function Operations({api,id,revision,refresh,children}:{api:ApiClient;id:string;revision?:number|undefined;refresh:()=>void;children:ReactNode}) {
+const Context=createContext<{store:CommandStore;refresh:()=>void;ingest:(observation:Observation)=>void;online:boolean;observations:Observation[];notify:(message:string)=>void;startNew:(slot:string,superseded?:string)=>Promise<void>;dock:ReactNode}|null>(null);
+export function Operations({api,id,revision,refresh,dock='inline',children}:{api:ApiClient;id:string;revision?:number|undefined;refresh:()=>void;dock?:'inline'|'external';children:ReactNode}) {
   const [tick,setTick]=useState(0),[observations,setObservations]=useState<Observation[]>([]),[online,setOnline]=useState(navigator.onLine),[error,setError]=useState(''),[notices,setNotices]=useState<string[]>([]);
   const notify=useCallback((message:string)=>setNotices(list=>list.includes(message)?list:[...list.slice(-4),message]),[]);
   const forceRead=useRef(false);
@@ -83,7 +83,14 @@ export function Operations({api,id,revision,refresh,children}:{api:ApiClient;id:
     const forced=forceRead.current;forceRead.current=false;
     void read(forced);return()=>{active=false;clearTimeout(timer);};
   },[store,tick,online,recordSignature]);
-  return <Context.Provider value={{store,refresh:changed,ingest,online:online && Boolean(navigator.locks),observations,notify,startNew}}>{!navigator.locks && <p role="status">Trình duyệt chưa hỗ trợ khóa thao tác giữa các tab. Dùng trình duyệt hỗ trợ Web Locks để gửi yêu cầu.</p>}{notices.length>0 && <section className="panel my-3 min-w-0 border border-warning border-l-3 bg-surface p-3.5 sm:p-4" aria-label="Thao tác chưa được gửi"><h2 className="m-0 text-base">Thao tác chưa được gửi</h2>{notices.map(text=><p key={text} role="alert" className="my-1.5 text-sm">{text}</p>)}<button onClick={()=>setNotices([])}>Đã hiểu</button></section>}{children}{error && <div role="alert" className="my-2 border border-danger border-l-3 bg-surface p-3 text-sm"><p className="my-1">{error}</p>{error.includes('Mã phục hồi bị hỏng') && <button type="button" onClick={()=>{store.clearCorrupted();reread();}}>Xóa mã phục hồi bị hỏng</button>}</div>}{observations.length>0 && <section className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4" aria-label="Theo dõi thao tác"><h2 className="m-0 mb-2 text-base">Thao tác đã gửi</h2>{current.map(row)}{current.length===0 && <p className="my-1 text-sm text-muted">Không có thao tác đang theo dõi cho màn hình này.</p>}{past.length>0 && <details className="my-2"><summary>Lịch sử thao tác ({past.length})</summary>{past.map(row)}</details>}</section>}</Context.Provider>;
+  // The dock is the error banner plus the tracked-operations list; `external` only moves where it renders.
+  const panel=<>{error && <div role="alert" className="my-2 border border-danger border-l-3 bg-surface p-3 text-sm"><p className="my-1">{error}</p>{error.includes('Mã phục hồi bị hỏng') && <button type="button" onClick={()=>{store.clearCorrupted();reread();}}>Xóa mã phục hồi bị hỏng</button>}</div>}{observations.length>0 && <section data-component="OperationsDock" className="panel my-4 min-w-0 border border-line bg-surface p-3.5 sm:p-4" aria-label="Theo dõi thao tác"><h2 className="m-0 mb-2 text-base">Thao tác đã gửi</h2>{current.map(row)}{current.length===0 && <p className="my-1 text-sm text-muted">Không có thao tác đang theo dõi cho màn hình này.</p>}{past.length>0 && <details className="my-2"><summary>Lịch sử thao tác ({past.length})</summary>{past.map(row)}</details>}</section>}</>;
+  return <Context.Provider value={{store,refresh:changed,ingest,online:online && Boolean(navigator.locks),observations,notify,startNew,dock:panel}}>{!navigator.locks && <p role="status">Trình duyệt chưa hỗ trợ khóa thao tác giữa các tab. Dùng trình duyệt hỗ trợ Web Locks để gửi yêu cầu.</p>}{notices.length>0 && <section className="panel my-3 min-w-0 border border-warning border-l-3 bg-surface p-3.5 sm:p-4" aria-label="Thao tác chưa được gửi"><h2 className="m-0 text-base">Thao tác chưa được gửi</h2>{notices.map(text=><p key={text} role="alert" className="my-1.5 text-sm">{text}</p>)}<button onClick={()=>setNotices([])}>Đã hiểu</button></section>}{children}{dock==='inline' && panel}</Context.Provider>;
+}
+/** Renders the operations dock where `Operations dock="external"` left it out. */
+export function OperationsDock() {
+  const context=useContext(Context);if(!context)throw new Error('Operations boundary required');
+  return <>{context.dock}</>;
 }
 export function useCommands(slot:string) {
   const context=useContext(Context);if(!context)throw new Error('Operations boundary required');

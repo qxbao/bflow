@@ -1,27 +1,31 @@
 import { LoadingState } from './components/LoadingState';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, Route, Routes, useParams } from 'react-router';
-import type { WebEvent, WebProject } from '@bflow/contracts/web';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { Link, Route, Routes, useMatch, useNavigate, useParams } from 'react-router';
+import type { WebEvent, WebProject, WebProjectSession } from '@bflow/contracts/web';
 import { ApiClient, ApiError, consumeBootstrap } from './api/client';
 import { subscribeEvents, type Connection } from './api/events';
 import { AppShell } from './components/AppShell';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { ErrorState } from './components/ErrorState';
 import { EmptyState } from './components/EmptyState';
-import { StatusBadge } from './components/StatusBadge';
 import { Projects } from './features/projects';
 import { Runs, RunView } from './features/runs';
 import { ChatPage } from './features/chat/page';
 import { Review } from './features/review';
 import { Settings } from './features/settings';
 import { useRead } from './features/data';
-import { Blockers } from './components/Blockers';
-import { decisionQuestionLabel } from './components/DecisionCard';
-import { ReadProblems } from './components/ReadProblems';
-import { SessionActions } from './features/run-actions/session';
-import { Operations } from './features/operations';
-import { RequestForm } from './features/requests';
-import { ClarificationForm } from './features/clarifications';
+import { Operations, OperationsDock } from './features/operations';
+import { Overview } from './features/overview';
+import { useUiMode, type UiMode } from './features/office/mode';
+import { OfficeFrame, OverviewOutlet } from './features/office/ui/OfficeFrame';
+import { ModeSwitch } from './features/office/ui/ModeSwitch';
+import { OfficeStage, type StageControl } from './features/office/ui/OfficeStage';
+import { OfficeHud, currentRun } from './features/office/ui/OfficeHud';
+import { useOfficeModel } from './features/office/ui/useOfficeModel';
+import { AgentInspector, AgentList, handoffEvidence } from './features/office/ui/AgentInspector';
+import { CabinetInspector, ServerInspector, runEvidence } from './features/office/ui/ObjectInspector';
+import type { OfficeTarget } from './features/office/model/types';
 
 export function App({api,bootstrap}:{api:ApiClient;bootstrap?:string|undefined}) {
   const [ready,setReady]=useState(false),[error,setError]=useState<unknown>(),[attempt,setAttempt]=useState(0),[revision,setRevision]=useState(0);
@@ -40,9 +44,29 @@ function Workspace({api,revision,refresh,onPair}:{api:ApiClient;revision:number;
 }
 function Project({api,projects,projectsLoading,projectsError,revision,refresh,onPair}:{api:ApiClient;projects:WebProject[];projectsLoading:boolean;projectsError:unknown;revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>}) {
   const {projectId=''}=useParams(); const project=projects.find(project=>project.projectId===projectId);
-  return <AppShell projects={projects} projectId={projectId}>{project?<ProjectContent key={projectId} api={api} project={project} revision={revision} refresh={refresh}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
+  const [mode,setMode]=useUiMode(),[overviewOpen,setOverviewOpen]=useState(false),[host,setHost]=useState<HTMLElement|null>(null),[hud,setHud]=useState<HTMLElement|null>(null),[dockPx,setDockPx]=useState(0);
+  const [inspector,setInspector]=useState<Inspector|undefined>(),[inspectorHost,setInspectorHost]=useState<HTMLElement|null>(null);
+  const navigate=useNavigate(),isIndex=Boolean(useMatch({path:'/projects/:projectId',end:true})),base=`/projects/${encodeURIComponent(projectId)}`;
+  // Reset during render, not in an effect, so the previous project's inspector never paints for the new one.
+  const [seenProject,setSeenProject]=useState(projectId);
+  if(seenProject!==projectId){setSeenProject(projectId);setOverviewOpen(false);setInspector(undefined);}
+  // Overview is only meaningful at the index path; leaving it forgets the HUD-opened state.
+  useEffect(()=>{if(!isIndex)setOverviewOpen(false);},[isIndex]);
+  // Visual mode: the index path closes the panel (or shows the HUD-opened overview); every other route opens it.
+  const visual=mode==='visual' && Boolean(project),panelOpen=!isIndex || overviewOpen || inspector!==undefined;
+  // The re-pair view cannot be dismissed (Esc and the close button do nothing): it reopens itself while the session is refused, so closing would only fight it.
+  const closable=inspector?.kind!=='repair';
+  const close=useCallback(()=>{if(!closable)return;setOverviewOpen(false);setInspector(undefined);if(!isIndex)navigate(base);},[closable,isIndex,navigate,base]);
+  const showOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);},[]);
+  const openOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
+  // Inspectors live in the panel on the index path: opening one leaves any page route and the overview.
+  const openInspector=useCallback((next:Inspector|undefined)=>{if(next){setOverviewOpen(false);if(!isIndex)navigate(base);}setInspector(next);},[isIndex,navigate,base]);
+  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,closable,dockPx,inspectorRef:setInspectorHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,dockPx,setDockPx,inspector,openInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
 }
-function ProjectContent({api,project,revision,refresh}:{api:ApiClient;project:WebProject;revision:number;refresh:()=>void}) {
+type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void;dockPx:number;setDockPx:(px:number)=>void;inspector:Inspector|undefined;openInspector:(next:Inspector|undefined)=>void;inspectorHost:HTMLElement|null};
+/** What the overlay panel shows in 3D besides pages: local state, never a route. */
+export type Inspector={kind:'agent';instanceId:string}|{kind:'unseated'}|{kind:'cabinet'}|{kind:'server'}|{kind:'repair'};
+function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame}) {
   const id=project.projectId;
   const [connection,setConnection]=useState<Connection>('connecting'),[events,setEvents]=useState<WebEvent[]>([]);
   const hadDisconnect=useRef(false);
@@ -69,39 +93,76 @@ function ProjectContent({api,project,revision,refresh}:{api:ApiClient;project:We
     return()=>{close();clearTimeout(timer);window.removeEventListener('online',online);};
   },[id,refresh,reconnectEpoch]);
   useEffect(()=>{if(connection==='connected')return;const poll=setInterval(refresh,15000);return()=>clearInterval(poll);},[connection,refresh]);
-  return <Operations api={api} id={id} revision={revision} refresh={refresh}><div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm"><div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div><Routes><Route index element={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></Operations>;
+  const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div>;
+  const visual=frame.mode==='visual';
+  const list=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['review','Cần bạn quyết định'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
+  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':'inline'}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame>{visual && <VisualOffice api={api} project={project} projects={projects} onPair={onPair} session={session.data} connection={connection} revision={revision} refresh={refresh} list={list} frame={frame}/>}</Operations>;
 }
 function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) { const {runId=''}=useParams();return <RunView key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh}/>; }
-function Overview({api,project,session,revision,refresh,events}:{api:ApiClient;project:WebProject;session:ReturnType<typeof useRead<Awaited<ReturnType<ApiClient['sessionView']>>>>;revision:number;refresh:()=>void;events:WebEvent[]}) {
-  const id=project.projectId;
-  const runs=useRead(`overview-runs:${id}`,()=>api.runs(id),revision),decisions=useRead(`overview-decisions:${id}`,()=>api.decisions(id),revision);
-  const preview=useRead(`preview:${id}`,()=>api.preview(id),revision);
-  const sessionInactive=Boolean(session.data && !session.error && ['stopped','unavailable'].includes(session.data.state));
-  useEffect(()=>{if(!session.data || !['starting','stopping'].includes(session.data.state))return;const poll=setInterval(refresh,2500);return()=>clearInterval(poll);},[session.data?.state,refresh]);
-  const pendingDecisions=(decisions.data?.items??[]).filter(decision=>decision.status==='pending');
-  const configured=Boolean(session.data?.state==='stopped' || session.data?.sessionId || preview.data?.available || runs.data?.items.length);
-  const problems=[{label:'phiên dự án',result:session},{label:'công việc',result:runs},{label:'quyết định',result:decisions},{label:'thông tin chuẩn bị',result:preview}]
-    .filter(item=>Boolean(item.result.error))
-    .filter(item=>!(sessionInactive && (item.label==='công việc' || item.label==='quyết định') && item.result.error instanceof ApiError && item.result.error.code==='unavailable'))
-    .map(item=>({label:item.label,error:item.result.error,stale:Boolean(item.result.data)}));
-  return <><div className="mb-3 flex flex-wrap items-baseline justify-between gap-2"><div><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Dự án / Tổng quan</div><h1 className="mt-1 mb-1">Tổng quan <em>dự án.</em></h1><p className="m-0 max-w-2xl text-sm text-muted">Theo dõi tiến độ thực tế, trả lời làm rõ và phê duyệt kết quả ngay tại một nơi.</p></div></div>
-    <ReadProblems retry={refresh} problems={problems}/><LoadingState loading={session.loading} initial={!session.data} label="Đang đọc phiên dự án…"/>
-    {!session.data && Boolean(session.error) && <section className="panel my-3 min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Phiên dự án</h2><Link className="font-data text-xs font-semibold" to={`/projects/${encodeURIComponent(id)}/settings`}>Kiểm tra điều kiện dự án →</Link></div><SessionActions api={api} id={id} session={{apiVersion:1,projectId:id,state:'unavailable',pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()}} fresh={false} refresh={refresh}/></section>}
-    {session.data && <section className="panel my-3 min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><h2 className="m-0 text-base">Phiên dự án</h2><StatusBadge prefix="Phiên" value={session.data.state}/>{session.data.conversationStatus && <StatusBadge prefix="Hội thoại" value={session.data.conversationStatus}/>}</div><Link className="font-data text-xs font-semibold" to={`/projects/${encodeURIComponent(id)}/settings`}>Kiểm tra điều kiện dự án →</Link></div>
-      {sessionInactive && (configured?<p className="my-2.5 border-l-3 border-line bg-canvas px-3 py-2 text-sm text-muted">Phiên làm việc đang dừng. Bấm <strong className="text-ink">Khởi động phiên</strong> bên dưới khi bạn muốn giao hoặc tiếp tục công việc mới.</p>:!preview.loading?<div className="my-2.5 border-l-3 border-accent bg-canvas px-3 py-2 text-sm"><p className="m-0 font-data font-semibold text-ink">3 bước để bắt đầu làm việc:</p><ol className="my-1.5 pl-5 text-sm text-muted"><li><Link to={`/projects/${encodeURIComponent(id)}/settings`}>Mở Cài đặt dự án →</Link> để khởi tạo cấu hình, chọn model và commit cấu hình.</li><li>Quay lại đây và bấm <strong>Khởi động phiên</strong>.</li><li>Điền biểu mẫu <strong>Tạo công việc</strong> bên dưới để giao việc.</li></ol></div>:null)}
-      <SessionActions api={api} id={id} session={session.data} fresh={!session.loading && !session.error} refresh={refresh}/><Blockers items={session.data.blockers}/>
-      {session.data.pendingIntakes.map(intake=><article className="panel mt-3 min-w-0 border border-line bg-canvas p-3.5 sm:p-4" key={intake.intakeId}><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="m-0 [overflow-wrap:anywhere]">{intake.title}</h3><div className="flex items-center gap-2"><StatusBadge value={intake.status}/>{intake.runId && <Link className="text-sm" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(intake.runId)}`}>Mở công việc →</Link>}</div></div>{intake.clarifications.map(question=><ClarificationForm key={question.questionId} api={api} id={id} intakeId={intake.intakeId} question={question} enabled={!session.error && session.data?.state==='ready' && intake.status==='clarifying'} refresh={refresh}/>)}</article>)}
-    </section>}
 
-    <div className="my-4 grid min-w-0 gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(260px,2fr)]">
-    <section className="m-0 border border-line bg-surface p-3.5 sm:p-4"><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Công việc gần đây</h2><Link className="text-sm" to={`/projects/${encodeURIComponent(id)}/runs`}>Xem tất cả công việc →</Link></div><LoadingState loading={runs.loading} initial={!runs.data} label="Đang đọc công việc…"/>{runs.data?<><p className="my-1.5 text-xs text-muted">{runs.data.items.length} công việc gần đây{runs.data.nextCursor?' · Còn trang tiếp theo':''}.</p>{sessionInactive && <p className="my-1 text-xs text-muted">Đang hiển thị dữ liệu lưu từ phiên gần nhất (phiên hiện đang dừng).</p>}{runs.data.items.length?[...runs.data.items].sort((a,b)=>Number(['completed','failed','cancelled'].includes(a.sdlcStatus))-Number(['completed','failed','cancelled'].includes(b.sdlcStatus))||b.updatedAt.localeCompare(a.updatedAt)).slice(0,5).map(run=><article className="grid min-w-0 grid-cols-1 items-center gap-2 border-t border-line py-2.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-x-3" key={run.runId}><Link className="font-medium" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(run.runId)}`}>{run.title}</Link><StatusBadge value={run.sdlcStatus}/></article>):<p className="my-2 text-sm text-muted">Chưa có công việc trong phiên này.</p>}</>:!runs.loading && sessionInactive?<p className="my-2 text-sm text-muted">Khởi động phiên dự án để xem danh sách công việc.</p>:null}</section>
-    <section className={`m-0 border bg-surface p-3.5 sm:p-4 ${pendingDecisions.length?'border-accent border-l-3':'border-line'}`}><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Đang chờ xem xét</h2><Link className="text-sm" to={`/projects/${encodeURIComponent(id)}/review`}>Mở hộp xem xét →</Link></div><LoadingState loading={decisions.loading} initial={!decisions.data} label="Đang đọc quyết định…"/>{decisions.data?<><p className="my-1.5 text-xs text-muted">{pendingDecisions.length} quyết định đang chờ bạn duyệt.</p>{sessionInactive && <p className="my-1 text-xs text-muted">Phiên hiện đang dừng; khởi động lại phiên để đồng bộ quyết định mới.</p>}{pendingDecisions.slice(0,3).map(decision=><p key={decision.decisionId} className="my-0 border-t border-line py-2.5 text-sm"><Link className="font-medium" to={`/projects/${encodeURIComponent(id)}/runs/${encodeURIComponent(decision.runId)}`}>{decisionQuestionLabel(decision.question)}</Link></p>)}</>:!decisions.loading && sessionInactive?<p className="my-2 text-sm text-muted">Khởi động phiên dự án để xem các gói cần bạn duyệt.</p>:null}</section>
-    </div>
-    {session.data && <RequestForm api={api} id={id} sessionId={session.data.sessionId??'stopped'} enabled={session.data.state==='ready' && !session.error} refresh={refresh}/>}
-
-    <div className="my-3 grid gap-x-6 lg:grid-cols-2">
-      <details className="my-1"><summary>Thông tin chuẩn bị</summary><LoadingState loading={preview.loading} initial={!preview.data} label="Đang tải…"/>{preview.data && <><p className="text-sm">{preview.data.available?'Đã đọc được cấu hình dự kiến. Cấu hình không tự cấp quyền thực thi khi chưa khởi động phiên.':(preview.data.summary||'Chưa có thông tin cấu hình dự kiến.')}</p><Blockers items={preview.data.blockers}/></>}</details>
-      <details className="my-1"><summary>Hoạt động gần đây ({events.length})</summary><p className="text-xs text-muted">Cập nhật trực tiếp nhận trong lần mở trang này.</p>{events.length?<ol className="space-y-1.5 text-xs tabular-nums">{events.slice(0,10).map((event,index)=><li key={`${event.cursor}:${index}`}><time dateTime={event.occurredAt}>{new Date(event.occurredAt).toLocaleTimeString('vi')}</time> · {event.type==='reset'?'Đã đồng bộ lại dữ liệu hiện hành':event.type==='notice'?'Có thông báo mới trong công việc':'Dữ liệu dự án vừa cập nhật'}</li>)}</ol>:<p className="text-sm text-muted">Chưa nhận cập nhật mới trong lần mở trang này.</p>}</details>
-    </div>
+/**
+ * Rendered only in visual mode, so Classic issues no extra reads. Portals the scene into the full-screen stage node, the floating HUD into
+ * the HUD node and any inspector into the panel; all from one model. Read-only: the HUD only navigates and hands a chat draft to the chat page.
+ */
+function VisualOffice({api,project,projects,onPair,session,connection,revision,refresh,list,frame}:{api:ApiClient;project:WebProject;projects:WebProject[];onPair:(secret:string)=>Promise<void>;session:WebProjectSession|undefined;connection:Connection;revision:number;refresh:()=>void;list:ReactNode;frame:Frame}) {
+  const id=project.projectId,base=`/projects/${encodeURIComponent(id)}`,navigate=useNavigate();
+  const state=useOfficeModel({api,id,session,connection,revision});
+  const {model,runs,stale,overflow,workforce,decisions,authRequired,error}=state;
+  const control=useRef<StageControl|null>(null);
+  const {inspector,openInspector}=frame;
+  // A refused session is never shown as stale data: the panel offers re-pairing, the same ErrorState Classic uses.
+  useEffect(()=>{
+    if(authRequired)openInspector({kind:'repair'});
+    else if(inspector?.kind==='repair')openInspector(undefined);
+  },[authRequired,inspector?.kind,openInspector]);
+  const RAIL_PX=84;
+  /** Pixels the HUD covers: the rail, the bottom block, and the panel when it is (about to be) open beside the scene. */
+  const insetFor=(open:boolean)=>{
+    const w=window.innerWidth,bottom=frame.hud?.querySelector<HTMLElement>('[data-hud-bottom]')?.offsetHeight??0;
+    return {right:RAIL_PX+(open&&w>=768?Math.min(720,w*0.7):0),bottom,left:0};
+  };
+  const hasModel=model!==undefined,refocusHud=useRef(false);
+  useEffect(()=>{
+    const apply=()=>control.current?.setInset(insetFor(frame.panelOpen));
+    apply();window.addEventListener('resize',apply);return()=>window.removeEventListener('resize',apply);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[frame.panelOpen,frame.dockPx,frame.hud,hasModel]);
+  // An agent that vanished after the model loaded: drop its inspector and hand focus back to the HUD.
+  useEffect(()=>{
+    if(inspector?.kind==='agent' && model?.tier==='full' && !model.agents.some(a=>a.instanceId===inspector.instanceId)){refocusHud.current=true;openInspector(undefined);}
+  },[model,inspector,openInspector]);
+  // Runs after OfficeFrame restored the opener, so the HUD (not a vanished control) ends up focused.
+  useEffect(()=>{if(refocusHud.current && !frame.panelOpen){refocusHud.current=false;frame.hud?.focus();}},[frame.panelOpen,frame.hud]);
+  const go=(path:string)=>{openInspector(undefined);navigate(path);};
+  const select=(target:OfficeTarget)=>{
+    // Before the camera moves: centre the selection in what the panel leaves visible.
+    control.current?.setInset(insetFor(true));
+    if(target.kind==='agent'){openInspector({kind:'agent',instanceId:target.instanceId});return;}
+    switch(target.object){
+      case 'counter':go(`${base}/chat`);break;
+      case 'board':go(`${base}/runs`);break;
+      case 'mailbox':go(`${base}/review`);break;
+      case 'settings':go(`${base}/settings`);break;
+      case 'door':go('/');break;
+      case 'cabinet':openInspector({kind:'cabinet'});break;
+      case 'server':openInspector({kind:'server'});break;
+    }
+  };
+  const run=currentRun(runs);
+  const titleOf=(runId:string,taskId?:string)=>{const r=runs.find(x=>x.runId===runId);return (taskId?r?.tasks.find(t=>t.taskId===taskId)?.title:undefined)??r?.title??taskId??runId;};
+  const agent=inspector?.kind==='agent'?model?.agents.find(a=>a.instanceId===inspector.instanceId):undefined;
+  const inspected=inspector&&frame.inspectorHost?createPortal(
+    inspector.kind==='repair'?<ErrorState error={error} retry={refresh} onPair={onPair}/>
+    :inspector.kind==='agent'?(agent?<AgentInspector api={api} projectId={id} agent={agent} view={workforce?.agents.find(a=>a.instanceId===agent.instanceId)} handoffs={workforce?.handoffs??[]} revision={revision} titleOf={titleOf}/>:<EmptyState title="Nhân viên này không còn trong danh sách"><p>Có thể phiên đã thay đổi. Tải lại dữ liệu để xem danh sách hiện tại.</p></EmptyState>)
+    :inspector.kind==='unseated'?<AgentList title="Lập trình viên chưa hiện trong cảnh" note="Cảnh có tối đa 20 chỗ ngồi. Những nhân viên dưới đây vẫn đang được theo dõi." agents={(model?.agents??[]).filter(a=>!a.seat)} onPick={instanceId=>openInspector({kind:'agent',instanceId})}/>
+    :inspector.kind==='cabinet'?<CabinetInspector api={api} projectId={id} run={run} evidence={runEvidence(run?.runId,decisions,handoffEvidence(workforce?.handoffs??[],undefined,run?.runId))}/>
+    :<ServerInspector api={api} projectId={id} session={session} fresh={!stale&&!authRequired} refresh={refresh}/>,frame.inspectorHost):null;
+  return <>
+    {frame.host && createPortal(<section aria-label="Danh sách công việc" className="m-0 h-full">{model?<OfficeStage model={model} onSelect={select} links={list} control={control}/>:<>{list}</>}</section>,frame.host)}
+    {inspected}
+    {frame.hud && createPortal(<OfficeHud projectName={project.displayName} projects={projects} projectId={id} onProject={next=>navigate(next?`/projects/${encodeURIComponent(next)}`:'/')} session={session} model={model} runs={runs} connection={connection} stale={stale} failed={error!==undefined&&!authRequired&&!model} authRequired={authRequired} mode={frame.mode} onMode={frame.setMode} panelOpen={frame.panelOpen} overflow={overflow}
+      onOverview={frame.openOverview} onNavigate={path=>{if(path==='')frame.openOverview();else go(`${base}/${path}`);}} onDocuments={()=>openInspector({kind:'cabinet'})} onRefresh={refresh}
+      onFocusZone={zone=>control.current?.focusZone(zone)} onAgentList={()=>openInspector({kind:'unseated'})}
+      onChatDraft={draft=>{openInspector(undefined);navigate(`${base}/chat`,{state:{draft}});}} dock={<OperationsDock/>} onDockHeight={frame.setDockPx}/>,frame.hud)}
   </>;
 }

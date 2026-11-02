@@ -368,3 +368,79 @@ it.skipIf(process.platform === 'win32')('surfaces an expired writer lease after 
  expect((await f.inspect()).tasks[0].spec.strategy.metadata?.tddEvidence??[]).toHaveLength(0);
  await expect(f.runtime.requestPhaseVerification(binding,'run-1','implement','red',revision)).rejects.toThrow(/commit a repair/i);
 });
+
+async function completedTddHolder(related = true) {
+  const f=await fixture({tdd:true});f.ports.preflightRoleCapabilities=async()=>{};
+  await f.runtime.proposeWorkflow('run-1',f.spec,f.def);await f.runtime.tick();
+  for(const phase of ['red','green','refactor'] as const)await f.evidence('implement',phase);
+  const before=await f.runtime.inspect() as any;
+  const parent=before.outbound.find((o:any)=>o.message.type==='task.assignment');
+  const coordinator=f.panes.bindings.find(p=>p.role==='coordinator')!;
+  await f.runtime.observeCoordinatorOutcome(f.envelope('task.status',{status:'blocked',summary:'Existing holder needs to submit its rework dossier'}, {recipient:{role:'conversation'},sender:{role:'coordinator',agent_id:coordinator.agentId,pane_id:coordinator.paneId}}));
+  if(related){const {AgenticJournal}=await import('../../src/agentic/journal.js');await new AgenticJournal(join(f.root,'journal'),f.repository).exclusive(async(state,save)=>{state.runs[0]!.pendingAction!.sourceMessageId=parent.message.message_id;state.runs[0]!.pendingAction!.actionId=`next-${digest(['run-1',parent.message.message_id])}`;await save();});}
+  return {f,before,parent,paused:await f.inspect()};
+}
+it('explicitly resumes the same completed-TDD holder after lease expiry with a higher fence and no reassignment/evidence reset',async()=>{
+  const {f,before,parent,paused}=await completedTddHolder();
+  const {FileAgentRegistry}=await import('@bflow/agent-registry');const future=new Date(Date.now()+301000);
+  f.ports.clock=()=>future;f.ports.registry=new FileAgentRegistry({stateFile:join(f.root,'registry.json'),clock:()=>future});
+  await f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId,{conversationUserMessageId:'owner-resume-completed-tdd'});
+  let after=await f.runtime.inspect() as any;
+  const notice=after.outbound.find((o:any)=>o.message.payload.kind==='assignment_resume');
+  expect(notice).toMatchObject({parentAssignmentId:parent.message.message_id,message:{recipient:{agent_id:parent.handle.target.agentId,pane_id:parent.handle.target.paneId}}});
+  const current=after.outbound.find((o:any)=>o.message.message_id===parent.message.message_id);
+  expect(current.handle).toEqual(parent.handle);expect(current.lease.fencingToken).toBeGreaterThan(parent.lease.fencingToken);
+  expect(after.runs[0].tasks[0].spec.strategy.metadata.tddEvidence).toEqual(before.runs[0].tasks[0].spec.strategy.metadata.tddEvidence);
+  expect(after.outbound.filter((o:any)=>o.message.type==='task.assignment')).toHaveLength(1);
+  await f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId,{conversationUserMessageId:'owner-resume-completed-tdd'});
+  after=await f.runtime.inspect() as any;expect(after.outbound.filter((o:any)=>o.message.message_id===notice.message.message_id)).toHaveLength(1);
+},60000);
+it.each(['busy','replacement','missing','model-only','unknown-delivery','unrelated-blocker'] as const)('does not wake the completed-TDD holder under %s uncertainty',async mode=>{
+  const {f,parent,paused}=await completedTddHolder(mode!=='unrelated-blocker');
+  const binding=f.panes.bindings.find(p=>p.agentId===parent.handle.target.agentId)!;
+  if(mode==='busy')f.panes.busy.add('developer');
+  if(mode==='missing')f.panes.missing.add(binding.paneId);
+  if(mode==='replacement')binding.session={...binding.session!,value:'replacement-native'};
+  if(mode==='unknown-delivery'){
+    const {AgenticJournal}=await import('../../src/agentic/journal.js');
+    await new AgenticJournal(join(f.root,'journal'),f.repository).exclusive(async(state,save)=>{state.outbound.find(o=>o.message.message_id===parent.message.message_id)!.status='unknown_delivery';await save();});
+  }
+  const resume=f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId,mode==='model-only'?{}:{conversationUserMessageId:'owner-resume-guarded'});
+  if(mode==='unknown-delivery')await expect(resume).rejects.toThrow(/Unknown delivery/);else await resume;
+  const after=await f.runtime.inspect() as any;
+  expect(after.outbound.some((o:any)=>o.message.payload.kind==='assignment_resume')).toBe(false);
+  if(mode!=='unknown-delivery'){
+    expect(after.runs[0].status).toBe('implementing');expect(after.runs[0].pendingAction.actionId).toBe(paused.pendingAction.actionId);
+    expect(after.runs[0].resumeReceipts).toEqual(expect.arrayContaining([expect.objectContaining({actionId:paused.pendingAction.actionId})]));
+    expect(after.outbound.find((o:any)=>o.message.message_id===parent.message.message_id).lease).toEqual(parent.lease);
+  }
+});
+it('rejects forged, stale or automatic owner-resume lease authority before Registry acquisition',async()=>{
+  const {f,parent}=await completedTddHolder();
+  const {AgenticJournal}=await import('../../src/agentic/journal.js');const {HerdrOutbox}=await import('../../src/agentic/outbox.js');const {RoleMessageSchema}=await import('@bflow/contracts');
+  const acquire=vi.spyOn(f.ports.registry,'acquireLease');
+  await new AgenticJournal(join(f.root,'journal'),f.repository).exclusive(async(state,save)=>{
+    const run=state.runs[0]!;run.status='implementing';const owner=state.outbound.find(o=>o.message.message_id===parent.message.message_id)!;
+    for(const mode of ['no-receipt','stale-action','automatic','model-sender','foreign-run']){
+      const messageId='test-resume-'+mode;const actionId=run.pendingAction!.actionId;
+      const auth=new HerdrOutbox(f.ports,state,save).enqueue(RoleMessageSchema.parse({schema_version:2,message_id:messageId,correlation_id:parent.message.correlation_id,run_id:mode==='foreign-run'?'foreign':'run-1',sender:{role:mode==='model-sender'?'conversation':'runtime'},recipient:{role:'coordinator'},type:'task.status',payload:{kind:'resume_run',actionId:mode==='stale-action'?'old-action':actionId,automatic:mode==='automatic',conversationUserMessageId:'claimed-physical-turn'},artifact_references:[],idempotency_key:messageId}));
+      run.resumeReceipts=mode==='no-receipt'?[]:[{actionId:mode==='stale-action'?'old-action':actionId,messageId}];
+      await expect(new HerdrOutbox(f.ports,state,save).recoverTaskLease(owner,auth)).rejects.toThrow(/explicit resume authority/);
+    }
+  });
+  expect(acquire).not.toHaveBeenCalled();
+});
+
+it('recovers the same fenced lease after Registry acquisition acknowledgement is lost before the owner notice',async()=>{
+  const {f,parent,paused}=await completedTddHolder();const {FileAgentRegistry}=await import('@bflow/agent-registry');const future=new Date(Date.now()+301000);
+  f.ports.clock=()=>future;const registry=new FileAgentRegistry({stateFile:join(f.root,'registry.json'),clock:()=>future});f.ports.registry=registry;
+  const acquire=registry.acquireLease.bind(registry);let lost=false;
+  vi.spyOn(registry,'acquireLease').mockImplementation(async(request,options)=>{const result=await acquire(request,options);if(!lost&&result.ok){lost=true;throw new Error('lost acquisition acknowledgement');}return result;});
+  const options={conversationUserMessageId:'owner-resume-acquisition-recovery'};
+  await f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId,options);
+  let state=await f.runtime.inspect() as any;expect(state.outbound.some((o:any)=>o.message.payload.kind==='assignment_resume')).toBe(false);
+  f.restart();await f.runtime.resumeBlockedRun('run-1',paused.pendingAction.actionId,options);
+  state=await f.runtime.inspect() as any;const resumed=state.outbound.find((o:any)=>o.message.message_id===parent.message.message_id);
+  expect(resumed.handle).toEqual(parent.handle);expect(resumed.leaseHistory).toHaveLength(1);expect(resumed.lease.fencingToken).toBeGreaterThan(parent.lease.fencingToken);
+  expect(state.outbound.filter((o:any)=>o.message.payload.kind==='assignment_resume')).toHaveLength(1);
+});

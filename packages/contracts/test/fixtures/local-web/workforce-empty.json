@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "projectId": "fixture-project",
+  "sessionId": "fixture-conversation-session",
+  "revisionToken": "workforce-rev-0",
+  "agents": [],
+  "handoffs": [],
+  "truncated": false,
+  "observedAt": "2026-11-02T00:00:00.000Z"
+}

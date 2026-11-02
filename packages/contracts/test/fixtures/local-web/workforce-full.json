@@ -1,0 +1,135 @@
+{
+  "apiVersion": 1,
+  "projectId": "fixture-project",
+  "sessionId": "fixture-conversation-session",
+  "revisionToken": "workforce-rev-7",
+  "agents": [
+    {
+      "instanceId": "agent-1111111111111111",
+      "role": "conversation",
+      "displayName": "Conversation",
+      "group": "conversation",
+      "permanent": true,
+      "provider": "claude",
+      "model": "fixture-model",
+      "allocation": "active",
+      "transport": { "state": "idle", "observedAt": "2026-11-02T00:00:00.000Z" },
+      "boundAt": "2026-11-01T23:00:00.000Z",
+      "work": []
+    },
+    {
+      "instanceId": "agent-2222222222222222",
+      "role": "coordinator",
+      "displayName": "Coordinator",
+      "group": "coordination",
+      "permanent": true,
+      "provider": "codex",
+      "allocation": "active",
+      "transport": { "state": "working", "observedAt": "2026-11-02T00:00:00.000Z" },
+      "boundAt": "2026-11-01T23:00:01.000Z",
+      "work": [
+        {
+          "messageId": "fixture-delegation-1",
+          "kind": "delegation",
+          "runId": "fixture-run",
+          "delivery": "accepted",
+          "acceptedAt": "2026-11-01T23:30:00.000Z",
+          "turnSeenAt": "2026-11-01T23:30:05.000Z"
+        }
+      ]
+    },
+    {
+      "instanceId": "agent-3333333333333333",
+      "role": "developer",
+      "profileId": "frontend-developer",
+      "displayName": "Frontend developer",
+      "group": "developer_worktree",
+      "permanent": false,
+      "provider": "claude",
+      "model": "fixture-model",
+      "allocation": "active",
+      "transport": { "state": "working", "observedAt": "2026-11-02T00:00:00.000Z" },
+      "boundAt": "2026-11-01T23:40:00.000Z",
+      "work": [
+        {
+          "messageId": "fixture-assignment-1",
+          "kind": "assignment",
+          "runId": "fixture-run",
+          "taskId": "fixture-task-1",
+          "attemptId": "fixture-attempt-1",
+          "delivery": "accepted",
+          "acceptedAt": "2026-11-01T23:41:00.000Z",
+          "turnSeenAt": "2026-11-01T23:41:10.000Z",
+          "leaseExpiresAt": "2026-11-02T00:10:00.000Z"
+        },
+        {
+          "messageId": "fixture-assignment-2",
+          "kind": "assignment",
+          "runId": "fixture-run",
+          "taskId": "fixture-task-2",
+          "delivery": "unknown_delivery"
+        }
+      ]
+    },
+    {
+      "instanceId": "agent-4444444444444444",
+      "role": "reviewer",
+      "displayName": "Reviewer",
+      "group": "verification",
+      "permanent": true,
+      "provider": "codex",
+      "allocation": "stopped_retained",
+      "transport": { "state": "disconnected", "observedAt": "2026-11-02T00:00:00.000Z" },
+      "boundAt": "2026-11-01T23:00:02.000Z",
+      "work": []
+    }
+  ],
+  "handoffs": [
+    {
+      "handoffId": "handoff-out-0",
+      "ordinal": 0,
+      "runId": "fixture-run",
+      "messageType": "delegation.request",
+      "direction": "outbound",
+      "from": { "role": "conversation", "instanceId": "agent-1111111111111111" },
+      "to": { "role": "coordinator", "instanceId": "agent-2222222222222222" },
+      "state": "accepted",
+      "evidence": []
+    },
+    {
+      "handoffId": "handoff-out-1",
+      "ordinal": 1,
+      "runId": "fixture-run",
+      "taskId": "fixture-task-1",
+      "messageType": "task.assignment",
+      "direction": "outbound",
+      "from": { "role": "coordinator", "instanceId": "agent-2222222222222222" },
+      "to": { "role": "developer", "instanceId": "agent-3333333333333333" },
+      "state": "accepted",
+      "evidence": [
+        {
+          "artifactId": "fixture-spec-artifact",
+          "runId": "fixture-run",
+          "kind": "document",
+          "mediaType": "text/markdown",
+          "checksum": { "algorithm": "sha256", "value": "0000000000000000000000000000000000000000000000000000000000000000" },
+          "sizeBytes": 128
+        }
+      ]
+    },
+    {
+      "handoffId": "handoff-in-0",
+      "ordinal": 0,
+      "runId": "fixture-run",
+      "taskId": "fixture-task-1",
+      "messageType": "task.result",
+      "direction": "inbound",
+      "from": { "role": "developer", "instanceId": "agent-3333333333333333" },
+      "to": { "role": "coordinator" },
+      "state": "applied",
+      "evidence": []
+    }
+  ],
+  "truncated": false,
+  "observedAt": "2026-11-02T00:00:00.000Z"
+}

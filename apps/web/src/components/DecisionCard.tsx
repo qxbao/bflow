@@ -94,7 +94,7 @@ export function Evidence({api,projectId,evidence}:{api:ApiClient;projectId:strin
     if(lastIdentity.current!==identity){lastIdentity.current=identity;reqGen.current+=1;setText(undefined);setError(undefined);setLoading(false);}
   },[identity]);
   useEffect(()=>()=>{reqGen.current+=1;},[]);
-  return <section className="evidence my-2.5 min-w-0 border-t border-line pt-2.5 text-sm">
+  return <section data-component="Evidence" className="evidence my-2.5 min-w-0 border-t border-line pt-2.5 text-sm">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="m-0">Tài liệu kiểm chứng · {evidence.mediaType}{evidence.sizeBytes!==undefined?` · ${new Intl.NumberFormat('vi').format(evidence.sizeBytes)} byte`:''}</p>
       <div className="flex flex-wrap items-center gap-2">

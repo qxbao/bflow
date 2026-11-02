@@ -100,6 +100,7 @@ describe('host test-integrity integration',()=>{
     const findings=view.testIntegrityObservation.report.findings;
     await host.requestTestIntegrityException(f.binding,{reviewId:view.reviewId,findingId:findings[0].id,reason:'Temporary exception while the replacement oracle is prepared'});
     expect(f.requests[0]).toMatchObject({messageId:'request',findingId:findings[0].id,context:expect.objectContaining({runId:'run'})});
+    expect((f.requests[0] as any).context.input).not.toHaveProperty('hostCandidateBehavioralEvidence');
     const verdicts=findings.map((item:any)=>({findingId:item.id,evidence:f.sourceEvidence,verdict:'confirmed_violation',reason:'Owner must approve this exact temporary relaxation'}));
     const denied=await host.completeReview(f.binding,{...f.reviewArgs(view.reviewId),testIntegrityVerdicts:verdicts});expect(denied.result.status).toBe('failed');
     // A fresh independent observation after an owner decision has a distinct submission receipt.

@@ -9,9 +9,9 @@ import type {
 import type { CancellationStopProof, NamespaceExitProof } from "./cancellation-stop.js";
 import type { ExecutionResolutionReader } from "./execution-binding.js";
 import type { NativeDiagnosticFenceAuthority } from "./native-diagnostic-fence.js";
+import { managedWorktreeRoot } from "./worktree-root.js";
 import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 import { execFile } from "node:child_process";
-import { resolve } from "node:path";
 import { promisify } from "node:util";
 import * as spec from "@bflow/specification";
 import * as tdd from "@bflow/test-strategy";
@@ -205,7 +205,7 @@ export async function loadAgenticPolicies(options: AgenticCompositionOptions): P
     // init `.bflow/.gitignore`, and staying inside the checkout keeps the provider's folder trust for the repository.
     git: await (async () => {
       const gitEngine = await git.GitIntegrationEngine.open({ repositoryPath: options.repositoryPath, artifactStore: options.artifactStore,
-        worktreeRoot: resolve(options.repositoryPath, ".bflow", "state", "worktrees") });
+        worktreeRoot: managedWorktreeRoot(options.repositoryPath) });
       gitEngine.treeOf = async (revision: string): Promise<string> => {
         if (typeof revision !== "string" || !/^[a-fA-F0-9]{7,40}$/.test(revision)) {
           throw new Error(`Invalid Git revision for tree lookup: ${String(revision)}`);
