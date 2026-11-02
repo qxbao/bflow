@@ -59,3 +59,16 @@ export interface OfficeModel {
   observedAt?: string;
   connection: OfficeConnection;
 }
+
+/** One seated instance. Plain data: JSON round-trips unchanged. */
+export interface SeatEntry {
+  instanceId: string;
+  /** Seat id, e.g. `developer:3`, `annex:5`, `verification:reviewer`, `verification:reviewer:2`. */
+  seat: string;
+}
+
+/** Output of the seat assignment (V2.2). `overflow` counts Developers that no seat could hold. */
+export interface SeatMap {
+  entries: SeatEntry[];
+  overflow: number;
+}
