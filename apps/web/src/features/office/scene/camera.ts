@@ -55,3 +55,12 @@ export function cameraKey(key: string): CameraKey | undefined {
     default: return undefined;
   }
 }
+
+/** Spread ratio that counts as one integer zoom step. */
+export const PINCH_RATIO = 1.4;
+/** Two-pointer zoom: +1 / -1 once the finger spread has grown or shrunk by PINCH_RATIO since `startDist`, else 0. The caller then resets `startDist`. */
+export function pinchStep(startDist: number, dist: number): 1 | -1 | 0 {
+  if (startDist <= 0 || dist <= 0) return 0;
+  const ratio = dist / startDist;
+  return ratio >= PINCH_RATIO ? 1 : ratio <= 1 / PINCH_RATIO ? -1 : 0;
+}

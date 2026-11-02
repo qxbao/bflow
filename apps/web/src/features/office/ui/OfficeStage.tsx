@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { OfficeModel, OfficeTarget } from '../model/types';
-
-// Type-only reference: erased at build, and keeps the boundary test's static-import rule honest.
-type OfficeRenderer = import('../scene/renderer').OfficeRenderer;
+// Type-only: erased at build, so Pixi stays behind the dynamic import below.
+import type { OfficeRenderer } from '../scene/renderer';
 
 /**
  * Hosts the Pixi scene. The renderer module (and Pixi with it) is reached only through a dynamic import, so the Classic
@@ -19,9 +18,10 @@ export function OfficeStage({ model, onSelect, fallback }: { model: OfficeModel;
     const el = host.current;
     if (!el) return;
     let dead = false;
+    const abort = new AbortController();
     const visibility = (): void => renderer.current?.setPaused(document.hidden);
     void import('../scene/renderer')
-      .then(m => m.createOfficeRenderer(el, target => latest.current.onSelect(target)))
+      .then(m => m.createOfficeRenderer(el, target => latest.current.onSelect(target), abort.signal))
       .then(created => {
         if (dead) { created.destroy(); return; }
         renderer.current = created;
@@ -32,6 +32,7 @@ export function OfficeStage({ model, onSelect, fallback }: { model: OfficeModel;
     document.addEventListener('visibilitychange', visibility);
     return () => {
       dead = true;
+      abort.abort();
       document.removeEventListener('visibilitychange', visibility);
       renderer.current?.destroy();
       renderer.current = undefined;

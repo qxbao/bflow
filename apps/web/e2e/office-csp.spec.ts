@@ -8,23 +8,44 @@ test.use({ launchOptions: { ...(process.env.BFLOW_WEB_TEST_BROWSER ? { executabl
 
 const CLIENT = 'dist/client';
 
+type Chunk = { file: string; text: string };
+/** Static edges only: `import"./x.js"`, `import ... from"./x.js"`, `export ... from"./x.js"`. Dynamic `import("...")` is excluded by the paren. */
+const STATIC_EDGE = /(?:^|[;}\s])(?:import|export)\s*(?:[^'"();]*?\bfrom\s*)?["']([^"']+)["']/g;
+const DYNAMIC_EDGE = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
+const resolveFrom = (from: string, spec: string): string => new URL(spec, `http://chunk.invalid/${from}`).pathname.slice(1);
+const edges = (re: RegExp, c: Chunk): string[] => [...c.text.matchAll(re)].map(m => resolveFrom(c.file, m[1]!));
+
 test('classic bundle contains no pixi chunk', async () => {
   const html = await readFile(join(CLIENT, 'index.html'), 'utf8');
-  const entry = /<script[^>]*src="\/(assets\/[^"]+\.js)"/.exec(html)?.[1];
-  expect(entry).toBeTruthy();
+  const rootsFromHtml = [...html.matchAll(/<(?:script|link)\b[^>]*?(?:src|href)="([^"]+\.js)"/g)].map(m => resolveFrom('index.html', m[1]!));
+  expect(rootsFromHtml.length).toBeGreaterThan(0);
+  const files = (await readdir(join(CLIENT, 'assets'))).filter(f => f.endsWith('.js')).map(f => `assets/${f}`);
+  const chunks = new Map<string, Chunk>(await Promise.all(files.map(async file => [file, { file, text: await readFile(join(CLIENT, file), 'utf8') }] as const)));
+  const closure = (starts: string[], withDynamic = false): Set<string> => {
+    const seen = new Set<string>();
+    const queue = [...starts];
+    while (queue.length > 0) {
+      const f = queue.pop()!;
+      const chunk = chunks.get(f);
+      if (!chunk || seen.has(f)) continue;
+      seen.add(f);
+      queue.push(...edges(STATIC_EDGE, chunk), ...(withDynamic ? edges(DYNAMIC_EDGE, chunk) : []));
+    }
+    return seen;
+  };
+  // Pixi chunks are found by content, plus everything reachable (static or dynamic) from a chunk the entry loads through import() whose closure holds Pixi: the lazy scene chunk and its renderer back ends.
+  const marker = (f: string): boolean => chunks.get(f)?.text.includes('pixijs.com') === true;
+  const pixi = new Set(files.filter(marker));
+  expect(pixi.size).toBeGreaterThan(0);
+  const eager = closure(rootsFromHtml);
+  expect(eager.size).toBeGreaterThan(0);
+  const lazyTargets = [...eager].flatMap(f => edges(DYNAMIC_EDGE, chunks.get(f)!));
+  const lazyPixi = lazyTargets.filter(t => [...closure([t], true)].some(marker));
+  expect(lazyPixi.length, 'the entry must reach the scene only through import()').toBeGreaterThan(0);
+  for (const t of lazyPixi) for (const f of closure([t], true)) if (!eager.has(f)) pixi.add(f); // shared code (the entry itself) is legitimately eager
+  const leaked = [...eager].filter(f => pixi.has(f));
+  expect(leaked).toEqual([]);
   expect(html).not.toMatch(/modulepreload/);
-  const entryText = await readFile(join(CLIENT, entry!), 'utf8');
-  const chunks = await readdir(join(CLIENT, 'assets'));
-  const texts = await Promise.all(chunks.filter(f => f.endsWith('.js')).map(async f => [f, await readFile(join(CLIENT, 'assets', f), 'utf8')] as const));
-  // Non-vacuous: Pixi really is in the build, in some other chunk.
-  const pixi = texts.filter(([, t]) => t.includes('pixijs.com'));
-  expect(pixi.length).toBeGreaterThan(0);
-  expect(entryText).not.toContain('pixijs.com');
-  for (const [name] of pixi) {
-    if (name === entry!.slice('assets/'.length)) continue;
-    // The entry may name a Pixi chunk only as a dynamic import(), never as a static import or re-export.
-    expect(entryText).not.toMatch(new RegExp(`(?:^|[;}])\\s*(?:import|export)[^;()]*?from\\s*["'][^"']*${name.replace(/\W/g, '\\$&')}["']`));
-  }
 });
 
 let host: AcceptanceHost;
@@ -44,14 +65,31 @@ test('office renders with zero CSP violations', async ({ page }) => {
   await page.getByLabel('Đường dẫn Git tuyệt đối').fill(host.repository);
   await page.getByRole('button', { name: 'Đăng ký dự án' }).click();
   await page.getByRole('link', { name: /thư viện.*Xem dự án/ }).click();
-  await page.getByRole('button', { name: 'Trực quan' }).click();
+  // Toggle fast, before the first renderer can be ready: overlapping creations must not break the live one.
+  for (const name of ['Trực quan', 'Cổ điển', 'Trực quan', 'Cổ điển', 'Trực quan']) await page.getByRole('button', { name }).click();
   const stage = page.getByLabel('Cảnh văn phòng');
   await expect(stage).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
   const canvas = stage.locator('canvas');
   await expect(canvas).toHaveAttribute('aria-hidden', 'true');
-  // The canvas is not blank: sample it through a screenshot of the element and require more than one colour.
-  const shot = await canvas.screenshot();
-  expect(shot.length).toBeGreaterThan(2000);
+  // The canvas is not blank: decode a screenshot of the element in a blank page and require several distinct colours.
+  await expect(stage.locator('canvas')).toHaveCount(1);
+  const shot = (await canvas.screenshot()).toString('base64');
+  const probe = await page.context().newPage();
+  const colours = await probe.evaluate(async b64 => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d')!;
+    g.drawImage(img, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    const seen = new Set<number>();
+    for (let i = 0; i < d.length; i += 4 * 7) seen.add((d[i]! << 16) | (d[i + 1]! << 8) | d[i + 2]!);
+    return seen.size;
+  }, shot);
+  await probe.close();
+  expect(colours).toBeGreaterThan(8);
   // Leaving and re-entering destroys and rebuilds the renderer on the same cached assets.
   await page.getByRole('button', { name: 'Cổ điển' }).click();
   await expect(page.getByLabel('Cảnh văn phòng')).toHaveCount(0);

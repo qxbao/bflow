@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { KEEP_VISIBLE, cameraKey, clampCamera, fitCamera, panBy, zoomBy } from '../src/features/office/scene/camera';
+import { KEEP_VISIBLE, PINCH_RATIO, cameraKey, clampCamera, fitCamera, panBy, pinchStep, zoomBy } from '../src/features/office/scene/camera';
 import { DESK_CELLS, GRID_H, GRID_W, OBJECT_CELLS, WORLD, cellCentre, seatCell } from '../src/features/office/scene/layers';
 import { DEVELOPER_SEATS, applySeats } from '../src/features/office/model/seats';
 import type { OfficeModel } from '../src/features/office/model/types';
@@ -39,6 +39,22 @@ describe('camera', () => {
     expect(cameraKey('-')).toEqual({ kind: 'zoom', step: -1 });
     expect(cameraKey('0')).toEqual({ kind: 'fit' });
     expect(cameraKey('Enter')).toBeUndefined();
+  });
+});
+
+describe('pinch', () => {
+  test('spreading or closing the fingers gives one integer step past the ratio, otherwise nothing', () => {
+    expect(pinchStep(100, 100 * PINCH_RATIO)).toBe(1);
+    expect(pinchStep(100, 100 / PINCH_RATIO)).toBe(-1);
+    expect(pinchStep(100, 120)).toBe(0);
+    expect(pinchStep(100, 85)).toBe(0);
+    expect(pinchStep(0, 100)).toBe(0);
+    expect(pinchStep(100, 0)).toBe(0);
+  });
+  test('repeated steps compose with zoomBy into bounded integer zoom', () => {
+    let cam = { zoom: 1, x: 0, y: 0 };
+    for (let i = 0; i < 6; i++) cam = zoomBy(cam, pinchStep(100, 200) as 1, { x: 800, y: 450 }, view, WORLD);
+    expect(cam.zoom).toBe(4);
   });
 });
 

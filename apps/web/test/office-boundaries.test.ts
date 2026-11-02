@@ -16,7 +16,7 @@ const RENDERER = join(OFFICE, 'scene/renderer');
 
 type Rule = 'scene' | 'model' | 'ui';
 type Reader = (file: string) => string | undefined;
-type Edge = { kind: 'static' | 'dynamic' | 'computed'; spec: string; names: string[] };
+type Edge = { kind: 'static' | 'dynamic' | 'computed'; spec: string; names: string[]; typeOnly?: boolean };
 type Facts = { edges: Edge[]; hazards: string[] };
 type Violation = { rule: Rule; file: string; reason: string };
 
@@ -79,11 +79,14 @@ function scan(file: string, source: string): Facts {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const bindings = node.importClause?.namedBindings;
       const names = bindings && ts.isNamedImports(bindings) ? namesOf(bindings.elements) : [];
-      edges.push({ kind: 'static', spec: node.moduleSpecifier.text, names });
+      // `import type ...` and `import { type A }` are erased at build: no runtime edge.
+      const clause = node.importClause;
+      const typeOnly = Boolean(clause && (clause.isTypeOnly || (!clause.name && bindings && ts.isNamedImports(bindings) && bindings.elements.length > 0 && bindings.elements.every(el => el.isTypeOnly))));
+      edges.push({ kind: 'static', spec: node.moduleSpecifier.text, names, ...(typeOnly ? { typeOnly } : {}) });
     } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
       const clause = node.exportClause;
       const names = clause && ts.isNamedExports(clause) ? namesOf(clause.elements) : [];
-      edges.push({ kind: 'static', spec: node.moduleSpecifier.text, names });
+      edges.push({ kind: 'static', spec: node.moduleSpecifier.text, names, ...(node.isTypeOnly ? { typeOnly: true } : {}) });
     } else if (
       ts.isImportEqualsDeclaration(node) &&
       ts.isExternalModuleReference(node.moduleReference) &&
@@ -102,6 +105,9 @@ function scan(file: string, source: string): Facts {
       }
       if (ts.isIdentifier(node.expression) && node.expression.text === 'fetch') hazards.push('fetch()');
       if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'fetch') hazards.push('fetch()');
+    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
+      // `import('x').T` as a type query is erased too.
+      edges.push({ kind: 'static', spec: node.argument.literal.text, names: [], typeOnly: true });
     } else if (ts.isPropertyAccessExpression(node)) {
       if (ts.isIdentifier(node.expression) && node.expression.text === 'Date' && node.name.text === 'now') {
         hazards.push('Date.now');
@@ -150,6 +156,8 @@ const RULES: Record<Rule, {
     lazyOk: target => target !== undefined && isRendererModule(target),
     hazards: false,
     blocked: (edge, target) => {
+      // Type-only imports and type queries of the renderer are permitted explicitly; any value import is not.
+      if (edge.typeOnly && target !== undefined && isRendererModule(target)) return undefined;
       if (PIXI_PKGS.some(name => matchesPkg(edge.spec, name))) return 'pixi.js';
       if (edge.kind === 'static' && target !== undefined && isRendererModule(target)) {
         return 'scene/renderer (static)';
@@ -192,6 +200,8 @@ export function collectViolations(read: Reader, roots: Record<Rule, string[]>): 
         if (edge.kind === 'dynamic' && spec.lazyOk?.(target)) continue;
         const reason = spec.blocked(edge, target);
         if (reason) report(reason);
+        // A permitted type-only renderer edge is not followed, or the walk would reach Pixi through erased code.
+        if (rule === 'ui' && edge.typeOnly && target && isRendererModule(target)) continue;
         if (target && !seen.has(target)) {
           seen.add(target);
           queue.push(target);
@@ -239,6 +249,8 @@ describe('features/office import boundaries', () => {
       'features/office/ui/bad-computed.tsx': 'export const load = (p: string) => import(p);',
       'features/office/ui/bad-renderer-index.tsx': "import { idx } from '../scene/renderer/index';\nexport const I = idx;",
       'features/office/ui/bad-lazy-hud.tsx': "export const load = () => import('../scene/hud');",
+      'features/office/ui/ok-type.tsx': "import type { R } from '../scene/renderer';\nimport { type Q } from '../scene/renderer';\nexport type T = import('../scene/renderer').R;\nexport type { R, Q };",
+      'features/office/ui/bad-mixed.tsx': "import { r, type R } from '../scene/renderer';\nexport const x: R = r;",
       'features/office/ui/ok-lazy.tsx': "export const load = () => import('../scene/renderer');",
       'features/office/ui/ok-lazy-index.tsx': "export const load = () => import('../scene/renderer/index');",
     };
@@ -262,6 +274,7 @@ describe('features/office import boundaries', () => {
       'ui features/office/scene/renderer.ts pixi.js',
       'ui features/office/scene/renderer/index.ts pixi.js',
       'ui features/office/ui/bad-computed.tsx computed dynamic import',
+      'ui features/office/ui/bad-mixed.tsx scene/renderer (static)',
       'ui features/office/ui/bad-pixi.tsx pixi.js',
       'ui features/office/ui/bad-renderer-index.tsx scene/renderer (static)',
       'ui features/office/ui/bad-renderer.tsx scene/renderer (static)',
