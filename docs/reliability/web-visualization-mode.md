@@ -1,12 +1,12 @@
 # Bflow Web Visualization Mode — xác nhận ngày 2026-11-02
 
-Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Không push, merge hay tạo PR. Báo cáo gồm source, test cục bộ, phép đo fixture GPU thật và một phiên V9 live bị chặn trước dispatch Developer; chưa có nghiệm thu SDLC đầu-cuối.
+Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Không push, merge hay tạo PR. Báo cáo gồm source, test cục bộ, phép đo fixture GPU thật và các lần V9 live với hai Developer thật; phiên Golden đang được phục hồi sau fault, chưa có nghiệm thu SDLC đầu-cuối.
 
 ## Phạm vi và revision
 
 - Nhánh `agent/web/visualization-mode`, baseline `247faf9c`, HEAD đầu phiên `15cc644bc9eb1353d7ee5651f0ca91f8902724e3`.
 - Đọc plan trong checkout chính, áp phần “Điều chỉnh 2026-11-02” và “Tham chiếu hình ảnh”; giữ Three.js thuần `0.187.0`, CSP, Classic mặc định và token tối trong `.office-3d`.
-- Hai bản sửa sau xác nhận: projection chỉ đọc không gán identity cũ sang agent mới theo role và không khớp identity sai role; stage abort và hủy renderer trả về muộn sau context-loss. Không thêm điều phối hay quyền Runtime, không đổi hợp đồng.
+- Hai bản sửa Web sau xác nhận: projection chỉ đọc không gán identity cũ sang agent mới theo role và không khớp identity sai role; stage abort và hủy renderer trả về muộn sau context-loss. Hai bản sửa Web không thêm điều phối/quyền Runtime hay đổi hợp đồng; các sửa CLI/Runtime được owner mở phạm vi sau đó ghi riêng ở phần V9.
 - Không sửa `AGENTS.md` hay `docs/guide/**`. Bộ GLB vẫn là tài nguyên khởi đầu, còn việc chốt bộ cuối/giấy phép trước phát hành.
 
 ## Xác nhận đúng tại 15cc644b
@@ -66,56 +66,59 @@ Hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo đư
 
 Re-review bản sửa: xem ledger; review độc lập vẫn mở đến khi có quota Sonnet/Haiku.
 
-## V9 — đã chạy thật, chưa nghiệm thu đầu-cuối
+## V9 — phiên live Golden đang tiếp tục
 
-Source chạy: `e44b451f`; Herdr `0.9.5`, protocol 22; Codex `0.166.0`, profile `personal`, model **GPT-6-Luna** cho toàn bộ role. Conversation/Planner/Specifier/Developer effort `low`; Coordinator/Architect/Reviewer/QA `medium`; `maxConcurrency=2`. Đây chỉ là phạm vi một provider.
+Chủ dự án đã bỏ phép so thời gian với Classic; không chạy Classic và không tính mục này là thiếu nghiệm thu. Tất cả thao tác nghiệp vụ tạo việc, làm rõ, xem/duyệt thiết kế và phục hồi công việc dùng panel trong 3D. Lệnh CLI chỉ phục vụ quan sát telemetry và vận hành/phục hồi phiên. Không sửa journal live hay gọi API ghi thay cho UI.
 
-- Named session: `bf-3faa1d4b158d16b5d0ea`.
-- Run: `run-web-f21b68bf-e49d-442a-acec-a3de32e2107f`.
-- Repo dùng một lần, HOME/BFLOW_HOME/Herdr/XDG riêng ở `/tmp/bfo-v9-9r739p5a`. Chạy binary build từ worktree. Không chạy setup với HOME thật.
-- Thời gian chiến dịch từ bấm tạo yêu cầu đến manifest down: 10:23:36–10:41:37 UTC, 1081 giây. Bao gồm các lần bị chặn và thời gian điều tra/điều khiển; **không phải thời gian hoàn thành workflow**. Chưa có phép so Classic.
+Herdr `0.9.5`, protocol 22; Codex `0.166.0`, profile `personal`, **gpt-6-luna** cho toàn bộ role, `maxConcurrency=2`. Golden: Coordinator effort `high`, Reviewer `medium`, các role khác `low`. Đây chỉ là phạm vi một provider. Cấu hình specialist `required=false` không giảm topology: vẫn có bảy pane thường trực; không tuyên bố chỉ chạy bốn pane.
 
-### Việc đã chứng minh bằng phiên thật
+HOME/BFLOW_HOME/Herdr/XDG cô lập tại `/tmp/bfo-v9-9r739p5a`, dùng CLI build từ worktree. Hook trust được owner cho phép riêng trong kho approval V9, ghi/thu hồi bằng public API; không sửa approval hoặc hook dùng chung. Policy đang được giữ vì session Golden vẫn up và chưa thể teardown an toàn; phải thu hồi bằng public API sau khi dừng được phiên.
 
-1. Khắc phục preflight cũ bằng đường dẫn local ngắn và `bflow skills sync --provider codex --allow-machine-scope` với exact pin; doctor exit 0 / healthy. Không phát lại bước tool install GitNexus từng bị gián đoạn.
-2. Khởi động Web thật qua PTY; ghép nối, đăng ký repo, chọn 3D, khởi động phiên, tạo yêu cầu, gửi làm rõ, chỉnh yêu cầu và duyệt đặc tả đều qua component HTML trong panel 3D. Không gọi API ghi thay cho thao tác UI, không sửa journal.
-3. Hook symlink của `personal` bị preflight chặn. Chủ dự án **đã cho phép** policy hook chỉ trong kho V9 cô lập. Policy được ghi bằng public API vào `/tmp/bfo-v9-9r739p5a/b/state`, không ghi approval store dùng chung. Runtime sau đó kích hoạt 7 role thật. Đã đọc terminal Coordinator thấy `GPT-6-Luna medium` và các cuộc gọi MCP thật. Herdr idle/done không được dùng làm bằng chứng thành công.
-4. Có ít nhất năm mốc đủ DOM mirror + workforce + manifest + `bflow status <run-id> --telemetry`: `m1-intake`, `m2-browser-reload`, `m3-server-restart`, `m5-plan-drift`, `m6-after-resume`. Workforce/manifest cùng 7 identity; DOM cùng bảy nhãn vai trò. `m4-request-revised` chỉ có telemetry/manifest, không tính là bộ đối chiếu DOM đầy đủ. **Chưa có Developer nào** ở các mốc này.
-5. Chủ động reload trang giữa phiên; 3D vẫn dùng cho thao tác nghiệp vụ. Chủ động SIGINT rồi mở lại riêng Web owner, Runtime host vẫn sống; dùng pairing mới trở về đúng run, không gửi lại create. Locator chờ một câu offline trong harness không khớp câu UI và timeout, nên không ghi assertion thông báo offline là PASS; log kết nối bị cắt/refused và phục hồi run được giữ.
-6. Runtime nhận đặc tả full, TDD required, hai task `parse-duration` và `format-duration`, `dependencies=[]`, ownedPaths tách biệt. Gói thiết kế được đọc và duyệt qua Web 3D. Đây là **phê duyệt thiết kế**, chưa phải phê duyệt bàn giao.
+### Các lần trước và blocker đã xử lý
 
-Một lần driver bị chờ locator không có timeout đã được khởi động lại; Web/Runtime không đổi. Browser mới dùng bootstrap mới từ owner reuse; không phát lại bootstrap một lần đã dùng. Các lỗi điều khiển này ghi riêng, không coi là lỗi provider hay bằng chứng acceptance.
+| Run / source | Kết quả có bằng chứng |
+| --- | --- |
+| `f21b68bf` / `e44b451f` | Full SDD/TDD required, năm mốc đối chiếu; drift trước Developer dispatch. Reload trang và restart riêng Web owner phục hồi đúng run. |
+| `fa604881` / `ea2effaf` | Hai Developer thật đồng thời working. Fixture thiếu thư mục cha làm cả hai bị chặn trước fault pane, nên không quy lỗi cho recovery. Đã cancel qua UI. |
+| `94bb021c` / `ea2effaf` | Red/Green/Refactor thật, một task qua gate độc lập; task còn lại bị test frozen mâu thuẫn TypeError/RangeError. Giữ blocked, không sửa/waive test. |
+| Golden `12b3147a` / `8b7ada8b` → `b6a1b543` | Hai task số học với test phẳng cố định; cả hai có authenticated succeeded result, triple qua independent gate. Double kẹt writer sau đóng pane; đang phục hồi cùng checkpoint bằng bản sửa được owner duyệt. |
 
-### Blocker live được tái hiện
+CLI native trust drift được sửa tại `ea2effaf`, follow-up an toàn `8b7ada8b`: chỉ chuẩn hóa read-only bảng trust Bflow tạo khi có Git receipt/backlink đúng, giữ mọi nội dung model/quyền/hook khác trong digest. Sonnet scoped re-review **APPROVE**. Full CLI clean-env **1166 PASS / 7 SKIP**; targeted cuối **31 PASS**, deps/typecheck/build PASS. Không thay schema, lockfile hay root config. Giới hạn fail-closed/coverage xem review trong ledger.
 
-**B1 — mixed criteria bị từ chối ở cấp workflow.** Host gọi `HostVerification.assertSupported` trên toàn bộ spec trước per-task checks; `host-verification.ts:433` từ chối khi có cả `manual_review` và behavioral criteria dù thông báo yêu cầu tách task. Yêu cầu sandbox được chỉnh công khai qua `revise_request`: chỉ tiêu chí chức năng thư viện/README dùng unit test; điều kiện hai Developer thật, Reviewer/QA và human approval vẫn giữ trong ràng buộc chiến dịch. Không đổi Runtime, không waive tiêu chí hay tắt gate. Revision 3 qua admission.
+### Run Golden cần theo dõi
 
-**B2 — native Codex workspace trust tự gây execution-plan drift.** Sau duyệt thiết kế, Runtime tạo worktree parse đầu tiên rồi escalates trước dispatch: `ExecutionPlanDriftError`, component `inputs.native-profile-settings-119`. Không có message `task.assignment` và không có Developer pane.
+- Repo: `/tmp/bfo-v9-9r739p5a/repo-golden`.
+- Session: `bf-84d92b8752a8f6103dec`.
+- Run: `run-web-12b3147a-8411-4f65-b020-76f3c9bb0fdc`.
+- Hai task `double-task`, `triple-task`, không phụ thuộc nhau, source tách biệt; owner-provided test ở baseline gồm bảy cặp input/output mỗi hàm. QA chạy Red thật rồi mới authorize implementation; Green/Refactor chạy thật. Không dùng baseline self-check làm independent evidence.
+- Các bộ checkpoint `n2-design`, `n3-implementation`, `n4-verifying`, `n5-writer-blocked` có DOM mirror/workforce/manifest/telemetry. `n1-intake` chưa đủ DOM/workforce, không tính đủ năm mốc.
+- Fault lúc `2026-11-02T13:42:38.802912Z`: đóng pane Developer `w2:p2` sau khi `implementation.submitted` của double được persist received, trước writer settlement/verification. Đây là fault tại durable handoff boundary, không phải phục hồi giữa lúc chỉnh code. Message `b6fd1273-7dfb-4eb1-b002-2f5a77aca3c3`.
 
-Đối chiếu read-only chứng minh:
+### Runtime writer-stop: sửa hẹp được owner cho phép
 
-- Nguồn là `personal/home/.codex/config.toml`, được `apps/cli/src/execution-preview.ts` ghim toàn bộ bytes.
-- `packages/agent-providers/src/codex-trust.ts` thêm bảng trust cho worktree mới theo opt-in `trustedWorkspace` của repo. Không phải agent điều tra tự sửa file để vượt prompt.
-- Hash đã chấp nhận: `94082083500da5eec62ac4d18687c379abfc17cd8ec62c0964390c5644ad14b3`.
-- Hash sau tạo trust: `6cba0abb128c2430bbb1929097a2175061fa334966900b9426ffea37912ca28b`.
-- Loại riêng bảng trust vừa sinh và newline phân cách **trong bộ nhớ** khôi phục chính xác hash đã chấp nhận; không ghi file native. Bằng chứng `plan-drift-root-cause.json`.
-- `bflow task preview --run <id> --json` exit 0; sau đó nút **Tiếp tục** vẫn lặp đúng drift. Giữ guard, không sửa trạng thái/receipt và không tự rebind kế hoạch.
+Normal successful completion trước đây chỉ chờ pane ready/matching, nên pane đã mất khiến writer giữ mãi dù result xác thực. Run escalated; checkpoint `down --yes` thành công, không cancel run hay tạo fixture mới.
 
-Cần quyết định owner mở phạm vi sửa CLI và test hồi quy cho B2. Hướng dự kiến: phân biệt đúng phần trust Bflow tạo cho worktree đã xác minh với thay đổi cấu hình model/quyền/hook của người dùng; không loại toàn bộ native config khỏi guard. Chưa có implementation sửa B2.
+Commit `b6a1b543` chỉ dùng capability `stopDeveloperExecutionScope` hiện hữu khi health xác nhận đúng pane đã mất. Binding phải thuộc exact execution; proof phải parse đúng Linux namespace, handle và thời điểm. Process-scope manager seal/stop và persist proof trước metadata-only release. Uncertain delivery giữ allocation/lease; thiếu/sai proof hoặc lỗi stop giữ writer. Busy/unknown/replacement không bị stop. Evidence, lease/fence, independent Reviewer/QA và human gates giữ nguyên.
 
-### Những tiêu chí V9 chưa đạt
+Regression ban đầu RED→GREEN; **83 test liên quan PASS**. Sau một vòng Sonnet finding/fix/re-review, **11 test hẹp PASS**, typecheck/build/diff-check PASS; Sonnet không thấy Critical/Important mới. Test thêm mất acknowledgement sau metadata release rồi restart/tick và stop throw. Test native unknown delivery chạy rào cản top-level; guard outbound tường minh chưa có test nhánh riêng. Lỗi stop hiện dùng thông điệp fail-closed chung. Kiểm chứng live sau resume đã ghi proof `linux_pid_namespace` đúng double execution `a9212c69-6483-40b7-9259-719c959c4511` lúc `14:26:39.133Z`; writer được nhả, changeSet thu được và verification độc lập bắt đầu. Đây là chứng cứ live cho phạm vi fault này, riêng test unit vẫn dùng fake ports.
 
-- Hai Developer thực thi song song: **chưa đạt**, zero task assignments.
-- Đóng một pane Developer khi đang chạy: **chưa thực hiện**, chưa có pane phù hợp.
-- Truy vết mọi cue đã vẽ tới handoffId: **chưa đủ**; có log workforce/receipts thật nhưng chưa có audit từng cue hiển thị.
-- Verification/integration và phê duyệt bàn giao: **chưa đến**.
-- So thời gian hoàn tất với Classic: **chưa có**.
+### Phần còn lại của Golden
 
-### Teardown và giữ bằng chứng
+Live exact stop proof đã xác nhận. Sau đó Reviewer duyệt double; QA từ chối vì thiếu behavioral observation lúc review dù host behavioral auto-unit chạy 1/1 PASS đúng candidate ở bước sau. Runtime giữ gate và mở rework; Developer đã nộp lại kết quả, chưa có verdict cuối. Không can thiệp sửa test hay buộc gate pass. Cycle2 bị Reviewer/QA từ chối: Developer chỉ đổi thứ tự toán hạng và chưa chứng minh repair cho finding. Host behavioral auto-unit vẫn PASS đúng candidate `cebc7cbc3b9a54c75a091e10f7976607327ff7c9`. Rework generation2 Developer báo blocked, chưa có authenticated result; Coordinator đã xác nhận mâu thuẫn evidence/aggregate. Trạng thái run có thể chuyển escalated → implementing theo auto-resume có giới hạn, chưa phải tiến triển hay thành công.
 
-Đã dừng phiên bằng SessionActions trong 3D theo luồng checkpoint thông thường: manifest `down`, named Herdr `not_running`; run escalated và một worktree vẫn được giữ. Đã thu hồi policy hook V9 bằng public API (`policiesRemaining=0`), dừng riêng Web/Chrome/observer của chiến dịch. Không đụng phiên khác, không xóa ledger hay worktree. Bảng trust native do Bflow tạo được giữ làm bằng chứng, không tự sửa ngược cấu hình dùng chung.
+Sáu mốc `n2`–`n7` khớp instance IDs workforce/manifest, nhãn/số nhân viên DOM (Developer đánh số theo `boundAt`) và telemetry đúng run. `n1` không đủ. Timestamp riêng mỗi nguồn được giữ; các snapshot là quan sát gần nhau, không phải transaction nguyên tử.
 
-Snapshot/log đã sao chép vào ledger `v9-live/evidence/`; không sao chép bootstrap, cookie hay browser storage. Các thử setup trước đó vẫn giữ riêng trong `v9-preflight/`.
+Reload trang giữa verification giữ nguyên URL run và 3D. Restart riêng Web owner ghi nhận UI đang kết nối lại/dữ liệu có thể cũ; Runtime vẫn sống. Sau pairing mới phục hồi đúng run và mode. Một lần driver chuyển URL quá sớm hủy bootstrap khiến hết phiên; sửa harness chờ bootstrap POST 200 rồi mới điều hướng, không phát lại mã cũ hay nghiệp vụ.
+
+Audit 101 cue accepted-walk đã capture (54 handoff IDs duy nhất) khớp receipt outbox accepted/released/trusted delivery hoặc inbox applied. ArtifactReference `evidence` không phải receipt vận chuyển nên không dùng việc array rỗng để kết luận thiếu receipt. Wrapper có khoảng trống lúc bootstrap/reload, không capture desk indicators; chưa tuyên bố bao phủ mọi cue toàn phiên.
+
+Còn double independent gate, workflow integration/verification và duyệt bàn giao. Chưa tuyên bố V9 đạt.
+
+Đã chuẩn bị đề xuất read-only evidence packet trong ledger `v9-review-evidence-proposal.md`, đang chờ owner mở phạm vi mới vì quyền Runtime vừa cấp chỉ bao gồm writer-stop. Chưa sửa thêm production logic. Phải phân biệt `sourceRevision` của candidate với `testRevision` frozen; không lấy self-check thay independent evidence hay ép Reviewer/QA đổi verdict.
+
+Lệnh checkpoint `down --yes` sau blocker mới **exit 1**: guard báo Developer chưa có correlated result, không dừng gì. Không dùng `--force` hoặc cancel để làm đẹp teardown vì sẽ mất attempt hiện tại. Session vẫn **up**, worktrees/run được giữ nguyên; scoped hook policy chưa revoke khi session còn up. Đây là giới hạn teardown thực tế, không ghi là đã checkpoint thành công. Web/Chrome/observer chiến dịch được giữ cho cùng-run continuation; không đụng process của người dùng. Thời gian run gồm cả điều tra/sửa và downtime, không phải benchmark thời gian hoàn tất.
+
+Bằng chứng gốc ở `/tmp/bfo-v9-9r739p5a/golden-attempt/evidence/`, các snapshot chiến dịch cũ trong ledger `v9-live/`, `v9-fixed-live/`. Không sao chép bootstrap/cookie/browser storage vào báo cáo.
 
 ## Nơi giữ bằng chứng và ruling
 
@@ -128,6 +131,9 @@ Ledger ngoài Git (không xóa): `.superpowers/sdd/2026-11-02-web-visualization-
 - `verification-15cc644b/`: các log gốc, error index, kết quả đo JSON và machine context.
 - `resume-F1-red.log`, `resume-F1-green.log`, `resume-F2-red.log`, `resume-F2-green.log`: chứng cứ hồi quy.
 - `verification-final/`: xác nhận sau đợt sửa.
-- `v9-preflight/`: các thử preflight cũ; `v9-live/`: doctor/skills readiness và bằng chứng live, blocker, checkpoints, teardown.
+- `v9-preflight/`: preflight cũ; `v9-live/`, `v9-fixed-live/`: các chiến dịch trước.
+- `v9-golden-live/evidence/`: Golden checkpoints, concurrent Developer tool witness, fault/recovery, exact writer-stop proof, cue/receipt audit, evidence contradiction và lỗi teardown.
+- `writer-stop-{sonnet-review,sonnet-rereview}.md`, `writer-stop-checks/`, `writer-stop-review-green-final.log`: scoped review và kiểm chứng sửa Runtime.
+- `v9-review-evidence-proposal.md`: phạm vi sửa tiếp theo đang chờ owner quyết định.
 
 Ruling mới: giữ ledger theo lệnh owner; timeout 240s là trần test tổng; không đổi screenshot khi chưa tái hiện flaky; không thay review độc lập bằng self-review/quota fallback; không gọi phép đo fixture hay catalog access là live acceptance. Chi phí: còn gate review, full suite và V9 trước khi owner quyết định merge/phát hành.
