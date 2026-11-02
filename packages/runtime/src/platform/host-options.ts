@@ -4,7 +4,7 @@ import { ProviderFailoverPolicySchema } from "@bflow/contracts";
 import {
   WorkflowPackSchema, SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
   NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema,
-  RepositoryToolPolicySchema, ResolvedToolGrantSchema, RoleProfilePinSchema, RoleProfileCatalogSchema, ROLE_PROFILE_FEATURE,
+  RepositoryToolPolicySchema, ResolvedToolGrantSchema, RuntimeHttpPolicySchema, RuntimeHttpGrantSchema, RoleProfilePinSchema, RoleProfileCatalogSchema, ROLE_PROFILE_FEATURE,
   sameRoleProfilePin
 } from "@bflow/contracts";
 
@@ -81,6 +81,9 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   toolPolicy: RepositoryToolPolicySchema.optional(),
   /** Host-resolved grants bound to exact roles, operations and session scope. */
   toolGrants: z.array(ResolvedToolGrantSchema).optional(),
+  /** Direct host HTTP authority is separate from provider/Gateway grants. */
+  runtimeHttpPolicy: RuntimeHttpPolicySchema.optional(),
+  runtimeHttpGrants: z.array(RuntimeHttpGrantSchema).max(1).optional(),
   /** Trusted machine service resource keys; never supplied by role tool arguments. */
   exclusiveMcpResources: z.record(IdentifierSchema, IdentifierSchema).optional()
 }).strict().superRefine((options, ctx) => {

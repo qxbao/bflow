@@ -7,6 +7,8 @@ import {
   selectedProfileName
 } from "./platform-resolution.js";
 export { configuredPlatformRoles, resolveRepositoryToolPolicy, selectedProfileName };
+import { resolveRuntimeHttpPolicy, resolveRuntimeHttpGrant } from "./runtime-http-policy.js";
+export { resolveRuntimeHttpPolicy, resolveRuntimeHttpGrant };
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgenticHostPlatformOptions, HostPrepareResponse, PlatformRoleOption } from "@bflow/runtime";
@@ -213,6 +215,9 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
   if ((environment.requiredMcpServices?.length ?? 0) > 0)
     throw new Error(`Legacy environment.requiredMcpServices cannot be safely mapped to role operations; migrate each service to environment.toolPolicy with explicit role and operation allowlists (services: ${environment.requiredMcpServices!.join(", ")}).`);
   const toolPolicy = resolveRepositoryToolPolicy(input, deps.context.machineId);
+  const runtimeHttpPolicy = resolveRuntimeHttpPolicy(input, deps.context.machineId);
+  const runtimeHttpGrant = resolveRuntimeHttpGrant(runtimeHttpPolicy, { machineId: deps.context.machineId, repositoryId: input.repository.id,
+    workspaceRoot: input.repository.root, sessionId: input.repository.sessionName });
   const serviceReadiness = new Map(deps.context.serviceReadiness ?? []);
   if (environment.deepwiki?.enabled !== false && !serviceReadiness.has(DEEPWIKI_SERVICE_ID) && deps.deepwikiReady !== undefined)
     serviceReadiness.set(DEEPWIKI_SERVICE_ID, { status: deps.deepwikiReady ? "ready" : "blocked",
@@ -245,6 +250,8 @@ export async function buildHostPlatformOptions(input: EnvironmentCompositionInpu
     ...(resolution.roleProfiles.length ? { roleProfiles: resolution.roleProfiles } : {}),
     ...(toolPolicy ? { toolPolicy } : {}),
     ...(toolGrants.length ? { toolGrants } : {}),
+    ...(runtimeHttpPolicy ? { runtimeHttpPolicy } : {}),
+    ...(runtimeHttpGrant ? { runtimeHttpGrants: [runtimeHttpGrant] } : {}),
     exclusiveMcpResources: Object.fromEntries((deps.context.mcpServices ?? []).map(raw => MCPServiceDefinitionSchema.parse(raw))
       .filter(service => toolGrants.some(grant => grant.serviceId === service.serviceId) && service.tool.resource.sharing === "exclusive")
       .map(service => [service.serviceId, service.tool.resource.sharing === "exclusive" ? service.tool.resource.resourceKey : ""])),

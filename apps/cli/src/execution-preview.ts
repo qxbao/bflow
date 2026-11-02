@@ -9,6 +9,7 @@ import type { EnvironmentCompositionInput } from './environment.js';
 import { identifyRepository } from './repository.js';
 import { readEnvironmentConfig } from './environment-config.js';
 import { resolveIsolatorStateRoot, configuredPlatformRoles, resolveRolePlatformOption, selectedProfileName, resolveRepositoryToolPolicy, resolveToolGrants, projectRecordedServiceReadiness } from './platform-options.js';
+import { resolveRuntimeHttpPolicy } from './runtime-http-policy.js';
 import { SUPPORTED_CLI_COMMANDS } from './command-reference.js';
 import type { AgenticHostPlatformOptions } from '@bflow/runtime';
 import { resolvePlatformConfiguration, rolePreferenceConstraints } from './platform-resolution.js';
@@ -30,6 +31,7 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
         platform = isolatedPlatformProfile(platform, resolve(host.env.BFLOW_HOME));
     const skills = await loadMachineSkillCatalog(input);
     const policy = resolveRepositoryToolPolicy(input, platform.machineId);
+    const runtimeHttpPolicy = resolveRuntimeHttpPolicy(input, platform.machineId);
     const decisions: PlanDecision[] = [...resolution.decisions];
     const blockers: ExecutionPlanInput['blockers'] = [...resolution.blockers];
     const observations: PlanObservation[] = [];
@@ -235,6 +237,7 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
         }
     }
     const requirements = policy?.requirements ?? [];
+    const toolPolicyFingerprintInput = runtimeHttpPolicy ? { requirements, runtimeHttpPolicy } : requirements;
     const requiredTools = requirements.filter(item => item.requiredness === 'required').map(item => item.toolId);
     if (!decisions.some(item => item.field === 'tools.required'))
         decisions.push(resolvePlanField({ field: 'tools.required', candidates: [{ source: source('environment.toolPolicy'), value: requiredTools }] }));
@@ -263,7 +266,7 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
     if (!decisions.some(decision => decision.field === 'capabilities.required'))
         decisions.push(resolvePlanField({ field: 'capabilities.required', candidates: [{ source: { kind: 'builtin', locator: 'preflight' }, value: requiredCapabilities }] }));
     const governance = { sdd: input.config.environment.sdd, tdd: input.config.environment.tdd, verification: input.config.environment.verification, fastPath: input.config.environment.fastPath, permissions: input.config.environment.permissions ?? {} };
-    return ExecutionPlanInputSchema.parse({ schemaVersion: 3, resolverVersion: EXECUTION_RESOLVER_VERSION, policyVersion: 'bflow-host-1', repository: { revision, dirtyDigests }, components: { configuration: canonicalPlanDigest({ roles: input.config.environment.roles, skills: input.config.environment.skills ?? {}, governance }), ownerVerification: canonicalPlanDigest(ownerVerification), profiles: canonicalPlanDigest(resolution.roleProfiles.length ? { native: profileProjection, specialists: resolution.roleProfiles } : profileProjection), skills: canonicalPlanDigest(skills.definitions.map(item => ({ skillId: item.skillId, version: item.version, digest: item.digest }))), toolPolicy: canonicalPlanDigest(requirements), workflow: canonicalPlanDigest(input.config.defaultWorkflow) }, decisions, observations, mode: 'intake', pack: resolution.pack, policy: { gates: [...defaultHostChecks({ verification: input.config.environment.verification }).map(gate => gate.id), ...appGateIds], tdd: 'unresolved', alternativeVerification: [], requiredTools, requiredCapabilities, explanations: intakePolicyExplanations(appGateIds.length > 0, input.config.environment.sdd.approvalRequired) }, blockers, unknowns: ['specification_unresolved', 'accepted_workflow_unresolved', 'task_dag_unresolved', 'provider_readiness_not_checked', 'cost_and_dynamic_allocations_unresolved'], approvalPoints: ['specification_design_approval_if_required', 'governed_scope_or_policy_change', 'git_integration_if_required'] });
+    return ExecutionPlanInputSchema.parse({ schemaVersion: 3, resolverVersion: EXECUTION_RESOLVER_VERSION, policyVersion: 'bflow-host-1', repository: { revision, dirtyDigests }, components: { configuration: canonicalPlanDigest({ roles: input.config.environment.roles, skills: input.config.environment.skills ?? {}, governance }), ownerVerification: canonicalPlanDigest(ownerVerification), profiles: canonicalPlanDigest(resolution.roleProfiles.length ? { native: profileProjection, specialists: resolution.roleProfiles } : profileProjection), skills: canonicalPlanDigest(skills.definitions.map(item => ({ skillId: item.skillId, version: item.version, digest: item.digest }))), toolPolicy: canonicalPlanDigest(toolPolicyFingerprintInput), workflow: canonicalPlanDigest(input.config.defaultWorkflow) }, decisions, observations, mode: 'intake', pack: resolution.pack, policy: { gates: [...defaultHostChecks({ verification: input.config.environment.verification }).map(gate => gate.id), ...appGateIds], tdd: 'unresolved', alternativeVerification: [], requiredTools, requiredCapabilities, explanations: intakePolicyExplanations(appGateIds.length > 0, input.config.environment.sdd.approvalRequired) }, blockers, unknowns: ['specification_unresolved', 'accepted_workflow_unresolved', 'task_dag_unresolved', 'provider_readiness_not_checked', 'cost_and_dynamic_allocations_unresolved'], approvalPoints: ['specification_design_approval_if_required', 'governed_scope_or_policy_change', 'git_integration_if_required'] });
 }
 /** Policy provenance for intake: values come from host policy/project config; TDD waits for an accepted specification. */
 function intakePolicyExplanations(ownerGates: boolean, approvalRequired: boolean): ExecutionPlanInput['policy']['explanations'] {
