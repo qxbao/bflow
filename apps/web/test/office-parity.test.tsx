@@ -133,10 +133,12 @@ const rows: Row[] = [
     expect(await inMain().findByLabelText('Tên công việc')).toBeTruthy();
     expect(inMain().getByRole('button', { name: 'Tạo công việc' })).toBeTruthy();
   } },
-  { row: 12, name: 'intake clarification in Overview', note: 'No counter badge exists in the HUD; the Overview panel hosts the ClarificationForm', go: async () => {
+  { row: 12, name: 'intake clarification in Overview', note: 'The Tổng quan button carries a badge; the Overview panel hosts the ClarificationForm', go: async () => {
     const intake = { intakeId: 'intake', sessionId: 'host-session', correlationId: 'corr', title: 'Tìm sách nhanh', status: 'clarifying', clarifications: [{ questionId: 'scope', question: 'Cần tìm theo trường nào?', options: ['Tên sách'], expectedVersion: version }], updatedAt: now };
     mount('/projects/p', { '/api/v1/projects/p/session': { ...ready, pendingIntakes: [intake] } });
-    await rail('Tổng quan');
+    const nav = await screen.findByRole('navigation', { name: 'Lối tắt' });
+    await waitFor(() => expect(nav.textContent).toContain('Câu hỏi chờ trả lời: 1'));
+    await rail(/^Tổng quan/);
     expect(await inMain().findByText('Cần tìm theo trường nào?')).toBeTruthy();
     expect(inMain().getByRole('button', { name: 'Gửi câu trả lời' })).toBeTruthy();
   } },
@@ -262,15 +264,14 @@ const rows: Row[] = [
     fireEvent.click(await inMain().findByRole('link', { name: /Tìm sách nhanh hơn/ }));
     expect(await inMain().findByText(/Trò chuyện qua web chưa sẵn sàng/)).toBeTruthy();
   } },
-  { row: 29, name: 'connection state is shown in the HUD pill', note: 'The HUD has its own pill text; Classic ConnectionBanner is not rendered in 3D', go: async () => {
+  { row: 29, name: 'connection state is shown in the HUD pill', note: 'The HUD pill uses the ConnectionBanner wording', go: async () => {
     const api = mount();
     const pill = await screen.findByLabelText('Trạng thái văn phòng');
     await waitFor(() => expect(api.handlers.has('open')).toBe(true));
     api.handlers.get('open')!(new Event('open'));
-    await waitFor(() => expect(pill.textContent).toContain('Đã kết nối'));
+    await waitFor(() => expect(pill.textContent).toContain('Trực tiếp: đã kết nối'));
     api.handlers.get('error')!(new Event('error'));
-    await waitFor(() => expect(pill.textContent).toContain('Đang kết nối lại'));
-    expect(screen.queryByText(/Trình duyệt: đang kết nối lại/)).toBeNull();
+    await waitFor(() => expect(pill.textContent).toContain('Trình duyệt: đang kết nối lại'));
   } },
   { row: 30, name: 'reload data: the rail button re-reads', go: async () => {
     const api = mount();

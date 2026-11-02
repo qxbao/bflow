@@ -1,14 +1,18 @@
-# ADR 0008 — D-WEB-03: web workforce projection and Pixi visualization dependency
+# ADR 0008 — D-WEB-03: web workforce projection and three.js visualization dependency
 
-Status: **ACCEPTED by project owner** (2026-11-02). The owner approved D-WEB-03,
-the exact dependency `pixi.js` 8.22.0 for `apps/web`, the limit of pixel-art
-styling to the canvas, and that Classic remains the default view. No approver
-name or verbatim approval wording is recorded here. Schema freeze occurs only at
-the verified integration commit identified in the implementing handoff.
+Status: **ACCEPTED by project owner** (2026-11-02). The owner approved D-WEB-03
+and that Classic remains the default view. The same day the owner changed the
+visualization direction from isometric pixel art on PixiJS to a stylized 3D
+low-poly office, and approved the exact dependency `three` 0.187.0 for
+`apps/web` (see "Amendment 2026-11-02: 3D direction" below, which supersedes
+the Pixi sections). No approver name or verbatim approval wording is recorded
+here. Schema freeze occurs only at the verified integration commit identified in
+the implementing handoff.
 
 Nothing in this ADR is live-verified. It records a design decision and its
-compatibility rules. No Herdr, Chrome, browser, or provider evidence exists for
-the Workforce view or the Pixi canvas at the time of writing.
+compatibility rules. The Workforce view and the 3D scene have source and local
+test evidence only (fixtures, SwiftShader and one local hardware GL run of a
+measurement script); no Herdr or provider evidence exists for them.
 
 Inputs: the supplied planning sections `section-4.1-data.md` (§4.1 and §4.2) and
 `section-3.3-tech.md` (§3.3) under
@@ -27,7 +31,7 @@ strict and carry no per-role transport state, so the Web UI cannot show it
 that such a field needs an additive contract decision).
 
 This ADR adds two read-only projections, a Workforce view and a run activity
-view, and one optional dependency for the Visualization Mode canvas. The domain
+view, and one optional dependency for the Visualization Mode scene. The domain
 name is `Workforce`, not `Office`: contracts must not contain presentation
 concepts, and the Classic view may reuse the same data.
 
@@ -42,7 +46,7 @@ Affected owners:
   the projection fingerprint in `packages/runtime/src/agentic/host.ts`
   (`webProjectionFingerprint`).
 - **Local Server**: two read-only GET routes and the client adapter methods.
-- **Web**: Visualization Mode in `apps/web`, the `pixi.js` dependency, and the
+- **Web**: Visualization Mode in `apps/web`, the `three` dependency, and the
   degraded tier when the Workforce view is unavailable.
 - **E2E fixtures**: the CSP test and the bundle-separation test described below.
 
@@ -147,7 +151,11 @@ it, a change in work assignment does not produce an `invalidate` event. Every
 time field that changes between snapshots must sit under `observedAt`, so the
 existing `stable()` normalization removes it from the fingerprint.
 
-## Decision: Pixi visualization dependency (amends ADR 0006)
+## Decision: Pixi visualization dependency (amends ADR 0006) — SUPERSEDED
+
+> Superseded the same day by the 3D direction. `pixi.js` was never shipped: the
+> amendment below replaces it with `three` 0.187.0. This section is kept as the
+> original decision record; none of its Pixi rules apply.
 
 ADR 0006 lists the pinned frontend set. This ADR adds one entry to it:
 
@@ -210,8 +218,9 @@ Further conditions:
   `webProjectionFingerprint` addition. The Web UI then uses the degraded tier.
 - The additive schemas may be left in place as unused exports, or removed in the
   same change. No persisted data refers to them.
-- Remove `pixi.js` from `apps/web/package.json`. The integrator regenerates the
-  lockfile. Classic is unaffected because the Pixi chunk is loaded lazily.
+- Remove `three` and `@types/three` from `apps/web/package.json`. The integrator
+  regenerates the lockfile. Classic is unaffected because the scene chunk is
+  loaded lazily.
 - No data needs to be reverted: the feature stores nothing.
 
 ## Activity log (v1): diagnostic and possibly incomplete
@@ -226,8 +235,84 @@ or completion decisions.
 
 - This ADR does not create a `TddDecision`. Each implementation task sets its
   own, under the existing SDD and TDD policy.
-- The `csp-office` Playwright test and the Classic bundle-separation test are
-  required gates for the Pixi change. Neither has been run.
+- The `office-csp` Playwright spec (zero CSP violations, Classic bundle holds no
+  three.js chunk) is a required gate for the `three` dependency. It runs in the
+  web e2e suite against the real Local Server.
 - Bounds in the schemas (`max(100)`, `max(8)`, `max(20)`, the 60- and 40-entry
   windows) are enforced by tests in the implementing tasks. They are not claimed
   as verified here.
+
+## Amendment 2026-11-02: 3D direction (supersedes the Pixi sections)
+
+The project owner approved on 2026-11-02 replacing the isometric pixel-art
+office with a stylized low-poly 3D office, chibi characters, a high camera and
+floating HTML panels. The data model, routes, parity rules and certainty levels
+of this ADR are unchanged. The following replaces the Pixi decision.
+
+### Dependency
+
+| Package | Pin | Scope |
+| --- | --- | --- |
+| `three` | exact `0.187.0` in `apps/web/package.json` | Runtime dependency (MIT), loaded only by the lazy scene chunk. |
+| `@types/three` | exact `0.187.0` | Development only. |
+
+`pixi.js` is removed; it was never part of a released build. `@react-three/fiber`
+is not used: `OfficeRenderer` is imperative and scene state changes per frame
+outside React, so a reconciler would add weight without benefit.
+
+Why three replaces Pixi: the owner's reference is a 3D room with a high camera,
+real depth, lighting and extruded furniture. That is a mesh and camera problem,
+not a sprite draw-order problem, so the earlier reason for PixiJS ("depth is draw
+order, so no 3D camera, lighting or mesh is needed") no longer holds.
+
+### Conditions
+
+1. **CSP is unchanged.** `apps/local-server/src/security.ts` is not edited: no
+   `unsafe-eval`, no `blob:`, no `worker-src`. three.js needs none of them for
+   this scene.
+2. **GLB models carry colour only.** `img-src` has no `blob:`, so a GLB with
+   embedded images would be blocked. The models are generated by
+   `apps/web/scripts/generate-office-models.mjs` with material colours and no
+   textures. Draco and KTX2 are not used (they need a worker or wasm). A same-origin
+   `fetch` of the GLB is allowed by `connect-src 'self'`, and the existing
+   `application/octet-stream` type needs no Local Server change. Final art may
+   replace the GLBs without code changes if the node, material and clip names are
+   kept.
+3. **Lazy load and separation.** three.js is reached only through `import()` when
+   Visualization Mode is entered. The `office-csp` spec proves the Classic bundle
+   holds no three.js chunk and no `modulepreload`, and that the scene raises no
+   `securitypolicyviolation`.
+4. **Boundary.** `features/office/scene/**` imports no command or write API.
+   Labels are DOM text, not canvas text, so Vietnamese diacritics stay sharp and
+   the DOM mirror stays the stable accessible surface.
+5. **WebGL unavailable or lost.** The mirror becomes the visible complete list and
+   nothing else in the panel changes. There is no retry loop.
+6. **Browser import closure.** `@bflow/contracts/web` already imports
+   `AgentRoleSchema` from `packages/contracts/src/agent-roles.ts`. That file
+   imports only `zod`, so the browser closure of the web subpath gains this one
+   zod-only module and no Node or domain code. Nothing in `packages/contracts/**`
+   is edited by the 3D work.
+7. **Dark tokens exception.** DESIGN.md (square corners, 1 px lines, light only)
+   still governs Classic and every Classic component. Inside the 3D mode only, a
+   scoped `.office-3d` block in `apps/web/src/styles/global.css` re-values the same
+   design tokens as a dark palette (charcoal translucent panels, olive 1 px border,
+   cream text, pale-lime accent) and rounds controls. The scope class exists only
+   while the mode is active; outside it nothing changes. Text pairs are held at
+   4.5:1 or better by a unit test that computes the ratios from the real CSS, and
+   panels keep `prefers-reduced-motion` support.
+
+### Performance budgets
+
+Chunk of the graphics code under 250 KiB gzip; total models under 4 MiB; 30
+simultaneous characters; at most 30 fps while something moves, at most 8 fps while
+only clips idle, 0 frames in a hidden tab; no task over 50 ms caused by the scene
+during interaction. Budgets are reported, not loosened, by
+`apps/web/scripts/measure-office.mjs`. The measured numbers and the machine they
+came from belong in the implementing handoff, not in this ADR.
+
+### Evidence level
+
+Source implementation plus local tests: vitest (jsdom), Playwright in real Chrome
+against the real Local Server with the deterministic W09/W07 fixture hosts, and
+SwiftShader software GL. Fixtures and SwiftShader are not live Herdr or provider
+evidence. Only a real session run (V9) may be recorded as live evidence.

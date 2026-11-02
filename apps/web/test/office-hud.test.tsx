@@ -38,12 +38,12 @@ test('the card shows the current run, the pill shows session, connection and cou
   expect(within(card).getByText(/Triển khai/)).toBeTruthy();
   const pill = screen.getByLabelText('Trạng thái văn phòng');
   expect(pill.textContent).toContain('Phiên sẵn sàng');
-  expect(pill.textContent).toContain('Đã kết nối');
+  expect(pill.textContent).toContain('Trực tiếp: đã kết nối');
   expect(pill.textContent).toContain('2 đang làm · 1 đang chờ · 1 rảnh');
   expect(screen.queryByText('Dữ liệu cũ')).toBeNull();
   rerender(<OfficeHud {...props({ stale: true, connection: 'reconnecting', runs: [] })} />);
   expect(screen.getByText('Dữ liệu cũ')).toBeTruthy();
-  expect(screen.getByText('Đang kết nối lại')).toBeTruthy();
+  expect(screen.getByText(/Trình duyệt: đang kết nối lại/)).toBeTruthy();
   expect(screen.getByText('Chưa có công việc đang chạy')).toBeTruthy();
 });
 
@@ -144,4 +144,15 @@ test('3D chat bar opens /chat with the draft, prefills the composer and sends no
   await waitFor(() => expect(document.getElementById('chat-draft')).not.toBeNull());
   expect((document.getElementById('chat-draft') as HTMLTextAreaElement).value).toBe('Thêm ô tìm kiếm <b>nhanh</b>');
   expect((fetcher.mock.calls as unknown[][]).some(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toBe(false);
+});
+
+test('the Tổng quan button badges waiting clarifications, and blockers show in the pill', () => {
+  const intake = { intakeId: 'i', sessionId: 'host-session', correlationId: 'c', title: 'T', status: 'clarifying', clarifications: [{ questionId: 'q', question: 'Hỏi?', options: [], expectedVersion: { revisionToken: 'v' } }], updatedAt: now };
+  const { rerender } = render(<OfficeHud {...props()} />);
+  const nav = screen.getByRole('navigation', { name: 'Lối tắt' });
+  expect(nav.textContent).not.toContain('Câu hỏi chờ trả lời');
+  expect(screen.getByLabelText('Trạng thái văn phòng').textContent).not.toContain('điểm cần lưu ý');
+  rerender(<OfficeHud {...props({ session: { ...ready, pendingIntakes: [intake as never], blockers: [{ code: 'x', message: 'y' }] } })} />);
+  expect(within(nav).getByRole('button', { name: /Tổng quan/ }).textContent).toContain('Câu hỏi chờ trả lời: 1');
+  expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('1 điểm cần lưu ý');
 });

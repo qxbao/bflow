@@ -2,12 +2,12 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import type { WebProjectSession, WebRunView } from '@bflow/contracts/web';
 import { phases } from '../../../components/StatusBadge';
 import type { Connection } from '../../../api/events';
+import { connectionText } from '../../../components/ConnectionBanner';
 import type { UiMode } from '../mode';
 import type { OfficeFocusZone, OfficeModel, OfficePose } from '../model/types';
 
 /** Terminal runs are not "being worked on". */
 const FINISHED = new Set(['completed', 'failed', 'cancelled']);
-const CONNECTION: Record<Connection, string> = { connecting: 'Đang kết nối', connected: 'Đã kết nối', reconnecting: 'Đang kết nối lại', offline: 'Mất kết nối' };
 const SESSION: Record<string, string> = { ready: 'Phiên sẵn sàng', starting: 'Phiên đang khởi động', stopping: 'Phiên đang dừng', stopped: 'Phiên đã dừng', unavailable: 'Phiên chưa sẵn sàng' };
 
 /** The run the "Đang làm" block shows: the most recently updated run that has not reached a terminal state. */
@@ -107,6 +107,10 @@ export function OfficeHud(p: OfficeHudProps) {
   }, [onDockHeight]);
   const run = currentRun(p.runs), counts = agentCounts(p.model), chat = chatAvailable(p.session);
   const pending = p.model?.pendingDecisions ?? 0;
+  // Questions waiting in the Overview panel (intakes), and notes the owner should see (session and current run blockers).
+  const clarifications = (p.session?.pendingIntakes ?? []).reduce((n, i) => n + i.clarifications.length, 0);
+  const blockers = (p.session?.blockers.length ?? 0) + (run?.blockers.length ?? 0);
+  const link = connectionText(p.connection, p.session?.state === 'stopped' || p.session?.state === 'unavailable');
   const done = run ? run.tasks.filter(t => t.status === 'succeeded').length : 0;
   const hideOnPhone = p.panelOpen ? 'max-md:hidden' : '';
   const submit = (event: FormEvent): void => {
@@ -116,8 +120,8 @@ export function OfficeHud(p: OfficeHudProps) {
     setDraft('');
     p.onChatDraft(text);
   };
-  const rail: [IconName, string, () => void, number?][] = [
-    ['overview', 'Tổng quan', p.onOverview], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending],
+  const rail: [IconName, string, () => void, number?, string?][] = [
+    ['overview', 'Tổng quan', p.onOverview, clarifications, 'Câu hỏi chờ trả lời: '], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending, 'Đang chờ: '],
     ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
   ];
   const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', 'Conversation'], ['coordinator', 'coordinator', 'Coordinator'], ['developer', 'developer', 'Developer'], ['qa', 'qa', 'QA']];
@@ -144,17 +148,18 @@ export function OfficeHud(p: OfficeHudProps) {
       <div aria-label="Trạng thái văn phòng" className={`pointer-events-auto col-span-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 justify-self-start px-3 py-1.5 font-data text-xs text-ink lg:col-span-1 lg:col-start-2 lg:row-start-1 lg:justify-self-center ${panel}`}>
         <span>{p.session ? SESSION[p.session.state] ?? 'Phiên chưa rõ' : 'Đang đọc phiên'}</span>
         <span aria-hidden="true" className="text-line">|</span>
-        <span className={p.connection === 'connected' ? '' : 'text-warning'}>{CONNECTION[p.connection]}</span>
+        <span role="status" className={link.degraded ? 'text-warning' : ''}>{link.label}</span>
         {counts.length > 0 && <><span aria-hidden="true" className="text-line">|</span><span>{counts.join(' · ')}</span></>}
         {p.model?.tier === 'degraded' && <><span aria-hidden="true" className="text-line">|</span><span className={p.failed ? 'text-warning' : 'text-muted'}>{p.failed ? 'Không đọc được dữ liệu nhân viên' : 'Chưa có dữ liệu nhân viên'}</span></>}
+        {blockers > 0 && <span className="rounded border border-warning px-1.5 text-warning">{blockers} điểm cần lưu ý</span>}
         {p.authRequired && <span className="rounded border border-warning px-1.5 text-warning">Cần ghép nối lại</span>}
         {p.stale && <span className="rounded border border-warning px-1.5 text-warning">Dữ liệu cũ</span>}
       </div>
     </div>
     <nav aria-label="Lối tắt" className={`pointer-events-auto absolute top-[11.5rem] right-2 flex flex-col gap-0.5 p-1 sm:top-[8.5rem] md:right-3 md:top-1/2 md:-translate-y-1/2 ${panel} ${hideOnPhone}`}>
-      {rail.map(([icon, label, action, badge]) => <button type="button" key={label} className={railButton} onClick={action}>
+      {rail.map(([icon, label, action, badge, badgeText]) => <button type="button" key={label} className={railButton} onClick={action}>
         <Icon name={icon}/><span className="text-center">{label}</span>
-        {badge !== undefined && badge > 0 && <span className="absolute top-0.5 right-1.5 min-w-4 rounded-full bg-danger px-1 text-center text-[0.625rem] leading-4 font-semibold text-canvas"><span className="sr-only">Đang chờ: </span>{badge}</span>}
+        {badge !== undefined && badge > 0 && <span className="absolute top-0.5 right-1.5 min-w-4 rounded-full bg-danger px-1 text-center text-[0.625rem] leading-4 font-semibold text-canvas"><span className="sr-only">{badgeText}</span>{badge}</span>}
       </button>)}
     </nav>
     <div ref={bottom} data-hud-bottom className={`absolute inset-x-3 bottom-0 flex flex-col gap-2 pb-3 ${p.panelOpen ? 'max-md:pb-0' : ''}`}>

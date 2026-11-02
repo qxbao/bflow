@@ -134,3 +134,11 @@ checks as the other GET routes. They call the optional
 without them answers `operation_not_allowed` (422). A response whose project
 (or, for activity, run) differs from the request, or that fails the strict
 schema, maps to `unavailable`.
+
+### Serving the 3D office assets
+
+The web build's 3D mode needs no Local Server change and no CSP change. Its two models (`office/character.glb`, `office/furniture.glb`) are ordinary
+same-origin static files, served by the existing asset route with the fallback `application/octet-stream` type and read with `fetch`, which the
+existing `connect-src 'self'` allows. The models carry colour only (no embedded images), because `img-src` has no `blob:`; no `unsafe-eval`,
+`worker-src` or `blob:` is added for three.js. The workforce and activity routes above are the only server data the mode adds, and both are read-only.
+Evidence level: source plus local tests (the real server under Playwright with fixture hosts); not live Herdr or provider evidence.
