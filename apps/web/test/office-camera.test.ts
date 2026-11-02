@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { CameraMove, FOCUS_MS, HOME_ZOOM, homeCamera, FOCUS_ZOOM, KEY_ZOOM, MAX_ZOOM, MIN_ZOOM, cameraKey, cameraPose, clampCamera, easeCamera, fitCamera, fitDistance, focusOn, panByPixels, pinchFactor, wheelFactor, zoomBy } from '../src/features/office/scene/camera';
+import { AGENT_ZOOM, CameraIntent, NO_INSET, withInset, CameraMove, FOCUS_MS, HOME_ZOOM, homeCamera, FOCUS_ZOOM, KEY_ZOOM, MAX_ZOOM, MIN_ZOOM, cameraKey, cameraPose, clampCamera, easeCamera, fitCamera, fitDistance, focusOn, panByPixels, pinchFactor, wheelFactor, zoomBy } from '../src/features/office/scene/camera';
 import { ZONE_TITLES, contentBox, BOARD_X, DEVELOPER_SEAT_COUNT, FOCUS_POINTS, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, TABLE_CELLS, WORLD, cellCentre, deskPlan, developerRowsFor, routeBetween, seatCell, zoneAt, zones } from '../src/features/office/scene/world';
 import { DEVELOPER_SEATS, applySeats } from '../src/features/office/model/seats';
 import type { OfficeModel } from '../src/features/office/model/types';
@@ -12,7 +12,9 @@ describe('camera', () => {
     expect(cam).toEqual({ x: GRID_W / 2, z: GRID_H / 2, zoom: MIN_ZOOM });
     const home = homeCamera(WORLD);
     expect(home.zoom).toBe(HOME_ZOOM);
-    expect(home.zoom).toBeGreaterThanOrEqual(MIN_ZOOM); // the default view frames the drawn content (see contentBox), not the whole grid
+    // With few agents the default view is tighter than the fit of the whole world: it frames the drawn content (see contentBox).
+    const view = { w: 1600, h: 900 }, few = homeCamera(contentBox(deskPlan([]).desks));
+    expect(fitDistance(view, contentBox(deskPlan([]).desks)) / few.zoom).toBeLessThan(fitDistance(view, WORLD) / fit_zoom(cam));
     for (const v of [{ w: 1600, h: 900 }, { w: 390, h: 700 }, { w: 900, h: 900 }]) {
       const pose = cameraPose(cam, v, WORLD);
       expect(pose.position[1]).toBeGreaterThan(0);
@@ -85,6 +87,45 @@ describe('focus', () => {
   test('reduced motion jumps at once', () => {
     const to = focusOn({ x: 20, z: 4 }, WORLD);
     expect(new CameraMove(fitCamera(WORLD), to, 0, true).at(0)).toEqual({ camera: to, done: true });
+  });
+});
+
+const fit_zoom = (c: { zoom: number }): number => c.zoom;
+
+describe('camera intent and inset', () => {
+  const box = contentBox(deskPlan([]).desks);
+  test('re-homes only before the first interaction; selection and HUD focus count as interaction', () => {
+    const intent = new CameraIntent();
+    const moved = { x: 5, z: 4, zoom: 2 };
+    expect(intent.reframe(moved, box)).toEqual(homeCamera(box));
+    intent.touch(); // a selection or a HUD preset calls this
+    expect(intent.interacted).toBe(true);
+    expect(intent.reframe(moved, box)).toEqual(clampCamera(moved, box));
+    expect(intent.reframe(moved, box)).not.toEqual(homeCamera(box));
+  });
+  const view = { w: 1440, h: 900 }, inset = { right: 800, bottom: 60, left: 0 };
+  test('agent zoom is about 1.6 to 1.8', () => {
+    expect(AGENT_ZOOM).toBeGreaterThanOrEqual(1.6);
+    expect(AGENT_ZOOM).toBeLessThanOrEqual(1.8);
+  });
+  test('with an inset the camera looks right of and above the target so the target sits in the visible area', () => {
+    const at = { x: 12, z: 4 };
+    const plain = focusOn(at, box, AGENT_ZOOM), shifted = focusOn(at, box, AGENT_ZOOM, { view, inset });
+    // Panel at the right: the camera moves right, so the target appears left of the screen centre, i.e. in the visible part.
+    expect(shifted.x).toBeGreaterThan(plain.x);
+    // Bottom block: the target appears higher, so the camera looks lower on the floor (larger z).
+    expect(shifted.z).toBeGreaterThan(plain.z);
+    expect(shifted.zoom).toBe(plain.zoom);
+    // No inset keeps the old behaviour exactly.
+    expect(focusOn(at, box, AGENT_ZOOM, { view, inset: NO_INSET }).x).toBeCloseTo(plain.x, 6);
+  });
+  test('the clamp is relaxed while an inset is active, so an edge target is still centred in the visible area', () => {
+    const edge = { x: box.cx + box.w / 2 - 1, z: box.cz };
+    const strict = clampCamera({ x: edge.x + 6, z: edge.z, zoom: AGENT_ZOOM }, box);
+    const relaxed = focusOn(edge, box, AGENT_ZOOM, { view, inset });
+    expect(relaxed.x).toBeGreaterThan(strict.x);
+    expect(withInset(box, view, inset).slackX).toBeGreaterThan(0);
+    expect(withInset(box, view, NO_INSET).slackX).toBe(0);
   });
 });
 

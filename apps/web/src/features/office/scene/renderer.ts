@@ -8,7 +8,7 @@ import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from 
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
 import { agentTag } from '../model/labels';
 import { Choreographer } from './actors';
-import { CameraMove, FOV, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
+import { AGENT_ZOOM, CameraIntent, CameraMove, FOV, NO_INSET, withInset, type Inset, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, HOME_ZOOM, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
 import { BACKGROUND, Stage, setShadowCasting } from './stage';
@@ -20,7 +20,9 @@ export interface OfficeRenderer {
   setPaused(paused: boolean): void;
   /** DOM label anchors in host pixels for the current frame: zone titles and one tag per character. Text only; the caller draws them. */
   projectLabels?(): ProjectedLabel[];
-  /** Receives `projectLabels()` after every rendered frame. */
+  /** Screen pixels the HUD or panel covers: labels hide inside it and selections centre in what is left. Setting it never moves the camera. */
+  setInset?(inset: Inset): void;
+  /** Receives `projectLabels()` after every rendered frame (the same array, reused). */
   setLabelSink?(sink: ((labels: ProjectedLabel[]) => void) | undefined): void;
   /** Eases the camera to a target the user selected (also called for selections made in the DOM mirror). */
   focus?(target: OfficeTarget): void;
@@ -112,7 +114,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
 
   // ---- camera ----
   const cam = new PerspectiveCamera(FOV, 1, 0.1, 200);
-  let box: WorldBox = WORLD, userTouched = false;
+  let box: WorldBox = WORLD, inset: Inset = NO_INSET;
+  const intent = new CameraIntent();
   let state: Camera = homeCamera(box);
   let move: CameraMove | undefined;
   const aim = (): void => {
@@ -122,7 +125,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     cam.lookAt(...p.target);
     cam.updateProjectionMatrix();
   };
-  const userMove = (next: Camera): void => { move = undefined; userTouched = true; if (next !== state) { state = next; aim(); dirty = true; wake(); } };
+  const userMove = (next: Camera): void => { move = undefined; intent.touch(); if (next !== state) { state = next; aim(); dirty = true; wake(); } };
 
   // ---- actors and marks ----
   const choreo = new Choreographer(!reduced());
@@ -165,30 +168,44 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   };
 
   // ---- labels ----
+  // Pooled: the label list, its objects, the overlap rectangles and the tag strings are reused, so a frame allocates nothing per label.
   let sink: ((labels: ProjectedLabel[]) => void) | undefined;
   const probe = new Vector3();
-  const project = (x: number, y: number, z: number, v: { w: number; h: number }): { x: number; y: number } | undefined => {
+  const pool: ProjectedLabel[] = [], out: ProjectedLabel[] = [];
+  const rects: number[] = [];
+  const tags = new Map<string, { label: string; pose: string; text: string }>();
+  let agentsById = new Map<string, OfficeModel['agents'][number]>();
+  const pt = { x: 0, y: 0 };
+  /** Projects to host pixels; false when behind the camera or outside the safe area (the HUD and panel inset). */
+  const project = (x: number, y: number, z: number, w: number, h: number): boolean => {
     probe.set(x, y, z).project(cam);
-    if (probe.z > 1 || Math.abs(probe.x) > 1.05 || Math.abs(probe.y) > 1.05) return undefined;
-    return { x: (probe.x * 0.5 + 0.5) * v.w, y: (-probe.y * 0.5 + 0.5) * v.h };
+    if (probe.z > 1) return false;
+    pt.x = (probe.x * 0.5 + 0.5) * w; pt.y = (-probe.y * 0.5 + 0.5) * h;
+    return pt.x >= inset.left && pt.x <= w - inset.right && pt.y >= 0 && pt.y <= h - inset.bottom;
+  };
+  const slot = (n: number, id: string, kind: 'zone' | 'agent', text: string): void => {
+    const l = pool[n] ?? (pool[n] = { id: '', kind, text: '', x: 0, y: 0 });
+    l.id = id; l.kind = kind; l.text = text; l.x = pt.x; l.y = pt.y;
+    out[n] = l;
   };
   const projectLabels = (): ProjectedLabel[] => {
-    const v = size(), out: ProjectedLabel[] = [];
-    for (const zt of ZONE_TITLES) { const p = project(zt.at.x, 0.05, zt.at.z, v); if (p) out.push({ id: `zone:${zt.id}`, kind: 'zone', text: zt.text, ...p }); }
-    const agents = new Map((lastModel?.agents ?? []).map(a => [a.instanceId, a] as const));
-    // Far out, tags that would overlap an earlier one are hidden; closer in everything shows.
-    const taken: { x0: number; x1: number; y0: number; y1: number }[] = [];
+    const v = size();
+    let n = 0, r = 0;
+    for (const zt of ZONE_TITLES) if (project(zt.at.x, 0.05, zt.at.z, v.w, v.h)) slot(n++, zt.id, 'zone', zt.text);
     for (const view of choreo.views()) {
-      const a = agents.get(view.instanceId);
-      if (!a) continue;
-      const p = project(view.point.x, 2.15, view.point.z, v);
-      if (!p) continue;
-      const text = agentTag(a.label, a.pose), half = text.length * 3.4 + 6;
-      const r = { x0: p.x - half, x1: p.x + half, y0: p.y - 18, y1: p.y };
-      if (state.zoom < 1.8 && taken.some(t => r.x0 < t.x1 && r.x1 > t.x0 && r.y0 < t.y1 && r.y1 > t.y0)) continue;
-      taken.push(r);
-      out.push({ id: `agent:${view.instanceId}`, kind: 'agent', text, ...p });
+      const a = agentsById.get(view.instanceId);
+      if (!a || !project(view.point.x, 2.15, view.point.z, v.w, v.h)) continue;
+      let tag = tags.get(a.instanceId);
+      if (!tag || tag.label !== a.label || tag.pose !== a.pose) { tag = { label: a.label, pose: a.pose, text: agentTag(a.label, a.pose) }; tags.set(a.instanceId, tag); }
+      const half = tag.text.length * 3.4 + 6, x0 = pt.x - half, x1 = pt.x + half, y0 = pt.y - 18, y1 = pt.y;
+      // Far out, tags that would overlap an earlier one are hidden; closer in everything shows.
+      let clash = false;
+      if (state.zoom < 1.8) for (let i = 0; i < r; i += 4) if (x0 < (rects[i + 1] as number) && x1 > (rects[i] as number) && y0 < (rects[i + 3] as number) && y1 > (rects[i + 2] as number)) { clash = true; break; }
+      if (clash) continue;
+      rects[r++] = x0; rects[r++] = x1; rects[r++] = y0; rects[r++] = y1;
+      slot(n++, `agent:${a.instanceId}`, 'agent', tag.text);
     }
+    out.length = n;
     return out;
   };
 
@@ -254,20 +271,22 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     const o = stage.objects.find(s => s.id === target.object);
     return o ? o.position : cellCentre(OBJECT_CELLS[target.object]);
   };
+  /** The box with the reach an active inset needs; user gestures clamp against it. */
+  const reach = (): WorldBox => (inset === NO_INSET ? box : withInset(box, size(), inset));
+  const insetArg = (): { view: { w: number; h: number }; inset: Inset } | undefined => (inset === NO_INSET ? undefined : { view: size(), inset });
+  const easeTo = (to: Camera): void => { intent.touch(); move = new CameraMove(state, to, performance.now(), reduced()); wake(); };
   const focus = (target: OfficeTarget): void => {
     const p = positionOf(target);
     if (!p || destroyed) return;
-    const to = focusOn(p, box, target.kind === 'object' && target.object === 'board' ? 1.6 : undefined);
-    move = new CameraMove(state, to, performance.now(), reduced());
-    wake();
+    const zoom = target.kind === 'agent' ? AGENT_ZOOM : target.object === 'board' ? 1.6 : undefined;
+    easeTo(focusOn(p, box, zoom, insetArg()));
   };
   const focusZone = (zone: OfficeFocusZone): void => {
     if (destroyed) return;
-    const to = zone === 'overview' ? homeCamera(box) : focusOn(FOCUS_POINTS[zone].at, box, FOCUS_POINTS[zone].zoom);
-    move = new CameraMove(state, to, performance.now(), reduced());
-    wake();
+    easeTo(zone === 'overview' ? focusOn({ x: box.cx ?? box.w / 2, z: box.cz ?? box.d / 2 }, box, HOME_ZOOM, insetArg()) : focusOn(FOCUS_POINTS[zone].at, box, FOCUS_POINTS[zone].zoom, insetArg()));
   };
-  const select = (target: OfficeTarget): void => { if (!suppressTap) { focus(target); rawSelect(target); } };
+  // The consumer hears the selection first so it can set the inset (the panel about to open) before the camera moves.
+  const select = (target: OfficeTarget): void => { if (!suppressTap) { rawSelect(target); focus(target); } };
 
   // ---- camera input: user gestures only ----
   let drag: { id: number; x: number; y: number; sx: number; sy: number; moved: boolean } | undefined;
@@ -294,7 +313,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) {
       const dist = spread(), factor = pinchFactor(pinchDist, dist);
-      if (factor !== 1) { userMove(zoomBy(state, factor, box)); pinchDist = dist; }
+      if (factor !== 1) { userMove(zoomBy(state, factor, reach())); pinchDist = dist; }
       return;
     }
     if (!drag || e.pointerId !== drag.id) return;
@@ -302,7 +321,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     drag.moved = true; suppressTap = true;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     drag.x = e.clientX; drag.y = e.clientY;
-    userMove(panByPixels(state, dx, dy, size(), box));
+    userMove(panByPixels(state, dx, dy, size(), reach()));
   };
   const onUp = (e: PointerEvent): void => {
     const tap = drag && e.pointerId === drag.id && !drag.moved && !suppressTap && e.target === canvas && e.type === 'pointerup';
@@ -312,7 +331,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     pinchDist = 0;
     if (tap) { const target = pick(at.x, at.y); if (target) select(target); }
   };
-  const onWheel = (e: WheelEvent): void => { e.preventDefault(); if (e.deltaY !== 0) userMove(zoomBy(state, wheelFactor(e.deltaY), box)); };
+  const onWheel = (e: WheelEvent): void => { e.preventDefault(); if (e.deltaY !== 0) userMove(zoomBy(state, wheelFactor(e.deltaY), reach())); };
   const onKey = (e: KeyboardEvent): void => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
@@ -320,8 +339,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     const action = cameraKey(e.key);
     if (!action) return;
     e.preventDefault();
-    if (action.kind === 'pan') userMove(panByPixels(state, action.dx, action.dy, size(), box));
-    else if (action.kind === 'zoom') userMove(zoomBy(state, action.factor, box));
+    if (action.kind === 'pan') userMove(panByPixels(state, action.dx, action.dy, size(), reach()));
+    else if (action.kind === 'zoom') userMove(zoomBy(state, action.factor, reach()));
     else userMove(homeCamera(box));
   };
   canvas.addEventListener('pointerdown', onDown);
@@ -337,7 +356,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (destroyed || host.clientWidth === 0 || host.clientHeight === 0) return;
     const v = size();
     gl.setSize(v.w, v.h, false);
-    state = clampCamera(state, box);
+    state = clampCamera(state, reach());
     aim(); dirty = true; wake();
   });
   observer.observe(host);
@@ -354,6 +373,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     apply(model, cues) {
       if (destroyed) return [];
       lastModel = model;
+      agentsById = new Map(model.agents.map(a => [a.instanceId, a] as const));
+      for (const id of tags.keys()) if (!agentsById.has(id)) tags.delete(id);
       // Hidden tab: cues are dropped, only the latest pose matters.
       const accepted = choreo.apply(model, paused ? [] : cues);
       const plan = deskPlan(model.agents.flatMap(a => (a.seat ? [a.seat] : [])));
@@ -362,7 +383,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       const next = contentBox(plan.desks);
       if (next.w !== box.w || next.d !== box.d || next.cx !== box.cx || next.cz !== box.cz) {
         box = next; move = undefined;
-        state = userTouched ? clampCamera(state, box) : homeCamera(box);
+        state = intent.reframe(state, box);
         aim();
       }
       syncActors();
@@ -375,6 +396,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       return accepted;
     },
     projectLabels,
+    setInset(next) { inset = next.right === 0 && next.bottom === 0 && next.left === 0 ? NO_INSET : next; dirty = true; wake(); },
     setLabelSink(next) { sink = next; if (next && ready) next(projectLabels()); },
     setPaused(next) {
       if (next === paused) return;

@@ -4,7 +4,7 @@ import type { WebProject } from '@bflow/contracts/web';
 import { FieldHelp } from './FieldHelp';
 
 /** `dockPx` is the height of the HUD's bottom block; on phones the panel stops above it so the operations dock is never covered. */
-export type VisualShell={panelOpen:boolean;dockPx:number;onClose:()=>void;onOverview:()=>void;inspectorRef:(element:HTMLElement|null)=>void;hudRef:(element:HTMLElement|null)=>void;stageRef:(element:HTMLElement|null)=>void};
+export type VisualShell={panelOpen:boolean;closable:boolean;dockPx:number;onClose:()=>void;onOverview:()=>void;inspectorRef:(element:HTMLElement|null)=>void;hudRef:(element:HTMLElement|null)=>void;stageRef:(element:HTMLElement|null)=>void};
 export function AppShell({projects,projectId,visual,children}:{projects:WebProject[];projectId?:string;visual?:VisualShell|undefined;children:ReactNode}) {
   const navigate=useNavigate(), location=useLocation(), main=useRef<HTMLElement>(null);
   const [menuOpen,setMenuOpen]=useState(false);
@@ -42,7 +42,7 @@ export function AppShell({projects,projectId,visual,children}:{projects:WebProje
         <p className="mt-6 border-t border-line pt-4 text-xs leading-relaxed text-muted">Đóng trình duyệt không dừng công việc. Trạng thái được đọc từ phiên dự án.</p>
       </aside>
       {visual && <><section ref={visual.stageRef} aria-label="Văn phòng" className="fixed inset-0 z-0 m-0 min-w-0 bg-canvas"/><section ref={visual.hudRef} id="office-hud" tabIndex={-1} aria-label="Thanh điều khiển" onKeyDown={e=>{if(e.key==='Escape' && visual.panelOpen && !e.defaultPrevented){e.preventDefault();visual.onClose();}}} className={`pointer-events-none fixed inset-y-0 left-0 z-30 m-0 ${visual.panelOpen?'right-0 md:right-[min(720px,70vw)]':'right-0'}`}/></>}
-      <main id="main" ref={main} tabIndex={-1} onKeyDown={visual?e=>{if(e.key==='Escape' && !e.defaultPrevented){e.preventDefault();visual.onClose();}}:undefined} className={visual?`min-w-0 overflow-y-auto border-l border-line bg-surface/95 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 fixed top-0 right-0 bottom-[var(--hud-h,0px)] z-20 w-full backdrop-blur-md md:bottom-0 md:w-[min(720px,70vw)] md:max-w-full md:rounded-l-xl ${visual.panelOpen?'':'hidden'}`:'min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-8'}>{visual && <div className="mb-3 flex justify-end"><button type="button" onClick={visual.onClose}>Đóng bảng</button></div>}{visual && <div ref={visual.inspectorRef}/>}{children}</main>
+      <main id="main" ref={main} tabIndex={-1} onKeyDown={visual?e=>{if(e.key==='Escape' && !e.defaultPrevented){e.preventDefault();visual.onClose();}}:undefined} className={visual?`min-w-0 overflow-y-auto border-l border-line bg-surface/95 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 fixed top-0 right-0 bottom-[var(--hud-h,0px)] z-20 w-full backdrop-blur-md md:bottom-0 md:w-[min(720px,70vw)] md:max-w-full md:rounded-l-xl ${visual.panelOpen?'':'hidden'}`:'min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-8'}>{visual && <div className="mb-3 flex justify-end"><button type="button" disabled={!visual.closable} onClick={visual.onClose}>Đóng bảng</button></div>}{visual && <div ref={visual.inspectorRef}/>}{children}</main>
     </div>
     <footer className={`${visual?'hidden ':''}border-t border-line px-4 py-4 font-data text-xs text-muted sm:px-6`}>Bflow · Web cục bộ · Theo dõi và xem xét công việc</footer>
   </div>;

@@ -47,19 +47,23 @@ function Project({api,projects,projectsLoading,projectsError,revision,refresh,on
   const [mode,setMode]=useUiMode(),[overviewOpen,setOverviewOpen]=useState(false),[host,setHost]=useState<HTMLElement|null>(null),[hud,setHud]=useState<HTMLElement|null>(null),[dockPx,setDockPx]=useState(0);
   const [inspector,setInspector]=useState<Inspector|undefined>(),[inspectorHost,setInspectorHost]=useState<HTMLElement|null>(null);
   const navigate=useNavigate(),isIndex=Boolean(useMatch({path:'/projects/:projectId',end:true})),base=`/projects/${encodeURIComponent(projectId)}`;
-  useEffect(()=>{setOverviewOpen(false);setInspector(undefined);},[projectId]);
+  // Reset during render, not in an effect, so the previous project's inspector never paints for the new one.
+  const [seenProject,setSeenProject]=useState(projectId);
+  if(seenProject!==projectId){setSeenProject(projectId);setOverviewOpen(false);setInspector(undefined);}
   // Overview is only meaningful at the index path; leaving it forgets the HUD-opened state.
   useEffect(()=>{if(!isIndex)setOverviewOpen(false);},[isIndex]);
   // Visual mode: the index path closes the panel (or shows the HUD-opened overview); every other route opens it.
   const visual=mode==='visual' && Boolean(project),panelOpen=!isIndex || overviewOpen || inspector!==undefined;
-  const close=useCallback(()=>{setOverviewOpen(false);setInspector(undefined);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
+  // The re-pair view cannot be dismissed (Esc and the close button do nothing): it reopens itself while the session is refused, so closing would only fight it.
+  const closable=inspector?.kind!=='repair';
+  const close=useCallback(()=>{if(!closable)return;setOverviewOpen(false);setInspector(undefined);if(!isIndex)navigate(base);},[closable,isIndex,navigate,base]);
   const showOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);},[]);
   const openOverview=useCallback(()=>{setInspector(undefined);setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
   // Inspectors live in the panel on the index path: opening one leaves any page route and the overview.
   const openInspector=useCallback((next:Inspector|undefined)=>{if(next){setOverviewOpen(false);if(!isIndex)navigate(base);}setInspector(next);},[isIndex,navigate,base]);
-  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,dockPx,inspectorRef:setInspectorHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,setDockPx,inspector,openInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
+  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,closable,dockPx,inspectorRef:setInspectorHost,onClose:close,onOverview:showOverview,hudRef:setHud,stageRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} projects={projects} revision={revision} refresh={refresh} onPair={onPair} frame={{mode,setMode,overviewOpen,panelOpen,hud,host,openOverview,dockPx,setDockPx,inspector,openInspector,inspectorHost}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
 }
-type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void;setDockPx:(px:number)=>void;inspector:Inspector|undefined;openInspector:(next:Inspector|undefined)=>void;inspectorHost:HTMLElement|null};
+type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;hud:HTMLElement|null;host:HTMLElement|null;openOverview:()=>void;dockPx:number;setDockPx:(px:number)=>void;inspector:Inspector|undefined;openInspector:(next:Inspector|undefined)=>void;inspectorHost:HTMLElement|null};
 /** What the overlay panel shows in 3D besides pages: local state, never a route. */
 export type Inspector={kind:'agent';instanceId:string}|{kind:'unseated'}|{kind:'cabinet'}|{kind:'server'}|{kind:'repair'};
 function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{api:ApiClient;project:WebProject;projects:WebProject[];revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>;frame:Frame}) {
@@ -111,8 +115,28 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     if(authRequired)openInspector({kind:'repair'});
     else if(inspector?.kind==='repair')openInspector(undefined);
   },[authRequired,inspector?.kind,openInspector]);
+  const RAIL_PX=84;
+  /** Pixels the HUD covers: the rail, the bottom block, and the panel when it is (about to be) open beside the scene. */
+  const insetFor=(open:boolean)=>{
+    const w=window.innerWidth,bottom=frame.hud?.querySelector<HTMLElement>('[data-hud-bottom]')?.offsetHeight??0;
+    return {right:RAIL_PX+(open&&w>=768?Math.min(720,w*0.7):0),bottom,left:0};
+  };
+  const hasModel=model!==undefined,refocusHud=useRef(false);
+  useEffect(()=>{
+    const apply=()=>control.current?.setInset(insetFor(frame.panelOpen));
+    apply();window.addEventListener('resize',apply);return()=>window.removeEventListener('resize',apply);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[frame.panelOpen,frame.dockPx,frame.hud,hasModel]);
+  // An agent that vanished after the model loaded: drop its inspector and hand focus back to the HUD.
+  useEffect(()=>{
+    if(inspector?.kind==='agent' && model?.tier==='full' && !model.agents.some(a=>a.instanceId===inspector.instanceId)){refocusHud.current=true;openInspector(undefined);}
+  },[model,inspector,openInspector]);
+  // Runs after OfficeFrame restored the opener, so the HUD (not a vanished control) ends up focused.
+  useEffect(()=>{if(refocusHud.current && !frame.panelOpen){refocusHud.current=false;frame.hud?.focus();}},[frame.panelOpen,frame.hud]);
   const go=(path:string)=>{openInspector(undefined);navigate(path);};
   const select=(target:OfficeTarget)=>{
+    // Before the camera moves: centre the selection in what the panel leaves visible.
+    control.current?.setInset(insetFor(true));
     if(target.kind==='agent'){openInspector({kind:'agent',instanceId:target.instanceId});return;}
     switch(target.object){
       case 'counter':go(`${base}/chat`);break;
@@ -132,7 +156,7 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
     :inspector.kind==='agent'?(agent?<AgentInspector api={api} projectId={id} agent={agent} view={workforce?.agents.find(a=>a.instanceId===agent.instanceId)} handoffs={workforce?.handoffs??[]} revision={revision} titleOf={titleOf}/>:<EmptyState title="Nhân viên này không còn trong danh sách"><p>Có thể phiên đã thay đổi. Tải lại dữ liệu để xem danh sách hiện tại.</p></EmptyState>)
     :inspector.kind==='unseated'?<AgentList title="Lập trình viên chưa hiện trong cảnh" note="Cảnh có tối đa 20 chỗ ngồi. Những nhân viên dưới đây vẫn đang được theo dõi." agents={(model?.agents??[]).filter(a=>!a.seat)} onPick={instanceId=>openInspector({kind:'agent',instanceId})}/>
     :inspector.kind==='cabinet'?<CabinetInspector api={api} projectId={id} run={run} evidence={runEvidence(run?.runId,decisions,handoffEvidence(workforce?.handoffs??[],undefined,run?.runId))}/>
-    :<ServerInspector api={api} projectId={id} session={session} fresh={Boolean(session)} refresh={refresh}/>,frame.inspectorHost):null;
+    :<ServerInspector api={api} projectId={id} session={session} fresh={!stale&&!authRequired} refresh={refresh}/>,frame.inspectorHost):null;
   return <>
     {frame.host && createPortal(<section aria-label="Danh sách công việc" className="m-0 h-full">{model?<OfficeStage model={model} onSelect={select} links={list} control={control}/>:<>{list}</>}</section>,frame.host)}
     {inspected}

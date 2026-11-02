@@ -1,9 +1,13 @@
-// Pure camera maths for the high perspective view. The camera never moves by itself: every function here is called from a user
-// gesture, a user-driven resize or a user selection (`focusOn`). The state is the floor point the camera looks at plus a continuous zoom.
+// Pure camera maths for the high perspective view. The camera moves only for a user gesture, a user selection or HUD preset (`focusOn`),
+// a resize, or the first framing of the drawn content before any interaction (`CameraIntent`). The state is the floor point the camera
+// looks at plus a continuous zoom.
 import type { Vec2 } from './world';
 
 /** The floor rectangle the camera frames: size, plus the centre when it is not the middle of the grid (content framing). */
-export interface WorldBox { w: number; d: number; cx?: number; cz?: number }
+export interface WorldBox { w: number; d: number; cx?: number; cz?: number; /** Extra reach (floor units) while an inset is active, so a target can sit off-centre. */ slackX?: number; slackZ?: number }
+/** Screen pixels covered by HUD or panel: the visible area is what is left. */
+export interface Inset { right: number; bottom: number; left: number }
+export const NO_INSET: Inset = { right: 0, bottom: 0, left: 0 };
 const midX = (w: WorldBox): number => w.cx ?? w.w / 2;
 const midZ = (w: WorldBox): number => w.cz ?? w.d / 2;
 export interface Camera { x: number; z: number; zoom: number }
@@ -44,13 +48,13 @@ export function fitDistance(view: Size, world: WorldBox): number {
 export function clampCamera(cam: Camera, world: WorldBox): Camera {
   const zoom = clamp(Number.isFinite(cam.zoom) ? cam.zoom : 1, MIN_ZOOM, MAX_ZOOM);
   const reach = 1 - 1 / zoom;
-  const rx = (world.w / 2) * reach + SLACK * reach, rz = (world.d / 2) * reach + SLACK * reach;
+  const rx = (world.w / 2) * reach + SLACK * reach + (world.slackX ?? 0), rz = (world.d / 2) * reach + SLACK * reach + (world.slackZ ?? 0);
   return { zoom, x: clamp(cam.x, midX(world) - rx, midX(world) + rx), z: clamp(cam.z, midZ(world) - rz, midZ(world) + rz) };
 }
 
 /** The whole office in view. */
 export const fitCamera = (world: WorldBox): Camera => ({ x: midX(world), z: midZ(world), zoom: MIN_ZOOM });
-/** The default view: closer than the whole office (the edges of the room may be cropped), looking at the middle of the floor. Initial state and the 0 key. */
+/** The default view: the given box (the drawn content) fills the view, looking at its middle. Initial state and the 0 key. */
 export const HOME_ZOOM = 1;
 export const homeCamera = (world: WorldBox): Camera => clampCamera({ x: midX(world), z: midZ(world), zoom: HOME_ZOOM }, world);
 
@@ -82,9 +86,38 @@ export function zoomBy(cam: Camera, factor: number, world: WorldBox): Camera {
 /** Wheel notches become a smooth factor; one 100-unit notch is about 1.16x. */
 export const wheelFactor = (deltaY: number): number => Math.exp(clamp(-deltaY, -240, 240) * 0.0015);
 
-/** The state that frames `target` for a selection. */
-export function focusOn(target: Vec2, world: WorldBox, zoom = FOCUS_ZOOM): Camera {
-  return clampCamera({ x: target.x, z: target.z, zoom }, world);
+/** Zoom of a selected agent: close enough to read, wide enough to keep the room around it. */
+export const AGENT_ZOOM = 1.7;
+
+/** Floor distance between the screen centre and the centre of the visible area (what the inset leaves), at a camera state. */
+function insetShift(cam: Camera, view: Size, world: WorldBox, inset: Inset): Vec2 {
+  const g = groundPerPixel(cam, view, world);
+  // The visible centre is right of the screen centre by (left - right) / 2 and below it by -bottom / 2 pixels.
+  return { x: ((inset.left - inset.right) / 2) * g.x, z: (-inset.bottom / 2) * g.z };
+}
+/** The largest shift an inset can cause (at zoom 1), added to the clamp so an off-centre target is reachable while the inset is active. */
+export function withInset(world: WorldBox, view: Size, inset: Inset): WorldBox {
+  const s = insetShift({ x: 0, z: 0, zoom: MIN_ZOOM }, view, world, inset);
+  return { ...world, slackX: Math.abs(s.x), slackZ: Math.abs(s.z) };
+}
+
+/** The state that frames `target` for a selection. With an inset the target is centred in the visible area, not the screen. */
+export function focusOn(target: Vec2, world: WorldBox, zoom = FOCUS_ZOOM, inset?: { view: Size; inset: Inset }): Camera {
+  if (!inset) return clampCamera({ x: target.x, z: target.z, zoom }, world);
+  const relaxed = withInset(world, inset.view, inset.inset);
+  const shift = insetShift({ x: target.x, z: target.z, zoom }, inset.view, relaxed, inset.inset);
+  return clampCamera({ x: target.x - shift.x, z: target.z - shift.z, zoom }, relaxed);
+}
+
+/**
+ * Remembers whether the user has interacted with the camera (a gesture, a selection or a HUD preset). The default framing of the drawn
+ * content applies only before that; afterwards a change of content only keeps the camera inside the new bounds.
+ */
+export class CameraIntent {
+  private touched = false;
+  touch(): void { this.touched = true; }
+  get interacted(): boolean { return this.touched; }
+  reframe(state: Camera, box: WorldBox): Camera { return this.touched ? clampCamera(state, box) : homeCamera(box); }
 }
 
 export type CameraKey = { kind: 'pan'; dx: number; dy: number } | { kind: 'zoom'; factor: number } | { kind: 'fit' };

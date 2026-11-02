@@ -212,6 +212,25 @@ describe('OfficeStage control', () => {
   });
 });
 
+describe('label layer writes', () => {
+  test('an unchanged label position writes no style', async () => {
+    const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');
+    const parent = document.createElement('div');
+    const layer = createLabelLayer(parent);
+    const label = { id: 'a', kind: 'agent' as const, text: 'Dev #1 · Rảnh', x: 10.2, y: 20.4 };
+    layer.update([label]);
+    const el = parent.querySelector('[data-kind]') as HTMLElement;
+    let writes = 0;
+    const style = el.style;
+    const original = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'transform');
+    Object.defineProperty(style, 'transform', { configurable: true, get: () => original?.get?.call(style), set: v => { writes += 1; original?.set?.call(style, v); } });
+    layer.update([{ ...label, x: 10.4 }]);
+    expect(writes).toBe(0);
+    layer.update([{ ...label, x: 40 }]);
+    expect(writes).toBe(1);
+  });
+});
+
 describe('label layer', () => {
   test('draws text only, ignores pointer events, hides from assistive technology and drops stale labels', async () => {
     const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');

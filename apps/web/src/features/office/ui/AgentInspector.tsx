@@ -23,17 +23,19 @@ export function handoffEvidence(handoffs: readonly WebHandoffView[], instanceId?
   return [...seen.values()];
 }
 
-function Activity({ api, projectId, runId, role, revision }: { api: ApiClient; projectId: string; runId: string; role: string; revision: number }) {
+/** The log names a role per line, not an instance, so every line of the run is shown with its role; nothing is attributed to this agent. */
+function Activity({ api, projectId, runId, revision }: { api: ApiClient; projectId: string; runId: string; revision: number }) {
   const read = useRead(`office-activity:${projectId}:${runId}`, () => api.readRunActivity(projectId, runId), revision);
-  const entries: WebActivityEntry[] = (read.data?.items ?? []).filter(e => e.role === role).slice(-8);
+  const entries: WebActivityEntry[] = (read.data?.items ?? []).slice(-8);
   const unsupported = read.error instanceof ApiError && ['not_found', 'operation_not_allowed'].includes(read.error.code);
   return <section aria-label="Hoạt động gần đây" className="mt-3">
     <h3 className="m-0 text-sm">Hoạt động gần đây (chẩn đoán, có thể thiếu)</h3>
+    <p className="my-1 text-xs text-muted">Nhật ký chỉ ghi vai trò, không ghi nhân viên nào. Đây là các dòng của cả công việc, không riêng nhân viên này.</p>
     {read.loading && !read.data && <p className="my-1 text-sm text-muted">Đang đọc hoạt động…</p>}
     {Boolean(read.error) && <p className="my-1 text-sm text-muted">{unsupported ? 'Máy chủ chưa cung cấp nhật ký hoạt động.' : 'Chưa đọc được hoạt động. Điều này không cho biết nhân viên đang rảnh.'}</p>}
     {read.data && entries.length === 0 && <p className="my-1 text-sm text-muted">Chưa có hoạt động nào được ghi nhận. Danh sách này có thể thiếu.</p>}
     {entries.length > 0 && <ul className="my-1 list-none p-0 text-sm">{entries.map(e => <li key={e.entryId} className="border-t border-line py-1 first:border-t-0">
-      <time dateTime={e.occurredAt} className="text-xs text-muted">{when(e.occurredAt)}</time>{' '}{e.action}{e.outcome ? `: ${e.outcome}` : ''}
+      <time dateTime={e.occurredAt} className="text-xs text-muted">{when(e.occurredAt)}</time>{' '}<span className="font-semibold">{roleLabel(e.role)}</span>: {e.action}{e.outcome ? `: ${e.outcome}` : ''}
     </li>)}</ul>}
   </section>;
 }
@@ -48,6 +50,7 @@ export function AgentInspector({ api, projectId, agent, view, handoffs, revision
   const base = `/projects/${encodeURIComponent(projectId)}`;
   const runId = agent.runId ?? view?.work[0]?.runId;
   const evidence = handoffEvidence(handoffs, agent.instanceId);
+  const runIds = [...new Set([...(runId ? [runId] : []), ...(view?.work.map(w => w.runId) ?? [])])].slice(0, 3);
   return <section aria-label={`Nhân viên ${agent.label}`} className="min-w-0">
     <h2 className="mt-0">{agent.label}</h2>
     <dl className="my-2">
@@ -61,7 +64,7 @@ export function AgentInspector({ api, projectId, agent, view, handoffs, revision
     {!view || view.work.length === 0 ? <p className="my-1 text-sm text-muted">Không có việc đang giữ.</p> : <ul className="my-1 list-none p-0 text-sm">{view.work.map(w => <li key={w.messageId} className="border-t border-line py-1 first:border-t-0">
       {KIND[w.kind] ?? w.kind}: {titleOf(w.runId, w.taskId)} ({DELIVERY[w.delivery] ?? w.delivery})
     </li>)}</ul>}
-    {runId && <Activity api={api} projectId={projectId} runId={runId} role={agent.role} revision={revision} />}
+    {runIds.map(r => <Activity key={r} api={api} projectId={projectId} runId={r} revision={revision} />)}
     <section aria-label="Tài liệu kiểm chứng" className="mt-3">
       <h3 className="m-0 text-sm">Tài liệu kiểm chứng</h3>
       {evidence.length === 0 ? <p className="my-1 text-sm text-muted">Chưa có tài liệu đính kèm.</p> : evidence.map(e => <Evidence key={e.artifactId} api={api} projectId={projectId} evidence={e} />)}

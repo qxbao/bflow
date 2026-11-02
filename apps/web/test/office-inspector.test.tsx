@@ -70,6 +70,13 @@ test('inspector offers navigation, never a mutation button of its own', async ()
   expect(container.querySelector('form, input, textarea, select')).toBeNull();
 });
 
+test('activity lists every line of the run with its role and says it is not per agent', async () => {
+  mount({ apiVersion: 1, items: [entry('đã giao', 'ok'), { ...entry('đã nhận', 'ok'), entryId: '6f1f1d7e-3b1a-4c53-9a58-0d2f5d6a7b02', role: 'coordinator' }] });
+  expect(await screen.findByText(/Điều phối viên/)).toBeTruthy();
+  expect(screen.getAllByText(/Lập trình viên/).length).toBeGreaterThan(0);
+  expect(screen.getByText(/không riêng nhân viên này/)).toBeTruthy();
+});
+
 test('activity that cannot be read is said so and never read as idle', async () => {
   installApi({});
   render(<MemoryRouter><AgentInspector api={new ApiClient()} projectId="p" agent={agent} view={view} handoffs={[]} revision={0} titleOf={() => 'x'} /></MemoryRouter>);
@@ -130,4 +137,39 @@ test('the skip link targets the HUD in 3D', async () => {
   const skip = screen.getByRole('link', { name: 'Bỏ qua điều hướng' });
   expect(skip.getAttribute('href')).toBe('#office-hud');
   expect(document.getElementById('office-hud')?.getAttribute('tabindex')).toBe('-1');
+});
+
+test('an agent that vanishes after the model loaded closes its inspector and returns focus to the HUD', async () => {
+  writeMode('visual');
+  const wf = (agents: unknown[]) => ({ apiVersion: 1, projectId: 'p', sessionId: 'host-session', revisionToken: 'w1', agents, handoffs: [], truncated: false, observedAt: now });
+  const conv = { ...view, instanceId: 'conv', role: 'conversation', displayName: 'Conversation', work: [] };
+  let body = wf([view, conv]);
+  const { fetcher } = installApi({ '/api/v1/projects/p/session': ready, '/api/v1/projects/p/runs/run/activity': { apiVersion: 1, items: [] } });
+  const base = fetcher.getMockImplementation()! as (p: string) => Promise<Response>;
+  vi.stubGlobal('fetch', vi.fn(async (path: string) => path.endsWith('/workforce') ? Response.json(body) : base(path)));
+  render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
+  const mirror = await screen.findByRole('region', { name: 'Bản văn bản của văn phòng' });
+  fireEvent.click(await within(mirror).findByRole('button', { name: /Developer #1/ }));
+  const main = () => document.getElementById('main')!;
+  expect(await within(main()).findByRole('heading', { name: 'Developer #1' })).toBeTruthy();
+  body = wf([conv]);
+  fireEvent.click(within(screen.getByRole('navigation', { name: 'Lối tắt' })).getByRole('button', { name: 'Tải lại dữ liệu' }));
+  await waitFor(() => expect(main().classList.contains('hidden')).toBe(true));
+  expect(within(main()).queryByRole('heading', { name: 'Developer #1' })).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(document.getElementById('office-hud')));
+});
+
+test('the re-pair view does not close on Esc or by button', async () => {
+  writeMode('visual');
+  const fetcher = installApi({ '/api/v1/projects/p/session': ready }).fetcher;
+  const base = fetcher.getMockImplementation()! as (p: string) => Promise<Response>;
+  vi.stubGlobal('fetch', vi.fn(async (path: string) => path.endsWith('/workforce') ? new Response(JSON.stringify({ apiVersion: 1, code: 'session_required', message: 'x', retryable: false, correlationId: 't' }), { status: 401 }) : base(path)));
+  render(<MemoryRouter initialEntries={['/projects/p']}><App api={new ApiClient()} /></MemoryRouter>);
+  await screen.findByText('Cần ghép nối lại');
+  const main = document.getElementById('main')!;
+  await within(main).findByLabelText(/Mã hoặc đường dẫn ghép nối/);
+  fireEvent.keyDown(main, { key: 'Escape' });
+  expect(main.classList.contains('hidden')).toBe(false);
+  expect((screen.getByRole('button', { name: 'Đóng bảng' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(within(main).getByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
 });
