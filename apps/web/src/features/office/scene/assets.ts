@@ -51,11 +51,20 @@ export async function acquireModels(urls: ModelUrls, signal?: AbortSignal): Prom
     // Not loaded yet: stop the fetch; the settle handler above disposes whatever still arrives.
     if (mine.settled) disposeModels(mine.settled); else mine.abort.abort();
   };
+  let stop: (() => void) | undefined;
   const cancelled = new Promise<never>((_, reject) => {
-    const stop = (): void => { release(); reject(new DOMException('office renderer creation cancelled', 'AbortError')); };
+    stop = (): void => { release(); reject(new DOMException('office renderer creation cancelled', 'AbortError')); };
     if (signal?.aborted) stop(); else signal?.addEventListener('abort', stop, { once: true });
   });
-  // An abort wins the race, so a cancelled creation never waits for a slow load.
-  const models = await Promise.race([mine.models, cancelled]).catch((error: unknown) => { release(); throw error; });
-  return { models, release };
+  try {
+    // An abort wins the race, so a cancelled creation never waits for a slow load.
+    const models = await Promise.race([mine.models, cancelled]);
+    return { models, release };
+  } catch (error) {
+    release();
+    throw error;
+  } finally {
+    // Once acquisition has settled, only release() drops the lease; a later abort of the same signal must not.
+    if (stop) signal?.removeEventListener('abort', stop);
+  }
 }

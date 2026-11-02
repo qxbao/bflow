@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { CLIPS, Choreographer, SEAT_OFFSET_Z, WALK_LIMITS, clipFor } from '../src/features/office/scene/actors';
-import { GRID_H, GRID_W, cellCentre, routeBetween, seatCell } from '../src/features/office/scene/world';
+import { GRID_H, GRID_W, cellCentre, deskPlan, routeBetween, seatCell } from '../src/features/office/scene/world';
 import type { VisualCue } from '../src/features/office/model/timeline';
 import type { OfficeModel, OfficePose } from '../src/features/office/model/types';
 
@@ -58,7 +58,7 @@ describe('poses', () => {
 
 describe('routes', () => {
   test('route between seats is 4-connected, walkable and bounded', () => {
-    const route = routeBetween(seatCell('coordination:coordinator')!, seatCell('developer:1')!);
+    const route = routeBetween(seatCell('coordination:coordinator')!, seatCell('developer:1')!, deskPlan(['coordination:coordinator', 'developer:1']).desks);
     expect(route.length).toBeGreaterThan(2);
     for (let i = 1; i < route.length; i++) expect(Math.abs(route[i]!.gx - route[i - 1]!.gx) + Math.abs(route[i]!.gy - route[i - 1]!.gy)).toBe(1);
     for (const c of route) { expect(c.gx).toBeGreaterThanOrEqual(0); expect(c.gx).toBeLessThan(GRID_W); expect(c.gy).toBeLessThan(GRID_H); }
@@ -89,7 +89,7 @@ describe('Choreographer', () => {
     expect(done.walking).toBe(false);
     expect(done.point).toEqual(home);
     expect(done.clip).toBe('sleep');
-    expect(done.heading).toBe(Math.PI);
+    expect(done.heading).toBe(0);
   });
   test('pause drops the backlog and walkers, and nothing replays', () => {
     const c = new Choreographer();

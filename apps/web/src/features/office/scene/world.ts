@@ -1,7 +1,7 @@
 // Pure layout of the 3D office (§5.1, reference layout 2026-11-02). No three.js here, so the layout is unit-testable and
 // the renderer stays a drawing layer. One grid cell is one world unit; cell (gx, gy) has its centre at x = gx + 0.5, z = gy + 0.5.
 // Rooms (north is the far wall, the camera looks from the south):
-//   back row  : Conversation | Coordination (Coordinator, Planner, Architect, Specifier) | Task Board
+//   back row  : Conversation | Task Board (hero wall screen, centred on the back wall) | Coordination (Planner, Coordinator, Architect, Specifier)
 //   front row : Developer zone (20 seats, rows appear as agents arrive)       | Verification (Reviewer, QA, Tester, Security)
 import { findPath } from '../model/path';
 import type { OfficeObjectId } from '../model/types';
@@ -19,24 +19,30 @@ export interface Vec2 { x: number; z: number }
 export function cellCentre(c: Cell): Vec2 { return { x: c.gx + 0.5, z: c.gy + 0.5 }; }
 export const WORLD: { w: number; d: number } = { w: GRID_W, d: GRID_H };
 
-/** Developer pool: 20 seats, filled row by row. */
-export const DEVELOPER_COLUMNS = [3, 6, 9, 12, 15] as const;
-export const DEVELOPER_ROWS = [10, 12, 14, 16] as const;
-export const DEVELOPER_SEAT_COUNT = DEVELOPER_COLUMNS.length * DEVELOPER_ROWS.length;
+/** Developer pool: 20 seats in rows of seven (three rows, the last one partly used), filled row by row. */
+export const DEVELOPER_COLUMNS = [3, 5, 7, 9, 11, 13, 15] as const;
+export const DEVELOPER_ROWS = [10, 13, 16] as const;
+export const DEVELOPER_SEAT_COUNT = 20;
 
 const FIXED_BASES: Readonly<Record<string, Cell>> = {
   'conversation:conversation': { gx: 4, gy: 3 },
-  'coordination:planner': { gx: 11, gy: 3 },
-  'coordination:coordinator': { gx: 13, gy: 3 },
-  'coordination:architect': { gx: 15, gy: 3 },
-  'coordination:specifier': { gx: 17, gy: 3 },
-  'verification:reviewer': { gx: 22, gy: 10 },
-  'verification:qa': { gx: 25, gy: 10 },
-  'verification:tester': { gx: 22, gy: 15 },
-  'verification:security': { gx: 25, gy: 15 },
+  'coordination:planner': { gx: 20, gy: 3 },
+  'coordination:coordinator': { gx: 22, gy: 3 },
+  'coordination:architect': { gx: 24, gy: 3 },
+  'coordination:specifier': { gx: 26, gy: 3 },
+  'verification:reviewer': { gx: 21, gy: 10 },
+  'verification:qa': { gx: 24, gy: 10 },
+  'verification:tester': { gx: 21, gy: 13 },
+  'verification:security': { gx: 24, gy: 13 },
+};
+/** Spare seats of each fixed role, for its second, third ... instance (`zone:role:2` takes the first spare). More instances than spares are not drawn. */
+const SPARES: Readonly<Record<string, readonly Cell[]>> = {
+  'conversation:conversation': [{ gx: 2, gy: 3 }, { gx: 6, gy: 3 }],
+  'coordination:planner': [{ gx: 20, gy: 6 }], 'coordination:coordinator': [{ gx: 22, gy: 6 }], 'coordination:architect': [{ gx: 24, gy: 6 }], 'coordination:specifier': [{ gx: 26, gy: 6 }],
+  'verification:reviewer': [{ gx: 26, gy: 10 }], 'verification:qa': [{ gx: 26, gy: 13 }], 'verification:tester': [{ gx: 21, gy: 16 }], 'verification:security': [{ gx: 24, gy: 16 }],
 };
 
-/** Cell of a seat id from `assignSeats` (`developer:3`, `verification:reviewer:2`), or undefined when unknown. */
+/** Cell of a seat id from `assignSeats` (`developer:3`, `verification:reviewer:2`), or undefined when unknown or beyond the spare seats. */
 export function seatCell(seat: string): Cell | undefined {
   const base = FIXED_BASES[seat];
   if (base) return base;
@@ -47,65 +53,86 @@ export function seatCell(seat: string): Cell | undefined {
     const i = n - 1, cols = DEVELOPER_COLUMNS.length;
     return { gx: DEVELOPER_COLUMNS[i % cols] as number, gy: DEVELOPER_ROWS[Math.floor(i / cols)] as number };
   }
-  const origin = FIXED_BASES[`${zone}:${name}`];
   const extra = Number(k);
-  if (!origin || !Number.isInteger(extra) || extra < 2) return undefined;
-  // Further instances of a fixed role queue down the room behind the first desk, one desk row (2 cells) apart.
-  const cell = { gx: origin.gx, gy: origin.gy + 2 * (extra - 1) };
-  return cell.gy < GRID_H - 1 ? cell : undefined;
+  if (!Number.isInteger(extra) || extra < 2) return undefined;
+  return SPARES[`${zone}:${name}`]?.[extra - 2];
 }
 
-/** Interactive objects (§5.3) and where they stand. The task board is a wall display; `counter` is the Conversation reception desk. */
+/** Interactive objects (§5.3). `board` is the hero wall screen centred on the back wall; `counter` is the Conversation reception desk. */
 export const OBJECT_CELLS: Readonly<Record<OfficeObjectId, Cell>> = {
   counter: { gx: 4, gy: 3 },
-  board: { gx: 23, gy: 0 },
-  mailbox: { gx: 7, gy: 2 },
-  cabinet: { gx: 9, gy: 1 },
-  server: { gx: 19, gy: 1 },
-  settings: { gx: 8, gy: 7 },
+  board: { gx: 13, gy: 0 },
+  mailbox: { gx: 1, gy: 5 },
+  cabinet: { gx: 8, gy: 0 },
+  server: { gx: 27, gy: 0 },
+  settings: { gx: 19, gy: 8 },
   door: { gx: 0, gy: 7 },
 };
+/** World x of the centre of the back wall, where the Task Board hangs. */
+export const BOARD_X = GRID_W / 2;
 
-/** Desks (the Conversation seat is the reception counter, not a desk). */
-export const DESK_CELLS: readonly Cell[] = [
-  ...Object.entries(FIXED_BASES).filter(([k]) => k !== 'conversation:conversation').map(([, c]) => c),
-  ...Array.from({ length: DEVELOPER_SEAT_COUNT }, (_, i) => seatCell(`developer:${i + 1}`) as Cell),
-];
+/** Fixed desks that are always drawn: one per fixed role except Conversation (its seat is the reception counter). */
+const BASE_DESKS: readonly Cell[] = Object.entries(FIXED_BASES).filter(([k]) => k !== 'conversation:conversation').map(([, c]) => c);
 
-/** Non-interactive decoration. */
-export const PLANT_CELLS: readonly Cell[] = [{ gx: 1, gy: 1 }, { gx: 9, gy: 8 }, { gx: 20, gy: 8 }, { gx: 26, gy: 8 }, { gx: 1, gy: 17 }, { gx: 26, gy: 17 }];
+/** Non-interactive decoration that blocks a cell. */
+export const PLANT_CELLS: readonly Cell[] = [{ gx: 1, gy: 1 }, { gx: 9, gy: 7 }, { gx: 18, gy: 7 }, { gx: 27, gy: 8 }, { gx: 1, gy: 17 }, { gx: 27, gy: 17 }];
+/** The standing meeting table of the Task Board zone, two cells wide. */
+export const TABLE_CELLS: readonly Cell[] = [{ gx: 13, gy: 4 }, { gx: 14, gy: 4 }];
+
+export interface DeskPlan {
+  /** Developer rows drawn: every row holding an occupied seat plus the next free row, at least one. */
+  developerRows: number;
+  /** Cells of every desk that is drawn, and therefore blocks passers-by. */
+  desks: Cell[];
+}
+/** Which desks exist for the occupied seats. Unused developer rows have no desks and do not block paths. */
+export function deskPlan(occupiedSeats: readonly string[]): DeskPlan {
+  const cols = DEVELOPER_COLUMNS.length;
+  let maxDev = 0;
+  const desks: Cell[] = [...BASE_DESKS];
+  const have = new Set(desks.map(c => `${c.gx},${c.gy}`));
+  for (const seat of occupiedSeats) {
+    if (seat.startsWith('developer:')) { maxDev = Math.max(maxDev, Number(seat.slice(10)) || 0); continue; }
+    const c = seatCell(seat);
+    if (c && seat !== 'conversation:conversation' && !have.has(`${c.gx},${c.gy}`)) { have.add(`${c.gx},${c.gy}`); desks.push(c); }
+  }
+  const developerRows = Math.min(DEVELOPER_ROWS.length, Math.ceil(Math.min(maxDev, DEVELOPER_SEAT_COUNT) / cols) + 1);
+  for (let n = 1; n <= Math.min(DEVELOPER_SEAT_COUNT, developerRows * cols); n++) desks.push(seatCell(`developer:${n}`) as Cell);
+  return { developerRows, desks };
+}
 
 export type ZoneId = 'conversation' | 'coordination' | 'taskboard' | 'developer' | 'verification' | 'lobby';
 export interface Zone { id: ZoneId; x0: number; y0: number; x1: number; y1: number }
-/** Cell rectangles, inclusive. The developer zone is cut to the rows in use by `developerRows`. */
+/** Cell rectangles, inclusive. The developer zone is cut to the rows drawn. */
 export function zones(developerRows: number): Zone[] {
   const rows = Math.max(1, Math.min(DEVELOPER_ROWS.length, developerRows));
   return [
-    { id: 'conversation', x0: 1, y0: 1, x1: 8, y1: 6 },
-    { id: 'coordination', x0: 10, y0: 1, x1: 18, y1: 6 },
-    { id: 'taskboard', x0: 20, y0: 1, x1: 26, y1: 6 },
-    { id: 'developer', x0: 1, y0: 9, x1: 18, y1: 9 + rows * 2 },
-    { id: 'verification', x0: 20, y0: 9, x1: 26, y1: 16 },
+    { id: 'conversation', x0: 1, y0: 1, x1: 8, y1: 7 },
+    { id: 'taskboard', x0: 10, y0: 1, x1: 17, y1: 7 },
+    { id: 'coordination', x0: 19, y0: 1, x1: 27, y1: 7 },
+    { id: 'developer', x0: 1, y0: 9, x1: 17, y1: 10 + rows * 3 - 2 },
+    { id: 'verification', x0: 19, y0: 9, x1: 27, y1: 17 },
   ];
 }
-/** Rows of the Developer zone needed for `count` Developers (at least one, so the zone is always visible). */
-export const developerRowsFor = (count: number): number => Math.max(1, Math.min(DEVELOPER_ROWS.length, Math.ceil(count / DEVELOPER_COLUMNS.length)));
+/** Rows of the Developer zone needed for `count` Developers (the occupied rows plus the next free one). */
+export const developerRowsFor = (count: number): number => deskPlan(count > 0 ? [`developer:${Math.min(count, DEVELOPER_SEAT_COUNT)}`] : []).developerRows;
 
 export function zoneAt(c: Cell, developerRows: number = DEVELOPER_ROWS.length): ZoneId {
   for (const z of zones(developerRows)) if (c.gx >= z.x0 && c.gx <= z.x1 && c.gy >= z.y0 && c.gy <= z.y1) return z.id;
   return 'lobby';
 }
 
-/** Fixed walkable grid: every cell except desks, interactive objects and plants. Built once; never mutated. */
-const BLOCKED: ReadonlySet<string> = new Set([...DESK_CELLS, ...Object.values(OBJECT_CELLS), ...PLANT_CELLS].map(c => `${c.gx},${c.gy}`));
+/** Cells other than desks that nothing may cross: interactive objects, plants and the meeting table. */
+const FIXED_BLOCKS: readonly Cell[] = [...Object.values(OBJECT_CELLS), ...PLANT_CELLS, ...TABLE_CELLS];
 
 /**
- * Shortest 4-directional route between two cells (both included), or [] when unreachable. A seat or object cell is blocked for
- * passers-by, but the two endpoints of a walk are opened for it: a character stands up from its desk and walks to the other desk.
+ * Shortest 4-directional route between two cells (both included), or [] when unreachable. Only the drawn `desks` block, plus objects, plants
+ * and the table. The two endpoints of a walk are opened for it: a character stands up from its desk and walks to the other desk.
  */
-export function routeBetween(from: Cell, to: Cell): Cell[] {
+export function routeBetween(from: Cell, to: Cell, desks: readonly Cell[]): Cell[] {
+  const blocked = new Set([...desks, ...FIXED_BLOCKS].map(c => `${c.gx},${c.gy}`));
   const open = new Set([`${from.gx},${from.gy}`, `${to.gx},${to.gy}`]);
-  const grid = Array.from({ length: GRID_H }, (_, y) => Array.from({ length: GRID_W }, (_, x) => open.has(`${x},${y}`) || !BLOCKED.has(`${x},${y}`)));
+  const grid = Array.from({ length: GRID_H }, (_, y) => Array.from({ length: GRID_W }, (_, x) => open.has(`${x},${y}`) || !blocked.has(`${x},${y}`)));
   return findPath(grid, { x: from.gx, y: from.gy }, { x: to.gx, y: to.gy }).map(c => ({ gx: c.x, gy: c.y }));
 }
 

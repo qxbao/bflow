@@ -13,8 +13,6 @@ export const ROLE_COLORS: Readonly<Record<string, string>> = {
   reviewer: '#b9d98a', qa: '#eba0bf', tester: '#7fcfd0', security: '#ee8f86', developer: '#9bb8f0',
 };
 const FADE = 0.18;
-/** Characters are drawn a little larger than modelled, matching PROP_SCALE of the furniture they sit at. */
-const CHIBI_SCALE = 1.2;
 const hashOf = (id: string): number => { let h = 2166136261; for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619); return (h >>> 0) / 4294967296; };
 const shortest = (from: number, to: number): number => { let d = (to - from) % (Math.PI * 2); if (d > Math.PI) d -= Math.PI * 2; if (d < -Math.PI) d += Math.PI * 2; return d; };
 
@@ -35,18 +33,17 @@ export class Character {
     body.traverse(o => {
       if (!(o instanceof Mesh)) return;
       const m = (o.material as MeshStandardMaterial).clone();
-      if (m.name === 'outfit') m.color = new Color(ROLE_COLORS[role] ?? ROLE_COLORS['developer']);
+      if (m.name === 'outfit') { m.color = new Color(ROLE_COLORS[role] ?? ROLE_COLORS['developer']); m.emissive = m.color.clone(); m.emissiveIntensity = 0.22; }
       o.material = m; o.castShadow = true; o.receiveShadow = false;
       this.mats.push(m);
     });
     this.paper = body.getObjectByName('paper');
     if (this.paper) this.paper.visible = false;
-    body.scale.setScalar(CHIBI_SCALE);
     this.root.add(body);
     this.mixer = new AnimationMixer(body);
     this.phase = hashOf(instanceId);
     this.proxy = new Mesh(proxyGeometry, proxyMaterial);
-    this.proxy.position.y = 0.65; this.proxy.scale.set(0.85, 1.35, 0.85);
+    this.proxy.position.y = 0.85; this.proxy.scale.set(0.9, 1.7, 0.9);
     this.proxy.userData['instanceId'] = instanceId;
     this.root.add(this.proxy);
   }
@@ -58,7 +55,7 @@ export class Character {
     if (this.paper) this.paper.visible = view.carrying;
     if (alpha !== this.alpha) {
       this.alpha = alpha;
-      for (const m of this.mats) { m.transparent = alpha < 1; m.opacity = alpha; m.needsUpdate = true; }
+      for (const m of this.mats) { m.transparent = alpha < 1; m.opacity = alpha; m.depthWrite = alpha >= 1; m.needsUpdate = true; }
     }
     if (view.clip !== this.current) this.play(view.clip, animate);
   }

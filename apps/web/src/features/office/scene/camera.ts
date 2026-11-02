@@ -10,8 +10,8 @@ export interface Pose { position: [number, number, number]; target: [number, num
 export const MIN_ZOOM = 1;
 export const MAX_ZOOM = 4.5;
 /** Vertical field of view and the angle of the view above the floor, in degrees. */
-export const FOV = 36;
-export const PITCH = 58;
+export const FOV = 38;
+export const PITCH = 40;
 export const KEY_PAN = 36;
 export const KEY_ZOOM = 1.25;
 /** Duration of the eased move to a selected target; reduced motion jumps instead. */
@@ -20,7 +20,7 @@ export const FOCUS_ZOOM = 2.4;
 /** Extra floor (world units) the camera target may leave the office by, so the walls stay reachable. */
 const SLACK = 1.5;
 /** Height of the point the camera looks at (a character's chest), so closer zooms frame the people. */
-const AIM_Y = 0.5;
+const AIM_Y = 0.9;
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
 const rad = (deg: number): number => (deg * Math.PI) / 180;
@@ -44,7 +44,11 @@ export function clampCamera(cam: Camera, world: { w: number; d: number }): Camer
   return { zoom, x: clamp(cam.x, world.w / 2 - rx, world.w / 2 + rx), z: clamp(cam.z, world.d / 2 - rz, world.d / 2 + rz) };
 }
 
+/** The whole office in view. */
 export const fitCamera = (world: { w: number; d: number }): Camera => ({ x: world.w / 2, z: world.d / 2, zoom: MIN_ZOOM });
+/** The default view: closer than the whole office (the edges of the room may be cropped), looking at the middle of the floor. Initial state and the 0 key. */
+export const HOME_ZOOM = 1.22;
+export const homeCamera = (world: { w: number; d: number }): Camera => clampCamera({ x: world.w / 2, z: world.d * 0.5, zoom: HOME_ZOOM }, world);
 
 /** Where the three.js camera stands and looks for a state. */
 export function cameraPose(cam: Camera, view: Size, world: { w: number; d: number }): Pose {

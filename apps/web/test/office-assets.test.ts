@@ -59,4 +59,20 @@ describe('model cache', () => {
     await expect(acquireModels({ character: '/bad.glb', furniture: '/f3.glb' })).rejects.toThrow('404');
     expect(fetches).toBeGreaterThanOrEqual(4);
   });
+  test('after acquisition only release() drops the lease: a later abort of the same signal changes nothing', async () => {
+    const { acquireModels } = await import('../src/features/office/scene/assets');
+    const abort = new AbortController();
+    const added = vi.spyOn(abort.signal, 'addEventListener'), removed = vi.spyOn(abort.signal, 'removeEventListener');
+    const mine = await acquireModels({ character: '/c4.glb', furniture: '/f4.glb' }, abort.signal);
+    expect(added).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
+    expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]![1]);
+    abort.abort(); // the creation that owned the signal is done; the renderer now owns the lease
+    expect(disposed).toEqual([]);
+    const second = await acquireModels({ character: '/c4.glb', furniture: '/f4.glb' });
+    expect(second.models).toBe(mine.models); // still cached, not reloaded
+    mine.release();
+    expect(disposed).toEqual([]); // the second owner still holds it
+    second.release();
+    expect(disposed.filter(d => d.startsWith('geo:'))).toHaveLength(2);
+  });
 });

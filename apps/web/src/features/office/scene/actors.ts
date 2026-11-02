@@ -3,15 +3,15 @@
 // and no success animation: a finished turn has no clip of its own.
 import { dropBacklog, enqueue, type VisualCue, type VisualEndpoint, type VisualLimits } from '../model/timeline';
 import type { OfficeAgent, OfficeModel, OfficePose } from '../model/types';
-import { OBJECT_CELLS, cellCentre, routeBetween, seatCell, type Cell, type Vec2 } from './world';
+import { OBJECT_CELLS, cellCentre, deskPlan, routeBetween, seatCell, type Cell, type Vec2 } from './world';
 
 export type Clip = 'sleep' | 'idle' | 'type' | 'type_fast' | 'walk' | 'carry' | 'raise_hand' | 'blocked' | 'ghost';
 /** Clip names of character.glb (office-actors.test compares them with the file). */
 export const CLIPS: readonly Clip[] = ['sleep', 'idle', 'type', 'type_fast', 'walk', 'carry', 'raise_hand', 'blocked', 'ghost'];
-/** A seated character sits this far (world units) south of its desk, facing north (its back to the camera, like the audience in the reference); the offset fades out while it walks. */
-export const SEAT_OFFSET_Z = 0.6;
-/** Heading of a seated character: facing -z, towards its monitor. */
-export const SEATED_HEADING = Math.PI;
+/** A seated character sits this far (world units) north of its desk, facing the camera side; the offset fades out while it walks. */
+export const SEAT_OFFSET_Z = -0.62;
+/** Heading of a seated character: facing +z, so its face is visible over the low laptop. */
+export const SEATED_HEADING = 0;
 
 /** One clip per pose. A pose with no distinct clip (question, preparing) stands still and shows its desk bubble instead. */
 export function clipFor(pose: OfficePose): Clip {
@@ -37,7 +37,7 @@ export interface ActorView {
   clip: Clip;
   /** World floor position (x, z) of the character. */
   point: Vec2;
-  /** Direction the character faces, radians about the y axis (0 faces +z, towards the camera; a seated character faces -z). */
+  /** Direction the character faces, radians about the y axis (0 faces +z, towards the camera). */
   heading: number;
   walking: boolean;
   /** True while the walk carries a document (outbound leg). */
@@ -53,6 +53,8 @@ const SEATED_AT = (c: Cell): Vec2 => { const p = cellCentre(c); return { x: p.x,
 export class Choreographer {
   private readonly actors = new Map<string, Actor>();
   private queue: VisualCue[] = [];
+  /** Desks drawn for the current model; only these block a walk. */
+  private desks: readonly Cell[] = deskPlan([]).desks;
   private readonly animateClips: boolean;
   /** `animateClips` false (reduced motion) leaves every clip frozen on its first pose, so nothing is busy at idle. */
   constructor(animateClips = true) { this.animateClips = animateClips; }
@@ -60,6 +62,7 @@ export class Choreographer {
   /** Poses and seats always follow the model at once. Only walk cues are queued, and only when the caller allows motion. */
   apply(model: OfficeModel, cues: readonly VisualCue[]): string[] {
     const seen = new Set<string>();
+    this.desks = deskPlan(model.agents.flatMap(a => (a.seat ? [a.seat] : []))).desks;
     for (const agent of model.agents) {
       const home = agent.seat ? seatCell(agent.seat) : undefined;
       if (!home) continue;
@@ -105,7 +108,7 @@ export class Choreographer {
     // The walker goes to the other end of the handoff: the receiver when it is the sender, else the sender's zone.
     const target = cue.from.kind === 'instance' && cue.from.instanceId === actor.instanceId ? cue.to : cue.from;
     const cell = this.cellFor(target);
-    const out = cell ? routeBetween(actor.home, cell) : [];
+    const out = cell ? routeBetween(actor.home, cell, this.desks) : [];
     if (out.length < 2) return;
     actor.trip = { cells: [...out, ...[...out].reverse().slice(1)], elapsed: 0 };
   }

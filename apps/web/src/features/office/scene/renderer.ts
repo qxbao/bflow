@@ -1,17 +1,17 @@
 // Office scene (stylized 3D). Reads an OfficeModel and draws it; emits selections and never writes anywhere else.
 // Plain three.js, no React: scene state changes per frame outside React. Loaded only through the dynamic import in ui/OfficeStage.
 import {
-  ACESFilmicToneMapping, BoxGeometry, Color, Group, Mesh, MeshBasicMaterial, PCFSoftShadowMap, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, Vector2, WebGLRenderer, type Material, type Object3D,
+  ACESFilmicToneMapping, BoxGeometry, Color, FogExp2, Group, Mesh, MeshBasicMaterial, PCFShadowMap, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, Vector2, WebGLRenderer, type Material, type Object3D,
 } from 'three';
 import { acquireModels, type ModelLease } from './assets';
 import type { OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
 import { Choreographer } from './actors';
-import { CameraMove, FOV, cameraKey, cameraPose, clampCamera, fitCamera, focusOn, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
+import { CameraMove, FOV, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
-import { BACKGROUND, Stage } from './stage';
-import { DEVELOPER_COLUMNS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, developerRowsFor, type Vec2 } from './world';
+import { BACKGROUND, Stage, setShadowCasting } from './stage';
+import { OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, deskPlan, type Vec2 } from './world';
 
 export interface OfficeRenderer {
   /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
@@ -64,14 +64,15 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   // ---- renderer, quality ----
   gl.outputColorSpace = SRGBColorSpace;
   gl.toneMapping = ACESFilmicToneMapping;
-  gl.toneMappingExposure = 1.3;
-  gl.shadowMap.type = PCFSoftShadowMap;
+  gl.toneMappingExposure = 1.25;
+  gl.shadowMap.type = PCFShadowMap;
   let quality: QualitySettings = settingsFor(initialTier(rendererName(gl)), window.devicePixelRatio);
   const governor = new FpsGovernor();
 
   // ---- scene ----
   const scene = new Scene();
   scene.background = new Color(BACKGROUND);
+  scene.fog = new FogExp2(BACKGROUND, 0.011);
   const stage = new Stage(lease.models.furniture.scene as unknown as Group);
   scene.add(stage.group);
   const kit = new MarkKit();
@@ -88,8 +89,10 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const applyQuality = (next: QualitySettings): void => {
     quality = next;
     gl.shadowMap.enabled = next.shadows;
-    stage.lights.key.castShadow = next.shadows;
+    setShadowCasting(stage.lights.key, next.shadows);
     for (const l of stage.lights.accents) l.visible = next.accentLights;
+    // The low tier has no spot pools, so its fill is lifted to keep the room readable.
+    stage.lights.hemi.intensity = next.tier === 'low' ? 1.75 : 1.25;
     gl.setPixelRatio(next.pixelRatio);
     const v = size();
     gl.setSize(v.w, v.h, false);
@@ -100,7 +103,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
 
   // ---- camera ----
   const cam = new PerspectiveCamera(FOV, 1, 0.1, 200);
-  let state: Camera = fitCamera(WORLD);
+  let state: Camera = homeCamera(WORLD);
   let move: CameraMove | undefined;
   const aim = (): void => {
     const v = size(), p = cameraPose(state, v, WORLD);
@@ -115,7 +118,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const choreo = new Choreographer(!reduced());
   const characters = new Map<string, Character>();
   const marks = new Map<string, Group>();
-  let paused = false, dirty = true, destroyed = false, closed = false, raf = 0, lastRender = 0, ready = false, lastModel: OfficeModel | undefined;
+  let paused = false, dirty = true, destroyed = false, closed = false, raf = 0, timer = 0, lastRender = 0, ready = false, lastModel: OfficeModel | undefined;
 
   const syncActors = (): void => {
     const keep = new Set<string>();
@@ -146,22 +149,34 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       const slot = `${cell.gx},${cell.gy}`, n = stacked.get(slot) ?? 0;
       stacked.set(slot, n + 1);
       const p = cellCentre(cell);
-      g.position.set(p.x - 0.55 + n * 0.55, 1.55, p.z - 0.6);
+      g.position.set(p.x - 0.5 + n * 0.55, 2.45, p.z - 0.62);
     }
     for (const [id, g] of marks) if (!keep.has(id)) { g.removeFromParent(); marks.delete(id); }
   };
 
-  // ---- loop: 30 fps while something moves, 8 while clips idle, nothing when still or hidden ----
+  // ---- loop: display-rate frames only while something moves; 8 fps timer while clips idle; nothing at all when still or hidden ----
   const render = (): void => {
     gl.render(scene, cam);
     if (!ready) { ready = true; host.dataset.officeRenderer = 'ready'; }
+  };
+  let moving = false;
+  const stopTimers = (): void => { if (raf) cancelAnimationFrame(raf); raf = 0; if (timer) clearTimeout(timer); timer = 0; };
+  /** `fast` wants the next display frame; otherwise the idle interval is used. Nothing is scheduled when `fast` is undefined. */
+  const schedule = (fast: boolean | undefined): void => {
+    if (fast === undefined || paused || destroyed) return;
+    if (fast) {
+      if (timer) { clearTimeout(timer); timer = 0; }
+      if (!raf) raf = requestAnimationFrame(frame);
+    } else if (!raf && !timer) {
+      timer = window.setTimeout(() => { timer = 0; frame(performance.now()); }, IDLE_MS);
+    }
   };
   const frame = (now: number): void => {
     raf = 0;
     if (paused || destroyed) return;
     const gap = now - lastRender;
-    // The loop runs on every display frame but renders only at its own rate.
-    if (lastRender !== 0 && gap < (moving ? MOVING_MS : IDLE_MS) - 3 && !dirty) { schedule(); return; }
+    // Display frames above 30 fps are skipped while something moves.
+    if (lastRender !== 0 && !dirty && moving && gap < MOVING_MS - 3) { schedule(true); return; }
     const dt = lastRender === 0 ? 16 : Math.min(gap, 100);
     lastRender = now;
     if (move) {
@@ -175,12 +190,12 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (!reduced()) for (const c of characters.values()) c.update(dt / 1000);
     dirty = false;
     render();
-    if (quality.tier === 'high' && governor.frame(now, moving) ) applyQuality(settingsFor('low', window.devicePixelRatio));
-    if (move !== undefined || choreo.busy() || dirty) schedule(); else lastRender = 0;
+    if (quality.tier === 'high' && governor.frame(now, moving)) applyQuality(settingsFor('low', window.devicePixelRatio));
+    if (moving || dirty) schedule(true);
+    else if (choreo.busy()) schedule(false);
+    else lastRender = 0; // asleep: no timer, no frame until the next apply, gesture or resize
   };
-  let moving = false;
-  const schedule = (): void => { if (!raf && !paused && !destroyed) raf = requestAnimationFrame(frame); };
-  const wake = (): void => { schedule(); };
+  const wake = (): void => schedule(true);
 
   // ---- picking ----
   const ray = new Raycaster(), ndc = new Vector2();
@@ -262,7 +277,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     e.preventDefault();
     if (action.kind === 'pan') userMove(panByPixels(state, action.dx, action.dy, size(), WORLD));
     else if (action.kind === 'zoom') userMove(zoomBy(state, action.factor, WORLD));
-    else userMove(fitCamera(WORLD));
+    else userMove(homeCamera(WORLD));
   };
   canvas.addEventListener('pointerdown', onDown);
   window.addEventListener('pointermove', onMove);
@@ -288,7 +303,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
 
   applyQuality(quality);
   aim();
-  schedule();
+  schedule(true);
 
   return {
     apply(model, cues) {
@@ -296,13 +311,12 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       lastModel = model;
       // Hidden tab: cues are dropped, only the latest pose matters.
       const accepted = choreo.apply(model, paused ? [] : cues);
-      const maxDev = Math.max(0, ...model.agents.map(a => (a.role === 'developer' && a.seat?.startsWith('developer:') ? Number(a.seat.slice(10)) || 0 : 0)));
-      stage.layout(developerRowsFor(Math.min(maxDev, DEVELOPER_COLUMNS.length * 4)));
+      stage.layout(deskPlan(model.agents.flatMap(a => (a.seat ? [a.seat] : []))));
       syncActors();
       syncMarks(model);
       // Closed session: the office is dark. The last saved data stays visible.
       const off = model.tier === 'closed';
-      gl.toneMappingExposure = off ? 0.45 : 1.3;
+      gl.toneMappingExposure = off ? 0.45 : 1.25;
       dirty = true;
       wake();
       return accepted;
@@ -310,19 +324,19 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     setPaused(next) {
       if (next === paused) return;
       paused = next;
-      if (next) { choreo.pause(); if (raf) cancelAnimationFrame(raf); raf = 0; lastRender = 0; governor.reset(); return; }
+      if (next) { choreo.pause(); stopTimers(); lastRender = 0; governor.reset(); return; }
       // Back from hidden: jump to the latest pose, no replay.
       syncActors();
       if (lastModel) syncMarks(lastModel);
       dirty = true;
-      schedule();
+      schedule(true);
     },
     focus,
     destroy() {
       if (closed) return;
       closed = true;
       destroyed = true;
-      if (raf) cancelAnimationFrame(raf);
+      stopTimers();
       observer.disconnect();
       canvas.removeEventListener('pointerdown', onDown);
       window.removeEventListener('pointermove', onMove);
