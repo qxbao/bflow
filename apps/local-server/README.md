@@ -124,3 +124,13 @@ Stop requests may add optional `force:true` with `confirmed:true`; the local
 operation fingerprint includes that choice. Legacy stop methods remain compatible,
 and a reused operation ID with a changed force value conflicts. The CLI forwards
 it to the existing checkpointed force-stop implementation, never a direct kill.
+
+## Workforce and run activity reads (D-WEB-03)
+
+GET `projects/:id/workforce` and GET `projects/:id/runs/:runId/activity[?cursor]`
+are read-only routes behind the same authentication, exact Origin and schema
+checks as the other GET routes. They call the optional
+`UserInteractionClient.readWorkforce` / `readRunActivity` ports; a backend
+without them answers `operation_not_allowed` (422). A response whose project
+(or, for activity, run) differs from the request, or that fails the strict
+schema, maps to `unavailable`.
