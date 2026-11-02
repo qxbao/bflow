@@ -84,7 +84,14 @@ export class WebOperationStore {
     const temp = join(this.directory, `pending-${randomUUID()}.tmp`);
     const file = await open(temp, "wx", 0o600);
     try {
-      try { await file.writeFile(canonicalWebJson(receipt)); await file.sync(); }
+      try {
+        await file.writeFile(canonicalWebJson(receipt));
+        try { await file.sync(); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+        }
+      }
       finally { await file.close(); }
       try { await link(temp, join(this.directory, name)); }
       catch (error) {
@@ -94,7 +101,13 @@ export class WebOperationStore {
         return false;
       }
       const directory = await open(this.directory, "r");
-      try { await directory.sync(); } finally { await directory.close(); }
+      try {
+        try { await directory.sync(); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+        }
+      } finally { await directory.close(); }
       return true;
     } finally { await rm(temp, { force: true }); }
   }
@@ -225,6 +238,20 @@ export class WebOperationStore {
       if (!intent || !this.active.has(id) || (await this.operation(id, intent)).state !== "accepted") return false;
       const operation = WebOperationSchema.parse({ ...intent.payload.operation, state: "running", updatedAt: new Date().toISOString() });
       return this.publish(`${id}.running.json`, this.envelope(intent, operation));
+    });
+  }
+  /** Read-only proof of the immutable dispatch boundary; does not create it. */
+  hasDispatchIntent(principalId: string, commandId: string): Promise<boolean> {
+    return this.exclusive(async () => {
+      if (!await this.prepare(false)) return false;
+      const id = this.id(principalId, commandId), intent = await this.intent(id);
+      if (!intent) return false;
+      const raw = await this.readJson(`${id}.running.json`);
+      if (raw === undefined) return false;
+      const running = this.parse(raw);
+      if (running.payload.operation.state !== "running" || canonicalWebJson(running) !== canonicalWebJson(this.envelope(intent, running.payload.operation)))
+        throw new Error("Invalid web dispatch receipt");
+      return true;
     });
   }
   /** Only after the caller observes an authoritative committed effect. Unlike

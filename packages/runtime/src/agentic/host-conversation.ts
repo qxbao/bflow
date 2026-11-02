@@ -13,7 +13,31 @@ interface ConversationIntakePort {
   handleTrustedApproval(input: unknown): Promise<unknown | undefined>;
 }
 /** messageId is optional: the host binds the decision to this pane's latest authenticated user turn, so a model never has to copy it. */
-const DecisionCallSchema = z.object({ messageId: z.string().min(1).optional(), decision: JsonValueSchema }).strict();
+const DecisionCallSchema = z.object({
+  messageId: z.preprocess(
+    value => (value === null || (typeof value === "string" && value.trim().length === 0) ? undefined : value),
+    z.string().trim().min(1).optional()
+  ),
+  decision: JsonValueSchema
+}).strict();
+
+function isZodErrorLike(error: unknown): error is { issues: readonly { path: readonly (string | number)[]; message: string }[] } {
+  return typeof error === "object" && error !== null && "issues" in error && Array.isArray((error as { issues?: unknown }).issues);
+}
+
+function formatConversationDecideValidationError(
+  issues: readonly { path: readonly (string | number)[]; message: string }[],
+  prefix: string
+): Error {
+  const summary = issues
+    .slice(0, 6)
+    .map(issue => {
+      const path = issue.path.length ? `${prefix}.${issue.path.join(".")}` : prefix;
+      return `${path}: ${issue.message}`;
+    })
+    .join("; ");
+  return new Error(`Invalid conversation_decide payload (${summary}). Fix the invalid fields and call conversation_decide again.`);
+}
 const ReceivedTurnSchema = z.object({ messageId: z.string().min(1), conversationSessionId: z.string().min(1),
   content: z.string().min(1), userId: z.string().min(1),
   agyLaunchId: z.string().min(1).optional(), agyAnchor: AgyNativeAnchorSchema.optional(), source: z.literal("local_web").optional(), runId: z.string().min(1).optional() }).strict();
@@ -198,7 +222,14 @@ export class HostConversationIntake {
   }
   decide(principal: PaneBinding, input: unknown): Promise<JsonValue> {
     return this.exclusive(async () => {
-      const binding = PaneBindingSchema.parse(principal), args = DecisionCallSchema.parse(input);
+      const binding = PaneBindingSchema.parse(principal);
+      let args: z.infer<typeof DecisionCallSchema>;
+      try {
+        args = DecisionCallSchema.parse(input);
+      } catch (error) {
+        if (isZodErrorLike(error)) throw formatConversationDecideValidationError(error.issues, "input");
+        throw error;
+      }
       if (binding.role !== "conversation" || !binding.session) throw new Error("Only authenticated Conversation may decide user intent");
       await this.receipts.assertConversationUserTurn(binding);
       const turns = await this.receipts.conversationTurns();
@@ -211,7 +242,13 @@ export class HostConversationIntake {
       const approvalFailure = await this.receipts.conversationApprovalFailure(messageId);
       if (approvalFailure !== undefined && await this.receipts.conversationDecision(messageId) === undefined)
         throw new Error(`Trusted approval failed: ${approvalFailure.note} Runtime error: ${approvalFailure.error}. Report this trusted failure to the user. Do not decide, approve or retry it automatically.`);
-      const decision = json(await this.conversation().parseDecision(args.decision));
+      let decision: JsonValue;
+      try {
+        decision = json(await this.conversation().parseDecision(args.decision));
+      } catch (error) {
+        if (isZodErrorLike(error)) throw formatConversationDecideValidationError(error.issues, "decision");
+        throw error;
+      }
       if (parseConversationResumeRequest(turn.content) && record(decision).intent === "workflow_request")
         throw new Error("An explicit resume request must use resume_run with the existing runId, then conversation_only; preserve the existing acceptance criteria.");
       const previous = await this.receipts.conversationDecision(messageId);

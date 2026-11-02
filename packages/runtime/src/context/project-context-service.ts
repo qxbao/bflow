@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { mkdir as mkdirAsync, open as openAsync, rename as renameAsync, rm as rmAsync } from "node:fs/promises";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { execFile } from "node:child_process";
@@ -19,6 +20,7 @@ import {
 import type { StructuredLogger } from "../resilience/structured-logger.js";
 import type { ObservabilityTracker } from "../observability/metrics.js";
 import { redactString, isSensitiveKey } from "../resilience/redaction.js";
+import { runtimeGitDirectoryFlags } from "../agentic/patch-paths.js";
 
 // --- Types & Interfaces ---
 
@@ -280,22 +282,47 @@ export function scrubSecrets(text: string): string {
   );
 }
 
+const BENIGN_FSYNC_CODES = ["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"];
+
+function truncateUtf8Buffer(buf: Buffer, maxBytes: number): Buffer {
+  const limit = Math.max(0, maxBytes);
+  if (buf.length <= limit) return buf;
+  let end = limit;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+  if (end < limit) {
+    const lead = buf[end]!;
+    const seqLen =
+      (lead & 0x80) === 0 ? 1 : (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 1;
+    if (end + seqLen > limit) return buf.subarray(0, end);
+  }
+  return buf.subarray(0, limit);
+}
+
 /**
  * Atomic file writing: writes to unique temp file, fsyncs, and atomically renames.
  */
 export async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
   const dir = path.dirname(filePath);
-  await fs.promises.mkdir(dir, { recursive: true });
+  await mkdirAsync(dir, { recursive: true });
   const tmpPath = `${filePath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
   const jsonStr = JSON.stringify(data, null, 2);
-  const fileHandle = await fs.promises.open(tmpPath, "w");
   try {
-    await fileHandle.writeFile(jsonStr, "utf8");
-    await fileHandle.sync();
+    const fileHandle = await openAsync(tmpPath, "w");
+    try {
+      await fileHandle.writeFile(jsonStr, "utf8");
+      try {
+        await fileHandle.sync();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !BENIGN_FSYNC_CODES.includes(code)) throw error;
+      }
+    } finally {
+      await fileHandle.close();
+    }
+    await renameAsync(tmpPath, filePath);
   } finally {
-    await fileHandle.close();
+    await rmAsync(tmpPath, { force: true });
   }
-  await fs.promises.rename(tmpPath, filePath);
 }
 
 /**
@@ -531,8 +558,9 @@ async function identifyRepository(repositoryRoot: string): Promise<SurveyReposit
     GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
     GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", PAGER: "cat", GIT_NO_REPLACE_OBJECTS: "1"
   };
+  const dirFlags = await runtimeGitDirectoryFlags(realRoot, { resetSafeDirectory: true });
   const git = async (args: string[]): Promise<string> => {
-    const { stdout } = await executeFile("git", ["-C", realRoot, "-c", "safe.directory=", "-c", `safe.directory=${realRoot}`,
+    const { stdout } = await executeFile("git", ["-C", realRoot, ...dirFlags,
       "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.hooksPath=/dev/null",
       "-c", "core.pager=cat", "-c", "diff.external=", ...args], {
       env, encoding: "utf8", timeout: 3000, maxBuffer: 1024 * 1024
@@ -619,7 +647,12 @@ export class ArchitecturalDecisionStore {
         }
         const fullPath = path.join(adrDir, entry.name);
         const relPath = path.relative(this.repositoryRoot, fullPath).replace(/\\/g, "/");
-        const content = (await readRepositoryFile(this.repositoryRoot, fullPath)).toString("utf8");
+        let content: string;
+        try {
+          content = (await readRepositoryFile(this.repositoryRoot, fullPath)).toString("utf8");
+        } catch {
+          continue;
+        }
         const sha256 = crypto.createHash("sha256").update(content, "utf8").digest("hex");
 
         const parsed = this.parseAdrContent(content, relPath, sha256);
@@ -1203,7 +1236,12 @@ export class ProjectContextService {
         let roleProfile: AgentRoleProfile | undefined = undefined;
         let roleProfilePath: string | undefined = undefined;
 
-        const files = await fs.promises.readdir(agentFolder, { withFileTypes: true });
+        let files: fs.Dirent[];
+        try {
+          files = await fs.promises.readdir(agentFolder, { withFileTypes: true });
+        } catch {
+          continue;
+        }
         for (const f of files) {
           if (!f.isFile()) continue;
           const fRel = `${relDir}/${f.name}`;
@@ -1598,10 +1636,10 @@ export class ProjectContextService {
         const suffix = `\n[TRUNCATED: original size ${sizeBytes} bytes]`;
         const suffixBytes = Buffer.byteLength(suffix, "utf8");
         if (maxBytesPerFile <= suffixBytes) {
-          finalContent = Buffer.from(suffix, "utf8").subarray(0, maxBytesPerFile).toString("utf8");
+          finalContent = truncateUtf8Buffer(Buffer.from(suffix, "utf8"), maxBytesPerFile).toString("utf8");
         } else {
           const maxBodyBytes = maxBytesPerFile - suffixBytes;
-          const body = Buffer.from(content, "utf8").subarray(0, maxBodyBytes).toString("utf8");
+          const body = truncateUtf8Buffer(Buffer.from(content, "utf8"), maxBodyBytes).toString("utf8");
           finalContent = body + suffix;
         }
         truncated = true;

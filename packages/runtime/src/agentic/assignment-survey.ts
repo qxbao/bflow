@@ -5,9 +5,20 @@ import { digest, record } from "./journal.js";
 
 const surveyRoles = new Set<AgentRole>(["coordinator", "specifier", "architect", "planner"]);
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? record(value) : {};
-const paths = (value: unknown): string[] => Array.isArray(value) ? value.filter((path): path is string => typeof path === "string" &&
-  path.length > 0 && !/[?*\[\]]/.test(path) && !path.startsWith("/") && !path.includes("\\") && !path.includes("\0") &&
-  path.split("/").every(part => part !== ".." && part !== "." && part !== "")) : [];
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+const paths = (value: unknown): string[] => Array.isArray(value) ? value.flatMap(raw => {
+  if (typeof raw !== "string") return [];
+  const path = raw.replace(/\/+$/, "");
+  if (path.length === 0 || /[?*\[\]]/.test(path) || path.startsWith("/") || path.includes("\\") || path.includes("\0")) return [];
+  return path.split("/").every(part => part !== ".." && part !== "." && part !== "") ? [path] : [];
+}) : [];
 
 /** A pane id alone is reusable. Keep assignments scoped to the authenticated native binding. */
 export function assignmentsForBinding(outbound: readonly unknown[], binding: PaneBinding): Record<string, unknown>[] {
@@ -66,7 +77,7 @@ export class AssignmentSurvey {
     this.cache.delete(key); this.cache.set(key, bundle);
     if (this.cache.size > 8) this.cache.delete(this.cache.keys().next().value!);
     const { baselineFiles: _baselineFiles, ...visibleContext } = bundle;
-    const short = (items: readonly string[]) => items.slice(0, 8).map(item => item.slice(0, 240));
+    const short = (items: readonly string[]) => items.slice(0, 8).map(item => sliceUtf16(item, 240));
     const visibleDrift = drift ? { drifted: drift.drifted, checkedAt: drift.checkedAt, specVersionDrifted: drift.specVersionDrifted,
       reasons: short(drift.reasons), modifiedFiles: short(drift.modifiedFiles), deletedFiles: short(drift.deletedFiles), addedOwnedFiles: short(drift.addedOwnedFiles),
       counts: { reasons: drift.reasons.length, modifiedFiles: drift.modifiedFiles.length, deletedFiles: drift.deletedFiles.length, addedOwnedFiles: drift.addedOwnedFiles.length },

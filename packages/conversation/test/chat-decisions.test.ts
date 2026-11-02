@@ -460,4 +460,155 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     expect((await turn("Yêu cầu rõ", decision)).ok).toBe(false);
     expect(transport.sentRequests).toHaveLength(0);
   });
+
+  it("advances activeRunId and preserves completed child status in reconcileRuntimeRuns when parent is superseded (escalated)", async () => {
+    const { turn, gateway } = await setup();
+    const first = await turn("A", spike("A"));
+    if (!first.ok || !first.value.delegationRequest) throw new Error("setup failed");
+    const parent = first.value.delegationRequest;
+    const childRunId = `${parent.runId}-r2`;
+    const child = {
+      ...parent,
+      runId: childRunId,
+      delegationId: "del-follow-up",
+      messageId: "msg-follow-up",
+      specificationId: "spec-lineage-chat",
+      metadata: { ...parent.metadata, originRunId: parent.runId, parentRunId: parent.runId, followUp: 2, supersededApprovalId: "apr-parent", revision: 1 }
+    };
+    expect(gateway.getContextSnapshot().session.activeRunId).toBe(parent.runId);
+    // Parent is non-terminal 'escalated' with supersededBy -> activeRunId must advance to childRunId
+    await gateway.reconcileRuntimeRuns([
+      { runId: parent.runId, delegation: parent, status: "escalated", cancelled: false, supersededBy: childRunId },
+      { runId: child.runId, delegation: child, status: "planning", cancelled: false }
+    ]);
+    expect(gateway.getContextSnapshot().session.activeRunId).toBe(childRunId);
+    expect(gateway.getContextSnapshot().workflows[first.value.correlationId]?.runId).toBe(childRunId);
+
+    // Chat requirement revision on child preserves specificationId and follow-up lineage metadata
+    const rev = await turn("Cập nhật child", {
+      intent: "workflow_request",
+      targetRunId: childRunId,
+      requirementDraft: { ...spike("Cập nhật child").requirementDraft, isRequirementChange: true }
+    });
+    expect(rev.ok).toBe(true);
+    if (rev.ok) {
+      expect(rev.value.delegationRequest?.specificationId).toBe("spec-lineage-chat");
+      expect(rev.value.delegationRequest?.metadata).toMatchObject({
+        originRunId: parent.runId,
+        parentRunId: parent.runId,
+        followUp: 2,
+        supersededApprovalId: "apr-parent",
+        revision: 2
+      });
+    }
+
+    // When child reaches terminal 'completed' while superseded parent remains 'escalated', workflows[correlationId] must NOT revert to parent!
+    await gateway.reconcileRuntimeRuns([
+      { runId: parent.runId, delegation: parent, status: "escalated", cancelled: false, supersededBy: childRunId },
+      { runId: child.runId, delegation: child, status: "completed", cancelled: false }
+    ]);
+    const afterComplete = gateway.getContextSnapshot();
+    expect(afterComplete.workflows[first.value.correlationId]).toMatchObject({ runId: childRunId, sdlcStatus: "completed" });
+    expect(afterComplete.session.activeRunId).toBeUndefined();
+  });
+
+  it("tolerates LLM tool-call quirks (blank/uppercase enums, empty unused objects, trailing blank questions, Việc k without #) and requires explicit owner reason on chat test-integrity approval", async () => {
+    const { turn, gateway } = await setup();
+    const created = await turn("Tạo tính năng", {
+      intent: "workflow_request",
+      directReply: "   ",
+      clarifyingQuestions: [],
+      cancellationInput: { runId: null, reason: "  " },
+      requirementDraft: {
+        title: "  Feature X  ",
+        objective: "  Build X  ",
+        kind: "FEATURE",
+        sddLevel: "LIGHTWEIGHT",
+        priority: "  ",
+        scopeDefined: true,
+        isLargeTask: null,
+        affectedPaths: ["src/x.ts", "   "],
+        acceptanceCriteriaDescriptions: ["Tests pass"],
+        verificationMethods: null,
+        acceptanceCriteria: null,
+        isRequirementChange: null
+      }
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok || !created.value.runId) throw new Error("create failed");
+    const runId = created.value.runId;
+    gateway.syncNoticeAliases({ runShortIds: { "việc #1": runId } });
+
+    // Status query with empty requirementDraft/cancellationInput objects and "Việc 1" (without #)
+    const status = await turn("Trạng thái việc 1", {
+      intent: "status_query",
+      targetRunId: "Việc 1",
+      requirementDraft: {},
+      cancellationInput: { runId: "", reason: null }
+    });
+    expect(status.ok).toBe(true);
+
+    // Clarify with trailing whitespace-only question entry filtered out
+    const clarify = await turn("Làm rõ", {
+      intent: "clarify",
+      clarifyingQuestions: ["Bạn muốn hỗ trợ định dạng nào?", "   "]
+    });
+    expect(clarify.ok).toBe(true);
+    if (clarify.ok) {
+      expect(gateway.getContextSnapshot().pendingClarifications[clarify.value.correlationId]?.unresolvedQuestions).toEqual([
+        "Bạn muốn hỗ trợ định dạng nào?"
+      ]);
+    }
+
+    // Native chat test-integrity exception approval: bare "1" without owner reason must be refused without consuming the approval
+    await gateway.reconcilePendingApprovals([{
+      correlationId: created.value.correlationId,
+      request: {
+        schemaVersion: 2,
+        approvalId: "apr-ti-chat",
+        runId,
+        sessionId: "session-chat",
+        status: "pending",
+        target: { type: "task", taskId: "task-1" },
+        revision: 1,
+        generation: 0,
+        requestedBy: "reviewer",
+        requestedAt: new Date().toISOString(),
+        reason: "Approve test weakening?",
+        evidence: [],
+        idempotencyKey: "apr-ti-chat",
+        metadata: {
+          kind: "user_decision",
+          testIntegrityException: { findingId: "TI-chat-1" },
+          question: "Approve test weakening?",
+          options: ["Approve test-integrity exception", "Reject test-integrity exception"]
+        }
+      }
+    }]);
+    const bareApprove = await gateway.handleUserTurn({
+      sessionId: "session-chat",
+      messageId: "chat-ti-bare",
+      content: "1",
+      provenance: { origin: "user", authenticatedUser: true, userId: "owner-1", channel: "herdr_attach", paneId: "pane-chat" }
+    });
+    expect(bareApprove.ok).toBe(true);
+    if (bareApprove.ok) expect(bareApprove.value.approvalDecision).toBeUndefined();
+    expect(gateway.getContextSnapshot().pendingApprovals["apr-ti-chat"]).toBeDefined();
+
+    const reasonedApprove = await gateway.handleUserTurn({
+      sessionId: "session-chat",
+      messageId: "chat-ti-reasoned",
+      content: "1: Chấp nhận tạm thời cho migration ở revision này",
+      provenance: { origin: "user", authenticatedUser: true, userId: "owner-1", channel: "herdr_attach", paneId: "pane-chat" }
+    });
+    expect(reasonedApprove.ok).toBe(true);
+    if (reasonedApprove.ok) {
+      expect(reasonedApprove.value.approvalDecision).toMatchObject({
+        approvalId: "apr-ti-chat",
+        decision: "approved",
+        metadata: { selectedOption: "Approve test-integrity exception" }
+      });
+    }
+    expect(gateway.getContextSnapshot().pendingApprovals["apr-ti-chat"]).toBeUndefined();
+  });
 });

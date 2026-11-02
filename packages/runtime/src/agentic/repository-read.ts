@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { JsonValue } from "@bflow/contracts";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
 
 const execFileAsync = promisify(execFile);
 const READ_LIMIT = 64 * 1024;
@@ -13,7 +14,7 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_DIRECTORY_SCAN = 500;
 const MAX_DIRECTORY_CURSOR = 1_000_000;
 const MAX_GIT_OUTPUT = 128 * 1024;
-const MAX_GIT_TIMEOUT_MS = 2_000;
+const MAX_GIT_TIMEOUT_MS = 15_000;
 
 const relativePath = z.string().min(1).max(2048).refine(path =>
   !path.includes("\0") && !path.includes("\\") && !isAbsolute(path) && path.split("/").every(segment => segment !== "" && segment !== "." && segment !== ".."),
@@ -393,9 +394,9 @@ function safeGitEnvironment(): NodeJS.ProcessEnv {
 
 async function runGit(root: string, args: string[], maxBuffer = MAX_GIT_OUTPUT): Promise<string> {
   const config = [
-    // Global/system config is intentionally hidden. Re-authorize only this canonical, host-supplied session root,
-    // replacing any safe.directory values even if a future environment change exposes Git config overrides.
-    "-c", "safe.directory=", "-c", `safe.directory=${root}`,
+    // Global/system config is intentionally hidden. Re-authorize only this canonical, host-supplied session root
+    // and its validated worktree/common-dir metadata, replacing any inherited safe.directory values.
+    ...(await runtimeGitDirectoryFlags(root, { resetSafeDirectory: true })),
     "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.pager=cat",
     "-c", "color.ui=false", "-c", "diff.external=", "-c", "diff.trustExitCode=false", "-c", "core.hooksPath=/dev/null"
   ];

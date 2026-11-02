@@ -13,11 +13,39 @@ export interface ChatTransportPort {
  observeAdmission?(record:Readonly<ChatRecord>):Promise<unknown|undefined>;
 }
 const marker='[bflow-web:';
+export class ChatApprovalRejectionError extends Error {
+ constructor(message:string){super(message);this.name='ChatApprovalRejectionError';}
+}
+export class ChatPreDispatchError extends Error {
+ readonly preDispatchReason:'busy'|'session_changed';
+ constructor(reason:'busy'|'session_changed',message:string){super(message);this.name='ChatPreDispatchError';this.preDispatchReason=reason;}
+}
+function preDispatchReasonOf(error:unknown):'busy'|'session_changed'|undefined{
+ if(error instanceof ChatPreDispatchError)return error.preDispatchReason;
+ const reason=(error as {preDispatchReason?:unknown}|null)?.preDispatchReason;
+ return reason==='busy'||reason==='session_changed'?reason:undefined;
+}
+function isApprovalFailedResult(result:unknown):boolean{
+ return typeof result==='object'&&result!==null&&(result as {approvalFailed?:unknown}).approvalFailed===true;
+}
 export class HostChat {
  private readonly store:ChatDeliveryStore;
  private readonly activeEcho=new Set<string>();
  constructor(private readonly port:ChatTransportPort){this.store=new ChatDeliveryStore(port.directory,port.projectId,port.hostSessionId);}
  private wire(r:ChatRecord){return `${marker}${r.input.messageId}:${r.nonce}]\n${r.input.content}`;}
+ private async reconcileObserved(sessionId?:string):Promise<void>{
+  if(!this.port.observeAdmission)return;
+  await this.store.exclusive(async()=>{
+   for(const r of await this.store.all()){
+    if((sessionId!==undefined&&r.input.sessionId!==sessionId)||r.state==='queued'||r.state==='not_delivered'||r.admitted)continue;
+    const result=await this.port.observeAdmission!(r);
+    if(result!==undefined){
+     const failed=isApprovalFailedResult(result);
+     await this.store.write({...r,admitted:true,state:failed?'not_delivered':'delivered',result,message:{...r.message,delivery:failed?'failed':'delivered'}});
+    }
+   }
+  });
+ }
  async supported(){const s=await this.port.session();return s.ready&&['claude','codex'].includes(s.provider);}
  async send(raw:unknown,principalId:string):Promise<WebChatMessage>{
   const input=WebChatSendSchema.parse(raw);
@@ -37,8 +65,9 @@ export class HostChat {
   await this.pump();return (await this.store.all()).find(r=>r.input.messageId===message.messageId)!.message;
  }
  async pump():Promise<void>{
-  const observed=(await this.store.all()).filter(r=>r.echoObserved&&!r.admitted);
-  if(observed.length){const s=await this.port.session();for(const r of observed){if(s.sessionId===r.input.sessionId&&s.nativeSessionId===r.nativeSessionId&&s.paneId===r.paneId)await this.echo({nativeSessionId:r.nativeSessionId,paneId:r.paneId,prompt:this.wire(r)});}}
+  await this.reconcileObserved();
+  const observed=(await this.store.all()).filter(r=>r.echoObserved&&!r.admitted&&r.state!=='not_delivered');
+  if(observed.length){const s=await this.port.session();for(const r of observed){if(s.sessionId===r.input.sessionId&&s.nativeSessionId===r.nativeSessionId&&s.paneId===r.paneId){try{await this.echo({nativeSessionId:r.nativeSessionId,paneId:r.paneId,prompt:this.wire(r)});}catch(error){if(!(error instanceof ChatApprovalRejectionError))throw error;}}}}
   const candidate=await this.store.exclusive(async()=>{
    const all=await this.store.all();
    if(!all.some(r=>r.state==='queued'))return;
@@ -56,7 +85,12 @@ export class HostChat {
   });
   if(!candidate)return;
   try{await this.port.prompt(this.wire(candidate),{paneId:candidate.paneId,nativeSessionId:candidate.nativeSessionId,sessionId:candidate.input.sessionId});await this.store.exclusive(async()=>{const current=(await this.store.all()).find(r=>r.input.messageId===candidate.input.messageId)!;if(current.state==='dispatching')await this.store.write({...current,state:'accepted',message:{...current.message,delivery:'accepted'}});});}
-  catch{/* Uncertain write/ACK never authorizes resend. The exact native echo may still reconcile. */}
+  catch(error){
+   const reason=preDispatchReasonOf(error);
+   if(reason==='busy'){await this.store.exclusive(async()=>{const current=(await this.store.all()).find(r=>r.input.messageId===candidate.input.messageId)!;if(current.state==='dispatching')await this.store.write({...current,state:'queued',message:{...current.message,delivery:'queued'}});});}
+   else if(reason==='session_changed'){await this.store.exclusive(async()=>{const current=(await this.store.all()).find(r=>r.input.messageId===candidate.input.messageId)!;if(current.state==='dispatching')await this.store.write({...current,state:'not_delivered',message:{...current.message,delivery:'failed'}});});}
+   /* Uncertain write/ACK never authorizes resend. The exact native echo may still reconcile. */
+  }
  }
  async echo(input:{nativeSessionId:string;paneId:string;prompt:string}):Promise<unknown|undefined>{
   if(!input.prompt.startsWith(marker))return undefined;
@@ -69,29 +103,30 @@ export class HostChat {
    this.activeEcho.add(r.input.messageId);
    try{const result=r.admitted?r.result:await this.port.admit(r.input.messageId,r.input.content,r.principalId,r.input.runId);
     const current=(await this.store.all()).find(v=>v.input.messageId===r.input.messageId)!;
-    await this.store.write({...current,admitted:true,state:'delivered',result,message:{...r.message,delivery:'delivered'}});return result;
+    const failed=isApprovalFailedResult(result);
+    await this.store.write({...current,admitted:true,state:failed?'not_delivered':'delivered',result,message:{...r.message,delivery:failed?'failed':'delivered'}});return result;
+   }catch(error){
+    if(error instanceof ChatApprovalRejectionError){
+     const current=(await this.store.all()).find(v=>v.input.messageId===r.input.messageId);
+     if(current)await this.store.write({...current,state:'not_delivered',message:{...current.message,delivery:'failed'}});
+    }
+    throw error;
    }finally{this.activeEcho.delete(r.input.messageId);}
   });
  }
  async recordApproval(messageId:string,raw:unknown){
-  if(!this.activeEcho.has(messageId))throw Error('Approval requires the current correlated web echo');
+  if(!this.activeEcho.has(messageId))throw new ChatApprovalRejectionError('Approval requires the current correlated web echo');
   const decision=ApprovalDecisionSchema.parse(raw),r=(await this.store.all()).find(r=>r.input.messageId===messageId);
-  if(!r||decision.sessionId!==r.input.sessionId||decision.decidedBy!==r.principalId)throw Error('Foreign web chat approval');
+  if(!r||decision.sessionId!==r.input.sessionId||decision.decidedBy!==r.principalId)throw new ChatApprovalRejectionError('Foreign web chat approval');
   const current=(this.port.approvalContext?await this.port.approvalContext(r.input.runId):[]).map(v=>WebDecisionSchema.parse(v));
   const pinned=r.approvalContext.find(a=>a.decisionId===decision.approvalId&&a.status==='pending');
-  if(!pinned||canonicalWebJson(current)!==canonicalWebJson(r.approvalContext)||pinned.runId!==decision.runId||pinned.expectedVersion.approvalId!==decision.approvalId||pinned.expectedVersion.revision!==decision.revision||pinned.expectedVersion.generation!==decision.generation||canonicalWebJson(pinned.expectedVersion.target)!==canonicalWebJson(decision.target))throw Error('Stale chat approval context; use the current decision card');
-  if(r.approval&&canonicalWebJson(r.approval)!==canonicalWebJson(decision))throw Error('Conflicting web approval');
+  if(!pinned||canonicalWebJson(current)!==canonicalWebJson(r.approvalContext)||pinned.runId!==decision.runId||pinned.expectedVersion.approvalId!==decision.approvalId||pinned.expectedVersion.revision!==decision.revision||pinned.expectedVersion.generation!==decision.generation||canonicalWebJson(pinned.expectedVersion.target)!==canonicalWebJson(decision.target))throw new ChatApprovalRejectionError('Stale chat approval context; use the current decision card');
+  if(r.approval&&canonicalWebJson(r.approval)!==canonicalWebJson(decision))throw new ChatApprovalRejectionError('Conflicting web approval');
   await this.store.write({...r,approval:decision});
  }
  async authenticateHuman(raw:unknown){const decision=ApprovalDecisionSchema.parse(raw);return (await this.store.all()).some(r=>r.approval&&canonicalWebJson(r.approval)===canonicalWebJson(decision));}
  async list(sessionId:string,cursor?:string){
-  if(this.port.observeAdmission)await this.store.exclusive(async()=>{
-   for(const r of await this.store.all()){
-    if(r.input.sessionId!==sessionId||r.state==='queued'||r.state==='not_delivered'||r.admitted)continue;
-    const result=await this.port.observeAdmission!(r);
-    if(result!==undefined)await this.store.write({...r,admitted:true,state:'delivered',result,message:{...r.message,delivery:'delivered'}});
-   }
-  });
+  await this.reconcileObserved(sessionId);
   const records=(await this.store.all()).filter(r=>r.input.sessionId===sessionId);
   let native:WebChatMessage[]=[];
   try{native=this.port.history?await this.port.history(sessionId):[];}catch(error){if(!records.length)throw error;}

@@ -320,6 +320,12 @@ describe("adaptive classification and schema", () => {
     expect(classifyChange({ ...policyDetails(draft()).assessment, risk: "medium" }).complexity).toBe("standard");
   });
 
+  it("names the expected classification when declared complexity, risk or level disagree with the assessment", () => {
+    const spec = draft("feature");
+    expect(() => parseSpecification({ ...spec, complexity: "complex" }))
+      .toThrow(`classification must match assessed impact and affected paths: expected complexity ${spec.complexity}, riskLevel ${spec.riskLevel}, level ${spec.level}; got complexity complex, riskLevel ${spec.riskLevel}, level ${spec.level}; derived from metadata.sdd.assessment and affectedPaths (ordinary behavior change)`);
+  });
+
   it("rejects whitespace-only scope entries", () => {
     expect(() => parseSpecification({ ...draft(), scope: { inScope: [" "], outOfScope: [] } })).toThrow(/blank/);
   });

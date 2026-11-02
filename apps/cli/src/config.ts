@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { lstat, readFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { ensureEnvironmentInitialized } from "./environment-config.js";
 import { parseConfigYaml } from "./config-format.js";
 import {
   WorkflowDefinitionSchema,
@@ -158,7 +157,11 @@ export function resolveReadableConfigPath(cwd: string, configPath?: string, dir?
   const targetDir = dir !== undefined ? (isAbsolute(dir) ? dir : resolve(cwd, dir)) : cwd;
   for (const relative of [DEFAULT_CONFIG_RELATIVE_PATH, ".bflow/config.yaml", ".bflow/config.json"]) {
     const candidate = resolve(targetDir, relative);
-    if (existsSync(candidate)) return candidate;
+    try {
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Missing or unreadable candidate; continue checking fallbacks.
+    }
   }
   return resolve(targetDir, DEFAULT_CONFIG_RELATIVE_PATH);
 }
@@ -168,8 +171,29 @@ export async function loadRepositoryConfig(
 ): Promise<OperationResult<BflowRepositoryConfig>> {
   let content: string;
   try {
+    const info = await lstat(configPath);
+    if (info.isDirectory()) {
+      return {
+        ok: false,
+        error: {
+          code: "corruption",
+          retryable: false,
+          message: `Configuration path '${configPath}' is a directory; expected a YAML file.`
+        }
+      };
+    }
     content = await readFile(configPath, "utf-8");
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EISDIR") {
+      return {
+        ok: false,
+        error: {
+          code: "corruption",
+          retryable: false,
+          message: `Configuration path '${configPath}' is a directory; expected a YAML file.`
+        }
+      };
+    }
     return {
       ok: false,
       error: {
@@ -381,6 +405,7 @@ export async function initRepositoryConfig(options: {
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
 }): Promise<OperationResult<InitCommandOutput>> {
   try {
+    const { ensureEnvironmentInitialized } = await import("./environment-config.js");
     const targetDir = resolve(options.cwd, options.dir ?? ".");
     return {
       ok: true,

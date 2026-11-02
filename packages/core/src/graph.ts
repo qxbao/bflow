@@ -74,7 +74,9 @@ export function requiredGatesSatisfied(
           gate.gateId === binding.gateId &&
           gate.phase === binding.phase &&
           gate.generation === task.generation &&
-          gate.attemptId === task.attemptId &&
+          (binding.phase === "before_dispatch"
+            ? gate.attemptId === undefined || gate.attemptId === task.attemptId
+            : gate.attemptId === task.attemptId) &&
           gate.status === "passed"
       )
     );

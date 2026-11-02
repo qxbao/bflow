@@ -43,7 +43,9 @@ function normalizeTestPath(raw: string, checkout: string): string {
 }
 
 function stripTapDirective(name: string): string {
-  return name.replace(/\s+#\s*(?:SKIP|TODO)\b.*$/i, "").trim();
+  const directiveMatch = /^(.*?)\s+#\s*(?:SKIP|TODO)(?:$|\s+.*)$/i.exec(name);
+  const body = directiveMatch ? directiveMatch[1]! : name;
+  return body.replace(/\\([#\\])/g, "$1").trim();
 }
 
 function extractTapLocation(yamlBlock: string, checkout: string): string | undefined {

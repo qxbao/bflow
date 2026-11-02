@@ -59,8 +59,20 @@ function cyclePath(root: string, runId: string, taskId: string): string {
 
 async function readCycle(path: string): Promise<VerificationCycle | undefined> {
   let text: string;
-  try { text = await readFile(path, "utf8"); } catch { return undefined; }
-  const parsed = VerificationCycleSchema.safeParse(JSON.parse(text));
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    throw new HighLevelError({ code: "corruption", retryable: false, message: `Verification cycle state is corrupt: ${path}` });
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new HighLevelError({ code: "corruption", retryable: false, message: `Verification cycle state is corrupt: ${path}` });
+  }
+  const parsed = VerificationCycleSchema.safeParse(raw);
   if (!parsed.success) throw new HighLevelError({ code: "corruption", retryable: false, message: `Verification cycle state is corrupt: ${path}` });
   return parsed.data;
 }

@@ -30,7 +30,7 @@ Node.js **≥22.13**, pnpm **12.5.1**; [package.json](../package.json) pin pnpm.
 
 Không dùng global bypass cho bất kỳ permission mode nào. Sandbox của **test runner** không chứng minh isolation của **toàn bộ provider process**. Adapter permission compile không tự cung cấp deployment/container an toàn. [Provider contract](provider-contracts.md) và [permission compiler](../packages/agent-providers/src/permissions.ts) là nguồn tham chiếu.
 
-Standalone `agent check` dùng adapter environment riêng, không đọc role/profile/model từ config và có thể chạy model probe. `mcp status` đọc inventory nhưng binary chưa nối live health port mặc định; dùng `doctor`/service status và `docs status` (Context7) để chẩn đoán.
+Standalone `agent check` dùng adapter environment riêng, không đọc role/profile/model từ config và có thể chạy model probe. `mcp status` đọc inventory nhưng binary chưa nối live health port mặc định; dùng `doctor`/service status và `docs status` (DeepWiki) để chẩn đoán.
 
 `bflow up` và `doctor` mặc định dùng native auth/catalog, không model ping. `doctor --deep` là opt-in có thể tiêu hao usage. Readiness vẫn yêu cầu đúng launch/generation/native session, Ed25519 attestation, skills, permissions và MCP reachability. Agy auth/onboarding trong HOME launch cũng được kiểm tra; receipt copy hoặc Herdr `idle` không đủ.
 
@@ -43,7 +43,7 @@ Standalone `agent check` dùng adapter environment riêng, không đọc role/pr
 | RTK | CLI-only, formatter `pipe` trên raw output đã capture | Command gốc chạy một lần; parser/gate dùng raw status/output. Passthrough không được gọi là token saving |
 | GitNexus | Stdio MCP, query/context/impact theo policy | `bflow init` lập chỉ mục và đăng ký `gitnexus-<repo>` vào Gateway (`--check`, `--remove`, `--no-gitnexus`); Runtime có resource lease/fence theo registration; không tự rebuild trong task |
 | MemPalace | Managed Python venv, MCP search qua Gateway | Dịch vụ cấp máy dùng chung giữa các repo/worktree nhưng phân vùng theo `wing` chỉ đọc được resolve (mặc định repo ID), provenance/trusted artifact bắt buộc; memory không thay current spec/test |
-| Context7 | Hosted MCP qua Gateway, anonymous/API key | Dùng chung giữa các repo/worktree; optional cache, không OAuth; version/quota/network failure phải hiển thị |
+| DeepWiki | Hosted MCP qua Gateway (`https://mcp.deepwiki.com/mcp`), không cần API key | Dùng chung giữa các repo/worktree; chỉ repository công khai được chỉ định; quota/network failure phải hiển thị; thay Context7 (migrate có backup) |
 | Chrome DevTools | Dedicated profile/resource APIs ở Gateway/services + `BrowserResourceTransactions` ở Runtime | Runtime quản lý lease độc quyền theo từng attempt được xác thực (`browser-resource-transactions.json`, TTL 5 phút, `browser_lease_busy` khi gọi đồng thời); không dùng profile cá nhân hay dùng chung profile Chrome của `setup`. Gate owner `appChecks` (`host-app-<suite>`) chạy Chrome riêng trong sandbox với lease host-local, không dùng profile Gateway. Chưa có live Chrome SDLC acceptance |
 | Canonical skills | Exact bundle pins, role bindings, manifests, `read_pinned_instructions` | Nội dung được load không chứng minh tuân thủ; không cấp capability/tool permission |
 

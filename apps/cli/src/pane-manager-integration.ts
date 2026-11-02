@@ -11,7 +11,7 @@ import {
 } from "@bflow/pane-manager";
 import type { HostPrepareResponse } from "@bflow/runtime";
 import type { EnvironmentCompositionInput, EnvironmentIntegration } from "./environment.js";
-import { EnvironmentError } from "./environment.js";
+import { EnvironmentError } from "./environment-error.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
 import { RoleStartupChecks } from "./role-startup-checks.js";
@@ -170,7 +170,7 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
       for (const pane of current.value.panes) {
         if (stopped && pane.transportState === "cancelled") continue;
         checks.push({ checkId: `pane-${pane.bindingId}`.slice(0, 200), name: `${pane.role}: ${pane.paneId}`,
-          status: ["idle", "done", "working"].includes(pane.transportState) ? "passed" : "failed", message: `Agent ${pane.agentId}: ${pane.transportState}` });
+          status: ["idle", "done", "working", "accepted"].includes(pane.transportState) ? "passed" : "failed", message: `Agent ${pane.agentId}: ${pane.transportState}` });
       }
     }
     return EnvironmentDoctorReportSchema.parse({ schemaVersion: 2, workspaceRoot: root, sessionId: this.input.repository.sessionName,
@@ -245,6 +245,7 @@ export function openPaneManagerEnvironment(input: EnvironmentCompositionInput, r
   };
   return {
     requiresNativeSession: true,
+    rolesNeedPreparation: async () => (await connect()).rolesNeedPreparation?.() ?? false,
     prepareRoles: async options => {
       const result = await prepare(options);
       if (!result.ok) throw new EnvironmentError(result.error);

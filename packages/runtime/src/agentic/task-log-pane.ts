@@ -245,10 +245,23 @@ export class TaskLogPane {
     await chmod(dirname(this.receiptPath), 0o700);
     const temp = `${this.receiptPath}.${randomUUID()}.tmp`;
     const handle = await open(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
-    try { await handle.writeFile(JSON.stringify(receipt)); await handle.sync(); } finally { await handle.close(); }
+    try {
+      await handle.writeFile(JSON.stringify(receipt));
+      try { await handle.sync(); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EPERM', 'EACCES', 'EROFS'].includes(code)) throw error;
+      }
+    } finally { await handle.close(); }
     await rename(temp, this.receiptPath); await chmod(this.receiptPath, 0o600);
     const directoryHandle = await open(dirname(this.receiptPath), constants.O_RDONLY | constants.O_DIRECTORY);
-    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+    try {
+      try { await directoryHandle.sync(); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EPERM', 'EACCES', 'EBADF', 'EISDIR', 'EROFS'].includes(code)) throw error;
+      }
+    } finally { await directoryHandle.close(); }
   }
 
   private async removeReceipt(): Promise<void> { try { await unlink(this.receiptPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, it } from "vitest";
 
+// File name kept from the Context7 era: a leftover Context7 key must never reach DeepWiki, which needs none.
 const run = promisify(execFile);
 const bin = join(import.meta.dirname, "../dist/bin.js");
 let home: string;
@@ -21,29 +22,33 @@ async function check(env: Record<string, string>): Promise<{ stdout: string; std
 }
 const diagnostics = (stdout: string): string[] => (JSON.parse(stdout).data?.diagnostics ?? []) as string[];
 
-it("treats a malformed CONTEXT7_API_KEY in the environment as advice, not as a reason to abort a read-only check", async () => {
+it("ignores a malformed CONTEXT7_API_KEY in the environment as advice, not as a reason to abort a read-only check", async () => {
   const result = await check({ CONTEXT7_API_KEY: "not-a-key" });
   const notes = diagnostics(result.stdout);
   expect(notes.some(note => note.startsWith("CONTEXT7_API_KEY in the environment is ignored"))).toBe(true);
-  expect(notes.some(note => /runs anonymously/.test(note))).toBe(true);
+  expect(notes.some(note => /DeepWiki needs no API key/.test(note))).toBe(true);
   expect(result.stdout).not.toContain("not-a-key");
   expect(result.stderr).not.toContain("not-a-key");
 }, 90_000);
 
-it("uses a well-formed key from the environment and says only that a key is in use", async () => {
+it("ignores a well-formed legacy key from the environment and never prints or forwards it", async () => {
   const key = "ctx7sk-0123456789abcdef-clitest";
   const result = await check({ CONTEXT7_API_KEY: key });
-  expect(diagnostics(result.stdout).some(note => /runs with an API key/.test(note))).toBe(true);
+  expect(diagnostics(result.stdout).some(note => note.startsWith("CONTEXT7_API_KEY in the environment is ignored"))).toBe(true);
+  expect(diagnostics(result.stdout).some(note => /runs with an API key/.test(note))).toBe(false);
   expect(result.stdout).not.toContain(key);
+  expect(result.stderr).not.toContain(key);
 }, 90_000);
 
-it("refuses --context7-api-key-stdin from a terminal-less shell with an empty key rather than storing nothing", async () => {
+it("rejects the removed --context7-api-key-stdin flag without reading or storing what is piped to it", async () => {
+  const key = "ctx7sk-piped-secret-0123456789";
   const child = execFile(process.execPath, [bin, "setup", "--apply", "--context7-api-key-stdin", "--json"], { env: { ...process.env, BFLOW_HOME: home }, timeout: 60_000 });
   let stdout = ""; let stderr = "";
   child.stdout?.on("data", chunk => { stdout += chunk; });
   child.stderr?.on("data", chunk => { stderr += chunk; });
-  child.stdin?.end("   \n");
+  child.stdin?.end(`${key}\n`);
   const code = await new Promise<number>(resolve => child.on("close", code => resolve(code ?? 1)));
   expect(code).not.toBe(0);
-  expect(`${stdout}${stderr}`).toMatch(/empty/i);
+  expect(`${stdout}${stderr}`).toMatch(/unknown option|DeepWiki needs no API key/i);
+  expect(`${stdout}${stderr}`).not.toContain(key);
 }, 90_000);

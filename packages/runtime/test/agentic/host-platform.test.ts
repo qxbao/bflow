@@ -63,16 +63,16 @@ async function profiledToolSession(restrictions: NonNullable<Parameters<typeof r
   const scope = { kind: "session", machineId: options.platform.machineId, repositoryId: options.platform.repositoryId,
     workspaceRoot: options.repositoryPath, sessionId: options.sessionId };
   const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: scope.repositoryId,
-    scope: { kind: "repository", machineId: scope.machineId, repositoryId: scope.repositoryId, workspaceRoot: scope.workspaceRoot }, digest: "b".repeat(64), requirements: [cli ? { toolId: "rtk", kind: "cli_only", operations: ["pipe"], requiredness: "optional", roles: [role], triggers: ["routine_command"] } : { toolId: "context7",
-      kind: "native_remote_mcp", serviceId: "docs", operations: ["query_docs"], requiredness: "optional", roles: [role], triggers: ["external_documentation"] }] });
+    scope: { kind: "repository", machineId: scope.machineId, repositoryId: scope.repositoryId, workspaceRoot: scope.workspaceRoot }, digest: "b".repeat(64), requirements: [cli ? { toolId: "rtk", kind: "cli_only", operations: ["pipe"], requiredness: "optional", roles: [role], triggers: ["routine_command"] } : { toolId: "deepwiki",
+      kind: "native_remote_mcp", serviceId: "docs", operations: ["ask_wiki_question"], requiredness: "optional", roles: [role], triggers: ["external_documentation"] }] });
   const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-profile", policyDigest: policy.digest,
     requiredness: "optional", role, scope,
     ...(cli ? { toolId: "rtk", kind: "cli_only", triggers: ["routine_command"], operations: ["pipe"],
       cliIdentity: { executablePath: "/trusted/rtk", version: "1.0.0", digest: "c".repeat(64) } } :
-      { toolId: "context7", kind: "native_remote_mcp", triggers: ["external_documentation"], serviceId: "docs", operations: ["query_docs"] }),
+      { toolId: "deepwiki", kind: "native_remote_mcp", triggers: ["external_documentation"], serviceId: "docs", operations: ["ask_wiki_question"] }),
     capabilityIds: ["documentation"] });
   const profile = roleProfileFixture({ profileId: "db-reviewer", baseRole: role, restrictions });
-  const configured = { ...platform, roles: [{ ...roleOption(role, "codex"), capabilityIds: ["repository.read", "documentation"], toolIds: [cli ? "rtk" : "context7"] }],
+  const configured = { ...platform, roles: [{ ...roleOption(role, "codex"), capabilityIds: ["repository.read", "documentation"], toolIds: [cli ? "rtk" : "deepwiki"] }],
     toolPolicy: policy, toolGrants: [grant], roleProfiles: [profile] };
   const host = new HostPlatformSession({ ...options, platform: configured });
   await host.prepare();
@@ -94,15 +94,15 @@ describe("profiled tool launch authority", () => {
   });
   it.each([false, true])("routes specialist tools to the dedicated allocation and freshness check (reconcile=%s)", async reconcile => {
     const f = await profiledToolSession();
-    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", reconcile,
+    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "deepwiki", "docs", "ask_wiki_question", "external_documentation", {}, "call-profile", reconcile,
       undefined, undefined, f.binding);
     expect(result.ok).toBe(true);
     expect(f.fresh).toEqual(["launch-profile"]);
-    expect(f.calls).toMatchObject([{ kind: reconcile ? "reconcile" : "invoke", args: [expect.anything(), "reviewer", "allocation-review-1", "docs", "query_docs", {}, "call-profile", { timeoutMs: 5_000 }] }]);
+    expect(f.calls).toMatchObject([{ kind: reconcile ? "reconcile" : "invoke", args: [expect.anything(), "reviewer", "allocation-review-1", "docs", "ask_wiki_question", {}, "call-profile", { timeoutMs: 5_000 }] }]);
   });
   it.each([{ tools: [] }, { capabilityIds: ["repository.read"] }])("denies optional tools removed by effective profile grants (%j)", async restrictions => {
     const f = await profiledToolSession(restrictions);
-    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "deepwiki", "docs", "ask_wiki_question", "external_documentation", {}, "call-profile", false,
       undefined, undefined, f.binding);
     expect(result.ok).toBe(false);
     expect(f.calls).toEqual([]);
@@ -132,7 +132,7 @@ describe("profiled tool launch authority", () => {
       f.configured.toolGrants = [];
       return { ok: true, value: { checkedAt: at, healthy: true, lost: [], uncertain: false } };
     };
-    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+    const result = await f.host.invokeTool("reviewer", "allocation-review-1", "deepwiki", "docs", "ask_wiki_question", "external_documentation", {}, "call-profile", false,
       undefined, undefined, f.binding);
     expect(result.ok).toBe(false);
     expect(f.calls).toEqual([]);
@@ -166,23 +166,23 @@ describe("profiled tool launch authority", () => {
   });
   it("does not permit a released profiled allocation or a base launch with the same role", async () => {
     const f = await profiledToolSession();
-    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "deepwiki", "docs", "ask_wiki_question", "external_documentation", {}, "call-profile", false,
       undefined, undefined, { ...f.binding, metadata: { launchId: "launch-reviewer" } })).resolves.toMatchObject({ ok: false });
     await f.host.releaseDeveloper("allocation-review-1");
-    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", true,
+    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "deepwiki", "docs", "ask_wiki_question", "external_documentation", {}, "call-profile", true,
       undefined, undefined, f.binding)).resolves.toMatchObject({ ok: false });
     expect(f.calls).toEqual([]);
   });
   it("does not carry profile tool authority into a newer platform generation", async () => {
     const f = await profiledToolSession();
     await f.host.prepare();
-    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+    await expect(f.host.invokeTool("reviewer", "allocation-review-1", "deepwiki", "docs", "ask_wiki_question", "external_documentation", {}, "call-profile", false,
       undefined, undefined, f.binding)).resolves.toMatchObject({ ok: false });
     expect(f.calls).toEqual([]);
   });
   it("refuses a profiled binding with a missing allocation rather than choosing the permanent registration", async () => {
     const f = await profiledToolSession();
-    const result = await f.host.invokeTool("reviewer", undefined, "context7", "docs", "query_docs", "external_documentation", {}, "call-profile", false,
+    const result = await f.host.invokeTool("reviewer", undefined, "deepwiki", "docs", "ask_wiki_question", "external_documentation", {}, "call-profile", false,
       undefined, undefined, f.binding);
     expect(result.ok).toBe(false);
     expect(f.calls).toEqual([]);
@@ -217,10 +217,10 @@ describe("profile selection ingress", () => {
   it("accepts only exported tool policy and grant schemas on the host wire", () => {
     const scope = { kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "session-1" };
     const policy = RepositoryToolPolicySchema.parse({ schemaVersion: 3, repositoryId: "repo-1", scope: { kind: "repository", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo" },
-      digest: "a".repeat(64), requirements: [{ toolId: "context7", requiredness: "optional", roles: ["coordinator"], triggers: ["external_documentation"], operations: ["query_docs"], kind: "native_remote_mcp", serviceId: "context7" }] });
-    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-context7", policyDigest: "a".repeat(64), toolId: "context7",
+      digest: "a".repeat(64), requirements: [{ toolId: "deepwiki", requiredness: "optional", roles: ["coordinator"], triggers: ["external_documentation"], operations: ["ask_wiki_question"], kind: "native_remote_mcp", serviceId: "deepwiki" }] });
+    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-deepwiki", policyDigest: "a".repeat(64), toolId: "deepwiki",
       kind: "native_remote_mcp", requiredness: "optional", role: "coordinator", scope, triggers: ["external_documentation"],
-      serviceId: "context7", operations: ["query_docs"] });
+      serviceId: "deepwiki", operations: ["ask_wiki_question"] });
     expect(AgenticHostPlatformOptionsSchema.parse({ ...platform, toolPolicy: policy, toolGrants: [grant] })).toMatchObject({ toolPolicy: policy, toolGrants: [grant] });
     expect(AgenticHostPlatformOptionsSchema.safeParse({ ...platform, toolGrants: [{ ...grant, operations: [" "] }] }).success).toBe(false);
   });
@@ -320,15 +320,15 @@ describe("profile selection ingress", () => {
     expect(finished[0]).toMatchObject([expect.anything(), "coordinator", "authenticated-attempt"]);
   });
   it("registers exact MCP operations while preserving catalog tool IDs", () => {
-    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-context7", policyDigest: "a".repeat(64), toolId: "context7",
+    const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "grant-deepwiki", policyDigest: "a".repeat(64), toolId: "deepwiki",
       kind: "native_remote_mcp", requiredness: "optional", role: "coordinator",
       scope: { kind: "session", machineId: "machine-1", repositoryId: "repo-1", workspaceRoot: "/repo", sessionId: "session-1" },
-      triggers: ["external_documentation"], serviceId: "context7", operations: ["query_docs"] });
-    const required = requirementFor({ ...roleOption("coordinator", "codex"), toolIds: ["context7"] },
+      triggers: ["external_documentation"], serviceId: "deepwiki", operations: ["ask_wiki_question"] });
+    const required = requirementFor({ ...roleOption("coordinator", "codex"), toolIds: ["deepwiki"] },
       {}, "/repo", undefined, [grant]);
-    expect(required.toolIds).toEqual(["context7"]);
-    expect(required.mcpOperations).toEqual(["query_docs"]);
-    expect(required.mcpServiceIds).toEqual(["context7"]);
+    expect(required.toolIds).toEqual(["deepwiki"]);
+    expect(required.mcpOperations).toEqual(["ask_wiki_question"]);
+    expect(required.mcpServiceIds).toEqual(["deepwiki"]);
     const legacyWithoutPolicy = requirementFor({ ...roleOption("coordinator", "codex"), mcpServiceIds: ["legacy-service"], toolIds: ["legacy-tool"] }, {}, "/repo");
     expect(legacyWithoutPolicy.mcpServiceIds).toEqual(["legacy-service"]);
     expect(legacyWithoutPolicy.toolGrants).toBeUndefined();

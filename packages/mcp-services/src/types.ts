@@ -159,6 +159,7 @@ export interface ManagedBackendRegistrationOptions {
   readonly idleTimeoutMs?: number | undefined;
   readonly maxMemoryBytes?: number | undefined;
   readonly maxConcurrentClients?: number | undefined;
+  readonly clientLeaseTtlMs?: number | undefined;
   readonly isolateByRepository?: boolean | undefined;
 }
 

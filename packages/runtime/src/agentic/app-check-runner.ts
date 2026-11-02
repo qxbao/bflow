@@ -156,6 +156,7 @@ function selectChecks(suite: AppCheckSuite, checkIds: readonly string[] | undefi
 async function executableReal(path: string): Promise<string | undefined> {
   try {
     const real = await realpath(path);
+    if (!(await lstat(real)).isFile()) return undefined;
     await access(real, constants.X_OK);
     return real;
   } catch { return undefined; }

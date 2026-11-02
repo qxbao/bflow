@@ -179,6 +179,10 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
     if (config.dependsOnPaths?.some(path => !safePath(path))) throw new Error("Unsafe check dependency path");
     return config;
   });
+  const includesCanonicalTestName = (list: readonly string[], target: string): boolean => {
+    const canonical = target.trim().normalize("NFC");
+    return list.some(candidate => candidate.trim().normalize("NFC") === canonical);
+  };
   if (!value.reviewWaiver) {
     if (!configs.some(c => c.kind === "review")) throw new Error("An independent Reviewer or QA check is required");
   } else {
@@ -197,7 +201,7 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
         if (criterion.required === false || criterion.status === "waived") continue;
         const names = mappings.get(criterion.id);
         if (!names || !configs.some(c => c.kind === "deterministic" && c.method === criterion.verificationMethod && c.criterionIds.includes(criterion.id) &&
-            names.every(name => c.testNames.includes(name))))
+            names.every(name => includesCanonicalTestName(c.testNames, name))))
           throw new Error(`review_waiver_unmapped_criterion: deterministic_coverage waiver requires a deterministic check mapping for ${criterion.id}`);
       }
     } else if (value.reviewWaiver.kind === "identical_integrated_tree") {
@@ -212,7 +216,7 @@ export function createVerificationPlan(input: unknown): VerificationPlan {
     if (value.reviewWaiver?.kind === "identical_integrated_tree" && criterion.verificationMethod === "manual_review") continue;
     const names = mappings.get(criterion.id);
     if (!names || !configs.some(c => c.method === criterion.verificationMethod && c.criterionIds.includes(criterion.id) &&
-        names.every(name => c.testNames.includes(name)))) throw new Error(`No complete check mapping for ${criterion.id}`);
+        names.every(name => includesCanonicalTestName(c.testNames, name)))) throw new Error(`No complete check mapping for ${criterion.id}`);
   }
   if (strategy.coverageThresholdPercent !== undefined && !configs.some(c => c.measuresCoverage))
     throw new Error("Coverage threshold needs a configured aggregate coverage check");

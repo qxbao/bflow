@@ -304,6 +304,9 @@ export class SdlcWorkflowOrchestrator {
           options
         );
         if (!dispatchRes.ok) {
+          // An uncertain delivery blocks the run for reconciliation, but the caller must still see it: swallowing the
+          // error would hide that the send may have reached the agent.
+          if (dispatchRes.error.code === "unknown_delivery") return dispatchRes as OperationResult<WorkflowRunSnapshot>;
           // Check if dispatch failure transitioned the task or run to a blocked state
           const refreshedSnap = await this.#ports.engine.getSnapshot(runId, options);
           if (refreshedSnap.ok && refreshedSnap.value) {

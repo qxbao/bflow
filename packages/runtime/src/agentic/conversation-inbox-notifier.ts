@@ -21,6 +21,13 @@ export interface ConversationInboxPorts {
   now(): number;
 }
 
+function sliceUtf16Safe(text: string, max: number): string {
+  if (max <= 0) return "";
+  if (text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
 /** OS notification attempts per notice before the advisory notification is given up (e.g. `herdr notification show` unsupported). */
 export const MAX_NOTIFICATION_FAILURES = 3;
 
@@ -56,7 +63,7 @@ export class ConversationInboxNotifier {
     }
     if (due.length) {
       let notificationSucceeded = true;
-      try { await ports.notify(`Bflow: ${due.length} cập nhật mới`, due.map(item => item.body).join("\n---\n").slice(0, 1200)); }
+      try { await ports.notify(`Bflow: ${due.length} cập nhật mới`, sliceUtf16Safe(due.map(item => item.body).join("\n---\n"), 1200)); }
       catch (error) {
         notificationSucceeded = false;
         for (const item of due) {

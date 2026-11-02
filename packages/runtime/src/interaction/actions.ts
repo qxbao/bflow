@@ -5,9 +5,11 @@ import {
 } from "@bflow/contracts";
 import {
   digest,
+  isConversationDelivery,
   type JournalState,
   type RunRecord,
 } from "../agentic/journal.js";
+import { unmeasuredPolicyPhaseRequests } from "../agentic/phase-recovery.js";
 export const terminal = (r: RunRecord) =>
   r.cancelled ||
   !!r.supersededBy ||
@@ -68,12 +70,27 @@ export function availableActions(
       "revise_request",
       Number(r.delegation.metadata?.followUp ?? 1) >= 6
         ? "follow_up_budget_exhausted"
-        : uncertain
-          ? "delivery_reconciliation_required"
-          : undefined,
+        : r.coreCreated
+          // Mirrors Runtime admission: tasks already in Core cannot be re-planned in place.
+          ? "core_execution_started"
+          : uncertain
+            ? "delivery_reconciliation_required"
+            : undefined,
     ),
   ];
-  if (r.pendingAction && r.pendingAction.kind !== "coordinator_continuation") {
+  const previousResume = r.resumeReceipts?.find(item => item.actionId === r.pendingAction?.actionId);
+  const retiredToResume = state.outbound.some(out => out.message.run_id === r.runId && out.phaseRetirement !== undefined && out.phaseRetirement.resumeAuthorizedBy === undefined);
+  // Runtime accepts a separately identified explicit resume after its automatic wake or after a retired policy phase, including while queued.
+  const explicitAfterAutomatic = r.pendingAction?.kind === "resume_coordinator" && (retiredToResume || (previousResume !== undefined &&
+    state.outbound.some(out => out.message.message_id === previousResume.messageId && out.message.run_id === r.runId &&
+      out.message.type === "task.status" && out.message.sender.role === "runtime" &&
+      typeof out.message.payload === "object" && out.message.payload !== null && !Array.isArray(out.message.payload) &&
+      out.message.payload.kind === "resume_run" && out.message.payload.actionId === r.pendingAction?.actionId && out.message.payload.automatic === true)));
+  const unmeasuredResume = r.pendingAction?.kind === "coordinator_continuation" && r.status === "implementing" &&
+    unmeasuredPolicyPhaseRequests(state, r).length > 0;
+  const resumeUncertain = !!r.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === r.runId &&
+    ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out));
+  if (r.pendingAction && (r.pendingAction.kind !== "coordinator_continuation" || unmeasuredResume)) {
     const a = r.pendingAction;
     const issued = new Set(
       state.outbound
@@ -94,21 +111,22 @@ export function availableActions(
     const restore =
       a.previousStatus === "awaiting_approval" &&
       ["task", "delivery"].includes(r.approvalKind ?? "") &&
+      r.approval?.status === "pending" &&
+      decisions.some((d) => d.decisionId === r.approval?.approvalId && d.status === "pending") &&
+      !decisions.some((d) => d.status === "pending" && d.decisionId !== r.approval?.approvalId) &&
       !Object.values(r.userDecisions ?? {}).some((d) => d.status === "pending");
     actions.push(
       action(
         "resume",
-        uncertain
+        resumeUncertain
           ? "delivery_reconciliation_required"
           : Math.max(a.manualResumeAttempts ?? 0, issued) >= 3
             ? "resume_budget_exhausted"
             : gate && !restore
               ? "decision_required"
-              : r.status !== "escalated" || a.state !== "pending"
+              : !explicitAfterAutomatic && ((r.status !== "escalated" && !unmeasuredResume) || a.state !== "pending")
                 ? "action_not_pending"
-                : a.requiredRole
-                  ? "capability_revalidation_required"
-                  : undefined,
+                : undefined,
       ),
     );
   }

@@ -19,13 +19,21 @@ const SUPPORTED_SCHEMA_KEYWORDS = new Set(["$schema", "type", "properties", "req
   "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
   "description", "title", "default", "examples", "deprecated"]);
 const SUPPORTED_JSON_TYPES = new Set(["object", "array", "string", "number", "integer", "boolean", "null"]);
+/** `anyOf` is enforced as: every sibling constraint holds and at least one branch holds. Both bounds are fail-closed. */
+const MAX_ANY_OF_BRANCHES = 16;
+const MAX_ANY_OF_NESTING = 4;
+/** The only vendor annotation accepted: FastMCP's boolean output-wrapping hint. It carries no constraint, so nothing is lost by keeping it. */
+const WRAP_RESULT_ANNOTATION = "x-fastmcp-wrap-result";
 
 /** Reject definitions whose constraints this Gateway cannot faithfully enforce. */
 export function isSupportedJsonSchema(schema: unknown): schema is MCPUpstreamJsonObject {
-  const visit = (rule: unknown, depth: number): boolean => {
+  const visit = (rule: unknown, depth: number, anyOfDepth: number): boolean => {
     if (depth > 32 || rule === null || typeof rule !== "object" || Array.isArray(rule)) return false;
     const s = rule as Record<string, unknown>;
-    if (Object.keys(s).some(key => !SUPPORTED_SCHEMA_KEYWORDS.has(key))) return false;
+    if (Object.keys(s).some(key => !SUPPORTED_SCHEMA_KEYWORDS.has(key) && key !== "anyOf" && key !== WRAP_RESULT_ANNOTATION)) return false;
+    if (s[WRAP_RESULT_ANNOTATION] !== undefined && typeof s[WRAP_RESULT_ANNOTATION] !== "boolean") return false;
+    if (s.anyOf !== undefined && (!Array.isArray(s.anyOf) || s.anyOf.length === 0 || s.anyOf.length > MAX_ANY_OF_BRANCHES ||
+        anyOfDepth + 1 > MAX_ANY_OF_NESTING || s.anyOf.some(branch => !visit(branch, depth + 1, anyOfDepth + 1)))) return false;
     if (s.$schema !== undefined && (typeof s.$schema !== "string" || s.$schema.trim().length === 0)) return false;
     if (s.type !== undefined && !(typeof s.type === "string" ? SUPPORTED_JSON_TYPES.has(s.type) :
       Array.isArray(s.type) && s.type.length > 0 && new Set(s.type).size === s.type.length &&
@@ -45,12 +53,12 @@ export function isSupportedJsonSchema(schema: unknown): schema is MCPUpstreamJso
     if (s.minItems !== undefined && s.maxItems !== undefined && (s.minItems as number) > (s.maxItems as number)) return false;
     if (s.minProperties !== undefined && s.maxProperties !== undefined && (s.minProperties as number) > (s.maxProperties as number)) return false;
     if (s.properties !== undefined && (s.properties === null || typeof s.properties !== "object" || Array.isArray(s.properties) ||
-        Object.values(s.properties).some(child => !visit(child, depth + 1)))) return false;
-    if (s.items !== undefined && !visit(s.items, depth + 1)) return false;
-    if (s.additionalProperties !== undefined && typeof s.additionalProperties !== "boolean" && !visit(s.additionalProperties, depth + 1)) return false;
+        Object.values(s.properties).some(child => !visit(child, depth + 1, anyOfDepth)))) return false;
+    if (s.items !== undefined && !visit(s.items, depth + 1, anyOfDepth)) return false;
+    if (s.additionalProperties !== undefined && typeof s.additionalProperties !== "boolean" && !visit(s.additionalProperties, depth + 1, anyOfDepth)) return false;
     return true;
   };
-  return visit(schema, 0);
+  return visit(schema, 0, 0);
 }
 
 /** Fail-closed validation for the common JSON Schema subset used by MCP tool definitions. */
@@ -61,6 +69,8 @@ export function validateJsonSchema(value: unknown, schema: MCPUpstreamJsonObject
     if (!isSupportedJsonSchema(rule)) return false;
     if ("const" in s && JSON.stringify(candidate) !== JSON.stringify(s.const)) return false;
     if (Array.isArray(s.enum) && !s.enum.some((item) => JSON.stringify(item) === JSON.stringify(candidate))) return false;
+    // The sibling constraints below must hold as well as one branch; support was verified for the whole schema above.
+    if (Array.isArray(s.anyOf) && !s.anyOf.some((branch) => visit(candidate, branch, depth + 1))) return false;
     const validType = (type: unknown): boolean => {
       switch (type) {
         case "object": return candidate !== null && typeof candidate === "object" && !Array.isArray(candidate);

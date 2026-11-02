@@ -1,15 +1,35 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, IsoDateTimeSchema, JsonValueSchema,
   OperationResultSchema, QualityFindingSchema, type ArtifactReference, type ArtifactStore,
-  type QualityFinding, type QualityGateResult, type VerificationCycle, type VerificationResult
+  type JsonValue, type QualityFinding, type QualityGateResult, type VerificationCycle, type VerificationResult
 } from "@bflow/contracts";
-import { digest, json, textField } from "./journal.js";
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
+
+function json(value: unknown): JsonValue {
+  return JsonValueSchema.parse(JSON.parse(JSON.stringify(value)));
+}
+function digest(value: unknown): string {
+  const canonical = (v: unknown): string =>
+    Array.isArray(v)
+      ? `[${v.map(canonical)}]`
+      : v !== null && typeof v === "object"
+        ? `{${Object.entries(v)
+            .filter(([, x]) => x !== undefined)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)}}`
+        : JSON.stringify(v) ?? "null";
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+function textField(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("Expected nonempty string");
+  return value;
+}
 
 const execute = promisify(execFile);
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -67,6 +87,13 @@ export const ReworkAssignmentContextSchema = z.object({
 export type ReworkAssignmentContext = z.infer<typeof ReworkAssignmentContextSchema>;
 
 function normalizeSourceLocationInput(value: unknown): unknown {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const out: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+    if (out.startLine === null) delete out.startLine;
+    if (out.endLine === null) delete out.endLine;
+    if (out.symbol === null || (typeof out.symbol === "string" && out.symbol.trim() === "")) delete out.symbol;
+    return out;
+  }
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   const lineMatch = /^(.+?):(\d+)(?:-(\d+))?$/.exec(trimmed);
@@ -102,7 +129,25 @@ export const ReworkSourceLocationSchema = z.preprocess(
 );
 export type ReworkSourceLocation = z.infer<typeof ReworkSourceLocationObjectSchema>;
 
-export const DiscriminatingCheckSchema = z.object({
+function stripOptionalNulls(
+  value: unknown,
+  stringKeys: readonly string[],
+  otherKeys: readonly string[] = []
+): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const out: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const key of stringKeys) {
+    if (out[key] === null || (typeof out[key] === "string" && out[key].trim() === "")) {
+      delete out[key];
+    }
+  }
+  for (const key of otherKeys) {
+    if (out[key] === null) delete out[key];
+  }
+  return out;
+}
+
+const DiscriminatingCheckObjectSchema = z.object({
   kind: z.string().trim().min(1).max(128).default("check_work"),
   command: z.string().trim().min(1).max(1024).optional(),
   target: z.string().trim().min(1).max(1024).optional(),
@@ -114,9 +159,13 @@ export const DiscriminatingCheckSchema = z.object({
     context.addIssue({ code: "custom", message: "discriminatingCheck requires command or target" });
   }
 });
-export type DiscriminatingCheck = z.infer<typeof DiscriminatingCheckSchema>;
+export const DiscriminatingCheckSchema = z.preprocess(
+  value => stripOptionalNulls(value, ["kind", "command", "target"], ["exitCode"]),
+  DiscriminatingCheckObjectSchema
+);
+export type DiscriminatingCheck = z.infer<typeof DiscriminatingCheckObjectSchema>;
 
-export const FindingResolutionEvidenceInputSchema = z.object({
+const FindingResolutionEvidenceInputObjectSchema = z.object({
   runId: z.string().trim().min(1).optional(),
   taskId: z.string().trim().min(1).optional(),
   attemptId: z.string().trim().min(1).optional(),
@@ -126,7 +175,11 @@ export const FindingResolutionEvidenceInputSchema = z.object({
   summary: z.string().trim().min(3).max(4000),
   artifactRef: ArtifactReferenceSchema.optional()
 }).strict();
-export type FindingResolutionEvidenceInput = z.infer<typeof FindingResolutionEvidenceInputSchema>;
+export const FindingResolutionEvidenceInputSchema = z.preprocess(
+  value => stripOptionalNulls(value, ["runId", "taskId", "attemptId"], ["coreGeneration", "artifactRef"]),
+  FindingResolutionEvidenceInputObjectSchema
+);
+export type FindingResolutionEvidenceInput = z.infer<typeof FindingResolutionEvidenceInputObjectSchema>;
 
 export const FindingResolutionEvidenceSchema = z.object({
   runId: z.string().trim().min(1),
@@ -144,7 +197,7 @@ export type FindingResolutionEvidence = z.infer<typeof FindingResolutionEvidence
 export const ReworkFindingDispositionSchema = z.enum(["addressed", "disputed", "blocked"]);
 export type ReworkFindingDisposition = z.infer<typeof ReworkFindingDispositionSchema>;
 
-export const ReworkFindingResolutionInputSchema = z.object({
+const ReworkFindingResolutionInputObjectSchema = z.object({
   findingId: z.string().trim().min(1).max(256),
   disposition: ReworkFindingDispositionSchema,
   rootCause: z.string().trim().min(10).max(4000),
@@ -157,7 +210,11 @@ export const ReworkFindingResolutionInputSchema = z.object({
   discriminatingCheck: DiscriminatingCheckSchema,
   evidence: FindingResolutionEvidenceInputSchema
 }).strict();
-export type ReworkFindingResolutionInput = z.infer<typeof ReworkFindingResolutionInputSchema>;
+export const ReworkFindingResolutionInputSchema = z.preprocess(
+  value => stripOptionalNulls(value, ["disputeReason", "blockerReason", "reproductionSteps"], ["hypothesisConfirmed"]),
+  ReworkFindingResolutionInputObjectSchema
+);
+export type ReworkFindingResolutionInput = z.infer<typeof ReworkFindingResolutionInputObjectSchema>;
 
 export const ReworkFindingResolutionSchema = z.object({
   findingId: z.string().trim().min(1).max(256),
@@ -177,14 +234,50 @@ export const ReworkFindingResolutionSchema = z.object({
 }).strict();
 export type ReworkFindingResolution = z.infer<typeof ReworkFindingResolutionSchema>;
 
-export const ReworkFindingVerdictSchema = z.object({
+function normalizeFindingVerdictInput(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const out: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  if ((out.filePath === undefined || out.filePath === null || out.filePath === "") && typeof out.file === "string") {
+    out.filePath = out.file;
+  }
+  delete out.file;
+  if (typeof out.location === "string" && out.location.trim().length > 0) {
+    const locMatch = /^(.+?):(\d+)(?:[-:]\d+)?$/.exec(out.location.trim());
+    if (locMatch) {
+      if (out.filePath === undefined || out.filePath === null || out.filePath === "") out.filePath = locMatch[1]!.trim();
+      if (out.line === undefined || out.line === null || out.line === "") out.line = Number.parseInt(locMatch[2]!, 10);
+    } else if (out.filePath === undefined || out.filePath === null || out.filePath === "") {
+      out.filePath = out.location.trim();
+    }
+  }
+  delete out.location;
+  if (out.filePath === null || (typeof out.filePath === "string" && out.filePath.trim() === "")) {
+    delete out.filePath;
+  }
+  if (out.line === null || (typeof out.line === "string" && out.line.trim() === "")) {
+    delete out.line;
+  } else if (typeof out.line === "string") {
+    const lineMatch = /^\s*(\d+)(?:\s*-\s*\d+)?\s*$/.exec(out.line);
+    if (lineMatch) {
+      const parsedLine = Number.parseInt(lineMatch[1]!, 10);
+      if (parsedLine >= 1) out.line = parsedLine;
+    }
+  }
+  return out;
+}
+
+const ReworkFindingVerdictObjectSchema = z.object({
   findingId: z.string().trim().min(1).max(256),
   verdict: z.enum(["confirmed", "rejected"]),
   summary: z.string().trim().min(3).max(2000),
   filePath: z.string().trim().min(1).max(1024).optional(),
   line: z.number().int().min(1).optional()
 }).strict();
-export type ReworkFindingVerdict = z.infer<typeof ReworkFindingVerdictSchema>;
+export const ReworkFindingVerdictSchema = z.preprocess(
+  normalizeFindingVerdictInput,
+  ReworkFindingVerdictObjectSchema
+);
+export type ReworkFindingVerdict = z.infer<typeof ReworkFindingVerdictObjectSchema>;
 
 export const ReworkFindingOutcomeSchema = z.object({
   findingId: z.string().trim().min(1).max(256),
@@ -296,10 +389,34 @@ export function buildReworkAssignmentContext(input: {
           message: `Verification ${lastResult.verificationId} failed on iteration ${lastResult.cycleNumber}; inspect failed criteria and repair root cause.`
         }];
 
+  // Fallback gate attribution for legacy VerificationResults where explicit gate findings omitted details.checkId.
+  const remainingGateFindings: { gateId: string; code: string; message: string; location?: string | undefined }[] = [];
+  for (const gate of lastResult.qualityGateResults) {
+    for (const gf of gate.findings) {
+      if (gf.severity === "error") {
+        remainingGateFindings.push({ gateId: gate.gateId, code: gf.code, message: gf.message, location: gf.location });
+      }
+    }
+  }
+
   const assignedFindings: AssignedReworkFinding[] = selectedFindings.map((finding, findingIndex) => {
     const details = recordMaybe(finding.details);
     const original = recordMaybe(details?.original);
-    const checkId = typeof details?.checkId === "string" ? details.checkId : typeof original?.checkId === "string" ? original.checkId : undefined;
+    let checkId = typeof details?.checkId === "string" ? details.checkId : typeof original?.checkId === "string" ? original.checkId : undefined;
+    if (checkId === undefined) {
+      const matchIdx = remainingGateFindings.findIndex(
+        gf => gf.code === finding.code && gf.message === finding.message && (gf.location ?? undefined) === (finding.location ?? undefined)
+      );
+      if (matchIdx >= 0) {
+        checkId = remainingGateFindings[matchIdx]!.gateId;
+        remainingGateFindings.splice(matchIdx, 1);
+      }
+    } else {
+      const matchIdx = remainingGateFindings.findIndex(
+        gf => gf.gateId === checkId && gf.code === finding.code && gf.message === finding.message
+      );
+      if (matchIdx >= 0) remainingGateFindings.splice(matchIdx, 1);
+    }
     const criterionId = typeof details?.criterionId === "string" ? details.criterionId : typeof original?.criterionId === "string" ? original.criterionId : undefined;
     const priorFindingId = typeof details?.priorFindingId === "string" ? details.priorFindingId : typeof original?.priorFindingId === "string" ? original.priorFindingId : undefined;
     const filePath = typeof details?.filePath === "string"
@@ -400,7 +517,8 @@ export function toAssignedQualityFindings(context: ReworkAssignmentContext): Qua
 
 async function gitInWorktree(cwd: string, args: string[]): Promise<string> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_") && !key.startsWith("NODE_")));
-  return (await execute("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args],
+  const dirFlags = await runtimeGitDirectoryFlags(cwd);
+  return (await execute("git", [...dirFlags, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args],
     { cwd, env, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
 }
 
@@ -536,6 +654,15 @@ export async function validateAndStoreReworkResolution(options: {
   if (worktreeState.dirty) {
     throw new Error("Rework worktree has uncommitted changes; commit changes before submitting rework resolution");
   }
+  if (
+    submissionStatus === "succeeded" &&
+    !parsedInputs.some(item => item.disposition === "addressed") &&
+    worktreeState.headCommitHash.toLowerCase() === reworkContext.failedRevision.toLowerCase()
+  ) {
+    throw new Error(
+      `Rework submission with status 'succeeded' has no new commit after failedRevision (${reworkContext.failedRevision}); commit a change (for example a reproduction or regression test) or submit pure no-commit disputes with status 'blocked' for escalation`
+    );
+  }
 
   const resolvedFindings: ReworkFindingResolution[] = [];
   for (const assigned of reworkContext.findings) {
@@ -608,7 +735,7 @@ export async function validateAndStoreReworkResolution(options: {
       }
       const absolute = resolve(worktreePath, loc.path);
       try {
-        const info = await stat(absolute);
+        const info = await lstat(absolute);
         if (!info.isFile()) {
           throw new Error(`Rework finding '${assigned.findingId}' sourceLocation '${loc.path}' is not a regular file`);
         }
@@ -621,10 +748,13 @@ export async function validateAndStoreReworkResolution(options: {
           }
         }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
           if (input.disposition !== "addressed" || !worktreeState.changedPaths.includes(loc.path)) {
             throw new Error(`Rework finding '${assigned.findingId}' sourceLocation '${loc.path}' does not exist in worktree`);
           }
+        } else if (code === "ENOTDIR" || code === "EISDIR") {
+          throw new Error(`Rework finding '${assigned.findingId}' sourceLocation '${loc.path}' is not a regular file`);
         } else {
           throw error;
         }
@@ -806,6 +936,11 @@ export async function verifyStoredReworkDossier(options: {
   if (worktreeState.dirty || dossier.submittedRevision.toLowerCase() !== worktreeState.headCommitHash.toLowerCase()) {
     throw new Error(`Rework resolution dossier submittedRevision (${dossier.submittedRevision}) does not match clean worktree HEAD (${worktreeState.headCommitHash})`);
   }
+  if (expectedStatus === "succeeded" && worktreeState.headCommitHash.toLowerCase() === reworkContext.failedRevision.toLowerCase()) {
+    throw new Error(
+      `Rework resolution dossier with submissionStatus 'succeeded' has no new commit after failedRevision (${reworkContext.failedRevision})`
+    );
+  }
   await verifyAndReadArtifact(artifactStore, dossier.artifactRef, reworkContext.runId, reworkContext.taskId);
   for (const resolution of dossier.findingResolutions) {
     await verifyAndReadArtifact(artifactStore, resolution.evidence.artifactRef, reworkContext.runId, reworkContext.taskId);
@@ -865,19 +1000,98 @@ export function reworkVerificationBinding(dossier: ReworkResolutionDossier) {
   };
 }
 
-export function parseRequiredFindingVerdicts(dossier: ReworkResolutionDossier, input: unknown): ReworkFindingVerdict[] {
-  const requiredIds = new Set(dossier.reworkContext.findings.map(f => f.findingId));
+export interface ReworkGateFindingScopeOptions {
+  readonly gateId?: string | undefined;
+  readonly role?: string | undefined;
+  readonly siblingReviewGateIds?: readonly string[] | undefined;
+  readonly hasReviewerGate?: boolean | undefined;
+}
+
+export function requiredReworkFindingIdsForGate(
+  dossier: ReworkResolutionDossier,
+  options?: ReworkGateFindingScopeOptions
+): { requiredFindingIds: string[]; optionalFindingIds: string[] } {
+  const findings = dossier.reworkContext.findings;
+  const siblingIds = options?.gateId && options.siblingReviewGateIds
+    ? new Set(options.siblingReviewGateIds.filter(id => id !== options.gateId))
+    : undefined;
+  if (!siblingIds || siblingIds.size === 0) {
+    return { requiredFindingIds: findings.map(f => f.findingId), optionalFindingIds: [] };
+  }
+  const claimsUnassigned = options?.role === "reviewer" || options?.hasReviewerGate === false;
+  const requiredFindingIds: string[] = [];
+  const optionalFindingIds: string[] = [];
+  for (const finding of findings) {
+    if (finding.checkId === options?.gateId) {
+      requiredFindingIds.push(finding.findingId);
+    } else if (finding.checkId !== undefined && siblingIds.has(finding.checkId)) {
+      optionalFindingIds.push(finding.findingId);
+    } else if (claimsUnassigned) {
+      requiredFindingIds.push(finding.findingId);
+    } else {
+      optionalFindingIds.push(finding.findingId);
+    }
+  }
+  return { requiredFindingIds, optionalFindingIds };
+}
+
+export function parseRequiredFindingVerdicts(
+  dossier: ReworkResolutionDossier,
+  input: unknown,
+  options?: ReworkGateFindingScopeOptions
+): ReworkFindingVerdict[] {
+  const allowedIds = new Set(dossier.reworkContext.findings.map(f => f.findingId));
+  const { requiredFindingIds } = requiredReworkFindingIdsForGate(dossier, options);
+  const requiredIds = new Set(requiredFindingIds);
+  if ((input === undefined || input === null) && requiredIds.size === 0) {
+    return [];
+  }
+  if (!Array.isArray(input)) {
+    throw new Error(
+      `Missing required findingVerdicts for independent rework verification; required findingId(s): ${[...requiredIds].join(", ")}`
+    );
+  }
   const verdicts = z.array(ReworkFindingVerdictSchema).parse(input);
   if (new Set(verdicts.map(v => v.findingId)).size !== verdicts.length) throw new Error("Duplicate findingId in findingVerdicts");
   for (const verdict of verdicts) {
-    if (!requiredIds.has(verdict.findingId)) throw new Error(`Unknown findingId '${verdict.findingId}' in rework findingVerdicts`);
+    if (!allowedIds.has(verdict.findingId)) {
+      throw new Error(`Unknown findingId '${verdict.findingId}' in rework findingVerdicts; valid findingId(s): ${[...allowedIds].join(", ")}`);
+    }
   }
-  if (verdicts.length !== requiredIds.size) throw new Error("Missing required findingVerdicts for independent rework verification");
+  const submittedIds = new Set(verdicts.map(v => v.findingId));
+  const missingIds = [...requiredIds].filter(id => !submittedIds.has(id));
+  if (missingIds.length > 0) {
+    throw new Error(
+      `Missing required findingVerdicts for independent rework verification; missing findingId(s): ${missingIds.join(", ")}`
+    );
+  }
   return verdicts;
 }
 
+function extractPinnedGateScope(
+  gate: QualityGateResult,
+  role: string
+): ReworkGateFindingScopeOptions | undefined {
+  const raw = recordMaybe(gate.metadata?.reworkGateScope);
+  if (!raw || raw.gateId !== gate.gateId || raw.role !== role || !Array.isArray(raw.siblingReviewGateIds)) {
+    return undefined;
+  }
+  const siblingReviewGateIds = raw.siblingReviewGateIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  if (!siblingReviewGateIds.includes(gate.gateId)) return undefined;
+  return {
+    gateId: gate.gateId,
+    role,
+    siblingReviewGateIds,
+    ...(typeof raw.hasReviewerGate === "boolean" ? { hasReviewerGate: raw.hasReviewerGate } : {})
+  };
+}
+
 /** Validate a host-authenticated independent gate against the exact submitted repair. */
-export function validateReworkGate(dossier: ReworkResolutionDossier, gate: QualityGateResult): ReworkFindingVerdict[] {
+export function validateReworkGate(
+  dossier: ReworkResolutionDossier,
+  gate: QualityGateResult,
+  options?: ReworkGateFindingScopeOptions
+): ReworkFindingVerdict[] {
   const observation = recordMaybe(gate.metadata?.verification);
   if (gate.runId !== dossier.runId || gate.taskId !== dossier.taskId ||
       observation?.runId !== dossier.runId || observation.taskId !== dossier.taskId ||
@@ -888,7 +1102,8 @@ export function validateReworkGate(dossier: ReworkResolutionDossier, gate: Quali
       digest(gate.metadata?.reworkVerification) !== digest(reworkVerificationBinding(dossier))) {
     throw new Error("Missing or stale independent rework verification binding");
   }
-  const verdicts = parseRequiredFindingVerdicts(dossier, gate.metadata?.findingVerdicts);
+  const effectiveOptions = options ?? extractPinnedGateScope(gate, String(observation.role));
+  const verdicts = parseRequiredFindingVerdicts(dossier, gate.metadata?.findingVerdicts, effectiveOptions);
   if (gate.status === "passed" && verdicts.some(v => v.verdict === "rejected")) throw new Error("Passed gate contradicts rejected finding verdict");
   return verdicts;
 }
@@ -902,9 +1117,19 @@ export function reworkVerificationVerdicts(dossier: ReworkResolutionDossier, res
   const gates = result.qualityGateResults.filter(g => ["reviewer", "qa", "tester"].includes(String(recordMaybe(g.metadata?.verification)?.role)) &&
     recordMaybe(g.metadata?.verification)?.method === "manual_review");
   if (!gates.length) throw new Error("Missing independent rework finding verdicts");
-  const verdictsByGate = gates.map(g => validateReworkGate(dossier, g));
+  const siblingReviewGateIds = gates.map(g => g.gateId);
+  const hasReviewerGate = gates.some(g => String(recordMaybe(g.metadata?.verification)?.role) === "reviewer");
+  const verdictsByGate = gates.map(g => validateReworkGate(dossier, g, {
+    gateId: g.gateId,
+    role: String(recordMaybe(g.metadata?.verification)?.role),
+    siblingReviewGateIds,
+    hasReviewerGate
+  }));
   return dossier.reworkContext.findings.map(f => {
-    const judgments = verdictsByGate.map(vs => vs.find(v => v.findingId === f.findingId)!);
+    const judgments = verdictsByGate.flatMap(vs => vs.filter(v => v.findingId === f.findingId));
+    if (judgments.length === 0) {
+      throw new Error(`Missing independent rework finding verdicts for findingId '${f.findingId}'`);
+    }
     return judgments.find(v => v.verdict === "rejected") ?? judgments[0]!;
   });
 }

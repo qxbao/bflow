@@ -125,29 +125,62 @@ export const VerificationMethodSchema = z.enum([
 ]);
 export type VerificationMethod = z.infer<typeof VerificationMethodSchema>;
 
+const nullToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(value => (value === null ? undefined : value), schema.optional());
+
+const blankToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(
+    value => (value === null || (typeof value === "string" && value.trim().length === 0) ? undefined : value),
+    schema.optional()
+  );
+
+const normalizeLowerEnum = (value: unknown): unknown =>
+  typeof value === "string" ? value.trim().toLowerCase() : value;
+
+const normalizeBlankOrLowerEnum = (value: unknown): unknown =>
+  value === null || (typeof value === "string" && value.trim().length === 0)
+    ? undefined
+    : typeof value === "string"
+      ? value.trim().toLowerCase()
+      : value;
+
+const normalizeStringList = (value: unknown): unknown =>
+  value === null
+    ? undefined
+    : Array.isArray(value)
+      ? value
+          .filter(item => typeof item !== "string" || item.trim().length > 0)
+          .map(item => (typeof item === "string" ? item.trim() : item))
+      : value;
+
 export const ExtractedRequirementDraftSchema = z
   .object({
-    title: z.string().min(1),
-    objective: z.string().min(1),
-    kind: z.enum(["feature", "bugfix", "refactor", "spike"]),
-    sddLevel: SddPolicyLevelSchema,
-    priority: z.enum(["low", "normal", "high", "critical"]),
-    scopeDefined: z.boolean(),
-    isLargeTask: z.boolean(),
-    affectedPaths: z.array(z.string()),
+    title: z.string().trim().min(1),
+    objective: z.string().trim().min(1),
+    kind: z.preprocess(normalizeLowerEnum, z.enum(["feature", "bugfix", "refactor", "spike"])),
+    sddLevel: z.preprocess(normalizeLowerEnum, SddPolicyLevelSchema),
+    priority: z.preprocess(normalizeBlankOrLowerEnum, z.enum(["low", "normal", "high", "critical"]).default("normal")),
+    scopeDefined: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
+    isLargeTask: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
+    affectedPaths: z.preprocess(normalizeStringList, z.array(z.string()).default([])),
     /** Legacy form; omitted when `acceptanceCriteria` states each criterion with its method. */
-    acceptanceCriteriaDescriptions: z.array(z.string()).default([]),
+    acceptanceCriteriaDescriptions: z.preprocess(value => (value === null ? undefined : value), z.array(z.string()).default([])),
     /** Legacy methods: one per criterion (by index) or a single method for every criterion. */
-    verificationMethods: z.array(VerificationMethodSchema).optional(),
+    verificationMethods: nullToUndefined(z.array(VerificationMethodSchema)),
     /** Each criterion with its own explicit verification method. */
-    acceptanceCriteria: z.array(z.object({ description: z.string(), verificationMethod: VerificationMethodSchema }).strict()).optional(),
-    isRequirementChange: z.boolean(),
-    codeChangesAuthorized: z.boolean().optional(),
-    targetRunId: IdentifierSchema.optional(),
-    targetCorrelationId: IdentifierSchema.optional(),
-    investigationTasks: z.array(z.object({ objective: z.string().min(1), affectedPaths: z.array(z.string()), codeChangesAuthorized: z.literal(false) }).strict()).optional()
+    acceptanceCriteria: nullToUndefined(z.array(z.object({ description: z.string(), verificationMethod: VerificationMethodSchema }).strict())),
+    isRequirementChange: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
+    codeChangesAuthorized: nullToUndefined(z.boolean()),
+    targetRunId: blankToUndefined(IdentifierSchema),
+    targetCorrelationId: blankToUndefined(IdentifierSchema),
+    investigationTasks: nullToUndefined(z.array(z.object({ objective: z.string().min(1), affectedPaths: z.array(z.string()), codeChangesAuthorized: z.literal(false) }).strict()))
   })
   .strict();
+
+export const ClarifyRequirementDraftSchema = ExtractedRequirementDraftSchema.extend({
+  kind: z.preprocess(normalizeBlankOrLowerEnum, z.enum(["feature", "bugfix", "refactor", "spike"]).default("feature")),
+  sddLevel: z.preprocess(normalizeBlankOrLowerEnum, SddPolicyLevelSchema.default("lightweight"))
+}).strict();
 
 export interface ExtractedRequirementDraft {
   readonly investigationTasks?: readonly { readonly objective: string; readonly affectedPaths: readonly string[]; readonly codeChangesAuthorized: false }[] | undefined;
@@ -168,24 +201,110 @@ export interface ExtractedRequirementDraft {
   readonly targetCorrelationId?: string | undefined;
 }
 
-export const ChatCancellationInputSchema = z.union([
-  z.object({ runId: IdentifierSchema, taskId: IdentifierSchema.optional(), reason: z.string().trim().min(1).optional() }).strict(),
-  z.object({ runIds: z.array(IdentifierSchema).min(1).refine(ids => new Set(ids).size === ids.length, "Duplicate cancellation run IDs"),
-    reason: z.string().trim().min(1).optional() }).strict(),
-  z.object({ scope: z.literal("session_existing"), reason: z.string().trim().min(1).optional() }).strict()
+function normalizeFlatCancellationInput(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const cleaned: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  for (const key of ["runId", "taskId", "runIds", "scope", "reason"]) {
+    const val = cleaned[key];
+    if (val === null || (typeof val === "string" && val.trim().length === 0)) {
+      delete cleaned[key];
+    }
+  }
+  return cleaned;
+}
+
+export const ChatCancellationInputSchema = z.preprocess(
+  normalizeFlatCancellationInput,
+  z.union([
+    z.object({ runId: IdentifierSchema, taskId: blankToUndefined(IdentifierSchema), reason: blankToUndefined(z.string().trim().min(1)) }).strict(),
+    z.object({ runIds: z.array(IdentifierSchema).min(1).refine(ids => new Set(ids).size === ids.length, "Duplicate cancellation run IDs"),
+      reason: blankToUndefined(z.string().trim().min(1)) }).strict(),
+    z.object({ scope: z.literal("session_existing"), reason: blankToUndefined(z.string().trim().min(1)) }).strict()
+  ])
+);
+
+const FLAT_CHAT_DECISION_SIBLING_KEYS = new Set([
+  "directReply",
+  "clarifyingQuestions",
+  "requirementDraft",
+  "targetCorrelationId",
+  "targetRunId",
+  "cancellationInput"
 ]);
 
+function isEmptyUnusedObject(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every(
+    entry =>
+      entry === null ||
+      entry === undefined ||
+      (typeof entry === "string" && entry.trim().length === 0) ||
+      (Array.isArray(entry) && entry.every(item => item === null || item === undefined || (typeof item === "string" && item.trim().length === 0)))
+  );
+}
+
+function normalizeFlatChatDecisionInput(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+  const record = raw as Record<string, unknown>;
+  const intent = typeof record["intent"] === "string" ? record["intent"].trim().toLowerCase() : record["intent"];
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "intent") {
+      cleaned[key] = intent;
+      continue;
+    }
+    if (!FLAT_CHAT_DECISION_SIBLING_KEYS.has(key)) {
+      cleaned[key] = value;
+      continue;
+    }
+    if (value === null || value === undefined) continue;
+    if ((key === "targetRunId" || key === "targetCorrelationId") && typeof value === "string" && value.trim().length === 0) {
+      continue;
+    }
+    if (key === "directReply" && intent !== "conversation_only" && typeof value === "string" && value.trim().length === 0) {
+      continue;
+    }
+    if (key === "clarifyingQuestions" && intent !== "clarify" && Array.isArray(value) &&
+        value.every(item => item === null || item === undefined || (typeof item === "string" && item.trim().length === 0))) {
+      continue;
+    }
+    if (key === "cancellationInput" && intent !== "cancellation_request" && isEmptyUnusedObject(value)) {
+      continue;
+    }
+    if (key === "requirementDraft" && intent !== "workflow_request" && isEmptyUnusedObject(value)) {
+      continue;
+    }
+    cleaned[key] = value;
+  }
+  return cleaned;
+}
+
+const NonEmptyClarifyingQuestionsSchema = z.preprocess(
+  value =>
+    Array.isArray(value)
+      ? value
+          .filter(item => typeof item !== "string" || item.trim().length > 0)
+          .map(item => (typeof item === "string" ? item.trim() : item))
+      : value,
+  z.array(z.string().trim().min(1)).min(1).max(8)
+);
+
 /** Private Chat/host intake protocol. Governance approvals are deliberately absent. */
-export const ChatDecisionSchema = z.discriminatedUnion("intent", [
-  z.object({ intent: z.literal("conversation_only"), directReply: z.string().trim().min(1) }).strict(),
-  z.object({ intent: z.literal("clarify"), clarifyingQuestions: z.array(z.string().trim().min(1)).min(1).max(3),
-    requirementDraft: ExtractedRequirementDraftSchema.optional(), targetCorrelationId: IdentifierSchema.optional() }).strict(),
-  z.object({ intent: z.literal("workflow_request"), requirementDraft: ExtractedRequirementDraftSchema,
-    targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
-  z.object({ intent: z.literal("status_query"), targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict(),
-  z.object({ intent: z.literal("cancellation_request"), cancellationInput: ChatCancellationInputSchema,
-    targetCorrelationId: IdentifierSchema.optional(), targetRunId: IdentifierSchema.optional() }).strict()
-]);
+export const ChatDecisionSchema = z.preprocess(
+  normalizeFlatChatDecisionInput,
+  z.discriminatedUnion("intent", [
+    z.object({ intent: z.literal("conversation_only"), directReply: z.string().trim().min(1) }).strict(),
+    z.object({ intent: z.literal("clarify"), clarifyingQuestions: NonEmptyClarifyingQuestionsSchema,
+      requirementDraft: nullToUndefined(ClarifyRequirementDraftSchema),
+      targetCorrelationId: blankToUndefined(IdentifierSchema),
+      targetRunId: blankToUndefined(IdentifierSchema) }).strict(),
+    z.object({ intent: z.literal("workflow_request"), requirementDraft: ExtractedRequirementDraftSchema,
+      targetCorrelationId: blankToUndefined(IdentifierSchema), targetRunId: blankToUndefined(IdentifierSchema) }).strict(),
+    z.object({ intent: z.literal("status_query"), targetCorrelationId: blankToUndefined(IdentifierSchema), targetRunId: blankToUndefined(IdentifierSchema) }).strict(),
+    z.object({ intent: z.literal("cancellation_request"), cancellationInput: ChatCancellationInputSchema,
+      targetCorrelationId: blankToUndefined(IdentifierSchema), targetRunId: blankToUndefined(IdentifierSchema) }).strict()
+  ])
+);
 
 export type ChatDecision = z.infer<typeof ChatDecisionSchema>;
 
@@ -204,6 +323,7 @@ export interface ExtractedCancellationInput {
   readonly runId?: string;
   readonly taskId?: string;
   readonly reason?: string;
+  readonly closeSessionClarifications?: boolean;
 }
 
 export interface IntentClassificationResult {
@@ -219,6 +339,7 @@ export interface IntentClassificationResult {
   readonly cancellationInput?: ExtractedCancellationInput;
   readonly targetCorrelationId?: string;
   readonly targetRunId?: string;
+  readonly resolvedClarificationCorrelationId?: string;
 }
 
 export const PendingClarificationContextSchema = z
@@ -476,7 +597,7 @@ export interface ClosedApproval {
 
 /** Session-owned Runtime targets, including multiple follow-up runs sharing a display correlation. */
 export const RuntimeCancellationTargetSchema = z.object({ runId: IdentifierSchema, delegation: DelegationRequestSchema,
-  status: SdlcWorkStatusSchema, cancelled: z.boolean() }).strict();
+  status: SdlcWorkStatusSchema, cancelled: z.boolean(), supersededBy: IdentifierSchema.optional() }).strict();
 export type RuntimeCancellationTarget = z.infer<typeof RuntimeCancellationTargetSchema>;
 
 /** Private durable Conversation plan. Existing public request schemas remain unchanged. */

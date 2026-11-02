@@ -31,14 +31,23 @@ function requiresFull(text: string): boolean {
     !/(?:\b(?:not|no|never|neither|doesn't|don't)|không|chưa|chẳng)(?:\s+\p{L}+){0,3}\s+$/iu.test(clause.slice(0, match.index))));
 }
 
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+
 /** Display guidance and conservative pause classification; never revises or approves a requirement. */
 export function requirementRevisionGuidance(payload: unknown, runId?: string, workLabel?: string) {
   const parsed = Details.safeParse(payload);
   if (!parsed.success) return undefined;
   const detail = parsed.data;
-  const blockers = (detail.blockers ?? []).slice(0, 2).map(value => redactString(value).slice(0, 200));
+  const blockers = (detail.blockers ?? []).slice(0, 2).map(value => sliceUtf16(redactString(value), 200));
   const text = [detail.reason, detail.summary, detail.blockageReason,
-    ...(detail.blockers ?? []).slice(0, 10).map(value => value.slice(0, 2000))].filter(Boolean).join("\n");
+    ...(detail.blockers ?? []).slice(0, 10).map(value => sliceUtf16(value, 2000))].filter(Boolean).join("\n");
   const sdd = sddConflict(text);
   if (detail.requested_action !== "authorized_requirement_revision" && !sdd) return undefined;
   // Only suggest full when the reported blocker explicitly says full is required.

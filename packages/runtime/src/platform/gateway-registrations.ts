@@ -1,6 +1,7 @@
 import { BrowserResourceTransactions, type GatewayToolOperationOptions } from "./browser-resource-transactions.js";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   AgentProviderIdSchema, AgentRoleSchema, IsoDateTimeSchema, MCPClientRegistrationSchema, MCPEndpointSchema,
@@ -704,7 +705,27 @@ async function generationDirectories(stateDirectory: string): Promise<string[]> 
 async function readLedger(path: string): Promise<{ entries: LedgerEntries }> {
   if (!(await assertNotSymlink(join(path, ".."), "directory"))) return { entries: {} };
   if (!(await assertNotSymlink(path, "file"))) return { entries: {} };
-  const text = await readFile(path, "utf8");
+  let text: string;
+  try {
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) {
+        throw new LedgerError("validation", "Refusing non-regular Gateway registration ledger");
+      }
+      text = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (error instanceof LedgerError) throw error;
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ENOENT") return { entries: {} };
+    if (code === "ELOOP" || code === "EISDIR") {
+      throw new LedgerError("validation", "Refusing symlinked or non-regular Gateway registration ledger");
+    }
+    throw error;
+  }
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -717,17 +738,54 @@ async function readLedger(path: string): Promise<{ entries: LedgerEntries }> {
 /** Atomic replace: temp file (0600) → fsync → rename. Callers pass the full entry set. */
 async function writeLedger(identity: PlatformSessionIdentity, path: string, entries: LedgerEntries): Promise<void> {
   await ensurePrivateDirectory(identity.stateDirectory);
-  await ensurePrivateDirectory(join(path, ".."));
+  const parentDir = join(path, "..");
+  await ensurePrivateDirectory(parentDir);
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     const handle = await open(temporary, "wx", 0o600);
     try {
       await handle.writeFile(`${JSON.stringify({ schemaVersion: LEDGER_SCHEMA_VERSION, entries }, null, 2)}\n`);
-      await handle.sync();
+      try {
+        await handle.sync();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (
+          code !== "EINVAL" &&
+          code !== "ENOSYS" &&
+          code !== "ENOTSUP" &&
+          code !== "EOPNOTSUPP" &&
+          code !== "EROFS" &&
+          code !== "EPERM" &&
+          code !== "EACCES"
+        ) {
+          throw error;
+        }
+      }
     } finally {
       await handle.close();
     }
     await rename(temporary, path);
+    const parent = await open(parentDir, constants.O_RDONLY);
+    try {
+      await parent.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (
+        code !== "EINVAL" &&
+        code !== "ENOSYS" &&
+        code !== "ENOTSUP" &&
+        code !== "EOPNOTSUPP" &&
+        code !== "EROFS" &&
+        code !== "EPERM" &&
+        code !== "EACCES" &&
+        code !== "EISDIR" &&
+        code !== "EBADF"
+      ) {
+        throw error;
+      }
+    } finally {
+      await parent.close();
+    }
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;

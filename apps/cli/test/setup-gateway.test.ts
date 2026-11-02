@@ -39,28 +39,31 @@ afterEach(async () => {
   else await rm(root, { recursive: true, force: true });
 });
 
-it("shares approved hosted Context7 across worktrees while keeping the repository GitNexus private", async () => {
+it("shares approved hosted DeepWiki across worktrees while keeping the repository GitNexus private", async () => {
   const { input, ctx, platform } = fixture();
   await installFixtureTools(["query", "context", "impact"], { executableName: "gitnexus" });
   await installFixtureTools(["mempalace_status", "mempalace_search"]);
   const actualFetch = globalThis.fetch;
   vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
-    if (String(url) !== "https://mcp.context7.com/mcp") return actualFetch(url, options);
+    if (String(url) !== "https://mcp.deepwiki.com/mcp") return actualFetch(url, options);
     const message = JSON.parse(String(options?.body));
     if (message.id === undefined) return new Response(null, { status: 202 });
     const result = message.method === "initialize"
       ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "hosted-docs-fixture", version: "1" } }
       : message.method === "tools/list"
-        ? { tools: ["resolve-library-id", "query-docs"].map(name => ({ name, inputSchema: { type: "object" } })) }
+        ? { tools: ["ask_wiki_question", "read_wiki_contents", "read_wiki_structure"].map(name => ({ name,
+          inputSchema: name === "ask_wiki_question"
+            ? { type: "object", properties: { repoName: { anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }] }, question: { type: "string" } }, required: ["repoName", "question"] }
+            : { type: "object", properties: { repoName: { type: "string" } }, required: ["repoName"] } })) }
         : { content: [{ type: "text", text: "documentation from hosted upstream" }] };
     return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers: { "Content-Type": "application/json" } });
   });
   const tools = await import(new URL("../../../packages/tool-installer/dist/index.js", import.meta.url).href);
   // An operator service cannot become machine-shared just by claiming the same tool identity.
-  const operatorService = { ...tools.createContext7RemoteService({ authenticated: false, operation: { schemaVersion: 3,
-    scope: { kind: "machine", machineId: platform.machineId }, idempotencyKey: "operator-docs" } }), serviceId: "operator-context7" };
+  const operatorService = { ...tools.createDeepWikiRemoteService({ operation: { schemaVersion: 3,
+    scope: { kind: "machine", machineId: platform.machineId }, idempotencyKey: "operator-docs" } }), serviceId: "operator-deepwiki" };
   const components = wrapSetupComponents([], { ...input, config: { ...input.config, mcpServices: [operatorService] },
-    remoteServices: [{ toolId: "context7", authenticated: false, keyFingerprint: null }] });
+    remoteServices: [{ toolId: "deepwiki" }] });
   for (const component of components) expect((await component.apply(ctx)).diagnostics).toEqual([]);
   const configPath = join(platform.paths.config, "setup-gateway.json");
   const savedConfig = await readFile(configPath, "utf8");
@@ -78,22 +81,22 @@ it("shares approved hosted Context7 across worktrees while keeping the repositor
   const catalog = await loaded.value.inspectServices(operation);
   expect(catalog.ok).toBe(true);
   if (!catalog.ok) throw new Error(catalog.error.message);
-  expect(catalog.value.map(service => service.serviceId)).toContain("context7");
+  expect(catalog.value.map(service => service.serviceId)).toContain("deepwiki");
   expect(catalog.value.map(service => service.serviceId)).not.toContain(repoReport.serviceId);
   const locator = JSON.parse(await readFile(join(platform.paths.state, "gateway-control.json"), "utf8"));
   const client = MCPClientRegistrationSchema.parse({ schemaVersion: 3, registrationId: "other-reviewer", provider: "codex", role: "reviewer",
-    scope: operation.scope, environmentId: "other-reviewer-env", serviceIds: ["context7"], allowedTools: ["query-docs"],
+    scope: operation.scope, environmentId: "other-reviewer-env", serviceIds: ["deepwiki"], allowedTools: ["ask_wiki_question"],
     connection: { transport: "streamable_http", endpoint: locator.endpoint, token: "secret://runtime/other-reviewer" },
     configDigest: "a".repeat(64), expiresAt: new Date(Date.now() + 60_000).toISOString(), idempotencyKey: "other-reviewer" });
-  const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "other-reviewer-context7",
-    policyDigest: "b".repeat(64), toolId: "context7", kind: "native_remote_mcp", requiredness: "required",
-    role: client.role, scope: operation.scope, serviceId: "context7", operations: ["query-docs"], triggers: ["external_documentation"] });
+  const grant = ResolvedToolGrantSchema.parse({ schemaVersion: 3, grantId: "other-reviewer-deepwiki",
+    policyDigest: "b".repeat(64), toolId: "deepwiki", kind: "native_remote_mcp", requiredness: "required",
+    role: client.role, scope: operation.scope, serviceId: "deepwiki", operations: ["ask_wiki_question"], triggers: ["external_documentation"] });
   const registered = await loaded.value.register(client, undefined, [grant]);
   expect(registered.ok).toBe(true);
   if (!registered.ok) throw new Error(registered.error.message);
   const response = await fetch(locator.endpoint, { method: "POST", headers: { Authorization: `Bearer ${registered.value.bearerToken}`,
     "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: "docs", method: "tools/call",
-      params: { name: "query-docs", serviceId: "context7", arguments: { query: "example" } } }) });
+      params: { name: "ask_wiki_question", serviceId: "deepwiki", arguments: { repoName: "facebook/react", question: "example" } } }) });
   expect(await response.json()).toMatchObject({ result: { status: "completed", output: [{ text: "documentation from hosted upstream" }] } });
   expect((await loaded.value.register({ ...client, registrationId: "foreign-gitnexus", idempotencyKey: "foreign-gitnexus",
     serviceIds: [repoReport.serviceId], allowedTools: ["query"] })).ok).toBe(false);
@@ -256,11 +259,11 @@ it("identifies newly selected MCP services as a setup plan change", async () => 
   const savedBytes = await readFile(configPath, "utf8");
   const machine = JSON.parse(await readFile(join(platform.paths.config, "machine.json"), "utf8"));
   const changed = wrapSetupComponents([], { ...input, config: machine,
-    remoteServices: [{ toolId: "context7", authenticated: false, keyFingerprint: null }] });
+    remoteServices: [{ toolId: "deepwiki" }] });
 
   const observed = await changed[0]!.observe({ ...ctx, mode: "check" });
   expect(observed.valid).toBe(false);
-  expect(observed.diagnostics.join(" ")).toContain("managed MCP services changed (added: context7, mempalace; removed: none)");
+  expect(observed.diagnostics.join(" ")).toContain("managed MCP services changed (added: deepwiki, mempalace; removed: none)");
   expect(observed.diagnostics.join(" ")).toContain("bflow setup");
   expect(await readFile(configPath, "utf8")).toBe(savedBytes);
   expect(runtime).toBeUndefined();

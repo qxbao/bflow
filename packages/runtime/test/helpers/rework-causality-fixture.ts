@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -201,7 +202,7 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
       name: "review",
       evaluator: "review",
       required: true,
-      timeout: { executionTimeoutMs: 10_000, onTimeout: "block" },
+      timeout: { executionTimeoutMs: 30_000, onTimeout: "block" },
       configuration: {
         kind: "review",
         method: "manual_review",
@@ -282,12 +283,13 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
   ];
 
   // Automatically service `verification.requested` messages sent to `reviewer` through the real HostVerification tools.
+  const runDetachedFromJournal = AsyncLocalStorage.snapshot();
   const originalSend = transport.send.bind(transport);
   transport.send = async (request, sendOptions) => {
     const receipt = await originalSend(request, sendOptions);
     const parsed = JSON.parse(request.instruction) as RoleMessage;
     if (parsed.type === "verification.requested" && parsed.recipient.role === "reviewer") {
-      queueMicrotask(() => {
+      queueMicrotask(() => runDetachedFromJournal(() => {
         void (async () => {
           const reviewerBinding = panes.bindings.find(b => b.role === "reviewer")!;
           const inspected = (await verification.inspectReview(reviewerBinding, {
@@ -346,7 +348,7 @@ export async function createReworkFixture(options: { maxIterations?: number; leg
             })
           );
         })();
-      });
+      }));
     }
     return receipt;
   };

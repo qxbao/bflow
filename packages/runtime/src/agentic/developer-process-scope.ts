@@ -32,16 +32,40 @@ async function privateJSON(path: string): Promise<unknown> {
 async function optionalPrivateJSON(path: string): Promise<unknown> {
   return privateJSON(path).catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
 }
+const BENIGN_FILE_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EROFS"]);
+const BENIGN_DIR_SYNC_CODES = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EACCES", "EBADF", "EROFS"]);
+export async function syncFileHandle(file: { sync: () => Promise<void> }): Promise<void> {
+  try {
+    await file.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_FILE_SYNC_CODES.has(code)) throw error;
+  }
+}
+export async function syncDirectory(
+  dirPath: string,
+  openDirectory: (path: string, flags: string) => Promise<{ sync: () => Promise<void>; close: () => Promise<void> }> = open
+): Promise<void> {
+  const directory = await openDirectory(dirPath, "r");
+  try {
+    await directory.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (!code || !BENIGN_DIR_SYNC_CODES.has(code)) throw error;
+  } finally {
+    await directory.close();
+  }
+}
 async function writeRecord(path: string, value: unknown): Promise<void> {
   const temporary = path + "." + randomUUID() + ".tmp";
   const file = await open(temporary, "wx", 0o600);
-  try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
-  await rename(temporary, path); const directory = await open(dirname(path), "r"); try { await directory.sync(); } finally { await directory.close(); }
+  try { await file.writeFile(JSON.stringify(value)); await syncFileHandle(file); } finally { await file.close(); }
+  await rename(temporary, path); await syncDirectory(dirname(path));
 }
 async function writeImmutable(path: string, value: unknown): Promise<void> {
   const temporary = path + "." + randomUUID() + ".tmp";
   const bytes = JSON.stringify(value), file = await open(temporary, "wx", 0o600);
-  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+  try { await file.writeFile(bytes); await syncFileHandle(file); } finally { await file.close(); }
   try {
     try { await link(temporary, path); }
     catch (error) {
@@ -50,12 +74,17 @@ async function writeImmutable(path: string, value: unknown): Promise<void> {
       if (canonicalReceiptJson(existing) !== canonicalReceiptJson(JsonValueSchema.parse(JSON.parse(bytes)))) throw new Error("Conflicting immutable process-scope receipt");
     }
   } finally { await unlink(temporary); }
-  const directory = await open(dirname(path), "r"); try { await directory.sync(); } finally { await directory.close(); }
+  await syncDirectory(dirname(path));
 }
 async function executable(name: string): Promise<string> {
   for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
-    try { const path = await realpath(join(directory, name)); if (!(await lstat(path)).isFile()) continue;
-      await access(path, constants.X_OK); return path; } catch { /* continue installed discovery */ }
+    if (!directory) continue;
+    try {
+      const path = await realpath(join(directory, name));
+      if (!(await lstat(path)).isFile()) continue;
+      await access(path, constants.X_OK);
+      return path;
+    } catch { /* continue installed discovery */ }
   }
   throw new Error(`Developer process supervision requires installed ${name}`);
 }
@@ -85,8 +114,14 @@ export class DeveloperProcessScopes {
     const name = material.provider === "claude" ? "claude" : material.provider === "agy" ? "agy" : "codex";
     let target: string | undefined;
     for (const dir of originalPath.split(delimiter)) {
-      try { const candidate = await realpath(join(dir, name)); if (!(await lstat(candidate)).isFile()) continue;
-        await access(candidate, constants.X_OK); target = candidate; break; } catch { /* continue effective Herdr PATH */ }
+      if (!dir) continue;
+      try {
+        const candidate = await realpath(join(dir, name));
+        if (!(await lstat(candidate)).isFile()) continue;
+        await access(candidate, constants.X_OK);
+        target = candidate;
+        break;
+      } catch { /* continue effective Herdr PATH */ }
     }
     if (!target) throw new Error("Provider command is absent from its actual launch PATH");
     const targetDigest = hash(await readFile(target));
@@ -299,6 +334,6 @@ export class DeveloperProcessScopes {
 
 }
 async function writeFilePrivate(path: string, content: string, mode: number): Promise<void> {
-  const file = await open(path, "wx", mode); try { await file.writeFile(content); await file.sync(); } finally { await file.close(); }
+  const file = await open(path, "wx", mode); try { await file.writeFile(content); await syncFileHandle(file); } finally { await file.close(); }
   await chmod(path, mode);
 }

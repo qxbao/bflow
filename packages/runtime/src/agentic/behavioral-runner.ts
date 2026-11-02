@@ -6,10 +6,10 @@ import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { QualityGateDefinitionSchema, type ArtifactReference, type AgentRole, type JsonValue, type QualityGateDefinition } from "@bflow/contracts";
-import type { QualityCommandOutcome } from "@bflow/quality-gates";
+import { createQualityCommandRunner, type QualityCommandOutcome } from "@bflow/quality-gates";
 import { json, record, textField } from "./journal.js";
-import { BehavioralIdentityMismatch, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
-import { parseVitestJson } from "./vitest-json.js";
+import { BehavioralIdentityMismatch, BehavioralIdentityRepair, buildRunnerNamePattern, NodeTapTestCodeFailure, parseNodeTap } from "./node-tap.js";
+import { parseVitestJson, VitestTestCodeFailure } from "./vitest-json.js";
 import { assertCheckoutDependencyRoot, sandboxBehavior } from "./behavioral-sandbox.js";
 import type { AdapterRunner } from "./runner-adapter.js";
 import { parseRunnerResult } from "./runner-results.js";
@@ -119,7 +119,7 @@ export function bindRunnerProfile(profile: RunnerProfile, identities: { testName
   assertExecutionBounds(profile.timeoutMs, profile.maxOutputBytes);
   if (profile.prepare !== undefined) assertExecutionBounds(profile.prepare.timeoutMs, undefined);
   profile.adapter?.bind({ testNames, testPaths }, "/tmp/bflow-profile-validation");
-  const filter = "^(?:" + testNames.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")$";
+  const filter = buildRunnerNamePattern(testNames, profile.reporter === "vitest_json" ? "vitest" : "node");
   const selectedArgs = profile.adapter ? [...args] : [...args, ...(profile.reporter === "vitest_json" ? [`--testNamePattern=${filter}`] : args.includes("--test") ? [`--test-name-pattern=${filter}`] : []), ...testPaths];
   return {
     id: profile.id, command: profile.command, executable: profile.executable, args: selectedArgs,
@@ -168,18 +168,23 @@ export function behavioralChecks(commands: readonly BehavioralCommand[]): Qualit
 /** Launcher failures (bubblewrap or sandbox-exec) are infrastructure errors, never test results. */
 const SANDBOX_ERROR = /^(?:bwrap|sandbox-exec):/;
 const execute = promisify(execFile);
+import { runtimeGitDirectoryFlags } from "./patch-paths.js";
+export { runtimeGitDirectoryFlags } from "./patch-paths.js";
+
 /**
  * `input` feeds stdin (for `hash-object --stdin`); `indexFile` points GIT_INDEX_FILE at a private scratch index so
  * callers can build trees without touching the repository's own index. Both are applied after the sanitized env.
  */
 export async function verificationGit(cwd: string, args: string[], extra: { readonly input?: string; readonly indexFile?: string } = {}): Promise<string> {
   // The host passes the verified session root (or the new canonical detached checkout on recursive calls).
-  // Git's global/system config is deliberately omitted, so trust only this exact root for this process.
+  // Git's global/system config is deliberately omitted, so trust only this exact root/worktree metadata for this process.
   const canonicalCwd = await realpath(cwd);
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_"))), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
   const options = { cwd: canonicalCwd, env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 };
-  const fixed = ["-c", "safe.directory=", "-c", `safe.directory=${canonicalCwd}`,
-    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "submodule.recurse=false"];
+  const fixed = [
+    ...(await runtimeGitDirectoryFlags(canonicalCwd, { resetSafeDirectory: true })),
+    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "submodule.recurse=false"
+  ];
   // Git checkout/status can run smudge/clean/process filters before the test sandbox exists.
   // Disable every effective filter, including config includes and worktree scopes; global/system config is excluded above.
   let keys = "";
@@ -390,8 +395,7 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     const invocation = command.adapter?.bind({ testNames: command.testNames, testPaths: command.testPaths }, reportDirectory);
     if (invocation?.reportPaths?.length && (await collectRunnerReports(invocation.reportPaths, checkout, reportDirectory)).length) throw new Error("Behavioral report must not exist before execution");
     const projectCwd = command.adapter && command.adapter.projectDirectory !== "." ? join(checkout, command.adapter.projectDirectory) : checkout;
-    const module = await import("@bflow/quality-gates");
-    const runner = module.createQualityCommandRunner();
+    const runner = createQualityCommandRunner();
     const env: Record<string, string> = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", HOME: "/tmp/bflow-home", TMPDIR: "/tmp", ...(command.adapter?.environment ?? {}) };
     // Seatbelt cannot mount a tmpfs, so the sandboxed process writes only to a dedicated scratch sibling of the checkout.
     if (process.platform === "darwin") { const scratch = join(temporary, "tmp"); await mkdir(scratch, { mode: 0o700 }); env["TMPDIR"] = scratch; env["HOME"] = scratch; }
@@ -480,6 +484,17 @@ async function runMeasurementCommand(command: BoundBehavioralCommand, cwd: strin
     await rm(temporary, { recursive: true, force: true });
   }
 }
+/** Reuse only the isolated raw execution boundary: compiler exits are never parsed as test results or Red evidence. */
+export async function measureCompiler(profile: RunnerProfile, cwd: string, revision: string, originalRevision?: string, testPaths: string[] = []) {
+  if (testPaths.some(path => !testFilePattern.test(path))) throw new Error("Compiler test exceptions must be selected behavioral test paths");
+  const command: BoundBehavioralCommand = { ...profile, reporter: "node_tap", testNames: [], testPaths,
+    ...(originalRevision ? { originalRevision } : {}) };
+  const { outcome } = await runMeasurementCommand(command, cwd, revision);
+  if (outcome.spawnError || outcome.signal || outcome.timedOut || outcome.aborted || outcome.outputTruncated || outcome.exitCode === null || SANDBOX_ERROR.test(outcome.stderr))
+    throw new Error(`Typecheck infrastructure failure: ${outcome.spawnError ?? outcome.signal ?? (outcome.timedOut ? "deadline exceeded" : outcome.aborted ? "aborted" : outcome.outputTruncated ? "truncated output" : outcome.stderr)}`);
+  return { exitCode: outcome.exitCode, output: (outcome.stdout + outcome.stderr).slice(0, 4096) };
+}
+
 /** Parser failure that keeps the original message and carries bounded, JSON-safe runner evidence for audit and Conversation. */
 export class BehavioralMeasurementError extends Error {
   constructor(readonly original: unknown, readonly diagnostics: JsonValue) { super(original instanceof Error ? original.message : String(original)); }
@@ -497,12 +512,19 @@ export async function measureBehavior(command: BoundBehavioralCommand, cwd: stri
   let parsed: ReturnType<typeof parseNodeTap> | ReturnType<typeof parseVitestJson>;
   try {
     parsed = command.adapter ? parseRunnerResult(command.adapter.format, outcome, command.testNames, reports, command.adapter.failureExitCodes, command.testPaths)
-      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined) : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined, command.testPaths);
+      : command.reporter === "vitest_json" ? parseVitestJson(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.testNames.length > 0)
+      : parseNodeTap(outcome, command.testNames, command.checkoutDependencyRoots !== undefined || command.args.some(arg => arg.startsWith("--test-name-pattern")), command.testPaths);
   } catch (error) {
     if (error instanceof NodeTapTestCodeFailure) {
-      if (rtkResult) throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+      if (rtkResult) {
+        if (error instanceof VitestTestCodeFailure) throw new VitestTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+        throw new NodeTapTestCodeFailure(error.outcome, error.failedTestNames, rtkResult);
+      }
       throw error;
     }
+    if (error instanceof BehavioralIdentityMismatch)
+      throw new BehavioralIdentityRepair(outcome, error.expectedNames, error.observedNames, command.reporter === "vitest_json" ? "vitest_json" : "node_tap",
+        measurementDiagnostics(command, outcome, error), rtkResult);
     throw new BehavioralMeasurementError(error, measurementDiagnostics(command, outcome, error));
   }
   return { sourceRevision: revision, command: command.command, commandId: command.id, method: command.method, testBlobs, ...parsed, outcome,

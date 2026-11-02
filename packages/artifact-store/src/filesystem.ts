@@ -4,6 +4,17 @@ import type { FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fail } from "./support.js";
 
+const UNSUPPORTED_DIR_FSYNC_CODES = new Set([
+  "EINVAL",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "ENOSYS",
+  "EPERM",
+  "EACCES",
+  "EBADF",
+  "EROFS"
+]);
+
 /** Root is configured by the operator, never taken from an artifact URI. */
 export class SafeRoot {
   private constructor(readonly path: string, private readonly dev: number, private readonly ino: number) {}
@@ -62,6 +73,15 @@ export class SafeRoot {
   async sync(): Promise<void> {
     await this.check();
     const directory = await open(this.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try { await directory.sync(); } finally { await directory.close(); }
+    try {
+      await directory.sync();
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+        ? error.code
+        : undefined;
+      if (code === undefined || !UNSUPPORTED_DIR_FSYNC_CODES.has(code)) throw error;
+    } finally {
+      await directory.close();
+    }
   }
 }

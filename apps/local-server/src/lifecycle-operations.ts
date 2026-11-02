@@ -35,7 +35,7 @@ export class Operations {
     if(final(record.operation) && canonicalWebJson(value)!==canonicalWebJson(record.operation))throw new Error('Final operation changed');
     await this.index.save({...record,operation:value});return value;
   }
-  private async uncertain(record:IndexedOperation):Promise<WebOperation>{try{return await this.update(record,{...record.operation,state:'reconciliation_required',updatedAt:now()});}catch{throw new HttpError('reconciliation_required',record.index.commandId);}}
+  private async uncertain(record:IndexedOperation):Promise<WebOperation>{if(record.operation.state==='reconciliation_required')return record.operation;try{return await this.update(record,{...record.operation,state:'reconciliation_required',updatedAt:now()});}catch{throw new HttpError('reconciliation_required',record.index.commandId);}}
   private async deliverLifecycle(projectId:string,id:string,kind:'session_start'|'session_stop',body:unknown,authorize:()=>void):Promise<WebOperation>{
     const fingerprint=createHash('sha256').update(canonicalWebJson({projectId,kind,body})).digest('hex');
     const old=await this.index.read(projectId,id);
@@ -62,7 +62,7 @@ export class Operations {
     const hostSessionId=IdentifierSchema.parse(this.resolveHostSession?await observeWithinDeadline(()=>this.resolveHostSession!(command.projectId)):session.sessionId);
     const record=await this.reserve(command.projectId,command.commandId,command.kind,fingerprint,authorize,hostSessionId);
     try{
-      const result=WebOperationResponseSchema.parse(await observeWithinDeadline(()=>client.execute(command)));
+      const result=WebOperationResponseSchema.parse(await observeWithinDeadline(()=>client.execute(command),35000));
       if(!result.ok){if(['validation','conflict','not_found','unsupported_version'].includes(result.error.code))return await this.update(record,{...record.operation,state:'failed',error:publicError(new HttpError(contractError(result.error).code,command.commandId)),updatedAt:now()});return await this.uncertain(record);}
       return await this.update(record,result.value);
     }catch{return this.uncertain(record);}
@@ -72,7 +72,7 @@ export class Operations {
     try{
       let raw:unknown;
       if(record.index.owner==='local_lifecycle')raw=await observeWithinDeadline(()=>this.workspace.reconcileSessionOperation(record.operation));
-      else if(this.historical)raw=await observeWithinDeadline(()=>this.historical!(record.index));
+      else if(this.historical)raw=await observeWithinDeadline(()=>this.historical!(record.index),35000);
       else {
         if(!context)throw new HttpError('unavailable');
         const client=await observeWithinDeadline(()=>this.interaction(record.index.projectId,context));
@@ -80,7 +80,7 @@ export class Operations {
         // The frozen client cannot authenticate a historical session in its operation DTO.
         // Fail closed rather than accepting another host's plausible same-ID receipt.
         if(session.projectId!==record.index.projectId || session.sessionId!==record.index.hostSessionId)return await this.uncertain(record);
-        raw=await observeWithinDeadline(()=>client.readOperation(record.index.projectId,record.index.receiptId));
+        raw=await observeWithinDeadline(()=>client.readOperation(record.index.projectId,record.index.receiptId),35000);
       }
       const result=WebOperationResponseSchema.parse(raw);
       if(!result.ok)return await this.uncertain(record);

@@ -9,7 +9,8 @@ import { DeveloperProcessScopes } from "./developer-process-scope.js";
 import type { AgentExecutionHandle, AgentRequest } from "@bflow/contracts";
 import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { chmod, copyFile, mkdir, open, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, copyFile, lstat, mkdir, open, readlink, rename, rm, symlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { FailoverCandidateSchema } from "@bflow/contracts";
@@ -221,12 +222,45 @@ function describeFailure(error: ContractError): string {
   return failing.length > 0 ? `${error.message} (${failing.join("; ")})` : error.message;
 }
 
+async function readBoundedRegularUtf8(path: string, maxBytes = 4 * 1024 * 1024): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) {
+      const err = new Error(`Path '${path}' is not a regular file`) as NodeJS.ErrnoException;
+      err.code = "EISDIR";
+      throw err;
+    }
+    if (info.size > maxBytes) {
+      throw new Error(`File '${path}' exceeds ${maxBytes}-byte limit`);
+    }
+    return await file.readFile("utf8");
+  } finally {
+    await file.close();
+  }
+}
+
 async function writePrivateAtomic(path: string, content: string): Promise<void> {
   const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
   const file = await open(temporary, "wx", 0o600);
   try {
     await file.writeFile(content, "utf8");
-    await file.sync();
+    try {
+      await file.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (
+        code !== "EINVAL" &&
+        code !== "ENOSYS" &&
+        code !== "ENOTSUP" &&
+        code !== "EOPNOTSUPP" &&
+        code !== "EROFS" &&
+        code !== "EPERM" &&
+        code !== "EACCES"
+      ) {
+        throw error;
+      }
+    }
   } finally {
     await file.close();
   }
@@ -328,7 +362,8 @@ export class HostPlatformSession {
     if (!template) throw new Error("Profile base role has no configured platform template");
     const effective = resolveRoleProfile(snapshot, requirementFor(template, this.options.hostCapabilities, this.options.repositoryPath, undefined,
       this.options.platform.toolGrants, this.options.platform.toolPolicy));
-    if (requiredCapabilities.some(capability => !effective.capabilityIds.includes(capability))) throw new Error("Profile capability scope cannot satisfy the assignment");
+    const missing = requiredCapabilities.filter(capability => !effective.capabilityIds.includes(capability));
+    if (missing.length) throw new Error(`Profile capability scope cannot satisfy the assignment: missing ${missing.join(", ")}; available ${effective.capabilityIds.join(", ") || "none"}`);
   }
   async attestProfileExecutor(binding: PaneBinding, purpose: ExecutorLineage["purpose"], assignmentId: string): Promise<ExecutorLineage> {
     const launchId = this.bindingLaunchId(binding), launch = launchId ? this.profiledLaunches.get(launchId) : undefined;
@@ -602,8 +637,8 @@ export class HostPlatformSession {
       try { material = await processScopes.prepare({ runId: runId!, taskId, material, executable: result.value.profile.executable,
         executableDigest: result.value.profile.executableDigest, configFiles: result.value.profile.configFiles }); }
       catch (error) {
-        await this.options.service.releaseLaunch(launchId);
-        await removeLaunchProbe(this.options.probeDirectory, launchId);
+        await this.options.service.releaseLaunch(launchId).catch(() => undefined);
+        await removeLaunchProbe(this.options.probeDirectory, launchId).catch(() => undefined);
         throw error;
       }
     }
@@ -638,24 +673,57 @@ export class HostPlatformSession {
   async allocateProfileSpecialist(request: { taskId: string; runId: string; role: import("@bflow/contracts").SpecialistRole; roleProfile: ResolvedRoleProfileSnapshot }): Promise<DeveloperLaunchMaterial> {
     if (!this.identity || request.role === "developer") throw new Error("Profiled specialist launch requires a prepared specialist generation");
     this.preflightProfile(request.roleProfile, request.role, ["repository.read"]);
-    const template = this.options.platform.roles.find(option => option.role === request.role)!;
-    const requirement = resolveRoleProfile(request.roleProfile, requirementFor(template, this.options.hostCapabilities, this.options.repositoryPath,
-      request.taskId, this.options.platform.toolGrants, this.options.platform.toolPolicy));
+    const template = this.options.platform.roles.find(option => option.role === request.role);
+    if (!template) throw new Error(`Profiled specialist base role '${request.role}' is not configured in this platform session`);
+    await this.releaseDeveloper(request.taskId);
+    const requirement = {
+      ...resolveRoleProfile(
+        request.roleProfile,
+        requirementFor(
+          template,
+          this.options.hostCapabilities,
+          this.options.repositoryPath,
+          request.taskId,
+          this.options.platform.toolGrants,
+          this.options.platform.toolPolicy
+        )
+      ),
+      required: true
+    };
     const generation = this.identity.generation;
     const result = await this.options.service.prepareSession(this.identity, [requirement]);
-    if (!result.ok || !result.value.report.ready || result.value.launches.length !== 1) throw new Error("Profiled specialist launch readiness is blocked");
+    if (!result.ok || !result.value.report.ready || result.value.launches.length !== 1) {
+      const reason = !result.ok
+        ? result.error.message
+        : result.value.report.roles.find(item => item.status !== "ready")?.message;
+      throw new Error(reason ? `Profiled specialist launch readiness is blocked: ${reason}` : "Profiled specialist launch readiness is blocked");
+    }
     const prepared = result.value.launches[0]!;
+    const launchId = prepared.launch.launchId;
     try {
       const expectation = await publishLaunchProbe(this.options.probeDirectory, prepared);
-      this.profiledLaunches.set(prepared.launch.launchId, prepared);
-      this.profileToolRequirements.set(prepared.launch.launchId, { generation, requirement: structuredClone(requirement) });
-      this.developerLaunches.set(request.taskId, prepared.launch.launchId);
-      this.developerGates.set(prepared.launch.launchId, expectation ?? null);
+      this.profiledLaunches.set(launchId, prepared);
+      this.profileToolRequirements.set(launchId, { generation, requirement: structuredClone(requirement) });
+      this.developerLaunches.set(request.taskId, launchId);
+      this.developerGates.set(launchId, expectation ?? null);
       this.rememberNativeAgyHome(prepared);
-      this.developerInstructions.set(prepared.launch.launchId, { launchId: prepared.launch.launchId, manifest: prepared.skills.manifest,
-        instructionText: prepared.skills.rendered.instructionText, references: prepared.skills.rendered.references.map(reference => ({ ...reference })) });
+      if (prepared.skills?.manifest && prepared.skills?.rendered) {
+        this.developerInstructions.set(launchId, { launchId, manifest: prepared.skills.manifest,
+          instructionText: prepared.skills.rendered.instructionText, references: prepared.skills.rendered.references.map(reference => ({ ...reference })) });
+      }
       return launchMaterial(prepared);
-    } catch (error) { await this.options.service.releaseLaunch(prepared.launch.launchId); throw error; }
+    } catch (error) {
+      this.profiledLaunches.delete(launchId);
+      this.profileToolRequirements.delete(launchId);
+      if (this.developerLaunches.get(request.taskId) === launchId) this.developerLaunches.delete(request.taskId);
+      this.developerGates.delete(launchId);
+      this.developerInstructions.delete(launchId);
+      this.nativeAgyHomes.delete(launchId);
+      this.nativeTranscriptRoots.delete(launchId);
+      await removeLaunchProbe(this.options.probeDirectory, launchId).catch(() => undefined);
+      await this.options.service.releaseLaunch(launchId).catch(() => undefined);
+      throw error;
+    }
   }
   /**
    * The supervision backend when this host can run it. A host without it (no Bubblewrap user namespaces, AppArmor
@@ -716,6 +784,7 @@ export class HostPlatformSession {
     this.developerGates.delete(launchId);
     this.developerInstructions.delete(launchId);
     this.nativeAgyHomes.delete(launchId);
+    this.nativeTranscriptRoots.delete(launchId);
   }
 
   /** Revokes this session's Gateway registrations. Shared services are never stopped here. */
@@ -787,13 +856,21 @@ export class HostPlatformSession {
     const resourceKey = this.options.platform.exclusiveMcpResources?.[serviceId];
     if (trigger === "browser_inspection" && (!transactionId || !resourceKey))
       return { ok: false, error: { code: "validation", retryable: false, message: "Browser action needs an authenticated assignment and trusted machine resource key" } };
-    const boundedOptions: GatewayToolOperationOptions = {
-      ...(trigger === "browser_inspection" ? { browserTransaction: { id: transactionId!, resourceKey: resourceKey! } } : {}),
-      timeoutMs: Math.min(options?.timeoutMs ?? 5_000, 5_000),
+    const verifyOptions: OperationOptions = {
+      timeoutMs: Math.min(Math.max(1, options?.timeoutMs ?? 5_000), 5_000),
       ...(options?.signal ? { signal: options.signal } : {}),
       ...(options?.deadline ? { deadline: options.deadline } : {})
     };
-    const gateway = await this.options.service.verifyGateway(boundedOptions);
+    const toolOptions: GatewayToolOperationOptions = {
+      ...(trigger === "browser_inspection" ? { browserTransaction: { id: transactionId!, resourceKey: resourceKey! } } : {}),
+      timeoutMs:
+        options?.timeoutMs !== undefined && Number.isFinite(options.timeoutMs)
+          ? Math.min(Math.max(1, options.timeoutMs), 120_000)
+          : 5_000,
+      ...(options?.signal ? { signal: options.signal } : {}),
+      ...(options?.deadline ? { deadline: options.deadline } : {})
+    };
+    const gateway = await this.options.service.verifyGateway(verifyOptions);
     if (!gateway.ok) return gateway;
     if (!gateway.value.healthy || gateway.value.uncertain)
       return { ok: false, error: { code: "conflict", retryable: true, message: "Tool action Gateway registrations are lost or uncertain" } };
@@ -804,8 +881,8 @@ export class HostPlatformSession {
         if (current.launchId !== launchId || current.taskId !== taskId) throw new Error("Profile tool allocation changed during Gateway inspection");
       } catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
     }
-    if (reconcile) return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
-    return this.options.service.invokeTool(identity, role, taskId, serviceId, operation, input, callId, boundedOptions);
+    if (reconcile) return this.options.service.reconcileToolCall(identity, role, taskId, serviceId, operation, input, callId, toolOptions);
+    return this.options.service.invokeTool(identity, role, taskId, serviceId, operation, input, callId, toolOptions);
   }
 
   async finishToolTransaction(role: AgentRole, transactionId: string): Promise<OperationResult<void>> {
@@ -828,10 +905,10 @@ export class HostPlatformSession {
    */
   async recoverPreviousDaemon(): Promise<void> {
     let previous: z.infer<typeof LaunchesFileSchema> = {};
-    try { previous = LaunchesFileSchema.parse(JSON.parse(await readFile(this.options.launchesFile, "utf8"))); }
+    try { previous = LaunchesFileSchema.parse(JSON.parse(await readBoundedRegularUtf8(this.options.launchesFile))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     let generation = 0;
-    try { generation = GenerationSchema.parse(JSON.parse(await readFile(this.options.generationFile, "utf8"))).generation; }
+    try { generation = GenerationSchema.parse(JSON.parse(await readBoundedRegularUtf8(this.options.generationFile))).generation; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     if (generation === 0) return; // never prepared: nothing to retire
     const identity: PlatformSessionIdentity = {
@@ -912,7 +989,7 @@ export class HostPlatformSession {
   private async nextGeneration(): Promise<number> {
     let current = 0;
     try {
-      current = GenerationSchema.parse(JSON.parse(await readFile(this.options.generationFile, "utf8"))).generation;
+      current = GenerationSchema.parse(JSON.parse(await readBoundedRegularUtf8(this.options.generationFile))).generation;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
@@ -1011,8 +1088,11 @@ function createCoalescedAgyRunner(baseRunner: ProviderCommandRunner): ProviderCo
             await mkdir(probeConfigDir, { recursive: true, mode: 0o700 });
             const sourceOnboarding = join(rawHome, ".gemini", "antigravity-cli", "cache", "onboarding.json");
             const targetOnboarding = join(probeCacheDir, "onboarding.json");
-            await copyFile(sourceOnboarding, targetOnboarding).catch(() => {});
-            await chmod(targetOnboarding, 0o600).catch(() => {});
+            const onboardingInfo = await lstat(sourceOnboarding).catch(() => undefined);
+            if (onboardingInfo?.isFile()) {
+              await copyFile(sourceOnboarding, targetOnboarding).catch(() => {});
+              await chmod(targetOnboarding, 0o600).catch(() => {});
+            }
             const sourceKeychains = join(rawHome, "Library", "Keychains");
             const linkTarget = await readlink(sourceKeychains).catch(() => undefined);
             if (linkTarget !== undefined) {
@@ -1100,7 +1180,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
     const client = await GatewayControlClient.fromLocator(platform.gatewayLocatorPath);
     if (client.ok) {
       try {
-        const locator = z.object({ endpoint: z.string().min(1) }).passthrough().parse(JSON.parse(await readFile(platform.gatewayLocatorPath, "utf8")));
+        const locator = z.object({ endpoint: z.string().min(1) }).passthrough().parse(JSON.parse(await readBoundedRegularUtf8(platform.gatewayLocatorPath)));
         gatewayControl = client.value;
         gatewayEndpoint = locator.endpoint;
       } catch {
@@ -1152,7 +1232,7 @@ export async function rewritePersistedPlatform(
   extras?: { readonly policy?: unknown; readonly impactIndex?: unknown;
     readonly executionResolution?: unknown; readonly executionSourceDigests?: unknown }
 ): Promise<void> {
-  const current = z.record(z.unknown()).parse(JSON.parse(await readFile(path, "utf8")));
+  const current = z.record(z.unknown()).parse(JSON.parse(await readBoundedRegularUtf8(path)));
   await writePrivateAtomic(
     path,
     JSON.stringify({

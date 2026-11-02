@@ -2,6 +2,16 @@ import { ChangeComplexitySchema, RiskLevelSchema, SddPolicyLevelSchema } from "@
 import type { ChangeComplexity, OperationResult } from "@bflow/contracts";
 import { z } from "zod";
 
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value).filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 /** Structured impact assessment, supplied by Analyst/Architect, never inferred from diff size. */
 export const ChangeAssessmentSchema = z.object({
   kind: z.enum(["documentation", "formatting", "feature", "bugfix", "refactoring", "configuration"]),
@@ -13,7 +23,7 @@ export const ChangeAssessmentSchema = z.object({
   architectureImpact: z.boolean(),
   migrationRequired: z.boolean(),
   risk: RiskLevelSchema,
-  unresolvedQuestions: z.array(z.string().trim().min(1))
+  unresolvedQuestions: z.preprocess(v => v === null ? undefined : v, z.array(z.string().trim().min(1)).default([]))
 }).strict();
 
 export type ChangeAssessment = z.infer<typeof ChangeAssessmentSchema>;
@@ -33,11 +43,11 @@ export function hasSecurityPathHint(paths: readonly string[]): boolean {
 }
 
 export function hasPublicApiPathHint(paths: readonly string[]): boolean {
-  return paths.some(path => /(?:^|\/)(?:contracts|openapi|proto|graphql)(?:\/|\.|$)/i.test(path));
+  return paths.some(path => /(?:^|[/\\])(?:contracts|openapi|proto|graphql)(?:[/\\]|\.|$)/i.test(path));
 }
 
 export function hasDataSchemaPathHint(paths: readonly string[]): boolean {
-  return paths.some(path => /(?:^|\/)(?:migrations?|schema)(?:\/|\.|$)|\.sql$/i.test(path));
+  return paths.some(path => /(?:^|[/\\])(?:migrations?|schema)(?:[/\\]|\.|$)|\.sql$/i.test(path));
 }
 
 export function classifyChange(input: unknown, affectedPaths: readonly string[] = []): Classification {
@@ -55,7 +65,11 @@ export function classifyChange(input: unknown, affectedPaths: readonly string[] 
     reasons.push("persistent data schema impact");
   }
   if (change.architectureImpact) reasons.push("architecture impact");
-  if (new Set(change.modules).size > 1) reasons.push("multiple modules affected");
+  const normalizedModules = change.modules.map(m => {
+    const clean = m.trim().normalize("NFC").replace(/\\/g, "/").replace(/^(?:\.\/)+/, "").replace(/\/+/g, "/").replace(/\/+$/, "");
+    return clean || m.trim().normalize("NFC");
+  });
+  if (new Set(normalizedModules).size > 1) reasons.push("multiple modules affected");
   if (change.migrationRequired) reasons.push("migration required");
   if (change.risk === "high" || change.risk === "critical") reasons.push("high declared risk");
   const complex = reasons.length > 0;

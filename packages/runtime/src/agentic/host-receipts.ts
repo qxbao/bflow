@@ -96,6 +96,9 @@ function extractNoticeReason(
   blocked?: { readonly reason: string }
 ): string | undefined {
   const obj = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const escalation = obj.escalation && typeof obj.escalation === "object" && !Array.isArray(obj.escalation)
+    ? obj.escalation as Record<string, unknown>
+    : undefined;
   const candidates = [
     obj.reason,
     obj.blockageReason,
@@ -104,6 +107,8 @@ function extractNoticeReason(
     userDecision?.question,
     obj.headline,
     obj.summary,
+    escalation?.reason,
+    obj.verdict,
     obj.status
   ];
   const raw = candidates.find((val): val is string => typeof val === "string" && val.trim().length > 0);
@@ -371,7 +376,14 @@ export class HostReceiptJournal {
     const envelope = this.validate({ ...value, checksum: digest(value) }, kind, id);
     await this.prepare();
     const path = join(this.directory, `pending-${randomUUID()}.tmp`), file = await open(path, "wx", 0o600);
-    try { await file.writeFile(JSON.stringify(envelope)); await file.sync(); } finally { await file.close(); }
+    try {
+      await file.writeFile(JSON.stringify(envelope));
+      try { await file.sync(); }
+      catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EROFS"].includes(code)) throw error;
+      }
+    } finally { await file.close(); }
     let created = true;
     try {
       try { await link(path, join(this.directory, this.filename(kind, id))); }
@@ -381,7 +393,13 @@ export class HostReceiptJournal {
         if (digest(await this.read(kind, id)) !== digest(payload)) throw new Error("Conflicting immutable host receipt");
       }
       const directory = await open(this.directory, "r");
-      try { await directory.sync(); } finally { await directory.close(); }
+      try {
+        try { await directory.sync(); }
+        catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code;
+          if (!code || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(code)) throw error;
+        }
+      } finally { await directory.close(); }
       return created;
     } finally { await rm(path, { force: true }); }
   }
@@ -492,7 +510,9 @@ export class HostReceiptJournal {
     const current = starts[0]; if (!current) return false;
     if ((await this.coordinatorBoundaries()).some(item => this.bindingIdentity(item.binding) === this.bindingIdentity(binding) && item.sequence >= current.sequence)) return false;
     if (starts[1]?.sequence === current.sequence) throw new Error("Ambiguous Coordinator turn identity");
-    await this.write("coordinator-stop", this.turnId(binding, current.message), current); return true;
+    const id = this.turnId(binding, current.message);
+    if (sourceMessageId === undefined && await this.read("coordinator-stop-handled", id) !== undefined) return false;
+    await this.write("coordinator-stop", id, current); return true;
   }
   async pendingCoordinatorStops(): Promise<CoordinatorTurnObservation[]> {
     const pending: CoordinatorTurnObservation[] = [];
@@ -882,10 +902,10 @@ export class HostReceiptJournal {
       throw new Error("Resume requires the current authenticated Conversation user message");
     const request = parseConversationResumeRequest(turn.content);
     let requestedRunId = request?.runId;
-    if (requestedRunId && /^việc\s*#[1-9]\d*$/iu.test(requestedRunId)) {
-      const key = requestedRunId.toLowerCase().replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #");
+    if (requestedRunId && /^việc\s*#?[1-9]\d*$/iu.test(requestedRunId)) {
+      const num = /^việc\s*#?([1-9]\d*)$/iu.exec(requestedRunId)![1]!;
       const aliases = await this.noticeAliases();
-      requestedRunId = aliases.runShortIds[key] ?? requestedRunId;
+      requestedRunId = aliases.runShortIds[`việc #${num}`] ?? requestedRunId;
     }
     if (!request || requestedRunId !== undefined && requestedRunId !== runId)
       throw new Error("An explicit resume request is required: reply 'tiếp tục' or 'resume <run-id>' in Conversation");
@@ -1336,7 +1356,7 @@ export class HostReceiptJournal {
 const RESUME_PREFIX = "(?:(?:ok(?:e|ay)?|được|hãy|vui lòng|please)[\\s,]+){0,2}";
 const RESUME_SUFFIX_WORDS = "đi|nhé|nha|giúp mình|giúp em|giúp tôi|please|pls";
 const RESUME_REQUEST = new RegExp(`^${RESUME_PREFIX}(?:tiếp tục|resume|continue)` +
-  `(?:\\s+(?:(việc\\s*#[1-9]\\d*)|(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*)))?` +
+  `(?:\\s+(?:(việc\\s*#?[1-9]\\d*)|(?:run\\s+)?(?!(?:${RESUME_SUFFIX_WORDS})(?:[\\s,.!]|$))([A-Za-z0-9][A-Za-z0-9._:-]*)))?` +
   `(?:[\\s,]+(?:${RESUME_SUFFIX_WORDS})){0,2}\\s*[.!]?$`, "iu");
 /** An explicit user request to resume, optionally naming the exact run or work alias: "tiếp tục", "tiếp tục việc #1", "Continue run-1 please". */
 export function parseConversationResumeRequest(content: string): { runId?: string } | undefined {
@@ -1344,8 +1364,7 @@ export function parseConversationResumeRequest(content: string): { runId?: strin
   if (!match) return undefined;
   const rawTarget = match[1] ?? match[2];
   if (rawTarget === undefined) return {};
-  const normalized = /^việc\s*#/iu.test(rawTarget)
-    ? rawTarget.replace(/\s+/gu, " ").replace(/^việc\s*#/iu, "việc #").toLowerCase()
-    : rawTarget;
+  const aliasMatch = /^việc\s*#?([1-9]\d*)$/iu.exec(rawTarget.trim());
+  const normalized = aliasMatch ? `việc #${aliasMatch[1]!}` : rawTarget;
   return { runId: normalized };
 }

@@ -2099,6 +2099,8 @@ export abstract class BaseProviderAdapter implements AgentProviderAdapter {
         throw new Error("Unsafe existing private Agy onboarding receipt");
       const existingHandle = await open(destination, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
+        const existingInfo = await existingHandle.stat();
+        if (!existingInfo.isFile() || existingInfo.size > 64 * 1024) throw new Error("Ineligible private Agy onboarding receipt");
         const existingBytes = await existingHandle.readFile();
         const existingReceipt: unknown = JSON.parse(existingBytes.toString("utf8"));
         if (typeof existingReceipt === "object" && existingReceipt !== null && !Array.isArray(existingReceipt) &&

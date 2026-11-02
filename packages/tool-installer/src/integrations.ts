@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, open, readFile, readlink, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { MCPServiceDefinitionSchema, MCPServiceObservationSchema, ToolCapabilitySchema, type ToolCapability } from "@bflow/contracts";
@@ -6,7 +7,7 @@ import { z } from "zod";
 import { spawn } from "node:child_process";
 import { constants as osConstants, hostname } from "node:os";
 import { createToolCapability, systemToolHost, type ProcessResult, type ToolHost } from "./installer.js";
-import { privateDirectory, readRegular } from "./files.js";
+import { fsyncTolerant, privateDirectory, readRegular } from "./files.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -113,14 +114,19 @@ export class FileToolCapabilityRegistry {
     const temporary = `${this.#file}.tmp-${randomUUID()}`;
     const payload = JSON.stringify(registryFileSchema.parse({ schemaVersion: 3, entries }));
     const handle = await open(temporary, "wx", 0o600);
-    try { await handle.writeFile(payload); await handle.sync(); }
+    try { await handle.writeFile(payload); await fsyncTolerant(handle); }
     finally { await handle.close(); }
     try {
       await rename(temporary, this.#file);
-      const directory = await open(dirname(this.#file), "r");
-      try { await directory.sync(); } finally { await directory.close(); }
     }
     catch (error) { await rm(temporary, { force: true }); throw error; }
+    try {
+      const directory = await open(dirname(this.#file), "r");
+      try { await fsyncTolerant(directory); } finally { await directory.close(); }
+    } catch (error) {
+      const errno = (error as NodeJS.ErrnoException).code;
+      if (!errno || !["EINVAL", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EPERM", "EACCES", "EBADF", "EISDIR", "EROFS"].includes(errno)) throw error;
+    }
   }
   async #locked<T>(action: (entries: z.infer<typeof registryFileSchema>["entries"]) => Promise<T>): Promise<T> {
     await mkdir(dirname(this.#file), { recursive: true, mode: 0o700 });
@@ -283,22 +289,113 @@ async function gitNexusBusyDiagnostic(lockPath: string, kind: "storage" | "write
     "Inspect the lock and arrange release of its reader or writer before rerunning approved setup.";
 }
 
+function resolveCanonical(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    return resolve(target);
+  }
+}
+
+function gitSafeDirectoryEnvironment(dir: string, baseEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const safeDirs = new Set<string>();
+  let disableFileMode = false;
+  let current = resolveCanonical(dir);
+  for (;;) {
+    const dotGit = join(current, ".git");
+    if (existsSync(dotGit)) {
+      safeDirs.add(current);
+      try {
+        const info = statSync(dotGit);
+        if (info.isDirectory()) {
+          safeDirs.add(resolveCanonical(dotGit));
+          const headPath = join(dotGit, "HEAD");
+          if (existsSync(headPath) && (statSync(headPath).mode & 0o111) !== 0) {
+            disableFileMode = true;
+          }
+        } else if (info.isFile()) {
+          if ((info.mode & 0o111) !== 0) disableFileMode = true;
+          const pointer = readFileSync(dotGit, "utf8").trim();
+          const match = /^gitdir:\s*(.+)$/i.exec(pointer);
+          if (match?.[1]) {
+            const gitDir = resolveCanonical(resolve(current, match[1].trim()));
+            safeDirs.add(gitDir);
+            const headPath = join(gitDir, "HEAD");
+            if (existsSync(headPath) && (statSync(headPath).mode & 0o111) !== 0) {
+              disableFileMode = true;
+            }
+            const commondirFile = join(gitDir, "commondir");
+            const commonGitDir = existsSync(commondirFile)
+              ? resolveCanonical(resolve(gitDir, readFileSync(commondirFile, "utf8").trim()))
+              : resolveCanonical(resolve(gitDir, "..", ".."));
+            safeDirs.add(commonGitDir);
+            safeDirs.add(resolveCanonical(dirname(commonGitDir)));
+            const commonHead = join(commonGitDir, "HEAD");
+            if (existsSync(commonHead) && (statSync(commonHead).mode & 0o111) !== 0) {
+              disableFileMode = true;
+            }
+          }
+        }
+      } catch {
+        // best-effort discovery; git enforces validity
+      }
+      break;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      safeDirs.add(resolveCanonical(dir));
+      break;
+    }
+    current = parent;
+  }
+
+  const out: Record<string, string> = {};
+  const parsedCount = Number.parseInt(baseEnv.GIT_CONFIG_COUNT ?? "0", 10);
+  let count = Number.isInteger(parsedCount) && parsedCount >= 0 ? parsedCount : 0;
+  for (let i = 0; i < count; i++) {
+    const k = baseEnv[`GIT_CONFIG_KEY_${i}`];
+    const v = baseEnv[`GIT_CONFIG_VALUE_${i}`];
+    if (k !== undefined && v !== undefined) {
+      out[`GIT_CONFIG_KEY_${i}`] = k;
+      out[`GIT_CONFIG_VALUE_${i}`] = v;
+    }
+  }
+  for (const safeDir of safeDirs) {
+    out[`GIT_CONFIG_KEY_${count}`] = "safe.directory";
+    out[`GIT_CONFIG_VALUE_${count}`] = safeDir;
+    count += 1;
+  }
+  if (disableFileMode) {
+    out[`GIT_CONFIG_KEY_${count}`] = "core.fileMode";
+    out[`GIT_CONFIG_VALUE_${count}`] = "false";
+    count += 1;
+  }
+  out.GIT_CONFIG_COUNT = String(count);
+  return out;
+}
+
 /** One machine-wide writer lock because independent repos may share a GitNexus registry/store. */
 export async function ensureGitNexusIndex(input: {
   repositoryRoot: string; stateRoot: string; executable: string; host?: ToolHost; timeoutMs?: number;
 }): Promise<GitNexusIndexObservation> {
   const host = input.host ?? systemToolHost;
   const root = await realpath(input.repositoryRoot);
-  const head = await host.run("git", ["rev-parse", "HEAD"], { cwd: root, timeoutMs: 15_000 });
-  const dirty = await host.run("git", ["status", "--porcelain"], { cwd: root, timeoutMs: 15_000 });
-  if (head.exitCode !== 0)
+  const gitEnv = gitSafeDirectoryEnvironment(root);
+  const head = await host.run("git", ["rev-parse", "HEAD"], { cwd: root, timeoutMs: 15_000, environment: gitEnv });
+  const dirty = await host.run("git", ["status", "--porcelain"], { cwd: root, timeoutMs: 15_000, environment: gitEnv });
+  if (head.exitCode !== 0) {
+    if (/dubious ownership|not a git repository/i.test(head.stderr)) {
+      return { status: "failed", repositoryRoot: root, fingerprint: sha("git-error"),
+        diagnostic: `Git repository check failed: ${head.stderr.trim().slice(0, 400)}` };
+    }
     return { status: "failed", repositoryRoot: root, fingerprint: sha("unborn-head"),
       diagnostic: "GitNexus indexing needs a repository with at least one commit; create the first commit and rerun bflow setup" };
+  }
   if (dirty.exitCode !== 0) throw new Error("Repository fingerprint unavailable");
   const fingerprint = sha(head.stdout.trim() + "\n" + dirty.stdout);
   await privateDirectory(input.stateRoot);
   const home = await privateDirectory(join(input.stateRoot, "gitnexus-home"));
-  const environment = { GITNEXUS_HOME: home, GITNEXUS_SHARED_STORE: "off" };
+  const environment = { ...gitEnv, GITNEXUS_HOME: home, GITNEXUS_SHARED_STORE: "off" };
   const observe = async () => {
     const result = await host.run(input.executable, ["status", "--json"], { cwd: root, timeoutMs: input.timeoutMs ?? 30_000, environment });
     let status: z.infer<typeof gitNexusStatusSchema> | null = null;

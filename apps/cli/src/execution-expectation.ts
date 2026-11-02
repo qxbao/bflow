@@ -6,6 +6,7 @@ import { buildExecutionPlan, canonicalPlanDigest, executionPlanExpectation, reva
 import { HighLevelEnvelopeSchema, HighLevelError, validationError, conflictError } from './high-level/envelope.js';
 import { readPreviewFile } from './preview-files.js';
 import { loadExecutionPreview } from './execution-preview.js';
+import { gitSafeDirectoryFlags } from './git-safe-directory.js';
 /** Accept only an exported plan or the exact successful/blocked preview envelope. */
 export async function readSavedExecutionPlan(path: string): Promise<ExecutionPlan> {
     try {
@@ -57,7 +58,7 @@ export async function prepareExecutionExpectation(cwd: string, file: string, tar
             const environment: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
             for (const key of Object.keys(environment)) if (key.startsWith('GIT_') && key !== 'GIT_OPTIONAL_LOCKS') delete environment[key];
             try {
-                const base = await promisify(execFile)('git', ['rev-parse', '--verify', '--end-of-options', `${target.baseRevision}^{commit}`], { cwd, env: environment });
+                const base = await promisify(execFile)('git', [...gitSafeDirectoryFlags(cwd), 'rev-parse', '--verify', '--end-of-options', `${target.baseRevision}^{commit}`], { cwd, env: environment });
                 if (base.stdout.trim() !== saved.repository.revision) throw mismatch();
             } catch { throw mismatch(); }
         }

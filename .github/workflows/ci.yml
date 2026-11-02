@@ -111,7 +111,43 @@ jobs:
         run: pnpm run build
 
       - name: Run Vitest unit & package tests (shard ${{ matrix.shard }}/4)
-        run: pnpm exec vitest run --shard=${{ matrix.shard }}/4
+        run: pnpm exec vitest run --shard=${{ matrix.shard }}/4 --exclude='packages/runtime/test/agentic/lifecycle-fault-matrix-*.test.ts'
+
+  test-lifecycle:
+    name: Runtime Lifecycle Matrices (Serial)
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download compiled dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-dist
+
+      - name: Ensure workspace build is up-to-date
+        run: pnpm run build
+
+      - name: Run lifecycle fault matrices serially
+        run: |
+          pnpm exec vitest run \
+            packages/runtime/test/agentic/lifecycle-fault-matrix-extended-restart.test.ts \
+            packages/runtime/test/agentic/lifecycle-fault-matrix-faults.test.ts \
+            --maxWorkers=1 --minWorkers=1 --reporter=basic
 
   test-e2e:
     name: E2E Scenarios (Shard ${{ matrix.shard }}/2)

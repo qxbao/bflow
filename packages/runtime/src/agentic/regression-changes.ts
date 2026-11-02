@@ -45,8 +45,10 @@ const EXACT_ROOT_CONFIGS = new Set([
 ]);
 
 const DOC_PATTERN = /\.(md|txt|rst)$/i;
+const DECLARATION_PATTERN = /\.d\.[cm]?ts$/i;
 const CODE_PATTERN = /\.[cm]?[jt]sx?$/;
-const NESTED_CONFIG_PATTERN = /\/(?:vitest\.(?:config|workspace)|jest\.config|[^/]+\.config)\.[cm]?[jt]s$/;
+const NESTED_CONFIG_PATTERN =
+  /\/(?:vitest\.(?:config|workspace)|jest\.config|[^/]+\.config)\.[cm]?[jt]s$|\/(?:vitest|jest)[.-]setup\.[cm]?[jt]sx?$|\/(?:test|tests|__tests__|spec)\/(?:global-?)?setup\.[cm]?[jt]sx?$/i;
 
 function raiseTier(current: ScopeTier, next: ScopeTier): ScopeTier {
   return TIER_RANK[next] > TIER_RANK[current] ? next : current;
@@ -58,6 +60,7 @@ function isRootConfig(path: string): boolean {
     EXACT_ROOT_CONFIGS.has(path) ||
     /^tsconfig[^/]*\.json$/.test(path) ||
     /^vitest\.(?:config|workspace)\.[^/]+$/.test(path) ||
+    /^(?:vitest|jest)[.-]setup\.[cm]?[jt]sx?$/i.test(path) ||
     /^.+\.config\.(?:[cm]?[jt]s|json)$/.test(path)
   );
 }
@@ -98,7 +101,7 @@ export function classifyChanges(
       continue;
     }
 
-    // Runner/build configuration has no importers, but changes how every test of its package runs.
+    // Runner/build configuration and test setup scripts have no importers, but change how every test of their package runs.
     if (NESTED_CONFIG_PATTERN.test(path)) {
       const pkg = packageRootOf(path);
       if (pkg !== undefined) {
@@ -107,6 +110,20 @@ export function classifyChanges(
         tier = raiseTier(tier, "package");
       } else {
         widening.push({ path, tier: "full", reason: "package_config" });
+        tier = raiseTier(tier, "full");
+      }
+      continue;
+    }
+
+    // Ambient/declaration files (.d.ts/.d.mts/.d.cts) have no runtime import graph edges and are not executable tests.
+    if (DECLARATION_PATTERN.test(path)) {
+      const pkg = packageRootOf(path);
+      if (pkg !== undefined) {
+        packageRoots.add(pkg);
+        widening.push({ path, tier: "package", reason: "type_declaration", packageRoot: pkg });
+        tier = raiseTier(tier, "package");
+      } else {
+        widening.push({ path, tier: "full", reason: "type_declaration" });
         tier = raiseTier(tier, "full");
       }
       continue;

@@ -50,7 +50,7 @@ export const HandoverMatrixRowSchema = z.object({
 export type HandoverMatrixRow = z.infer<typeof HandoverMatrixRowSchema>;
 
 export const HandoverApprovalSchema = z.object({
-  approvalId: id, kind: z.enum(["specification", "design", "task", "delivery", "user_decision"]), target: text,
+  approvalId: id, kind: z.enum(["specification", "prototype", "design", "task", "delivery", "user_decision"]), target: text,
   requestedAt: IsoDateTimeSchema, decision: z.enum(["approved", "rejected", "changes_requested", "pending", "answered", "expired", "cancelled"]),
   decidedBy: text.optional(), decidedAt: IsoDateTimeSchema.optional(),
   validity: z.enum(["valid", "stale", "superseded", "pending", "refused"]), reasons: z.array(text)

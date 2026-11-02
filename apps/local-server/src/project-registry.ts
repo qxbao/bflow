@@ -17,7 +17,7 @@ export class ProjectRegistry {
   }catch{throw new HttpError('unavailable');}}
   private async gitRoot(path:string):Promise<string>{
     const env={...process.env};for(const key of Object.keys(env))if(key.startsWith('GIT_'))delete env[key];
-    const {stdout}=await exec('git',['--no-optional-locks','-C',path,'rev-parse','--show-toplevel'],{env,timeout:5000,maxBuffer:8192});
+    const {stdout}=await exec('git',['--no-optional-locks','-c','safe.directory=*','-C',path,'rev-parse','--show-toplevel'],{env,timeout:5000,maxBuffer:8192});
     return realpath(stdout.endsWith('\n')?stdout.slice(0,-1):stdout);
   }
   async register(path:string):Promise<{project:WebProject;created:boolean}>{

@@ -41,6 +41,8 @@ export interface NoticeLike {
   runLabel?: string | undefined;
   summary?: string | undefined;
   truncated?: boolean | undefined;
+  /** Bounded summary/reason/status extracted before the 4096-byte JSON summary is truncated. */
+  reason?: string | undefined;
   /** Preferred over the summary when present and valid. Receipts written before this field existed simply lack it. */
   userDecision?: unknown;
   /** Structured fields of a non-decision approval, when stored. */
@@ -268,6 +270,13 @@ function workTagOf(notice: { readonly runLabel?: string | undefined }, runId: st
  * Structured decision fields for an approval.request payload, clipped to the receipt bounds.
  * Undefined for anything that is not a user decision. The approval id is never clipped: a clipped id is a different id.
  */
+function sliceUtf16Safe(text: string, max: number): string {
+  if (max <= 0) return "";
+  if (text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
 export function userDecisionNoticeFields(payload: unknown): UserDecisionNotice | undefined {
   const parsed = APPROVAL_PAYLOAD.safeParse(payload);
   const metadata = parsed.success ? parsed.data.metadata : undefined;
@@ -275,10 +284,10 @@ export function userDecisionNoticeFields(payload: unknown): UserDecisionNotice |
   const fields = UserDecisionNoticeSchema.safeParse({
     approvalId: parsed.data.approvalId,
     ...(parsed.data.runId === undefined ? {} : { runId: parsed.data.runId }),
-    ...(metadata.requestedByRole === undefined ? {} : { requestedByRole: metadata.requestedByRole.slice(0, 64) }),
-    question: metadata.question.slice(0, 2000),
-    ...(metadata.options === undefined ? {} : { options: metadata.options.filter(option => option.length > 0).slice(0, 10).map(option => option.slice(0, 500)) }),
-    ...(parsed.data.expiresAt === undefined ? {} : { expiresAt: parsed.data.expiresAt.slice(0, 64) })
+    ...(metadata.requestedByRole === undefined ? {} : { requestedByRole: sliceUtf16Safe(metadata.requestedByRole, 64) }),
+    question: sliceUtf16Safe(metadata.question, 2000),
+    ...(metadata.options === undefined ? {} : { options: metadata.options.filter(option => option.length > 0).slice(0, 10).map(option => sliceUtf16Safe(option, 500)) }),
+    ...(parsed.data.expiresAt === undefined ? {} : { expiresAt: sliceUtf16Safe(parsed.data.expiresAt, 64) })
   });
   return fields.success ? fields.data : undefined;
 }
@@ -310,40 +319,90 @@ export function approvalNoticeFields(payload: unknown): ApprovalNotice | undefin
   const evidence = Array.isArray(raw.evidence) ? raw.evidence as unknown[] : [];
   const references = evidence.flatMap(item => {
     const value = item && typeof item === "object" ? item as Record<string, unknown> : undefined;
-    return typeof value?.kind === "string" && typeof value.uri === "string" ? [{ kind: value.kind.slice(0, 64), uri: value.uri.slice(0, 300) }] : [];
+    return typeof value?.kind === "string" && typeof value.uri === "string" ? [{ kind: sliceUtf16Safe(value.kind, 64), uri: sliceUtf16Safe(value.uri, 300) }] : [];
   });
   const fields = ApprovalNoticeSchema.safeParse({
     approvalId: parsed.data.approvalId,
     ...(parsed.data.runId === undefined ? {} : { runId: parsed.data.runId }),
-    target: targetLabel.slice(0, 300),
-    reason: typeof raw.reason === "string" && raw.reason ? raw.reason.slice(0, 2000) : "Không có lý do được ghi",
-    requestedBy: typeof raw.requestedBy === "string" && raw.requestedBy ? raw.requestedBy.slice(0, 200) : "runtime",
-    ...(parsed.data.expiresAt === undefined ? {} : { expiresAt: parsed.data.expiresAt.slice(0, 64) }),
+    target: sliceUtf16Safe(targetLabel, 300),
+    reason: typeof raw.reason === "string" && raw.reason ? sliceUtf16Safe(raw.reason, 2000) : "Không có lý do được ghi",
+    requestedBy: typeof raw.requestedBy === "string" && raw.requestedBy ? sliceUtf16Safe(raw.requestedBy, 200) : "runtime",
+    ...(parsed.data.expiresAt === undefined ? {} : { expiresAt: sliceUtf16Safe(parsed.data.expiresAt, 64) }),
     evidence: references.slice(0, 10), evidenceCount: references.length
   });
   return fields.success ? fields.data : undefined;
 }
 
+const VERIFICATION_OUTCOME_LABELS: Readonly<Record<string, string>> = {
+  passed: "Kết quả kiểm tra đạt yêu cầu",
+  approved: "Kết quả đánh giá đạt yêu cầu",
+  failed: "Kết quả kiểm tra chưa đạt yêu cầu",
+  rejected: "Kết quả đánh giá chưa đạt yêu cầu",
+  changes_requested: "Cần chỉnh sửa theo góp ý đánh giá",
+  blocked: "Bước kiểm tra đang tạm dừng vì vướng mắc",
+  inconclusive: "Kết quả kiểm tra chưa đủ căn cứ kết luận"
+};
+
+const BARE_PROGRESS_STATUS_TOKENS = new Set([
+  "pending", "accepted", "clarifying", "specifying", "designing", "planning",
+  "awaiting_approval", "implementing", "verifying", "integrating", "completed",
+  "succeeded", "failed", "cancelled", "escalated", "running"
+]);
+
+function extractUpdateText(type: string, notice: NoticeLike, payload: unknown): string | undefined {
+  const obj = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : undefined;
+  if (["conversation.progress", "conversation.clarification", "delegation.accepted"].includes(type)) {
+    const fromPayload = obj
+      ? [obj.blockageReason, obj.headline].find((value): value is string => typeof value === "string" && value.length > 0)
+      : undefined;
+    if (fromPayload) return fromPayload;
+    const fallback = typeof notice.reason === "string" ? notice.reason.trim() : "";
+    if (fallback.length > 0 && !BARE_PROGRESS_STATUS_TOKENS.has(fallback.toLowerCase())) return fallback;
+    return undefined;
+  }
+  if (["verification.result", "review.verdict", "verification.escalation"].includes(type)) {
+    const escalation = obj?.escalation && typeof obj.escalation === "object" && !Array.isArray(obj.escalation)
+      ? obj.escalation as Record<string, unknown>
+      : undefined;
+    const candidate = (obj
+      ? [obj.summary, obj.reason, escalation?.reason, obj.verdict, obj.status]
+          .find((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : undefined) ?? (typeof notice.reason === "string" && notice.reason.trim().length > 0 ? notice.reason : undefined);
+    if (!candidate) return undefined;
+    const trimmed = candidate.trim();
+    return VERIFICATION_OUTCOME_LABELS[trimmed.toLowerCase()] ?? trimmed;
+  }
+  return undefined;
+}
+
 function updateNotice(notice: NoticeLike): RenderedNotice {
   const type = notice.type ?? "notice";
   const truncated = notice.truncated === true;
-  // A Runtime progress message says why it matters in blockageReason (or headline); show that instead of only the type.
-  const payload = ["conversation.progress", "delegation.accepted"].includes(type) ? parseSummary(notice) : undefined;
-  const rawText = payload && typeof payload === "object" && !Array.isArray(payload)
-    ? [(payload as Record<string, unknown>).blockageReason, (payload as Record<string, unknown>).headline].find(value => typeof value === "string" && value.length > 0) as string | undefined
+  // A Runtime progress or verification message says why it matters in blockageReason/headline/summary/reason; show that instead of only the type.
+  const payload = ["conversation.progress", "conversation.clarification", "delegation.accepted", "verification.result", "review.verdict", "verification.escalation"].includes(type)
+    ? parseSummary(notice)
     : undefined;
+  const rawText = extractUpdateText(type, notice, payload);
   const runLabel = notice.runLabel;
   const workTag = workTagOf(notice, notice.runId) ?? formatRoleLabel(notice.senderRole ?? "runtime");
   const cleanText = rawText ? sanitizeCardProse(rawText, { runId: notice.runId, workTag }) : (MESSAGE_TYPE_LABELS[type] ? `Đã nhận ${MESSAGE_TYPE_LABELS[type]}` : "Có cập nhật tiến độ mới");
   // Bind display to this exact notice and its content: repeated/stale headlines must not acknowledge a different update.
   const ackToken = notice.runId && rawText ? `${workTag}: ${cleanText}` : undefined;
   const headline = `▶ ${workTag}: ${cleanText}`;
-  const note = truncated ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
+  // The user can only answer a clarification whose questions are shown; the headline alone hides them.
+  const rawQuestions = type === "conversation.clarification" && payload && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>).questions : undefined;
+  const questions = Array.isArray(rawQuestions)
+    ? rawQuestions.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 10)
+      .map((item, index) => `  ${index + 1}. ${sanitizeCardProse(sliceUtf16Safe(item, 1000), { runId: notice.runId, workTag })}`)
+    : [];
+  const missingTruncatedContent = truncated && (!rawText || (type === "conversation.clarification" && questions.length === 0));
+  const note = missingTruncatedContent ? " — nội dung bị cắt ngắn, không hiển thị đầy đủ" : "";
   // Substantive progress needs display recovery too. Its text is an acknowledgement token, never approval authority.
   return { messageId: notice.messageId, kind: "update", ...(notice.runId ? { runId: notice.runId } : {}),
     ...(runLabel ? { runLabel } : {}), headline,
     ...(ackToken ? { ackToken, ackText: cleanText } : {}),
-    display: `${headline}${note}` };
+    display: [`${headline}${note}`, ...(questions.length ? ["Câu hỏi cần bạn trả lời:", ...questions] : [])].join("\n") };
 }
 
 function decisionNotice(notice: NoticeLike, fields: UserDecisionNotice): RenderedNotice {
@@ -385,7 +444,7 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype =
     { number: 2, text: "Từ chối hẳn prototype (ghi lý do)" }
   ] : [
     { number: 1, text: "Đồng ý" },
-    { number: 2, text: "Chưa đồng ý (ghi lý do)" }
+    { number: 2, text: "Từ chối hẳn (ghi lý do, dừng công việc)" }
   ];
   const headline = `🔔 Cần bạn duyệt${prototype ? " prototype" : ""} · ${shortId}`;
   const evidenceLine = fields.evidenceCount > 0 ? `Kèm ${fields.evidenceCount} tài liệu (gõ "xem chi tiết ${shortId}" để xem)` : undefined;
@@ -394,7 +453,9 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype =
   const reply = prototype
     ? `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt prototype, "${shortId}: cần sửa <góp ý>" để yêu cầu sửa prototype, ` +
       `"${shortId}: đổi yêu cầu <nội dung>" nếu góp ý cần đổi yêu cầu đã chấp nhận, "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn, hoặc "hủy ${workCommand}" để hủy công việc — ${expiryText}`
-    : `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") nếu cần sửa — ${expiryText}`;
+    // "2"/"từ chối" records a final rejection that ends the work; a fix is requested with "cần sửa" (changes_requested).
+    : `Bạn trả lời: "${shortId}: đồng ý" (hoặc "${shortId}: 1") để duyệt, "${shortId}: cần sửa <góp ý>" để yêu cầu sửa và giữ công việc, ` +
+      `hoặc "${shortId}: từ chối vì <lý do>" (hoặc "${shortId}: 2 <lý do>") để từ chối hẳn và dừng công việc — ${expiryText}`;
   const lines = [
     headline,
     ...(runLabel ? [runLabel] : []),
@@ -412,9 +473,11 @@ function approvalContent(notice: NoticeLike, fields: ApprovalNotice, prototype =
 function approvalNotice(notice: NoticeLike, payload: z.infer<typeof APPROVAL_PAYLOAD>): RenderedNotice | undefined {
   const metadata = payload.metadata;
   if (metadata?.kind === "user_decision" && metadata.question !== undefined) {
+    const decisionFields = userDecisionNoticeFields(payload);
+    if (decisionFields) return decisionNotice(notice, decisionFields);
     return decisionNotice(notice, { approvalId: payload.approvalId, ...(payload.runId ? { runId: payload.runId } : {}),
-      ...(metadata.requestedByRole ? { requestedByRole: metadata.requestedByRole } : {}), question: metadata.question,
-      ...(metadata.options ? { options: metadata.options } : {}), ...(payload.expiresAt ? { expiresAt: payload.expiresAt } : {}) });
+      ...(metadata.requestedByRole ? { requestedByRole: sliceUtf16Safe(metadata.requestedByRole, 64) } : {}), question: sliceUtf16Safe(metadata.question, 2000),
+      ...(metadata.options ? { options: metadata.options.map(opt => sliceUtf16Safe(opt, 500)) } : {}), ...(payload.expiresAt ? { expiresAt: sliceUtf16Safe(payload.expiresAt, 64) } : {}) });
   }
   const fields = approvalNoticeFields(payload);
   return fields === undefined ? undefined : approvalContent(notice, fields, metadata?.kind === "prototype_review");
@@ -476,9 +539,9 @@ export function blockedNoticeFields(payload: unknown): z.infer<typeof BlockedNot
   const revision = requirementRevisionGuidance(value, value.runId);
   const automatic = AutomaticResumeSchema.safeParse((value as { automaticResume?: unknown }).automaticResume);
   const parsed = BlockedNoticeSchema.safeParse({
-    kind: value.kind, reason: value.reason.slice(0, 2000),
+    kind: value.kind, reason: sliceUtf16Safe(value.reason, 2000),
     ...(value.runId ? { runId: value.runId } : {}), ...(automatic.success ? { automaticResume: automatic.data } : {}),
-    ...(value.options ? { options: value.options.slice(0, 10).map(option => option.slice(0, 500)) } : {}),
+    ...(value.options ? { options: value.options.slice(0, 10).map(option => sliceUtf16Safe(option, 500)) } : {}),
     ...(revision ? { requested_action: revision.requested_action, blockers: revision.blockers,
       ...(revision.requiredSddLevel ? { requiredSddLevel: revision.requiredSddLevel } : {}) } : {})
   });
@@ -507,11 +570,11 @@ export function renderConversationNotice(notice: NoticeLike): RenderedNotice {
 export function notificationBody(notice: RenderedNotice, max = 400): string {
   if (notice.display.length <= max) return notice.display;
   // Reserve the action before clipping the diagnostic headline; otherwise a long reason consumes the whole notification.
-  const reply = (notice.reply ?? "").slice(0, max);
-  const head = notice.headline.slice(0, Math.max(0, max - reply.length - (reply ? 1 : 0)));
+  const reply = sliceUtf16Safe(notice.reply ?? "", max);
+  const head = sliceUtf16Safe(notice.headline, Math.max(0, max - reply.length - (reply ? 1 : 0)));
   const room = max - head.length - reply.length - 2;
-  const question = (notice.question ?? "").slice(0, Math.max(0, room));
-  return [head, question, reply].filter(Boolean).join("\n").slice(0, max);
+  const question = sliceUtf16Safe(notice.question ?? "", Math.max(0, room));
+  return sliceUtf16Safe([head, question, reply].filter(Boolean).join("\n"), max);
 }
 
 /** The MUST SHOW block placed first in hook output. Empty when there is nothing to show. */

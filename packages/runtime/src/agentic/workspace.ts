@@ -2,7 +2,7 @@ import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding
+  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type ContractError, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
@@ -110,6 +110,19 @@ interface PendingDeveloper { readonly taskId: string; readonly launchId: string;
  * retry resumes the same launch instead of preparing another. A failed proof, or no proof within the startup
  * timeout, releases the launch and pane and is a non-retryable validation error.
  */
+/**
+ * A failure while preparing a Developer launch. Preparation leaves no lasting side effect, so a system-level fault (an errno such as
+ * EISDIR, EACCES or ENOENT) is an infrastructure fault that Runtime may retry a bounded number of times, and it keeps its errno and
+ * syscall. Every other thrown error is a deliberate policy or validation refusal and stays fail-closed and non-retryable.
+ */
+export function launchPreparationFailure(error: unknown): ContractError {
+  const system = error instanceof Error ? error as NodeJS.ErrnoException : undefined;
+  if (system !== undefined && typeof system.code === "string" && /^E[A-Z0-9]{2,}$/.test(system.code))
+    return { code: "transport_unavailable", retryable: true, message: String(error).slice(0, 500),
+      details: { stage: "prepare_launch", errno: system.code, ...(typeof system.syscall === "string" ? { syscall: system.syscall } : {}) } };
+  return { code: "validation", retryable: false, message: String(error) };
+}
+
 export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunchPort, launchOptions: DeveloperLaunchOptions = {}): PanePolicy {
   const timeoutMs = launchOptions.startupTimeoutMs ?? DEVELOPER_STARTUP_TIMEOUT_MS;
   const now = launchOptions.now ?? Date.now;
@@ -151,7 +164,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
             ...(request.roleProfile ? { roleProfile: request.roleProfile } : {}),
             ...(request.failoverCandidate ? { candidate: request.failoverCandidate } : {}),
             ...(request.continuationId ? { continuationId: request.continuationId } : {}) }); }
-        catch (error) { return { ok: false, error: { code: "validation", retryable: false, message: String(error) } }; }
+        catch (error) { return { ok: false, error: launchPreparationFailure(error) }; }
         // Carried as a widened value: the PanePolicy request type predates the launch fields Pane Manager accepts.
         const { failoverCandidate: _candidate, continuationId: _continuationId, ...baseRequest } = request;
         const { model: _model, ...material } = launch;
@@ -276,7 +289,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       return rolePanes.getRoleBinding(paneId, callOptions);
     }
   }) : rolePanes;
-  const specialists = new Map<string, { role: import("@bflow/contracts").AgentRole; launch: import("./host-platform.js").DeveloperLaunchMaterial; pane?: PaneBinding }>();
+  const specialistStartupTimeoutMs = 120_000;
+  const specialists = new Map<string, { role: import("@bflow/contracts").AgentRole; launch: import("./host-platform.js").DeveloperLaunchMaterial; pane?: PaneBinding; since: number }>();
   const panes: PanePolicy = options.specialistLaunches ? {
     ...basePanes,
     async inspectRoleHealth(selector, operation) {
@@ -290,15 +304,37 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       let retained = specialists.get(request.taskId);
       const fresh = !retained;
       if (!retained) {
-        const launch = await options.specialistLaunches!.allocate(request);
-        retained = { role: request.role, launch }; specialists.set(request.taskId, retained);
+        let launch;
+        try { launch = await options.specialistLaunches!.allocate(request); }
+        catch (error) { return { ok: false, error: launchPreparationFailure(error) }; }
+        retained = { role: request.role, launch, since: Date.now() }; specialists.set(request.taskId, retained);
       }
       // A launch prepared in this call owns Gateway registrations. If no pane can be bound to it, revoke it now:
       // authority is only narrowed, and a later retry prepares a new launch that Pane Manager reconciles by launch id.
       const abandon = async (): Promise<void> => {
         if (!fresh) return;
         specialists.delete(request.taskId);
-        await options.specialistLaunches!.release(request.taskId);
+        await options.specialistLaunches!.release(request.taskId).catch(() => undefined);
+      };
+      const failSpecialistClosed = async (detail: string): Promise<OperationResult<PaneBinding>> => {
+        if (retained?.pane) {
+          await rolePanes.releaseSpecialist({
+            taskId: request.taskId,
+            agentId: retained.pane.agentId,
+            paneId: retained.pane.paneId,
+            closePane: true
+          }, operation).catch(() => undefined);
+        }
+        await options.specialistLaunches!.release(request.taskId).catch(() => undefined);
+        specialists.delete(request.taskId);
+        return {
+          ok: false,
+          error: {
+            code: "validation",
+            retryable: false,
+            message: `Profile specialist ${request.taskId} ${detail}; its pane and launch were released`
+          }
+        };
       };
       try { await options.readExecutionResolution?.(); } catch (error) { await abandon(); throw error; }
       const allocated = await rolePanes.allocateSpecialist({ ...request, cwd: repository, agentKind: retained.launch.provider, launch: retained.launch }, operation);
@@ -308,8 +344,21 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       if (!topology.ok) return topology;
       const observed = await rolePanes.getRoleBinding(allocated.value.bindingId, operation);
       if (!observed.ok || !observed.value) return observed;
-      const verdict = await options.specialistLaunches!.reachability(retained.launch.launchId, observed.value.paneId);
-      if (!observed.value.session || verdict.state !== "ready") return { ok: false, error: { code: "conflict", retryable: true, message: "Profile specialist native startup/readiness is pending" } };
+      let verdict: ReachabilityVerdict;
+      try { verdict = await options.specialistLaunches!.reachability(retained.launch.launchId, observed.value.paneId); }
+      catch (error) { return failSpecialistClosed(`has no readable reachability record: ${String(error)}`); }
+      if (verdict.state === "failed") {
+        return failSpecialistClosed(
+          `cannot reach Gateway registration ${verdict.registrationId} from its provider process (${verdict.envName}: ${verdict.code}; ${verdict.reason})`
+        );
+      }
+      if (!observed.value.session || verdict.state !== "ready") {
+        const reason = verdict.state === "pending" ? verdict.reason : "native-session binding is not ready";
+        if (Date.now() - retained.since >= specialistStartupTimeoutMs) {
+          return failSpecialistClosed(`did not prove Gateway tool reachability/native-session readiness within ${specialistStartupTimeoutMs} ms (${reason})`);
+        }
+        return { ok: false, error: { code: "conflict", retryable: true, message: `Profile specialist native startup/readiness is pending: ${reason}` } };
+      }
       return observed;
     },
     async releaseSpecialist(request, operation) {
@@ -381,6 +430,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       ...(options.projectApprovalRequired ? { projectApprovalRequired: options.projectApprovalRequired } : {})
     }, { journalDirectory: resolve(directory, "journal"), repositoryPath: repository });
     await runtime.initialize();
+    // An owner reopen may restore a request whose Node process never launched. Unknown remote deliveries remain untouched.
+    await runtime.recoverProvenPrelaunchPolicyDeliveries();
     await options.beforeRecovery?.(runtime);
     conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),

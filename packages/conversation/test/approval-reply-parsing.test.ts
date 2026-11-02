@@ -176,6 +176,9 @@ describe("approval reply targeting", () => {
     expect(decided("#1: 1", context)).toMatchObject({ approvalId: DESIGN, decision: "approved" });
     expect(decided("#1: từ chối vì thiếu kiểm thử", context))
       .toMatchObject({ approvalId: DESIGN, decision: "rejected", reason: expect.stringContaining("thiếu kiểm thử") });
+    // The design card offers "cần sửa" to keep the work as a follow-up revision instead of a terminal rejection.
+    expect(decided("#1: cần sửa đường dẫn phải là src/calculator.ts", context))
+      .toMatchObject({ approvalId: DESIGN, decision: "changes_requested", reason: expect.stringContaining("src/calculator.ts") });
     expect(decided("#2: 1", context)).toMatchObject({ approvalId: APR_A, decision: "approved", selectedOption: "Đóng run" });
     expect(decided("#2 1", context)).toMatchObject({ approvalId: APR_A, decision: "approved", selectedOption: "Đóng run" });
   });

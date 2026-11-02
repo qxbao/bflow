@@ -1,11 +1,13 @@
 import { getRoleTopologySpec, type RoleSelector } from "./types.js";
-import { readFile, open } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { constants } from "node:fs";
 
 export interface RoleMcpServer {
   readonly command: string;
   readonly args?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
+  readonly startup_timeout_sec?: number;
+  readonly tool_timeout_sec?: number;
 }
 export interface ProviderRoleLaunchOptions {
   readonly agentKind: "claude" | "codex";
@@ -32,11 +34,44 @@ export interface ProviderRoleLaunchFiles {
   readonly hooksSettingsFile: string;
 }
 
+function tomlString(value: string): string {
+  return JSON.stringify(value).replace(/\x7f/g, "\\u007f");
+}
+
 function toml(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(toml).join(",")}]`;
+  if (typeof value === "string") return tomlString(value);
+  if (Array.isArray(value)) return `[${value.map(item => toml(item ?? null)).join(",")}]`;
   if (value !== null && typeof value === "object")
-    return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${toml(item)}`).join(",")}}`;
+    return `{${Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => `${tomlString(key)}=${toml(item)}`)
+      .join(",")}}`;
   return JSON.stringify(value);
+}
+
+async function readTrustedRegularUtf8(path: string, label: string, maxBytes = 4 * 1024 * 1024): Promise<string> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === "ELOOP" || code === "EISDIR") {
+      throw new Error(`${label} must be a regular file`);
+    }
+    throw error;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) {
+      throw new Error(`${label} must be a regular file`);
+    }
+    if (info.size > maxBytes) {
+      throw new Error(`${label} exceeds ${maxBytes}-byte limit`);
+    }
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -44,6 +79,38 @@ function toml(value: unknown): string {
  * when listed in `env_vars` (mirrors agent-providers, which this leaf package must not import).
  */
 const CODEX_MCP_FORWARDED_ENV = ["HERDR_PANE_ID", "BFLOW_LAUNCH_ID"] as const;
+const CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC = 120;
+const CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC = 600;
+
+function withCodexRoleMcpTimeouts(server: RoleMcpServer): Record<string, unknown> {
+  const startupTimeoutSec =
+    typeof server.startup_timeout_sec === "number" && Number.isFinite(server.startup_timeout_sec) && server.startup_timeout_sec > 0
+      ? Math.max(server.startup_timeout_sec, CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC)
+      : CODEX_DEFAULT_MCP_STARTUP_TIMEOUT_SEC;
+  const toolTimeoutSec =
+    typeof server.tool_timeout_sec === "number" && Number.isFinite(server.tool_timeout_sec) && server.tool_timeout_sec > 0
+      ? Math.max(server.tool_timeout_sec, CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC)
+      : CODEX_DEFAULT_MCP_TOOL_TIMEOUT_SEC;
+  return {
+    ...server,
+    env_vars: [...CODEX_MCP_FORWARDED_ENV],
+    default_tools_approval_mode: "approve",
+    startup_timeout_sec: startupTimeoutSec,
+    tool_timeout_sec: toolTimeoutSec,
+  };
+}
+
+function toClaudeRoleMcpServer(server: RoleMcpServer): {
+  readonly command: string;
+  readonly args?: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+} {
+  return {
+    command: server.command,
+    ...(server.args !== undefined ? { args: server.args } : {}),
+    ...(server.env !== undefined ? { env: server.env } : {}),
+  };
+}
 
 /** Roles that investigate read-only and may run the git reads below (mirrors the Runtime host guard). */
 const INVESTIGATION_ROLES: ReadonlySet<string> = new Set(["planner", "specifier", "architect", "reviewer", "qa"]);
@@ -64,6 +131,9 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
   if (hook?.includes("\0")) throw new Error("Native session hook cannot contain NUL");
   if (options.agentKind === "claude") {
     const settings = hook ? { hooks: { SessionStart: [{ hooks: [{ type: "command", command: hook, timeout: 10 }] }] } } : {};
+    const claudeServers = Object.fromEntries(
+      Object.entries(servers).map(([name, server]) => [name, toClaudeRoleMcpServer(server)]),
+    );
     // Conversation and Coordinator get their scoped context through trusted host
     // tools; native repository reads would also expose host state/secrets.
     const tools = spec.topologyRole === "chat" || spec.topologyRole === "coordinator"
@@ -79,7 +149,7 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
       // Claude applies Read(path) to all read tools and Edit(path) to all file writes.
       "--disallowedTools", ["Read", "Edit"].flatMap(tool =>
         ["./.bflow/**", "./.git/**", "~/.claude/**", "~/.codex/**", "~/.ssh/**", "~/.aws/**", "~/.config/**"].map(pattern => `${tool}(${pattern})`)).join(","),
-      "--settings", JSON.stringify(settings), "--mcp-config", JSON.stringify({ mcpServers: servers }),
+      "--settings", JSON.stringify(settings), "--mcp-config", JSON.stringify({ mcpServers: claudeServers }),
       "--append-system-prompt", options.systemPrompt,
       ...(options.model ? ["--model", options.model] : [])];
   }
@@ -87,7 +157,7 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
     "--ask-for-approval", "never", "-c", `developer_instructions=${JSON.stringify(options.systemPrompt)}`,
     // Approval policy `never` auto-rejects MCP calls Codex would prompt for; pre-approve the operator servers.
     "-c", "web_search=\"disabled\"", "-c", `mcp_servers=${toml(Object.fromEntries(Object.entries(servers)
-      .map(([name, server]) => [name, { ...server, env_vars: [...CODEX_MCP_FORWARDED_ENV], default_tools_approval_mode: "approve" }])))}`];
+      .map(([name, server]) => [name, withCodexRoleMcpTimeouts(server)])))}`];
   if (hook) args.push("--enable", "hooks", "--dangerously-bypass-hook-trust", "-c",
     `hooks.SessionStart=${toml([{ hooks: [{ type: "command", command: hook, timeout: 10 }] }])}`);
   if (options.model) args.push("--model", options.model);
@@ -96,8 +166,8 @@ export function buildProviderRoleLaunch(options: ProviderRoleLaunchOptions): rea
 
 /** Launch-local files are generated by the trusted host, never loaded from project agent output. */
 export async function buildProviderRoleLaunchFromFiles(options: ProviderRoleLaunchFiles): Promise<readonly string[]> {
-  const mcp = JSON.parse(await readFile(options.mcpConfigFile, "utf8"));
-  const settings = JSON.parse(await readFile(options.hooksSettingsFile, "utf8"));
+  const mcp = JSON.parse(await readTrustedRegularUtf8(options.mcpConfigFile, "Trusted host MCP config"));
+  const settings = JSON.parse(await readTrustedRegularUtf8(options.hooksSettingsFile, "Trusted host settings"));
   if (!mcp || typeof mcp !== "object" || !mcp.mcpServers || typeof mcp.mcpServers !== "object" || Array.isArray(mcp.mcpServers))
     throw new Error("Trusted host MCP config must contain mcpServers");
   if (!settings || typeof settings !== "object" || !settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks))

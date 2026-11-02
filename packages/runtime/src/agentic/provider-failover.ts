@@ -77,13 +77,19 @@ export class TaskProviderFailover {
   }
 
   async continue(): Promise<void> {
+    let firstError: unknown;
     for (const run of this.state.runs) for (const task of run.tasks) for (const entry of task.failovers ?? []) {
       if (["dispatched", "cancelled"].includes(entry.phase)) continue;
       if (run.cancelled) { entry.phase = "cancelled"; await this.save(); continue; }
       if (entry.phase === "blocked" || !this.ports.providerFailover) continue;
-      await this.step(run, task, entry);
-      await this.save();
+      try {
+        await this.step(run, task, entry);
+        await this.save();
+      } catch (error) {
+        firstError ??= error;
+      }
     }
+    if (firstError !== undefined) throw firstError;
   }
   private async step(run: RunRecord, task: TaskRecord, entry: TaskFailover): Promise<void> {
     if (!await this.safe(run, entry)) return;
@@ -129,7 +135,8 @@ export class TaskProviderFailover {
     }
     if (!await this.safe(run, entry)) return;
     if (entry.phase === "stopped") {
-      const bound = unwrap(await this.ports.panes.getRoleBinding(source.selector));
+      const bindingSelector = source.selector === "developer" ? entry.sourceBinding.agentId : source.selector;
+      const bound = unwrap(await this.ports.panes.getRoleBinding(bindingSelector));
       if (bound && (bound.agentId !== entry.sourceBinding.agentId || bound.paneId !== entry.sourceBinding.paneId || digest(bound.session) !== digest(entry.sourceBinding.session))) {
         this.hold(run, entry, "source_binding_changed", true); return;
       }
@@ -140,6 +147,16 @@ export class TaskProviderFailover {
       entry.handoverStatus = selected?.status === "selected" ? "selected" : loaded.status === "absent" ? "absent" : "withheld";
       await this.save();
       // The original Registry grant and pane are retired before any replacement is allocated. Replays use their existing receipts.
+      for (const child of this.state.outbound) {
+        if (child.parentAssignmentId !== source.message.message_id) continue;
+        if (child.status === "accepted") await this.outbox.release(child);
+        else if (child.status === "queued") {
+          delete child.request;
+          delete child.lease;
+          child.status = "cancelled";
+          child.error = "Parent assignment retired for provider failover continuation";
+        }
+      }
       await this.outbox.release(source);
       const release = this.ports.panes.releaseCancelledDeveloper ?? this.ports.panes.releaseDeveloper;
       unwrap(await release.call(this.ports.panes, { taskId: `${run.runId}-${task.taskId}`, closePane: false, removeWorktree: false }));

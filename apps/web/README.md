@@ -6,6 +6,9 @@ shows a pairing error; there is no production mock mode, proxy or security bypas
 Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 `@bflow/web/assets` remains the separate Node asset resolver.
 
+- Step-by-step end-user guide (Vietnamese with screenshots): [`docs/guide/web-manual.md`](../../docs/guide/web-manual.md)
+- UX/CLS stabilization & live single-provider Web SDLC evidence (`run-web-c72842ea-a325-4305-833e-760d560e095b`): [`docs/reliability/web-ux-stabilization.md`](../../docs/reliability/web-ux-stabilization.md)
+
 ## Screen and state mapping
 
 | Screen | Components / data | States |
@@ -15,7 +18,7 @@ Browser code imports only the browser-safe `@bflow/contracts/web` subpath.
 | Công việc | Search/phase URL filters, cursor pages, run detail, tasks/blockers, lineage links | Pre-Core null, all engine/task statuses, unknown/done terminal observations, historical continuation, empty/error/stale |
 | Cần bạn quyết định | DecisionCard, revision/status/expiry, safe evidence | Pending/expired/superseded etc. as returned; view-only, no approval inferred from phase |
 | Cài đặt dự án | Explicit init/update/GitNexus repair, readiness inspection, role/provider/model forms, policy/tool/MCP/skills groups, full YAML, confirmed unregister | Durable initialization ID/progress/recovery, revision conflict and validation errors; config changes apply after session restart |
-| Trò chuyện | Run detail panel on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
+| Trò chuyện | Own project tab (`/chat`, `/chat/:runId`): one thread per run on the same Conversation session | Claude/Codex adapters; unsupported/unavailable sessions keep direct actions |
 
 Workflow create/revise/clarification/approval/resume/cancel and lifecycle start/stop
 controls belong to W07. The registry form and read-only inspect call the frozen
@@ -37,11 +40,12 @@ The prescribed Big Shoulders Display / Inter / IBM Plex Sans / JetBrains Mono
 Vietnamese/Latin/Latin-ext variable WOFF2 faces are served locally under
 `public/fonts`, with SIL OFL notices. No external fonts/network request or CSP
 relaxation. Font source: Google Fonts CSS service and Google Fonts repository
-license files. Body 18px (17px on small screens), detail titles 32px, responsive
-display titles; a yellow registry CTA uses ink text. No workflow CTA is invented.
+license files. Tailwind builds the styles through its Vite plugin. Body 16px, page titles
+28–32px and section titles 20px; a yellow registry CTA uses ink text. No workflow CTA is invented.
 
-Desktop sidebar layout; gutters reduce at 900px, navigation stacks at 720px.
-Focus rings are 3px; text colors follow DESIGN's AAA pairs. Screenshot inspection
+Desktop uses a 224px sidebar at 1024px and up; smaller viewports have an inline
+navigation disclosure. Gutters are 16–32px. Desktop controls are 36px high; small-screen
+controls are at least 44px with 16px form text. Focus rings are 2px; text colors follow DESIGN's AAA pairs. Screenshot inspection
 and browser overflow checks cover 1440/1280/768 and 375px. These are local browser
 checks, not comprehensive WCAG certification or owner visual acceptance.
 
@@ -164,7 +168,7 @@ See W07-HANDOFF.md for measured results and integration-owned runner proposal.
 
 ## W08 optional chat
 
-Run detail includes normalized session history and a bounded text composer. It uses
+The Trò chuyện tab shows normalized session history and a bounded text composer. It uses
 the same authenticated HTTP origin and run/session as direct actions. The host
 rechecks readiness and native binding; successful history alone grants no authority.
 Claude/Codex adapters use correlated real native hooks and provider transcript IDs.
@@ -224,3 +228,50 @@ force stop using the existing lifecycle implementation. It has a separate intent
 from normal stop and retains quiesce/checkpoint barriers; interrupted unverified
 attempts may be lost, while worktrees/history remain available for reconciliation.
 Use it for failed pane/worktree-group closure after reviewing the displayed warning.
+
+## Compact UX and Tailwind
+
+Layout/component styles use Tailwind utilities in JSX. `styles/global.css` contains
+semantic theme values and shared document/control defaults; `styles/fonts.css`
+retains local font declarations. The old token/layout, request and chat stylesheets
+are removed. No CSS CDN or new runtime styling dependency is used.
+
+Initial reads show accessible skeletons. Background reads retain visible content,
+focus and drafts with a small update indicator; failed refreshes still identify stale
+data and disable actions through the existing freshness/authority checks.
+
+- Projects: name/path search and local pages of 12 on the loaded registry.
+- Runs: server cursor pages of 25, previous/next/first controls, URL filters and
+  browser-history cursor trails scoped to project/filter. Cursor deep links without
+  a known trail show “Trang hiện tại” and only offer a return to the first page.
+  Total pages are not inferred. Retry retains filters.
+- Review: status filter and local pages of 10 on the API snapshot, with one run
+  read per distinct visible run. This does not expand the API aggregate cap.
+  Paging/filtering after editing asks before discarding the decision input. Browser
+  Back/Forward keeps in-memory drafts pinned to the reviewed package; a changed
+  revision still requires explicit rereview. One failed run read affects its own
+  packages without disabling other authorized reviews.
+- Chat: previous/next/first history controls preserve the mounted composer draft.
+- Overview prioritizes session readiness, recent work and pending decisions;
+  diagnostic/observed-feed detail is expandable. Run detail groups reading and
+  action sections into columns when space allows. Settings uses anchor navigation
+  without unmounting configuration drafts and a separate unregister section.
+
+See [approved scope](UX-IMPROVEMENTS.md), [implementation plan](UX-PLAN.md) and
+`test/ux.test.tsx` / `e2e/ux.spec.ts` for interaction and responsive checks.
+
+## Operational UX handoff (UX-01..UX-28)
+
+Source plus local tests; not live acceptance. Behaviour added on top of the frozen web contract:
+
+- Run page: "Bước hiện tại" states who the run is waiting on from projection fields only, never terminal idle/done. The elapsed text is time since the last change, not processing time.
+- Blockers are classified as required, in-progress check or optional degradation. Unknown codes stay required. Several reads failing for one cause on the overview render one notice.
+- Settled approvals are read from the run page under "Đã có hiệu lực". The review inbox stays a to-do list. Runtime keeps only the run's latest approval, so an earlier design approval is replaced once a task or delivery approval is issued.
+- A request form still tracking an operation says so, disables sending and offers a new intent only after the outcome is known.
+- Chat is a messenger-style tab with one thread per run, reading at most 20 pages. It hides other runs' messages but keeps those without a `runId`, because Conversation replies and terminal turns carry none yet.
+- "Đang soạn tin" is inferred, not a provider signal: the user's last message is `delivered`, the session is ready, no reply has arrived and the message is under five minutes old. The thread re-reads history every five seconds during that window.
+- Operations settled over ten minutes ago and unrelated to the open run move to a collapsed history.
+- Each acceptance criterion carries its own verification method; the default applies only until changed.
+- Background refreshes render a zero-height screen-reader status (`CLS = 0.00000`) while keeping visible panels, focus and drafts mounted; settled operations recorded in local storage automatically unlock action slots on reload/reread, SSE cursors deduplicate delivered events, and `Settings` provides a 1-click bulk Provider/Model bar across all configured roles plus plain-Vietnamese readiness/decision disclosures and route-aligned timeouts (`40s`/`50s`).
+
+Not implementable without an additive contract decision (`WebRunView`/`WebTransportSummary` are strict): per-task Red/Green/Refactor phase and owner (UX-05), QA progress (UX-20), role per transport state (UX-16), notice feed grouping (UX-11), checked model catalog (UX-25) and provider onboarding by role with a pane link (UX-26).

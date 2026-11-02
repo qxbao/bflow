@@ -29,7 +29,10 @@ export function openCatalog(filename: string, storeId: string, busyTimeoutMs: nu
       if (identity === undefined) db.prepare("INSERT INTO identity VALUES(1,?)").run(storeId);
       else if (identity.store_id !== storeId) throw new ArtifactFailure({ code: "conflict", retryable: true, message: "Storage root belongs to a different storeId" });
       db.exec("COMMIT");
-    } catch (error) { db.exec("ROLLBACK"); throw error; }
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* already auto-rolled back */ }
+      throw error;
+    }
     return db;
   } catch (error) { db.close(); throw error; }
 }

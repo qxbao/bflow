@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, truncate } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it } from "vitest";
@@ -232,6 +232,13 @@ it("queries a real host subprocess before Core without activating it, scopes rea
       "launch-index.json",
     );
     expect(await readdir(repositoryPath)).not.toContain("herdr-calls.jsonl");
+    const largeRun = run('large-journal');
+    largeRun.delegation.metadata = {retainedDiagnostic:'x'.repeat(17*1024*1024)};
+    await writeFile(journalPath,JSON.stringify({...state([largeRun]),repository:repositoryPath}));
+    expect(await client.listRuns(projectId,{})).toMatchObject({ok:true,value:{items:[{runId:'large-journal'}]}});
+    await truncate(journalPath,64*1024*1024+1);
+    expect(await client.listRuns(projectId,{})).toMatchObject({ok:false});
+
   } finally {
     try {
       await controller.shutdown();

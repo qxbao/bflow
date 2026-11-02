@@ -1,3 +1,4 @@
+import { projectPolicyPhaseEnvelope, provenPrelaunchPolicyFailure, PrelaunchRegistryRecoveryError, prelaunchLeaseIdentity } from "./policy-prompt.js";
 import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-binding.js";
 import { ExecutorLineageSchema, RoleProfilePinSchema, sameRoleProfilePin } from "@bflow/contracts";
 import { assertProfileBinding, assertProfileSnapshotCurrent, assertIndependentProfileExecutor, selectRoleProfile } from "./profile-admission.js";
@@ -18,6 +19,18 @@ export const CONVERSATION_DELIVERY_MAX_ATTEMPTS = 5;
 export const DISPATCH_FAILURE_NOTICE_ATTEMPTS = 5;
 /** Backoff between consecutive capability preflight failures of one unsent message; the next failure after these marks it failed. */
 export const PREFLIGHT_RETRY_DELAYS_MS: readonly number[] = [0, 2_000, 8_000, 30_000];
+/** Backoff between consecutive execution-plan drift checks of one unsent message while keeping it queued for drift remediation. */
+export const EXECUTION_DRIFT_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000, 30_000];
+const DEFERRED_CONTROL_NOTICE_KINDS = new Set(["policy_phase_outcome", "user_decision_answer"]);
+function isPermanentTaskNoticeAuthorityError(error: unknown): boolean {
+  return /Task notice (requires an active parent assignment|parent lease is expired or mismatched|parent execution is stopped or terminal|recipient session or worktree changed|parent Core execution is stopped or terminal)|Lease expired or already released|Lease expired or released|Expired assignment lease|Assignment lease release is pending|Assignment has no current lease|Invalid pending task lease continuation|Pending task lease continuation ownership mismatch|Task lease continuation limit exhausted/i.test(String(error));
+}
+function formatTaskNoticeAuthorityError(error: unknown): string {
+  const detail = String(error);
+  return /Lease expired|Expired assignment lease/i.test(detail) && !detail.includes("parent lease is expired")
+    ? `Task notice parent lease is expired or mismatched: ${detail}`
+    : detail;
+}
 
 export function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -66,7 +79,32 @@ export class HerdrOutbox {
     const parsed = RoleMessageSchema.parse(message);
     const candidate: Outbound = { message: parsed, status: "queued", selector: parentAssignment.selector,
       taskId: parentAssignment.taskId, attemptId: parentAssignment.attemptId, capabilities: [], parentAssignmentId: parentAssignment.message.message_id };
-    const parent = this.noticeParent(candidate);
+    let parent: Outbound;
+    try {
+      parent = this.noticeParent(candidate);
+    } catch (error) {
+      const kind = String(record(parsed.payload).kind ?? "");
+      if (!DEFERRED_CONTROL_NOTICE_KINDS.has(kind) ||
+          parentAssignment.parentAssignmentId !== undefined || parentAssignment.message.type !== "task.assignment" ||
+          !parentAssignment.assignment || !parentAssignment.request || !parentAssignment.handle || !parentAssignment.lease ||
+          parsed.run_id !== parentAssignment.message.run_id)
+        throw error;
+      if (parsed.type !== "task.status" || parsed.sender.role !== "coordinator" || parsed.recipient.role !== "developer" ||
+          parsed.recipient.agent_id && parsed.recipient.agent_id !== parentAssignment.handle.target.agentId ||
+          parsed.recipient.pane_id && parsed.recipient.pane_id !== parentAssignment.handle.target.paneId)
+        throw new Error("Task notice must address the assigned Developer");
+      const existing = this.state.outbound.find(item => item.message.message_id === parsed.message_id || item.message.idempotency_key === parsed.idempotency_key);
+      if (existing && existing.parentAssignmentId !== candidate.parentAssignmentId) throw new Error("Conflicting task notice parent");
+      const out = this.enqueue(parsed, candidate.selector, candidate.taskId, candidate.attemptId);
+      if (parentAssignment.roleProfile) out.roleProfile = parentAssignment.roleProfile;
+      out.parentAssignmentId = parentAssignment.message.message_id;
+      out.lease = parentAssignment.lease;
+      if (!out.request && !out.handle && out.status === "queued") {
+        out.status = "cancelled";
+        out.error = String(error);
+      }
+      return out;
+    }
     if (parsed.type !== "task.status" || parsed.sender.role !== "coordinator" || parsed.recipient.role !== "developer" ||
         parsed.recipient.agent_id && parsed.recipient.agent_id !== parent.handle!.target.agentId ||
         parsed.recipient.pane_id && parsed.recipient.pane_id !== parent.handle!.target.paneId)
@@ -144,7 +182,7 @@ export class HerdrOutbox {
         !run || run.cancelled || run.status !== "implementing" || authorization.message.run_id !== run.runId ||
         authorization.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
         payload.taskId !== owner.taskId || payload.implementationAttemptId !== owner.attemptId ||
-        !(authorization.phaseRetirement?.resumeAuthorizedBy || authorization.phaseFailure?.repairable === false && authorization.phaseFailure.applied && authorization.phaseFailure.retryAuthorized === true) || run.nativeDeliveries?.length ||
+        !(authorization.phaseRetirement?.resumeAuthorizedBy || (authorization.phaseFailure?.repairable === false || authorization.phaseFailure?.leaseRecoveryRequired === true) && authorization.phaseFailure!.applied && authorization.phaseFailure!.retryAuthorized === true) || run.nativeDeliveries?.length ||
         run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
         Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)))
@@ -181,7 +219,10 @@ export class HerdrOutbox {
       for (const child of this.state.outbound) if (child.parentAssignmentId === owner.message.message_id) child.lease = owner.lease;
       await this.save();
     }
-    if (!owner.leaseReacquisition && Date.parse(owner.lease.expiresAt) > Date.parse(this.now())) { await this.renew(owner); return; }
+    if (!owner.leaseReacquisition && Date.parse(owner.lease.expiresAt) > Date.parse(this.now())) {
+      try { await this.renew(owner); return; }
+      catch (error) { if (!isPermanentTaskNoticeAuthorityError(error)) throw error; }
+    }
     if ((owner.leaseHistory?.length ?? 0) >= 3) throw new Error("Task lease continuation limit exhausted");
     owner.leaseReacquisition ??= AcquireAgentLeaseRequestSchema.parse({
       leaseId: `lease-${digest([owner.message.message_id, owner.lease.leaseId, owner.lease.fencingToken])}`,
@@ -252,6 +293,9 @@ export class HerdrOutbox {
           const delay = PREFLIGHT_RETRY_DELAYS_MS[out.deliveryAttempts - 1];
           if (delay === undefined) { out.status = "failed"; delete out.nextAttemptAt; }
           else out.nextAttemptAt = new Date(Date.parse(this.now()) + delay).toISOString();
+        } else if (error instanceof ExecutionPlanDriftError) {
+          const delay = EXECUTION_DRIFT_RETRY_DELAYS_MS[Math.min(out.deliveryAttempts - 1, EXECUTION_DRIFT_RETRY_DELAYS_MS.length - 1)]!;
+          out.nextAttemptAt = new Date(Date.parse(this.now()) + delay).toISOString();
         }
         await this.save();
       }
@@ -287,6 +331,15 @@ export class HerdrOutbox {
           !["conversation", "coordinator"].includes(out.message.recipient.role))
         return; // Cancellation reconciliation owns stop proof and lease release for this exact execution; pane readiness is insufficient.
       if (!out.parentAssignmentId) await onBound(out, out.handle);
+      if (out.parentAssignmentId) {
+        const parent = this.state.outbound.find(item => item.message.message_id === out.parentAssignmentId);
+        const parentRun = this.state.runs.find(item => item.runId === out.message.run_id);
+        const parentTask = parentRun?.tasks.find(item => item.taskId === out.taskId);
+        if (!parent || parent.status !== "accepted" || parent.cancelRequested || parent.leaseRelease || parentTask?.writerReleased) {
+          await this.release(out);
+          return;
+        }
+      }
       if (out.message.type === "task.assignment") {
         const run = this.state.runs.find(item => item.runId === out.message.run_id);
         const task = run?.tasks.find(item => item.taskId === out.taskId);
@@ -300,12 +353,51 @@ export class HerdrOutbox {
         }
         return;
       }
+      const isPolicyPhase = out.message.type === "verification.requested" && record(out.message.payload).kind === "conditional_evidence";
       const health = await this.ports.panes.inspectRoleHealth(out.selector);
-      if (health.ok && health.value.readyForPrompt && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId)
+      const liveOccupant = health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId;
+      if (liveOccupant && !health.value.readyForPrompt && out.turnObservedWorkingAt === undefined) {
+        const observedAt = this.now();
+        if (Date.parse(observedAt) >= Date.parse(out.handle.acceptedAt)) {
+          out.turnObservedWorkingAt = observedAt;
+          await this.save();
+        }
+      }
+      const hasRealTransportState = health.ok && typeof (health.value as { transportState?: unknown }).transportState === "string";
+      const stoppedWithoutOutcome = out.stopObservedAt !== undefined || this.state.outbound.some(item =>
+        item.message.run_id === out.message.run_id &&
+        item.message.type === "task.status" &&
+        ["specialist_no_response", "developer_no_response"].includes(String(record(item.message.payload).kind)) &&
+        record(item.message.payload).sourceMessageId === out.message.message_id &&
+        record(item.message.payload).stoppedExecutionId === out.handle!.executionId);
+      const answeredInInbox = this.state.inbox.some(item =>
+        item.message.run_id === out.message.run_id &&
+        item.message.causation_id === out.message.message_id &&
+        item.message.sender.role === out.message.recipient.role &&
+        ["applied", "rejected"].includes(item.status));
+      const coordinatorRun = out.message.recipient.role === "coordinator"
+        ? this.state.runs.find(item => item.runId === out.message.run_id)
+        : undefined;
+      const coordinatorResponded = out.message.recipient.role === "coordinator" && (
+        coordinatorRun?.pendingAction?.kind === "resume_coordinator" && coordinatorRun.pendingAction.state === "pending" ||
+        this.state.outbound.slice(out.coordinatorResponseBaseline ?? 0).some(item =>
+          item !== out && item.message.run_id === out.message.run_id &&
+          item.message.sender.role === "coordinator" && item.message.type !== "delegation.accepted"));
+      const canReleaseOnPromptReady = (!isPolicyPhase && !hasRealTransportState) ||
+        out.turnObservedWorkingAt !== undefined ||
+        stoppedWithoutOutcome ||
+        answeredInInbox ||
+        coordinatorResponded ||
+        Date.parse(this.now()) - Date.parse(out.handle.acceptedAt) >= 45_000;
+      if (canReleaseOnPromptReady && liveOccupant && health.value.readyForPrompt)
         await this.release(out); // transport capacity only; never task-success evidence
-      else if (health.ok && health.value.occupantMatches && health.value.paneId === out.handle.target.paneId && !out.parentAssignmentId &&
-          (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000))
-        await this.renew(out); // a bounded host measurement may outlive one lease period
+      else if (health.ok && health.value.occupantMatches && health.value.paneId !== out.handle.target.paneId &&
+          out.message.recipient.role === "coordinator")
+        await this.release(out); // singleton Coordinator moved to a new session pane; release transport capacity without claiming specialist/review outcomes
+      else if (liveOccupant && !out.parentAssignmentId &&
+          (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
+        try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); } // a bounded host measurement may outlive one lease period
+      }
       return;
     }
     if (out.status !== "queued") return;
@@ -325,7 +417,14 @@ export class HerdrOutbox {
     }
     if (out.error === "Policy continuation waits for active implementing state and all human/delivery gates") delete out.error;
     if (out.parentAssignmentId) {
-      try { this.noticeParent(out); } catch (error) { out.status = "cancelled"; out.error = String(error); await this.save(); return; }
+      try { this.noticeParent(out); } catch (error) {
+        const formatted = formatTaskNoticeAuthorityError(error);
+        out.status = "cancelled";
+        if (!out.handle && formatted.includes("parent lease is expired")) delete out.request;
+        out.error = formatted;
+        await this.save();
+        return;
+      }
     }
     const run = this.state.runs.find(item => item.runId === out.message.run_id);
     if (run?.nativeDeliveries?.length && ["delegation.request", "task.assignment", "verification.requested"].includes(out.message.type)) {
@@ -458,20 +557,27 @@ export class HerdrOutbox {
       if (!resolved || resolved.agentId !== pane.agentId) { out.error = "No capable agent in recipient pane"; return; }
       if (!out.lease) {
         await guardWorkDispatch();
+        const identity = prelaunchLeaseIdentity(out);
         const acquired = await this.ports.registry.acquireLease({
-          leaseId: `lease-${digest(out.message.message_id)}`, agentId: pane.agentId, runId: out.message.run_id!,
+          leaseId: identity.leaseId, agentId: pane.agentId, runId: out.message.run_id!,
           taskId: out.taskId, attemptId: out.attemptId, ttlMs: 300_000, requestedAt: this.now(),
-          idempotencyKey: `acquire:${out.message.message_id}`
+          idempotencyKey: identity.idempotencyKey
         });
         if (!acquired.ok) { out.error = acquired.error.message; return; }
         out.lease = AgentLeaseSchema.parse(acquired.value);
+        if (out.prelaunchFailure?.lease && out.lease.fencingToken <= out.prelaunchFailure.lease.fencingToken) throw new Error("Recovered dispatch requires a fresh Registry fence");
         await this.save();
       }
     }
     // Registry is authoritative: renewal detects stale/released fencing tokens and optimistic versions.
     try { await this.renew(out); } catch (error) {
       if (!out.parentAssignmentId) throw error;
-      out.error = String(error); await this.save(); return;
+      const formatted = formatTaskNoticeAuthorityError(error);
+      if (isPermanentTaskNoticeAuthorityError(error)) {
+        out.status = "cancelled";
+        if (!out.handle && formatted.includes("parent lease is expired")) delete out.request;
+      }
+      out.error = formatted; await this.save(); return;
     }
     if (!out.lease) throw new Error("Dispatch has no lease");
     if (out.lease.agentId !== pane.agentId || Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Stale dispatch lease");
@@ -489,6 +595,8 @@ export class HerdrOutbox {
       wire = RoleMessageSchema.parse({ ...wire, recipient: { role: pane.role, agent_id: pane.agentId, pane_id: pane.paneId },
         payload: { assignment: out.assignment, context: wire.payload } });
     }
+    try { wire = projectPolicyPhaseEnvelope(wire); }
+    catch (error) { out.status = "queued"; out.error = `Prompt presentation blocked before transport: ${String(error)}`; await this.save(); return; }
     if (out.request && (digest(out.request.target) !== digest(target) || digest(out.request.context) !== digest(json(wire)))) {
       out.error = "Pinned request or recipient changed; explicit reconciliation required"; await this.save(); return;
     }
@@ -499,7 +607,7 @@ export class HerdrOutbox {
       timeout: { executionTimeoutMs: 300_000, onTimeout: "block" },
       idempotency: { key: wire.idempotency_key, scope: "agent-request", fingerprint: digest(wire) },
       createdAt: this.now(), metadata: { leaseId: out.lease.leaseId, fencingToken: out.lease.fencingToken } });
-    if (wire.type === "delegation.request" && wire.recipient.role === "coordinator")
+    if (wire.recipient.role === "coordinator")
       out.coordinatorResponseBaseline ??= this.state.outbound.length;
     await guardWorkDispatch();
     if (pane.role === "developer" && !out.parentAssignmentId) await this.ports.pinDeveloperDispatch?.(out.request, pane);
@@ -513,7 +621,16 @@ export class HerdrOutbox {
         if (!currentHealth.readyForPrompt || !currentHealth.occupantMatches || currentHealth.paneId !== currentPane.paneId || currentHealth.agentId !== currentPane.agentId)
           throw new Error("Task notice recipient is no longer ready");
         await this.validateNotice(out, currentPane); await this.renew(out);
-      } catch (error) { out.status = "queued"; out.error = String(error); await this.save(); return; }
+      } catch (error) {
+        const formatted = formatTaskNoticeAuthorityError(error);
+        if (isPermanentTaskNoticeAuthorityError(error)) {
+          out.status = "cancelled";
+          if (!out.handle && formatted.includes("parent lease is expired")) delete out.request;
+        } else {
+          out.status = "queued";
+        }
+        out.error = formatted; await this.save(); return;
+      }
     }
     if (pane.role === "developer" && !out.parentAssignmentId && this.ports.pinDeveloperDispatch) {
       // Scope bootstrap verification can await the OS. Revalidate the current lease/fence after it and the durable dispatch intent.
@@ -542,6 +659,22 @@ export class HerdrOutbox {
   async reconcile(messageId: string, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
     const out = this.state.outbound.find(item => item.message.message_id === messageId);
     if (!out?.request || !["sending", "unknown_delivery"].includes(out.status)) throw new Error("No uncertain handoff to reconcile");
+    if (provenPrelaunchPolicyFailure(out, this.state.inbox)) {
+      // Retain exact release arguments before touching Registry, while the original prelaunch proof remains replayable.
+      if (out.lease) {
+        out.leaseRelease ??= ReleaseAgentLeaseRequestSchema.parse({leaseId:out.lease.leaseId,fencingToken:out.lease.fencingToken,
+          expectedVersion:out.lease.version,releasedAt:this.now(),idempotencyKey:`prelaunch-release:${out.request.requestId}:${out.lease.version}`});
+        await this.save();
+        const released = await this.ports.registry.releaseLease(out.leaseRelease);
+        if (!released.ok && !(released.error.code === "conflict" && Date.parse(out.lease.expiresAt) <= Date.parse(this.now()))) throw new PrelaunchRegistryRecoveryError(`${released.error.code}: ${released.error.message}`);
+      }
+      out.prelaunchFailure = { request: out.request, reconciledAt: this.now(),
+        ...(out.executorLineage ? {executorLineage:out.executorLineage} : {}), ...(out.lease ? {lease:out.lease} : {}) };
+      delete out.lease; delete out.leaseRelease; delete out.leaseRenewal; delete out.executorLineage;
+      delete out.request; // No invocation exists: normal dispatch must pin the current recipient after host recovery.
+      out.status = "queued"; out.error = "Reconciled exact oversized Node prelaunch E2BIG; no invocation started";
+      await this.save(); return;
+    }
     const req = out.request;
     const result = parseReconciliationForRequest(req, unwrap(await this.ports.transport.reconcile({
       requestId: req.requestId, attemptId: req.attemptId, runId: req.runId, taskId: req.taskId,

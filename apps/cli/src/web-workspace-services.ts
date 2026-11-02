@@ -49,19 +49,30 @@ async function readReceipt(directory:string,projectId:string,id:string):Promise<
   if(value.projectId!==projectId || value.operationId!==id || value.owner!=='local_lifecycle')throw new Error('Foreign lifecycle receipt');
   return value;
 }
-async function syncDirectory(directory:string){const handle=await open(directory,'r');try{await handle.sync();}finally{await handle.close();}}
+const IGNORED_FSYNC_CODES=['EINVAL','ENOTSUP','EOPNOTSUPP','ENOSYS','EPERM','EACCES','EBADF','EISDIR','EROFS'];
+async function syncHandleSafe(handle:{sync():Promise<void>}){
+  try{await handle.sync();}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
+}
+async function syncDirectory(directory:string){
+  let handle;
+  try{handle=await open(directory,'r');await syncHandleSafe(handle);}
+  catch(error){const code=(error as NodeJS.ErrnoException)?.code??'';if(!IGNORED_FSYNC_CODES.includes(code))throw error;}
+  finally{await handle?.close().catch(()=>{});}
+}
 async function reserveReceipt(directory:string,operation:WebOperation):Promise<boolean>{
   await receiptRoot(directory,true);let handle;
   try{handle=await open(receiptPath(directory,operation.projectId,operation.operationId),constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);}
   catch(error){if((error as NodeJS.ErrnoException).code==='EEXIST')return false;throw error;}
-  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await handle.sync();}finally{await handle.close();}
+  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await syncHandleSafe(handle);}finally{await handle.close();}
   await syncDirectory(directory);return true;
 }
 async function settleReceipt(directory:string,operation:WebOperation){
-  const temp=join(directory,'pending-'+randomUUID()+'.tmp'),handle=await open(temp,'wx',0o600);
-  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await handle.sync();await handle.close();
+  const temp=join(directory,'pending-'+randomUUID()+'.tmp');
+  let handle:Awaited<ReturnType<typeof open>>|undefined=await open(temp,'wx',0o600);
+  try{await handle.writeFile(JSON.stringify(WebOperationSchema.parse(operation)));await syncHandleSafe(handle);await handle.close();handle=undefined;
     await rename(temp,receiptPath(directory,operation.projectId,operation.operationId));await syncDirectory(directory);
-  }finally{await handle.close();await unlink(temp).catch(()=>{});}
+  }finally{await handle?.close().catch(()=>{});await unlink(temp).catch(()=>{});}
 }
 
 /** Local, owner-generated diagnostics only (no credentials): control characters removed and bounded. */
@@ -80,7 +91,7 @@ export interface WebWorkspaceServices extends LocalWorkspaceServices {
   pendingLifecycle(): Promise<void>[];
 }
 export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWorkspaceServices {
-  const inFlight = new Set<Promise<void>>();
+  const inFlight = new Map<string, Promise<void>>();
   const settings=createWebProjectSettings({resolveProject:options.resolveProject,
     receiptDirectory:options.receiptDirectory??join(process.cwd(),'.bflow/state/web-settings')});
   const registered = async (projectId: string) => {
@@ -108,7 +119,7 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
   });
   const directory=(project:WebProject)=>options.receiptDirectory??join(project.canonicalPath,'.bflow/state/web-lifecycle');
   const perform=async(project:WebProject,id:string,kind:'session_start'|'session_stop',effect:()=>Promise<OperationResult<WebProjectSession>>):Promise<OperationResult<WebProjectSession>>=>{
-    const root=directory(project),initial=WebOperationSchema.parse({apiVersion:1,projectId:project.projectId,operationId:id,
+    const root=directory(project),path=receiptPath(root,project.projectId,id),initial=WebOperationSchema.parse({apiVersion:1,projectId:project.projectId,operationId:id,
       owner:'local_lifecycle',operationKind:kind,state:'running',updatedAt:new Date().toISOString()});
     if(!await reserveReceipt(root,initial)){
       const previous=await readReceipt(root,project.projectId,id);
@@ -116,29 +127,34 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
       if(previous.state==='applied' && previous.result?.kind==='lifecycle')return WebProjectSessionResultSchema.parse({ok:true,value:previous.result.session});
       return error('transport_unavailable','Lifecycle operation chưa được xác nhận; không gửi lại effect.');
     }
-    let result:OperationResult<WebProjectSession>;
-    let finished!:()=>void;const tracked=new Promise<void>(resolve=>{finished=resolve;});inFlight.add(tracked);
-    try{result=WebProjectSessionResultSchema.parse(await effect().finally(()=>{inFlight.delete(tracked);finished();}));}
-    catch(failure){
-      // Settle every outcome: an unsettled `running` receipt would never resolve for the browser.
-      // Only a startup that proved no session side effect is definitive; anything else stays uncertain.
-      const definitive=startupLeftSessionUnchanged(failure),message=lifecycleFailureMessage(failure,kind);
-      await settleReceipt(root,WebOperationSchema.parse({...initial,state:definitive?'failed':'reconciliation_required',
-        error:{apiVersion:1,code:definitive?'operation_not_allowed':'reconciliation_required',message,retryable:false,operationId:id,correlationId:randomUUID()},
-        updatedAt:new Date().toISOString()}));
-      return error(definitive?'validation':'transport_unavailable',message);
+    let finished!:()=>void;const tracked=new Promise<void>(resolve=>{finished=resolve;});inFlight.set(path,tracked);
+    try{
+      let result:OperationResult<WebProjectSession>;
+      try{result=WebProjectSessionResultSchema.parse(await effect());}
+      catch(failure){
+        // Settle every outcome: an unsettled `running` receipt would never resolve for the browser.
+        // Only a startup that proved no session side effect is definitive; anything else stays uncertain.
+        const definitive=startupLeftSessionUnchanged(failure),message=lifecycleFailureMessage(failure,kind);
+        await settleReceipt(root,WebOperationSchema.parse({...initial,state:definitive?'failed':'reconciliation_required',
+          error:{apiVersion:1,code:definitive?'operation_not_allowed':'reconciliation_required',message,retryable:false,operationId:id,correlationId:randomUUID()},
+          updatedAt:new Date().toISOString()}));
+        return error(definitive?'validation':'transport_unavailable',message);
+      }
+      if(result.ok){
+        if(result.value.projectId!==project.projectId)throw new Error('Foreign lifecycle session');
+        await settleReceipt(root,WebOperationSchema.parse({...initial,state:'applied',result:{kind:'lifecycle',session:result.value},updatedAt:new Date().toISOString()}));
+      } else await settleReceipt(root,WebOperationSchema.parse({...initial,state:'reconciliation_required',
+        error:{apiVersion:1,code:'reconciliation_required',message:result.error.message.slice(0,4000),retryable:false,operationId:id,correlationId:randomUUID()},updatedAt:new Date().toISOString()}));
+      return result;
+    }finally{
+      if(inFlight.get(path)===tracked)inFlight.delete(path);
+      finished();
     }
-    if(result.ok){
-      if(result.value.projectId!==project.projectId)throw new Error('Foreign lifecycle session');
-      await settleReceipt(root,WebOperationSchema.parse({...initial,state:'applied',result:{kind:'lifecycle',session:result.value},updatedAt:new Date().toISOString()}));
-    } else await settleReceipt(root,WebOperationSchema.parse({...initial,state:'reconciliation_required',
-      error:{apiVersion:1,code:'reconciliation_required',message:result.error.message.slice(0,4000),retryable:false,operationId:id,correlationId:randomUUID()},updatedAt:new Date().toISOString()}));
-    return result;
   };
   const remediation = 'Mở Cài đặt dự án trên web để khởi tạo hoặc sửa cấu hình. Kiểm tra project đã đăng ký và cấu hình. Chạy bflow init trong kho mã; chạy bflow setup --check để kiểm tra môi trường. Dùng nút Khởi tạo / sửa GitNexus trong Cài đặt để khởi tạo rõ ràng; cài đặt máy vẫn thuộc machine setup.';
   return {
     ...settings,
-    pendingLifecycle: () => [...inFlight,...settings.pending()],
+    pendingLifecycle: () => [...inFlight.values(),...settings.pending()],
     async inspectProject(projectId) {
       try {
         const { repository } = await registered(projectId);
@@ -148,7 +164,7 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
           const missing = (failure as NodeJS.ErrnoException).code === 'ENOENT';
           return WebProjectInspectionResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId, ready: false,
             checks: [{ id: 'repository-config', state: 'failed', message: missing
-              ? 'Kho mã chưa có .bflow/config.yml. Dùng Khởi tạo / sửa GitNexus bên trên rồi kiểm tra lại.'
+              ? 'Kho mã chưa có .bflow/config.yml. Dùng Khởi tạo / sửa GitNexus bên dưới (hoặc chạy bflow init) rồi kiểm tra lại.'
               : `Cấu hình .bflow/config.yml không hợp lệ: ${String(failure instanceof Error ? failure.message : failure).slice(0, 1000)}` }],
             observedAt: new Date().toISOString() } });
         }
@@ -200,15 +216,31 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         // Observation only, including missing config/host/stopped sessions. Never call up/down.
         const project=WebProjectSchema.parse(await options.resolveProject(operation.projectId));
         if(project.projectId!==operation.projectId)throw new Error('Foreign registered project');
-        const saved=await readReceipt(directory(project),operation.projectId,operation.operationId);
+        const root=directory(project),path=receiptPath(root,operation.projectId,operation.operationId);
+        const saved=await readReceipt(root,operation.projectId,operation.operationId);
         if(saved && saved.operationKind!==operation.operationKind)throw new Error('Lifecycle receipt kind mismatch');
-        return WebOperationResponseSchema.parse({ok:true,value:saved && saved.state!=='running' && saved.state!=='accepted'?saved:
+        const activeInProcess=saved?.state==='running' && inFlight.has(path);
+        return WebOperationResponseSchema.parse({ok:true,value:activeInProcess || (saved && saved.state!=='running' && saved.state!=='accepted')?saved!:
           {...operation,state:'reconciliation_required'}});
       } catch { return error('validation', 'Operation lifecycle không hợp lệ.'); }
     },
     async preview(projectId) {
       try {
-        const { repository } = await context(projectId);
+        const { repository } = await registered(projectId);
+        try {
+          await readPreviewFile(join(repository.root, '.bflow/config.yml'));
+          await readEnvironmentConfig(repository);
+        } catch (failure) {
+          const missing = (failure as NodeJS.ErrnoException).code === 'ENOENT';
+          return WebProjectPreviewResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId,
+            available: false,
+            summary: missing
+              ? 'Kho mã chưa có tệp cấu hình (.bflow/config.yml). Mở Cài đặt dự án để khởi tạo cấu hình.'
+              : 'Tệp cấu hình (.bflow/config.yml) chưa hợp lệ. Mở Cài đặt dự án để kiểm tra và sửa lại.',
+            blockers: [],
+            observedAt: new Date().toISOString(),
+          }});
+        }
         const plan = ExecutionPlanSchema.parse(await loadExecutionPreview(repository.root));
         return WebProjectPreviewResultSchema.parse({ ok: true, value: { apiVersion: 1, projectId,
           available: true, summary: `Execution preview: ${plan.mode}. Đây là cấu hình dự kiến, chưa cấp quyền hay xác nhận readiness.`,

@@ -7,8 +7,11 @@ import {
   stat as nodeStat
 } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import type { RunnerAdapter } from "./runner-adapter.js";
+import { parseNodeTestFlags, type RunnerAdapter } from "./runner-adapter.js";
+export { parseNodeTestFlags } from "./runner-adapter.js";
 import type { RunnerDetection, RunnerProfile } from "./behavioral-runner.js";
+import { warmNpmDependencies } from "./dependency-warming.js";
+import { detectRunnerCatalog } from "./runner-catalog.js";
 
 /** Narrow filesystem port so detection can run against fixtures or fakes. Only read operations are used. */
 export interface DetectionFs {
@@ -108,26 +111,6 @@ export function parseTscBuildArgs(script: string): string[] | undefined {
   if (rest[0] !== "-b" && rest[0] !== "--build") return undefined;
   if (rest.slice(1).some(path => !isSafeRelativePath(path))) return undefined;
   return rest;
-}
-
-/** Node flags a `node [flags] --test` script may carry; anything else is not forwarded and is not detected. */
-const NODE_TEST_FLAG = /^(--experimental-strip-types|--disable-warning=[A-Za-z][A-Za-z0-9_]*)$/;
-
-/**
- * Returns the allowlisted node flags that precede `--test` in a script containing `node [flags] --test`, or undefined
- * when the script has no such invocation. Only the first `node` invocation in the script is considered.
- */
-export function parseNodeTestFlags(script: string): string[] | undefined {
-  const tokens = script.trim().split(/\s+/);
-  const start = tokens.indexOf("node");
-  if (start === -1) return undefined;
-  const flags: string[] = [];
-  for (const token of tokens.slice(start + 1)) {
-    if (token === "--test") return flags;
-    if (!NODE_TEST_FLAG.test(token)) return undefined;
-    flags.push(token);
-  }
-  return undefined;
 }
 
 /** A workspace package whose entry points resolve into `dist/` needs a build before tests can import it. */
@@ -239,7 +222,11 @@ async function detect(repositoryRoot: string, nodeExecutable: string, fs: Detect
   let prepare: { args: string[]; timeoutMs: number } | undefined;
   const build = typeof scripts.build === "string" ? scripts.build.trim() : "";
   if (build) {
-    const tscArgs = parseTscBuildArgs(build);
+    // A common workspace script builds TypeScript before a separately bundled app.
+    // Recognize that literal shape, but execute only the validated compiler argv.
+    const compilerPrefix = /^(.+?) && pnpm --filter @?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)? (?:run )?build$/.exec(build)?.[1];
+    const tscArgs = parseTscBuildArgs(build) ?? (compilerPrefix ? parseTscBuildArgs(compilerPrefix) : undefined);
+    if (tscArgs && compilerPrefix) notes.push("prepare: fixed TypeScript prefix only; secondary workspace build omitted");
     if (tscArgs === undefined) {
       notes.push("build script không thuộc dạng tsc được hỗ trợ; không chạy bước prepare / build script is not a supported tsc form; prepare skipped");
     } else if (!(await statOrUndefined(fs, join(root, "node_modules/typescript/bin/tsc"), true))?.isFile()) {
@@ -290,7 +277,6 @@ export async function detectTestRunners(
     let javascript = await detect(repositoryRoot, options.nodeExecutable ?? process.execPath, fs);
     if (!options.fs && javascript.status === "unsupported") {
       // Only a Runtime-owned, lock-verified public npm cache can be created automatically. Other ecosystems remain offline.
-      const { warmNpmDependencies } = await import("./dependency-warming.js");
       const warmed = await warmNpmDependencies(repositoryRoot);
       if (warmed.status === "ready") {
         warmedDependencySources.add(warmed.dependencySource);
@@ -300,7 +286,6 @@ export async function detectTestRunners(
       }
     }
     if (options.fs) return javascript;
-    const { detectRunnerCatalog } = await import("./runner-catalog.js");
     return await detectRunnerCatalog(repositoryRoot, javascript, options.adapters, javascriptDependencySource);
   } catch (error) {
     return unsupported(`Phát hiện runner thất bại / Test runner detection failed: ${errorMessage(error)}`);

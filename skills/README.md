@@ -87,7 +87,7 @@ No skill starts duplicate workers, mutates global provider settings or installs 
 | sdlc | [specification-driven-development](sdlc/specification-driven-development/SKILL.md) | specifier, architect, coordinator, planner |
 | sdlc | [task-decomposition](sdlc/task-decomposition/SKILL.md) | coordinator, planner |
 | tooling | [mcp-tool-discovery](tooling/mcp-tool-discovery/SKILL.md) | conversation, coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
-| tooling | [use-context7](tooling/use-context7/SKILL.md) | specifier, architect, planner, developer, reviewer, qa |
+| tooling | [use-deepwiki](tooling/use-deepwiki/SKILL.md) | specifier, architect, planner, developer, reviewer, qa |
 | tooling | [use-mempalace](tooling/use-mempalace/SKILL.md) | coordinator, planner, architect, specifier, developer, tester, reviewer, qa, security |
 | tooling | [use-gitnexus](tooling/use-gitnexus/SKILL.md) | specifier, architect, planner, developer, reviewer, security |
 | tooling | [use-rtk](tooling/use-rtk/SKILL.md) | developer, tester, qa, reviewer |
@@ -96,6 +96,8 @@ No skill starts duplicate workers, mutates global provider settings or installs 
 | verification | [run-verification](verification/run-verification/SKILL.md) | coordinator, developer, tester, reviewer, qa, security |
 | verification | [security-review](verification/security-review/SKILL.md) | security, reviewer |
 | verification | [test-planning](verification/test-planning/SKILL.md) | tester, qa |
+
+`use-deepwiki` teaches roles to read documentation of an explicitly named public repository through the DeepWiki service (no API key). It replaced the legacy `use-context7` skill; the binding is conditional on the `deepwiki` tool grant.
 
 ## Worked examples
 

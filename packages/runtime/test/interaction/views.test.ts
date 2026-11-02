@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { projectRun, paginateRuns } from "../../src/interaction/views.js";
-import { run, state, at, uiStates } from "./fixtures.js";
+import { run, state, at, uiStates, pending } from "./fixtures.js";
 const source = (runs = [run()]) => ({
   state: state(runs),
   sessionId: "conversation-1",
@@ -104,7 +104,19 @@ it("pins exact approval target/revision/generation/evidence and never offers a s
     feedbackArtifacts: [],
     idempotencyKey: "apr-1",
   };
-  expect(projectRun(source([r]), r.runId).decisions).toEqual([]);
+  // A decided approval stays readable but is no longer an answerable decision.
+  const decided = projectRun(source([r]), r.runId);
+  expect(decided.decisions).toEqual([expect.objectContaining({ decisionId: "apr-1", status: "approved" })]);
+  expect(decided.availableActions.some((a) => a.kind === "answer_decision")).toBe(false);
+});
+it("orders runs by latest update and never exposes the private pending-action reason", () => {
+  const older = run("run-a", { delegation: { ...run("run-a").delegation, requestedAt: "2026-01-01T00:00:00.000Z" } } as never);
+  const newer = run("run-z", { delegation: { ...run("run-z").delegation, requestedAt: "2026-06-01T00:00:00.000Z" } } as never);
+  expect(paginateRuns(source([older, newer]), { limit: 25 }).items.map((v) => v.runId)).toEqual(["run-z", "run-a"]);
+  const blocked = run("run-b", { status: "escalated", error: "private /secret/path", pendingAction: { ...pending, reason: "private /secret/path", recovery: "manual" } } as never);
+  const view = projectRun(source([blocked]), "run-b");
+  expect(view.blockers).toEqual([expect.objectContaining({ code: "manual_resume_required" })]);
+  expect(JSON.stringify(view)).not.toContain("secret");
 });
 
 import { interactionUiFixtures } from "./ui-fixtures.js";

@@ -395,6 +395,30 @@ describe("P12 repository environment lifecycle", () => {
     expect(await readFile(join(dir, ".bflow/state/session.json"), "utf8")).toBe(before);
     await expect(readFile(join(dir, ".bflow/state/operation.json"))).rejects.toThrow();
   });
+  linuxIt.each([true, false])("reconciles cold host preparation=%s before activating an existing session", async cold => {
+    await lifecycle.up();
+    const manifest = fixture.create();
+    manifest.metadata = { ...manifest.metadata, panePresentationVersion: 1 };
+    fixture.set(manifest);
+    vi.mocked(fixture.manager.up).mockClear();
+    const order: string[] = [];
+    const original = fixture.manager.up;
+    vi.mocked(original).mockImplementationOnce(async () => {
+      order.push("reconcile");
+      return { ok: true, value: manifest };
+    });
+    const composed = new EnvironmentLifecycle(dir, { runner, integration: {
+      manager: fixture.manager, runtime: mockRuntime([activeRun]),
+      rolesNeedPreparation: async () => { order.push("inspect"); return cold; },
+      prepareRoles: async () => { order.push("prepare"); },
+      activate: async () => { order.push("activate"); }
+    } });
+
+    await composed.up();
+
+    expect(order).toEqual(cold ? ["inspect", "prepare", "reconcile", "activate"] : ["inspect", "activate"]);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+  });
   linuxIt("prepares provider roles before starting Herdr on a new session", async () => {
     const order: string[] = [];
     const prepareRoles = vi.fn(async () => { order.push("prepare"); });
@@ -1155,6 +1179,6 @@ describe("environment command parsing and session context", () => {
   });
   it("removes inherited socket, remote and caller pane context", () => {
     expect(namedSessionEnvironment("repo-session", { PATH: "/bin", HERDR_SOCKET: "/wrong", HERDR_PANE_ID: "other", HERDR_SESSION: "other", HERDR_ENV: "1", HERDR_CONFIG_PATH: "/explicit/config" }))
-      .toEqual({ PATH: "/bin", DISABLE_AUTOUPDATER: "1", HERDR_CONFIG_PATH: "/explicit/config", HERDR_SESSION: "repo-session" });
+      .toEqual({ PATH: "/bin", DISABLE_AUTOUPDATER: "1", MCP_TIMEOUT: "120000", HERDR_CONFIG_PATH: "/explicit/config", HERDR_SESSION: "repo-session" });
   });
 });

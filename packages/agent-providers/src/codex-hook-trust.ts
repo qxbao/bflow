@@ -563,6 +563,28 @@ async function readApprovalStore(storePath: string): Promise<z.infer<typeof Appr
   return parsed.data;
 }
 
+function isIgnorableFileSyncError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return (
+    code === "EINVAL" ||
+    code === "ENOSYS" ||
+    code === "ENOTSUP" ||
+    code === "EOPNOTSUPP" ||
+    code === "EROFS" ||
+    code === "EPERM" ||
+    code === "EACCES"
+  );
+}
+
+function isIgnorableDirectorySyncError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return (
+    isIgnorableFileSyncError(error) ||
+    code === "EISDIR" ||
+    code === "EBADF"
+  );
+}
+
 async function writePrivateStore(storePath: string, value: unknown): Promise<void> {
   const parent = dirname(storePath);
   await ensurePrivateStoreParent(storePath, true);
@@ -570,12 +592,15 @@ async function writePrivateStore(storePath: string, value: unknown): Promise<voi
   let renamed = false;
   try {
     const handle = await open(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { await handle.writeFile(JSON.stringify(value, null, 2) + "\n", "utf8"); await handle.sync(); }
+    try {
+      await handle.writeFile(JSON.stringify(value, null, 2) + "\n", "utf8");
+      try { await handle.sync(); } catch (error) { if (!isIgnorableFileSyncError(error)) throw error; }
+    }
     finally { await handle.close(); }
     await rename(tempPath, storePath);
     renamed = true;
     const dir = await open(parent, constants.O_RDONLY);
-    try { await dir.sync(); } finally { await dir.close(); }
+    try { await dir.sync(); } catch (error) { if (!isIgnorableDirectorySyncError(error)) throw error; } finally { await dir.close(); }
   } finally { if (!renamed) await unlink(tempPath).catch(() => undefined); }
 }
 

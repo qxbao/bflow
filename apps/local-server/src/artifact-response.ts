@@ -21,7 +21,7 @@ export async function artifactResponse(req: IncomingMessage, res: ServerResponse
   try {
     if(metadata.artifactId!==artifactId)throw new HttpError('unavailable');
     if(metadata.sizeBytes>maxTransfer)throw new HttpError('payload_too_large');
-    const inert=['text/plain','application/json','text/markdown'].includes(metadata.mediaType.toLowerCase().trim());
+    const inert=['text/plain','application/json','text/markdown','text/x-patch','text/diff'].includes(metadata.mediaType.toLowerCase().trim());
     const inline=inert && metadata.disposition==='inline' && metadata.sizeBytes<=Math.min(WEB_LIMITS.previewBytes,metadata.previewLimitBytes);
     let size=0;const hash=createHash(metadata.checksum.algorithm);
     // The Runtime/ArtifactStore verifies a complete snapshot before its first chunk. Do not emit headers on first-read failure.

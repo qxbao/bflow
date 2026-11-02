@@ -21,7 +21,8 @@ Sau [bootstrap một lần](../../docs/guide/installation.md) bằng `node apps/
 | `bflow init --force` hoặc `--yes` | Thay toàn bộ config bằng defaults mới; lần index GitNexus không tương tác cần `--yes`; khác nghĩa `setup --yes` |
 | `bflow init --accept-gitnexus-license` | Chỉ chấp nhận license và index GitNexus không tương tác, không ghi đè config; không kết hợp với `--no-gitnexus` hoặc `--check`/`--remove` |
 | `bflow config-migrate` | Chuyển `.yaml`/`.json` cũ sang `.yml`, giữ byte gốc trong `.bak` |
-| `bflow up [--timeout <ms>]` | Prepare persistent host/platform, preflight, launch qua Herdr, verify activated health |
+| `bflow up [--timeout <ms>] [--expect-plan <file>]` | Prepare persistent host/platform, preflight, launch qua Herdr, verify activated health; `--expect-plan` dừng nếu execution plan hiện tại lệch khỏi preview đã lưu |
+| `bflow web [--port N] [--no-open]` | Mở UI web tiếng Việt trên `127.0.0.1:4317` (mặc định) qua Local Server; ghép nối bằng URL fragment một lần, không hỗ trợ `--json`. Ctrl-C chỉ đóng web, phiên dự án vẫn chạy. Không tự setup/init/index. [Web README](../web/README.md) |
 | `bflow attach` | TTY trực tiếp vào Conversation pane |
 | `bflow status` | Environment/host status; truyền `<run-id>` không kèm `--telemetry` hoặc dùng filters chuyển sang legacy Runtime query |
 | `bflow status <run-id> --telemetry [--json]` | Báo cáo metric chỉ đọc cho `<run-id>` qua agentic host đang chạy ([TELEMETRY-SPEC.md](../../packages/runtime/TELEMETRY-SPEC.md)) |
@@ -29,7 +30,7 @@ Sau [bootstrap một lần](../../docs/guide/installation.md) bằng `node apps/
 | `bflow down [--yes] [--force] [--timeout <ms>]` | Quiesce/checkpoint/revoke, rồi dừng owned panes/server; confirmation/force không bỏ Runtime barrier |
 | `bflow recover --yes` | Recover empty legacy directory lifecycle lock sau khi owner process đã chết; không reconstruct workflow |
 
-Setup có `--context7-api-key-stdin` (hoặc `CONTEXT7_API_KEY` trong environment), `--no-context7`; không đưa API key vào argv/config. Hook operator policy có `--trust-all` và `--revoke-trust-all` trong hook-only apply flow. [Setup guide](../../docs/setup-guide.md) · [Security](../../docs/guide/security-approval.md).
+Setup có `--no-deepwiki`; DeepWiki không cần API key (cờ `--context7-api-key-stdin` và biến `CONTEXT7_API_KEY` là legacy của Context7, đã được replaced và bị bỏ qua); không đưa secret vào argv/config. Hook operator policy có `--trust-all` và `--revoke-trust-all` trong hook-only apply flow. [Setup guide](../../docs/setup-guide.md) · [Security](../../docs/guide/security-approval.md).
 
 ## Lệnh cấp cao
 
@@ -40,13 +41,15 @@ Các lệnh này kết hợp engine/ports hiện có. Chúng không tự launch 
 | Khảo sát repository | `bflow repo inspect` | Chỉ đọc source/Git context |
 | Preview/check task graph | `bflow task plan --spec <file> [--workflow <file>]` | Traceability; không sinh spec từ natural-language objective |
 | Ghi task graph | `bflow task plan --spec <file> --write [--out <file>] [--force]` | Khác nội dung cần quyền thay thế |
-| Chuẩn bị implementation | `bflow task implement <task-id> --run <run-id> --spec <file>` | Approved spec/artifact, TDD, worktree và assignment request; không start agent |
+| Execution preview | `bflow task preview [--run <id>] [--compare <file>] [--json]` | Chỉ đọc: provider/model/profile, gate, TDD, approval, skill và failover sẽ áp dụng kèm provenance; `--compare` báo `PlanDiff`. Không launch, không cấp approval/readiness ([ADR 0005](../../docs/adr/0005-execution-preview.md)) |
+| Chuẩn bị implementation | `bflow task implement <task-id> --run <run-id> --spec <file> [--expect-plan <file>]` | Approved spec/artifact, TDD, worktree và assignment request; không start agent |
 | Kiểm chứng | `bflow verify <task-id> --run <run-id> --plan <file>` | Independent gates/evidence; thiếu runner trả blocked |
 | Tích hợp có kiểm soát | `bflow git prepare <run-id> [--task <id>] [--yes] [--resume]` | Preview trước; yes cho dedicated integration branch và workflow-verification request; không merge main/push/PR |
 | Inventory MCP | `bflow mcp status [--service <id>]` | Đọc config/pins; live health cần Gateway port được inject, CLI mặc định chưa nối port này |
 | Tool inventory | `bflow tool status [--tool <id>]` | Probe catalog/version/digest; `tools status` dùng parser kế thừa, ưu tiên cú pháp singular cho contract bên dưới |
 | Skill sync | `bflow skills sync [--provider <kind>] [--dry-run] [--allow-machine-scope]` | Owned machine target cần quyền tường minh; preview bằng `--dry-run`; CLI hiện chưa nhận `skills list`/`--list` |
 | Custom skills | `bflow skills scan\|import\|approve\|disable\|revoke\|status` | Scan/import chỉ đọc nguồn được chọn và stage bundle chưa duyệt; `approve --approve` ghi receipt chính xác vào machine state; revoke/status báo session cần đối soát |
+| Gói bàn giao offline | `bflow handover inspect --run <id>` · `handover export --run <id> (--revision <commit> \| --snapshot <id>) --out <dir> [--format html\|md] [--include-evidence] [--replace]` · `handover verify --package <dir>` | Đọc journal/ArtifactStore, không kết nối host; gói `eligible` thoát 0, `draft`/`partial` thoát 3; không đổi run status/approval ([chi tiết](docs/command-reference.md)) |
 | Provider preflight | `bflow agent check <claude\|codex\|agy> [--role <role>] [--mode restricted\|workspace_auto]` | Standalone preflight; có thể chạy model probe và dùng account mặc định, không là readiness của role/profile trong config |
 
 Lệnh `repo inspect` dùng Git root của thư mục hiện tại, không có `--dir`/`--include-files`/`--max-files`; hãy `cd` vào repo trước. `agent check` không tạo Herdr pane nhưng adapter mặc định có thể chạy execution probe và tiêu hao usage; dùng `doctor`/`up` cho kiểm tra role/profile/model đã cấu hình.
@@ -63,7 +66,7 @@ bflow iso help
 bflow iso status
 ```
 
-Docs qua Context7/Gateway, query gửi ra ngoài; flags gồm `--library-id`, `--version`, `--language`, `--no-cache`, `--role`, `--timeout`. OAuth chưa hỗ trợ. [Docs package](../../packages/docs-retrieval/README.md).
+Docs qua DeepWiki/Gateway (`ask`, `structure`, `contents`, `status`, `probe`), repository công khai gửi ra ngoài; flags gồm `--repo owner/repo`, `--public`, `--question`, `--live` (probe), `--role`, `--timeout`. Không cần API key. [Docs package](../../packages/docs-retrieval/README.md).
 
 `iso` chạy ai-isolator đi kèm để tạo/login/chọn profile; provider args giữ riêng. Đây là profile isolation, không tự chứng minh sandbox/readiness của workflow. [CLI README](README.md) và `bflow iso help` có exact subcommands.
 

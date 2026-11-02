@@ -176,8 +176,27 @@ async function publishImmutableJson(file: string, value: unknown): Promise<boole
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
     const handle = await open(temp, "wx", 0o600);
-    try { await handle.writeFile(`${canonicalReceiptJson(value)}\n`, "utf8"); await handle.sync(); }
-    finally { await handle.close(); }
+    try {
+      await handle.writeFile(`${canonicalReceiptJson(value)}\n`, "utf8");
+      try {
+        await handle.sync();
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (
+          code !== "EINVAL" &&
+          code !== "ENOSYS" &&
+          code !== "ENOTSUP" &&
+          code !== "EOPNOTSUPP" &&
+          code !== "EROFS" &&
+          code !== "EPERM" &&
+          code !== "EACCES"
+        ) {
+          throw error;
+        }
+      }
+    } finally {
+      await handle.close();
+    }
     try { await link(temp, file); return true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; return false; }
   } finally { await rm(temp, { force: true }); }
@@ -218,7 +237,26 @@ export async function persistRoleProfileSnapshot(identity: PlatformSessionIdenti
   const stored = await loadRoleProfileSnapshot(identity, snapshot.pin);
   if (canonicalReceiptJson(stored) !== canonicalReceiptJson(snapshot)) throw new Error("role profile snapshot conflicts with existing immutable proof");
   const parent = await open(directory, "r");
-  try { await parent.sync(); } finally { await parent.close(); }
+  try {
+    await parent.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (
+      code !== "EINVAL" &&
+      code !== "ENOSYS" &&
+      code !== "ENOTSUP" &&
+      code !== "EOPNOTSUPP" &&
+      code !== "EROFS" &&
+      code !== "EPERM" &&
+      code !== "EACCES" &&
+      code !== "EISDIR" &&
+      code !== "EBADF"
+    ) {
+      throw error;
+    }
+  } finally {
+    await parent.close();
+  }
   return file;
 }
 

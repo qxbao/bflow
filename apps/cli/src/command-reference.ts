@@ -28,9 +28,11 @@ export const SUPPORTED_CLI_COMMANDS = [
   "skills sync",
   "skills list",
   "agent check",
-  "docs search",
-  "docs lookup",
-  "docs status"
+  "docs ask",
+  "docs structure",
+  "docs contents",
+  "docs status",
+  "docs probe"
 ] as const;
 
 export type SupportedCliCommand = (typeof SUPPORTED_CLI_COMMANDS)[number];
@@ -428,15 +430,15 @@ export const CLI_COMMAND_REFERENCE: readonly CliCommandReferenceEntry[] = [
   },
   {
     command: "docs",
-    syntax: "bflow docs search <library> [options] | bflow docs lookup [<library>] --query <text> [options] | bflow docs status [options]",
-    purpose: "Look up current, version-specific library documentation through the shared Gateway's Context7 service; status reports whether it is reachable, authenticated and usable.",
+    syntax: "bflow docs ask --repo <owner/repo> --public --question <text> | bflow docs structure --repo <owner/repo> --public | bflow docs contents --repo <owner/repo> --public | bflow docs status | bflow docs probe [--live]",
+    purpose: "Read documentation of an explicitly named public repository through the shared Gateway's DeepWiki service (no API key); status reports whether it is reachable and usable; probe records owner-run evidence labelled live, fixture or skipped.",
     reusedEngines: ["DocsClient", "McpGateway"],
-    requiredFlags: ["--query <text> (lookup)"],
-    optionalFlags: ["--library-id <id>", "--version <version>", "--language <name>", "--no-cache", "--role <role>", "--timeout <ms>", "-j, --json", "-h, --help"],
+    requiredFlags: ["--repo <owner/repo> (ask, structure, contents)", "--public (ask, structure, contents)", "--question <text> (ask)"],
+    optionalFlags: ["--live (probe)", "--role <role>", "--timeout <ms>", "-j, --json", "-h, --help"],
     exitCodes: COMMON_EXIT_CODES,
-    idempotencyAndRetry: "Read-only and safe to repeat. Transient failures (network, timeout, rate limit) are retried by the Gateway only for read-only calls; results may be served from an optional local cache.",
-    permissionRequirements: "Needs a Gateway registration that grants the context7 service. Inside an agent pane the agent's own registration is used; an operator outside a pane acts under the role given by --role. Queries are sent to the hosted Context7 service.",
-    skills: ["use-context7", "using-bflow"]
+    idempotencyAndRetry: "Read-only and safe to repeat. Transient failures (network, timeout, rate limit) are retried by the Gateway only for read-only calls.",
+    permissionRequirements: "Needs a Gateway registration that grants the deepwiki service. Inside an agent pane the agent's own registration is used; an operator outside a pane acts under the role given by --role. Only the public repository name and the question are sent to the hosted DeepWiki service.",
+    skills: ["use-deepwiki", "using-bflow"]
   },
   {
     command: "mcp status",

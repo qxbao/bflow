@@ -1,7 +1,0 @@
-.chat-history{min-width:0}
-.chat-messages{list-style:none;padding:0;margin:24px 0}
-.chat-messages li{padding:16px 0;border-bottom:1px solid var(--z-line);min-width:0}
-.chat-content{white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-prose)}
-.chat-controls{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}
-.chat-history textarea{display:block;box-sizing:border-box;width:100%;min-width:0;margin:8px 0 16px;padding:12px;border:1px solid var(--z-line);border-radius:0;background:var(--z-bg);font:inherit;resize:vertical}
-.chat-history button:disabled,.chat-history textarea:disabled{cursor:not-allowed}

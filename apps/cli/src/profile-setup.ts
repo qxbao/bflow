@@ -98,16 +98,22 @@ export class ProfileSetupComponent implements SetupComponent {
   }
 
   private async interpreter(ctx: SetupContext): Promise<string> {
-    return this.python ??= (async () => {
-      const candidates = this.options.pythonCandidates ?? ["python3", "python"];
-      for (const executable of candidates) {
-        const result = await ctx.runner.run([executable, "-c", "import sys,tomllib; assert sys.version_info >= (3,11)"], {
-          timeoutMs: 5_000, ...(ctx.signal ? { signal: ctx.signal } : {})
-        }).catch(() => null);
-        if (result?.exitCode === 0 && !result.timedOut) return executable;
-      }
-      throw new Error("Python 3.11+ with tomllib is required for native/isolated profile synchronization");
-    })();
+    if (!this.python) {
+      this.python = (async () => {
+        const candidates = this.options.pythonCandidates ?? ["python3", "python"];
+        for (const executable of candidates) {
+          const result = await ctx.runner.run([executable, "-c", "import sys,tomllib; assert sys.version_info >= (3,11)"], {
+            timeoutMs: 5_000, ...(ctx.signal ? { signal: ctx.signal } : {})
+          });
+          if (result.exitCode === 0 && !result.timedOut) return executable;
+        }
+        throw new Error("Python 3.11+ with tomllib is required for native/isolated profile synchronization");
+      })().catch((error) => {
+        this.python = undefined;
+        throw error;
+      });
+    }
+    return this.python;
   }
 
   private async invoke(ctx: SetupContext, action: "inspect" | "apply"): Promise<ProfileSyncReport> {

@@ -6,6 +6,7 @@ import { OwnerKeySchema } from "../interaction/authority.js";
 import { buildWorkflowTelemetry, WorkflowTelemetryReportSchema, type WorkflowTelemetryReport } from "../telemetry/report.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -17,12 +18,13 @@ import {
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
-import { AgenticJournal, digest, record, textField } from "./journal.js";
+import { AgenticJournal, digest, record, syncFileHandle, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
 import { parseMutationChecks, type MutationCheck } from "./mutation-check.js";
 import { parseAppChecks, type AppCheckSuite } from "./app-check-config.js";
 import { AgenticHostPlatformOptionsSchema, HostPrepareResponseSchema, type AgenticHostPlatformOptions, type HostPrepareResponse } from "../platform/host-options.js";
 import { HostPlatformStatusSchema, rewritePersistedPlatform, type HostPlatformStatus } from "./host-platform.js";
+import { CancellationReconciliationReportSchema, type CancellationReconciliationReport } from "./cancellation-stop.js";
 import type { RegressionScope } from "./regression-changes.js";
 
 const HOST_STARTUP_TIMEOUT_MS = 120_000;
@@ -100,9 +102,18 @@ export interface AgenticHostController {
 }
 export interface HostConfiguration extends AgenticHostOptions { executionSourceDigests?: Record<string, string>; directory: string; socketPath: string; token: string }
 export async function readHostConfiguration(path: string): Promise<HostConfiguration> {
-  const stat = await lstat(path);
-  if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("Host configuration must be a private regular file");
-  const value = record(JSON.parse(await readFile(path, "utf8")));
+  const file = await open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  let raw: string;
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size > 256 * 1024) {
+      throw new Error("Host configuration must be a private regular file within size bounds");
+    }
+    raw = await file.readFile("utf8");
+  } finally {
+    await file.close();
+  }
+  const value = record(JSON.parse(raw));
   for (const key of ["repositoryPath", "sessionId", "directory", "socketPath", "token"]) textField(value[key]);
   parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
   parseAppChecks(value.appChecks);
@@ -290,7 +301,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe host socket directory");
   const bootLock = await open(join(directory, "boot.lock"), "a+", 0o600);
   try {
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + HOST_STARTUP_TIMEOUT_MS;
     while (true) {
       const acquired = await new Promise<boolean>((accept, reject) => {
         const child = spawn("flock", ["--nonblock", "3"], {stdio:["ignore","ignore","ignore",bootLock.fd]});
@@ -310,7 +321,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     const temporaryConfig = `${configPath}.${randomBytes(8).toString("hex")}.tmp`;
     try {
       const file = await open(temporaryConfig, "wx", 0o600);
-      try { await file.writeFile(JSON.stringify({ ...options, ...(executionSourceDigests ? { executionSourceDigests } : {}), repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await file.sync(); }
+      try { await file.writeFile(JSON.stringify({ ...options, ...(executionSourceDigests ? { executionSourceDigests } : {}), repositoryPath, directory, socketPath: join(socketRoot, identity + ".sock"), token: randomBytes(32).toString("hex") })); await syncFileHandle(file); }
       finally { await file.close(); }
       // Location/recovery readers may inspect the config before acquiring boot.lock.
       // Publish complete bytes exclusively; retain an existing host's exact token.
@@ -337,9 +348,13 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     : { ...sources, plan: buildExecutionPlan(sources.plan).fingerprint };
   const resolutionChanged = options.executionResolution !== undefined &&
     digest(resolutionAuthority(configuration.executionResolution)) !== digest(resolutionAuthority(options.executionResolution));
+  const resolveDeadlineMs = (deadlineValue: OperationOptions["deadline"]): number => {
+    if (deadlineValue === undefined) return Infinity;
+    return Date.parse(deadlineValue);
+  };
   const request = (method: string, params: unknown = {}, op?: OperationOptions) => {
-    const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000),
-      op?.deadline === undefined ? Infinity : Math.max(1, Date.parse(op.deadline) - Date.now()));
+    const deadlineRemainingMs = op?.deadline === undefined ? Infinity : resolveDeadlineMs(op.deadline) - Date.now();
+    const timeoutMs = Math.min(op?.timeoutMs ?? (method === "prepare" ? 600_000 : 30_000), deadlineRemainingMs);
     return callHost(configuration.socketPath, configuration.token, method, params, timeoutMs, op?.signal);
   };
   let alive = true;
@@ -385,6 +400,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
       });
       configuration = await readHostConfiguration(configPath);
     }
+
     const log = await open(join(directory, "host.log"), "a", 0o600);
     let exited: string | undefined;
     try {
@@ -412,8 +428,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   };
   return {
     async prepare(op) {
-      const deadline = new Date(Math.min(Date.now() + (op?.timeoutMs ?? 600_000),
-        op?.deadline === undefined ? Infinity : Date.parse(op.deadline))).toISOString();
+      const deadline = new Date(Math.min(Date.now() + (op?.timeoutMs ?? 600_000), resolveDeadlineMs(op?.deadline))).toISOString();
       return HostPrepareResponseSchema.parse(await request("prepare", { deadline }, op));
     },
     async platformStatus() { return HostPlatformStatusSchema.parse(await request("platform_status")); },
@@ -468,7 +483,7 @@ export async function readExistingAgenticTelemetry(options: { repositoryPath: st
 
 const RECONCILE_CANCELLATION_TIMEOUT_MS = 600_000;
 /** Explicit operator mutation, connect-only. Never bootstraps a daemon, changes platform configuration or resumes work. */
-export async function reconcileExistingAgenticCancellation(options: { repositoryPath: string; sessionId: string; runId: string }): Promise<import("./cancellation-stop.js").CancellationReconciliationReport> {
+export async function reconcileExistingAgenticCancellation(options: { repositoryPath: string; sessionId: string; runId: string }): Promise<CancellationReconciliationReport> {
   if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Invalid host session ID");
   const repositoryPath = await realpath(options.repositoryPath);
   const stateDirectory = findPrivateRuntimeStateDirectory(repositoryPath);
@@ -477,7 +492,6 @@ export async function reconcileExistingAgenticCancellation(options: { repository
   const configuration = await readHostConfiguration(join(directory, "host.json"));
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
     throw new Error("Foreign host configuration");
-  const { CancellationReconciliationReportSchema } = await import("./cancellation-stop.js");
   const report = CancellationReconciliationReportSchema.parse(await callHost(configuration.socketPath, configuration.token,
     // Bounded per-execution stops run under the journal lock; a client timeout does not mean the host stopped applying them.
     "reconcile_cancellation", { runId: textField(options.runId) }, RECONCILE_CANCELLATION_TIMEOUT_MS));

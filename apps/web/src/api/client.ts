@@ -13,7 +13,7 @@ const messages: Record<string, string> = {
   invalid_response: 'Dữ liệu trả về không hợp lệ. Hãy tải lại hoặc kiểm tra phiên dự án.',
   invalid_request: 'Thông tin chưa hợp lệ. Kiểm tra đường dẫn Git tuyệt đối trên máy này.',
   operation_conflict: 'Dự án còn thao tác chưa được xác nhận. Kiểm tra trạng thái thao tác trước khi hủy đăng ký.',
-  operation_not_allowed: 'Dịch vụ đang chạy chưa hỗ trợ thao tác này. Hãy khởi động lại Bflow Web bằng phiên bản mới.',
+  operation_not_allowed: 'Trạng thái hiện tại chưa cho phép thao tác này. Tải lại để xem thao tác hợp lệ; nếu vẫn bị từ chối, khởi động lại Bflow Web bằng phiên bản mới.',
   unavailable: 'Chưa kết nối được dịch vụ. Kiểm tra phiên dự án rồi thử tải lại.',
 };
 export function explain(error: unknown): string { return error instanceof ConfigurationError ? error.message : error instanceof ApiError ? messages[error.code] ?? messages.unavailable! : messages.unavailable!; }
@@ -27,16 +27,22 @@ export const projectPath = (id: string) => `/api/v1/projects/${encodeURIComponen
 export class ApiClient {
   private csrf: string | undefined;
   private session: WebSessionSummary | undefined;
-  async request<T>(path: string, schema: Parser<T>, method = 'GET', body?: unknown): Promise<T> {
+  async request<T>(path: string, schema: Parser<T>, method = 'GET', body?: unknown, timeoutMs = 10000): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (method !== 'GET' && this.csrf) headers['X-Bflow-CSRF'] = this.csrf;
-    const response = await fetch(path, { method, credentials: 'same-origin', cache: 'no-store', headers,
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(10000) });
+    let response: Response;
+    try {
+      response = await fetch(path, { method, credentials: 'same-origin', cache: 'no-store', headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(timeoutMs) });
+    } catch {
+      throw new ApiError('unavailable');
+    }
     if (!response.ok) {
-      const error = WebApiErrorSchema.safeParse(await response.json());
       if (response.status === 401) { this.csrf = undefined; this.session = undefined; }
-      throw new ApiError(error.success ? error.data.code : 'invalid_response');
+      const raw = await response.json().catch(() => undefined);
+      const error = WebApiErrorSchema.safeParse(raw);
+      throw new ApiError(error.success ? error.data.code : response.status === 401 ? 'session_required' : 'invalid_response');
     }
     try { return schema.parse(response.status === 204 ? undefined : await response.json()); } catch { throw new ApiError('invalid_response'); }
   }
@@ -55,7 +61,7 @@ export class ApiClient {
   initialize(id: string, input: unknown) { return this.request(`${projectPath(id)}/initializations`, contracts.initializeProject.response, 'POST', contracts.initializeProject.body.parse(input)); }
   initialization(id: string, operationId: string) { return this.request(`${projectPath(id)}/initializations/${encodeURIComponent(operationId)}`, contracts.initialization.response); }
   sessionView(id: string) { return this.request(`${projectPath(id)}/session`, contracts.projectSession.response); }
-  preview(id: string) { return this.request(`${projectPath(id)}/preview`, contracts.preview.response); }
+  preview(id: string) { return this.request(`${projectPath(id)}/preview`, contracts.preview.response, 'GET', undefined, 20000); }
   runs(id: string, search = '', phase = '', cursor?: string) {
     const query = new URLSearchParams({limit:'25'});
     if (search.trim()) query.set('search',search.trim()); if (phase) query.set('sdlcStatus',phase); if(cursor) query.set('cursor',cursor);
@@ -67,7 +73,7 @@ export class ApiClient {
     return value;
   }
   decisions(id: string) { return this.request(`${projectPath(id)}/decisions`, contracts.decisions.response); }
-  inspect(id: string) { return this.request(`${projectPath(id)}/session/inspect`, contracts.inspectSession.response, 'POST', contracts.inspectSession.body.parse({apiVersion:1})); }
+  inspect(id: string) { return this.request(`${projectPath(id)}/session/inspect`, contracts.inspectSession.response, 'POST', contracts.inspectSession.body.parse({apiVersion:1}), 50000); }
   async artifact(id: string, artifactId: string): Promise<string> {
     const response = await fetch(`${projectPath(id)}/artifacts/${encodeURIComponent(artifactId)}`, {credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(30000)});
     if (!response.ok) throw new ApiError(response.status === 401 ? 'session_required' : 'unavailable');

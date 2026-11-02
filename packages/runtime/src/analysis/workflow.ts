@@ -135,6 +135,8 @@ export class AnalysisWorkflowRuntime {
     if (!isAbsolute(ports.repositoryRoot) || !isAbsolute(ports.journalPath)) throw new Error("Analysis runtime paths must be absolute");
     const runtime = new AnalysisWorkflowRuntime(ports);
     try {
+      const st = await lstat(ports.journalPath);
+      if (!st.isFile()) throw new Error("Analysis journalPath must be a regular file");
       const parsed = JSON.parse(await readFile(ports.journalPath, "utf8")) as Journal;
       if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.runs)) throw new Error("Unsupported analysis journal version");
       runtime.journal = parsed;
@@ -688,7 +690,9 @@ export class AnalysisWorkflowRuntime {
       try { await handle.writeFile(content, "utf8"); } finally { await handle.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      // Idempotent republish after a restart; a different existing file is never overwritten.
+      // Idempotent republish after a restart; a different existing file or directory is never overwritten.
+      const existingStat = await lstat(absolute).catch(() => undefined);
+      if (!existingStat?.isFile()) throw new AnalysisPermissionDenied(`Refusing to overwrite existing non-file handoff path: ${path}`);
       if (sha256(await readFile(absolute)) !== sha256(content)) throw new AnalysisPermissionDenied(`Refusing to overwrite existing handoff file: ${path}`);
     }
   }

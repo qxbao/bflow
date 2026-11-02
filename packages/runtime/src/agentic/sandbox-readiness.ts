@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { access, readFile, realpath } from "node:fs/promises";
-import { constants } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { constants, statSync } from "node:fs";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { EnvironmentDoctorCheckSchema, type EnvironmentDoctorCheck } from "@bflow/contracts";
@@ -24,16 +24,22 @@ async function probeSandbox(repositoryRoot: string): Promise<{ readiness: Sandbo
     } catch { return { readiness: { status: "unsupported", code: "verification_sandbox_unavailable", reason: "Seatbelt cannot execute the required system/Node probe under the verification policy. Verify /usr/bin/sandbox-exec and use a standalone Node distribution whose runtime dependencies fit that policy" } }; }
   }
   if (process.platform !== "linux") return { readiness: { status: "unsupported", code: "verification_sandbox_unavailable", reason: `Behavioral sandbox is not verified on ${process.platform}` } };
+  const resolvedRepoRoot = resolve(repositoryRoot);
+  const canonicalRepoRoot = await realpath(resolvedRepoRoot).catch(() => resolvedRepoRoot);
+  const excludedRoots = [...new Set([resolvedRepoRoot, canonicalRepoRoot])];
   const seen = new Set<string>();
   let failure: { reason: string; usernsDenied?: string } | undefined;
   for (const directory of (process.env.PATH ?? "/usr/bin:/bin").split(delimiter)) {
-    if (!isAbsolute(directory)) continue;
+    if (!directory || !isAbsolute(directory)) continue;
     let executable: string;
     try {
       executable = await realpath(join(directory, "bwrap"));
-      if (executable === repositoryRoot || executable.startsWith(repositoryRoot + "/")) continue;
+      if (excludedRoots.some(root => executable === root || executable.startsWith(root === "/" ? "/" : root + "/"))) continue;
       if (seen.has(executable)) continue;
       seen.add(executable);
+      let nonFile = false;
+      try { nonFile = !statSync(executable).isFile(); } catch { /* virtual path in unit mocks */ }
+      if (nonFile) continue;
       await access(executable, constants.X_OK);
     } catch { continue; }
     try {

@@ -65,6 +65,7 @@ User decision routing: When a human decision is genuinely required (for example 
        3. Request implementation authorization (`authorize_implementation`).
        4. Implement minimal production code to turn tests Green.
        5. Refactor while maintaining passing test suite.
+       6. **Rework Attempt 2+ (`reworkContext` present)**: First inspect `workspace_status` (`recordedEvidence`). When Red/Green/Refactor receipts were already recorded on a prior attempt, Red `testPaths` remain frozen — do NOT edit frozen Red test files or re-request `red`. Call `authorize_implementation`, implement the root-cause fix in owned source files (and any brand-new non-frozen regression test files if needed), commit, run `check_work`, update `propose_task_handover` at the new `HEAD` revision, and call `submit_implementation` with `findingResolutions`.
      - When `mode === "not_applicable"`:
        - Follow mandatory alternative verification (e.g. static checks, regression suite, contract conformance).
        - Never waive verification.
@@ -119,3 +120,4 @@ Every Developer task completion and handoff to Coordinator must emit a structure
 
 - Never dump `ALL_TOOLS` or enumerate the full MCP tool catalog; inspect only the 1-3 tool schemas needed for your current step, and unpack MCP responses directly with `JSON.parse(res.content[0].text)`.
 - Prefer `assignment_context({ view: "compact", surveyView: "summary", includeReleased: false })`, `read_task_log({ runId, taskId, view: "compact", cursor })` with `nextCursor`, and `read_project_policy({ filePath, view: "toc" | "section", knownDigests })` to inspect repository policy files without redundant full-file reads.
+- Omit optional MCP tool and `RoleMessage` properties when unused instead of passing `null` or `""`. When calling `propose_task_handover`, always copy the exact current `binding` returned by `read_task_handover` (or the rejection receipt) after your latest Git commit so `binding.revision` matches `HEAD`.

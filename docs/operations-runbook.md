@@ -31,9 +31,9 @@ bflow docs status
 
 `status` không tham số đọc environment/host; `status <run-id> --telemetry` đọc metric chỉ đọc của lượt chạy từ agentic host đang chạy ([TELEMETRY-SPEC.md](../packages/runtime/TELEMETRY-SPEC.md)); `status <run-id>` không kèm `--telemetry` và các bộ lọc khác thuộc legacy Runtime. Với P19, hỏi tiến độ/run trong Conversation và dùng host status/telemetry/receipts để chẩn đoán. Delivery receipt không chứng minh model đã dùng tool, display receipt không phải approval.
 
-`mcp status` trên đường CLI hiện chưa inject live Gateway port; `configured: false` không chứng minh machine daemon chưa chạy. Dùng `doctor`, machine service status và `docs status` (chỉ Context7) để chẩn đoán; không lặp setup chỉ để làm lệnh này xanh.
+`mcp status` trên đường CLI hiện chưa inject live Gateway port; `configured: false` không chứng minh machine daemon chưa chạy. Dùng `doctor`, machine service status và `docs status` (chỉ DeepWiki) để chẩn đoán; không lặp setup chỉ để làm lệnh này xanh.
 
-Tool installation, repo allowance, resolved grant, readiness, invocation và consumption là các quan sát riêng. `bflow setup` có phạm vi cấp máy; Context7 và MemPalace (phân vùng theo `wing` mặc định là repository ID) được dùng chung giữa các repository/worktree, trong khi `bflow init` lập chỉ mục GitNexus và đăng ký dịch vụ `gitnexus-<repo>` theo từng repository (`bflow init --remove` để gỡ đăng ký). GitNexus và browser đều cần lease/fence hợp lệ; không rebuild index dưới reader đang active. [Tool integration](tools-sdlc-integration.md).
+Tool installation, repo allowance, resolved grant, readiness, invocation và consumption là các quan sát riêng. `bflow setup` có phạm vi cấp máy; DeepWiki và MemPalace (phân vùng theo `wing` mặc định là repository ID) được dùng chung giữa các repository/worktree, trong khi `bflow init` lập chỉ mục GitNexus và đăng ký dịch vụ `gitnexus-<repo>` theo từng repository (`bflow init --remove` để gỡ đăng ký). GitNexus và browser đều cần lease/fence hợp lệ; không rebuild index dưới reader đang active. [Tool integration](tools-sdlc-integration.md).
 
 ## Cập nhật dễ đọc và chẩn đoán qua Log
 

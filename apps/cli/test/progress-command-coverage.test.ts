@@ -26,7 +26,7 @@ describe("progress command coverage", () => {
   it.each([false, true])("reports documentation phases before the access result and stays quiet for JSON (%s)", async json => {
     const root = await directory();
     const captured = capture();
-    const result = await main(["docs", "search", "react", ...(json ? ["--json"] : [])], {
+    const result = await main(["docs", "ask", "--repo", "facebook/react", "--public", "--question", "How are hooks scheduled?", ...(json ? ["--json"] : [])], {
       cwd: root, io: captured.io, presentation: { interactive: true }, docs: {
         stateDirectory: root, machineId: "fixture-machine", env: {},
         access: async () => {

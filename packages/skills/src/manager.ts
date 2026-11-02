@@ -184,10 +184,22 @@ export class SkillManager {
       const definition = SkillDefinitionSchema.parse(raw);
       if (definition.digest !== digest)
         throw new Error("Catalog entry identity mismatch");
-      const actual = validateSkill(await this.options.store.getBundle(digest), {
-        source: definition.source,
-        supportedCommands: this.supportedCommands,
-      });
+      let actual: SkillDefinition;
+      try {
+        actual = validateSkill(await this.options.store.getBundle(digest), {
+          source: definition.source,
+          supportedCommands: this.supportedCommands,
+        });
+      } catch (error) {
+        // An immutable entry installed before a Bflow command was removed is retired, not corrupt: it can no longer be
+        // selected, but it must not make the whole catalog unreadable. Integrity and every other violation still throw.
+        if (
+          error instanceof Error &&
+          error.message.startsWith("Unsupported Bflow command: ")
+        )
+          continue;
+        throw error;
+      }
       if (canonical(actual) !== canonical(definition))
         throw new Error("Catalog metadata/content mismatch");
       if (

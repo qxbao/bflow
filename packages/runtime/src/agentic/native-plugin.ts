@@ -1,13 +1,16 @@
 import { execFile } from "node:child_process";
-import { readFile, lstat, readdir } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { open, readFile, readdir } from "node:fs/promises";
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { sign } from "node:crypto";
 import { AgentBindingReceiptSchema, RoleMessageSchema, SessionManifestSchema, canonicalReceiptJson } from "@bflow/contracts";
 import { createSignedBindingReceipt } from "./receipt-host.js";
 import { record, textField } from "./journal.js";
+import { HostReceiptJournal } from "./host-receipts.js";
+import { resolveNativePluginSelection } from "./native-intent-selection.js";
 
 /** Native Herdr action entrypoint; not a model tool and never loads a model API. */
 export async function deliverNativeHerdrMessage(env = process.env): Promise<void> {
@@ -37,11 +40,23 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
   if (matching.length !== 1) throw new Error("Native pane must belong to exactly one active host manifest");
   const config = matching[0]!;
   const keyPath = textField(config.privateKeyFile);
-  const keyStat = await lstat(keyPath);
-  if (!keyStat.isFile() || (keyStat.mode & 0o077) !== 0) throw new Error("Native signing key must be a private regular file");
-  const privateKey = await readFile(keyPath, "utf8");
-  let message = RoleMessageSchema.parse(JSON.parse(textField(context.selected_text)));
+  let privateKey: string;
+  const keyHandle = await open(keyPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  try {
+    const keyStat = await keyHandle.stat();
+    if (!keyStat.isFile() || (keyStat.mode & 0o077) !== 0 || keyStat.size > 64 * 1024) {
+      throw new Error("Native signing key must be a private regular file");
+    }
+    privateKey = await keyHandle.readFile("utf8");
+  } finally {
+    await keyHandle.close();
+  }
   const manifest = SessionManifestSchema.parse(JSON.parse(await readFile(textField(config.manifestFile), "utf8")));
+  let message = await resolveNativePluginSelection(textField(context.selected_text), async operationId => {
+    const receipts = new HostReceiptJournal(join(dirname(keyPath), "authentication-receipts"), manifest.workspaceRoot, manifest.sessionId);
+    const delivery = await receipts.nativeDelivery(operationId);
+    return delivery === undefined ? undefined : { ...delivery, rejected: (await receipts.nativeRejection(delivery.message.message_id)) !== undefined };
+  });
   const binding = manifest.panes.find(pane => pane.paneId === message.sender.pane_id && pane.agentId === message.sender.agent_id && pane.role === message.sender.role);
   if (!binding || context.focused_pane_id !== binding.paneId || context.workspace_id !== binding.workspaceId)
     throw new Error("Native message sender is outside the host's role manifest");
@@ -70,12 +85,42 @@ export async function deliverNativeHerdrMessage(env = process.env): Promise<void
     signature: sign(null, Buffer.from(canonicalReceiptJson(message)), privateKey).toString("base64") };
   await new Promise<void>((accept, reject) => {
     const socket = connect(textField(config.runtimeSocket));
-    let response = "";
-    socket.setTimeout(15_000, () => { socket.destroy(); reject(new Error("Native ingress reply timed out; reconcile before replay")); });
-    socket.once("error", reject);
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
+    const finish = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+    const settleReply = (raw: string) => {
+      try {
+        const line = raw.split("\n")[0]!.trim();
+        if (!line) { finish(() => reject(new Error("Native ingress closed before reply; reconcile before replay"))); return; }
+        finish(() => { record(JSON.parse(line)).ok === true ? accept() : reject(new Error("Native ingress rejected delivery")); });
+      } catch (error) { finish(() => reject(error)); }
+    };
+    socket.setTimeout(35_000, () => { socket.destroy(); finish(() => reject(new Error("Native ingress reply timed out; reconcile before replay"))); });
+    socket.once("error", error => finish(() => reject(error)));
     socket.once("connect", () => socket.write(JSON.stringify(packet) + "\n"));
-    socket.on("data", chunk => { response += String(chunk); if (response.length > 8192) socket.destroy(); });
-    socket.once("end", () => { try { record(JSON.parse(response)).ok === true ? accept() : reject(new Error("Native ingress rejected delivery")); } catch (error) { reject(error); } });
+    socket.on("data", chunk => {
+      if (settled) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buf.length;
+      if (totalBytes > 8192) {
+        socket.destroy();
+        finish(() => reject(new Error("Oversized native ingress reply; reconcile before replay")));
+        return;
+      }
+      chunks.push(buf);
+      if (buf.indexOf(10) >= 0) {
+        const full = Buffer.concat(chunks, totalBytes);
+        socket.end();
+        settleReply(full.toString("utf8"));
+      }
+    });
+    socket.once("end", () => {
+      if (!settled) settleReply(Buffer.concat(chunks, totalBytes).toString("utf8"));
+    });
+    socket.once("close", () => {
+      if (!settled) finish(() => reject(new Error("Native ingress closed before reply; reconcile before replay")));
+    });
   });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

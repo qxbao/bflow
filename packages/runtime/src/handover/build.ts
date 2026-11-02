@@ -20,6 +20,14 @@ export interface HandoverAttachment { readonly path: string; readonly bytes: Buf
 export interface HandoverBuild { readonly document: HandoverDocument; readonly attachments: readonly HandoverAttachment[] }
 export interface HandoverBuildOptions { readonly includeEvidence?: boolean | undefined }
 
+function sliceUtf16(text: string, maxUnits: number): string {
+  if (maxUnits <= 0) return "";
+  if (text.length <= maxUnits) return text;
+  let end = maxUnits;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
 type Scrub = (value: unknown, max?: number) => string;
 function scrubber(paths: readonly string[]): { field: Scrub; body: (text: string) => string } {
   const sorted = [...new Set(paths.filter(path => path.length > 1))].sort((a, b) => b.length - a.length);
@@ -27,13 +35,33 @@ function scrubber(paths: readonly string[]): { field: Scrub; body: (text: string
   return {
     field: (value, max = 2000) => {
       const text = unpath(redactString(String(value ?? "")).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " "));
-      return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+      return text.length > max ? `${sliceUtf16(text, max - 1)}…` : text;
     },
     // Packaged evidence keeps its line structure; the same redaction and path rules apply, without truncation.
     body: text => unpath(redactString(text).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " "))
   };
 }
 const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Prototype reviews are separate human decisions bound to one prototype manifest. They approve the prototype only and
+ * never prove acceptance criteria, but a handover must still show them beside the specification and delivery decisions.
+ */
+export function handoverPrototypeApprovals(prototype: RunRecord["prototype"], superseded: ReadonlySet<string>,
+  scrub: Scrub = value => String(value ?? "")): HandoverApproval[] {
+  return (prototype?.approvals ?? []).map(entry => {
+    const request = entry.request, decision = entry.decision, reasons = ["Prototype only; does not prove acceptance criteria"];
+    let validity: HandoverApproval["validity"] = entry.status === "pending" ? "pending" : entry.status === "approved" && decision?.decision === "approved" ? "valid"
+      : ["superseded", "cancelled"].includes(entry.status) ? "superseded" : "refused";
+    if (validity === "valid" && (decision!.approvalId !== request.approvalId || decision!.metadata?.manifestDigest !== entry.manifestDigest)) {
+      validity = "stale"; reasons.push("Decision is bound to another prototype manifest");
+    }
+    if (superseded.has(request.approvalId)) validity = "superseded";
+    return { approvalId: request.approvalId, kind: "prototype" as const, target: `prototype v${entry.version} manifest ${entry.manifestDigest.slice(0, 12)}`,
+      requestedAt: request.requestedAt, decision: decision?.decision ?? (entry.status === "pending" ? "pending" : "cancelled"),
+      ...(decision ? { decidedBy: scrub(decision.decidedBy, 200), decidedAt: decision.decidedAt } : {}), validity, reasons };
+  });
+}
 
 const latest = (cycle: VerificationCycle | undefined): VerificationResult | undefined => cycle?.history.at(-1);
 const sameEvidence = (a: readonly ArtifactReference[], b: readonly ArtifactReference[]) =>
@@ -131,6 +159,7 @@ export async function buildHandover(snapshot: HandoverSnapshot, sources: Handove
       requestedAt: request.requestedAt, decision: decision?.decision ?? "pending", ...(decision ? { decidedBy: scrub(decision.decidedBy, 200), decidedAt: decision.decidedAt } : {}),
       validity, reasons });
   }
+  approvals.push(...handoverPrototypeApprovals(run.prototype, superseded, scrub));
   let deliveryValidity: HandoverApproval["validity"] | undefined;
   if (run.approval && (run.approvalKind === "delivery" || run.approvalKind === "task" || run.approvalKind === "design")) {
     // While a gate waits, `run.decision` may still hold the previous gate's decision. A completed delivery must carry its own.

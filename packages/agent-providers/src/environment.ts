@@ -20,9 +20,19 @@ const DANGEROUS_ENV_KEYS = new Set([
   "BHOME"
 ]);
 
-/** Session-local lifecycle policy; provider self-updates must not race launch/activation digest checks. */
+export const CLAUDE_MCP_STARTUP_TIMEOUT_MS = "120000";
+export const CLAUDE_MCP_TOOL_TIMEOUT_MS = "600000";
+
+/** Session-local lifecycle policy; provider self-updates must not race launch/activation digest checks, and multi-pane stdio MCP startup must not trip Claude's 30s default handshake timeout under cold concurrent boot. */
 export function providerSessionEnvironment(provider: AgentEnvironment["provider"]): Readonly<Record<string, string>> {
-  return provider === "claude" ? { DISABLE_AUTOUPDATER: "1" } : {};
+  return provider === "claude" ? { DISABLE_AUTOUPDATER: "1", MCP_TIMEOUT: CLAUDE_MCP_STARTUP_TIMEOUT_MS } : {};
+}
+
+/** Per-launch provider defaults, adding long-running MCP tool execution budget (`check_work`, `submit_implementation`, `propose_workflow`) without mutating named Herdr session env. */
+export function providerLaunchEnvironment(provider: AgentEnvironment["provider"]): Readonly<Record<string, string>> {
+  return provider === "claude"
+    ? { ...providerSessionEnvironment(provider), MCP_TOOL_TIMEOUT: CLAUDE_MCP_TOOL_TIMEOUT_MS }
+    : providerSessionEnvironment(provider);
 }
 
 const SECRET_KEY_PATTERN = /(?:TOKEN|SECRET|API_KEY|PASSWORD|CREDENTIAL|PRIVATE_KEY)/i;

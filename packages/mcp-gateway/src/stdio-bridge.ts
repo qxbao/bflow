@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import type {
   ContractError,
   JsonValue,
@@ -40,6 +41,41 @@ export interface StdioToHttpBridgeOptions {
   readonly onStop?: ((reason?: string) => Promise<void> | void) | undefined;
 }
 
+const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
+
+interface SafeTimer {
+  clear(): void;
+}
+
+function scheduleSafeTimeout(callback: () => void, delayMs: number): SafeTimer {
+  if (!Number.isFinite(delayMs)) return { clear: () => {} };
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let remaining = Math.max(0, Math.ceil(delayMs));
+
+  const arm = () => {
+    if (cancelled) return;
+    const slice = Math.min(remaining, MAX_SAFE_TIMEOUT_MS);
+    remaining -= slice;
+    timer = setTimeout(() => {
+      if (cancelled) return;
+      if (remaining > 0) {
+        arm();
+      } else {
+        callback();
+      }
+    }, slice);
+  };
+
+  arm();
+  return {
+    clear() {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+}
+
 interface PendingRequest {
   readonly upstreamId: string;
   readonly clientRequestId: string;
@@ -48,7 +84,7 @@ interface PendingRequest {
   readonly isToolCall: boolean;
   readonly resolve: (res: JsonRpcResponse) => void;
   readonly reject: (err: ContractError) => void;
-  timeoutTimer?: NodeJS.Timeout | undefined;
+  timeoutTimer?: SafeTimer | undefined;
 }
 
 /**
@@ -72,6 +108,8 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
   private requestSeq = 0;
   private pendingWrites = 0;
   private incomingBuffer = "";
+  private incomingBufferBytes = 0;
+  private readonly stdoutDecoder = new StringDecoder("utf8");
 
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly clientRequestToUpstreamId = new Map<string, string>();
@@ -82,6 +120,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     { readonly clientRequestId: string; readonly callId?: string | undefined }
   >();
   private readonly crashListeners = new Set<(reason: string) => void>();
+  private readonly activeWriteCancels = new Set<(err: Error) => void>();
 
   constructor(options: StdioToHttpBridgeOptions) {
     this.instanceId = options.instanceId;
@@ -101,11 +140,13 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
   private setupStreams(stderr?: NodeJS.ReadableStream): void {
     this.stdout.on("data", (chunk: Buffer | string) => {
-      const str = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      const str = typeof chunk === "string" ? chunk : this.stdoutDecoder.write(chunk);
+      const addedBytes = typeof chunk === "string" ? Buffer.byteLength(chunk, "utf8") : Buffer.byteLength(str, "utf8");
       this.incomingBuffer += str;
+      this.incomingBufferBytes += addedBytes;
 
       if (
-        Buffer.byteLength(this.incomingBuffer, "utf8") > this.maxFrameBytes &&
+        this.incomingBufferBytes > this.maxFrameBytes &&
         !this.incomingBuffer.includes("\n")
       ) {
         this.triggerCrash("frame_size_exceeded");
@@ -114,9 +155,12 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
       let newlineIndex: number;
       while ((newlineIndex = this.incomingBuffer.indexOf("\n")) !== -1) {
-        const line = this.incomingBuffer.slice(0, newlineIndex).trim();
+        const rawLine = this.incomingBuffer.slice(0, newlineIndex);
+        const consumedBytes = Buffer.byteLength(rawLine, "utf8") + 1;
         this.incomingBuffer = this.incomingBuffer.slice(newlineIndex + 1);
+        this.incomingBufferBytes = Math.max(0, this.incomingBufferBytes - consumedBytes);
 
+        const line = rawLine.trim();
         if (line.length === 0) {
           continue;
         }
@@ -130,7 +174,30 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       }
     });
 
+    (this.stdin as NodeJS.EventEmitter).on?.("error", () => {
+      // Prevent unhandled 'error' (e.g. async EPIPE after child exit); per-write listeners handle active writes
+    });
+
     this.stdout.on("end", () => {
+      const flushed = this.stdoutDecoder.end();
+      if (flushed) {
+        this.incomingBuffer += flushed;
+        this.incomingBufferBytes += Buffer.byteLength(flushed, "utf8");
+      }
+      if (this.incomingBuffer.length > 0) {
+        const trailingLines = this.incomingBuffer.split("\n");
+        this.incomingBuffer = "";
+        this.incomingBufferBytes = 0;
+        for (const rawLine of trailingLines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
+            this.triggerCrash("frame_size_exceeded");
+            return;
+          }
+          this.handleInboundLine(line);
+        }
+      }
       if (this.alive) {
         this.triggerCrash("stdout_closed");
       }
@@ -146,6 +213,9 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       stderr.on("data", () => {
         // Collect stderr silently or consume stream to avoid process blocking
       });
+      (stderr as NodeJS.EventEmitter).on?.("error", () => {
+        // Ignore broken stderr pipe errors
+      });
     }
   }
 
@@ -154,6 +224,10 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     try {
       parsed = JSON.parse(line);
     } catch (parseError) {
+      if (!line.startsWith("{")) {
+        // Ignore non-JSON diagnostic/startup banner lines emitted by tools on stdout
+        return;
+      }
       this.triggerCrash(`malformed_json_frame: ${String(parseError)}`);
       return;
     }
@@ -202,7 +276,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       for (const [upstreamId, pending] of this.pendingRequests.entries()) {
         if (pending.isToolCall) {
           if (pending.timeoutTimer) {
-            clearTimeout(pending.timeoutTimer);
+            pending.timeoutTimer.clear();
           }
           pending.reject(blockedError);
           this.reconcileLedger.set(pending.clientRequestId, {
@@ -248,7 +322,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       this.callIdToUpstreamId.delete(pending.callId);
     }
     if (pending.timeoutTimer) {
-      clearTimeout(pending.timeoutTimer);
+      pending.timeoutTimer.clear();
     }
 
     pending.resolve(msg);
@@ -263,12 +337,16 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       let finished = false;
       let onDrain: (() => void) | undefined;
       let onError: ((err: Error) => void) | undefined;
+      let onClose: (() => void) | undefined;
+      const cancelWrite = (err: Error) => cleanupAndFinish(err);
 
       const cleanupAndFinish = (err?: Error) => {
         if (finished) return;
         finished = true;
+        this.activeWriteCancels.delete(cancelWrite);
         if (onDrain) (this.stdin as any).removeListener?.("drain", onDrain);
         if (onError) (this.stdin as any).removeListener?.("error", onError);
+        if (onClose) (this.stdin as any).removeListener?.("close", onClose);
         this.pendingWrites = Math.max(0, this.pendingWrites - 1);
         if (err) {
           reject(err);
@@ -277,19 +355,29 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
         }
       };
 
-      const flushed = this.stdin.write(line + "\n", "utf8", (error) => {
-        if (error) {
-          cleanupAndFinish(error);
-        } else {
-          cleanupAndFinish();
-        }
-      });
+      this.activeWriteCancels.add(cancelWrite);
 
-      if (!flushed) {
+      let flushed = true;
+      try {
+        flushed = this.stdin.write(line + "\n", "utf8", (error) => {
+          if (error) {
+            cleanupAndFinish(error);
+          } else {
+            cleanupAndFinish();
+          }
+        });
+      } catch (syncWriteErr) {
+        cleanupAndFinish(syncWriteErr instanceof Error ? syncWriteErr : new Error(String(syncWriteErr)));
+        return;
+      }
+
+      if (!flushed && !finished) {
         onDrain = () => cleanupAndFinish();
         onError = (err: Error) => cleanupAndFinish(err);
+        onClose = () => cleanupAndFinish(new Error("Stdio bridge stdin closed"));
         (this.stdin as any).once?.("drain", onDrain);
         (this.stdin as any).once?.("error", onError);
+        (this.stdin as any).once?.("close", onClose);
       }
     });
   }
@@ -339,12 +427,12 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     }
 
     return new Promise<OperationResult<JsonRpcResponse>>((resolve) => {
-      let timeoutTimer: NodeJS.Timeout | undefined;
+      let timeoutTimer: SafeTimer | undefined;
       const timeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs;
       let writtenToStdin = false;
 
       if (timeoutMs > 0) {
-        timeoutTimer = setTimeout(() => {
+        timeoutTimer = scheduleSafeTimeout(() => {
           this.pendingRequests.delete(upstreamId);
           this.clientRequestToUpstreamId.delete(clientReqId);
           if (options?.callId) {
@@ -378,7 +466,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
       const abortHandler = () => {
         if (timeoutTimer) {
-          clearTimeout(timeoutTimer);
+          timeoutTimer.clear();
         }
         this.pendingRequests.delete(upstreamId);
         this.clientRequestToUpstreamId.delete(clientReqId);
@@ -429,7 +517,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
         },
         reject: (contractErr) => {
           if (timeoutTimer) {
-            clearTimeout(timeoutTimer);
+            timeoutTimer.clear();
           }
           if (options?.signal) {
             options.signal.removeEventListener("abort", abortHandler);
@@ -458,7 +546,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
             this.callIdToUpstreamId.delete(options.callId);
           }
           if (timeoutTimer) {
-            clearTimeout(timeoutTimer);
+            timeoutTimer.clear();
           }
           if (options?.signal) {
             options.signal.removeEventListener("abort", abortHandler);
@@ -494,9 +582,56 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     }
   }
 
+  private resolveOperationTimeoutMs(options?: OperationOptions): OperationResult<number> {
+    if (options?.signal?.aborted) {
+      return err({
+        code: "cancelled",
+        retryable: false,
+        message: "Request was aborted before execution"
+      });
+    }
+    if (options?.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) {
+      return err({
+        code: "timeout",
+        retryable: true,
+        retrySafety: "not_started",
+        message: "Operation timeout budget exhausted before dispatch"
+      });
+    }
+    let budget = options?.timeoutMs ?? this.defaultTimeoutMs;
+    if (options?.deadline !== undefined) {
+      const deadlineMs = Date.parse(options.deadline);
+      if (!Number.isFinite(deadlineMs)) {
+        return err({
+          code: "validation",
+          retryable: false,
+          message: "Invalid operation deadline"
+        });
+      }
+      const remaining = deadlineMs - Date.now();
+      if (remaining <= 0) {
+        return err({
+          code: "timeout",
+          retryable: true,
+          retrySafety: "not_started",
+          message: "Operation deadline exceeded before dispatch"
+        });
+      }
+      budget = Math.min(budget, remaining);
+    }
+    return ok(Math.max(1, budget));
+  }
+
   async initialize(
     options?: OperationOptions
   ): Promise<OperationResult<MCPUpstreamInitializeResult>> {
+    const initialBudget = this.resolveOperationTimeoutMs(options);
+    if (!initialBudget.ok) {
+      return err(initialBudget.error);
+    }
+    const effectiveDeadlineMs = Date.now() + initialBudget.value;
+    const effectiveDeadline = new Date(effectiveDeadlineMs).toISOString();
+
     const initParams = {
       protocolVersion: DEFAULT_MCP_PROTOCOL_VERSION,
       capabilities: {},
@@ -507,7 +642,8 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     };
 
     const initRes = await this.sendJsonRpcRequest("init", "initialize", initParams, {
-      timeoutMs: options?.timeoutMs
+      timeoutMs: initialBudget.value,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {})
     });
 
     if (!initRes.ok) {
@@ -520,6 +656,22 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
         retryable: false,
         message: `Upstream initialization failed: ${initRes.value.error.message}`,
         details: initRes.value.error as unknown as JsonValue
+      });
+    }
+
+    if (options?.signal?.aborted) {
+      return err({
+        code: "cancelled",
+        retryable: false,
+        message: "Initialization aborted by signal"
+      });
+    }
+    if (effectiveDeadlineMs <= Date.now()) {
+      return err({
+        code: "timeout",
+        retryable: true,
+        retrySafety: "observation_only",
+        message: "Initialization timed out before tools/list"
       });
     }
 
@@ -538,7 +690,10 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
       });
     }
 
-    const listRes = await this.listToolDefinitions("init", options);
+    const listRes = await this.listToolDefinitions("init", {
+      deadline: effectiveDeadline,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {})
+    });
     if (!listRes.ok) {
       return err(listRes.error);
     }
@@ -579,8 +734,13 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     sessionId: string,
     options?: OperationOptions
   ): Promise<OperationResult<MCPUpstreamToolList>> {
+    const budget = this.resolveOperationTimeoutMs(options);
+    if (!budget.ok) {
+      return err(budget.error);
+    }
     const res = await this.sendJsonRpcRequest(sessionId, "tools/list", {}, {
-      timeoutMs: options?.timeoutMs
+      timeoutMs: budget.value,
+      ...(options?.signal !== undefined ? { signal: options.signal } : {})
     });
 
     if (!res.ok) {
@@ -708,7 +868,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
         this.callIdToUpstreamId.delete(pending.callId);
       }
       if (pending.timeoutTimer) {
-        clearTimeout(pending.timeoutTimer);
+        pending.timeoutTimer.clear();
       }
       pending.reject({
         code: "cancelled",
@@ -746,6 +906,11 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     }
     this.alive = false;
 
+    for (const cancelWrite of [...this.activeWriteCancels]) {
+      cancelWrite(new Error(`Upstream stdio process crashed: ${reason}`));
+    }
+    this.activeWriteCancels.clear();
+
     const crashError: ContractError = {
       code: "transport_unavailable",
       retryable: true,
@@ -754,7 +919,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
     for (const pending of this.pendingRequests.values()) {
       if (pending.timeoutTimer) {
-        clearTimeout(pending.timeoutTimer);
+        pending.timeoutTimer.clear();
       }
       pending.reject(crashError);
       this.reconcileLedger.set(pending.clientRequestId, { status: "unknown" });
@@ -785,6 +950,11 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
     }
     this.alive = false;
 
+    for (const cancelWrite of [...this.activeWriteCancels]) {
+      cancelWrite(new Error(`Upstream stdio driver stopped: ${reason ?? "stopped by host"}`));
+    }
+    this.activeWriteCancels.clear();
+
     const stopError: ContractError = {
       code: "transport_unavailable",
       retryable: true,
@@ -793,7 +963,7 @@ export class StdioToHttpBridge implements MCPUpstreamDriverInstance {
 
     for (const pending of this.pendingRequests.values()) {
       if (pending.timeoutTimer) {
-        clearTimeout(pending.timeoutTimer);
+        pending.timeoutTimer.clear();
       }
       pending.reject(stopError);
     }
@@ -973,8 +1143,29 @@ export class SubprocessStdioDriverFactory implements MCPUpstreamDriverFactory {
         ? { defaultTimeoutMs: this.options.defaultTimeoutMs }
         : {}),
       onStop: async (_reason) => {
-        if (!child.killed) {
-          child.kill("SIGTERM");
+        try {
+          child.stdin?.end();
+        } catch {
+          // ignore
+        }
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // ignore
+          }
+          const killTimer = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              try {
+                child.kill("SIGKILL");
+              } catch {
+                // ignore
+              }
+            }
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+          }, 250);
+          killTimer.unref();
         }
       }
     });

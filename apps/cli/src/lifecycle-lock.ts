@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath, rmdir, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { FileHandle } from "node:fs/promises";
+import { fsyncTolerant } from "./fs-resilience.js";
 
 // A callback awaiting an unresolved promise can otherwise lose its async frame
 // to GC. Keep the kernel authority alive until explicit close/process death.
@@ -20,7 +21,7 @@ export async function withLifecycleLock<T>(directory: string, operation: () => P
   const file = await open(join(directory, "lifecycle.guard"), constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
   activeGuards.add(file);
   let acquired = false;
-  let ownerWritten = false;
+  let ownerOpened = false;
   try {
     const guard = await file.stat();
     if (!guard.isFile() || guard.nlink !== 1) throw new Error("Lifecycle guard must be a single regular file");
@@ -38,13 +39,14 @@ export async function withLifecycleLock<T>(directory: string, operation: () => P
       await rmdir(legacy);
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     const owner = await open(join(directory, "lifecycle-owner.json"), constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    ownerOpened = true;
     try {
       const stat = await owner.stat(); if (!stat.isFile() || stat.nlink !== 1) throw new Error("Lifecycle owner receipt must be a single regular file");
-      await owner.truncate(0); await owner.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })); await owner.sync(); ownerWritten = true;
+      await owner.truncate(0); await owner.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })); await fsyncTolerant(owner);
     } finally { await owner.close(); }
     return await operation();
   } finally {
-    if (ownerWritten) await unlink(join(directory, "lifecycle-owner.json")).catch(() => undefined);
+    if (ownerOpened) await unlink(join(directory, "lifecycle-owner.json")).catch(() => undefined);
     await file.close();
     activeGuards.delete(file);
   }

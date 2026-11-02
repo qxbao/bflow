@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdtemp, rm, writeFile, readdir, realpath} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile, readFile, readdir, realpath} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {initializeEnvironmentConfig,readEnvironmentConfig} from '../src/environment-config.js';
@@ -67,6 +67,18 @@ it('does not leak secret canaries from invalid role selections in JSON or text',
  for(const flags of [[],['--json']]){const out=binary(['task','preview',...flags]);expect(out.status).not.toBe(0);expect(out.stdout+out.stderr).not.toContain('sk-canary-preview-value');}
 });
 
+it('names a moved or copied repository configuration instead of a generic invalid-input error',async()=>{
+ const path=join(root,'.bflow/config.yml');
+ await writeFile(path,(await readFile(path,'utf8')).replace(/repositoryId: [a-f0-9]{64}/,`repositoryId: ${'a'.repeat(64)}`));
+ for(const flags of [[],['--json']]){
+  const out=binary(['task','preview',...flags]);
+  expect(out.status).not.toBe(0);
+  expect(out.stdout+out.stderr).toContain('Configuration belongs to another repository or was moved');
+ }
+ const json=JSON.parse(binary(['task','preview','--json']).stdout);
+ expect(json.result.error.details).toEqual({reason:'repository_identity_mismatch'});
+});
+
 it('fingerprints verification invocation changes even when command identities stay the same',async()=>{
  const path=join(root,'.bflow/verification.json');
  const command={id:'unit',command:'node --test',executable:process.execPath,args:['--test','test/first.test.js'],method:'unit_test',levels:['unit'],testNames:['example'],testPaths:['test/first.test.js'],timeoutMs:1000};
@@ -85,7 +97,7 @@ it('checks actual Runtime resolution before launch when preflight resolves a pre
  const runtime=await import('@bflow/runtime');const {loadMachineSkillCatalog}=await import('../src/skill-catalog.js');
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
  const catalog=await loadMachineSkillCatalog({repository,config,env:process.env});
- const skill=catalog.definitions.find(item=>item.skillId==='use-context7')!;
+ const skill=catalog.definitions.find(item=>item.skillId==='use-deepwiki')!;
  const before=await loadExecutionPreview(root);await writeFile(join(root,'.bflow/preview.json'),JSON.stringify(before));
  const {fingerprint:_,...actual}=before;
  const decision=actual.decisions.find(item=>item.field==='skills.developer')!;
@@ -101,7 +113,7 @@ it('checks actual Runtime resolution before launch when preflight resolves a pre
 it('blocked required tools retain requirement sources without contacting machine ports',async()=>{
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
  config.environment.tools={rtk:{enabled:true,required:true},gitnexus:{enabled:false},mempalace:{enabled:false},'chrome-devtools-mcp':{enabled:false}};
- config.environment.context7={enabled:false};
+ config.environment.deepwiki={enabled:false};
  await writeFile(join(root,'.bflow/config.yml'),renderEnvironmentConfigYaml(config));
  const before=await readdir(root);
  const forbidden=vi.fn(()=>{throw new Error('FORBIDDEN blocked preview effect');});

@@ -29,9 +29,19 @@ export interface ReadSources {
   commandsSupported?: boolean;
   pendingClarifications?: import("@bflow/conversation").ConversationContextSnapshot["pendingClarifications"] | undefined;
   redact?: (text: string) => string;
+  redactOption?: (text: string) => string;
 }
+function sliceUtf16Safe(text: string, max: number): string {
+  if (max <= 0) return "";
+  if (text.length <= max) return text;
+  const code = text.charCodeAt(max - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
 const safe = (s: ReadSources, text: string, max = 16000) =>
-  (s.redact?.(text) ?? text).slice(0, max) || "[redacted]";
+  sliceUtf16Safe(s.redact?.(text) ?? text, max) || "[redacted]";
+const safeOption = (s: ReadSources, text: string, max = 200) =>
+  sliceUtf16Safe((s.redactOption ?? s.redact)?.(text) ?? text, max) || "[redacted]";
 export function projectDecision(
   s: ReadSources,
   r: RunRecord,
@@ -59,7 +69,7 @@ export function projectDecision(
       ? request.metadata.options
           .filter((v): v is string => typeof v === "string")
           .slice(0, 10)
-          .map((v) => safe(s, v, 200))
+          .map((v) => safeOption(s, v, 200))
       : [],
     expectedVersion: {
       revisionToken: digest(request),
@@ -72,6 +82,13 @@ export function projectDecision(
     evidence,
     ...(request.expiresAt ? { expiresAt: request.expiresAt } : {}),
   });
+}
+function pendingActionBlocker(action: NonNullable<RunRecord["pendingAction"]>): string {
+  if (action.kind === "reconcile_delivery" || action.recovery === "reconcile_delivery") return "delivery_reconciliation_required";
+  if (action.kind === "coordinator_continuation") return "coordinator_continuation_pending";
+  if (action.recovery === "auto_resume") return "auto_resume_scheduled";
+  if (action.recovery === "capability_repair") return "capability_repair_pending";
+  return "manual_resume_required";
 }
 export function projectRun(s: ReadSources, runId: string): WebRunView {
   const runs = s.state.runs.filter(
@@ -97,6 +114,10 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
     for (const request of pendingPrototypeApprovals(r.prototype))
       decisions.push(projectDecision(s, r, request, "approval"));
   }
+  // A decided approval stays readable; only its pending form is actionable (actions and admission require "pending").
+  const decided = r.approval && r.decision?.approvalId === r.approval.approvalId ? r.decision.decision : undefined;
+  if (decided)
+    decisions.push({ ...projectDecision(s, r, r.approval!, "approval"), status: decided });
   let current = r;
   const visited = new Set([r.runId]);
   while (current.supersededBy) {
@@ -187,15 +208,31 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
             },
           ]
         : []),
-      ...(r.error
+      ...(r.executionPlanDrift
         ? [
             {
-              code: "runtime_blocked",
-              message:
-                "Runtime requires attention; inspect the current action or decision.",
+              code: "execution_plan_drift",
+              message: "Source changed before dispatch; nothing was sent for this plan.",
             },
           ]
         : []),
+      // Codes only: the raw action reason is private Runtime state and never leaves the host.
+      ...(r.pendingAction && !terminal(r)
+        ? [
+            {
+              code: pendingActionBlocker(r.pendingAction),
+              message: "Runtime is waiting on a recorded recovery action.",
+            },
+          ]
+        : r.error
+          ? [
+              {
+                code: "runtime_blocked",
+                message:
+                  "Runtime requires attention; inspect the current action or decision.",
+              },
+            ]
+          : []),
       ...(stale
         ? [
             {
@@ -218,14 +255,14 @@ export function paginateRuns(s: ReadSources, input: WebRunQuery) {
   const query = WebRunQuerySchema.parse(input);
   const rows = s.state.runs
     .filter((r) => r.delegation.sessionId === s.sessionId)
-    .sort((a, b) => a.runId.localeCompare(b.runId))
     .map((r) => projectRun(s, r.runId))
     .filter(
       (v) =>
         (!query.search ||
           v.title.toLowerCase().includes(query.search.toLowerCase())) &&
         (!query.sdlcStatus || v.sdlcStatus === query.sdlcStatus),
-    );
+    )
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.runId.localeCompare(b.runId));
   const scope = digest([
     s.sessionId,
     query.search,
@@ -259,11 +296,14 @@ import {
   WebDecisionPageResultSchema,
 } from "@bflow/contracts";
 import { ConversationContextSnapshotSchema } from "@bflow/conversation";
-import { parseAgenticJournalState } from "../agentic/journal.js";
+import { ProjectionSnapshots } from "./projection-snapshots.js";
 import type { HostConfiguration } from "../agentic/host-controller.js";
 import { InteractionQuerySchema } from "./schemas.js";
 import { interactionProjectId } from "./client.js";
-async function readSnapshot(path: string): Promise<unknown | undefined> {
+const projectionSnapshots = new ProjectionSnapshots();
+async function readSnapshot(path: string): Promise<unknown | undefined>;
+async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
+async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown, maxBytes = 16 * 1024 * 1024): Promise<unknown | undefined> {
   let file;
   try {
     file = await open(
@@ -276,12 +316,12 @@ async function readSnapshot(path: string): Promise<unknown | undefined> {
   }
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > 16 * 1024 * 1024)
+    if (!stat.isFile() || stat.size > maxBytes)
       throw new Error("Invalid read source");
     const bytes = await file.readFile();
-    if (bytes.byteLength > 16 * 1024 * 1024)
+    if (bytes.byteLength > maxBytes)
       throw new Error("Read source too large");
-    return JSON.parse(bytes.toString("utf8"));
+    return decode ? decode(bytes) : JSON.parse(bytes.toString("utf8"));
   } finally {
     await file.close();
   }
@@ -354,7 +394,8 @@ export async function hostInteractionQuery(
       },
     };
   }
-  const journal = await readSnapshot(join(root, "agentic/journal/state.json"));
+  const journalPath = join(root, "agentic/journal/state.json");
+  const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
   const state =
     journal === undefined
       ? {
@@ -366,7 +407,7 @@ export async function hostInteractionQuery(
           pendingCore: [],
           pendingVerifications: [],
         }
-      : parseAgenticJournalState(journal, configuration.repositoryPath);
+      : journal;
   const core = new Map<string, WorkflowRunSnapshot>();
   for (const r of state.runs.filter(
     (r) => r.delegation.sessionId === sessionId && r.coreCreated,
@@ -386,14 +427,19 @@ export async function hostInteractionQuery(
     configuration.repositoryPath,
     configuration.socketPath,
   ];
-  const redact = (text: string) => {
+  const redactSecrets = (text: string) => {
     for (const value of secrets)
       if (value) text = text.split(value).join("[redacted]");
     return redactString(text).replace(
-      /(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key)\s*[=:]\s*\S+|\/(?:[^\s/]+\/)+[^\s]*)/gi,
+      /(?:Bearer\s+\S+|(?:token|secret|password|api[_-]?key)\s*[=:]\s*\S+)/gi,
       "[redacted]",
     );
   };
+  const redact = (text: string) =>
+    redactSecrets(text).replace(
+      /\/(?:[^\s/]+\/)+[^\s]*/gi,
+      "[redacted]",
+    );
   const rawContext = await readSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
   const context = rawContext === undefined ? undefined : ConversationContextSnapshotSchema.parse(rawContext);
   if (context && (context.session.sessionId !== sessionId || context.session.herdrSessionId !== configuration.sessionId))
@@ -407,6 +453,7 @@ export async function hostInteractionQuery(
     commandsSupported: options.commandsSupported ?? false,
     pendingClarifications: context?.pendingClarifications,
     redact,
+    redactOption: redactSecrets,
     transport: {
       states: [...new Set(manifest.panes.map((p) => p.transportState))].slice(
         0,
@@ -423,14 +470,14 @@ export async function hostInteractionQuery(
         intakeId: p.correlationId,
         sessionId,
         correlationId: p.correlationId,
-        title: redact(p.draft.title ?? "Yêu cầu cần làm rõ").slice(0, 200),
+        title: sliceUtf16Safe(redact(p.draft.title ?? "Yêu cầu cần làm rõ"), 200),
         status: "clarifying" as const,
         clarifications: p.unresolvedQuestions
           .slice(0, 100)
           .map((question, index) => ({
             questionId:
               "question-" + digest([p.correlationId, index, question]),
-            question: redact(question).slice(0, 16000),
+            question: sliceUtf16Safe(redact(question), 16000),
             options: [],
             expectedVersion: { revisionToken: digest(p) },
           })),
@@ -507,7 +554,9 @@ export async function hostInteractionQuery(
   }
   const decisions = state.runs
     .filter((r) => r.delegation.sessionId === sessionId)
-    .flatMap((r) => projectRun(source, r.runId).decisions);
+    .flatMap((r) => projectRun(source, r.runId).decisions)
+    // The review inbox stays a to-do list; settled approvals are read from their run.
+    .filter((d) => !["approved", "rejected", "changes_requested"].includes(d.status));
   if (decisions.length > 100)
     return {
       ok: false as const,

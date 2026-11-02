@@ -329,6 +329,55 @@ describe("A-Z acceptance: an implementing run stays recoverable", () => {
     expect((await f.state()).outbound.some(out => out.message.type === "conversation.clarification")).toBe(true);
   }, 60_000);
 
+  it.each([
+    ["a retryable infrastructure failure", { code: "transport_unavailable" as const, retryable: true as const,
+      message: "Error: EISDIR: illegal operation on a directory, read", details: { stage: "prepare_launch", errno: "EISDIR" } }, "auto_resume"],
+    ["a deliberate refusal", { code: "validation" as const, retryable: false as const,
+      message: "Error: Platform has no prepared generation; run bflow up again" }, "manual"]
+  ])("pauses Developer allocation after %s with the matching recovery", async (_name, error, recovery) => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    f.panes.allocateDeveloper = async () => ({ ok: false as const, error }) as never;
+    await f.runtime.tick();
+    expect(await f.record()).toMatchObject({ status: "escalated", pendingAction: { kind: "resume_coordinator", state: "pending", recovery } });
+  }, 60_000);
+
+  it("heals a transient infrastructure allocation failure with no user action once the backoff elapses", async () => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    const allocate = f.panes.allocateDeveloper.bind(f.panes);
+    f.panes.allocateDeveloper = async () => ({ ok: false as const, error: { code: "transport_unavailable" as const, retryable: true as const,
+      message: "Error: EISDIR: illegal operation on a directory, read", details: { stage: "prepare_launch", errno: "EISDIR" } } }) as never;
+    await f.runtime.tick();
+    expect((await f.record()).pendingAction).toMatchObject({ recovery: "auto_resume", state: "pending" });
+    f.advance(5 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 }); // still inside the backoff window
+    f.panes.allocateDeveloper = allocate; // the fault cleared
+    f.advance(31 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
+    await f.runtime.tick();
+    expect((await f.record()).status).toBe("implementing");
+    expect((await f.state()).outbound.some(out => out.message.type === "task.assignment" && out.message.recipient.role === "developer")).toBe(true);
+  }, 90_000);
+
+  it("stops healing a persistent allocation fault after the automatic budget and leaves the decision to the user", async () => {
+    const f = await fixture(); await delegate(f);
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    let attempts = 0;
+    f.panes.allocateDeveloper = async () => { attempts += 1; return { ok: false as const, error: { code: "transport_unavailable" as const, retryable: true as const,
+      message: "Error: EISDIR: illegal operation on a directory, read" } } as never; };
+    await f.runtime.tick();
+    for (let round = 0; round < 6; round++) { f.advance(130 * SECOND); await f.runtime.resumeRecoverableRuns(); await f.runtime.tick(); }
+    const blocked = await f.record();
+    expect(blocked).toMatchObject({ status: "escalated", pendingAction: { recovery: "manual", state: "pending" } });
+    const afterBudget = attempts;
+    f.advance(600 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 0 });
+    await f.runtime.tick();
+    expect(attempts).toBe(afterBudget); // no further automatic attempts
+    expect(afterBudget).toBeLessThanOrEqual(5);
+  }, 120_000);
+
   it("records a resumable action when Developer allocation fails and retries it after an explicit resume", async () => {
     const f = await fixture(); await delegate(f);
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
@@ -676,6 +725,29 @@ describe("human fencing of a stale diagnostic without claiming delivery", () => 
     encoded.version = 1;
     await writeFile(path, JSON.stringify(encoded));
     await expect(reopened.inspect("run-1")).rejects.toThrow("require private journal v2");
+  }, 60000);
+
+  it("fences a blocked report from a retired specialist pane only, never from a live pane or a Developer", async () => {
+    const f = await fencedFixture();
+    const qa = f.binding("qa");
+    const blocked = (id: string, patch: Record<string, unknown>) => RoleMessageSchema.parse({ ...f.message, ...patch, message_id: id, idempotency_key: id });
+    const stale = blocked("qa-stale", { recipient: { role: "coordinator" }, sender: { role: "qa", agent_id: qa.agentId, pane_id: "retired-qa" } });
+    await f.runtime.recordNativeDeliveryIntent(stale, "qa-stale");
+    await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, operationId: "qa-stale" })).resolves.toMatchObject({ disposition: "fenced_without_delivery_claim", resendAllowed: false });
+    expect((await f.record()).nativeDiagnosticFences?.map(item => item.message.message_id)).toEqual(["qa-stale"]);
+    const reopened = new AgenticWorkflowRuntime(f.ports, { journalDirectory: join(f.root, "journal"), repositoryPath: f.repository });
+    await reopened.initialize();
+    await reopened.recordNativeDeliveryIntent(stale, "qa-stale");
+    const restored = await reopened.inspect("run-1") as unknown as RunRecord;
+    expect((restored.nativeDeliveries ?? []).map(item => item.operationId)).toEqual(["old-diagnostic"]);
+    expect(restored.nativeDiagnosticFences).toHaveLength(1);
+    for (const [id, patch] of [
+      ["qa-live", { recipient: { role: "coordinator" }, sender: { role: "qa", agent_id: qa.agentId, pane_id: qa.paneId } }],
+      ["dev-to-coordinator", { recipient: { role: "coordinator" }, sender: { role: "developer", agent_id: "dev-1", pane_id: "retired-dev" } }]
+    ] as const) {
+      await f.runtime.recordNativeDeliveryIntent(blocked(id, patch), id).catch(() => undefined);
+      await expect(f.runtime.fenceNativeDiagnostic({ ...f.authority, operationId: id })).rejects.toThrow();
+    }
   }, 60000);
 
   it("refuses missing human authority, cross-session input, live-sender diagnostics and conclusive payloads", async () => {

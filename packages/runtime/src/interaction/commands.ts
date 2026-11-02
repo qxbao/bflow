@@ -139,9 +139,12 @@ export class HostStructuredCommands {
       const decision = view.decisions.find(decision => decision.decisionId === command.decisionId);
       if (!decision || decision.status !== "pending" || decision.expiresAt && Date.parse(decision.expiresAt) <= Date.now() ||
         canonicalWebJson(decision.expectedVersion) !== canonicalWebJson(command.expectedVersion)) throw new Refusal("stale_version");
-      if (decision.kind !== "user_decision" && command.selectedOption !== undefined ||
+      if (decision.kind === "user_decision" && command.outcome === "changes_requested" ||
+        decision.kind !== "user_decision" && command.selectedOption !== undefined ||
         command.selectedOption !== undefined && !decision.options.includes(command.selectedOption) ||
-        decision.kind === "user_decision" && decision.options.length && command.outcome === "approved" && command.selectedOption === undefined)
+        decision.kind === "user_decision" && decision.options.length && command.outcome === "approved" && command.selectedOption === undefined ||
+        decision.kind === "user_decision" && !decision.options.length && !command.reason?.trim() ||
+        decision.kind === "user_decision" && command.outcome === "approved" && command.selectedOption === "Approve test-integrity exception" && !command.reason?.trim())
         throw new Refusal("operation_not_allowed");
     }
   }
