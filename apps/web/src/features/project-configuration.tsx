@@ -97,7 +97,7 @@ function Roles({value,onChange}:{value:WebConfigValue[];onChange:(v:WebConfigVal
  const [bulkCli,setBulkCli]=useState('claude'),[bulkModel,setBulkModel]=useState('');
  const configuredModels=[...new Set(value.flatMap(item=>item && typeof item==='object' && !Array.isArray(item) && typeof item.model==='string' && item.model?[item.model]:[]))];
  const suggestions=[...new Set([...configuredModels,...(presetModels[bulkCli]??[])])];
- const applyAll=()=>{onChange(value.map(item=>{if(!item || typeof item!=='object' || Array.isArray(item))return item;const next:Record<string,WebConfigValue>={...item,cli:bulkCli};if(bulkCli==='agy')delete next.effort;if(bulkModel.trim())next.model=bulkModel.trim();return next;}));};
+ const applyAll=()=>{onChange(value.map(item=>{if(!item || typeof item!=='object' || Array.isArray(item))return item;const role=String(item.role);const targetCli=bulkCli==='agy' && role==='conversation'?String(item.cli??'claude'):bulkCli;const cliChanged=item.cli!==targetCli;const next:Record<string,WebConfigValue>={...item,cli:targetCli};if(targetCli==='agy')delete next.effort;if(bulkModel.trim())next.model=bulkModel.trim();else if(cliChanged)delete next.model;return next;}));};
  return <>
   <div className="my-2 border border-line bg-canvas p-2.5 text-xs">
    <div className="flex flex-wrap items-end gap-2">
@@ -145,7 +145,7 @@ export function ProjectConfiguration({api,id,revision,disabled=false,onDirtyChan
   return()=>{reqGen.current+=1;};
  },[api,id,revision]);
  async function save(event:FormEvent){
-  event.preventDefault();if(!saved)return;
+  event.preventDefault();if(!saved||disabled)return;
   const targetId=id,gen=++reqGen.current;
   const current=()=>mounted.current && activeId.current===targetId && reqGen.current===gen;
   setBusy(true);setError(undefined);setMessage('');
@@ -166,7 +166,7 @@ export function ProjectConfiguration({api,id,revision,disabled=false,onDirtyChan
   {envEntries.map(([key,value])=><details key={key} className="my-1"><summary>{titles[key]??key}</summary><Field name={key} path={`environment.${key}`} value={value} onChange={v=>setEnv(key,v)}/></details>)}
   <details className="my-1"><summary>Lưu trữ, workflow và thông tin hệ thống</summary>{Object.entries(values).filter(([key])=>!['projectName','environment'].includes(key)).map(([key,value])=><Field key={key} name={key} path={key} value={value} onChange={v=>setValues({...values,[key]:v})} disabled={['schemaVersion','runtimeId','createdAt'].includes(key)}/>)}</details>
  </div>
- </>}</fieldset><div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3"><button className="min-w-32 border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface" disabled={busy||disabled||!dirty}>Lưu cấu hình</button><button type="button" disabled={busy||disabled} onClick={()=>{assign(saved);setMessage('');setError(undefined);}}>Bỏ thay đổi</button><button type="button" disabled={busy||disabled||dirty} onClick={()=>void load()}>Tải cấu hình mới nhất</button></div></form></>}
+ </>}</fieldset><div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3"><button className="min-w-32 border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface" disabled={busy||disabled||!dirty}>Lưu cấu hình</button><button type="button" disabled={busy||disabled} onClick={()=>{assign(saved);setMessage('');setError(undefined);}}>Bỏ thay đổi</button><button type="button" disabled={busy||disabled||(dirty&&!Boolean(error))} onClick={()=>void load()}>Tải cấu hình mới nhất</button></div></form></>}
  {saved?.gitIgnore!==undefined && <details className="my-2"><summary>Quy tắc Git .bflow/.gitignore sẽ được commit cùng cấu hình</summary><pre className="text-xs">{saved.gitIgnore}</pre></details>}
  {message && <p role="status" className="my-2 text-sm text-success">{message}</p>}
  </section>;

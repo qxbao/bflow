@@ -92,7 +92,7 @@ export interface RunRecord {
      * `auto_resume`: Runtime resumes this blocker itself with backoff, sharing the bounded `resumeAttempts` budget; once spent it
      * becomes `manual`. `capability_repair` resumes only after a positive capability proof. Absent/`manual`: waits for a human.
      */
-    recovery?: "auto_resume" | "capability_repair" | "manual" | "reconcile_delivery";
+    recovery?: "auto_resume" | "capability_repair" | "manual" | "reconcile_delivery" | "plan_drift_reconcile";
     /** Last time this episode (or the action it inherited its budget from) was resumed; the automatic-resume backoff anchor. */
     lastResumedAt?: string;
     /** Explicit user resumes of this blocker lineage (bounded separately from `resumeAttempts`); absent in older journals means 0. */
@@ -385,7 +385,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
         throw new Error("Invalid durable workflow resume limit");
       if (action.relatedMessageIds !== undefined && (!Array.isArray(action.relatedMessageIds) || action.relatedMessageIds.length > 100 ||
           action.relatedMessageIds.some(id => typeof id !== "string" || !id))) throw new Error("Invalid related capability failure identities");
-      if (action.recovery !== undefined && !["auto_resume", "capability_repair", "manual", "reconcile_delivery"].includes(String(action.recovery)))
+      if (action.recovery !== undefined && !["auto_resume", "capability_repair", "manual", "reconcile_delivery", "plan_drift_reconcile"].includes(String(action.recovery)))
         throw new Error("Invalid workflow recovery classification");
       if (action.lastResumedAt !== undefined && !Number.isFinite(Date.parse(textField(action.lastResumedAt))))
         throw new Error("Invalid durable workflow resume time");

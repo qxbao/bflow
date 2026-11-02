@@ -20,6 +20,8 @@ export const DISPATCH_FAILURE_NOTICE_ATTEMPTS = 5;
 /** Backoff between consecutive capability preflight failures of one unsent message; the next failure after these marks it failed. */
 export const PREFLIGHT_RETRY_DELAYS_MS: readonly number[] = [0, 2_000, 8_000, 30_000];
 /** Backoff between consecutive execution-plan drift checks of one unsent message while keeping it queued for drift remediation. */
+/** Backoff after a proven transport rejection (or an unrelated pre-send failure); the attempt after the last delay fails the handoff visibly. */
+export const DELIVERY_REJECTION_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000, 30_000];
 export const EXECUTION_DRIFT_RETRY_DELAYS_MS: readonly number[] = [2_000, 5_000, 15_000, 30_000];
 const DEFERRED_CONTROL_NOTICE_KINDS = new Set(["policy_phase_outcome", "user_decision_answer"]);
 function isPermanentTaskNoticeAuthorityError(error: unknown): boolean {
@@ -650,11 +652,24 @@ export class HerdrOutbox {
         out.status = "unknown_delivery"; out.error = receipt.reason; await this.save();
       } else {
         // A proven rejection permits a later delivery, while other panes remain independently drainable.
-        out.status = "queued"; out.error = receipt.reason; await this.save();
+        out.status = "queued"; out.error = receipt.reason;
+        await this.backOffDelivery(out);
       }
     } catch (error) {
       out.status = "unknown_delivery"; out.error = String(error); await this.save();
     }
+  }
+  /** Counts a rejected delivery and delays the next attempt; once the budget is spent the handoff fails into a visible blocker. */
+  private async backOffDelivery(out: Outbound): Promise<void> {
+    out.deliveryAttempts = (out.deliveryAttempts ?? 0) + 1;
+    const delay = DELIVERY_REJECTION_RETRY_DELAYS_MS[out.deliveryAttempts - 1];
+    if (delay === undefined) {
+      const reason = out.error;
+      if (out.lease && !out.parentAssignmentId) { try { await this.release(out); } catch { /* lease settles through cancellation/expiry */ } }
+      out.status = "failed"; out.error = `Delivery rejected after ${out.deliveryAttempts} attempts: ${reason ?? "no reason"}`;
+      delete out.nextAttemptAt;
+    } else out.nextAttemptAt = new Date(Date.parse(this.now()) + delay).toISOString();
+    await this.save();
   }
   async reconcile(messageId: string, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
     const out = this.state.outbound.find(item => item.message.message_id === messageId);

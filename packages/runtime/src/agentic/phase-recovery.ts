@@ -1,11 +1,15 @@
 import { record, type JournalState, type RunRecord, type Outbound } from "./journal.js";
 
 /** Released or delivery-exhausted current phase requests with no observed result: only explicit recovery may authorize a new measurement. */
-export function unmeasuredPolicyPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
+/** `now` is the Runtime clock (ISO); it defaults to wall time only for callers that have no injected clock. */
+export function unmeasuredPolicyPhaseRequests(state: JournalState, run: RunRecord, now: string = new Date().toISOString()): Outbound[] {
     return state.outbound.filter((item, itemIndex) => {
+      if (!item.message || typeof item.message !== "object" || item.message.type !== "verification.requested") return false;
       const payload = record(item.message.payload);
+      const isExpiredLease = Boolean(item.lease && Date.parse(item.lease.expiresAt) <= Date.parse(now));
       const terminalWithoutMeasurement = item.status === "released" ||
-        (item.status === "failed" && !item.error?.includes("RoleCapabilityPreflightError"));
+        (item.status === "failed" && !item.error?.includes("RoleCapabilityPreflightError")) ||
+        (item.status === "accepted" && isExpiredLease);
       if (item.message.run_id !== run.runId || item.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
           !terminalWithoutMeasurement || item.phaseFailure || item.phaseRetirement || item.error?.startsWith("policy_phase_failed:")) return false;
       if (state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected")) return false;

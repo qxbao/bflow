@@ -577,11 +577,12 @@ describe("P30 dynamic Developer launches end to end", () => {
     expect(start.args[start.args.indexOf("--pane") + 1]).toBe(paneId);
     expect(start.args.slice(start.args.indexOf("--") + 1)).toEqual(launch.argv);
     // With no Gateway grant, the launch carries the session lifecycle policy and the pinned native Claude selectors
-    // (HOME and CLAUDE_CONFIG_DIR) that transcript registration validates, never a token or registration.
+    // (HOME, and CLAUDE_CONFIG_DIR only when the host sets it) that transcript registration validates,
+    // never a token or registration.
     const home = process.env["HOME"] ?? homedir();
     expect(launch.env).toEqual({
       DISABLE_AUTOUPDATER: "1", MCP_TIMEOUT: "120000", HOME: home,
-      CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] ?? join(home, ".claude")
+      ...(process.env["CLAUDE_CONFIG_DIR"] ? { CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] } : {})
     });
 
     expect(result.value.metadata).toEqual(expect.objectContaining({

@@ -43,6 +43,7 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
   void poll();return()=>{active=false;clearTimeout(timer);};
  },[api,id,operationId,pollAttempt,key]);
  async function initialize(retry=false){
+  if(busy||running)return;
   setError(undefined);setBusy(true);
   let op='';
   try{
@@ -74,7 +75,7 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
    if(op){setOperationId(op);setPollAttempt(value=>value+1);}
   }finally{setBusy(false);}
  }
- async function unregister(){setBusy(true);setError(undefined);try{await api.unregister(id);refresh();navigate('/');}catch(e){setError(e);}finally{setBusy(false);}}
+ async function unregister(){if(busy||running)return;setBusy(true);setError(undefined);try{await api.unregister(id);refresh();navigate('/');}catch(e){setError(e);}finally{setBusy(false);}}
  const attentionChecks=inspection?.checks.filter(c=>c.state!=='passed')??[],passedChecks=inspection?.checks.filter(c=>c.state==='passed')??[];
  return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Thông tin trên máy này</div><h1>Cài đặt dự án</h1>
  <nav aria-label="Các phần cài đặt" className="my-3 flex flex-wrap gap-x-5 gap-y-2 border-b border-line pb-2.5 font-data text-sm"><a href="#settings-readiness">Điều kiện sẵn sàng</a><a href="#settings-configuration">Cấu hình</a><a href="#settings-initialize">Khởi tạo</a><a href="#settings-remove" className="text-danger">Hủy đăng ký</a></nav>

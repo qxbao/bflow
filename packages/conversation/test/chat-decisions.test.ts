@@ -161,7 +161,8 @@ describe("Chat decides intent; Gateway validates and executes", () => {
     const recovered = new ConversationGateway(config);
     await recovered.initializeOrRecoverSession();
     expect(recovered.getContextSnapshot().pendingInboundQueue).toHaveLength(1);
-    expect(recovered.getContextSnapshot().pendingInboundQueue[0]?.attempts).toBe(1);
+    // Recovery re-attempts the queued decision once (the dispatch still fails), so the count advances.
+    expect(recovered.getContextSnapshot().pendingInboundQueue[0]?.attempts).toBe(2);
     config.bridge.handOffToCoordinator = dispatch;
     expect((await recovered.flushPendingInboundQueue()).ok).toBe(true);
     expect(recovered.getContextSnapshot().pendingInboundQueue).toHaveLength(0);

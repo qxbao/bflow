@@ -41,7 +41,11 @@ export interface ObservedIdentityLeaf {
 }
 
 export function normalizeTestIdentity(value: string): string {
-  return value.normalize("NFC").trim().replace(/\s+/g, " ");
+  return value.normalize("NFC").trim().replace(/\s*::\s*/g, " > ").replace(/\s+/g, " ");
+}
+
+export function stripFilePrefix(name: string): string {
+  return name.replace(/^(?:(?:\.{1,2}|[A-Za-z0-9_-]+)\/)*[A-Za-z0-9._-]+\.(?:[cm]?[jt]sx?|py|go|rs|rb|java|kt|cs)\s*(?:>|::|:)\s*/i, "").trim();
 }
 
 function buildLeafIdentityForms(leaf: ObservedIdentityLeaf): {
@@ -72,7 +76,14 @@ export function matchesExpectedIdentity(leaf: ObservedIdentityLeaf, expectedName
   const forms = buildLeafIdentityForms(leaf);
   if (forms.fullForms.has(norm) || forms.suffixForms.has(norm)) return true;
   if (norm.includes(">") && forms.hierarchyForm !== undefined) {
-    return forms.hierarchyForm === normalizeTestIdentity(norm.replace(/\s*>\s*/g, " "));
+    if (forms.hierarchyForm === normalizeTestIdentity(norm.replace(/\s*>\s*/g, " "))) return true;
+  }
+  const stripped = normalizeTestIdentity(stripFilePrefix(expectedName));
+  if (stripped !== norm) {
+    if (forms.fullForms.has(stripped) || forms.suffixForms.has(stripped)) return true;
+    if (stripped.includes(">") && forms.hierarchyForm !== undefined) {
+      if (forms.hierarchyForm === normalizeTestIdentity(stripped.replace(/\s*>\s*/g, " "))) return true;
+    }
   }
   return false;
 }
@@ -103,9 +114,10 @@ export function resolveExpectedIdentities(
 
   for (let j = 0; j < normExpected.length; j++) {
     const target = normExpected[j]!;
+    const stripped = normalizeTestIdentity(stripFilePrefix(target));
     const matches: number[] = [];
     for (let i = 0; i < leafForms.length; i++) {
-      if (leafForms[i]!.fullForms.has(target)) matches.push(i);
+      if (leafForms[i]!.fullForms.has(target) || (stripped !== target && leafForms[i]!.fullForms.has(stripped))) matches.push(i);
     }
     if (matches.length > 1) return { matched: false };
     if (matches.length === 1) {
@@ -119,7 +131,14 @@ export function resolveExpectedIdentities(
   const matchesSuffix = (entry: ReturnType<typeof buildLeafIdentityForms>, target: string): boolean => {
     if (entry.suffixForms.has(target)) return true;
     if (target.includes(">") && entry.hierarchyForm !== undefined) {
-      return entry.hierarchyForm === normalizeTestIdentity(target.replace(/\s*>\s*/g, " "));
+      if (entry.hierarchyForm === normalizeTestIdentity(target.replace(/\s*>\s*/g, " "))) return true;
+    }
+    const stripped = normalizeTestIdentity(stripFilePrefix(target));
+    if (stripped !== target) {
+      if (entry.suffixForms.has(stripped)) return true;
+      if (stripped.includes(">") && entry.hierarchyForm !== undefined) {
+        if (entry.hierarchyForm === normalizeTestIdentity(stripped.replace(/\s*>\s*/g, " "))) return true;
+      }
     }
     return false;
   };
@@ -158,7 +177,8 @@ export function isRecognizedAssertionMessage(rawMessage: string): boolean {
   if (/^(?:AssertionError|VitestAssertionError|JestAssertionError|JestExtendError|ChaiError|ExpectError|ExpectationError|MatcherError|AssertionFailedError|TestingLibraryElementError|HtmlElementTypeError)(?:\s*\[ERR_ASSERTION\])?:/.test(message)) {
     return true;
   }
-  if (/^Error:\s*expect\(/.test(message)) return true;
+  if (/^(?:Error:\s*)?\[ERR_ASSERTION\]:/.test(message)) return true;
+  if (/^(?:Error:\s*)?expect\(/.test(message)) return true;
   if (/^Error:\s*promise (?:resolved|rejected)\b[\s\S]*?\binstead of (?:rejecting|resolving)\b/.test(message)) return true;
   if (/^Error:\s*(?:Unable to find (?:an? (?:accessible )?element|a label|role)\b|Found multiple elements\b|Timed out in waitFor(?:ElementToBeRemoved)?\b)/.test(message)) {
     return true;
@@ -166,7 +186,8 @@ export function isRecognizedAssertionMessage(rawMessage: string): boolean {
   if (/^Error:/.test(message) && /\n\s*at (?:Proxy\.expectWrapper\b|_Assertion\.__VITEST_(?:REJECTS|RESOLVES)__\b|(?:Object\.)?getElementError\b|[^\n]*@vitest\/expect\/|[^\n]*@testing-library\/(?:dom|jest-dom)\/|Test\._assert(?:Status|Body|Header|Function)\b)/.test(message)) {
     return true;
   }
-  if (/^Error:\s*expected\s+.+\s+got\s+/i.test(message)) return true;
+  if (/^(?:Error:\s*)?(?:expected\s+.+\s+(?:got|to\s+|but\s+|received\s+)|expected\b|expect\b|assertion failed\b|assertion error\b)/i.test(message)) return true;
+  if (/^Assertion failed:/i.test(message)) return true;
   return false;
 }
 

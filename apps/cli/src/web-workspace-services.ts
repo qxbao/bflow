@@ -134,7 +134,11 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
       catch(failure){
         // Settle every outcome: an unsettled `running` receipt would never resolve for the browser.
         // Only a startup that proved no session side effect is definitive; anything else stays uncertain.
-        const definitive=startupLeftSessionUnchanged(failure),message=lifecycleFailureMessage(failure,kind);
+        const lockContention = String(failure).includes('Another bflow up/down/recover is still running');
+        const definitive = startupLeftSessionUnchanged(failure) || lockContention;
+        const message = lockContention
+          ? 'Thao tác vòng đời bị chặn vì có thao tác vòng đời khác đang chạy. Đợi thao tác hoàn tất rồi thử lại.'
+          : lifecycleFailureMessage(failure, kind);
         await settleReceipt(root,WebOperationSchema.parse({...initial,state:definitive?'failed':'reconciliation_required',
           error:{apiVersion:1,code:definitive?'operation_not_allowed':'reconciliation_required',message,retryable:false,operationId:id,correlationId:randomUUID()},
           updatedAt:new Date().toISOString()}));
@@ -220,6 +224,23 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         const saved=await readReceipt(root,operation.projectId,operation.operationId);
         if(saved && saved.operationKind!==operation.operationKind)throw new Error('Lifecycle receipt kind mismatch');
         const activeInProcess=saved?.state==='running' && inFlight.has(path);
+        if(saved?.state==='running' && !activeInProcess){
+          const settledInterrupted=WebOperationSchema.parse({
+            ...saved,
+            state:'reconciliation_required',
+            error:{
+              apiVersion:1,
+              code:'reconciliation_required',
+              message:'Thao tác vòng đời bị gián đoạn do tiến trình máy chủ khởi động lại. Kiểm tra bflow status trước khi tiếp tục.',
+              retryable:false,
+              operationId:operation.operationId,
+              correlationId:randomUUID()
+            },
+            updatedAt:new Date().toISOString()
+          });
+          await settleReceipt(root,settledInterrupted);
+          return WebOperationResponseSchema.parse({ok:true,value:settledInterrupted});
+        }
         return WebOperationResponseSchema.parse({ok:true,value:activeInProcess || (saved && saved.state!=='running' && saved.state!=='accepted')?saved!:
           {...operation,state:'reconciliation_required'}});
       } catch { return error('validation', 'Operation lifecycle không hợp lệ.'); }

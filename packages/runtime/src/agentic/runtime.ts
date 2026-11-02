@@ -569,7 +569,7 @@ export class AgenticWorkflowRuntime {
   }
   /** Released conditional-evidence requests of a live task attempt that ended without any measurement, failure or retirement. */
   private unmeasuredPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
-    return unmeasuredPolicyPhaseRequests(state, run);
+    return unmeasuredPolicyPhaseRequests(state, run, this.now());
   }
   private recordIngressDiagnostic(run: RunRecord, message: RoleMessage, reason: string, disposition: IngressDiagnostic["disposition"]): void {
     if ((run.ingressDiagnostics ?? []).some(item => item.messageId === message.message_id && item.disposition === disposition)) return;
@@ -2261,6 +2261,11 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }), "coordinator");
       }
       const verificationRetry = run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true;
+      // A continuation blocked only because no candidate was eligible launched nothing; an explicit resume lets it re-evaluate candidates.
+      if (!options.automatic) for (const task of run.tasks) for (const failover of task.failovers ?? [])
+        if (failover.phase === "blocked" && failover.reason === "no_eligible_candidate" && failover.destination === undefined) {
+          failover.phase = "retired"; delete failover.reason;
+        }
       for (const item of state.outbound) {
         if (!item.phaseFailure || item.phaseFailure.retryAuthorized) continue;
         const matchesSource = item.message.message_id === action.sourceMessageId;
@@ -2696,8 +2701,9 @@ export class AgenticWorkflowRuntime {
       if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out)))
         throw new Error("Unknown delivery must be reconciled before requesting another specialist assignment");
       if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
-      const pin = profileInput === undefined ? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(requestedRole)] : RoleProfilePinSchema.parse(profileInput);
-      const selectedProfile = selectRoleProfile(this.ports.roleProfiles, requestedRole, pin, [...requiredCapabilities, "repository.read"]);
+      const governanceRole = requestedRole;
+      const pin = profileInput === undefined ? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(governanceRole)] : RoleProfilePinSchema.parse(profileInput);
+      const selectedProfile = selectRoleProfile(this.ports.roleProfiles, governanceRole, pin, [...requiredCapabilities, "repository.read"]);
       if (selectedProfile && (!this.ports.panes.allocateSpecialist || !this.ports.preflightRoleProfile)) throw new Error("Profiled specialist allocation is unsupported by this host");
       if (selectedProfile) {
         for (const settledOut of state.outbound) {
@@ -2839,7 +2845,9 @@ export class AgenticWorkflowRuntime {
       return caps;
     };
     const proposalProfiles = [...new Map(originalProposal.tasks.flatMap(task => {
-      const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[AgentRoleSchema.parse(task.role)];
+      const parsedRole = AgentRoleSchema.safeParse(task.role);
+      if (!parsedRole.success || task.role !== "developer") throw new Error(`Implementation DAG nodes must be Developer tasks; found invalid role '${task.role}' on task ${task.id}`);
+      const pin = task.roleProfile ?? this.ports.roleProfileDefaults?.[parsedRole.data];
       const profile = selectRoleProfile(this.ports.roleProfiles, task.role, pin, taskRequiredCapabilities(task));
       return profile ? [profile] : [];
     }).map(profile => [profile.pin.digest, profile])).values()];
@@ -2900,7 +2908,8 @@ export class AgenticWorkflowRuntime {
       if (proposed.tasks.some(task => task.role !== "developer")) throw new Error("Implementation DAG nodes must be Developer tasks; request read-only specialists through requestSpecialist");
       if (proposed.dependencies.some(dep => dep.condition !== "succeeded")) throw new Error("Dependencies must require verified success");
       const classification = this.ports.policies.classifyChange(record(draft.metadata?.sdd).assessment, draft.affectedPaths);
-      if (classification.level !== draft.level)
+      const sddLevelMandatedFull = run.delegation.sddLevel === "full" && draft.level === "full";
+      if (classification.level !== draft.level && !sddLevelMandatedFull)
         throw new Error(`SDD level conflicts with assessed policy (expected level ${classification.level}, complexity ${classification.complexity}, riskLevel ${classification.riskLevel}; got level ${draft.level})`);
       // An accepted prototype is input to the formal design, never its approval; an open prototype review blocks the design.
       const prototype = prototypeDesignInput(run.prototype, proposed);
@@ -3489,8 +3498,8 @@ export class AgenticWorkflowRuntime {
     const request = run.approval;
     if (!request || run.status !== "awaiting_approval" || decision.approvalId !== request.approvalId || decision.runId !== request.runId ||
         decision.sessionId !== request.sessionId || decision.revision !== request.revision || decision.generation !== request.generation ||
-        digest(decision.target) !== digest(request.target) || Date.parse(decision.decidedAt) < Date.parse(request.requestedAt) ||
-        Date.parse(decision.decidedAt) > Date.parse(this.now()) || request.expiresAt && Date.parse(this.now()) >= Date.parse(request.expiresAt))
+        digest(decision.target) !== digest(request.target) || Date.parse(decision.decidedAt) < Date.parse(request.requestedAt) - 30_000 ||
+        Date.parse(decision.decidedAt) > Date.parse(this.now()) + 30_000 || request.expiresAt && Date.parse(this.now()) >= Date.parse(request.expiresAt))
       throw new Error("Stale or mismatched approval decision");
     if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
     if (decision.decision === "changes_requested" && (run.approvalKind === "design" || run.approvalKind === "delivery") &&
@@ -3816,9 +3825,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         !existingOut.handle && !existingOut.request && !run.cancelled;
       if (existingOut && !recoverableCancelledOut) continue;
       const agentName = `dev-${digest([run.runId, taskState.attemptId]).slice(0, 20)}`;
-      const prior = task.changeSet;
+      const prior = task.changeSet ?? task.cycle?.history.at(-1)?.changeSet;
+      const priorHead = prior?.headCommitHash;
       // A dependent task starts from its verified dependencies' heads; a fallback attempt stays on the run base once its merge conflicted.
-      const dependencyHeads = prior || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
+      const dependencyHeads = priorHead || task.dependencyBaseFallback === taskState.attemptId ? [] : dependencyHeadsFor(run, task.taskId);
       const { tree, conflict } = await prepareDependencyBaseWorktree({ prepareTask: async request => {
         await assertRunExecutionPlan(run, this.ports.readExecutionResolution);
         if (selectedProfile) assertProfileSnapshotCurrent(selectedProfile, this.ports.roleProfiles);
@@ -3826,7 +3836,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       } }, { runId: run.runId, taskId: task.taskId,
         attemptId: taskState.attemptId!, ownedPaths: strings(record(definition.metadata).ownedPaths),
         forbiddenPaths: definition.metadata?.forbiddenPaths ? strings(definition.metadata.forbiddenPaths) : [], developerId: agentName },
-      { runBaseRevision: run.baseRevision!, priorHead: prior?.headCommitHash, dependencyHeads });
+      { runBaseRevision: run.baseRevision!, priorHead, dependencyHeads });
       if (conflict !== undefined) {
         task.dependencyBaseFallback = taskState.attemptId!;
         this.progress(state, outbox, run, `Dependency outputs of ${task.taskId} overlap; starting from the run base and leaving the overlap to final integration. ${conflict}`);
@@ -4212,8 +4222,17 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         record(item.message.payload).phase === phase && record(item.message.payload).implementationAttemptId === current.attemptId &&
         !item.phaseRetirement && !item.error?.startsWith("policy_phase_failed:"));
       if (previous) {
-        if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
-        return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
+        const leaseExpired = Boolean(previous.lease && Date.parse(previous.lease.expiresAt) <= Date.parse(this.now()) && !previous.cancelRequested);
+        if (leaseExpired) {
+          previous.status = "released";
+          previous.error = `policy_phase_failed:${UNMEASURED_PHASE_SUMMARY}`;
+          previous.phaseFailure = { summary: UNMEASURED_PHASE_SUMMARY, repairable: false, applied: false, retryAuthorized: true };
+          await save();
+          await this.recoverPhaseFailures(state, save, outbox);
+        } else {
+          if (record(previous.message.payload).sourceRevision !== sourceRevision) throw new Error("Prior phase measurement is unresolved on another revision; reconcile it before retrying");
+          return json({ queued: true, messageId: previous.message.message_id, deliveryStatus: previous.status });
+        }
       }
       const failedHere = state.outbound.filter(item => item.message.run_id === runId && item.error?.startsWith("policy_phase_failed:") &&
           record(item.message.payload).taskId === taskId && record(item.message.payload).phase === phase &&
@@ -4853,8 +4872,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               await save();
             }
             const snapshot = await core.snapshot(run.runId);
-            if (snapshot.status === "blocked" && snapshot.tasks.some(task => ["failed", "blocked"].includes(task.status))) {
-              run.status = "escalated"; run.error = "Task blocked or implementation retry policy exhausted";
+            if (snapshot.status === "blocked") {
+              const blockedTask = snapshot.tasks.find(task => ["failed", "blocked", "cancelled"].includes(task.status));
+              run.status = "escalated";
+              run.error = blockedTask
+                ? (blockedTask.status === "failed" ? "Task blocked or implementation retry policy exhausted" : `Task ${blockedTask.taskId} is ${blockedTask.status}; workflow execution blocked`)
+                : "Workflow execution blocked by dependencies or exhausted retry policy";
               this.progress(state, outbox, run, run.error);
             }
             if (snapshot.status === "failed") { run.status = "failed"; delete run.pendingAction; this.progress(state, outbox, run, "Implementation retry policy exhausted"); }
@@ -4951,6 +4974,32 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           : "Independent verification could not finish (environment/timeout/evidence). Report it with the retry/cancel options; the user's resume (or retry_verification once the user chose it) re-runs it." },
       artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
   }
+  /**
+   * A final (non-retryable) verification outcome stops the run for a human decision. Keep it recoverable: a durable manual
+   * resume action, an actionable user notice and a Coordinator wake, instead of a bare `escalated` status.
+   */
+  private escalateForHumanDecision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, taskId: string, reason: string,
+    options: readonly string[], headline = `Workflow needs your decision: ${taskId}`): void {
+    const previousStatus = run.status === "escalated" ? "verifying" : run.status;
+    run.status = "escalated"; run.error = reason;
+    const sourceMessageId = `workflow-blocked-${digest([run.runId, taskId, reason])}`;
+    if (!(run.pendingAction?.state === "pending" && run.pendingAction.kind === "resume_coordinator" && run.pendingAction.sourceMessageId === sourceMessageId)) {
+      run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+        reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
+        ...inheritedManualResume(run), recovery: "manual" };
+    }
+    const action = run.pendingAction!;
+    this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, taskId, reason, actionId: action.actionId,
+      options: [...options], sdlcStatus: run.status, headline },
+      `workflow-blocked:${digest([run.runId, taskId, reason])}`, "conversation");
+    const wakeId = `p19-wake-${digest([run.runId, "workflow-blocked", taskId, reason])}`;
+    if (!state.outbound.some(out => out.message.message_id === wakeId)) outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId,
+      correlation_id: run.delegation.correlationId, causation_id: sourceMessageId, run_id: run.runId, sender: { role: "runtime" },
+      recipient: { role: "coordinator" }, type: "task.status", payload: { kind: "workflow_blocked", runId: run.runId, taskId, reason,
+        actionId: action.actionId, sdlcStatus: run.status,
+        next: "Runtime stopped this run for a human decision (verification limit, conflict or blocked delivery). Report it with the options; do not retry on your own." },
+      artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
+  }
   /** Bounded retries for a durable verification outcome that cannot be finished. Other entries and runs are unaffected. */
   private async recordVerificationFailure(item: JournalState["pendingVerifications"][number], error: unknown): Promise<void> {
     const id = pendingVerificationId(item);
@@ -5031,6 +5080,28 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   private recordRunStepFailure(state: JournalState, outbox: HerdrOutbox, run: RunRecord, error: unknown): void {
     const reason = redactString(String(error));
     run.error = `${RUN_STEP_FAILURE_PREFIX} ${reason}`;
+    if (/uncommitted changes/i.test(reason) && !(error instanceof ExecutionPlanDriftError)) {
+      // Retrying cannot clean the owner's repository: stop with an actionable blocker instead of "no action needed".
+      this.escalateForHumanDecision(state, outbox, run, "integration", reason.slice(0, 2000), [
+        "Commit or stash the uncommitted changes in the main repository, then ask to continue", "Cancel this run"],
+        "Integration is blocked by uncommitted changes in the main repository");
+      return;
+    }
+    if (error instanceof ExecutionPlanDriftError) {
+      run.status = "escalated";
+      const sourceMessageId = `plan-drift-${digest([run.runId, reason])}`;
+      run.pendingAction = {
+        actionId: `next-${digest([run.runId, sourceMessageId])}`,
+        kind: "resume_coordinator",
+        owner: "coordinator",
+        reason: run.error,
+        sourceMessageId,
+        createdAt: this.now(),
+        state: "pending",
+        previousStatus: "implementing",
+        recovery: "plan_drift_reconcile"
+      };
+    }
     this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, reason: run.error,
       options: error instanceof ExecutionPlanDriftError
         ? ["Run read-only task preview again, review the input diff and reconcile the accepted plan", "Cancel this run"]
@@ -5155,7 +5226,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           }
         }
         else if (retryable) this.escalateForRetry(state, outbox, run, task.taskId, `${VERIFICATION_RETRY_PREFIX} ${cycle.escalation?.reason ?? "Verification blocked"}`);
-        else { run.status = "escalated"; run.error = cycle.escalation?.reason ?? "Verification blocked"; }
+        else this.escalateForHumanDecision(state, outbox, run, task.taskId, cycle.escalation?.reason ?? "Verification blocked", [
+          "Review the verification findings and send an updated specification or plan", "Cancel this run"]);
       } else {
         run.workflowCycle = cycle; run.workflowVerificationPending = false;
         const currentIntegration = await this.ports.policies.git.getIntegration(run.integrationKey!);
@@ -5171,7 +5243,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           this.escalateForRetry(state, outbox, run, FINAL_TASK, `${VERIFICATION_RETRY_PREFIX} ${cycle.escalation?.reason ?? "Workflow verification blocked"}`);
         } else {
           // Integrated revisions are immutable. Workflow repair requires a new approved task graph.
-          run.status = "escalated"; run.error = cycle.escalation?.reason ?? "Integrated workflow verification failed; plan scoped repairs";
+          this.escalateForHumanDecision(state, outbox, run, FINAL_TASK, cycle.escalation?.reason ?? "Integrated workflow verification failed; plan scoped repairs", [
+            "Review the verification findings and approve an updated plan with scoped repairs", "Cancel this run"]);
         }
       }
       // A replayed durable outcome that moved the run on settles the verification-retry action it was escalated with.
@@ -5204,16 +5277,21 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     if (!await this.settleConflictResolvers(state, save, outbox, run)) return; // a previous resolver pane is still active
     if (integration.status === "conflict") { await this.assignConflictResolver(state, save, outbox, run, integration); return; }
-    if (integration.status !== "awaiting_verification" || run.workflowChange) return;
+    if (integration.status !== "awaiting_verification") return;
+    if (run.workflowChange) {
+      // The integrated change was already captured (recovery or an approval step reset the status): resume at workflow verification.
+      if (run.status === "implementing") { run.status = "verifying"; await save(); }
+      return;
+    }
     run.workflowChange = await captureIntegratedChange({ artifactStore: this.ports.artifactStore, runId: run.runId,
       taskId: FINAL_TASK, worktreePath: integration.worktreePath, branchName: integration.branchName,
       baseRevision: run.baseRevision!, headCommitHash: integration.expectedHead });
     run.status = "verifying"; await save();
   }
   private escalateConflict(state: JournalState, outbox: HerdrOutbox, run: RunRecord, detail?: string): void {
-    run.status = "escalated";
-    run.error = `${CONFLICT_ESCALATION}${detail ? ` (${detail})` : ""}`.slice(0, 2000);
-    this.progress(state, outbox, run, run.error);
+    this.escalateForHumanDecision(state, outbox, run, "integration", `${CONFLICT_ESCALATION}${detail ? ` (${detail})` : ""}`.slice(0, 2000), [
+      "Resolve the conflict manually in the preserved integration worktree, then ask to continue", "Cancel this run"], "Merge conflict needs your decision");
+    this.progress(state, outbox, run, run.error!);
   }
   /**
    * P18 stopped on a merge conflict and preserved the integration worktree. Runtime assigns a Developer resolver on that same
@@ -5509,7 +5587,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save();
       // Safely queued work never reached the provider. Release its own durable lease, while a task notice retains its parent's lease.
       if (out.lease && !out.parentAssignmentId) {
-        try { await outbox.release(out); }
+        try {
+          await outbox.release(out);
+          // The message never reached a provider: it stays cancelled (not "released") and no longer owns the settled lease.
+          if (out.message.type === "task.assignment") { out.status = "cancelled"; delete out.lease; delete out.leaseRelease; await save(); }
+        }
         catch (error) {
           out.error = `Cancellation lease release unresolved: ${redactString(String(error))}`;
           await save(); failure ??= error;
@@ -5943,7 +6025,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           ["queued", "sending", "accepted"].includes(item.status) && !item.phaseFailure && !item.phaseRetirement &&
           !item.error?.startsWith("policy_phase_failed:") &&
           !state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected"));
-        if (role === "developer" && (activePolicyPhaseForTask || unmeasuredPolicyPhaseRequests(state, run).some(item => record(item.message.payload).taskId === out.taskId))) continue;
+        if (role === "developer" && (activePolicyPhaseForTask || unmeasuredPolicyPhaseRequests(state, run, this.now()).some(item => record(item.message.payload).taskId === out.taskId))) continue;
         if (!this.outboundOwesResult(state, run, out) || run.nativeDeliveries?.length) continue;
         const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
         const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;

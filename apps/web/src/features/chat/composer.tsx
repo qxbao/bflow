@@ -13,8 +13,8 @@ function pending(key:string):string|undefined {
 }
 export function ChatComposer({api,projectId,sessionId,runId,ready,sessionFresh,refresh,onPending}:{api:ApiClient;projectId:string;sessionId:string;runId:string;ready:boolean;sessionFresh:boolean;refresh:()=>void;onPending:(message:PendingMessage|undefined)=>void}){
  const key=JSON.stringify(['bflow-chat',projectId,sessionId]);
- const [draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[sending,setSending]=useState(false),[notice,setNotice]=useState(''),[uncertain,setUncertain]=useState(()=>{try{return !!pending(key);}catch{return true;}}),[canUnlock,setCanUnlock]=useState(()=>{try{pending(key);return false;}catch{return true;}});
- useEffect(()=>{setNotice('');try{setUncertain(!!pending(key));setCanUnlock(false);}catch{setUncertain(true);setCanUnlock(true);}},[key]);
+ const [draft,setDraft]=useState(''),[busy,setBusy]=useState(false),[sending,setSending]=useState(false),[notice,setNotice]=useState(()=>{try{return pending(key)?'Đang có tin nhắn trước chờ đối chiếu kết quả gửi. Bấm “Đối chiếu tin nhắn” để kiểm tra.':'';}catch{return 'Dữ liệu đối chiếu cục bộ bị hỏng. Kiểm tra lịch sử trò chuyện rồi mở khóa khung soạn tin nếu cần; không tự gửi lại.';}}),[uncertain,setUncertain]=useState(()=>{try{return !!pending(key);}catch{return true;}}),[canUnlock,setCanUnlock]=useState(()=>{try{pending(key);return false;}catch{return true;}});
+ useEffect(()=>{try{const hasPending=Boolean(pending(key));setUncertain(hasPending);setCanUnlock(false);setNotice(hasPending?'Đang có tin nhắn trước chờ đối chiếu kết quả gửi. Bấm “Đối chiếu tin nhắn” để kiểm tra.':'');}catch{setUncertain(true);setCanUnlock(true);setNotice('Dữ liệu đối chiếu cục bộ bị hỏng. Kiểm tra lịch sử trò chuyện rồi mở khóa khung soạn tin nếu cần; không tự gửi lại.');}},[key]);
  const tooLarge=new TextEncoder().encode(draft).byteLength>WEB_LIMITS.chatBytes;
  // Sending is governed by fresh host/session readiness; a background re-read keeps the draft editable and focused.
  const canSend=ready&&sessionFresh&&!busy&&!uncertain&&!tooLarge&&!!draft.trim();

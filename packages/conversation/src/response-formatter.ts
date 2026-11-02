@@ -208,9 +208,16 @@ export function formatCoordinatorMessageForUser(params: {
   const type = params.roleMessage.type;
   const runId = params.roleMessage.run_id;
 
-  // An expired user decision always reaches the user, whatever the progress fingerprint says.
+  const BLOCKED_KINDS = [
+    "workflow_blocked", "run_stalled", "workflow_rejected", "delivery_failure",
+    "delegation_rejected", "coordinator_no_response", "developer_no_response",
+    "specialist_no_response", "verification_stuck"
+  ] as const;
+  const isBlockedKind = typeof p.kind === "string" && (BLOCKED_KINDS as readonly string[]).includes(p.kind);
+
+  // An expired user decision or blocked event always reaches the user, whatever the progress fingerprint says.
   const expiredApprovalId = userDecisionExpiredApprovalId(params.roleMessage.type, params.roleMessage.payload);
-  const substantive = expiredApprovalId !== undefined || isSubstantiveCoordinatorUpdate(
+  const substantive = expiredApprovalId !== undefined || isBlockedKind || isSubstantiveCoordinatorUpdate(
     params.roleMessage,
     params.workflow?.lastProgress
   );
@@ -273,15 +280,23 @@ export function formatCoordinatorMessageForUser(params: {
       .join("\n");
   }
   // 3. Blocked status
-  else if (taskState === "blocked" || blockageReason !== undefined) {
+  else if (taskState === "blocked" || blockageReason !== undefined || isBlockedKind) {
     isBlocked = true;
     messageIntent = "progress_update";
-    const reason = blockageReason ?? "Đang chờ điều kiện tiên quyết hoặc phê duyệt từ người dùng.";
+    const reason = blockageReason ?? safeString(p.reason) ?? "Đang chờ điều kiện tiên quyết hoặc phê duyệt từ người dùng.";
+    const rawOptions = Array.isArray(p.options) ? p.options.filter((opt): opt is string => typeof opt === "string" && opt.trim().length > 0) : [];
 
     formattedContent = [
       "🛑 **[BLOCKED] Nhiệm vụ đang bị chặn (Blocked)**",
       taskId ? `- **Tác vụ:** ${taskId}` : undefined,
       `- **Lý do chặn:** ${reason}`,
+      ...(rawOptions.length > 0
+        ? [
+            "",
+            "Các lựa chọn xử lý:",
+            ...rawOptions.map((opt, idx) => `${idx + 1}. ${opt}`)
+          ]
+        : []),
       "",
       "Hệ thống đang tạm dừng tác vụ này cho đến khi lý do chặn được tháo gỡ hoặc bạn cung cấp hướng dẫn tiếp theo."
     ]
@@ -392,6 +407,8 @@ export function formatCoordinatorMessageForUser(params: {
 
   const fingerprint = computeProgressFingerprint(params.roleMessage);
 
+  const createdAt = params.createdAt ?? params.roleMessage.occurred_at ?? new Date().toISOString();
+
   const snapshot: ProgressSnapshot = {
     ...(taskId !== undefined ? { taskId } : {}),
     ...(sdlcStatus !== undefined ? { sdlcStatus } : {}),
@@ -401,7 +418,7 @@ export function formatCoordinatorMessageForUser(params: {
     ...(blockageReason !== undefined ? { blockageReason } : {}),
     ...(failureSummary !== undefined ? { failureSummary } : {}),
     ...(isEscalated ? { escalated: true } : {}),
-    updatedAt: params.createdAt,
+    updatedAt: createdAt,
     fingerprint
   };
 
@@ -419,7 +436,7 @@ export function formatCoordinatorMessageForUser(params: {
     intent: messageIntent,
     content: formattedContent,
     artifactReferences: params.roleMessage.artifact_references ? [...params.roleMessage.artifact_references] : [],
-    createdAt: params.createdAt
+    createdAt
   };
 
   let parsed = ConversationMessageSchema.safeParse(rawMessage);

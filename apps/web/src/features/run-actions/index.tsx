@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { WebAction, WebRunView } from '@bflow/contracts/web';
 import { ApiClient, ApiError, explain } from '../../api/client';
 import { isBenignDisabledReason, reason as explainReason } from '../../components/reasons';
@@ -11,6 +11,11 @@ const isSettled=(cmd:{operation?:{state:string}|undefined})=>Boolean(cmd.operati
 export function RunActions({api,id,run,fresh,refreshing=false,refresh}:{api:ApiClient;id:string;run:WebRunView;fresh:boolean;refreshing?:boolean;refresh?:(()=>void)|undefined}) {
   const [confirmCancel,setConfirmCancel]=useState(false),[reason,setReason]=useState(''),[error,setError]=useState(''),[revise,setRevise]=useState(false),uid=useId();
   const cancel=useCommands(`cancel:${run.runId}`),resume=useCommands(`resume:${run.runId}`);
+  const lastActionSig=useRef(JSON.stringify([run.runId,run.updatedAt,run.availableActions.map(a=>[a.actionId,a.enabled,a.expectedVersion])]));
+  useEffect(()=>{
+    const currentSig=JSON.stringify([run.runId,run.updatedAt,run.availableActions.map(a=>[a.actionId,a.enabled,a.expectedVersion])]);
+    if(lastActionSig.current!==currentSig){lastActionSig.current=currentSig;setError('');}
+  },[run.runId,run.updatedAt,run.availableActions]);
   async function send(action:WebAction){
     if(!fresh || !action.enabled){setError('Thao tác chưa được gửi: trang đang cập nhật hoặc thao tác không còn khả dụng. Đợi tải xong rồi thử lại.');return;}
     if(action.kind==='cancel' && !reason.trim()){setError('Nêu lý do hủy công việc.');return;}

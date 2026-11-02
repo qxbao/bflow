@@ -43,6 +43,31 @@ test('recovery stop requires confirmation and uses a separate force intent',asyn
  fireEvent.click(screen.getByRole('button',{name:'Gửi yêu cầu dừng phiên'}));await waitFor(()=>expect(posts).toHaveLength(1));expect(posts[0]).toMatchObject({apiVersion:1,confirmed:true,force:true,operationId:expect.any(String)});
  expect(Object.keys(localStorage).some(key=>key.endsWith(':session_stop_force'))).toBe(true);
 });
+test('a later applied stop releases an uncertain start so a stopped session can start again',async()=>{
+ const {SessionActions}=await import('../src/features/run-actions/session');const session={apiVersion:1 as const,projectId:'p',state:'stopped' as const,pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()};const starts:any[]=[];
+ const startId='11111111-1111-4111-8111-111111111111',stopId='22222222-2222-4222-8222-222222222222',fingerprint='a'.repeat(64);
+ const seed=(slot:string,commandId:string,kind:string)=>localStorage.setItem(`bflow:web:operations:p:s:${slot}`,JSON.stringify({slot,scope:'s',commandId,fingerprint,kind}));
+ seed('session_start',startId,'session_start');seed('session_stop_force',stopId,'session_stop');
+ const operations:Record<string,unknown>={
+  [startId]:{apiVersion:1,projectId:'p',operationId:startId,owner:'local_lifecycle',operationKind:'session_start',state:'reconciliation_required',updatedAt:'2026-11-01T15:19:23.033Z'},
+  [stopId]:{apiVersion:1,projectId:'p',operationId:stopId,owner:'local_lifecycle',operationKind:'session_stop',state:'applied',result:{kind:'lifecycle',session:{...session,updatedAt:'2026-11-01T15:34:57.730Z'}},updatedAt:'2026-11-01T15:34:57.738Z'}};
+ vi.stubGlobal('fetch',async(path:string,init?:RequestInit)=>{if(init?.method==='POST'){const body=JSON.parse(init.body as string);starts.push(body);return Response.json({apiVersion:1,projectId:'p',operationId:body.operationId,owner:'local_lifecycle',operationKind:'session_start',state:'accepted',updatedAt:new Date().toISOString()});}if(path.includes('/operations/'))return Response.json(operations[path.split('/').at(-1)!]);return Response.json(session);});
+ const api=new ApiClient();render(<MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><SessionActions api={api} id="p" session={session} fresh/></Operations></MemoryRouter>);
+ await waitFor(()=>expect(screen.getAllByText(/Mã đối chiếu thao tác/)).toHaveLength(2));
+ const button=screen.getByRole('button',{name:'Khởi động phiên'}) as HTMLButtonElement;
+ expect(button.disabled).toBe(false);
+ fireEvent.click(button);await waitFor(()=>expect(starts).toHaveLength(1));
+ expect(starts[0].operationId).not.toBe(startId);
+});
+test('an uncertain start without a later applied stop keeps the session controls locked',async()=>{
+ const {SessionActions}=await import('../src/features/run-actions/session');const session={apiVersion:1 as const,projectId:'p',state:'stopped' as const,pendingIntakes:[],blockers:[],updatedAt:new Date().toISOString()};
+ const startId='11111111-1111-4111-8111-111111111111';let observed=false;
+ localStorage.setItem('bflow:web:operations:p:s:session_start',JSON.stringify({slot:'session_start',scope:'s',commandId:startId,fingerprint:'a'.repeat(64),kind:'session_start'}));
+ vi.stubGlobal('fetch',async(path:string)=>{if(path.includes('/operations/')){observed=true;return Response.json({apiVersion:1,projectId:'p',operationId:startId,owner:'local_lifecycle',operationKind:'session_start',state:'reconciliation_required',updatedAt:'2026-11-01T15:19:23.033Z'});}return Response.json(session);});
+ const api=new ApiClient();render(<MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><SessionActions api={api} id="p" session={session} fresh/></Operations></MemoryRouter>);
+ await waitFor(()=>expect(observed).toBe(true));await screen.findByText(/Mã đối chiếu thao tác/);
+ expect((screen.getByRole('button',{name:'Khởi động phiên'}) as HTMLButtonElement).disabled).toBe(true);
+});
 test('can open a cancellation confirmation during background refresh while mutation stays blocked until fresh',async()=>{
  const current={...run,availableActions:[cancel]};const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);const api=new ApiClient();
  render(<MemoryRouter><Operations api={api} id="p" refresh={()=>{}}><RunActions api={api} id="p" run={current} fresh={false} refreshing/></Operations></MemoryRouter>);
