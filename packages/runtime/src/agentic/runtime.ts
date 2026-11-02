@@ -569,7 +569,7 @@ export class AgenticWorkflowRuntime {
   }
   /** Released conditional-evidence requests of a live task attempt that ended without any measurement, failure or retirement. */
   private unmeasuredPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
-    return unmeasuredPolicyPhaseRequests(state, run);
+    return unmeasuredPolicyPhaseRequests(state, run, this.now());
   }
   private recordIngressDiagnostic(run: RunRecord, message: RoleMessage, reason: string, disposition: IngressDiagnostic["disposition"]): void {
     if ((run.ingressDiagnostics ?? []).some(item => item.messageId === message.message_id && item.disposition === disposition)) return;
@@ -4951,6 +4951,32 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           : "Independent verification could not finish (environment/timeout/evidence). Report it with the retry/cancel options; the user's resume (or retry_verification once the user chose it) re-runs it." },
       artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
   }
+  /**
+   * A final (non-retryable) verification outcome stops the run for a human decision. Keep it recoverable: a durable manual
+   * resume action, an actionable user notice and a Coordinator wake, instead of a bare `escalated` status.
+   */
+  private escalateForHumanDecision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, taskId: string, reason: string,
+    options: readonly string[], headline = `Workflow needs your decision: ${taskId}`): void {
+    const previousStatus = run.status === "escalated" ? "verifying" : run.status;
+    run.status = "escalated"; run.error = reason;
+    const sourceMessageId = `workflow-blocked-${digest([run.runId, taskId, reason])}`;
+    if (!(run.pendingAction?.state === "pending" && run.pendingAction.kind === "resume_coordinator" && run.pendingAction.sourceMessageId === sourceMessageId)) {
+      run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
+        reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
+        ...inheritedManualResume(run), recovery: "manual" };
+    }
+    const action = run.pendingAction!;
+    this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, taskId, reason, actionId: action.actionId,
+      options: [...options], sdlcStatus: run.status, headline },
+      `workflow-blocked:${digest([run.runId, taskId, reason])}`, "conversation");
+    const wakeId = `p19-wake-${digest([run.runId, "workflow-blocked", taskId, reason])}`;
+    if (!state.outbound.some(out => out.message.message_id === wakeId)) outbox.enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: wakeId,
+      correlation_id: run.delegation.correlationId, causation_id: sourceMessageId, run_id: run.runId, sender: { role: "runtime" },
+      recipient: { role: "coordinator" }, type: "task.status", payload: { kind: "workflow_blocked", runId: run.runId, taskId, reason,
+        actionId: action.actionId, sdlcStatus: run.status,
+        next: "Runtime stopped this run for a human decision (verification limit, conflict or blocked delivery). Report it with the options; do not retry on your own." },
+      artifact_references: [], occurred_at: this.now(), idempotency_key: wakeId }), "coordinator");
+  }
   /** Bounded retries for a durable verification outcome that cannot be finished. Other entries and runs are unaffected. */
   private async recordVerificationFailure(item: JournalState["pendingVerifications"][number], error: unknown): Promise<void> {
     const id = pendingVerificationId(item);
@@ -5031,6 +5057,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   private recordRunStepFailure(state: JournalState, outbox: HerdrOutbox, run: RunRecord, error: unknown): void {
     const reason = redactString(String(error));
     run.error = `${RUN_STEP_FAILURE_PREFIX} ${reason}`;
+    if (/uncommitted changes/i.test(reason) && !(error instanceof ExecutionPlanDriftError)) {
+      // Retrying cannot clean the owner's repository: stop with an actionable blocker instead of "no action needed".
+      this.escalateForHumanDecision(state, outbox, run, "integration", reason.slice(0, 2000), [
+        "Commit or stash the uncommitted changes in the main repository, then ask to continue", "Cancel this run"],
+        "Integration is blocked by uncommitted changes in the main repository");
+      return;
+    }
     if (error instanceof ExecutionPlanDriftError) {
       run.status = "escalated";
       const sourceMessageId = `plan-drift-${digest([run.runId, reason])}`;
@@ -5170,7 +5203,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           }
         }
         else if (retryable) this.escalateForRetry(state, outbox, run, task.taskId, `${VERIFICATION_RETRY_PREFIX} ${cycle.escalation?.reason ?? "Verification blocked"}`);
-        else { run.status = "escalated"; run.error = cycle.escalation?.reason ?? "Verification blocked"; }
+        else this.escalateForHumanDecision(state, outbox, run, task.taskId, cycle.escalation?.reason ?? "Verification blocked", [
+          "Review the verification findings and send an updated specification or plan", "Cancel this run"]);
       } else {
         run.workflowCycle = cycle; run.workflowVerificationPending = false;
         const currentIntegration = await this.ports.policies.git.getIntegration(run.integrationKey!);
@@ -5186,7 +5220,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           this.escalateForRetry(state, outbox, run, FINAL_TASK, `${VERIFICATION_RETRY_PREFIX} ${cycle.escalation?.reason ?? "Workflow verification blocked"}`);
         } else {
           // Integrated revisions are immutable. Workflow repair requires a new approved task graph.
-          run.status = "escalated"; run.error = cycle.escalation?.reason ?? "Integrated workflow verification failed; plan scoped repairs";
+          this.escalateForHumanDecision(state, outbox, run, FINAL_TASK, cycle.escalation?.reason ?? "Integrated workflow verification failed; plan scoped repairs", [
+            "Review the verification findings and approve an updated plan with scoped repairs", "Cancel this run"]);
         }
       }
       // A replayed durable outcome that moved the run on settles the verification-retry action it was escalated with.
@@ -5219,16 +5254,21 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     }
     if (!await this.settleConflictResolvers(state, save, outbox, run)) return; // a previous resolver pane is still active
     if (integration.status === "conflict") { await this.assignConflictResolver(state, save, outbox, run, integration); return; }
-    if (integration.status !== "awaiting_verification" || run.workflowChange) return;
+    if (integration.status !== "awaiting_verification") return;
+    if (run.workflowChange) {
+      // The integrated change was already captured (recovery or an approval step reset the status): resume at workflow verification.
+      if (run.status === "implementing") { run.status = "verifying"; await save(); }
+      return;
+    }
     run.workflowChange = await captureIntegratedChange({ artifactStore: this.ports.artifactStore, runId: run.runId,
       taskId: FINAL_TASK, worktreePath: integration.worktreePath, branchName: integration.branchName,
       baseRevision: run.baseRevision!, headCommitHash: integration.expectedHead });
     run.status = "verifying"; await save();
   }
   private escalateConflict(state: JournalState, outbox: HerdrOutbox, run: RunRecord, detail?: string): void {
-    run.status = "escalated";
-    run.error = `${CONFLICT_ESCALATION}${detail ? ` (${detail})` : ""}`.slice(0, 2000);
-    this.progress(state, outbox, run, run.error);
+    this.escalateForHumanDecision(state, outbox, run, "integration", `${CONFLICT_ESCALATION}${detail ? ` (${detail})` : ""}`.slice(0, 2000), [
+      "Resolve the conflict manually in the preserved integration worktree, then ask to continue", "Cancel this run"], "Merge conflict needs your decision");
+    this.progress(state, outbox, run, run.error!);
   }
   /**
    * P18 stopped on a merge conflict and preserved the integration worktree. Runtime assigns a Developer resolver on that same
@@ -5962,7 +6002,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           ["queued", "sending", "accepted"].includes(item.status) && !item.phaseFailure && !item.phaseRetirement &&
           !item.error?.startsWith("policy_phase_failed:") &&
           !state.inbox.some(entry => entry.message.causation_id === item.message.message_id && entry.message.type === "verification.result" && entry.status !== "rejected"));
-        if (role === "developer" && (activePolicyPhaseForTask || unmeasuredPolicyPhaseRequests(state, run).some(item => record(item.message.payload).taskId === out.taskId))) continue;
+        if (role === "developer" && (activePolicyPhaseForTask || unmeasuredPolicyPhaseRequests(state, run, this.now()).some(item => record(item.message.payload).taskId === out.taskId))) continue;
         if (!this.outboundOwesResult(state, run, out) || run.nativeDeliveries?.length) continue;
         const kind = role === "developer" ? "developer_no_response" : "specialist_no_response";
         const reason = `${role} ended its turn for ${out.message.type} (${out.message.message_id}) without a structured result`;

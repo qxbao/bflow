@@ -1,11 +1,12 @@
 import { record, type JournalState, type RunRecord, type Outbound } from "./journal.js";
 
 /** Released or delivery-exhausted current phase requests with no observed result: only explicit recovery may authorize a new measurement. */
-export function unmeasuredPolicyPhaseRequests(state: JournalState, run: RunRecord): Outbound[] {
+/** `now` is the Runtime clock (ISO); it defaults to wall time only for callers that have no injected clock. */
+export function unmeasuredPolicyPhaseRequests(state: JournalState, run: RunRecord, now: string = new Date().toISOString()): Outbound[] {
     return state.outbound.filter((item, itemIndex) => {
-      if (!item.message || typeof item.message !== "object") return false;
+      if (!item.message || typeof item.message !== "object" || item.message.type !== "verification.requested") return false;
       const payload = record(item.message.payload);
-      const isExpiredLease = Boolean(item.lease && Date.parse(item.lease.expiresAt) <= Date.parse(new Date().toISOString()));
+      const isExpiredLease = Boolean(item.lease && Date.parse(item.lease.expiresAt) <= Date.parse(now));
       const terminalWithoutMeasurement = item.status === "released" ||
         (item.status === "failed" && !item.error?.includes("RoleCapabilityPreflightError")) ||
         (item.status === "accepted" && isExpiredLease);

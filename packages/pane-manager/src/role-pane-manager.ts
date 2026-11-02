@@ -435,7 +435,10 @@ export class RolePaneManager {
     const session = this.#config.sessionId;
     const inspected = await this.#runHerdr(["pane", "read", paneId, "--source", "detection", "--lines", "35"], options);
     const screen = inspected.exitCode === 0 ? inspected.stdout : "";
-    const reason = /updat(?:e|ing).{0,50}(?:cli|codex|available)|(?:cli|codex).{0,50}updat|new version available/is.test(screen)
+    // A crashed or exited provider is not an interactive dialog; say so instead of asking the user to answer one.
+    const crashed = /(?:process exited with code [1-9]\d*|segmentation fault|core dumped|fatal error|panic:|command not found|cannot find module|uncaught exception)/i.test(screen);
+    const reason = crashed ? "Provider process crashed or exited with an error in this pane"
+      : /updat(?:e|ing).{0,50}(?:cli|codex|available)|(?:cli|codex).{0,50}updat|new version available/is.test(screen)
       ? "CLI update confirmation is waiting for your choice"
       : /trust.{0,50}(?:folder|directory|repo)|safety check/is.test(screen) ? "Repository trust confirmation is waiting for your choice"
       : /sign.?in|log.?in|authenticat/is.test(screen) ? "Provider sign-in is required in this pane"
@@ -1393,11 +1396,25 @@ export class RolePaneManager {
         return this.#startupBlocked(spec.topologyRole, agentName, agentKind, request.paneId, "launch pending or interactive not ready", options);
       }
 
+      // Claude/Codex register their native session a moment after launch. Poll briefly so a healthy start is not left "pending".
+      let settledInfo = agentInfo;
+      if (!settledInfo.session && agentKind !== "agy") {
+        for (let attempt = 0; attempt < 6 && !settledInfo.session; attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          const polled = await this.#runHerdr(["agent", "get", request.paneId], options);
+          if (polled.exitCode !== 0 || polled.failure) break;
+          try {
+            const refreshed = parseAgentInfoResult(polled, "agent_info");
+            settledInfo = refreshed;
+          } catch { break; }
+        }
+      }
+
       return this.#buildAndValidateBinding({
         spec,
-        agentInfo,
+        agentInfo: settledInfo,
         request: { ...request, provider: launch?.provider ?? this.#config.roleConfigs?.[spec.topologyRole]?.provider ?? this.#config.defaultProvider ?? "herdr", metadata: { ...request.metadata, ...launchMetadata, ...(originalPromptSource ? { promptInitialized: true, promptSource: originalPromptSource } : {}),
-          ...(!agentInfo.session ? { nativeSessionPending: true } : {}) } },
+          ...(!settledInfo.session ? { nativeSessionPending: true } : {}) } },
         agentName,
         agentKind
       });

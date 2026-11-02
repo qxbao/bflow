@@ -30,21 +30,14 @@ afterEach(async () => {
 
 describe("Flow 07 — Round 4 Verification, Rework & Git Delivery Hardening", () => {
   it("rework exceeding max iterations escalates to user with actionable workflow_blocked notice, pendingAction, and options", async () => {
-    const f = await p19Fixture();
-    // Lower maxIterations to 1 so the very first failed verification exhausts the limit
+    // A failing Reviewer with a single allowed iteration exhausts the verification loop on the first failed cycle.
+    const f = await p19Fixture({ failReview: true });
     const runId = "run-1";
-    await f.runtime.proposeWorkflow(runId, f.spec, f.def);
-    
-    // Set maxIterations = 1 on run
-    await f.runtime.transaction(async (state, save) => {
-      const run = state.runs.find(r => r.runId === runId)!;
-      run.maxIterations = 1;
-      await save();
-    });
-
+    await f.runtime.proposeWorkflow(runId, f.spec, f.def, 1);
     await f.runtime.tick();
     await f.evidence("implement");
     await f.submit("implement", "implemented code\n");
+    await f.runtime.tick();
     await f.runtime.tick();
 
     // Verify task verification failed
@@ -60,7 +53,7 @@ describe("Flow 07 — Round 4 Verification, Rework & Git Delivery Hardening", ()
     expect(runAfterTick.pendingAction.recovery).toBe("manual");
     expect(runAfterTick.pendingAction.state).toBe("pending");
 
-    const outMsgs = runAfterTick.outbound.map((o: any) => o.message);
+    const outMsgs = ((await f.runtime.inspect()) as any).outbound.map((o: any) => o.message);
     const progressNotice = outMsgs.find(
       (m: any) => m.type === "conversation.progress" && m.payload?.kind === "workflow_blocked"
     );
@@ -91,11 +84,10 @@ describe("Flow 07 — Round 4 Verification, Rework & Git Delivery Hardening", ()
     await f.runtime.transaction(async (state, save, _core, outbox) => {
       const run = state.runs.find(r => r.runId === "run-1")!;
       expect(run.conflictResolution).toBeDefined();
-      // Set attempts to 3 (exhausted)
+      // Both allowed resolver attempts failed (exhausted)
       run.conflictResolution!.attempts = [
         { messageId: "m1", taskId: "t1", attemptId: "a1", agentName: "d1", status: "failed", reason: "fail 1" },
-        { messageId: "m2", taskId: "t2", attemptId: "a2", agentName: "d2", status: "failed", reason: "fail 2" },
-        { messageId: "m3", taskId: "t3", attemptId: "a3", agentName: "d3", status: "failed", reason: "fail 3" }
+        { messageId: "m2", taskId: "t2", attemptId: "a2", agentName: "d2", status: "failed", reason: "fail 2" }
       ];
       await save();
     });
@@ -108,7 +100,7 @@ describe("Flow 07 — Round 4 Verification, Rework & Git Delivery Hardening", ()
     expect(run.pendingAction.kind).toBe("resume_coordinator");
     expect(run.pendingAction.recovery).toBe("manual");
 
-    const outMsgs = run.outbound.map((o: any) => o.message);
+    const outMsgs = ((await f.runtime.inspect()) as any).outbound.map((o: any) => o.message);
     const progressNotice = outMsgs.find(
       (m: any) => m.type === "conversation.progress" && m.payload?.kind === "workflow_blocked" && m.payload?.headline?.includes("conflict")
     );
@@ -133,7 +125,7 @@ describe("Flow 07 — Round 4 Verification, Rework & Git Delivery Hardening", ()
 
     const run = (await f.runtime.inspect("run-1")) as any;
     // Should NOT say "No action needed: Runtime retries this run on the next scheduling step"
-    const outMsgs = run.outbound.map((o: any) => o.message);
+    const outMsgs = ((await f.runtime.inspect()) as any).outbound.map((o: any) => o.message);
     const notice = outMsgs.find(
       (m: any) => m.type === "conversation.progress" && m.payload?.kind === "workflow_blocked" && m.payload?.reason?.includes("uncommitted changes")
     );
@@ -163,6 +155,7 @@ describe("Flow 07 — Round 4 Verification, Rework & Git Delivery Hardening", ()
       run.status = "implementing";
       run.workflowVerificationPending = false;
       delete run.workflowCycle;
+      delete run.approval; delete run.approvalKind; delete run.decision; delete run.pendingAction;
       await save();
     });
 
@@ -170,9 +163,12 @@ describe("Flow 07 — Round 4 Verification, Rework & Git Delivery Hardening", ()
     await f.runtime.tick();
 
     const run = (await f.runtime.inspect("run-1")) as any;
-    expect(run.workflowVerificationPending).toBe(true);
-    expect(run.status).toBe("verifying");
+    // The tick starts workflow-level verification for the already captured integrated change and settles it in the same pass.
+    expect(run.workflowVerificationPending).toBe(false);
     expect(run.workflowCycle).toBeDefined();
+    expect(run.workflowCycle.status).toBe("passed");
+    expect(run.status).toBe("awaiting_approval");
+    expect(run.approvalKind).toBe("delivery");
   });
 
   it("validates test-integrity evidence and rework finding verdicts with mixed-case Git commit hashes", async () => {
