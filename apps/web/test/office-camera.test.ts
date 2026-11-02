@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { CameraMove, FOCUS_MS, HOME_ZOOM, homeCamera, FOCUS_ZOOM, KEY_ZOOM, MAX_ZOOM, MIN_ZOOM, cameraKey, cameraPose, clampCamera, easeCamera, fitCamera, fitDistance, focusOn, panByPixels, pinchFactor, wheelFactor, zoomBy } from '../src/features/office/scene/camera';
-import { BOARD_X, DEVELOPER_SEAT_COUNT, FOCUS_POINTS, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, TABLE_CELLS, WORLD, cellCentre, deskPlan, developerRowsFor, routeBetween, seatCell, zoneAt, zones } from '../src/features/office/scene/world';
+import { ZONE_TITLES, contentBox, BOARD_X, DEVELOPER_SEAT_COUNT, FOCUS_POINTS, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, TABLE_CELLS, WORLD, cellCentre, deskPlan, developerRowsFor, routeBetween, seatCell, zoneAt, zones } from '../src/features/office/scene/world';
 import { DEVELOPER_SEATS, applySeats } from '../src/features/office/model/seats';
 import type { OfficeModel } from '../src/features/office/model/types';
 
@@ -12,7 +12,7 @@ describe('camera', () => {
     expect(cam).toEqual({ x: GRID_W / 2, z: GRID_H / 2, zoom: MIN_ZOOM });
     const home = homeCamera(WORLD);
     expect(home.zoom).toBe(HOME_ZOOM);
-    expect(home.zoom).toBeGreaterThan(MIN_ZOOM); // the default view is closer than the whole office
+    expect(home.zoom).toBeGreaterThanOrEqual(MIN_ZOOM); // the default view frames the drawn content (see contentBox), not the whole grid
     for (const v of [{ w: 1600, h: 900 }, { w: 390, h: 700 }, { w: 900, h: 900 }]) {
       const pose = cameraPose(cam, v, WORLD);
       expect(pose.position[1]).toBeGreaterThan(0);
@@ -153,6 +153,22 @@ describe('layout', () => {
     expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.coordinator.at.x), gy: Math.floor(FOCUS_POINTS.coordinator.at.z) })).toBe('coordination');
     expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.developer.at.x), gy: Math.floor(FOCUS_POINTS.developer.at.z) })).toBe('developer');
     expect(zoneAt({ gx: Math.floor(FOCUS_POINTS.qa.at.x), gy: Math.floor(FOCUS_POINTS.qa.at.z) })).toBe('verification');
+  });
+  test('only Coordinator and QA anchor desks are drawn without agents; others appear with their agent', () => {
+    const keys = (seats: string[]) => deskPlan(seats).desks.filter(c => c.gy < 9 || c.gx >= 19).map(c => `${c.gx},${c.gy}`);
+    expect(keys([]).sort()).toEqual([`${seatCell('coordination:coordinator')!.gx},3`, `${seatCell('verification:qa')!.gx},10`].sort());
+    expect(keys(['coordination:planner'])).toContain(`${seatCell('coordination:planner')!.gx},3`);
+  });
+  test('content framing follows the drawn desks, so few agents leave no empty foreground, and the camera clamps to it', () => {
+    const few = contentBox(deskPlan([]).desks), many = contentBox(deskPlan(DEVELOPER_SEATS).desks);
+    expect(few.d).toBeLessThan(many.d);
+    expect(few.cz).toBeLessThan(many.cz);
+    expect(few.cz + few.d / 2).toBeLessThanOrEqual(GRID_H);
+    // The home camera sits on the content centre and stays inside it.
+    expect(homeCamera(few)).toMatchObject({ x: few.cx, z: few.cz });
+    const far = clampCamera({ x: 0, z: 99, zoom: 2 }, few);
+    expect(far.z).toBeLessThanOrEqual(few.cz + (few.d / 2 + 1.5));
+    expect(ZONE_TITLES.map(z => z.text)).toEqual(['Conversation', 'Coordinator', 'Task Board', 'Developer Zone', 'QA / Reviewer']);
   });
   test('objects, desks and plants do not collide and stay inside the world', () => {
     const everyDesk = deskPlan([...Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`), 'verification:reviewer:2', 'verification:qa:2', 'verification:tester:2', 'verification:security:2', 'coordination:coordinator:2', 'coordination:planner:2', 'coordination:architect:2', 'coordination:specifier:2', 'conversation:conversation:2', 'conversation:conversation:3']).desks;

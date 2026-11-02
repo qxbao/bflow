@@ -15,7 +15,7 @@ const agent = (instanceId: string, pose: OfficeAgent['pose'], role: OfficeAgent[
 const model = (agents: OfficeAgent[], pendingDecisions = 0): OfficeModel => ({ tier: 'full', certainty: 'confirmed', statusText: '', agents, tasks: [], pendingDecisions, handoffs: [], connection: 'connected' });
 function props(over: Partial<OfficeHudProps> = {}): OfficeHudProps {
   return {
-    projectName: 'Vườn sách', session: ready, model: model([agent('a', 'working'), agent('b', 'typing'), agent('c', 'sleeping'), agent('d', 'hand_raised')], 2), runs: [run], connection: 'connected', stale: false, mode: 'visual', onMode: vi.fn(), panelOpen: false,
+    projectName: 'Vườn sách', projects: [{ projectId: 'p', displayName: 'Vườn sách' }, { projectId: 'q', displayName: 'Kho phim' }], projectId: 'p', onProject: vi.fn(), failed: false, authRequired: false, onDocuments: vi.fn(), session: ready, model: model([agent('a', 'working'), agent('b', 'typing'), agent('c', 'sleeping'), agent('d', 'hand_raised')], 2), runs: [run], connection: 'connected', stale: false, mode: 'visual', onMode: vi.fn(), panelOpen: false,
     overflow: 0, onOverview: vi.fn(), onNavigate: vi.fn(), onRefresh: vi.fn(), onFocusZone: vi.fn(), onAgentList: vi.fn(), onChatDraft: vi.fn(), dock: null, ...over,
   };
 }
@@ -45,6 +45,22 @@ test('the card shows the current run, the pill shows session, connection and cou
   expect(screen.getByText('Dữ liệu cũ')).toBeTruthy();
   expect(screen.getByText('Đang kết nối lại')).toBeTruthy();
   expect(screen.getByText('Chưa có công việc đang chạy')).toBeTruthy();
+});
+
+test('project switcher, failed and re-pair states, and the Tài liệu button', () => {
+  const p = props({ model: { ...model([]), tier: 'degraded' }, failed: true, authRequired: true });
+  render(<OfficeHud {...p} />);
+  fireEvent.change(screen.getByLabelText('Chuyển dự án'), { target: { value: 'q' } });
+  expect(p.onProject).toHaveBeenCalledWith('q');
+  const pill = screen.getByLabelText('Trạng thái văn phòng');
+  expect(pill.textContent).toContain('Không đọc được dữ liệu nhân viên');
+  expect(pill.textContent).toContain('Cần ghép nối lại');
+  expect(pill.textContent).not.toContain('Dữ liệu cũ');
+  fireEvent.click(screen.getByRole('button', { name: 'Tài liệu' }));
+  expect(p.onDocuments).toHaveBeenCalled();
+  cleanup();
+  render(<OfficeHud {...props({ model: { ...model([]), tier: 'degraded' } })} />);
+  expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Chưa có dữ liệu nhân viên');
 });
 
 test('Classic | 3D switch, right rail with the decision badge, and refresh', () => {

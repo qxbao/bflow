@@ -2,6 +2,10 @@
 // gesture, a user-driven resize or a user selection (`focusOn`). The state is the floor point the camera looks at plus a continuous zoom.
 import type { Vec2 } from './world';
 
+/** The floor rectangle the camera frames: size, plus the centre when it is not the middle of the grid (content framing). */
+export interface WorldBox { w: number; d: number; cx?: number; cz?: number }
+const midX = (w: WorldBox): number => w.cx ?? w.w / 2;
+const midZ = (w: WorldBox): number => w.cz ?? w.d / 2;
 export interface Camera { x: number; z: number; zoom: number }
 export interface Size { w: number; h: number }
 export interface Pose { position: [number, number, number]; target: [number, number, number] }
@@ -29,7 +33,7 @@ const sinPitch = Math.sin(rad(PITCH));
 const cosPitch = Math.cos(rad(PITCH));
 
 /** Camera distance at zoom 1: the whole floor plus the back wall fits horizontally and vertically. */
-export function fitDistance(view: Size, world: { w: number; d: number }): number {
+export function fitDistance(view: Size, world: WorldBox): number {
   const aspect = Math.max(0.2, view.w / Math.max(1, view.h));
   const byWidth = (world.w / 2) / (tanHalf * aspect);
   const byDepth = (world.d / 2 + 1.5) * sinPitch / tanHalf;
@@ -37,40 +41,40 @@ export function fitDistance(view: Size, world: { w: number; d: number }): number
 }
 
 /** Keeps the zoom in bounds and the target inside the office (with slack). At zoom 1 the office is centred. */
-export function clampCamera(cam: Camera, world: { w: number; d: number }): Camera {
+export function clampCamera(cam: Camera, world: WorldBox): Camera {
   const zoom = clamp(Number.isFinite(cam.zoom) ? cam.zoom : 1, MIN_ZOOM, MAX_ZOOM);
   const reach = 1 - 1 / zoom;
   const rx = (world.w / 2) * reach + SLACK * reach, rz = (world.d / 2) * reach + SLACK * reach;
-  return { zoom, x: clamp(cam.x, world.w / 2 - rx, world.w / 2 + rx), z: clamp(cam.z, world.d / 2 - rz, world.d / 2 + rz) };
+  return { zoom, x: clamp(cam.x, midX(world) - rx, midX(world) + rx), z: clamp(cam.z, midZ(world) - rz, midZ(world) + rz) };
 }
 
 /** The whole office in view. */
-export const fitCamera = (world: { w: number; d: number }): Camera => ({ x: world.w / 2, z: world.d / 2, zoom: MIN_ZOOM });
+export const fitCamera = (world: WorldBox): Camera => ({ x: midX(world), z: midZ(world), zoom: MIN_ZOOM });
 /** The default view: closer than the whole office (the edges of the room may be cropped), looking at the middle of the floor. Initial state and the 0 key. */
-export const HOME_ZOOM = 1.08;
-export const homeCamera = (world: { w: number; d: number }): Camera => clampCamera({ x: world.w / 2, z: world.d * 0.5, zoom: HOME_ZOOM }, world);
+export const HOME_ZOOM = 1;
+export const homeCamera = (world: WorldBox): Camera => clampCamera({ x: midX(world), z: midZ(world), zoom: HOME_ZOOM }, world);
 
 /** Where the three.js camera stands and looks for a state. */
-export function cameraPose(cam: Camera, view: Size, world: { w: number; d: number }): Pose {
+export function cameraPose(cam: Camera, view: Size, world: WorldBox): Pose {
   const dist = fitDistance(view, world) / cam.zoom;
   return { position: [cam.x, AIM_Y + dist * sinPitch, cam.z + dist * cosPitch], target: [cam.x, AIM_Y, cam.z] };
 }
 
 /** Floor units per screen pixel at the target, for the horizontal (x) and depth (z) axis. */
-function groundPerPixel(cam: Camera, view: Size, world: { w: number; d: number }): { x: number; z: number } {
+function groundPerPixel(cam: Camera, view: Size, world: WorldBox): { x: number; z: number } {
   const dist = fitDistance(view, world) / cam.zoom;
   const unit = (2 * dist * tanHalf) / Math.max(1, view.h);
   return { x: unit, z: unit / sinPitch };
 }
 
 /** Drag by screen pixels: the scene follows the pointer. */
-export function panByPixels(cam: Camera, dx: number, dy: number, view: Size, world: { w: number; d: number }): Camera {
+export function panByPixels(cam: Camera, dx: number, dy: number, view: Size, world: WorldBox): Camera {
   const g = groundPerPixel(cam, view, world);
   return clampCamera({ ...cam, x: cam.x - dx * g.x, z: cam.z - dy * g.z }, world);
 }
 
 /** Multiplies the zoom (>1 comes closer) about the current target. */
-export function zoomBy(cam: Camera, factor: number, world: { w: number; d: number }): Camera {
+export function zoomBy(cam: Camera, factor: number, world: WorldBox): Camera {
   if (!(factor > 0)) return cam;
   return clampCamera({ ...cam, zoom: cam.zoom * factor }, world);
 }
@@ -79,7 +83,7 @@ export function zoomBy(cam: Camera, factor: number, world: { w: number; d: numbe
 export const wheelFactor = (deltaY: number): number => Math.exp(clamp(-deltaY, -240, 240) * 0.0015);
 
 /** The state that frames `target` for a selection. */
-export function focusOn(target: Vec2, world: { w: number; d: number }, zoom = FOCUS_ZOOM): Camera {
+export function focusOn(target: Vec2, world: WorldBox, zoom = FOCUS_ZOOM): Camera {
   return clampCamera({ x: target.x, z: target.z, zoom }, world);
 }
 

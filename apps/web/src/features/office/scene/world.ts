@@ -71,8 +71,8 @@ export const OBJECT_CELLS: Readonly<Record<OfficeObjectId, Cell>> = {
 /** World x of the centre of the Task Board zone, where the board hangs. */
 export const BOARD_X = 23.5;
 
-/** Fixed desks that are always drawn: one per fixed role except Conversation (its seat is the reception counter). */
-const BASE_DESKS: readonly Cell[] = Object.entries(FIXED_BASES).filter(([k]) => k !== 'conversation:conversation').map(([, c]) => c);
+/** Desks that are always drawn: the Coordinator and QA zone anchors. Other fixed-role desks appear with their agent (the Conversation seat is the reception counter). */
+const BASE_DESKS: readonly Cell[] = (['coordination:coordinator', 'verification:qa'] as const).map(k => FIXED_BASES[k] as Cell);
 
 /** Non-interactive decoration that blocks a cell. */
 export const PLANT_CELLS: readonly Cell[] = [{ gx: 1, gy: 1 }, { gx: 9, gy: 7 }, { gx: 18, gy: 7 }, { gx: 27, gy: 8 }, { gx: 1, gy: 17 }, { gx: 27, gy: 17 }];
@@ -137,6 +137,26 @@ export function routeBetween(from: Cell, to: Cell, desks: readonly Cell[]): Cell
 }
 
 export const OFFICE_ASSET_PATHS = { character: 'office/character.glb', furniture: 'office/furniture.glb' } as const;
+
+/** World anchors of the zone titles drawn over the scene. */
+export const ZONE_TITLES: readonly { id: string; text: string; at: Vec2 }[] = [
+  { id: 'conversation', text: 'Conversation', at: { x: 4.5, z: 1.4 } },
+  { id: 'coordination', text: 'Coordinator', at: { x: 13.5, z: 1.4 } },
+  { id: 'taskboard', text: 'Task Board', at: { x: 23.5, z: 5.6 } },
+  { id: 'developer', text: 'Developer Zone', at: { x: 9.5, z: 9.3 } },
+  { id: 'verification', text: 'QA / Reviewer', at: { x: 23.5, z: 9.3 } },
+];
+
+/**
+ * The floor rectangle the default camera frames: the drawn desks, the reception counter and the Task Board, with a margin, inside the grid.
+ * Few agents therefore leave no large empty foreground.
+ */
+export function contentBox(desks: readonly Cell[]): { w: number; d: number; cx: number; cz: number } {
+  const cells = [...desks, OBJECT_CELLS.counter, OBJECT_CELLS.board, { gx: 27, gy: 0 }];
+  const x0 = Math.max(0, Math.min(...cells.map(c => c.gx)) - 2), x1 = Math.min(GRID_W, Math.max(...cells.map(c => c.gx)) + 3);
+  const z0 = 0, z1 = Math.min(GRID_H, Math.max(...cells.map(c => c.gy)) + 3);
+  return { w: x1 - x0, d: z1 - z0, cx: (x0 + x1) / 2, cz: (z0 + z1) / 2 };
+}
 
 /** Camera presets of the HUD (bottom-left buttons). `overview` is the home view; the rest frame one room. */
 export const FOCUS_POINTS: Readonly<Record<Exclude<OfficeFocusZone, 'overview'>, { at: Vec2; zoom: number }>> = {

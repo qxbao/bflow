@@ -1,28 +1,35 @@
 // Office scene (stylized 3D). Reads an OfficeModel and draws it; emits selections and never writes anywhere else.
 // Plain three.js, no React: scene state changes per frame outside React. Loaded only through the dynamic import in ui/OfficeStage.
 import {
-  ACESFilmicToneMapping, BoxGeometry, Color, FogExp2, Group, Mesh, MeshBasicMaterial, PCFShadowMap, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, Vector2, WebGLRenderer, type Material, type Object3D,
+  ACESFilmicToneMapping, BoxGeometry, Color, FogExp2, Group, Mesh, MeshBasicMaterial, PCFShadowMap, PerspectiveCamera, Raycaster, SRGBColorSpace, Scene, Vector2, Vector3, WebGLRenderer, type Material, type Object3D,
 } from 'three';
 import { acquireModels, type ModelLease } from './assets';
 import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
+import { agentTag } from '../model/labels';
 import { Choreographer } from './actors';
-import { CameraMove, FOV, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
+import { CameraMove, FOV, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
 import { BACKGROUND, Stage, setShadowCasting } from './stage';
-import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, deskPlan, type Vec2 } from './world';
+import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, ZONE_TITLES, cellCentre, contentBox, deskPlan, type Vec2 } from './world';
 
 export interface OfficeRenderer {
   /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
   apply(model: OfficeModel, cues: VisualCue[]): string[];
   setPaused(paused: boolean): void;
+  /** DOM label anchors in host pixels for the current frame: zone titles and one tag per character. Text only; the caller draws them. */
+  projectLabels?(): ProjectedLabel[];
+  /** Receives `projectLabels()` after every rendered frame. */
+  setLabelSink?(sink: ((labels: ProjectedLabel[]) => void) | undefined): void;
   /** Eases the camera to a target the user selected (also called for selections made in the DOM mirror). */
   focus?(target: OfficeTarget): void;
   /** Eases the camera to a HUD preset: the whole office or one room. */
   focusZone?(zone: OfficeFocusZone): void;
   destroy(): void;
 }
+
+export interface ProjectedLabel { id: string; kind: 'zone' | 'agent'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
 const MOVING_MS = 1000 / 30;
@@ -94,7 +101,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     setShadowCasting(stage.lights.key, next.shadows);
     for (const l of stage.lights.accents) l.visible = next.accentLights;
     // The low tier has no spot pools, so its fill is lifted to keep the room readable.
-    stage.lights.hemi.intensity = next.tier === 'low' ? 1.75 : 1.25;
+    stage.lights.hemi.intensity = next.tier === 'low' ? 2.4 : 1.25;
     gl.setPixelRatio(next.pixelRatio);
     const v = size();
     gl.setSize(v.w, v.h, false);
@@ -105,16 +112,17 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
 
   // ---- camera ----
   const cam = new PerspectiveCamera(FOV, 1, 0.1, 200);
-  let state: Camera = homeCamera(WORLD);
+  let box: WorldBox = WORLD, userTouched = false;
+  let state: Camera = homeCamera(box);
   let move: CameraMove | undefined;
   const aim = (): void => {
-    const v = size(), p = cameraPose(state, v, WORLD);
+    const v = size(), p = cameraPose(state, v, box);
     cam.aspect = v.w / v.h;
     cam.position.set(...p.position);
     cam.lookAt(...p.target);
     cam.updateProjectionMatrix();
   };
-  const userMove = (next: Camera): void => { move = undefined; if (next !== state) { state = next; aim(); dirty = true; wake(); } };
+  const userMove = (next: Camera): void => { move = undefined; userTouched = true; if (next !== state) { state = next; aim(); dirty = true; wake(); } };
 
   // ---- actors and marks ----
   const choreo = new Choreographer(!reduced());
@@ -156,6 +164,34 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     for (const [id, g] of marks) if (!keep.has(id)) { g.removeFromParent(); marks.delete(id); }
   };
 
+  // ---- labels ----
+  let sink: ((labels: ProjectedLabel[]) => void) | undefined;
+  const probe = new Vector3();
+  const project = (x: number, y: number, z: number, v: { w: number; h: number }): { x: number; y: number } | undefined => {
+    probe.set(x, y, z).project(cam);
+    if (probe.z > 1 || Math.abs(probe.x) > 1.05 || Math.abs(probe.y) > 1.05) return undefined;
+    return { x: (probe.x * 0.5 + 0.5) * v.w, y: (-probe.y * 0.5 + 0.5) * v.h };
+  };
+  const projectLabels = (): ProjectedLabel[] => {
+    const v = size(), out: ProjectedLabel[] = [];
+    for (const zt of ZONE_TITLES) { const p = project(zt.at.x, 0.05, zt.at.z, v); if (p) out.push({ id: `zone:${zt.id}`, kind: 'zone', text: zt.text, ...p }); }
+    const agents = new Map((lastModel?.agents ?? []).map(a => [a.instanceId, a] as const));
+    // Far out, tags that would overlap an earlier one are hidden; closer in everything shows.
+    const taken: { x0: number; x1: number; y0: number; y1: number }[] = [];
+    for (const view of choreo.views()) {
+      const a = agents.get(view.instanceId);
+      if (!a) continue;
+      const p = project(view.point.x, 2.15, view.point.z, v);
+      if (!p) continue;
+      const text = agentTag(a.label, a.pose), half = text.length * 3.4 + 6;
+      const r = { x0: p.x - half, x1: p.x + half, y0: p.y - 18, y1: p.y };
+      if (state.zoom < 1.8 && taken.some(t => r.x0 < t.x1 && r.x1 > t.x0 && r.y0 < t.y1 && r.y1 > t.y0)) continue;
+      taken.push(r);
+      out.push({ id: `agent:${view.instanceId}`, kind: 'agent', text, ...p });
+    }
+    return out;
+  };
+
   // ---- loop: display-rate frames only while something moves; 8 fps timer while clips idle; nothing at all when still or hidden ----
   const render = (): void => {
     gl.render(scene, cam);
@@ -192,6 +228,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (!reduced()) for (const c of characters.values()) c.update(dt / 1000);
     dirty = false;
     render();
+    sink?.(projectLabels());
     if (quality.tier === 'high' && governor.frame(now, moving)) applyQuality(settingsFor('low', window.devicePixelRatio));
     if (moving || dirty) schedule(true);
     else if (choreo.busy()) schedule(false);
@@ -220,13 +257,13 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const focus = (target: OfficeTarget): void => {
     const p = positionOf(target);
     if (!p || destroyed) return;
-    const to = focusOn(p, WORLD, target.kind === 'object' && target.object === 'board' ? 1.6 : undefined);
+    const to = focusOn(p, box, target.kind === 'object' && target.object === 'board' ? 1.6 : undefined);
     move = new CameraMove(state, to, performance.now(), reduced());
     wake();
   };
   const focusZone = (zone: OfficeFocusZone): void => {
     if (destroyed) return;
-    const to = zone === 'overview' ? homeCamera(WORLD) : focusOn(FOCUS_POINTS[zone].at, WORLD, FOCUS_POINTS[zone].zoom);
+    const to = zone === 'overview' ? homeCamera(box) : focusOn(FOCUS_POINTS[zone].at, box, FOCUS_POINTS[zone].zoom);
     move = new CameraMove(state, to, performance.now(), reduced());
     wake();
   };
@@ -257,7 +294,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) {
       const dist = spread(), factor = pinchFactor(pinchDist, dist);
-      if (factor !== 1) { userMove(zoomBy(state, factor, WORLD)); pinchDist = dist; }
+      if (factor !== 1) { userMove(zoomBy(state, factor, box)); pinchDist = dist; }
       return;
     }
     if (!drag || e.pointerId !== drag.id) return;
@@ -265,7 +302,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     drag.moved = true; suppressTap = true;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     drag.x = e.clientX; drag.y = e.clientY;
-    userMove(panByPixels(state, dx, dy, size(), WORLD));
+    userMove(panByPixels(state, dx, dy, size(), box));
   };
   const onUp = (e: PointerEvent): void => {
     const tap = drag && e.pointerId === drag.id && !drag.moved && !suppressTap && e.target === canvas && e.type === 'pointerup';
@@ -275,7 +312,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     pinchDist = 0;
     if (tap) { const target = pick(at.x, at.y); if (target) select(target); }
   };
-  const onWheel = (e: WheelEvent): void => { e.preventDefault(); if (e.deltaY !== 0) userMove(zoomBy(state, wheelFactor(e.deltaY), WORLD)); };
+  const onWheel = (e: WheelEvent): void => { e.preventDefault(); if (e.deltaY !== 0) userMove(zoomBy(state, wheelFactor(e.deltaY), box)); };
   const onKey = (e: KeyboardEvent): void => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
@@ -283,9 +320,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     const action = cameraKey(e.key);
     if (!action) return;
     e.preventDefault();
-    if (action.kind === 'pan') userMove(panByPixels(state, action.dx, action.dy, size(), WORLD));
-    else if (action.kind === 'zoom') userMove(zoomBy(state, action.factor, WORLD));
-    else userMove(homeCamera(WORLD));
+    if (action.kind === 'pan') userMove(panByPixels(state, action.dx, action.dy, size(), box));
+    else if (action.kind === 'zoom') userMove(zoomBy(state, action.factor, box));
+    else userMove(homeCamera(box));
   };
   canvas.addEventListener('pointerdown', onDown);
   window.addEventListener('pointermove', onMove);
@@ -300,7 +337,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     if (destroyed || host.clientWidth === 0 || host.clientHeight === 0) return;
     const v = size();
     gl.setSize(v.w, v.h, false);
-    state = clampCamera(state, WORLD);
+    state = clampCamera(state, box);
     aim(); dirty = true; wake();
   });
   observer.observe(host);
@@ -319,7 +356,15 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       lastModel = model;
       // Hidden tab: cues are dropped, only the latest pose matters.
       const accepted = choreo.apply(model, paused ? [] : cues);
-      stage.layout(deskPlan(model.agents.flatMap(a => (a.seat ? [a.seat] : []))));
+      const plan = deskPlan(model.agents.flatMap(a => (a.seat ? [a.seat] : [])));
+      stage.layout(plan);
+      // The default view frames what is drawn; once the user moves the camera it only keeps the target inside the new bounds.
+      const next = contentBox(plan.desks);
+      if (next.w !== box.w || next.d !== box.d || next.cx !== box.cx || next.cz !== box.cz) {
+        box = next; move = undefined;
+        state = userTouched ? clampCamera(state, box) : homeCamera(box);
+        aim();
+      }
       syncActors();
       syncMarks(model);
       // Closed session: the office is dark. The last saved data stays visible.
@@ -329,6 +374,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       wake();
       return accepted;
     },
+    projectLabels,
+    setLabelSink(next) { sink = next; if (next && ready) next(projectLabels()); },
     setPaused(next) {
       if (next === paused) return;
       paused = next;

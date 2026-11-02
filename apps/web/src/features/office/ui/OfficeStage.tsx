@@ -4,6 +4,7 @@ import type { OfficeFocusZone, OfficeModel, OfficeTarget } from '../model/types'
 // Type-only: erased at build, so three.js stays behind the dynamic import below.
 import type { OfficeRenderer } from '../scene/renderer';
 import { AccessibleOffice } from './AccessibleOffice';
+import { createLabelLayer } from './labelLayer';
 
 export type CreateRenderer = (host: HTMLElement, onSelect: (target: OfficeTarget) => void, signal: AbortSignal, onContextLost: () => void) => Promise<OfficeRenderer>;
 const lazyRenderer: CreateRenderer = (host, onSelect, signal, onLost) => import('../scene/renderer').then(m => m.createOfficeRenderer(host, onSelect, signal, onLost));
@@ -36,12 +37,14 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
     const el = host.current;
     if (!el) return;
     let dead = false;
+    let labelLayer: ReturnType<typeof createLabelLayer> | undefined;
     const abort = new AbortController();
     const visibility = (): void => renderer.current?.setPaused(document.hidden);
     const lose = (): void => {
       if (dead) return;
       const lostRenderer = renderer.current;
       renderer.current = undefined;
+      labelLayer?.destroy();
       // Notice first: a throwing destroy must still leave the visible list.
       setNotice(LOST);
       try { lostRenderer?.destroy(); } catch { /* the context is gone; nothing left to release */ }
@@ -50,6 +53,8 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
       .then(created => {
         if (dead) { created.destroy(); return; }
         renderer.current = created;
+        labelLayer = createLabelLayer(el);
+        created.setLabelSink?.(labels => labelLayer?.update(labels));
         created.apply(latest.current.model, []);
         visibility();
       })
@@ -59,8 +64,10 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
       dead = true;
       abort.abort();
       document.removeEventListener('visibilitychange', visibility);
+      renderer.current?.setLabelSink?.(undefined);
       renderer.current?.destroy();
       renderer.current = undefined;
+      labelLayer?.destroy();
     };
   }, []);
 

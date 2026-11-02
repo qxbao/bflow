@@ -211,3 +211,22 @@ describe('OfficeStage control', () => {
     expect(() => control.current!.focusZone('developer')).not.toThrow();
   });
 });
+
+describe('label layer', () => {
+  test('draws text only, ignores pointer events, hides from assistive technology and drops stale labels', async () => {
+    const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');
+    const parent = document.createElement('div');
+    const layer = createLabelLayer(parent);
+    layer.update([{ id: 'zone:a', kind: 'zone', text: 'Conversation', x: 10, y: 20 }, { id: 'agent:b', kind: 'agent', text: '<img src=x onerror=alert(1)> Dev #1 · Rảnh', x: 30, y: 40 }]);
+    const root = parent.firstElementChild!;
+    expect(root.getAttribute('aria-hidden')).toBe('true');
+    expect(root.className).toContain('pointer-events-none');
+    expect(root.children).toHaveLength(2);
+    expect(root.querySelector('img')).toBeNull();
+    expect(root.children[1]!.textContent).toContain('<img');
+    layer.update([{ id: 'zone:a', kind: 'zone', text: 'Conversation', x: 11, y: 20 }]);
+    expect(root.children).toHaveLength(1);
+    layer.destroy();
+    expect(parent.children).toHaveLength(0);
+  });
+});

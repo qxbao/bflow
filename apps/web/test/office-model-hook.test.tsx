@@ -121,3 +121,41 @@ test('ApiClient reads workforce and run activity through the contract parsers', 
   installApi({ '/api/v1/projects/p/workforce': { ...body, agents: [{ ...(body.agents[0] as object), paneId: 'secret' }] } });
   await expect(new ApiClient().readWorkforce('p')).rejects.toMatchObject({ code: 'invalid_response' });
 });
+
+test('401 is reported as authRequired, not as plain stale', async () => {
+  let fail = false;
+  const { client } = fakeApi(async () => { if (fail) throw new ApiError('session_required'); return workforce([agent('c1', 'conversation', now)]); });
+  const view = hook(client);
+  await waitFor(() => expect(view.result.current.model?.tier).toBe('full'));
+  fail = true;
+  view.rerender({ revision: 1 });
+  await waitFor(() => expect(view.result.current.authRequired).toBe(true));
+  expect(view.result.current.stale).toBe(false);
+  expect(view.result.current.error).toBeInstanceOf(ApiError);
+  expect(view.result.current.model?.tier).toBe('full');
+});
+
+test('a first failed read exposes the error and is not "unsupported"', async () => {
+  const { client } = fakeApi(async () => { throw new ApiError('unavailable'); });
+  const view = hook(client);
+  await waitFor(() => expect(view.result.current.error).toBeInstanceOf(ApiError));
+  expect(view.result.current.unsupported).toBe(false);
+  expect(view.result.current.authRequired).toBe(false);
+  expect(view.result.current.model?.tier).toBe('degraded');
+});
+
+test('becoming visible re-reads once at once and the timer stops while hidden', async () => {
+  const { api, client } = fakeApi(async () => workforce([agent('c1', 'conversation', now)]));
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  hook(client);
+  await waitFor(() => expect(api.readWorkforce).toHaveBeenCalledTimes(1));
+  Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+  act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(WORKFORCE_POLL_MS * 3); });
+  expect(api.readWorkforce).toHaveBeenCalledTimes(1);
+  Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+  act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+  await waitFor(() => expect(api.readWorkforce).toHaveBeenCalledTimes(2));
+  await act(async () => { await vi.advanceTimersByTimeAsync(WORKFORCE_POLL_MS); });
+  await waitFor(() => expect(api.readWorkforce).toHaveBeenCalledTimes(3));
+});

@@ -55,17 +55,26 @@ const camButton = 'flex min-h-11 items-center justify-center gap-1.5 rounded-lg 
 
 export interface OfficeHudProps {
   projectName: string;
+  projects: readonly { projectId: string; displayName: string }[];
+  projectId: string;
+  onProject: (projectId: string) => void;
   session: WebProjectSession | undefined;
   model: OfficeModel | undefined;
   runs: readonly WebRunView[];
   connection: Connection;
   stale: boolean;
+  /** Reads failed and there is no model: "failed", not "not available". */
+  failed: boolean;
+  /** The session cookie was refused: re-pairing is offered in the panel. */
+  authRequired: boolean;
   mode: UiMode;
   onMode: (mode: UiMode) => void;
   panelOpen: boolean;
   /** Seatless Developers, for the "+n" chip. */
   overflow: number;
   onOverview: () => void;
+  /** Opens the cabinet inspector (the Tài liệu button). */
+  onDocuments: () => void;
   onNavigate: (path: '' | 'runs' | 'review' | 'chat' | 'settings') => void;
   onRefresh: () => void;
   onFocusZone: (zone: OfficeFocusZone) => void;
@@ -109,14 +118,18 @@ export function OfficeHud(p: OfficeHudProps) {
   };
   const rail: [IconName, string, () => void, number?][] = [
     ['overview', 'Tổng quan', p.onOverview], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending],
-    ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['docs', 'Tài liệu', () => p.onNavigate('runs')], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
+    ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
   ];
   const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', 'Conversation'], ['coordinator', 'coordinator', 'Coordinator'], ['developer', 'developer', 'Developer'], ['qa', 'qa', 'QA']];
   return <>
     <div className={`pointer-events-none absolute inset-x-3 top-3 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)_auto] ${hideOnPhone}`}>
       <section aria-label="Văn phòng Bflow" className={`pointer-events-auto m-0 min-w-0 p-3 ${panel}`}>
         <h2 className="m-0 font-display text-xl leading-none font-extrabold tracking-wide text-ink">Bflow Office</h2>
-        <p className="m-0 mt-1 truncate font-data text-xs text-muted">{p.projectName}</p>
+        <select aria-label="Chuyển dự án" value={p.projectId} onChange={e => p.onProject(e.target.value)} className="mt-1 min-h-9 w-full truncate px-2 py-1 text-xs lg:min-h-8">
+          {p.projects.some(x => x.projectId === p.projectId) ? null : <option value={p.projectId}>{p.projectName}</option>}
+          {p.projects.map(x => <option key={x.projectId} value={x.projectId}>{x.displayName}</option>)}
+          <option value="">Quản lý dự án…</option>
+        </select>
         <div className="mt-2 border-t border-line pt-2">
           <p className="m-0 font-data text-[0.625rem] font-semibold tracking-[.14em] text-accent uppercase">Đang làm</p>
           {run ? <>
@@ -133,7 +146,8 @@ export function OfficeHud(p: OfficeHudProps) {
         <span aria-hidden="true" className="text-line">|</span>
         <span className={p.connection === 'connected' ? '' : 'text-warning'}>{CONNECTION[p.connection]}</span>
         {counts.length > 0 && <><span aria-hidden="true" className="text-line">|</span><span>{counts.join(' · ')}</span></>}
-        {p.model?.tier === 'degraded' && <><span aria-hidden="true" className="text-line">|</span><span className="text-muted">Chưa có dữ liệu nhân viên</span></>}
+        {p.model?.tier === 'degraded' && <><span aria-hidden="true" className="text-line">|</span><span className={p.failed ? 'text-warning' : 'text-muted'}>{p.failed ? 'Không đọc được dữ liệu nhân viên' : 'Chưa có dữ liệu nhân viên'}</span></>}
+        {p.authRequired && <span className="rounded border border-warning px-1.5 text-warning">Cần ghép nối lại</span>}
         {p.stale && <span className="rounded border border-warning px-1.5 text-warning">Dữ liệu cũ</span>}
       </div>
     </div>
