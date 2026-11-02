@@ -3,9 +3,13 @@
 import { Assets, type Spritesheet } from 'pixi.js';
 
 let initPromise: Promise<void> | undefined;
-/** Assets.init must run once, before any load, and must not use workers (they need a blob: worker-src the CSP forbids). A rejection is not cached. */
+/**
+ * Assets.init marks itself initialised before its first await, so after a rejected init a retry returns early and skips `preferences`.
+ * Workers need a blob: worker-src the CSP forbids, so preferWorkers:false is applied explicitly on every path. A rejection is not cached.
+ */
 export function initAssets(): Promise<void> {
-  initPromise ??= Assets.init({ preferences: { preferWorkers: false } }).catch(error => { initPromise = undefined; throw error; });
+  initPromise ??= Assets.init({ preferences: { preferWorkers: false } })
+    .then(() => { Assets.setPreferences({ preferWorkers: false }); }, (error: unknown) => { Assets.setPreferences({ preferWorkers: false }); initPromise = undefined; throw error; });
   return initPromise;
 }
 

@@ -121,6 +121,7 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
   const spread = (): number => { const [a, b] = [...pointers.values()]; return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0; };
   const onDown = (e: PointerEvent): void => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.pointerType === 'mouse') resetPointers();
     if (pointers.size === 0) suppressTap = false;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) { drag = undefined; pinchDist = spread(); suppressTap = true; }
@@ -128,6 +129,7 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
   };
   const onMove = (e: PointerEvent): void => {
     if (!pointers.has(e.pointerId)) return;
+    if (e.pointerType === 'mouse' && e.buttons === 0) { resetPointers(); return; }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 2) {
       const dist = spread(), step = pinchStep(pinchDist, dist);
@@ -147,6 +149,8 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
     drag.x = e.clientX; drag.y = e.clientY;
     move(panBy(camera, dx, dy, view(), WORLD));
   };
+  // A pointerup can be lost (window blur, tab switch, OS gesture); stale entries would turn the next touch into a pinch.
+  const resetPointers = (): void => { pointers.clear(); drag = undefined; pinchDist = 0; };
   const onUp = (e: PointerEvent): void => {
     pointers.delete(e.pointerId);
     if (drag && e.pointerId === drag.id) drag = undefined;
@@ -176,6 +180,8 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
   window.addEventListener('pointercancel', onUp);
+  window.addEventListener('blur', resetPointers);
+  document.addEventListener('visibilitychange', resetPointers);
   canvas.addEventListener('wheel', onWheel, { passive: false });
   host.addEventListener('keydown', onKey);
   // A resize only clamps the camera so the scene stays reachable; it never re-centres.
@@ -236,6 +242,8 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('blur', resetPointers);
+      document.removeEventListener('visibilitychange', resetPointers);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('webglcontextlost', onLost);
       canvas.removeEventListener('webglcontextrestored', onRestored);
