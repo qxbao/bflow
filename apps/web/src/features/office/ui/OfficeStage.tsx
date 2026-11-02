@@ -98,7 +98,7 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
   const degraded = notice !== undefined;
   // Degraded: the visible list scrolls inside the full-screen stage, clear of the floating HUD.
   return <div ref={root} className={degraded ? 'relative h-full overflow-y-auto px-4 pt-32 pb-40 md:pr-24' : 'relative h-full'}>
-    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-full min-h-64 w-full overflow-hidden bg-[#121418]" />}
+    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-full min-h-64 w-full overflow-hidden bg-[#dfe5e6]" />}
     <AccessibleOffice model={model} onSelect={target => { latest.current.onSelect(target); renderer.current?.focus?.(target); }} visible={degraded} notice={notice} extra={links} />
   </div>;
 }

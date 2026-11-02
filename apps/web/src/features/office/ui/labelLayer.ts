@@ -18,9 +18,7 @@ export function createLabelLayer(parent: HTMLElement): { update(labels: Projecte
         let n = nodes.get(l.id);
         if (!n) {
           const el = document.createElement('div');
-          el.className = l.kind === 'zone'
-            ? 'absolute left-0 top-0 whitespace-nowrap rounded-md border border-line bg-surface/70 px-2 py-0.5 font-data text-xs font-semibold tracking-wide text-accent uppercase'
-            : 'absolute left-0 top-0 whitespace-nowrap rounded-md bg-surface/80 px-1.5 py-0.5 font-data text-[0.6875rem] leading-4 text-ink';
+          el.className = 'absolute left-0 top-0 whitespace-nowrap rounded-md bg-surface/80 px-1.5 py-0.5 font-data text-[0.6875rem] leading-4 text-ink';
           el.dataset['kind'] = l.kind;
           layer.appendChild(el);
           n = { el, x: Number.NaN, y: Number.NaN, seen: true };
@@ -32,7 +30,7 @@ export function createLabelLayer(parent: HTMLElement): { update(labels: Projecte
         const x = Math.round(l.x), y = Math.round(l.y);
         if (x !== n.x || y !== n.y) {
           n.x = x; n.y = y;
-          n.el.style.transform = `translate(${x}px, ${y}px) translate(-50%, ${l.kind === 'agent' ? '-100%' : '-50%'})`;
+          n.el.style.transform = `translate(${x}px, ${y}px) translate(-50%, -100%)`;
         }
       }
       for (const [id, n] of nodes) if (!n.seen) { n.el.remove(); nodes.delete(id); }

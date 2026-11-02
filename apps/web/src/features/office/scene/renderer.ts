@@ -11,14 +11,14 @@ import { Choreographer } from './actors';
 import { AGENT_ZOOM, CameraIntent, CameraMove, FOV, NO_INSET, withInset, type Inset, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, HOME_ZOOM, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
-import { BACKGROUND, Stage, setShadowCasting } from './stage';
-import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, ZONE_TITLES, cellCentre, contentBox, deskPlan, type Vec2 } from './world';
+import { BACKGROUND, HEMI_HIGH, HEMI_LOW, Stage, setShadowCasting } from './stage';
+import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, contentBox, deskPlan, type Vec2 } from './world';
 
 export interface OfficeRenderer {
   /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
   apply(model: OfficeModel, cues: VisualCue[]): string[];
   setPaused(paused: boolean): void;
-  /** DOM label anchors in host pixels for the current frame: zone titles and one tag per character. Text only; the caller draws them. */
+  /** DOM label anchors in host pixels for the current frame: one tag per character (zone titles are signs in the scene). Text only; the caller draws them. */
   projectLabels?(): ProjectedLabel[];
   /** Screen pixels the HUD or panel covers: labels hide inside it and selections centre in what is left. Setting it never moves the camera. */
   setInset?(inset: Inset): void;
@@ -31,9 +31,11 @@ export interface OfficeRenderer {
   destroy(): void;
 }
 
-export interface ProjectedLabel { id: string; kind: 'zone' | 'agent'; text: string; x: number; y: number }
+/** Text the DOM draws over the canvas. `kind` is a union so further label kinds can be added. */
+export interface ProjectedLabel { id: string; kind: 'agent'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
+const EXPOSURE_OPEN = 1, EXPOSURE_CLOSED = 0.6;
 const MOVING_MS = 1000 / 30;
 const IDLE_MS = 1000 / 8;
 const alphaFor = (certainty: string, pose: string): number => (pose === 'ghost' ? 0.45 : certainty === 'confirmed' ? 1 : certainty === 'inferred' ? 0.88 : 0.6);
@@ -92,7 +94,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   // ---- renderer, quality ----
   gl.outputColorSpace = SRGBColorSpace;
   gl.toneMapping = ACESFilmicToneMapping;
-  gl.toneMappingExposure = 1.25;
+  gl.toneMappingExposure = EXPOSURE_OPEN;
   gl.shadowMap.type = PCFShadowMap;
   let quality: QualitySettings = settingsFor(initialTier(rendererName(gl)), window.devicePixelRatio);
   const governor = new FpsGovernor();
@@ -100,8 +102,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   // ---- scene ----
   const scene = new Scene();
   scene.background = new Color(BACKGROUND);
-  scene.fog = new FogExp2(BACKGROUND, 0.011);
-  const stage = new Stage(lease.models.furniture.scene as unknown as Group);
+  scene.fog = new FogExp2(BACKGROUND, 0.004);
+  const stage = new Stage(lease.models.furniture.scene as unknown as Group, () => { dirty = true; wake(); });
   scene.add(stage.group);
   const kit = new MarkKit();
   const proxyGeometry = new BoxGeometry(1, 1, 1);
@@ -120,7 +122,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     setShadowCasting(stage.lights.key, next.shadows);
     for (const l of stage.lights.accents) l.visible = next.accentLights;
     // The low tier has no spot pools, so its fill is lifted to keep the room readable.
-    stage.lights.hemi.intensity = next.tier === 'low' ? 2.4 : 1.25;
+    stage.lights.hemi.intensity = next.tier === 'low' ? HEMI_LOW : HEMI_HIGH;
     gl.setPixelRatio(next.pixelRatio);
     const v = size();
     gl.setSize(v.w, v.h, false);
@@ -200,7 +202,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     pt.x = (probe.x * 0.5 + 0.5) * w; pt.y = (-probe.y * 0.5 + 0.5) * h;
     return pt.x >= inset.left && pt.x <= w - inset.right && pt.y >= 0 && pt.y <= h - inset.bottom;
   };
-  const slot = (n: number, id: string, kind: 'zone' | 'agent', text: string): void => {
+  const slot = (n: number, id: string, kind: ProjectedLabel['kind'], text: string): void => {
     const l = pool[n] ?? (pool[n] = { id: '', kind, text: '', x: 0, y: 0 });
     l.id = id; l.kind = kind; l.text = text; l.x = pt.x; l.y = pt.y;
     out[n] = l;
@@ -208,7 +210,6 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   const projectLabels = (): ProjectedLabel[] => {
     const v = size();
     let n = 0, r = 0;
-    for (const zt of ZONE_TITLES) if (project(zt.at.x, 0.05, zt.at.z, v.w, v.h)) slot(n++, zt.id, 'zone', zt.text);
     for (const view of choreo.views()) {
       const a = agentsById.get(view.instanceId);
       if (!a || !project(view.point.x, 2.15, view.point.z, v.w, v.h)) continue;
@@ -405,9 +406,9 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       }
       syncActors();
       syncMarks(model);
-      // Closed session: the office is dark. The last saved data stays visible.
+      // Closed session: the office is dimmed but furniture stays visible. The last saved data stays visible.
       const off = model.tier === 'closed';
-      gl.toneMappingExposure = off ? 0.45 : 1.25;
+      gl.toneMappingExposure = off ? EXPOSURE_CLOSED : EXPOSURE_OPEN;
       dirty = true;
       wake();
       return accepted;
