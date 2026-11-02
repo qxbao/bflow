@@ -37,7 +37,7 @@ import {
   FAST_PATH_WORKFLOW_WAIVER_NOTICE,
   formatFastPathDowngradeNotice
 } from "./conversation-notice-render.js";
-import { buildDecisionRequestMessage, buildUserDecisionRequest, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
+import { buildDecisionRequestMessage, buildUserDecisionRequest, refuseDelegableCommand, USER_DECISION_EXPIRED_KIND, validateUserDecisionAnswer, type UserDecisionToolInput } from "./decision-routing.js";
 import { captureIntegratedChange, restoreRejectedConflictMerge } from "./integration-change.js";
 import { CoreSession, type CoreRestoreCache } from "./core-session.js";
 import { redactString } from "../resilience/redaction.js";
@@ -207,8 +207,10 @@ function isStoppableExecution(out: Outbound): boolean {
   return !out.reviewReplacement && ["task.assignment", "verification.requested", "delegation.request"].includes(out.message.type) &&
     !["coordinator", "conversation"].includes(out.message.recipient.role);
 }
+/** One attempt per host idle-check interval: an hour of retries. */
+const CANCELLATION_RETRY_LIMIT = 60;
 const DELIVERY_FAILURE_OPTIONS = ["Check the recipient role pane in Herdr; delivery retries automatically once it is ready",
-  "Restart the role with `bflow up` if its pane is gone", "Cancel this run"];
+  "If the role pane is gone, run `bflow up` in a terminal at this repository to reopen it; saved work is kept", "Cancel this run"];
 const UNCERTAIN_DELIVERY_OPTIONS = ["Ask Coordinator to reconcile the uncertain handoff (reconcile_delivery) before any resend", "Cancel this run"];
 const INBOUND_FAILURE_OPTIONS = ["Ask Coordinator to inspect the failed handoff and request a schema-valid resend from the sender", "Cancel this run"];
 const VERIFICATION_RETRY_OPTIONS = ["Retry verification for this run (Coordinator retry_verification)", "Cancel this run"];
@@ -303,6 +305,7 @@ export class AgenticWorkflowRuntime {
   private readonly journal: AgenticJournal;
   private taskLogAssignmentSnapshot: Record<string, unknown>[] = [];
   private repositorySetupQueue: Promise<unknown> = Promise.resolve();
+  private readonly cancellationRetries = new Map<string, number>();
   private readonly repositoryPath: string;
   readonly activityLog: TaskActivityLog;
   constructor(readonly ports: AgenticRuntimePorts, options: { journalDirectory: string; repositoryPath: string }) {
@@ -2816,6 +2819,8 @@ export class AgenticWorkflowRuntime {
     });
   }
   async reportProgress(runId: string, headline: string, questions: string[] = []): Promise<JsonValue> {
+    const refusal = refuseDelegableCommand([headline, ...questions]);
+    if (refusal) throw new Error(refusal);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.assertCoordinatorCommunicable(run);
       // Once Core exists the scheduler owns the run (dispatch retries, verification, integration); a question is still
@@ -5896,6 +5901,24 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     return { proof: CancellationStopProofSchema.parse({ source: "correlated_transport", handle, observedAt: observation.observedAt }) };
   }
   /** Operator-only observation: no tick, dispatch, interrupt, retry-budget reset or approval. Legacy final reports remain intact. */
+  /**
+   * Host timer: a cancellation whose final report still listed blockers is otherwise only finished by an explicit reconcile,
+   * so a Developer that was working at the last observation would wait for someone to run one. Bounded per host process.
+   */
+  async retryStuckCancellations(): Promise<void> {
+    const stuck = await this.transaction(async (state, _save, core) => {
+      const ids: string[] = [];
+      for (const run of state.runs) if (run.cancelled && run.cancelReconciled && run.coreCreated && (await core.snapshot(run.runId)).status === "cancelling") ids.push(run.runId);
+      return ids;
+    }, false);
+    for (const runId of stuck) {
+      const attempts = this.cancellationRetries.get(runId) ?? 0;
+      if (attempts >= CANCELLATION_RETRY_LIMIT) continue;
+      this.cancellationRetries.set(runId, attempts + 1);
+      // A failure is already reported on the run; the other runs must still be retried.
+      await this.reconcileCancellation(runId).catch(() => undefined);
+    }
+  }
   async reconcileCancellation(runId: string): Promise<CancellationReconciliationReport> {
     return this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, runId);
@@ -6114,8 +6137,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       : `Run cancelled: fully stopped, ${released} lease(s) released${expired ? `, ${expired} lease(s) expired without a release receipt` : ""}, ${worktreeText}`;
     const reason = unresolved.length
       ? [...unresolved, ...(coreCancelling ? ["Core run stays cancelling until these are reconciled"] : []), `Worktrees: ${worktreeText}`,
-        `Options: wait until the execution is idle, then run bflow cancel ${run.runId} --reconcile; it closes an idle Developer pane, keeps its worktree and finishes the cancellation`,
-        "Options: keep the retained worktrees for inspection or remove them yourself after confirming they hold no needed work"].join("; ")
+        "Options: nothing to run; Bflow retries this every minute while the session is up, closes an idle Developer pane, keeps its worktree and finishes the cancellation",
+        "Retained worktrees stay on disk for inspection and need no action"].join("; ")
       : worktreeText;
     this.emit(state, outbox, run, "conversation.progress", { sdlcStatus: run.status, headline, reason,
       ...(unresolved.length ? { blockageReason: reason } : {}) }, explicit ? `cancel-reconciled-explicit:${digest([headline, reason])}` : "cancel-reconciled", "conversation");

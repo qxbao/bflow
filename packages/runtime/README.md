@@ -521,11 +521,9 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   in the same turn. On Coordinator STOP, the rejection becomes a durable manual blocker;
   restart/watchdog do not retry the unchanged configuration. Explicit resumes retain the existing
   limits and delivery/approval fences, with a distinct idempotent action per recurrence.
-  User-facing codes: `no_test_runner_detected` (unknown ecosystem found no
-  supported runner; options: the Coordinator adds a setup task, or the run is cancelled), plus
-  `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
+  User-facing codes: `unsupported_verification` and `policy_violation`; `missing_behavioral_runner` remains only for
   owner-configured runners. Coordinator-fixable codes are returned to the Coordinator as the tool error
-  and are never sent to Conversation: `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
+  and are never sent to Conversation: `no_test_runner_detected` (no supported runner yet; Coordinator installs one with `repository_setup`), `runner_setup_required` (a recognized ecosystem needs a reviewed runner/reporter setup task), `missing_test_paths` (no test file in `affectedPaths`),
   `missing_test_mapping` (missing or ambiguous identities, owned test scope, or task execution budget), `unknown_test_command` (a target
   command is not a detected label, or the label is missing from `infrastructure.commands`) and
   `unsupported_method` (no runner for the criterion's method) and `invalid_specification` (the specification,
@@ -1811,6 +1809,12 @@ Each mutation is journaled in `run.repositorySetupLog` before it starts and afte
 refused once this run or another live run has Developer work. `withdraw_workflow_proposal` retracts a
 design still awaiting approval; the next proposal gets a new approval id and a notice naming which
 card replaced which.
+
+`request_user_decision` and `report_progress` refuse text that hands the user a command these tools
+cover (a backstop on the prompts: a heuristic over the wording, not a proof). When the user really must
+act outside the chat, `request_user_decision` takes `userAction` (`why`, `steps`, `done`). It becomes part
+of the question, so the terminal and Web cards show it on first display. The host also retries a
+cancellation still blocked after its final report, once a minute for up to an hour per host process.
 
 Custom skill dependency receipts can be passed separately as `dependencySkillApprovals` in role
 platform options (`dependencyApprovals` on the SkillManager request). These exact pins and receipt

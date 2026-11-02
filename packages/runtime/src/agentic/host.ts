@@ -2960,6 +2960,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     // After any watchdog pass in progress, so a stall it just reported is not also pinged from a stale snapshot.
     const task = Promise.resolve(watchdogTask).catch(() => undefined)
       .then(() => executeHostIdleCheck({ readState: () => ({ workspace, manifest, quiesced, closing }), receipts, activeHostVerifications, pings: idleCheckPings, observeAgent }))
+      .then(() => quiesced || closing ? undefined : workspace?.runtime.retryStuckCancellations())
       .catch(error => { process.stderr.write(`Bflow idle check: ${redactString(String(error))}\n`); })
       .finally(() => { if (idleCheckTask === task) idleCheckTask = undefined; });
     idleCheckTask = task;
@@ -3089,7 +3090,9 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     resume_run:{properties:{runId:string,actionId:string,messageId:string},required:["runId"]},
     [USER_DECISION_TOOL]:{properties:{runId:string,taskId:string,question:{type:"string",minLength:1,maxLength:2000},
       options:{type:"array",items:{type:"string",minLength:1,maxLength:200},minItems:2,maxItems:6},
-      context:{type:"string",maxLength:4000}},required:["runId","taskId","question"]},
+      context:{type:"string",maxLength:4000},
+      userAction:{type:"object",description:"Required when the user must do something outside this chat. Shown on the card.",properties:{why:{type:"string",minLength:1,maxLength:500},
+        steps:{type:"array",items:{type:"string",minLength:1,maxLength:500},minItems:1,maxItems:10},done:{type:"string",minLength:1,maxLength:300}},required:["why","steps","done"]}},required:["runId","taskId","question"]},
     inspect:{properties:{runId:string,view:{type:"string",enum:["full","summary","status","tasks","blockers"]},taskId:string,cursor:{type:"string",minLength:1,maxLength:128}},required:[]}, report_progress:{properties:{runId:string,headline:string,questions:array},required:["runId","headline"]},
     assess:{properties:{specification:assessmentSpecificationToolSchema},required:["specification"]},
     read_role_profiles:{properties:{},required:[]},

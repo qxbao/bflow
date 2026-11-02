@@ -192,7 +192,7 @@ describe("Conversation notice rendering", () => {
     expect(rendered.display).toContain("Việc #1: Thêm trang đăng nhập");
     expect(rendered.display).toContain("Chuyện gì xảy ra: Công việc đang tạm dừng vì vướng mắc — Lập trình viên không phản hồi.");
     expect(rendered.display).toContain("Ảnh hưởng: Việc #1 đang tạm dừng và chờ xử lý trước khi làm tiếp.");
-    expect(rendered.display).toContain('Bạn cần làm gì: Gõ "tiếp tục việc #1" sau khi xử lý xong, hoặc gõ "hủy việc #1" nếu muốn dừng hẳn.');
+    expect(rendered.display).toContain('Bạn cần làm gì: Gõ "tiếp tục việc #1" để Trưởng nhóm kỹ thuật kiểm tra và tự xử lý, hoặc gõ "hủy việc #1" nếu muốn dừng hẳn.');
     expect(rendered.display).not.toContain("<số lựa chọn>");
     expect(rendered.display).not.toContain('{"');
     expect(rendered.display).not.toContain("run-42");

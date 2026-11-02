@@ -436,7 +436,22 @@ describe("C / acceptance 3: cancelling a run with an idle Developer", () => {
     expect(report.fullyStopped).toBe(false);
     expect(f.panes.closes).toHaveLength(0);
     expect(report.blockers.join(";")).toContain("wait until it is idle");
-    expect((await conversationNotices(f)).map((out: any) => String(out.message.payload.reason)).join(";")).toContain("--reconcile");
+    expect((await conversationNotices(f)).map((out: any) => String(out.message.payload.reason)).join(";")).toContain("retries this every minute");
+  });
+  it("retries by itself once a working pane comes to rest, so nobody has to run reconcile", async () => {
+    const f = await fixture(); await f.dispatch();
+    await f.runtime.cancel("run-1", "stop"); await f.runtime.tick(); idle(f, "working");
+    await f.runtime.reconcileCancellation("run-1");
+    await f.runtime.retryStuckCancellations();
+    expect(f.panes.closes).toHaveLength(0);
+    idle(f);
+    await f.runtime.retryStuckCancellations();
+    expect(f.panes.closes).toHaveLength(1);
+    expect((await f.ports.engine.getSnapshot("run-1")).value.status).toBe("cancelled");
+    // Finished: later passes leave it alone.
+    const notices = (await conversationNotices(f)).length;
+    await f.runtime.retryStuckCancellations();
+    expect(await conversationNotices(f)).toHaveLength(notices);
   });
   it("never closes a pane another binding took over", async () => {
     const f = await fixture(); const developer = await f.dispatch();

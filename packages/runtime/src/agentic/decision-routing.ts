@@ -26,7 +26,46 @@ export const USER_DECISION_METADATA_KIND = "user_decision";
 export const USER_DECISION_EXPIRED_KIND = "user_decision_expired";
 
 const MAX_OPTIONS = 6;
-const ALLOWED_INPUT_KEYS = ["runId", "taskId", "question", "options", "context"] as const;
+const ALLOWED_INPUT_KEYS = ["runId", "taskId", "question", "options", "context", "userAction"] as const;
+const MAX_QUESTION = 2000;
+/** The card is clipped at this length; an action that would lose a step is refused instead. */
+const MAX_CARD_TEXT = 2000;
+
+/** Work only the user can do, told on the first card: why, every step, and how to report back. */
+export interface UserAction {
+  readonly why: string;
+  readonly steps: readonly string[];
+  readonly done: string;
+}
+
+/** Commands Coordinator runs itself through repository_setup, reresolve_execution_plan or reconcile_cancellation. */
+const DELEGABLE_COMMAND = /(?:^|[\s;&|(`])(?:npm\s+(?:init|i|install|ci)|git\s+(?:init|add|commit)|mkdir|touch|bflow\s+cancel|bflow\s+task\s+preview)(?=\s)/iu;
+/** Wording that hands a command to the reader. A report of what was already run ("đã chạy lệnh ...") is not a request. */
+const HANDS_OVER_COMMAND = /lệnh\s*(?:cần|sau|này|cho|:)|(?<!đã\s)chạy\s+(?:tay|tại|lệnh|trong)|terminal|\brun\s+(?:this|these|the\s+following|the\s+command)|manually/iu;
+
+/** Refusal text when an agent would hand the user a command an agent can run; undefined otherwise. */
+export function refuseDelegableCommand(texts: readonly string[], steps: readonly string[] = []): string | undefined {
+  const text = texts.join("\n");
+  if (!steps.some(step => DELEGABLE_COMMAND.test(step)) && !(DELEGABLE_COMMAND.test(text) && HANDS_OVER_COMMAND.test(text))) return undefined;
+  return "Do not ask the user to run this. Coordinator runs it: repository_setup (npm_init, npm_install_dev, gitignore_add, create_directories, git_add, git_commit), " +
+    "reresolve_execution_plan or reconcile_cancellation; other roles report the blocker to Coordinator. " +
+    "If repository_setup refuses because Developer work started, ask a decision with no command in it, such as cancelling and creating a new run.";
+}
+
+function parseUserAction(raw: unknown): UserAction {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("userAction must be an object");
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) if (!["why", "steps", "done"].includes(key)) throw new Error(`Unknown userAction key: ${key}`);
+  if (!Array.isArray(record.steps) || record.steps.length < 1 || record.steps.length > 10) throw new Error("userAction.steps must contain 1..10 entries");
+  return { why: boundedString(record.why, "userAction.why", 1, 500),
+    steps: record.steps.map((step, index) => boundedString(step, `userAction.steps[${index}]`, 1, 500)),
+    done: boundedString(record.done, "userAction.done", 1, 300) };
+}
+
+function cardText(question: string, action: UserAction | undefined): string {
+  if (!action) return question;
+  return [question, `Để làm gì: ${action.why}`, `Cách làm: ${action.steps.map((step, index) => `(${index + 1}) ${step}`).join(" ")}`, `Làm xong: ${action.done}`].join("\n");
+}
 
 export interface UserDecisionToolInput {
   readonly runId: string;
@@ -34,6 +73,7 @@ export interface UserDecisionToolInput {
   readonly question: string;
   readonly options?: readonly string[];
   readonly context?: string;
+  readonly userAction?: UserAction;
 }
 
 export type RoleParticipant = RoleMessage["sender"];
@@ -77,7 +117,7 @@ export function parseUserDecisionToolInput(raw: unknown): UserDecisionToolInput 
   }
   const runId = IdentifierSchema.parse(record.runId);
   const taskId = IdentifierSchema.parse(record.taskId);
-  const question = boundedString(record.question, "question", 1, 2000);
+  const question = boundedString(record.question, "question", 1, MAX_QUESTION);
   let options: string[] | undefined;
   if (record.options !== undefined) {
     if (!Array.isArray(record.options)) throw new Error("options must be an array");
@@ -90,10 +130,15 @@ export function parseUserDecisionToolInput(raw: unknown): UserDecisionToolInput 
     if (typeof record.context !== "string" || record.context.length > 4000) throw new Error("context must be at most 4000 characters");
     context = record.context;
   }
+  const userAction = record.userAction === undefined ? undefined : parseUserAction(record.userAction);
+  if (cardText(question, userAction).length > MAX_CARD_TEXT) throw new Error(`question and userAction together must fit ${MAX_CARD_TEXT} characters`);
+  const refusal = refuseDelegableCommand([question, ...(options ?? []), context ?? "", ...(userAction ? [userAction.why, userAction.done] : [])], userAction?.steps);
+  if (refusal) throw new Error(refusal);
   return {
     runId, taskId, question,
     ...(options !== undefined ? { options } : {}),
-    ...(context !== undefined ? { context } : {})
+    ...(context !== undefined ? { context } : {}),
+    ...(userAction !== undefined ? { userAction } : {})
   };
 }
 
@@ -111,12 +156,14 @@ export function buildUserDecisionRequest(params: UserDecisionRequestParams): App
 
   const input = parseUserDecisionToolInput(params.input);
   const options = input.options ?? [];
-  const hash = digestParts([input.runId, input.taskId, role.data, input.question, options, params.revision, params.generation]);
+  const hash = digestParts([input.runId, input.taskId, role.data, input.question, options, params.revision, params.generation, ...(input.userAction ? [input.userAction] : [])]);
+  // In the question itself, so every surface (terminal card, Web card, notice receipt) shows it without its own field.
+  const question = cardText(input.question, input.userAction);
   if (!Number.isFinite(Date.parse(params.now))) throw new Error("now must be an ISO-8601 timestamp");
 
   const metadata: Record<string, unknown> = {
     kind: USER_DECISION_METADATA_KIND,
-    question: input.question,
+    question,
     requestedByRole: role.data,
     ...(input.options !== undefined ? { options: input.options } : {}),
     ...(input.context !== undefined ? { context: input.context } : {})
@@ -133,7 +180,7 @@ export function buildUserDecisionRequest(params: UserDecisionRequestParams): App
     generation: params.generation,
     requestedBy: role.data,
     requestedAt: params.now,
-    reason: input.question,
+    reason: question,
     evidence: [],
     idempotencyKey: `user-decision:${hash}`,
     metadata

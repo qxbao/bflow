@@ -651,25 +651,13 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
       rejection = (error as WorkflowProposalRejected).rejection; message = (error as Error).message;
     }
     expect(rejection).toMatchObject({ code: "no_test_runner_detected" });
-    expect(rejection!.options).toEqual(["Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"]);
+    expect(rejection!.options[0]).toContain("repository_setup");
     expect(JSON.parse(message)).toEqual(rejection);
 
-    await runtime.reportWorkflowRejected(RUN, rejection!);
+    // Coordinator's job: the structured error is its instruction, so the user sees no blocker.
     await runtime.reportWorkflowRejected(RUN, rejection!);
     await runtime.flushOutbound();
-    const rejected = f.inbox.filter(item => payloadKind(item) === "workflow_rejected");
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.payload).toMatchObject({ code: "no_test_runner_detected", reason: rejection!.reason, runId: RUN });
-    expect((rejected[0]!.payload as { options: string[] }).options).toEqual(rejection!.options);
-
-    await persistNotices(f);
-    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập runner"))!;
-    const rendered = renderConversationNotice(notice);
-    expect(rendered.kind).toBe("blocked");
-    expect(rendered.display).toContain("- Trưởng nhóm kỹ thuật tự thiết lập runner");
-    expect(rendered.display).toContain("- Hủy run");
-    expect(rendered.display).not.toContain("<số lựa chọn>");
-    expect(rendered.display).not.toContain("verification.json");
+    expect(f.inbox.filter(item => payloadKind(item) === "workflow_rejected")).toHaveLength(0);
 
     expect(specification).toEqual(before);
     expect(specification.acceptanceCriteria[0]!.verificationMethod).toBe("unit_test");

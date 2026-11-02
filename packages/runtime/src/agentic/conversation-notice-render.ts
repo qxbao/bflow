@@ -485,7 +485,7 @@ function blockedNotice(notice: NoticeLike, payload: z.infer<typeof BLOCKED_PAYLO
     : automatic && runId
       ? `Bạn cần làm gì: Hệ thống Bflow sẽ tự thử chạy lại ${workTag} (lần ${automatic.attempt}/${automatic.limit}), bạn chưa cần làm gì; hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
       : runId
-        ? `Bạn cần làm gì: Gõ "tiếp tục ${workCommand}" sau khi xử lý xong, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
+        ? `Bạn cần làm gì: Gõ "tiếp tục ${workCommand}" để Trưởng nhóm kỹ thuật kiểm tra và tự xử lý, hoặc gõ "hủy ${workCommand}" nếu muốn dừng hẳn.`
         : "Bạn cần làm gì: Hãy cho biết bạn muốn xử lý tiếp như thế nào.";
   const nextSteps = (revision?.nextSteps ?? []).map(step => sanitizeCardProse(step, identity));
   return { messageId: notice.messageId, kind: "blocked", shortId, ...(runLabel ? { runLabel } : {}),
