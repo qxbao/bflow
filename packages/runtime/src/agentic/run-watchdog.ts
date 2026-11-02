@@ -24,6 +24,8 @@ export interface RunFacts {
   acceptedPanes?: readonly { role: string; paneId: string }[];
   /** Runtime itself owns the work (task/workflow verification or a durable outcome to apply); no pane is expected to be working. */
   runtimeWork?: boolean;
+  /** An open blocker waits on its recorded next action (automatic resume or the user); the user was already told. A queued action is not this: its handoff is in progress. */
+  reportedBlocker?: boolean;
   /** Pending user decisions (specialist questions) of the run. */
   pendingDecisions: readonly { approvalId: string; requestedAt: string }[];
 }
@@ -68,6 +70,9 @@ export type WatchdogAction =
 /** Notice message identity of a user decision, as Runtime emits it (buildDecisionRequestMessage). */
 export function decisionMessageId(approvalId: string): string { return `decision-${approvalId}`; }
 
+/** One idle episode of a run; new non-Conversation activity starts another. */
+export function episodeKeyOf(run: Pick<RunFacts, "runId" | "lastActivityAt">): string { return `${run.runId}@${run.lastActivityAt}`; }
+
 const NOT_WORKING = new Set(["idle", "done", "unknown", "disconnected", "cancelled", "blocked", "unavailable"]);
 
 /** Actions for the current facts. Terminal runs and displayed decisions produce nothing. */
@@ -103,8 +108,51 @@ export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {
     if (input.now - run.lastActivityAt <= options.stallAfterMs) continue;
     // Runtime names only this run's accepted holders in the notice.
     const holders = run.acceptedRoles ?? [];
-    actions.push({ kind: "stalled", runId: run.runId, episodeKey: `${run.runId}@${run.lastActivityAt}`, idleSince: run.lastActivityAt,
+    actions.push({ kind: "stalled", runId: run.runId, episodeKey: episodeKeyOf(run), idleSince: run.lastActivityAt,
       ...(holders.length ? { holders } : {}) });
   }
   return actions;
+}
+
+/** Period of the host's idle check. */
+export const IDLE_CHECK_INTERVAL_MS = 60_000;
+
+export interface IdleCheckOptions {
+  /** Quiet time before a run with no working agent counts as strange. */
+  idleAfterMs: number;
+  /** Wait between pings of one episode; each ping costs a Conversation turn. */
+  repeatAfterMs: number;
+  /** Pings allowed per episode. */
+  maxPings: number;
+}
+
+export const DEFAULT_IDLE_CHECK_OPTIONS: IdleCheckOptions = { idleAfterMs: 180_000, repeatAfterMs: 300_000, maxPings: 3 };
+
+/** Pings already sent for one episode. */
+export interface IdleCheckPing { pings: number; lastAt: number }
+
+export interface IdleCheck { runId: string; episodeKey: string; idleSince: number; attempt: number }
+
+/**
+ * Runs Conversation should look at: live, quiet, not waiting on a person or on Runtime, while no role pane in the session is working.
+ * Unlike the stall report this ignores undelivered handoffs, so one that never settles still surfaces. It only asks for a look.
+ */
+export function evaluateIdleCheck(input: {
+  now: number;
+  runs: readonly RunFacts[];
+  panes: readonly PaneFact[];
+  pings: ReadonlyMap<string, IdleCheckPing>;
+  activeVerificationRunIds?: readonly string[];
+  options?: Partial<IdleCheckOptions>;
+}): IdleCheck[] {
+  if (input.panes.some(pane => !NOT_WORKING.has(pane.status))) return [];
+  const options: IdleCheckOptions = { ...DEFAULT_IDLE_CHECK_OPTIONS, ...input.options };
+  const activeVerifications = new Set(input.activeVerificationRunIds ?? []);
+  return input.runs.flatMap(run => {
+    if (!run.live || run.awaitingHuman || run.runtimeWork || run.reportedBlocker || run.pendingDecisions.length > 0 || activeVerifications.has(run.runId)) return [];
+    if (input.now - run.lastActivityAt <= options.idleAfterMs) return [];
+    const episodeKey = episodeKeyOf(run), sent = input.pings.get(episodeKey);
+    if (sent && (sent.pings >= options.maxPings || input.now - sent.lastAt < options.repeatAfterMs)) return [];
+    return [{ runId: run.runId, episodeKey, idleSince: run.lastActivityAt, attempt: (sent?.pings ?? 0) + 1 }];
+  });
 }

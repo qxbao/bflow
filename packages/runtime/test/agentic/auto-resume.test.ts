@@ -533,6 +533,15 @@ describe("bounded automatic resume", () => {
     expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
   });
 
+  it("marks a blocker as reported only until its resume is queued", async () => {
+    const f = await fixture();
+    await f.runtime.observeCoordinatorOutcome(coordinatorBlocked("blocked-facts", "Transient planning blocker"));
+    expect((await f.runtime.watchdogSnapshot("session-1"))[0]).toMatchObject({ reportedBlocker: true });
+    f.advance(60 * SECOND);
+    expect(await f.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
+    expect((await f.runtime.watchdogSnapshot("session-1"))[0]).toMatchObject({ reportedBlocker: false });
+  });
+
   it("enqueues distinct resume_run wakes across recurring reportRunStalled episodes that share one actionId", async () => {
     const f = await fixture([run("run-1", "intake")]);
     const backoffs = [30, 60, 120];

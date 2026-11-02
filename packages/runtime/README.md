@@ -555,6 +555,13 @@ về việc giao nhận, không bao giờ là task thành công, và lần nhắ
   falling back to the delegation time. Limits: an unreadable pane is treated as working, and a design
   approval that never reached Conversation is not reconciled by the watchdog. Resurfacing counts
   unsurfaced notices as well, so a busy Conversation pane can reach the blocked notice.
+- **Idle check** (`evaluateIdleCheck`, `executeHostIdleCheck`; host timer every 60 s). When no non-Conversation
+  pane is working and a live run has had no non-Conversation activity for 180 seconds, it writes a non-user-facing
+  `idle_check` notice, which the inbox uses to wake Conversation to read the panes and tell the user what it observed.
+  It also covers handoffs that never settle, which the stall report skips. It skips human gates, pending decisions,
+  Runtime-owned verification and blockers already reported (`pendingAction.state: pending`). Each idle episode gets
+  at most three pings, five minutes apart, and the notice ids are stable so a host restart cannot exceed that.
+  It only asks for a look: it changes no run state and resumes nothing.
 - **Not live-verified.** The host timer, the Herdr notifications and the Stop-hook display acknowledgement
   depend on a live Herdr and Claude Code session. Tests cover the pure logic, the receipt epochs, the Runtime
   reports and the Gateway wiring with a fake transport; the host closure itself is only type-checked.

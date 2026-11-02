@@ -1520,6 +1520,7 @@ export class AgenticWorkflowRuntime {
       // Deterministic checks/test suites may legitimately run longer than the stall window without any message.
       runtimeWork: run.tasks.some(task => task.verificationPending) || run.workflowVerificationPending === true ||
         state.pendingVerifications.some(item => pendingRunId(item) === run.runId && !item.stuck),
+      reportedBlocker: run.pendingAction?.state === "pending",
       pendingDecisions: pendingDecisionRequests.map(item => ({ approvalId: item.request.approvalId, requestedAt: item.request.requestedAt })),
       pendingDecisionRequests
     };
