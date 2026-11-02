@@ -130,11 +130,17 @@ function VisualOffice({api,project,projects,onPair,session,connection,revision,r
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
   const dockSummary=useOperationsDockSummary();
   // Toàn cảnh closes every panel (the re-pair view stays); the camera eases only after that commit, with the then-current inset.
+  const pendingOverview=useRef(false);
+  const settleOverview=(open:boolean)=>{pendingOverview.current=false;control.current?.setInset(insetFor(open));control.current?.focusZone('overview');};
   const focusZone=(zone:OfficeFocusZone)=>{
     if(zone!=='overview'){control.current?.focusZone(zone);return;}
+    // Closing may navigate and the router can commit late, so the camera waits for the effect below once the panel is really closed.
+    // Nothing to wait for when no panel is open or the open one (the re-pair view) cannot close.
+    const waits=frame.panelOpen && frame.inspector?.kind!=='repair';
     frame.closePanels();
-    setTimeout(()=>{if(!mounted.current)return;control.current?.setInset(insetFor(panelNow.current));control.current?.focusZone(zone);},0);
+    if(waits)pendingOverview.current=true;else settleOverview(frame.panelOpen);
   };
+  useEffect(()=>{if(pendingOverview.current && !frame.panelOpen && mounted.current)settleOverview(false);},[frame.panelOpen]);// eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{
     const apply=()=>control.current?.setInset(insetFor(frame.panelOpen));
     apply();window.addEventListener('resize',apply);return()=>window.removeEventListener('resize',apply);

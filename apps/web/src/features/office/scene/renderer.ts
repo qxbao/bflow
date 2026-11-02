@@ -8,6 +8,7 @@ import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from 
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
 import { agentTag, poseLabel } from '../model/labels';
 import { Choreographer } from './actors';
+import { LabelPlacer } from './labelPlacement';
 import { AGENT_ZOOM, CameraIntent, CameraMove, FOV, NO_INSET, withInset, type Inset, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, HOME_ZOOM, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
@@ -194,7 +195,10 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   let sink: ((labels: ProjectedLabel[]) => void) | undefined;
   const probe = new Vector3();
   const pool: ProjectedLabel[] = [], out: ProjectedLabel[] = [];
-  const rects: number[] = [];
+  const placer = new LabelPlacer();
+  // Message boxes found in the first pass; placed in a second one, after every name tag.
+  const boxTag: Array<{ bubbleId: string }> = [], boxX: number[] = [], boxY: number[] = [], boxText: string[] = [];
+  let boxCount = 0;
   const tags = new Map<string, { label: string; pose: string; text: string; id: string; bubbleId: string; sleepId: string }>();
   let excerpts: ReadonlyMap<string, string> = new Map();
   let agentsById = new Map<string, OfficeModel['agents'][number]>();
@@ -211,28 +215,28 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     l.id = id; l.kind = kind; l.text = text; l.x = pt.x; l.y = pt.y;
     out[n] = l;
   };
-  const hits = (x0: number, x1: number, y0: number, y1: number, r: number): boolean => {
-    for (let i = 0; i < r; i += 4) if (x0 < (rects[i + 1] as number) && x1 > (rects[i] as number) && y0 < (rects[i + 3] as number) && y1 > (rects[i + 2] as number)) return true;
-    return false;
-  };
   const projectLabels = (): ProjectedLabel[] => {
     const v = size();
-    let n = 0, r = 0;
+    let n = 0;
+    boxCount = 0;
+    placer.begin();
+    const far = state.zoom < 1.8;
     for (const view of choreo.views()) {
       const a = agentsById.get(view.instanceId);
       if (!a || !project(view.point.x, 2.15, view.point.z, v.w, v.h)) continue;
       let tag = tags.get(a.instanceId);
       if (!tag || tag.label !== a.label || tag.pose !== a.pose) { tag = { label: a.label, pose: a.pose, text: agentTag(a.label, a.pose), id: `agent:${a.instanceId}`, bubbleId: `bubble:${a.instanceId}`, sleepId: `sleep:${a.instanceId}` }; tags.set(a.instanceId, tag); }
-      const far = state.zoom < 1.8;
-      const half = tag.text.length * 3.4 + 6, x0 = pt.x - half, x1 = pt.x + half, y0 = pt.y - 18, y1 = pt.y, tagX = pt.x, tagY = pt.y;
-      // Far out, tags that would overlap an earlier one are hidden; closer in everything shows.
-      if (!(far && hits(x0, x1, y0, y1, r))) { rects[r++] = x0; rects[r++] = x1; rects[r++] = y0; rects[r++] = y1; slot(n++, tag.id, 'agent', tag.text); }
+      const tagX = pt.x, tagY = pt.y;
+      if (placer.tag(tagX, tagY, tag.text.length * 6.8 + 12, 18, far)) slot(n++, tag.id, 'agent', tag.text);
       const extra = poseLabel(a.pose);
-      if (extra === 'bubble') {
-        // Message box above the name tag; far out, one that would overlap an earlier tag or box is hidden.
-        const by = tagY - 22, bx0 = tagX - BUBBLE_W / 2, bx1 = tagX + BUBBLE_W / 2, by0 = by - BUBBLE_H;
-        if (!(far && hits(bx0, bx1, by0, by, r))) { rects[r++] = bx0; rects[r++] = bx1; rects[r++] = by0; rects[r++] = by; pt.y = by; slot(n++, tag.bubbleId, 'bubble', excerpts.get(a.instanceId) ?? a.statusText); }
-      } else if (extra === 'sleep') { pt.y = tagY - 22; slot(n++, tag.sleepId, 'sleep', 'Zzz'); }
+      if (extra === 'bubble') { boxTag[boxCount] = tag; boxX[boxCount] = tagX; boxY[boxCount] = tagY - 22; boxText[boxCount] = excerpts.get(a.instanceId) ?? a.statusText; boxCount++; }
+      else if (extra === 'sleep') { pt.y = tagY - 22; slot(n++, tag.sleepId, 'sleep', 'Zzz'); }
+    }
+    // Message boxes go above their name tag; far out, one that would overlap any tag or an earlier box is hidden.
+    for (let i = 0; i < boxCount; i++) {
+      if (!placer.bubble(boxX[i] as number, boxY[i] as number, BUBBLE_W, BUBBLE_H, far)) continue;
+      pt.x = boxX[i] as number; pt.y = boxY[i] as number;
+      slot(n++, (boxTag[i] as { bubbleId: string }).bubbleId, 'bubble', boxText[i] as string);
     }
     out.length = n;
     return out;

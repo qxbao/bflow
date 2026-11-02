@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { WebAgentViewSchema } from '@bflow/contracts/web';
 import { ApiClient } from '../src/api/client';
@@ -79,4 +79,18 @@ test('page shows the unsupported-workforce state', async () => {
   installApi({});
   page();
   await waitFor(() => expect(screen.getByText('Chưa có dữ liệu nhân viên')).toBeTruthy());
+});
+
+test('switching agent never shows the previous agent text under the new heading', async () => {
+  const { fetcher } = installApi({ '/api/v1/projects/p/workforce': workforce, [T('dev-1')]: transcript('dev-1', 'dev log') });
+  page();
+  expect(await screen.findByText('dev log')).toBeTruthy();
+  const previous = screen.getByRole('region', { name: 'Nội dung gần đây của nhân viên' });
+  // The next agent's transcript never answers: its pane must start empty instead of keeping 'dev log'.
+  fetcher.mockImplementation(async (input: string) => input.includes('/workforce') ? new Response(JSON.stringify(workforce)) : new Promise<Response>(() => {}));
+  fireEvent.click(screen.getByRole('button', { name: /Tên a-1/ }));
+  expect(await screen.findByRole('heading', { level: 3, name: 'Tên a-1' })).toBeTruthy();
+  expect(screen.queryByText('dev log')).toBeNull();
+  // A keyed transcript is a fresh component, so no commit shows the previous agent's text under the new heading.
+  expect(previous.isConnected).toBe(false);
 });

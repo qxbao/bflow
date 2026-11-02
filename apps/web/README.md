@@ -38,7 +38,7 @@ dock are reachable from the scene (parity table in `test/office-parity.test.tsx`
   holds the truth). Decor, keyboards and extra furniture come from the generated models, under bright lighting.
 - **Zzz and message boxes.** A sleeping agent shows a `Zzz` pill; a working agent shows a message box with the last lines of its terminal
   text. The text is an unverified terminal snapshot read through `GET /api/v1/projects/:id/workforce/excerpts`, redacted and capped at 600 characters; it is
-  not an `AgentResult` and never evidence of task success. Without that route (an older or fixture host) the boxes are simply absent.
+  not an `AgentResult` and never evidence of task success. Without that route (an older or fixture host) the box shows the staff member's status text and no terminal text.
 - **Operations dock.** Hidden by default behind a toggle that shows when something is tracked or needs attention. `Toàn cảnh` closes every open panel
   except the re-pair view, then fits the camera.
 - **Nhân viên page.** `/projects/:id/agents` lists every staff member with their recent terminal text in Classic and 3D; the agent inspector has a
@@ -75,7 +75,7 @@ GPU string. Numbers from one machine are not portable. The latest run is recorde
 Source implementation plus local tests: vitest (jsdom), Playwright in real Chrome against the real Local Server with deterministic fixture hosts
 (W07/W09), SwiftShader software GL, and one local hardware-GL measurement. **Fixtures and SwiftShader are not live Herdr or provider evidence.** The
 workforce data in these tests is synthetic. A scoped single-provider live Web SDLC run is documented in `docs/reliability/web-ux-stabilization.md`
-for Classic; no live run has exercised the 3D mode, and the excerpt and transcript routes have been exercised only against fakes and a mocked route (the fixture host has no excerpts route), never a live Herdr or provider pane; and multi-provider and fault-campaign acceptance remain open. The hidden-tab frame count in the
+for Classic; no live run has exercised the 3D mode, and the excerpt and transcript routes have been exercised only against fakes and a mocked route (the fixture host has no excerpts route), never a live Herdr or provider pane. Multi-provider and fault-campaign acceptance remain open. The hidden-tab frame count in the
 measurement uses an overridden `document.hidden`, not a real background tab.
 
 ## Design and accessibility

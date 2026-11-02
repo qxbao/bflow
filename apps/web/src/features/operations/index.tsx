@@ -92,11 +92,11 @@ export function OperationsDock() {
   const context=useContext(Context);if(!context)throw new Error('Operations boundary required');
   return <>{context.dock}</>;
 }
-/** What the collapsed HUD dock toggle shows: the tracked count, and whether something needs a look (error banner, or an uncertain/failed operation). */
+/** What the collapsed HUD dock toggle shows: the tracked count, and whether something needs a look (error banner, or an uncertain/failed operation that is not already in History). */
 export function useOperationsDockSummary():{count:number;attention:boolean} {
   const context=useContext(Context);if(!context)throw new Error('Operations boundary required');
   const {observations,error}=context;
-  return {count:observations.length,attention:Boolean(error) || observations.some(item=>item.uncertain || item.operation?.state==='reconciliation_required' || item.operation?.state==='failed')};
+  return {count:observations.length,attention:Boolean(error) || observations.some(item=>!belongsToHistory(item,undefined) && (item.uncertain || item.operation?.state==='reconciliation_required' || item.operation?.state==='failed'))};
 }
 export function useCommands(slot:string) {
   const context=useContext(Context);if(!context)throw new Error('Operations boundary required');

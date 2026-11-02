@@ -71,7 +71,7 @@ export function AgentsPage({ api, id, revision }: { api: ApiClient; id: string; 
           <span className="block text-xs text-muted">{roleLabel(a.role)} · {TRANSPORT[a.transport.state] ?? 'Chưa rõ'} · {openWork(a)} việc đang giữ</span>
         </button>
       </li>)}</ul>
-      <div className="min-w-0"><h3 className="mt-0">{selected.displayName}</h3><AgentTranscript api={api} projectId={id} instanceId={selected.instanceId} className="h-[min(28rem,60dvh)]" /></div>
+      <div className="min-w-0"><h3 className="mt-0">{selected.displayName}</h3><AgentTranscript key={selected.instanceId} api={api} projectId={id} instanceId={selected.instanceId} className="h-[min(28rem,60dvh)]" /></div>
     </div>}
   </section>;
 }

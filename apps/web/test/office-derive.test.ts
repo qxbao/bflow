@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebWorkforceViewSchema, WebDecisionSchema, WebRunViewSchema, type WebAgentView, type WebAgentWork, type WebWorkforceView } from '@bflow/contracts/web';
 import { deriveOffice } from '../src/features/office/model/derive';
 import type { OfficeInput } from '../src/features/office/model/types';
 
-const fixture = (name: string) => JSON.parse(readFileSync(resolve(process.cwd(), '../../packages/contracts/test/fixtures/local-web', name), 'utf8'));
+const fixture = (name: string) => JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/contracts/test/fixtures/local-web', name), 'utf8'));
 const full: WebWorkforceView = WebWorkforceViewSchema.parse(fixture('workforce-full.json'));
 const T0 = Date.parse(full.observedAt);
 const session = { apiVersion: 1 as const, projectId: 'p', sessionId: 's', state: 'ready' as const, conversationStatus: 'active' as const, pendingIntakes: [], blockers: [], updatedAt: full.observedAt };

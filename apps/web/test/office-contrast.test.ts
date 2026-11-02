@@ -1,9 +1,11 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test } from 'vitest';
 
+const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Reads the real `.office-3d` block of global.css, so a token edit that breaks contrast fails here.
-const css = readFileSync(resolve(process.cwd(), 'src/styles/global.css'), 'utf8');
+const css = readFileSync(resolve(WEB_ROOT, 'src/styles/global.css'), 'utf8');
 const block = /\.office-3d\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
 const tokens = new Map([...block.matchAll(/--color-([a-z-]+):\s*(#[0-9a-fA-F]{6})/g)].map(m => [m[1]!, m[2]!]));
 const channel = (c: number): number => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
@@ -20,7 +22,7 @@ test('on-brand on brand is at least 4.5:1', () => { expect(contrast(token('on-br
 
 // A class list that puts bg-brand and a bare text-ink together gives cream text on yellow in dark mode.
 // Variants are compared within their own group: a hover: variant does not count, but aria-expanded:bg-brand with aria-expanded:text-ink does.
-const SRC = resolve(process.cwd(), 'src');
+const SRC = resolve(WEB_ROOT, 'src');
 const sourceFiles = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? sourceFiles(resolve(dir, e.name)) : /\.tsx?$/.test(e.name) ? [resolve(dir, e.name)] : []);
 const brandTextClash = (text: string): boolean => {
   for (const m of text.matchAll(/(["'`])((?:\\.|(?!\1)[^\n\\])*)\1/g)) {

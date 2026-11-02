@@ -257,7 +257,7 @@ order, so no 3D camera, lighting or mesh is needed") no longer holds.
    `AgentRoleSchema` from `packages/contracts/src/agent-roles.ts`. That file
    imports only `zod`, so the browser closure of the web subpath gains this one
    zod-only module and no Node or domain code. Nothing in `packages/contracts/**`
-   is edited by the 3D work.
+   is edited by the original 3D work (the transcript amendment below adds contracts).
 7. **Dark tokens exception.** DESIGN.md (square corners, 1 px lines, light only)
    still governs Classic and every Classic component. Inside the 3D mode only, a
    scoped `.office-3d` block in `apps/web/src/styles/global.css` re-values the same
@@ -289,9 +289,17 @@ evidence. Only a real session run (V9) may be recorded as live evidence.
 
 The project owner asked to read every staff member's output in the Classic and 3D views, and to see a live message box above each active character. The workforce view carries identity, work and handoffs but no output text, so the UI cannot show either. This amendment is the integration decision for the additive contract change below.
 
+### Affected agents and owners
+
+Contracts (`packages/contracts/src/web.ts`), Runtime (`packages/runtime/src/interaction/**`, host query kinds), Local Server (two routes, client adapter), Web (`apps/web`), and the Conversation/host session owners whose Herdr pane reads are used. No other package changes.
+
+### Approving owner
+
+The project owner requested this feature on 2026-11-02 and asked for the branch to be merged to `dele` and opened as a PR. Approval of the contract change itself is given at review of that PR.
+
 ### Decision
 
-Two read-only GET routes and two optional client methods are added. Existing schemas are not edited.
+Two read-only GET routes and two optional client methods are added. Existing schemas keep their fields; `WebHttpPathParamsSchema` gains one optional field, below.
 
 | Method/path | Body/query | Success |
 | --- | --- | --- |
@@ -321,7 +329,7 @@ The text is an unverified terminal snapshot. It is not an `AgentResult`, is not 
 
 ### Compatibility
 
-Both client methods are optional. A host without the pane reader answers `operation_not_allowed` (HTTP 422), as does a Local Server whose client lacks the methods. An old Local Server may answer `not_found` for the new routes; the UI must treat both as unsupported. No migration, no stored data and no new SSE kind. The read-only cookie, Origin and session checks of the other GET routes apply.
+Both client methods are optional. A host without the pane reader answers `operation_not_allowed` (HTTP 422), as does a Local Server whose client lacks the methods. An old Local Server may answer `not_found` for the new routes; the UI must treat both as unsupported. A host process started before this change rejects the new query kinds with a generic failure, not `operation_not_allowed`, until the session is restarted. No migration, no stored data and no new SSE kind. The read-only cookie, Origin and session checks of the other GET routes apply.
 
 ### Rollback
 

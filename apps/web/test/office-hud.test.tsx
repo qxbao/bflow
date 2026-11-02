@@ -177,9 +177,14 @@ test('the operations dock is collapsed behind a toggle, stays mounted and opens 
 test('attention is announced and styled but never opens the dock; no toggle when nothing is tracked', () => {
   const { rerender } = render(<OfficeHud {...dockProps({ count: 0, attention: false })} />);
   expect(screen.queryByRole('button', { name: /Thao tác đã gửi/ })).toBeNull();
+  // The live region is already in the page (and empty) before attention starts, so the change is announced.
+  const live = screen.getByTestId('dock-attention');
+  expect(live.getAttribute('role')).toBe('status');
+  expect(live.textContent).toBe('');
   rerender(<OfficeHud {...dockProps({ count: 0, attention: true })} />);
   const toggle = screen.getByRole('button', { name: /Thao tác đã gửi/ });
-  expect(toggle.textContent).toContain('Có thao tác cần xem');
+  expect(screen.getByTestId('dock-attention')).toBe(live);
+  expect(live.textContent).toContain('Có thao tác cần xem');
   expect(toggle.className).toContain('text-warning');
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
   expect(document.getElementById(toggle.getAttribute('aria-controls')!)!.hasAttribute('hidden')).toBe(true);

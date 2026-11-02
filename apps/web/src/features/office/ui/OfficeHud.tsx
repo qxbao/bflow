@@ -168,7 +168,9 @@ export function OfficeHud(p: OfficeHudProps) {
       </button>)}
     </nav>
     <div ref={bottom} data-hud-bottom className={`absolute inset-x-3 bottom-0 flex flex-col gap-2 pb-3 ${p.panelOpen ? 'max-md:pb-0' : ''}`}>
-      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={dockOpen} aria-controls={dockId} onClick={() => setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count}){p.dockSummary.attention && <span className="sr-only"> Có thao tác cần xem</span>}</button>}
+      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={dockOpen} aria-controls={dockId} onClick={() => setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count})</button>}
+      {/* Live region that exists before the state changes, so a screen reader hears the dock needing a look while it stays collapsed. */}
+      <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
       <div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
       <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
         <div role="group" aria-label="Góc nhìn camera" className={`pointer-events-auto flex flex-wrap gap-1 self-start p-1 ${panel}`}>
