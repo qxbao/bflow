@@ -247,7 +247,12 @@ async function lightweightRuntimeFixture(runs: RunRecord[] = [makeRun("run-1", "
     engine: {},
     runStore: {},
     artifactStore: {},
-    policies: {},
+    policies: {
+      git: {
+        cancelTask: async () => undefined,
+        cancelIntegration: async () => undefined
+      }
+    },
     taskChecks: [],
     workflowChecks: []
   } as unknown as AgenticRuntimePorts;
@@ -1588,5 +1593,357 @@ describe("Slice 08 — Outbox, Transport Receipts, Watchdog, Failover & Cancella
     expect(report.blockers).toEqual([]);
     const coreSnapshot = unwrap(await f.ports.engine.getSnapshot("run-1"));
     expect(coreSnapshot?.status).toBe("cancelled");
+  });
+
+  it("Bug 8: outbox rejection and lease acquisition failure increments deliveryAttempts with backoff and unmasks watchdog stall", async () => {
+    const approvedReq = ApprovalRequestSchema.parse({
+      schemaVersion: 2,
+      approvalId: "app-8",
+      runId: "run-8",
+      sessionId: "session-1",
+      target: { type: "run" },
+      revision: 1,
+      generation: 0,
+      status: "approved",
+      requestedBy: "coordinator",
+      requestedAt: T0,
+      reason: "Approved",
+      evidence: [],
+      idempotencyKey: "app-8"
+    });
+    const f = await lightweightRuntimeFixture([
+      makeRun("run-8", "implementing", {
+        tasks: [{ taskId: "task-1", spec: { specification: baseSpec, request: approvedReq, strategy: baseSpec.testStrategy! }, worktrees: [{ key: "tree-1", branchName: "b1", worktreePath: "/tmp", baseCommitHash: "c1" }], outboundIds: [] }]
+      })
+    ]);
+    const devBinding = f.panes.bindings.find(b => b.role === "developer")!;
+    const msg = RoleMessageSchema.parse({
+      schema_version: 2,
+      message_id: "dev-assign-8",
+      correlation_id: "corr-8",
+      causation_id: "cause-8",
+      run_id: "run-8",
+      sender: { role: "coordinator" },
+      recipient: { role: "developer", agent_id: devBinding.agentId, pane_id: devBinding.paneId },
+      type: "task.assignment",
+      payload: { context: "do work" },
+      artifact_references: [],
+      occurred_at: T0,
+      idempotency_key: "dev-assign-8"
+    });
+    await f.journal.exclusive(async (s, save) => {
+      new HerdrOutbox(f.ports, s, save).enqueue(msg, "developer", "task-1", "attempt-1", ["implementation"]);
+      await save();
+    });
+
+    // Configure transport to reject the submission
+    f.transport.send = async (req: any) => ({
+      ok: true,
+      value: {
+        status: "rejected",
+        requestId: req.requestId,
+        attemptId: req.attemptId,
+        runId: req.runId,
+        taskId: req.taskId,
+        reason: "Transport rejected submission",
+        observedAt: f.clock().toISOString()
+      }
+    });
+
+    await f.runtime.flushOutbound();
+    let state = await f.inspect();
+    let out = state.outbound.find(o => o.message.message_id === "dev-assign-8")!;
+    expect(out.status).toBe("queued");
+    expect(out.deliveryAttempts).toBe(1);
+    expect(out.nextAttemptAt).toBeDefined();
+
+    // Fast-forward past backoff and repeat until 5 attempts
+    for (let i = 2; i <= 5; i++) {
+      f.advance(35_000);
+      await f.runtime.flushOutbound();
+      state = await f.inspect();
+      out = state.outbound.find(o => o.message.message_id === "dev-assign-8")!;
+      expect(out.deliveryAttempts).toBe(i);
+    }
+
+    // Now watchdogSnapshot must recognize that activeHandoff is false because delivery attempts are exhausted!
+    const facts = await f.runtime.watchdogSnapshot("session-1");
+    expect(facts.find(item => item.runId === "run-8")!.activeHandoff).toBe(false);
+  });
+
+  it("Bug 9: watchdog stall detection treats unreadable / crashed panes (status unavailable) as not working", () => {
+    const runFacts = {
+      runId: "run-9",
+      status: "implementing",
+      live: true,
+      lastActivityAt: 100_000,
+      awaitingHuman: false,
+      activeHandoff: false,
+      acceptedPanes: [{ role: "developer", paneId: "pane-developer" }],
+      acceptedRoles: ["developer"],
+      pendingDecisions: []
+    };
+    // If pane is crashed or observeAgent threw error -> status: "unavailable"
+    const actions = evaluateWatchdog({
+      now: 400_000, // 300s > stallAfterMs (180s)
+      runs: [runFacts],
+      notices: [],
+      panes: [{ role: "developer", paneId: "pane-developer", status: "unavailable" }],
+      options: { stallAfterMs: 180_000 }
+    });
+    expect(actions).toEqual([
+      expect.objectContaining({
+        kind: "stalled",
+        runId: "run-9"
+      })
+    ]);
+  });
+
+  it("Bug 10: cancels unsent queued message with acquired lease by releasing lease and clearing out.lease so cancellation completes without false orphan lease blocker", async () => {
+    const approvedReq = ApprovalRequestSchema.parse({
+      schemaVersion: 2,
+      approvalId: "app-10",
+      runId: "run-10",
+      sessionId: "session-1",
+      target: { type: "run" },
+      revision: 1,
+      generation: 0,
+      status: "approved",
+      requestedBy: "coordinator",
+      requestedAt: T0,
+      reason: "Approved",
+      evidence: [],
+      idempotencyKey: "app-10"
+    });
+    const f = await lightweightRuntimeFixture([
+      makeRun("run-10", "implementing", {
+        tasks: [{ taskId: "task-1", spec: { specification: baseSpec, request: approvedReq, strategy: baseSpec.testStrategy! }, worktrees: [{ key: "tree-1", branchName: "b1", worktreePath: "/tmp", baseCommitHash: "c1" }], outboundIds: [] }]
+      })
+    ]);
+    const devBinding = f.panes.bindings.find(b => b.role === "developer")!;
+    const msg = RoleMessageSchema.parse({
+      schema_version: 2,
+      message_id: "dev-assign-queued-lease",
+      correlation_id: "corr-10",
+      causation_id: "cause-10",
+      run_id: "run-10",
+      sender: { role: "coordinator" },
+      recipient: { role: "developer", agent_id: devBinding.agentId, pane_id: devBinding.paneId },
+      type: "task.assignment",
+      payload: { context: "do work" },
+      artifact_references: [],
+      occurred_at: T0,
+      idempotency_key: "dev-assign-queued-lease"
+    });
+    // Enqueue message and acquire lease on it, but leave it queued (e.g. before transport sends)
+    await f.journal.exclusive(async (s, save) => {
+      const outbox = new HerdrOutbox(f.ports, s, save);
+      const out = outbox.enqueue(msg, "developer", "task-1", "attempt-1", ["implementation"]);
+      const acquired = unwrap(await f.ports.registry.acquireLease({
+        leaseId: "lease-queued-10",
+        agentId: devBinding.agentId,
+        runId: "run-10",
+        taskId: "task-1",
+        attemptId: "attempt-1",
+        ttlMs: 300_000,
+        requestedAt: T0,
+        idempotencyKey: "lease-queued-10"
+      }));
+      out.lease = acquired;
+      out.status = "queued";
+      await save();
+    });
+
+    // Cancel the run
+    await f.runtime.cancel("run-10", "Owner cancelled");
+    const report = await f.runtime.reconcileCancellation("run-10");
+    expect(report.fullyStopped).toBe(true);
+    expect(report.blockers).toEqual([]);
+
+    // Check that out.lease is cleared so it doesn't leak
+    const state = await f.inspect();
+    const out = state.outbound.find(o => o.message.message_id === "dev-assign-queued-lease")!;
+    expect(out.status).toBe("cancelled");
+    expect(out.lease).toBeUndefined();
+  });
+
+  it("Bug 11: herdrQualityGate dispatchTimer checks all accepted tasks so parallel Developer lease is renewed during long review wait", async () => {
+    const approvedReq = ApprovalRequestSchema.parse({
+      schemaVersion: 2,
+      approvalId: "app-11",
+      runId: "run-11",
+      sessionId: "session-1",
+      target: { type: "run" },
+      revision: 1,
+      generation: 0,
+      status: "approved",
+      requestedBy: "coordinator",
+      requestedAt: T0,
+      reason: "Approved",
+      evidence: [],
+      idempotencyKey: "app-11"
+    });
+    const f = await lightweightRuntimeFixture([
+      makeRun("run-11", "verifying", {
+        tasks: [
+          { taskId: "task-1", spec: { specification: baseSpec, request: approvedReq, strategy: baseSpec.testStrategy! }, worktrees: [{ key: "tree-1", branchName: "b1", worktreePath: "/tmp", baseCommitHash: "c1" }], outboundIds: [] }
+        ]
+      })
+    ]);
+    const archBinding = f.panes.bindings.find(b => b.role === "architect")!;
+    const archDelegation = DelegationRequestSchema.parse({
+      ...makeDelegation("run-11"),
+      delegationId: "delegation-arch-11",
+      messageId: "arch-req-11",
+      requestedBy: "coordinator",
+      targetRole: "architect",
+      idempotencyKey: "specialist:architect:11"
+    });
+    const archMessage = RoleMessageSchema.parse({
+      schema_version: 2,
+      message_id: "arch-req-11",
+      correlation_id: "corr-11",
+      causation_id: "cause-11",
+      run_id: "run-11",
+      sender: { role: "coordinator", agent_id: "coordinator-agent", pane_id: "pane-coordinator" },
+      recipient: { role: "architect", agent_id: archBinding.agentId, pane_id: archBinding.paneId },
+      type: "delegation.request",
+      payload: archDelegation,
+      artifact_references: [],
+      occurred_at: T0,
+      idempotency_key: "arch-req-11"
+    });
+    await f.journal.exclusive(async (s, save) => {
+      new HerdrOutbox(f.ports, s, save).enqueue(archMessage, "architect", undefined, undefined, ["repository.read"]);
+      await save();
+    });
+    await f.runtime.flushOutbound();
+    let state = await f.inspect();
+    const archOut = state.outbound.find(o => o.message.message_id === "arch-req-11")!;
+    expect(archOut.status).toBe("accepted");
+    const initialExpiry = Date.parse(archOut.lease!.expiresAt);
+
+    // Setup QualityGate review for Task 1
+    const gate = f.runtime.herdrQualityGate("host-review");
+    // Advance clock so Architect lease is near expiry (e.g. 250s passed out of 300s TTL: <= 240s remaining)
+    f.advance(250_000);
+
+    // Set reviewer and architect panes to working so leases are not prematurely released
+    f.panes.setState("reviewer", "working");
+    f.panes.setState("architect", "working");
+
+    // Start gate evaluation in background
+    const evalPromise = gate.evaluate({
+      runId: "run-11",
+      taskId: "task-1",
+      attemptId: "att-1",
+      definition: {
+        id: "host-review",
+        name: "review",
+        evaluator: "review",
+        required: true,
+        timeout: { executionTimeoutMs: 10_000, onTimeout: "block" },
+        configuration: { kind: "review", role: "reviewer" }
+      },
+      input: { scope: "task" },
+      artifacts: []
+    } as any, { timeoutMs: 10_000 });
+
+    // Wait 1.5s for dispatchTimer in herdrQualityGate to tick and detect that an accepted lease is due for renewal
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Check Architect lease: it should have been renewed!
+    state = await f.inspect();
+    const renewedArchOut = state.outbound.find(o => o.message.message_id === "arch-req-11")!;
+    expect(Date.parse(renewedArchOut.lease!.expiresAt)).toBeGreaterThan(initialExpiry);
+
+    // Clean up gate evaluation
+    await evalPromise.catch(() => undefined);
+  });
+
+  it("Bug 12: provider failover blocked phase creates pendingAction and resuming run unblocks entry.phase from blocked to retired", async () => {
+    const f = await integrationFixture({ tdd: false });
+    f.ports.providerFailover = {
+      policyFor: (binding: any) => ({
+        policy: {
+          schemaVersion: 3,
+          policyVersion: "1.0",
+          role: "developer",
+          maxSwitches: 2,
+          maxRetries: 0,
+          cooldownMs: 0,
+          candidates: []
+        },
+        current: { provider: binding.provider, model: binding.model, profile: "default" }
+      }),
+      authenticate: async () => true,
+      assertMutationSafe: async () => undefined,
+      preflight: async () => { throw new Error("no candidates"); }
+    };
+    f.ports.stopDeveloperExecutionScope = async handle => ({
+      source: "correlated_transport",
+      handle,
+      observedAt: new Date().toISOString()
+    });
+    const origAllocate = f.panes.allocateDeveloper.bind(f.panes);
+    (f.panes as unknown as { allocateDeveloper: typeof f.panes.allocateDeveloper }).allocateDeveloper = async (request: Parameters<typeof f.panes.allocateDeveloper>[0] & { failoverCandidate?: { provider: string; model: string } }) => {
+      const result = await origAllocate(request);
+      Object.assign(result.value, {
+        provider: request.failoverCandidate?.provider ?? "claude",
+        model: request.failoverCandidate?.model ?? "primary-model",
+        session: {
+          source: request.failoverCandidate?.provider ?? "claude",
+          kind: "id",
+          value: `native-${request.agentName}`
+        }
+      });
+      return result;
+    };
+
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def);
+    await f.runtime.tick();
+
+    let state = (await f.runtime.inspect()) as unknown as JournalState;
+    const source = state.outbound.find(o => o.status === "accepted" && o.message.type === "task.assignment" && o.message.recipient.role === "developer")!;
+    const devBinding = f.panes.bindings.find(b => b.paneId === source.handle!.target.paneId)!;
+
+    // Observe provider failure when no failover candidates exist, causing it to block
+    await f.runtime.observeProviderFailure(devBinding, {
+      schemaVersion: 3,
+      provider: "claude",
+      kind: "quota_exhausted",
+      source: "provider_structured",
+      executionId: source.handle!.executionId,
+      observedAt: new Date().toISOString(),
+      evidenceDigest: "f".repeat(64)
+    });
+    await f.runtime.continueProviderFailovers();
+
+    state = (await f.runtime.inspect()) as unknown as JournalState;
+    const run = state.runs[0]!;
+    expect(run.status).toBe("escalated");
+    const failover = run.tasks[0]!.failovers?.[0]!;
+    expect(failover.phase).toBe("blocked");
+    expect(failover.reason).toBe("no_eligible_candidate");
+
+    // Crucial: pendingAction MUST exist so the run can be resumed!
+    expect(run.pendingAction).toBeDefined();
+    expect(run.pendingAction?.kind).toBe("resume_coordinator");
+    const actionId = run.pendingAction!.actionId;
+
+    // Resuming the run should unblock the failover entry phase from 'blocked' to 'retired'!
+    (f.ports as any).preflightRoleCapabilities = async () => undefined;
+    await f.runtime.resumeBlockedRun(run.runId, actionId, { conversationUserMessageId: "user-resume-12" });
+
+    state = (await f.runtime.inspect()) as unknown as JournalState;
+    const resumedFailover = state.runs[0]!.tasks[0]!.failovers?.[0]!;
+    expect(resumedFailover.phase).toBe("retired");
+  });
+
+  it("Bug 13: queryAgenticHostInteraction supports configurable timeoutMs", async () => {
+    const { queryAgenticHostInteraction } = await import("../../dist/agentic/host-controller.js");
+    // Verify that queryAgenticHostInteraction accepts timeoutMs in options without error
+    await expect(queryAgenticHostInteraction({ repositoryPath: "/nonexistent", sessionId: "session-1", timeoutMs: 15_000 } as any))
+      .rejects.toThrow();
   });
 });

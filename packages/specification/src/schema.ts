@@ -11,13 +11,45 @@ import { canonicalJson, ChangeAssessmentSchema, classifyChange } from "./classif
 import type { ChangeAssessment } from "./classification.js";
 
 const Text = z.string().trim().min(1);
-const DefaultTextList = z.preprocess(v => v === null ? undefined : v, z.array(Text).default([]));
+const DefaultTextList = z.preprocess(v => {
+  if (v === null || v === undefined) return undefined;
+  if (typeof v === "string") {
+    const trimmed = v.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (Array.isArray(v)) {
+    return v.map(item => (typeof item === "string" ? item.trim() : String(item).trim())).filter(s => s.length > 0);
+  }
+  return v;
+}, z.array(Text).default([]));
 const OPTIONAL_POLICY_TEXT_KEYS = ["proposedTestStrategy", "designProposal", "migrationStrategy", "revisionReason"] as const;
+const ALLOWED_ASSESSMENT_KEYS = new Set([
+  "kind", "behaviorChange", "modules", "securityImpact", "publicApiImpact",
+  "dataSchemaImpact", "architectureImpact", "migrationRequired", "risk", "unresolvedQuestions"
+]);
 export const PolicyDetailsSchema = z.preprocess((raw) => {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const copy: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  if (copy.policyVersion === undefined || copy.policyVersion === "1") copy.policyVersion = 1;
   for (const key of OPTIONAL_POLICY_TEXT_KEYS) {
     if (copy[key] === null) delete copy[key];
+  }
+  if (copy.assessment && typeof copy.assessment === "object" && !Array.isArray(copy.assessment)) {
+    const rawAss = { ...(copy.assessment as Record<string, unknown>) };
+    for (const key of Object.keys(rawAss)) {
+      if (!ALLOWED_ASSESSMENT_KEYS.has(key)) delete rawAss[key];
+    }
+    copy.assessment = rawAss;
+  }
+  if (Array.isArray(copy.traceability)) {
+    copy.traceability = copy.traceability.map(item => {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const itemCopy = { ...(item as Record<string, unknown>) };
+        if (typeof itemCopy.taskIds === "string") itemCopy.taskIds = [(itemCopy.taskIds as string).trim()].filter(Boolean);
+        return itemCopy;
+      }
+      return item;
+    });
   }
   return copy;
 }, z.object({
@@ -30,7 +62,10 @@ export const PolicyDetailsSchema = z.preprocess((raw) => {
   apiDataContracts: DefaultTextList,
   risksAndTradeoffs: DefaultTextList,
   migrationStrategy: Text.optional(),
-  traceability: z.array(z.object({ criterionId: Text, taskIds: z.array(Text).min(1) }).strict()),
+  traceability: z.array(z.object({
+    criterionId: Text,
+    taskIds: z.preprocess(v => typeof v === "string" ? [v.trim()].filter(Boolean) : v, z.array(Text).min(1))
+  }).strict()),
   revisionReason: Text.optional()
 }).strict());
 
@@ -79,6 +114,9 @@ export const SpecificationDocumentSchema = SpecificationSchema.superRefine((spec
     mapping.taskIds.forEach(task => tasks.add(task));
   }
   const expectedTasks = [...tasks].sort();
+  if (spec.traceabilityTaskIds === undefined || spec.traceabilityTaskIds.length === 0) {
+    (spec as { traceabilityTaskIds?: string[] }).traceabilityTaskIds = expectedTasks;
+  }
   const declaredTasks = [...(spec.traceabilityTaskIds ?? [])].sort();
   if (new Set(spec.traceabilityTaskIds).size !== spec.traceabilityTaskIds?.length ||
       JSON.stringify(expectedTasks) !== JSON.stringify(declaredTasks)) {

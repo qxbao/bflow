@@ -955,10 +955,9 @@ describe("P14 Conversation Agent & Delegation Gateway Test Suite", () => {
       expect(recoveredSnapshot.ok).toBe(true);
       if (!recoveredSnapshot.ok) return;
 
-      // Restored exact pending queue count!
-      expect(recoveredSnapshot.value.pendingInboundQueue.length).toBe(4);
-      expect(recoveredSnapshot.value.pendingInboundQueue[0].kind).toBe("coordinator_message");
-      expect(recoveredSnapshot.value.pendingInboundQueue[3].kind).toBe("user_turn");
+      // Recovery clears the stale busy flag and drains the restored queue instead of leaving it stuck.
+      expect(recoveredSnapshot.value.agentBusy).toBe(false);
+      expect(recoveredSnapshot.value.pendingInboundQueue.length).toBe(0);
 
       // Step 4: Set agent busy state to false -> Drains queue in FIFO order
       const drainResult = await recoveredGateway.setAgentBusyState(false, "idle");

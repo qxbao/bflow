@@ -195,6 +195,13 @@ export function resolveClaudeTrustStateFiles(
   return [...new Set(candidates)];
 }
 
+function candidatePathKeys(targetPath: string): readonly string[] {
+  const resolved = resolve(targetPath);
+  const withoutTrailing = resolved.replace(/\/+$/, "");
+  const withTrailing = `${withoutTrailing}/`;
+  return [withoutTrailing, withTrailing];
+}
+
 async function propagateTrustInSingleFile(
   workspaceRoot: string,
   worktreePath: string,
@@ -221,29 +228,37 @@ async function propagateTrustInSingleFile(
       const projects = record(parsed["projects"]);
       if (!projects) return "skipped";
 
-      const rootTrusted =
-        record(projects[workspaceRoot])?.["hasTrustDialogAccepted"] === true ||
-        record(projects[rootCanonical])?.["hasTrustDialogAccepted"] === true ||
-        (rootReal !== undefined && record(projects[rootReal])?.["hasTrustDialogAccepted"] === true);
+      const rootCandidates = [
+        ...candidatePathKeys(workspaceRoot),
+        ...candidatePathKeys(rootCanonical),
+        ...(rootReal !== undefined ? candidatePathKeys(rootReal) : [])
+      ];
+      const rootTrusted = rootCandidates.some(
+        key => record(projects[key])?.["hasTrustDialogAccepted"] === true
+      );
       if (!rootTrusted) return "skipped";
 
-      if (worktreeCanonical === rootCanonical) return "already_trusted";
+      if (candidatePathKeys(worktreeCanonical).some(k => rootCandidates.includes(k))) return "already_trusted";
 
-      const targetKeys =
-        worktreeReal !== undefined && worktreeReal !== worktreeCanonical
-          ? [worktreeCanonical, worktreeReal]
-          : [worktreeCanonical];
+      const candidateTargets = [
+        ...candidatePathKeys(worktreeCanonical),
+        ...(worktreeReal !== undefined ? candidatePathKeys(worktreeReal) : [])
+      ];
 
-      for (const key of targetKeys) {
+      for (const key of candidateTargets) {
         if (record(projects[key])?.["hasTrustDialogAccepted"] === false) {
           return "skipped";
         }
       }
-      if (targetKeys.every(key => record(projects[key])?.["hasTrustDialogAccepted"] === true)) {
+      if (candidateTargets.some(key => record(projects[key])?.["hasTrustDialogAccepted"] === true)) {
         return "already_trusted";
       }
 
       const nextProjects: Record<string, unknown> = { ...projects };
+      const targetKeys =
+        worktreeReal !== undefined && worktreeReal !== worktreeCanonical
+          ? [worktreeCanonical, worktreeReal]
+          : [worktreeCanonical];
       for (const key of targetKeys) {
         const existingEntry = record(projects[key]);
         nextProjects[key] = {

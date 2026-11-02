@@ -28,7 +28,7 @@ export interface RunFacts {
   pendingDecisions: readonly { approvalId: string; requestedAt: string }[];
 }
 
-/** Herdr agent status of one role pane, observed by the host. Only "idle", "done" and "unknown" mean not working. */
+/** Herdr agent status of one role pane, observed by the host. A pane that is idle, done, unknown, disconnected, cancelled, blocked or unreadable ("unavailable", e.g. crashed) is not working. */
 export interface PaneFact { role: string; status: string; paneId?: string }
 
 /** Display state of a user-decision notice (see ConversationNoticeState in host-receipts.ts). `since` is ISO time. */
@@ -68,7 +68,7 @@ export type WatchdogAction =
 /** Notice message identity of a user decision, as Runtime emits it (buildDecisionRequestMessage). */
 export function decisionMessageId(approvalId: string): string { return `decision-${approvalId}`; }
 
-const NOT_WORKING = new Set(["idle", "done", "unknown", "disconnected", "cancelled", "blocked"]);
+const NOT_WORKING = new Set(["idle", "done", "unknown", "disconnected", "cancelled", "blocked", "unavailable"]);
 
 /** Actions for the current facts. Terminal runs and displayed decisions produce nothing. */
 export function evaluateWatchdog(input: WatchdogInput): WatchdogAction[] {

@@ -16,14 +16,20 @@ export function canonicalJson(value: unknown): string {
 export const ChangeAssessmentSchema = z.object({
   kind: z.enum(["documentation", "formatting", "feature", "bugfix", "refactoring", "configuration"]),
   behaviorChange: z.boolean(),
-  modules: z.array(z.string().trim().min(1)).min(1),
+  modules: z.preprocess(
+    v => typeof v === "string" ? [v.trim()].filter(Boolean) : Array.isArray(v) ? v.map(item => typeof item === "string" ? item.trim() : String(item).trim()).filter(Boolean) : v,
+    z.array(z.string().trim().min(1)).min(1)
+  ),
   securityImpact: z.boolean(),
   publicApiImpact: z.boolean(),
   dataSchemaImpact: z.boolean(),
   architectureImpact: z.boolean(),
   migrationRequired: z.boolean(),
   risk: RiskLevelSchema,
-  unresolvedQuestions: z.preprocess(v => v === null ? undefined : v, z.array(z.string().trim().min(1)).default([]))
+  unresolvedQuestions: z.preprocess(
+    v => v === null ? undefined : Array.isArray(v) ? v.filter(item => item !== null && typeof item === "string" && item.trim().length > 0) : typeof v === "string" ? [v.trim()].filter(Boolean) : v,
+    z.array(z.string().trim().min(1)).default([])
+  )
 }).strict();
 
 export type ChangeAssessment = z.infer<typeof ChangeAssessmentSchema>;

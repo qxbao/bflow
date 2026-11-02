@@ -165,7 +165,7 @@ export function resolveUserDecisionReply(
   request: { readonly metadata?: unknown },
   content: string
 ): UserDecisionReplyResolution {
-  const trimmed = content.trim();
+  const trimmed = content.normalize("NFC").trim();
   const normalized = normalize(trimmed);
   const options = optionsOf(request);
 
@@ -176,8 +176,8 @@ export function resolveUserDecisionReply(
   }
 
   // An explicit separator distinguishes a choice with feedback from a decimal, list of choices or ordinary prose.
-  const numbered = /^(?:(?:chọn|lựa chọn|option|choose)\s*)?(\d{1,2})\s*[.)]?$/u.exec(normalized) ??
-    /^(?:(?:chọn|lựa chọn|option|choose)\s*)?(\d{1,2})(?:[.)]\s+|\s*[:—–-]\s+)(\S.*)$/u.exec(normalized);
+  const numbered = /^(?:(?:chọn|lựa chọn|phương án(?:\s+số)?|option|choose|pa)\s*)?(\d{1,2})\s*[.)]?$/u.exec(normalized) ??
+    /^(?:(?:chọn|lựa chọn|phương án(?:\s+số)?|option|choose|pa)\s*)?(\d{1,2})(?:[.)]\s+|\s*[:—–-]\s+)(\S.*)$/u.exec(normalized);
   if (numbered) {
     const index = Number(numbered[1]);
     const feedback = numbered[2];

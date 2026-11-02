@@ -45,6 +45,20 @@ export class CommandStore {
       try{const v=JSON.parse(localStorage.getItem(key)!);if(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))records.push({slot:v.slot,scope:v.scope,commandId:v.commandId,fingerprint:v.fingerprint,kind:v.kind,...(v.outcome?{outcome:v.outcome}:{})});else throw new Error('invalid metadata');}catch{throw new Error('Mã phục hồi bị hỏng; cần đối chiếu thao tác trước khi tạo yêu cầu mới.');}
     }return records;
   }
+  clearCorrupted():void{
+    const toRemove:string[]=[];
+    for(let i=0;i<localStorage.length;i++){
+      const key=localStorage.key(i);if(!key?.startsWith(this.projectPrefix))continue;
+      try{
+        const v=JSON.parse(localStorage.getItem(key)!);
+        if(!(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))){
+          toRemove.push(key);
+        }
+      }catch{toRemove.push(key);}
+    }
+    for(const key of toRemove)localStorage.removeItem(key);
+    if(toRemove.length>0)this.changed();
+  }
   async observe(record:RecordEntry):Promise<Observation>{
     if(this.inFlight.has(record.commandId))return {record,submitting:true};
     try{const operation=await readOperation(this.api,this.projectId,record.commandId);if(operation.operationKind!==record.kind)throw new ApiError('invalid_response');return {record,operation};}

@@ -10,12 +10,22 @@ const nullToUndefined = (value: unknown) => (value === null ? undefined : value)
 
 export const ReadTaskLogInputSchema = z.object({
   runId: z.preprocess(emptyOrNullToUndefined, z.string().trim().min(1).optional()),
+  run_id: z.preprocess(emptyOrNullToUndefined, z.string().trim().min(1).optional()),
   taskId: z.preprocess(emptyOrNullToUndefined, z.string().trim().min(1).optional()),
+  task_id: z.preprocess(emptyOrNullToUndefined, z.string().trim().min(1).optional()),
   lines: z.preprocess(nullToUndefined, z.number().int().min(1).max(100).optional()),
   maxBytes: z.preprocess(nullToUndefined, z.number().int().min(256).max(16_384).optional()),
+  max_bytes: z.preprocess(nullToUndefined, z.number().int().min(256).max(16_384).optional()),
   cursor: z.preprocess(emptyOrNullToUndefined, z.string().trim().min(1).max(128).optional()),
   view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "compact"]).optional())
-}).strict();
+}).passthrough().transform(data => ({
+  runId: data.runId ?? data.run_id,
+  taskId: data.taskId ?? data.task_id,
+  lines: data.lines,
+  maxBytes: data.maxBytes ?? data.max_bytes,
+  cursor: data.cursor,
+  view: data.view
+}));
 
 export interface TaskLogToolContext {
   readonly role: AgentRole;
@@ -181,8 +191,8 @@ export async function handleTaskLogTool(context: TaskLogToolContext, name: strin
     };
   }
   if (context.role === "conversation") throw new Error("Conversation reports activity to the user; it does not log specialist task steps");
-  const normalizedTaskId = emptyOrNullToUndefined(parameters.taskId);
-  const runId = textField(parameters.runId), taskId = normalizedTaskId === undefined ? undefined : textField(normalizedTaskId);
+  const normalizedTaskId = emptyOrNullToUndefined(parameters.taskId ?? parameters.task_id);
+  const runId = textField(parameters.runId ?? parameters.run_id), taskId = normalizedTaskId === undefined ? undefined : textField(normalizedTaskId);
   const action = textField(parameters.action);
   if (action.length > 120 || /[\r\n]/.test(action)) throw new Error("Progress action must be one brief plain-text line (max 120 characters)");
   if (context.role !== "coordinator" && taskId === undefined) throw new Error("Specialists must include the taskId from their authenticated assignment");

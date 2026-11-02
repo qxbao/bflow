@@ -168,7 +168,13 @@ export const ExtractedRequirementDraftSchema = z
     /** Legacy methods: one per criterion (by index) or a single method for every criterion. */
     verificationMethods: nullToUndefined(z.array(VerificationMethodSchema)),
     /** Each criterion with its own explicit verification method. */
-    acceptanceCriteria: nullToUndefined(z.array(z.object({ description: z.string(), verificationMethod: VerificationMethodSchema }).strict())),
+    acceptanceCriteria: nullToUndefined(z.array(z.object({
+      id: z.string().optional(),
+      description: z.string(),
+      verificationMethod: VerificationMethodSchema,
+      required: z.boolean().optional(),
+      category: z.string().optional()
+    }).passthrough())),
     isRequirementChange: z.preprocess(value => (value === null ? undefined : value), z.boolean().default(false)),
     codeChangesAuthorized: nullToUndefined(z.boolean()),
     targetRunId: blankToUndefined(IdentifierSchema),

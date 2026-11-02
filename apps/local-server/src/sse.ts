@@ -79,15 +79,22 @@ export async function streamEvents(req: IncomingMessage, res: ServerResponse, so
     heartbeat=setInterval(()=>{
       try{authenticate();if(!stopped && !res.destroyed && !res.writableEnded && res.writableLength===0)res.write(': heartbeat\n\n');}catch{res.destroy();}
     },WEB_LIMITS.heartbeatSeconds*1000);
+    let producerDone = false;
     const produce=(async()=>{
       try {while(!stopped){const next=carried?await carried:await readNext();carried=undefined;if(!next || stopped)break;
-        if(next.done){stop();break;}
+        if(next.done){producerDone=true;wake?.();wake=undefined;break;}
         const value=frame(next.value);
         if(queue.length>=WEB_LIMITS.eventsPerClient){res.destroy();stop();break;}
         queue.push(value);maxQueued=Math.max(maxQueued,queue.length);wake?.();wake=undefined;
-      }}catch{res.destroy();stop();}
+      }if(!stopped){producerDone=true;wake?.();wake=undefined;}}catch{res.destroy();stop();}
     })();
-    while(!stopped){const event=queue.shift();if(!event){await new Promise<void>(resolve=>{wake=resolve;if(stopped)resolve();});continue;}
+    while(!stopped && (!producerDone || queue.length > 0)){
+      const event=queue.shift();
+      if(!event){
+        if(producerDone || stopped) break;
+        await new Promise<void>(resolve=>{wake=resolve;if(stopped || producerDone)resolve();});
+        continue;
+      }
       const payload=JSON.stringify(event).replace(/\u2028/g,'\\u2028').replace(/\u2029/g,'\\u2029');
       await write(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${payload}\n\n`);
     }

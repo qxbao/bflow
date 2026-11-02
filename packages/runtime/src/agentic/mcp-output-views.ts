@@ -366,11 +366,19 @@ export async function planningReferenceView(
 export const InspectInputSchema = z
   .object({
     runId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+    run_id: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
     view: z.preprocess(emptyOrNullToUndefined, z.enum(["full", "summary", "status", "tasks", "blockers"]).optional()),
     taskId: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
+    task_id: z.preprocess(emptyOrNullToUndefined, z.string().min(1).optional()),
     cursor: z.preprocess(emptyOrNullToUndefined, z.string().min(1).max(128).optional())
   })
-  .strict();
+  .passthrough()
+  .transform(data => ({
+    runId: data.runId ?? data.run_id,
+    view: data.view,
+    taskId: data.taskId ?? data.task_id,
+    cursor: data.cursor
+  }));
 
 export type InspectInput = z.infer<typeof InspectInputSchema>;
 
@@ -401,11 +409,11 @@ function verifyInspectCursor(
 ): boolean {
   const match = INSPECT_CURSOR_PATTERN.exec(providedCursor);
   if (!match) {
-    throw new Error("Invalid inspect cursor format");
+    return false;
   }
   const [, cursorScope, cursorState] = match;
   if (cursorScope !== expectedScopeDigest) {
-    throw new Error("Inspect cursor does not match the requested runId, view, or taskId scope");
+    return false;
   }
   return cursorState === actualStateDigest;
 }

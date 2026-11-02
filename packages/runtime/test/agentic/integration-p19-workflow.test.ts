@@ -244,8 +244,10 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
     } });
     const approval = (await f.runtime.inspect() as any).outbound.find((out: any) => out.message.type === "approval.request").message;
     await chat.receiveHerdr({ ...approval, sender: { role: "coordinator", agent_id: "coordinator" }, recipient: { role: "conversation" } });
+    // The host maps a post-receipt hook failure to a retryable conflict result instead of throwing.
     await expect(chat.handleUserTurn({ sessionId: "session-1", messageId: "user-before-crash", content: "approve",
-      provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: binding.paneId, channel: "herdr_attach" } })).rejects.toThrow("Simulated crash");
+      provenance: { origin: "user", authenticatedUser: true, userId: "human-1", paneId: binding.paneId, channel: "herdr_attach" } }))
+      .resolves.toMatchObject({ ok: false, error: { code: "conflict", retryable: true, message: expect.stringContaining("Simulated crash") } });
     expect((await f.runtime.inspect() as any).outbound.filter((out: any) => out.message.type === "approval.decision")).toHaveLength(0);
     receipts = new HostReceiptJournal(join(f.root, "host-receipts"), f.repository, "session-1");
     f.reopenStorage(); const restarted = f.restart();
