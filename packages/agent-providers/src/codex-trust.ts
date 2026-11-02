@@ -179,6 +179,13 @@ async function readCurrentConfig(configFile: string): Promise<
   }
 }
 
+function candidatePathKeys(targetPath: string): readonly string[] {
+  const resolved = resolve(targetPath);
+  const withoutTrailing = resolved.replace(/\/+$/, "");
+  const withTrailing = `${withoutTrailing}/`;
+  return [withoutTrailing, withTrailing];
+}
+
 /**
  * Records the "Trust this folder?" answer Codex would otherwise ask for in each headless pane.
  * Callers must hold an explicit repository opt-in (`environment.permissions.trustedWorkspace: true`).
@@ -209,15 +216,17 @@ export async function ensureCodexWorkspaceTrust(workspaceRoot: string, configFil
       }
       const projects = parsed["projects"];
       if (projects !== undefined && record(projects) === undefined) return "skipped";
-      const current = record(projects)?.[workspaceRoot];
-      if (current !== undefined) {
+      const existingKey = candidatePathKeys(workspaceRoot).find(k => record(projects)?.[k] !== undefined);
+      if (existingKey !== undefined) {
+        const current = record(projects)?.[existingKey];
         return record(current)?.["trust_level"] === "trusted" ? "already_trusted" : "skipped";
       }
 
       // Escape DEL (U+007F) in addition to JSON escapes so any valid POSIX path forms a legal TOML 1.0 basic string.
-      const next = `${text}${text.length && !text.endsWith("\n") ? "\n" : ""}${text.length ? "\n" : ""}[projects.${tomlBasicString(workspaceRoot)}]\ntrust_level = "trusted"\n`;
+      const normalizedRoot = resolve(workspaceRoot);
+      const next = `${text}${text.length && !text.endsWith("\n") ? "\n" : ""}${text.length ? "\n" : ""}[projects.${tomlBasicString(normalizedRoot)}]\ntrust_level = "trusted"\n`;
       try {
-        const check = record(record(parse(next) as Record<string, unknown>)?.["projects"])?.[workspaceRoot];
+        const check = record(record(parse(next) as Record<string, unknown>)?.["projects"])?.[normalizedRoot];
         if (record(check)?.["trust_level"] !== "trusted") return "skipped";
       } catch {
         return "skipped";
@@ -268,11 +277,13 @@ export async function isCodexWorkspaceTrusted(workspaceRoot: string, configFile:
     const parsed = parse(snapshot.text) as Record<string, unknown>;
     const projects = record(parsed["projects"]);
     if (!projects) return false;
-    const direct = record(projects[workspaceRoot])?.["trust_level"] === "trusted";
-    const resolved = record(projects[resolve(workspaceRoot)])?.["trust_level"] === "trusted";
-    if (direct || resolved) return true;
+    const candidates = [
+      ...candidatePathKeys(workspaceRoot),
+      ...candidatePathKeys(resolve(workspaceRoot))
+    ];
     const canonical = await realpath(workspaceRoot).catch(() => undefined);
-    return canonical !== undefined && record(projects[canonical])?.["trust_level"] === "trusted";
+    if (canonical !== undefined) candidates.push(...candidatePathKeys(canonical));
+    return candidates.some(key => record(projects[key])?.["trust_level"] === "trusted");
   } catch {
     return false;
   }
@@ -306,7 +317,7 @@ export async function propagateCodexWorktreeTrustIfRootTrusted(options: {
 }): Promise<CodexTrustResult> {
   const root = resolve(options.workspaceRoot);
   const worktree = resolve(options.worktreePath);
-  if (worktree === root) {
+  if (candidatePathKeys(worktree).some(k => candidatePathKeys(root).includes(k))) {
     return (await isCodexWorkspaceTrusted(options.workspaceRoot, options.configFile))
       ? "already_trusted"
       : "skipped";

@@ -228,13 +228,42 @@ export async function runNpmWarmSandbox(invocation: NpmWarmInvocation, helperExe
   const readHandshake = (child: ChildProcess, fd: number, limit: number): Promise<Buffer> => {
     return new Promise((resolveRead, rejectRead) => {
       const stream = fdStream(child, fd), chunks: Buffer[] = []; let length = 0;
+      let settled = false;
+      const complete = (buf: Buffer) => {
+        if (settled) return;
+        settled = true;
+        resolveRead(buf);
+      };
       stream.on("data", (chunk: Buffer) => {
         length += chunk.length;
-        if (length > limit) { rejectRead(new Error("Dependency warming handshake exceeds bound")); stream.destroy(); }
-        else chunks.push(Buffer.from(chunk));
+        if (length > limit) {
+          if (!settled) {
+            settled = true;
+            rejectRead(new Error("Dependency warming handshake exceeds bound"));
+            stream.destroy();
+          }
+        } else {
+          chunks.push(Buffer.from(chunk));
+          const currentBuf = Buffer.concat(chunks);
+          if (limit === 1 && length >= 1) {
+            complete(currentBuf);
+          } else if (limit > 1 && currentBuf.includes(0x7d)) {
+            try {
+              const parsed = JSON.parse(currentBuf.toString("utf8"));
+              if (parsed && typeof parsed === "object" && parsed["child-pid"]) {
+                complete(currentBuf);
+              }
+            } catch {}
+          }
+        }
       });
-      stream.once("error", () => rejectRead(new Error("Dependency warming handshake failed")));
-      stream.once("end", () => resolveRead(Buffer.concat(chunks)));
+      stream.once("error", () => {
+        if (!settled) {
+          settled = true;
+          rejectRead(new Error("Dependency warming handshake failed"));
+        }
+      });
+      stream.once("end", () => complete(Buffer.concat(chunks)));
     });
   };
   try {
@@ -250,7 +279,14 @@ export async function runNpmWarmSandbox(invocation: NpmWarmInvocation, helperExe
     const childPid = parseWarmChildPid(info.toString("utf8"));
     // Namespace creation can precede uid-map initialization. Do not ask slirp to enter an unmapped user namespace.
     const mapDeadline = Date.now() + Math.min(5000, timeoutMs);
-    while (!(await readFile(`/proc/${childPid}/uid_map`, "utf8")).trim()) {
+    while (true) {
+      let content = "";
+      try {
+        content = (await readFile(`/proc/${childPid}/uid_map`, "utf8")).trim();
+      } catch {
+        content = "";
+      }
+      if (content) break;
       if (Date.now() >= mapDeadline) throw new Error("Warming user namespace did not become ready");
       await Promise.race([new Promise(resolveWait => setTimeout(resolveWait, 10)), prematureExit, failure]);
     }

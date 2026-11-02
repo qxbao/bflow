@@ -58,7 +58,8 @@ export class Operations {
     if(old){if(old.index.fingerprint!==fingerprint || old.index.owner!=='host_interaction' || old.index.operationKind!==command.kind)throw new HttpError('operation_conflict');return this.observe(old,context);}
     const client=await observeWithinDeadline(()=>this.interaction(command.projectId,context));
     const session=unwrap(WebProjectSessionResultSchema.parse(await observeWithinDeadline(()=>client.readProjectSession(command.projectId))));
-    if(session.projectId!==command.projectId || !session.sessionId || session.state!=='ready')throw new HttpError('unavailable');
+    if(session.projectId!==command.projectId || !session.sessionId)throw new HttpError('unavailable');
+    if(session.state!=='ready')throw new HttpError('operation_not_allowed');
     const hostSessionId=IdentifierSchema.parse(this.resolveHostSession?await observeWithinDeadline(()=>this.resolveHostSession!(command.projectId)):session.sessionId);
     const record=await this.reserve(command.projectId,command.commandId,command.kind,fingerprint,authorize,hostSessionId);
     try{

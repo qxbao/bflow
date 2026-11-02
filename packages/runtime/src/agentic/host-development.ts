@@ -40,8 +40,41 @@ const FILE_BYTES = 128 * 1024;
 const normalizeOptionalId = (value: unknown): unknown =>
   value === null || (typeof value === "string" && value.trim() === "") ? undefined : value;
 const optionalNonEmptyId = z.preprocess(normalizeOptionalId, z.string().min(1).optional());
-const workspaceReadSchema = z.object({ path: z.string().min(1).max(4096), runId: optionalNonEmptyId, taskId: optionalNonEmptyId }).strict();
-const workspaceWriteSchema = workspaceReadSchema.extend({ content: z.string().max(FILE_BYTES), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }).strict();
+const normalizeFilePath = (raw: Record<string, unknown>): string => {
+  const p = raw.path ?? raw.filePath ?? raw.file_path;
+  if (typeof p === "string" && p.trim()) return p.trim();
+  return typeof raw.path === "string" ? raw.path : "";
+};
+const workspaceReadSchema = z.object({
+  path: z.string().min(1).max(4096).optional(),
+  filePath: z.string().min(1).max(4096).optional(),
+  file_path: z.string().min(1).max(4096).optional(),
+  runId: optionalNonEmptyId,
+  run_id: optionalNonEmptyId,
+  taskId: optionalNonEmptyId,
+  task_id: optionalNonEmptyId
+}).strict().transform(data => ({
+  path: normalizeFilePath(data as Record<string, unknown>),
+  runId: data.runId ?? data.run_id,
+  taskId: data.taskId ?? data.task_id
+}));
+const workspaceWriteSchema = z.object({
+  path: z.string().min(1).max(4096).optional(),
+  filePath: z.string().min(1).max(4096).optional(),
+  file_path: z.string().min(1).max(4096).optional(),
+  runId: optionalNonEmptyId,
+  run_id: optionalNonEmptyId,
+  taskId: optionalNonEmptyId,
+  task_id: optionalNonEmptyId,
+  content: z.string().max(FILE_BYTES),
+  expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable()
+}).strict().transform(data => ({
+  path: normalizeFilePath(data as Record<string, unknown>),
+  runId: data.runId ?? data.run_id,
+  taskId: data.taskId ?? data.task_id,
+  content: data.content,
+  expectedSha256: data.expectedSha256
+}));
 const SUPPLEMENTAL_RED_TEST_OR_FIXTURE_PATTERN =
   /\.(?:test|spec)\.[cm]?[jt]sx?$|(?<=^|\/)(?:test_[^/]+\.py|[^/]+_test\.py)$|_test\.(?:go|rb|dart|exs)$|Spec\.rb$|(?:Test|Tests|Spec)\.(?:java|kt|cs|php|swift|cpp|cc|cxx)$|(?<=^|\/)tests\/[^/]+\.rs$|(?<=^|\/)tests\.rs$|_tests?\.rs$|(?<=^|\/)(?:__fixtures__|__mocks__|__snapshots__|testdata)\/|(?<=^|\/)(?:test|tests|__tests__|spec|Specs|Tests)\/(?:fixtures|helpers|support|mocks|snapshots|common|testutils|util|utils)\//;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -78,7 +111,7 @@ export class HostDevelopment {
   }
   private async identity(bindingInput: PaneBinding, input: unknown) {
     const binding = PaneBindingSchema.parse(bindingInput), args = record(input);
-    const requestedRunId = normalizeOptionalId(args.runId), requestedTaskId = normalizeOptionalId(args.taskId);
+    const requestedRunId = normalizeOptionalId(args.runId ?? args.run_id), requestedTaskId = normalizeOptionalId(args.taskId ?? args.task_id);
     if (binding.role !== "developer" || !binding.worktreePath) throw new Error("An assigned Developer worktree is required");
     const state = record(await this.runtime().inspect());
     if (!Array.isArray(state.outbound)) throw new Error("Invalid Runtime assignment state");
@@ -454,7 +487,9 @@ export class HostDevelopment {
     return (await this.git(cwd, ["rev-parse", "HEAD"])).trim();
   }
   async commit(binding: PaneBinding, input: unknown) {
-    const context = await this.identity(binding, input), expected = textField(context.args.expectedHead), message = textField(context.args.message);
+    const context = await this.identity(binding, input);
+    const expected = textField(context.args.expectedHead ?? context.args.expected_head ?? context.args.expectedRevision);
+    const message = textField(context.args.message ?? context.args.commit_message ?? context.args.commitMessage);
     if (!/^[a-f0-9]{40}$/.test(expected) || message.includes("\0") || message.length > 500) throw new Error("Invalid expected revision or commit message");
     if (context.resolver) return this.runtime().commitConflictResolution(context.binding, context.runId, context.taskId, resolution =>
       this.commitMergeResolution(context.cwd, expected, message, resolution));

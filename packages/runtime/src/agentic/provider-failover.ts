@@ -56,7 +56,17 @@ export class TaskProviderFailover {
 
   private hold(run: RunRecord, entry: TaskFailover, reason: string, blocked = false) {
     entry.reason = reason;
-    if (blocked) { entry.phase = "blocked"; run.status = "escalated"; }
+    if (blocked) {
+      const previousStatus = run.status;
+      entry.phase = "blocked"; run.status = "escalated";
+      // A blocked continuation must stay recoverable: expose a durable manual resume action instead of a dead end.
+      const actionId = `next-${digest([run.runId, entry.sourceMessageId])}`;
+      if (run.pendingAction?.actionId !== actionId) {
+        run.pendingAction = { actionId, kind: "resume_coordinator", owner: "coordinator", reason: `Provider continuation blocked: ${reason}`,
+          sourceMessageId: entry.sourceMessageId, createdAt: this.now(), state: "pending",
+          ...(previousStatus === "escalated" ? {} : { previousStatus }), recovery: "manual" };
+      }
+    }
     run.error = `Provider continuation: ${reason}`;
     this.notify(run, entry, reason, blocked);
   }

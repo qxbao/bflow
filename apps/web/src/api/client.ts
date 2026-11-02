@@ -54,12 +54,12 @@ export class ApiClient {
   }
   get expiresAt() { return this.session?.expiresAt; }
   projects() { return this.request('/api/v1/projects', contracts.projects.response); }
-  register(path: string) { return this.request('/api/v1/projects', contracts.registerProject.response, 'POST', contracts.registerProject.body.parse({apiVersion:1,path})); }
-  unregister(id: string) { return this.request(projectPath(id), contracts.unregisterProject.response, 'DELETE', contracts.unregisterProject.body.parse({apiVersion:1,confirmed:true})); }
+  register(path: string) { return this.request('/api/v1/projects', contracts.registerProject.response, 'POST', contracts.registerProject.body.parse({apiVersion:1,path}), 35000); }
+  unregister(id: string) { return this.request(projectPath(id), contracts.unregisterProject.response, 'DELETE', contracts.unregisterProject.body.parse({apiVersion:1,confirmed:true}), 35000); }
   configuration(id: string) { return this.request(`${projectPath(id)}/configuration`, contracts.configuration.response); }
-  async saveConfiguration(id: string, input: unknown) { const result = await this.request(`${projectPath(id)}/configuration`, contracts.saveConfiguration.response, 'PUT', contracts.saveConfiguration.body.parse(input)); if(!result.ok)throw new ConfigurationError(result.error.message);return result.value; }
-  initialize(id: string, input: unknown) { return this.request(`${projectPath(id)}/initializations`, contracts.initializeProject.response, 'POST', contracts.initializeProject.body.parse(input)); }
-  initialization(id: string, operationId: string) { return this.request(`${projectPath(id)}/initializations/${encodeURIComponent(operationId)}`, contracts.initialization.response); }
+  async saveConfiguration(id: string, input: unknown) { const result = await this.request(`${projectPath(id)}/configuration`, contracts.saveConfiguration.response, 'PUT', contracts.saveConfiguration.body.parse(input), 40000); if(!result.ok)throw new ConfigurationError(result.error.message);return result.value; }
+  initialize(id: string, input: unknown) { return this.request(`${projectPath(id)}/initializations`, contracts.initializeProject.response, 'POST', contracts.initializeProject.body.parse(input), 40000); }
+  initialization(id: string, operationId: string) { return this.request(`${projectPath(id)}/initializations/${encodeURIComponent(operationId)}`, contracts.initialization.response, 'GET', undefined, 35000); }
   sessionView(id: string) { return this.request(`${projectPath(id)}/session`, contracts.projectSession.response); }
   preview(id: string) { return this.request(`${projectPath(id)}/preview`, contracts.preview.response, 'GET', undefined, 20000); }
   runs(id: string, search = '', phase = '', cursor?: string) {

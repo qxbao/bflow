@@ -775,6 +775,7 @@ export class HostPlatformSession {
     const launchId = this.developerLaunches.get(taskId);
     if (launchId === undefined) return;
     await this.options.processScopes?.sealLaunch(taskId, launchId);
+    await this.options.processScopes?.stopLaunch(taskId, launchId);
     const released = await this.options.service.releaseLaunch(launchId);
     if (!released.ok) throw new Error(`Developer ${taskId} launch release failed: ${describeFailure(released.error)}`);
     await this.removeLaunchArtifacts(launchId);
