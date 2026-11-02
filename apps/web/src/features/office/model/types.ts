@@ -72,3 +72,7 @@ export interface SeatMap {
   entries: SeatEntry[];
   overflow: number;
 }
+
+/** What a click or keypress on the stage selects. Emitted by the scene; resolved by the UI (V4). */
+export type OfficeObjectId = 'counter' | 'board' | 'mailbox' | 'cabinet' | 'server' | 'settings' | 'door';
+export type OfficeTarget = { kind: 'agent'; instanceId: string } | { kind: 'object'; object: OfficeObjectId };

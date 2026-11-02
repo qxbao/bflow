@@ -1,5 +1,5 @@
 import { LoadingState } from './components/LoadingState';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Route, Routes, useMatch, useNavigate, useParams } from 'react-router';
 import type { WebEvent, WebProject } from '@bflow/contracts/web';
 import { ApiClient, ApiError, consumeBootstrap } from './api/client';
@@ -19,6 +19,10 @@ import { Overview } from './features/overview';
 import { useUiMode, type UiMode } from './features/office/mode';
 import { OfficeFrame, OverviewOutlet } from './features/office/ui/OfficeFrame';
 import { ModeSwitch } from './features/office/ui/ModeSwitch';
+import { OfficeStage } from './features/office/ui/OfficeStage';
+import { deriveOffice } from './features/office/model/derive';
+import { applySeats } from './features/office/model/seats';
+import type { SeatMap } from './features/office/model/types';
 
 export function App({api,bootstrap}:{api:ApiClient;bootstrap?:string|undefined}) {
   const [ready,setReady]=useState(false),[error,setError]=useState<unknown>(),[attempt,setAttempt]=useState(0),[revision,setRevision]=useState(0);
@@ -79,7 +83,16 @@ function ProjectContent({api,project,revision,refresh,frame}:{api:ApiClient;proj
   useEffect(()=>{if(connection==='connected')return;const poll=setInterval(refresh,15000);return()=>clearInterval(poll);},[connection,refresh]);
   const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div>;
   const visual=frame.mode==='visual';
-  const stage=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['review','Cần bạn quyết định'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
+  const runs=useRead(`overview-runs:${id}`,()=>api.runs(id),revision),decisions=useRead(`overview-decisions:${id}`,()=>api.decisions(id),revision);
+  const seats=useRef<SeatMap>({entries:[],overflow:0});
+  // Degraded tier until useOfficeModel lands: no workforce view, built from the session, runs and decisions already read.
+  const office=useMemo(()=>{
+    if(!session.data)return undefined;
+    const derived=deriveOffice({session:session.data,runs:runs.data?.items??[],decisions:decisions.data?.items??[],connection,now:Date.now()});
+    const seated=applySeats(seats.current,derived);seats.current=seated.seats;return seated.model;
+  },[session.data,runs.data,decisions.data,connection]);
+  const list=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['review','Cần bạn quyết định'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
+  const stage=office?<OfficeStage model={office} onSelect={target=>{void target;}} fallback={list}/>:list;
   return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':'inline'}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen} hud={frame.hud} host={frame.host} stage={stage} mark={<>{mark}<button type="button" onClick={refresh}>Tải lại dữ liệu</button></>} onMode={frame.setMode} onOverview={frame.openOverview}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame></Operations>;
 }
 function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) { const {runId=''}=useParams();return <RunView key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh}/>; }

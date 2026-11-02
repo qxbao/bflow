@@ -1,5 +1,5 @@
 // Pure seat assignment. No React, Pixi, fetch or clock; the result is plain data and inputs are never mutated.
-import type { OfficeAgent, OfficeRole, SeatMap } from './types';
+import type { OfficeAgent, OfficeModel, OfficeRole, SeatMap } from './types';
 
 /** Developer pool: 6 main seats, then 12 annex seats. Main seats fill first. */
 export const DEVELOPER_SEATS: readonly string[] = [
@@ -78,4 +78,11 @@ function freeFixedSeat(role: Exclude<OfficeRole, 'developer'>, claimed: Readonly
   let k = 1;
   while (claimed.has(fixedSeat(base, k))) k += 1;
   return fixedSeat(base, k);
+}
+
+/** Returns the model with `seat` filled from a fresh assignment, and the map to pass as `previous` next time. Inputs are not mutated. */
+export function applySeats(previous: SeatMap, model: OfficeModel): { model: OfficeModel; seats: SeatMap } {
+  const seats = assignSeats(previous, model.agents);
+  const seatOf = new Map(seats.entries.map(e => [e.instanceId, e.seat] as const));
+  return { seats, model: { ...model, agents: model.agents.map(a => { const seat = seatOf.get(a.instanceId); return seat === undefined ? a : { ...a, seat }; }) } };
 }
