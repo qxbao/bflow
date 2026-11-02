@@ -1,6 +1,6 @@
 # Bflow Web Visualization Mode — xác nhận ngày 2026-11-02
 
-Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Không push, merge hay tạo PR. Đây là báo cáo source, test cục bộ và phép đo fixture trên GPU thật; chưa có live SDLC V9.
+Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Không push, merge hay tạo PR. Báo cáo gồm source, test cục bộ, phép đo fixture GPU thật và một phiên V9 live bị chặn trước dispatch Developer; chưa có nghiệm thu SDLC đầu-cuối.
 
 ## Phạm vi và revision
 
@@ -66,20 +66,56 @@ Hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo đư
 
 Re-review bản sửa: xem ledger; review độc lập vẫn mở đến khi có quota Sonnet/Haiku.
 
-## V9 — chưa nghiệm thu
+## V9 — đã chạy thật, chưa nghiệm thu đầu-cuối
 
-Không có run ID V9, không có đối chứng 5 mốc, chưa có hai Developer thật song song, chưa chạy fault campaign và chưa đo thời gian đối chứng Classic. Không mượn live run lịch sử của nhánh khác để đóng V9.
+Source chạy: `e44b451f`; Herdr `0.9.5`, protocol 22; Codex `0.166.0`, profile `personal`, model **GPT-6-Luna** cho toàn bộ role. Conversation/Planner/Specifier/Developer effort `low`; Coordinator/Architect/Reviewer/QA `medium`; `maxConcurrency=2`. Đây chỉ là phạm vi một provider.
 
-Đã chuẩn bị repo Git dùng một lần, tất cả role `codex`, model `gpt-6-luna`, profile `personal`; Conversation/Planner/Specifier/Developer/SOS effort `low`, Coordinator/Architect/Reviewer/QA `medium`, `maxConcurrency=2`. Herdr cài trên máy `0.9.5`, Codex `0.166.0`. Profile `personal` qua linked backend được xác nhận bằng catalog access, **chưa là bằng chứng inference/task success**.
+- Named session: `bf-3faa1d4b158d16b5d0ea`.
+- Run: `run-web-f21b68bf-e49d-442a-acec-a3de32e2107f`.
+- Repo dùng một lần, HOME/BFLOW_HOME/Herdr/XDG riêng ở `/tmp/bfo-v9-9r739p5a`. Chạy binary build từ worktree. Không chạy setup với HOME thật.
+- Thời gian chiến dịch từ bấm tạo yêu cầu đến manifest down: 10:23:36–10:41:37 UTC, 1081 giây. Bao gồm các lần bị chặn và thời gian điều tra/điều khiển; **không phải thời gian hoàn thành workflow**. Chưa có phép so Classic.
 
-Preflight chỉ dùng CLI build từ worktree với HOME/BFLOW_HOME riêng:
+### Việc đã chứng minh bằng phiên thật
 
-1. Setup trên scratch NTFS bị guard từ chối vì thư mục trả uid=0 trong khi process uid=1000; không thay guard.
-2. Chuyển filesystem local; setup timeout 180s trong bước `install-gitnexus`. Receipt giữ trạng thái `started`; không tự phát lại uncertain mutation, không tự đánh dấu setup hoàn tất.
-3. `init --provider codex --no-gitnexus` thành công; doctor thấy config đúng, auth Codex và sandbox verification sẵn sàng nhưng báo thiếu exact skill pins và lỗi độ dài socket Herdr trong HOME cô lập. Doctor tổng thể không healthy.
-4. Probe `bflow web --no-open` có log URL nhưng endpoint không truy cập được sau đó; không coi dòng log hay process sống ở mốc 35s là server ready. Chưa khởi động provider pane/workflow V9 qua UI.
+1. Khắc phục preflight cũ bằng đường dẫn local ngắn và `bflow skills sync --provider codex --allow-machine-scope` với exact pin; doctor exit 0 / healthy. Không phát lại bước tool install GitNexus từng bị gián đoạn.
+2. Khởi động Web thật qua PTY; ghép nối, đăng ký repo, chọn 3D, khởi động phiên, tạo yêu cầu, gửi làm rõ, chỉnh yêu cầu và duyệt đặc tả đều qua component HTML trong panel 3D. Không gọi API ghi thay cho thao tác UI, không sửa journal.
+3. Hook symlink của `personal` bị preflight chặn. Chủ dự án **đã cho phép** policy hook chỉ trong kho V9 cô lập. Policy được ghi bằng public API vào `/tmp/bfo-v9-9r739p5a/b/state`, không ghi approval store dùng chung. Runtime sau đó kích hoạt 7 role thật. Đã đọc terminal Coordinator thấy `GPT-6-Luna medium` và các cuộc gọi MCP thật. Herdr idle/done không được dùng làm bằng chứng thành công.
+4. Có ít nhất năm mốc đủ DOM mirror + workforce + manifest + `bflow status <run-id> --telemetry`: `m1-intake`, `m2-browser-reload`, `m3-server-restart`, `m5-plan-drift`, `m6-after-resume`. Workforce/manifest cùng 7 identity; DOM cùng bảy nhãn vai trò. `m4-request-revised` chỉ có telemetry/manifest, không tính là bộ đối chiếu DOM đầy đủ. **Chưa có Developer nào** ở các mốc này.
+5. Chủ động reload trang giữa phiên; 3D vẫn dùng cho thao tác nghiệp vụ. Chủ động SIGINT rồi mở lại riêng Web owner, Runtime host vẫn sống; dùng pairing mới trở về đúng run, không gửi lại create. Locator chờ một câu offline trong harness không khớp câu UI và timeout, nên không ghi assertion thông báo offline là PASS; log kết nối bị cắt/refused và phục hồi run được giữ.
+6. Runtime nhận đặc tả full, TDD required, hai task `parse-duration` và `format-duration`, `dependencies=[]`, ownedPaths tách biệt. Gói thiết kế được đọc và duyệt qua Web 3D. Đây là **phê duyệt thiết kế**, chưa phải phê duyệt bàn giao.
 
-Cần hoàn tất readiness ở môi trường local với đường dẫn socket ngắn và exact skills, giữ nguyên policies/human gates; sau đó mới chạy toàn bộ §8.4 và ghi run IDs/evidence thật.
+Một lần driver bị chờ locator không có timeout đã được khởi động lại; Web/Runtime không đổi. Browser mới dùng bootstrap mới từ owner reuse; không phát lại bootstrap một lần đã dùng. Các lỗi điều khiển này ghi riêng, không coi là lỗi provider hay bằng chứng acceptance.
+
+### Blocker live được tái hiện
+
+**B1 — mixed criteria bị từ chối ở cấp workflow.** Host gọi `HostVerification.assertSupported` trên toàn bộ spec trước per-task checks; `host-verification.ts:433` từ chối khi có cả `manual_review` và behavioral criteria dù thông báo yêu cầu tách task. Yêu cầu sandbox được chỉnh công khai qua `revise_request`: chỉ tiêu chí chức năng thư viện/README dùng unit test; điều kiện hai Developer thật, Reviewer/QA và human approval vẫn giữ trong ràng buộc chiến dịch. Không đổi Runtime, không waive tiêu chí hay tắt gate. Revision 3 qua admission.
+
+**B2 — native Codex workspace trust tự gây execution-plan drift.** Sau duyệt thiết kế, Runtime tạo worktree parse đầu tiên rồi escalates trước dispatch: `ExecutionPlanDriftError`, component `inputs.native-profile-settings-119`. Không có message `task.assignment` và không có Developer pane.
+
+Đối chiếu read-only chứng minh:
+
+- Nguồn là `personal/home/.codex/config.toml`, được `apps/cli/src/execution-preview.ts` ghim toàn bộ bytes.
+- `packages/agent-providers/src/codex-trust.ts` thêm bảng trust cho worktree mới theo opt-in `trustedWorkspace` của repo. Không phải agent điều tra tự sửa file để vượt prompt.
+- Hash đã chấp nhận: `94082083500da5eec62ac4d18687c379abfc17cd8ec62c0964390c5644ad14b3`.
+- Hash sau tạo trust: `6cba0abb128c2430bbb1929097a2175061fa334966900b9426ffea37912ca28b`.
+- Loại riêng bảng trust vừa sinh và newline phân cách **trong bộ nhớ** khôi phục chính xác hash đã chấp nhận; không ghi file native. Bằng chứng `plan-drift-root-cause.json`.
+- `bflow task preview --run <id> --json` exit 0; sau đó nút **Tiếp tục** vẫn lặp đúng drift. Giữ guard, không sửa trạng thái/receipt và không tự rebind kế hoạch.
+
+Cần quyết định owner mở phạm vi sửa CLI và test hồi quy cho B2. Hướng dự kiến: phân biệt đúng phần trust Bflow tạo cho worktree đã xác minh với thay đổi cấu hình model/quyền/hook của người dùng; không loại toàn bộ native config khỏi guard. Chưa có implementation sửa B2.
+
+### Những tiêu chí V9 chưa đạt
+
+- Hai Developer thực thi song song: **chưa đạt**, zero task assignments.
+- Đóng một pane Developer khi đang chạy: **chưa thực hiện**, chưa có pane phù hợp.
+- Truy vết mọi cue đã vẽ tới handoffId: **chưa đủ**; có log workforce/receipts thật nhưng chưa có audit từng cue hiển thị.
+- Verification/integration và phê duyệt bàn giao: **chưa đến**.
+- So thời gian hoàn tất với Classic: **chưa có**.
+
+### Teardown và giữ bằng chứng
+
+Đã dừng phiên bằng SessionActions trong 3D theo luồng checkpoint thông thường: manifest `down`, named Herdr `not_running`; run escalated và một worktree vẫn được giữ. Đã thu hồi policy hook V9 bằng public API (`policiesRemaining=0`), dừng riêng Web/Chrome/observer của chiến dịch. Không đụng phiên khác, không xóa ledger hay worktree. Bảng trust native do Bflow tạo được giữ làm bằng chứng, không tự sửa ngược cấu hình dùng chung.
+
+Snapshot/log đã sao chép vào ledger `v9-live/evidence/`; không sao chép bootstrap, cookie hay browser storage. Các thử setup trước đó vẫn giữ riêng trong `v9-preflight/`.
 
 ## Nơi giữ bằng chứng và ruling
 
@@ -92,6 +128,6 @@ Ledger ngoài Git (không xóa): `.superpowers/sdd/2026-11-02-web-visualization-
 - `verification-15cc644b/`: các log gốc, error index, kết quả đo JSON và machine context.
 - `resume-F1-red.log`, `resume-F1-green.log`, `resume-F2-red.log`, `resume-F2-green.log`: chứng cứ hồi quy.
 - `verification-final/`: xác nhận sau đợt sửa.
-- `v9-preflight/`: plan/setup receipts reference, cấu hình, doctor và log khởi động; chưa là V9 live.
+- `v9-preflight/`: các thử preflight cũ; `v9-live/`: doctor/skills readiness và bằng chứng live, blocker, checkpoints, teardown.
 
 Ruling mới: giữ ledger theo lệnh owner; timeout 240s là trần test tổng; không đổi screenshot khi chưa tái hiện flaky; không thay review độc lập bằng self-review/quota fallback; không gọi phép đo fixture hay catalog access là live acceptance. Chi phí: còn gate review, full suite và V9 trước khi owner quyết định merge/phát hành.
