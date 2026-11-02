@@ -6,6 +6,7 @@ import {
   WebRunPageResultSchema,
   WebRunViewResultSchema,
   WebDecisionPageResultSchema,
+  WebWorkforceViewSchema, OperationResultSchema,
   WebCommandSchema, WebOperationResponseSchema, type WebCommand,
   type UserInteractionClient,
   type OperationResult,
@@ -23,6 +24,7 @@ export function interactionProjectId(canonicalRepositoryPath: string): string {
       .slice(0, 32)
   );
 }
+const WebWorkforceResultSchema = OperationResultSchema(WebWorkforceViewSchema);
 const unavailable = <T>(): OperationResult<T> => ({
   ok: false,
   error: {
@@ -135,6 +137,8 @@ export async function openUserInteractionClient(options: {
             }
           : result;
       }),
+    readWorkforce: id =>
+      query({ kind: "workforce", projectId: id }, (v) => WebWorkforceResultSchema.parse(v)),
     async execute(input) {
       if (!options.interaction) return refused();
       let command;

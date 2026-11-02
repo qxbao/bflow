@@ -25,4 +25,7 @@ export const InteractionQuerySchema = z.discriminatedUnion("kind", [
   z
     .object({ kind: z.literal("decisions"), projectId: IdentifierSchema })
     .strict(),
+  z
+    .object({ kind: z.literal("workforce"), projectId: IdentifierSchema })
+    .strict(),
 ]);
