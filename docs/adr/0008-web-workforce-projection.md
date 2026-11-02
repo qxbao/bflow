@@ -247,8 +247,10 @@ order, so no 3D camera, lighting or mesh is needed") no longer holds.
    holds no three.js chunk and no `modulepreload`, and that the scene raises no
    `securitypolicyviolation`.
 4. **Boundary.** `features/office/scene/**` imports no command or write API.
-   Labels are DOM text, not canvas text, so Vietnamese diacritics stay sharp and
-   the DOM mirror stays the stable accessible surface.
+   Agent, object and message-box labels are DOM text, not canvas text, so Vietnamese
+   diacritics stay sharp and the DOM mirror stays the stable accessible surface.
+   Zone wall signs are the one exception: they are canvas text (decoration), and the
+   mirror still holds the truth.
 5. **WebGL unavailable or lost.** The mirror becomes the visible complete list and
    nothing else in the panel changes. There is no retry loop.
 6. **Browser import closure.** `@bflow/contracts/web` already imports
