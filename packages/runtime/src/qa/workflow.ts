@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import { canonicalReceiptJson } from "@bflow/contracts";
+import { extensionDecisionRequest } from "../extension-decisions.js";
 import { lstat, mkdir, open, readdir, readFile, readlink, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
-  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
+  hasAuthenticatedBindings, AgentBindingVerificationSchema, AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   ArtifactWriteOptionsSchema, DomainEventSchema, ResolvedToolGrantSchema, SpecificationSchema, StoredRunSchema, VerificationResultSchema,
   WorkflowAdvanceResultSchema, type ApprovalDecision, type ArtifactReference, type ArtifactStore, type JsonValue, type OperationResult,
   type ResolvedToolGrant, type RunStore, type TestStrategy, type WorkflowAdvanceResult, type WorkflowDefinition, type WorkflowEngine,
@@ -22,6 +24,8 @@ import { QaScopeDenied, QaUnresolvedVariable, actionOf, resolveTargetUrl, substi
 import { QA_BROWSER_TOOL_ID, QA_HTTP_TOOL_ID, type QaBrowserTool, type QaHttpOutcome, type QaHttpTool } from "./tools.js";
 import { verifyQaDesign, type QaDesignVerification } from "./verify.js";
 
+import { executeExtension, extensionIntent, type ExtensionExecution } from "../extension-execution.js";
+import type { NativeExtensionRolePort } from "../agentic/extension-delivery.js";
 /** One assignment to a standard role. Roles get context only: no write, command or network authority on the target. */
 export interface QaAssignment {
   readonly runId: string;
@@ -46,6 +50,7 @@ export type QaReconciliation =
 
 /** Role transport port. The persistent host would deliver over Runtime → Herdr; tests use deterministic fixtures. */
 export interface QaRolePort {
+  readonly native?: NativeExtensionRolePort;
   dispatch(assignment: QaAssignment): Promise<{ readonly agentId: string; readonly output: unknown }>;
   reconcile?(executionId: string): Promise<QaReconciliation>;
 }
@@ -112,6 +117,7 @@ interface ExecutionState {
   digest?: string; artifact?: ArtifactReference; completedAt?: string;
 }
 interface ExecutionRecord {
+  native?: ExtensionExecution;
   executionId: string; taskId: QaTaskKind; attemptId: string; attempt: number; generation: number;
   state: "bound" | "recorded"; agentId?: string; outputDigest?: string; startedAt: string;
   failure?: { code: string; message: string } | null; completedAt?: string;
@@ -135,7 +141,7 @@ interface RunRecord {
   rejections: { executionId: string; taskId: string; code: string; message: string; at: string }[];
   blockers: string[];
 }
-interface Journal { schemaVersion: 1; runs: RunRecord[] }
+interface Journal { schemaVersion: 1 | 2; delivery?: "native"; runs: RunRecord[] }
 
 /** A whole-run precondition that is not met yet (for example a busy lease): no side effect happened, drive again later. */
 class QaBlocked extends Error { constructor(readonly code: string) { super(code); this.name = "QaBlocked"; } }
@@ -181,14 +187,19 @@ export class QaWorkflowRuntime {
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
   private readonly sanitizers = new Map<string, QaSanitizer>();
-  private constructor(private readonly ports: QaRuntimePorts) {}
+  private constructor(private readonly ports: QaRuntimePorts) {
+    if (ports.roles.native) this.journal = { schemaVersion: 2, delivery: "native", runs: [] };
+  }
 
   static async open(ports: QaRuntimePorts): Promise<QaWorkflowRuntime> {
     if (!isAbsolute(ports.repositoryRoot) || !isAbsolute(ports.journalPath)) throw new Error("QA runtime paths must be absolute");
     const runtime = new QaWorkflowRuntime(ports);
     try {
       const parsed = JSON.parse(await readFile(ports.journalPath, "utf8")) as Journal;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.runs)) throw new Error("Unsupported QA journal version");
+      if (!Array.isArray(parsed.runs) || (ports.roles.native
+        ? parsed.schemaVersion !== 2 || parsed.delivery !== "native"
+        : parsed.schemaVersion !== 1 || parsed.delivery !== undefined))
+        throw new Error("Legacy SDK and native qa journals require separate versioned namespaces");
       runtime.journal = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -306,6 +317,9 @@ export class QaWorkflowRuntime {
 
   private async execute(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<"blocked" | void> {
     const kind = task.taskId as QaTaskKind;
+    if (this.ports.roles.native && !(RUNTIME_TASKS.has(kind))) {
+      await this.executeNative(run, task); return;
+    }
     let existing = run.executions.find(item => item.attemptId === task.attemptId);
     if (!existing && task.agentExecution && task.agentExecution.attemptId === task.attemptId) {
       // Core persisted the binding but the journal write was lost: adopt Core's binding and reconcile it, never rebind.
@@ -353,7 +367,42 @@ export class QaWorkflowRuntime {
     }
   }
 
+  private async executeNative(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<void> {
+    if (!hasAuthenticatedBindings(this.ports.engine)) throw new Error("Native extension requires authenticated Core binding support");
+    const engine = this.ports.engine, kind = task.taskId as QaTaskKind;
+    let execution = run.executions.find(item => item.attemptId === task.attemptId);
+    if (execution && !execution.native) throw new Error("Legacy logical execution cannot become native evidence");
+    if (!execution) {
+      if (task.agentExecution) throw new Error("Native Core binding lost its SDK delivery intent; recovery requires reconciliation");
+      execution = { executionId: `${run.runId}.${kind}.g${task.generation}.a${task.attempt}`, taskId: kind,
+        attemptId: task.attemptId!, attempt: task.attempt, generation: task.generation, state: "bound", startedAt: this.ports.now() };
+      const assignment = this.assignment(run, kind, execution);
+      execution.native = { intent: extensionIntent("qa", run.intake.sessionId, assignment, assignment, execution.startedAt), phase: "prepared" };
+      run.executions.push(execution); await this.save();
+    }
+    if (task.status === "waiting") { await this.evaluateGates(run, task, execution); return; }
+    if (execution.state === "recorded") { await this.recordResult(run, execution); return; }
+    const record = execution;
+    const outcome = await executeExtension({ execution: record.native!, port: this.ports.roles.native!, save: () => this.save(),
+      bind: async handle => {
+        record.executionId = handle.executionId; await this.save();
+        await this.mutate(run.runId, version => engine.bindAgentExecution({ runId: run.runId, taskId: kind, attempt: task.attempt,
+          handle, expectedVersion: version, idempotencyKey: `qa:bind:${handle.executionId}`, occurredAt: handle.acceptedAt }));
+      } });
+    record.native!.verification ??= AgentBindingVerificationSchema.parse({ receipt: outcome.receipt, evidence: outcome.receiptEvidence,
+      verifiedAt: this.ports.now() });
+    await this.save();
+    const proof = AgentBindingVerificationSchema.parse(record.native!.verification);
+    await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
+      verification: proof, occurredAt: proof.verifiedAt, idempotencyKey: `qa:verify-binding:${outcome.handle.executionId}` }));
+    await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
+  }
+
   private handle(run: RunRecord, execution: ExecutionRecord) {
+    if (execution.native) {
+      if (!execution.native.handle) throw new Error("Native execution has not been accepted");
+      return execution.native.handle;
+    }
     return { executionId: execution.executionId, requestId: `request-${execution.executionId}`, attemptId: execution.attemptId,
       runId: run.runId, taskId: execution.taskId, idempotencyKey: `qa:dispatch:${execution.executionId}`,
       target: { transport: RUNTIME_TASKS.has(execution.taskId) ? "runtime-qa" : "qa-role", agentId: this.roleOf(run, execution.taskId), paneId: execution.taskId },
@@ -386,7 +435,9 @@ export class QaWorkflowRuntime {
     try {
       const forbidden = forbiddenOutputKeys(outcome.output);
       if (forbidden.length) throw new QaScopeDenied("forbidden_authority", `Role output requested forbidden authority: ${forbidden.join(", ")}`);
-      if (!RUNTIME_TASKS.has(kind) && outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`))
+      if (!RUNTIME_TASKS.has(kind) && (execution.native
+        ? outcome.agentId !== execution.native.outcome?.sender.agent_id || execution.native.outcome.sender.role !== this.roleOf(run, kind)
+        : outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`)))
         throw new QaScopeDenied("wrong_role", `Output came from ${outcome.agentId}, not the assigned ${this.roleOf(run, kind)} role`);
       if (kind === "design") await this.acceptDesign(run, execution, outcome.agentId, QaRoleOutputSchemas.design.parse(outcome.output).design);
       else if (kind === "design-review") await this.acceptReview(run, outcome.agentId, QaRoleOutputSchemas["design-review"].parse(outcome.output));
@@ -416,9 +467,9 @@ export class QaWorkflowRuntime {
     const kind = execution.taskId;
     const failure = execution.failure ?? undefined;
     const at = execution.completedAt ?? this.ports.now();
-    const result = AgentResultSchema.parse({ requestId: `request-${execution.executionId}`, attemptId: execution.attemptId, runId: run.runId,
+    const result = AgentResultSchema.parse({ requestId: this.handle(run, execution).requestId, attemptId: execution.attemptId, runId: run.runId,
       taskId: kind, executionId: execution.executionId, status: failure ? "failed" : "succeeded",
-      verification: { status: "verified", evidence: `qa ${kind} output ${execution.outputDigest}`, correlation: this.handle(run, execution).correlation },
+      verification: { status: "verified", evidence: `qa ${kind} output ${execution.outputDigest}`, correlation: execution.native?.outcome?.receipt.correlation ?? this.handle(run, execution).correlation },
       artifactProposals: [], retryable: Boolean(failure), startedAt: execution.startedAt, completedAt: at,
       ...(failure ? { error: { code: failure.code, message: failure.message, retryable: true } } : {}) });
     const snapshot = await this.mutate(run.runId, version => this.ports.engine.recordAgentResult({ runId: run.runId, taskId: kind,
@@ -576,13 +627,31 @@ export class QaWorkflowRuntime {
       generation: snapshot.tasks.find(item => item.taskId === "design-review")!.generation, decision: input.decision, decidedBy: input.decidedBy,
       decidedAt: this.ports.now(), ...(input.reason ? { reason: input.reason } : {}), feedbackArtifacts: [], idempotencyKey: `qa:decision:${pending.approvalId}`,
       metadata: { approvalScope: "qa_test_design", designDigest: pending.designDigest, productChange: "not_authorized" } });
+    return this.applyHumanDecision(decision);
+  }
+
+  /** Apply the exact authenticated design decision supplied by Conversation/host. */
+  async applyHumanDecision(input: ApprovalDecision) {
+    const decision = ApprovalDecisionSchema.parse(input), run = this.run(decision.runId), pending = run.approval;
+    if (!pending || pending.approvalId !== decision.approvalId) throw new Error("No matching QA design approval is pending");
     await this.authorize(decision);
-    await this.mutate(runId, version => this.ports.engine.applyApproval({ expectedVersion: version, idempotencyKey: `qa:decision:${pending.approvalId}`, decision }));
+    if (pending.decision) {
+      if (canonicalReceiptJson(pending.decision) !== canonicalReceiptJson(decision)) throw new Error("QA approval already has another decision");
+      return this.status(run.runId);
+    }
+    this.live(run.runId);
+    if (run.status !== "awaiting_design_approval") throw new Error("No test design approval is pending");
+    await this.restoreCore(run);
+    const request = await extensionDecisionRequest(this.ports.runStore, decision, "qa_test_design", this.ports.now());
+    if (decision.metadata?.designDigest !== pending.designDigest || request.metadata?.designDigest !== pending.designDigest)
+      throw new Error("Approval must name the exact reviewed design digest");
+    await this.mutate(run.runId, version => this.ports.engine.applyApproval({ expectedVersion: version,
+      idempotencyKey: `qa:decision:${pending.approvalId}`, decision }));
     pending.decision = decision;
-    if (input.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`design_${input.decision}`]; }
+    if (decision.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`design_${decision.decision}`]; }
     else run.status = "running";
     await this.save();
-    return input.decision === "approved" ? this.drive(runId) : this.status(runId);
+    return decision.decision === "approved" ? this.drive(run.runId) : this.status(run.runId);
   }
 
   private async authorize(decision: ApprovalDecision) {

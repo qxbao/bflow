@@ -170,7 +170,7 @@ describe("native extension delivery", () => {
     const f = await fixture(), bridge = f.create(); const request = await bridge.prepare(f.intent), handle = await bridge.dispatch(request);
     await expect(f.deliver(bridge, handle, { sender: { role: "specifier", agent_id: "other-analyst", pane_id: "w2:p4" } }))
       .rejects.toThrow(/binding|sender|actor/i);
-    expect(await bridge.reconcile(request.requestId)).toEqual({ status: "unknown" });
+    expect(await bridge.reconcile(request.requestId)).toEqual({ status: "bound", handle });
   });
 
   it("retains an early authenticated output until its actual binding receipt arrives", async () => {
@@ -239,7 +239,7 @@ describe("native extension delivery", () => {
     await expect(f.create().dispatch(request)).rejects.toThrow(/unknown|reconcil/i);
     const actual = JSON.parse(readFileSync(join(f.root, "server-receipt.json"), "utf8"));
     f.transport.customReconcileHandler = () => ({ ok: true, value: { status: "bound", handle: actual.handle } });
-    expect(await f.create().reconcile(request.requestId)).toEqual({ status: "unknown" });
+    expect(await f.create().reconcile(request.requestId)).toEqual({ status: "bound", handle: actual.handle });
     expect(await f.create().dispatch(request)).toEqual(actual.handle);
     expect(f.transport.sentRequests).toHaveLength(0);
     await f.deliver(bridge, actual.handle);

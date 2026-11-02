@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import {
-  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
+  hasAuthenticatedBindings, AgentBindingVerificationSchema, AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   ArtifactWriteOptionsSchema, DomainEventSchema, SpecificationSchema, StoredRunSchema, VerificationResultSchema,
   WorkflowAdvanceResultSchema, type ApprovalDecision, type ArtifactReference, type ArtifactStore, type OperationResult,
   type RunStore, type TestStrategy, type WorkflowAdvanceResult, type WorkflowDefinition, type WorkflowEngine,
@@ -17,7 +17,12 @@ import { resolveAnalysisPack, type AnalysisPackPin, type AnalysisPackPolicy } fr
 import { ANALYSIS_GATES, assertAnalysisOnlyWorkflow, planAnalysisWorkflow } from "./plan.js";
 import { renderAnalysisDocument, renderVerificationSummary } from "./render.js";
 import { verifyAnalysisDocument, type AnalysisVerification } from "./verify.js";
+import { extensionDecisionRequest } from "../extension-decisions.js";
+import { canonicalReceiptJson } from "@bflow/contracts";
+import { z } from "zod";
 
+import { executeExtension, extensionIntent, type ExtensionExecution } from "../extension-execution.js";
+import type { NativeExtensionRolePort } from "../agentic/extension-delivery.js";
 /** One assignment delivered to a standard role; it carries read context only, never write/command authority. */
 export interface AnalysisAssignment {
   readonly runId: string;
@@ -45,6 +50,7 @@ export type AnalysisReconciliation =
 
 /** Role transport port. The persistent host would deliver over Runtime → Herdr; tests use deterministic fixtures. */
 export interface AnalysisRolePort {
+  readonly native?: NativeExtensionRolePort;
   dispatch(assignment: AnalysisAssignment): Promise<{ readonly agentId: string; readonly output: unknown }>;
   /** Outcome of an execution whose result was not journaled before a restart; absent means unknown. */
   reconcile?(executionId: string): Promise<AnalysisReconciliation>;
@@ -68,6 +74,7 @@ export type AnalysisRunStatus = "running" | "awaiting_business_decision" | "awai
   "needs_revision" | "published" | "superseded" | "failed";
 
 interface ExecutionRecord {
+  native?: ExtensionExecution;
   executionId: string; taskId: AnalysisTaskKind; attemptId: string; attempt: number; generation: number;
   state: "bound" | "recorded"; agentId?: string; outputDigest?: string; startedAt: string;
   /** Set with state "recorded": the processed outcome that Core must receive (re-submitted idempotently after a restart). */
@@ -84,7 +91,7 @@ interface RunRecord {
   verifications: { documentDigest: string; attemptId: string; at: string; status: AnalysisVerification["status"]; artifact: ArtifactReference; result: AnalysisVerification }[];
   review?: { agentId: string; verdict: "approved" | "changes_requested"; documentDigest: string; artifact: ArtifactReference;
     findings: { id: string; severity: "blocking" | "advisory"; statementIds: string[]; note: string }[] };
-  approvals: { elicitation?: { approvalId: string; decision?: ApprovalDecision["decision"] }; document?: { approvalId: string; documentDigest: string; decision?: ApprovalDecision } };
+  approvals: { elicitation?: { approvalId: string; decision?: ApprovalDecision["decision"]; receipt?: ApprovalDecision }; document?: { approvalId: string; documentDigest: string; decision?: ApprovalDecision } };
   denials: { executionId: string; taskId: string; reason: string; at: string }[];
   /** Rejected (non-permission) outputs, kept for diagnosis of failed attempts. */
   rejections: { executionId: string; taskId: string; code: string; message: string; at: string }[];
@@ -92,7 +99,7 @@ interface RunRecord {
   blockers: string[];
   supersededBy?: string;
 }
-interface Journal { schemaVersion: 1; runs: RunRecord[] }
+interface Journal { schemaVersion: 1 | 2; delivery?: "native"; runs: RunRecord[] }
 
 export class AnalysisPermissionDenied extends Error {
   constructor(message: string) { super(message); this.name = "AnalysisPermissionDenied"; }
@@ -129,7 +136,9 @@ function relativeSafe(path: string): string {
 export class AnalysisWorkflowRuntime {
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
-  private constructor(private readonly ports: AnalysisRuntimePorts) {}
+  private constructor(private readonly ports: AnalysisRuntimePorts) {
+    if (ports.roles.native) this.journal = { schemaVersion: 2, delivery: "native", runs: [] };
+  }
 
   static async open(ports: AnalysisRuntimePorts): Promise<AnalysisWorkflowRuntime> {
     if (!isAbsolute(ports.repositoryRoot) || !isAbsolute(ports.journalPath)) throw new Error("Analysis runtime paths must be absolute");
@@ -138,7 +147,10 @@ export class AnalysisWorkflowRuntime {
       const st = await lstat(ports.journalPath);
       if (!st.isFile()) throw new Error("Analysis journalPath must be a regular file");
       const parsed = JSON.parse(await readFile(ports.journalPath, "utf8")) as Journal;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.runs)) throw new Error("Unsupported analysis journal version");
+      if (!Array.isArray(parsed.runs) || (ports.roles.native
+        ? parsed.schemaVersion !== 2 || parsed.delivery !== "native"
+        : parsed.schemaVersion !== 1 || parsed.delivery !== undefined))
+        throw new Error("Legacy SDK and native analysis journals require separate versioned namespaces");
       runtime.journal = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -239,6 +251,9 @@ export class AnalysisWorkflowRuntime {
 
   private async execute(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<void> {
     const kind = task.taskId as AnalysisTaskKind;
+    if (this.ports.roles.native && !(kind === "publication")) {
+      await this.executeNative(run, task); return;
+    }
     let existing = run.executions.find(item => item.attemptId === task.attemptId);
     if (!existing && task.agentExecution && task.agentExecution.attemptId === task.attemptId) {
       // Core persisted the binding but the journal write was lost: adopt Core's binding and reconcile it, never rebind.
@@ -292,7 +307,42 @@ export class AnalysisWorkflowRuntime {
     await this.complete(run, execution, outcome);
   }
 
+  private async executeNative(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<void> {
+    if (!hasAuthenticatedBindings(this.ports.engine)) throw new Error("Native extension requires authenticated Core binding support");
+    const engine = this.ports.engine, kind = task.taskId as AnalysisTaskKind;
+    let execution = run.executions.find(item => item.attemptId === task.attemptId);
+    if (execution && !execution.native) throw new Error("Legacy logical execution cannot become native evidence");
+    if (!execution) {
+      if (task.agentExecution) throw new Error("Native Core binding lost its SDK delivery intent; recovery requires reconciliation");
+      execution = { executionId: `${run.runId}.${kind}.g${task.generation}.a${task.attempt}`, taskId: kind,
+        attemptId: task.attemptId!, attempt: task.attempt, generation: task.generation, state: "bound", startedAt: this.ports.now() };
+      const assignment = this.assignment(run, kind, execution);
+      execution.native = { intent: extensionIntent("analysis", run.intake.sessionId, assignment, assignment, execution.startedAt), phase: "prepared" };
+      run.executions.push(execution); await this.save();
+    }
+    if (task.status === "waiting") { await this.evaluateGates(run, task, execution); return; }
+    if (execution.state === "recorded") { await this.recordResult(run, execution); return; }
+    const record = execution;
+    const outcome = await executeExtension({ execution: record.native!, port: this.ports.roles.native!, save: () => this.save(),
+      bind: async handle => {
+        record.executionId = handle.executionId; await this.save();
+        await this.mutate(run.runId, version => engine.bindAgentExecution({ runId: run.runId, taskId: kind, attempt: task.attempt,
+          handle, expectedVersion: version, idempotencyKey: `analysis:bind:${handle.executionId}`, occurredAt: handle.acceptedAt }));
+      } });
+    record.native!.verification ??= AgentBindingVerificationSchema.parse({ receipt: outcome.receipt, evidence: outcome.receiptEvidence,
+      verifiedAt: this.ports.now() });
+    await this.save();
+    const proof = AgentBindingVerificationSchema.parse(record.native!.verification);
+    await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
+      verification: proof, occurredAt: proof.verifiedAt, idempotencyKey: `analysis:verify-binding:${outcome.handle.executionId}` }));
+    await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
+  }
+
   private handle(run: RunRecord, execution: ExecutionRecord) {
+    if (execution.native) {
+      if (!execution.native.handle) throw new Error("Native execution has not been accepted");
+      return execution.native.handle;
+    }
     return { executionId: execution.executionId, requestId: `request-${execution.executionId}`, attemptId: execution.attemptId,
       runId: run.runId, taskId: execution.taskId, idempotencyKey: `analysis:dispatch:${execution.executionId}`,
       target: { transport: execution.taskId === "publication" ? "runtime-publication" : "analysis-role",
@@ -324,7 +374,9 @@ export class AnalysisWorkflowRuntime {
     try {
       const forbidden = forbiddenOutputKeys(outcome.output);
       if (forbidden.length) throw new AnalysisPermissionDenied(`Role output requested forbidden authority: ${forbidden.join(", ")}`);
-      if (kind !== "publication" && outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`))
+      if (kind !== "publication" && (execution.native
+        ? outcome.agentId !== execution.native.outcome?.sender.agent_id || execution.native.outcome.sender.role !== this.roleOf(run, kind)
+        : outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`)))
         throw new AnalysisPermissionDenied(`Output came from ${outcome.agentId}, not the assigned ${this.roleOf(run, kind)} role`);
       if (kind === "survey") await this.acceptSurvey(run, RoleOutputSchemas.survey.parse(outcome.output));
       else if (kind === "elicitation") this.acceptElicitation(run, RoleOutputSchemas.elicitation.parse(outcome.output));
@@ -354,9 +406,9 @@ export class AnalysisWorkflowRuntime {
     const kind = execution.taskId;
     const failure = execution.failure ?? undefined;
     const at = execution.completedAt ?? this.ports.now();
-    const result = AgentResultSchema.parse({ requestId: `request-${execution.executionId}`, attemptId: execution.attemptId, runId: run.runId,
+    const result = AgentResultSchema.parse({ requestId: this.handle(run, execution).requestId, attemptId: execution.attemptId, runId: run.runId,
       taskId: kind, executionId: execution.executionId, status: failure ? "failed" : "succeeded",
-      verification: { status: "verified", evidence: `analysis ${kind} output ${execution.outputDigest}`, correlation: this.handle(run, execution).correlation },
+      verification: { status: "verified", evidence: `analysis ${kind} output ${execution.outputDigest}`, correlation: execution.native?.outcome?.receipt.correlation ?? this.handle(run, execution).correlation },
       artifactProposals: [], retryable: Boolean(failure), startedAt: execution.startedAt, completedAt: at,
       ...(failure ? { error: { code: failure.code, message: failure.message, retryable: true } } : {}) });
     const snapshot = await this.mutate(run.runId, version => this.ports.engine.recordAgentResult({ runId: run.runId, taskId: kind,
@@ -530,25 +582,7 @@ export class AnalysisWorkflowRuntime {
       target: { type: "task", taskId: "elicitation" }, revision: run.intake.revision, generation, decision: input.decision,
       decidedBy: input.decidedBy, decidedAt: this.ports.now(), ...(input.reason ? { reason: input.reason } : {}), feedbackArtifacts: [],
       idempotencyKey: `analysis:decision:${approvalId}`, metadata: { approvalScope: "business_decisions", answers: input.answers } });
-    await this.authorize(decision);
-    if (input.decision === "approved") {
-      const missing = run.questions.filter(item => item.blocking && !input.answers[item.id]?.trim() && !run.decisions[item.id]);
-      if (missing.length) throw new Error(`Required business decisions are missing: ${missing.map(item => item.id).join(", ")}`);
-      const unknown = Object.keys(input.answers).filter(id => !run.questions.some(item => item.id === id));
-      if (unknown.length) throw new Error(`Unknown business questions: ${unknown.join(", ")}`);
-    }
-    await this.mutate(runId, version => this.ports.engine.applyApproval({ expectedVersion: version, idempotencyKey: `analysis:decision:${approvalId}`, decision }));
-    run.approvals.elicitation!.decision = input.decision;
-    if (input.decision === "approved") {
-      for (const [id, answer] of Object.entries(input.answers))
-        if (answer.trim()) run.decisions[id] = { answer: answer.trim(), decidedBy: decision.decidedBy, decidedAt: decision.decidedAt };
-      run.status = "running";
-    } else {
-      run.status = "needs_revision";
-      run.blockers = [`business_decisions_${input.decision}`];
-    }
-    await this.save();
-    return input.decision === "approved" ? this.drive(runId) : this.status(runId);
+    return this.applyHumanDecision(decision);
   }
 
   /** Human approval of the exact analysis document digest. It approves the document only, never the product. */
@@ -565,13 +599,46 @@ export class AnalysisWorkflowRuntime {
       decision: input.decision, decidedBy: input.decidedBy, decidedAt: this.ports.now(), ...(input.reason ? { reason: input.reason } : {}),
       feedbackArtifacts: [], idempotencyKey: `analysis:decision:${pending.approvalId}`,
       metadata: { approvalScope: "analysis_document", documentDigest: pending.documentDigest, productAcceptance: "not_established" } });
+    return this.applyHumanDecision(decision);
+  }
+
+  /** Host entrypoint: authenticate and apply the exact original decision. No timestamp, key or metadata is regenerated. */
+  async applyHumanDecision(input: ApprovalDecision) {
+    const decision = ApprovalDecisionSchema.parse(input), run = this.run(decision.runId);
+    const business = run.approvals.elicitation?.approvalId === decision.approvalId;
+    const pending = business ? run.approvals.elicitation : run.approvals.document?.approvalId === decision.approvalId ? run.approvals.document : undefined;
+    if (!pending) throw new Error("No matching analysis human decision is pending");
     await this.authorize(decision);
-    await this.mutate(runId, version => this.ports.engine.applyApproval({ expectedVersion: version, idempotencyKey: `analysis:decision:${pending.approvalId}`, decision }));
-    pending.decision = decision;
-    if (input.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`document_${input.decision}`]; }
+    const previous = business ? run.approvals.elicitation?.receipt : run.approvals.document?.decision;
+    if (previous) {
+      if (canonicalReceiptJson(previous) !== canonicalReceiptJson(decision)) throw new Error("Analysis approval already has another decision");
+      return this.status(run.runId);
+    }
+    this.live(run.runId);
+    if (business ? run.status !== "awaiting_business_decision" : run.status !== "awaiting_document_approval")
+      throw new Error("Analysis decision is not at its waiting phase");
+    await this.restoreCore(run);
+    const request = await extensionDecisionRequest(this.ports.runStore, decision, business ? "business_decisions" : "analysis_document", this.ports.now());
+    const answers = business ? z.record(z.string()).parse(decision.metadata?.answers ?? {}) : {};
+    if (business && decision.decision === "approved") {
+      const missing = run.questions.filter(item => item.blocking && !answers[item.id]?.trim() && !run.decisions[item.id]);
+      if (missing.length) throw new Error(`Required business decisions are missing: ${missing.map(item => item.id).join(", ")}`);
+      const unknown = Object.keys(answers).filter(id => !run.questions.some(item => item.id === id));
+      if (unknown.length) throw new Error(`Unknown business questions: ${unknown.join(", ")}`);
+    }
+    if (!business && (decision.metadata?.documentDigest !== run.approvals.document!.documentDigest ||
+        request.metadata?.documentDigest !== run.approvals.document!.documentDigest)) throw new Error("Approval must name the exact reviewed document digest");
+    await this.mutate(run.runId, version => this.ports.engine.applyApproval({ expectedVersion: version,
+      idempotencyKey: `analysis:decision:${pending.approvalId}`, decision }));
+    if (business) {
+      run.approvals.elicitation!.decision = decision.decision; run.approvals.elicitation!.receipt = decision;
+      if (decision.decision === "approved") for (const [id, answer] of Object.entries(answers))
+        if (answer.trim()) run.decisions[id] = { answer: answer.trim(), decidedBy: decision.decidedBy, decidedAt: decision.decidedAt };
+    } else run.approvals.document!.decision = decision;
+    if (decision.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`${business ? "business_decisions" : "document"}_${decision.decision}`]; }
     else run.status = "running";
     await this.save();
-    return input.decision === "approved" ? this.drive(runId) : this.status(runId);
+    return decision.decision === "approved" ? this.drive(run.runId) : this.status(run.runId);
   }
 
   private async authorize(decision: ApprovalDecision) {

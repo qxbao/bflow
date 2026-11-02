@@ -24,6 +24,7 @@ export interface NativeExtensionOutcome {
   sender: RoleMessage["sender"]; evidence: ArtifactReference; output: JsonValue;
 }
 export type NativeExtensionReconciliation = { status: "not_delivered" } | { status: "unknown" } |
+  { status: "bound"; handle: AgentExecutionHandle } |
   { status: "completed"; outcome: NativeExtensionOutcome };
 export interface NativeExtensionRolePort {
   prepare(intent: NativeExtensionIntent): Promise<AgentRequest>;
@@ -327,13 +328,13 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
     const result = await this.outcome(requestId); if (result) return { status: "completed", outcome: result };
     return this.journal.exclusive(async (state, save) => {
       const out = this.out(state, requestId), request = out.request!;
-      if (out.handle && out.status === "accepted") return { status: "unknown" };
+      if (out.handle && out.status === "accepted") return { status: "bound", handle: AgentExecutionHandleSchema.parse(out.handle) };
       if (!["sending", "unknown_delivery"].includes(out.status)) throw new Error("No uncertain native delivery to reconcile");
       const resolved = parseReconciliationForRequest(request, value(await this.options.transport.reconcile({ requestId: request.requestId,
         attemptId: request.attemptId, runId: request.runId, taskId: request.taskId, idempotencyKey: request.idempotency.key,
         target: request.target, requestedAt: this.now() })));
       if (resolved.status === "not_delivered") { out.status = "queued"; await save(); return { status: "not_delivered" }; }
-      if (resolved.status === "bound") { out.handle = resolved.handle; out.status = "accepted"; await save(); }
+      if (resolved.status === "bound") { out.handle = resolved.handle; out.status = "accepted"; await save(); return { status: "bound", handle: resolved.handle }; }
       else { out.status = "unknown_delivery"; await save(); }
       return { status: "unknown" };
     });
