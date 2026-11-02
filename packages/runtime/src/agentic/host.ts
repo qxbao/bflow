@@ -588,9 +588,25 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const webCredentials = new Map<string, { principalId: string; issuerId: string; keyId: string }>();
   const webContext = new AsyncLocalStorage<{ command: WebCommand; principal: WebPrincipal; acceptedAt: string }>();
   const interactionReady = () => interactionHostReady({ workspace: !!workspace, manifest: !!manifest, activating: !!activation, closing, quiesced });
+  // Excerpts spawn one herdr read per busy pane: a 2 s cache with one shared in-flight read keeps several tabs from multiplying subprocesses.
+  // Terminal output is deliberately not part of webProjectionFingerprint, so it never raises an `invalidate` event.
+  let excerptCache: { at: number; result: Promise<unknown> } | undefined;
+  const readPane = (paneId: string, lines: number) => herdr(["pane", "read", paneId, "--source", "recent", "--lines", String(lines), "--format", "text"]);
   const readWebQuery = async (params: unknown) => {
+    if (record(params).kind === "workforce_excerpts") {
+      if (!excerptCache || Date.now() - excerptCache.at >= 2000) {
+        const result = readWebQueryUncached(params);
+        const entry = { at: Date.now(), result };
+        excerptCache = entry;
+        result.catch(() => { if (excerptCache === entry) excerptCache = undefined; });
+      }
+      return excerptCache.result;
+    }
+    return readWebQueryUncached(params);
+  };
+  const readWebQueryUncached = async (params: unknown) => {
     const result=await hostInteractionQuery(configuration, params, {
-      ready: interactionReady(), commandsSupported: webCredentials.size > 0,
+      ready: interactionReady(), commandsSupported: webCredentials.size > 0, readPane,
       readCore: async runId => { if (!workspace) return undefined; const result = await workspace.runtime.ports.engine.getSnapshot(runId); return result.ok ? result.value ?? undefined : undefined; } });
     if(record(params).kind==="session"){
       const session=WebProjectSessionResultSchema.parse(result);

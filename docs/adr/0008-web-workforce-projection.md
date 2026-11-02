@@ -280,3 +280,51 @@ Source implementation plus local tests: vitest (jsdom), Playwright in real Chrom
 against the real Local Server with the deterministic W09/W07 fixture hosts, and
 SwiftShader software GL. Fixtures and SwiftShader are not live Herdr or provider
 evidence. Only a real session run (V9) may be recorded as live evidence.
+
+## Amendment 2026-11-02: agent terminal transcripts
+
+### Motivation
+
+The project owner asked to read every staff member's output in the Classic and 3D views, and to see a live message box above each active character. The workforce view carries identity, work and handoffs but no output text, so the UI cannot show either. This amendment is the integration decision for the additive contract change below.
+
+### Decision
+
+Two read-only GET routes and two optional client methods are added. Existing schemas are not edited.
+
+| Method/path | Body/query | Success |
+| --- | --- | --- |
+| GET `/api/v1/projects/:id/workforce/excerpts` | no body/query | 200 `WebWorkforceExcerptsSchema` |
+| GET `/api/v1/projects/:id/agents/:instanceId/transcript` | no body/query | 200 `WebAgentTranscriptSchema` |
+
+```ts
+readWorkforceExcerpts?(projectId): Promise<OperationResult<WebWorkforceExcerpts>>;
+readAgentTranscript?(projectId, instanceId): Promise<OperationResult<WebAgentTranscript>>;
+```
+
+`WebHttpPathParamsSchema` gains `instanceId: id.optional()`. An excerpt is at most 600 characters (the last meaningful lines of the pane); a transcript is at most 64000 characters and keeps the tail, with `truncated` set when it was cut. The transcript `source` is the literal `terminal_snapshot`.
+
+Runtime reads a snapshot of the agent pane through Herdr (`pane read --source recent`, 60 lines for excerpts and 400 for transcripts, text format). Excerpts cover active panes that hold open work or report `working`, plus the Conversation pane; at most four pane reads run at once, results are cached for 2 seconds with one shared in-flight read, and a pane that fails to read is omitted. Terminal output is not part of `webProjectionFingerprint`, so output changes never produce an `invalidate` event.
+
+### What changes and what does not
+
+Terminal text now leaves the host. `RoleMessage` payloads still do not. Pane ids, cwd, worktree paths, session metadata and tokens still do not appear in any response; the instance id remains the digest defined for the workforce view. The workforce view itself is unchanged.
+
+### Redaction
+
+ANSI and control sequences are stripped first. The text then goes through the strict host redactor, the variant that removes configured secrets, bearer or token patterns and absolute paths, before it is cut or measured. Redaction is textual and conservative, not a guarantee that no sensitive text can appear in model output.
+
+### Evidence caveat
+
+The text is an unverified terminal snapshot. It is not an `AgentResult`, is not correlated or verified, and is never task evidence. Herdr `done` or idle and terminal text must not be used for approval, delivery or completion decisions. A pane that has moved on, been released or restarted shows whatever its terminal holds.
+
+### Compatibility
+
+Both client methods are optional. A host without the pane reader answers `operation_not_allowed` (HTTP 422), as does a Local Server whose client lacks the methods. An old Local Server may answer `not_found` for the new routes; the UI must treat both as unsupported. No migration, no stored data and no new SSE kind. The read-only cookie, Origin and session checks of the other GET routes apply.
+
+### Rollback
+
+Remove the two routes, the two client methods, the `workforce_excerpts` and `agent_transcript` query kinds and the host cache. The additive schemas may stay as unused exports. Nothing is persisted.
+
+### Evidence level
+
+Source implementation plus local tests (pure cleaning and filtering, redaction, bounded concurrency, failure isolation and Local Server route checks with fake clients). No live Herdr or provider probe is recorded for these routes.
