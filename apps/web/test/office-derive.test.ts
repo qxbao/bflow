@@ -21,6 +21,7 @@ const one = (a: WebAgentView, over: Partial<OfficeInput> = {}) => {
   expect(model.agents).toHaveLength(1); return model.agents[0]!;
 };
 const work = (over: Partial<WebAgentWork>): WebAgentWork => ({ messageId: 'm', kind: 'assignment', runId: 'fixture-run', delivery: 'accepted', ...over });
+const at = (ms: number) => new Date(T0 + ms).toISOString();
 const t = (state: WebAgentView['transport']['state']) => ({ state, observedAt: full.observedAt });
 
 describe('§4.3 table rows', () => {
@@ -29,7 +30,7 @@ describe('§4.3 table rows', () => {
     ['cancelled', agent({ transport: t('cancelled') }), 'disconnected', 'confirmed', 'Mất kết nối pane'],
     ['unknown_delivery', agent({ transport: t('working'), work: [work({ delivery: 'unknown_delivery' })] }), 'question', 'unknown', 'Chưa xác định việc đã tới'],
     ['accepted + live lease', agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: '2026-11-02T00:10:00.000Z' })] }), 'working', 'confirmed', 'Đang giữ việc: Thêm bộ lọc'],
-    ['accepted + turnSeenAt', agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', turnSeenAt: '2026-11-02T00:00:00.000Z' })] }), 'typing', 'inferred', 'Có dấu hiệu đang chạy'],
+    ['accepted + turnSeenAt', agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', turnSeenAt: '2026-11-02T00:00:00.000Z', leaseExpiresAt: at(5000) })] }), 'typing', 'inferred', 'Có dấu hiệu đang chạy'],
     ['queued', agent({ transport: t('idle'), work: [work({ delivery: 'queued' })] }), 'preparing', 'confirmed', 'Đang chờ giao'],
     ['sending', agent({ transport: t('idle'), work: [work({ delivery: 'sending' })] }), 'preparing', 'confirmed', 'Đang chờ giao'],
     ['idle no work', agent({ transport: t('idle') }), 'sleeping', 'inferred', 'Rảnh'],
@@ -41,14 +42,18 @@ describe('§4.3 table rows', () => {
   });
 
   test('pending decision of the agent run raises hand; other run does not', () => {
-    const a = agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1' })] });
+    const a = agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: at(5000) })] });
     expect(one(a, { decisions: [decisionOf('fixture-run')] })).toMatchObject({ pose: 'hand_raised', certainty: 'confirmed', statusText: 'Chờ bạn quyết định' });
     expect(one(a, { decisions: [decisionOf('other')] }).pose).not.toBe('hand_raised');
     expect(one(a, { decisions: [decisionOf('fixture-run', 'approved')] }).pose).not.toBe('hand_raised');
   });
+  test('a done agent with only released work does not raise a hand', () => {
+    const a = agent({ transport: t('done'), work: [work({ delivery: 'released' })] });
+    expect(one(a, { decisions: [decisionOf('fixture-run')] })).toMatchObject({ pose: 'sleeping', certainty: 'inferred' });
+  });
 
   test('precedence is top-down', () => {
-    const w = [work({ delivery: 'unknown_delivery' }), work({ messageId: 'm2', taskId: 'fixture-task-1' })];
+    const w = [work({ delivery: 'unknown_delivery' }), work({ messageId: 'm2', taskId: 'fixture-task-1', leaseExpiresAt: at(5000) })];
     const d = [decisionOf('fixture-run')];
     expect(one(agent({ transport: t('disconnected'), work: w }), { decisions: d }).pose).toBe('disconnected');
     expect(one(agent({ transport: t('working'), work: w }), { decisions: d }).pose).toBe('question');
@@ -64,19 +69,27 @@ test('unknown_delivery outranks accepted work', () => {
 });
 
 test('done transport never produces a success pose', () => {
-  const poses = ['done'].flatMap(s => [one(agent({ transport: t(s as 'done') })).pose, one(agent({ transport: t('done'), work: [work({ delivery: 'released' })] })).pose]);
-  for (const p of poses) expect(['sleeping']).toContain(p);
+  const cases = [agent({ transport: t('done') }), agent({ transport: t('done'), work: [work({ delivery: 'released' })] }),
+    agent({ transport: t('done'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: at(5000) })] })];
+  for (const c of cases) expect(['sleeping', 'working', 'typing', 'hand_raised', 'ghost']).toContain(one(c).pose);
+  // done is turn end only: with accepted work the pose follows the work, never a celebration.
+  expect(one(cases[0]!).pose).toBe('sleeping');
+  expect(one(cases[2]!)).toMatchObject({ pose: 'working', certainty: 'confirmed' });
+  // only sdlcStatus=completed may complete the board; tasks keep their own status.
   expect(deriveOffice(base()).tasks).toEqual([{ taskId: 'fixture-task-1', title: 'Thêm bộ lọc', status: 'running', runId: 'fixture-run' }]);
 });
 
 describe('time', () => {
   test('expired lease is compared to snapshot time, not browser clock', () => {
-    const a = agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: '2026-11-02T00:10:00.000Z' })] });
-    // browser clock far past the lease, but within 30s of the snapshot would be impossible; use a snapshot-relative expiry.
-    expect(one(a, { now: T0 + 29_000 }).pose).toBe('working');
-    const expired = agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: '2026-11-01T23:59:59.000Z' })] });
-    const o = one(expired, { now: T0 });
-    expect(o.pose).toBe('ghost'); expect(o.certainty).toBe('unknown');
+    const lease = (ms: number) => agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: at(ms) })] });
+    // Lease is 5s after the snapshot but 24s before the browser clock: a now-based check would say expired.
+    expect(one(lease(5000), { now: T0 + 29_000 })).toMatchObject({ pose: 'working', certainty: 'confirmed' });
+    // Lease is 1s before the snapshot while the browser clock equals the snapshot: expired.
+    expect(one(lease(-1000), { now: T0 })).toMatchObject({ pose: 'ghost', certainty: 'unknown' });
+  });
+  test('accepted work without a lease is not confirmed-held', () => {
+    const o = one(agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', turnSeenAt: at(0) })] }));
+    expect(o).toMatchObject({ pose: 'ghost', certainty: 'unknown', statusText: 'Chưa xác định' });
   });
   test('stale snapshot older than 30s demotes idle to unknown', () => {
     const a = agent({ transport: t('idle') });
@@ -114,7 +127,7 @@ describe('tiers', () => {
     const shuffled = { ...full, handoffs: [...full.handoffs].reverse() };
     expect(deriveOffice(base({ workforce: shuffled })).handoffs.map(h => h.handoffId)).toEqual(['handoff-out-0', 'handoff-out-1', 'handoff-in-0']);
   });
-  test('empty workforce fixture is full tier with no agents; sos draws no actor', () => {
+  test('empty workforce fixture is full tier with no agents', () => {
     const empty = WebWorkforceViewSchema.parse(fixture('workforce-empty.json'));
     expect(deriveOffice(base({ workforce: empty, now: Date.parse(empty.observedAt) })).agents).toEqual([]);
   });
@@ -138,8 +151,17 @@ describe('identity and labels', () => {
     expect(one(c, { session: { ...session, conversationStatus: 'delegated_to_coordinator' } })).toMatchObject({ pose: 'typing', certainty: 'inferred' });
     expect(one(c, { session: { ...session, conversationStatus: 'active' } }).pose).toBe('sleeping');
   });
-  test('runId and taskId are carried from the first live work', () => {
-    const o = one(agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1' })] }));
-    expect(o).toMatchObject({ runId: 'fixture-run', taskId: 'fixture-task-1' });
+  test('runId and taskId come from the work item that decided the pose', () => {
+    const live = one(agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: at(5000) })] }));
+    expect(live).toMatchObject({ runId: 'fixture-run', taskId: 'fixture-task-1' });
+    const dev = one(full.agents[2]!); // pose decided by the unknown_delivery item (task-2), not the accepted one (task-1)
+    expect(dev).toMatchObject({ pose: 'question', taskId: 'fixture-task-2' });
+    const idle = one(agent({ transport: t('idle') }));
+    expect(idle).not.toHaveProperty('runId');
   });
+});
+test('role labels are Vietnamese, not raw ids', () => {
+  const m = deriveOffice(base({ workforce: undefined }));
+  expect(m.agents.find(a => a.role === 'coordinator')!.label).toBe('Điều phối viên');
+  for (const a of m.agents) expect(a.label).not.toBe(a.role);
 });

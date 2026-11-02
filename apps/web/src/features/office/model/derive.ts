@@ -1,4 +1,5 @@
 import type { WebAgentView, WebAgentWork } from '@bflow/contracts/web';
+import { roleLabel } from './labels';
 import type { Certainty, OfficeAgent, OfficeHandoff, OfficeInput, OfficeModel, OfficePose, OfficeRole } from './types';
 
 export const STALE_MS = 30_000;
@@ -19,30 +20,37 @@ function labels(agents: readonly WebAgentView[]): Map<string, string> {
   return out;
 }
 
-function derivePose(a: WebAgentView, input: OfficeInput, pendingRuns: ReadonlySet<string>, taskTitle: (w: WebAgentWork) => string): Verdict {
-  const observed = Date.parse(input.workforce!.observedAt);
+const ACTIVE_DELIVERY = new Set(['queued', 'sending', 'accepted', 'unknown_delivery']);
+
+/** The verdict plus the work item that decided it (if any), so runId/taskId never describe a different item. */
+function derivePose(a: WebAgentView, input: OfficeInput, observed: number, pendingRuns: ReadonlySet<string>, taskTitle: (w: WebAgentWork) => string): { verdict: Verdict; via?: WebAgentWork | undefined } {
   const stale = input.now - observed > STALE_MS;
   const { work } = a;
   // 1. Pane lost.
-  if (a.transport.state === 'disconnected' || a.transport.state === 'cancelled') return v('disconnected', 'confirmed', 'Mất kết nối pane');
+  if (a.transport.state === 'disconnected' || a.transport.state === 'cancelled') return { verdict: v('disconnected', 'confirmed', 'Mất kết nối pane') };
   // 2. Delivery uncertain: never claim the work arrived.
-  if (work.some(w => w.delivery === 'unknown_delivery')) return v('question', 'unknown', 'Chưa xác định việc đã tới');
-  // 3. A pending human decision on a run this agent works on.
-  if (work.some(w => pendingRuns.has(w.runId))) return v('hand_raised', 'confirmed', 'Chờ bạn quyết định');
-  // 4/5. Accepted work. Lease expiry is judged against the snapshot time, never the browser clock.
-  const held = work.find(w => w.delivery === 'accepted' && (w.leaseExpiresAt === undefined || Date.parse(w.leaseExpiresAt) > observed));
+  const uncertain = work.find(w => w.delivery === 'unknown_delivery');
+  if (uncertain) return { verdict: v('question', 'unknown', 'Chưa xác định việc đã tới'), via: uncertain };
+  // 3. A pending human decision on a run where this agent still has non-terminal work.
+  const asked = work.find(w => ACTIVE_DELIVERY.has(w.delivery) && pendingRuns.has(w.runId));
+  if (asked) return { verdict: v('hand_raised', 'confirmed', 'Chờ bạn quyết định'), via: asked };
+  // 4/5. Accepted work needs a lease still valid at snapshot time (never the browser clock); no lease is not confirmed.
+  const held = work.find(w => w.delivery === 'accepted' && w.leaseExpiresAt !== undefined && Date.parse(w.leaseExpiresAt) > observed);
   if (held) {
-    return held.turnSeenAt !== undefined ? v('typing', 'inferred', 'Có dấu hiệu đang chạy') : v('working', 'confirmed', `Đang giữ việc: ${taskTitle(held)}`);
+    return { verdict: held.turnSeenAt !== undefined ? v('typing', 'inferred', 'Có dấu hiệu đang chạy') : v('working', 'confirmed', `Đang giữ việc: ${taskTitle(held)}`), via: held };
   }
   // 6. Not yet delivered.
-  if (work.some(w => w.delivery === 'queued' || w.delivery === 'sending')) return v('preparing', 'confirmed', 'Đang chờ giao');
-  // 7. No active work. Conversation busy is read from the session, not from transport.
-  const hasUnresolved = work.some(w => w.delivery === 'accepted');
-  if (!hasUnresolved && !stale && a.role === 'conversation' && input.session.conversationStatus && BUSY_CONVERSATION.has(input.session.conversationStatus)
-    && (a.transport.state === 'idle' || a.transport.state === 'done')) return v('typing', 'inferred', 'Có dấu hiệu đang chạy');
-  if (!hasUnresolved && !stale && (a.transport.state === 'idle' || a.transport.state === 'done')) return v('sleeping', 'inferred', 'Rảnh');
-  // 8. Everything else, including expired leases, unknown transport and stale snapshots.
-  return v('ghost', 'unknown', UNKNOWN);
+  const waiting = work.find(w => w.delivery === 'queued' || w.delivery === 'sending');
+  if (waiting) return { verdict: v('preparing', 'confirmed', 'Đang chờ giao'), via: waiting };
+  // 7. No unresolved work. Conversation busy is read from the session, not from transport.
+  const unresolved = work.find(w => w.delivery === 'accepted');
+  const idle = a.transport.state === 'idle' || a.transport.state === 'done';
+  if (!unresolved && !stale && idle) {
+    const busy = a.role === 'conversation' && input.session.conversationStatus !== undefined && BUSY_CONVERSATION.has(input.session.conversationStatus);
+    return { verdict: busy ? v('typing', 'inferred', 'Có dấu hiệu đang chạy') : v('sleeping', 'inferred', 'Rảnh') };
+  }
+  // 8. Everything else: expired or absent lease, unknown transport, stale snapshot.
+  return { verdict: v('ghost', 'unknown', UNKNOWN), via: unresolved };
 }
 
 const DIRECTION_ORDER = { outbound: 0, inbound: 1 } as const;
@@ -57,7 +65,7 @@ export function deriveOffice(input: OfficeInput): OfficeModel {
     return { ...common, tier: 'closed', certainty: 'confirmed', statusText: 'Phiên đang dừng', agents: [], handoffs: [] };
   }
   if (!workforce) {
-    const agents: OfficeAgent[] = PLACEHOLDER_ROLES.map(role => ({ instanceId: `placeholder-${role}`, label: role, role, ...v('ghost', 'unknown', UNKNOWN) }));
+    const agents: OfficeAgent[] = PLACEHOLDER_ROLES.map(role => ({ instanceId: `placeholder-${role}`, label: roleLabel(role), role, ...v('ghost', 'unknown', UNKNOWN) }));
     return { ...common, tier: 'degraded', certainty: 'unknown', statusText: UNKNOWN, agents, handoffs: [] };
   }
 
@@ -65,10 +73,11 @@ export function deriveOffice(input: OfficeInput): OfficeModel {
   const titles = new Map(runs.flatMap(r => [[`${r.runId}\u0000`, r.title] as const, ...r.tasks.map(t => [`${r.runId}\u0000${t.taskId}`, t.title] as const)]));
   const taskTitle = (w: WebAgentWork) => titles.get(`${w.runId}\u0000${w.taskId ?? ''}`) ?? w.taskId ?? titles.get(`${w.runId}\u0000`) ?? w.runId;
   const names = labels(workforce.agents);
+  const observed = Date.parse(workforce.observedAt);
   const agents: OfficeAgent[] = workforce.agents.map(a => {
-    const live = a.work.find(w => w.delivery === 'accepted' || w.delivery === 'queued' || w.delivery === 'sending') ?? a.work[0];
-    return { instanceId: a.instanceId, label: names.get(a.instanceId)!, role: a.role, ...derivePose(a, input, pendingRuns, taskTitle),
-      observedAt: a.transport.observedAt, ...(live ? { runId: live.runId } : {}), ...(live?.taskId ? { taskId: live.taskId } : {}) };
+    const { verdict, via } = derivePose(a, input, observed, pendingRuns, taskTitle);
+    return { instanceId: a.instanceId, label: names.get(a.instanceId) ?? a.displayName, role: a.role, ...verdict,
+      observedAt: a.transport.observedAt, ...(via ? { runId: via.runId } : {}), ...(via?.taskId ? { taskId: via.taskId } : {}) };
   });
   const handoffs: OfficeHandoff[] = [...workforce.handoffs]
     .sort((x, y) => DIRECTION_ORDER[x.direction] - DIRECTION_ORDER[y.direction] || x.ordinal - y.ordinal)
