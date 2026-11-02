@@ -20,8 +20,17 @@ interface Fake extends OfficeRenderer { apply: ReturnType<typeof vi.fn>; setPaus
 let fakes: Fake[];
 let lost: (() => void) | undefined;
 const factory: CreateRenderer = async (_host, _select, _signal, onLost) => {
-  const fake: Fake = { apply: vi.fn(), setPaused: vi.fn(), destroy: vi.fn() };
+  const fake = newFake();
   fakes.push(fake); lost = onLost;
+  return fake;
+};
+/** Mirrors the real renderer contract: a paused renderer drops walk cues and returns only what it accepted. */
+const newFake = (): Fake => {
+  let paused = false;
+  const fake: Fake = {
+    apply: vi.fn((_m: OfficeModel, cues: VisualCue[]) => (paused ? [] : cues.filter(c => c.kind === 'walk').map(c => c.handoffId))),
+    setPaused: vi.fn((p: boolean) => { paused = p; }), destroy: vi.fn(),
+  };
   return fake;
 };
 const settle = async (): Promise<void> => { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); };
@@ -73,7 +82,7 @@ describe('OfficeStage lifecycle', () => {
     const late: CreateRenderer = () => new Promise<OfficeRenderer>(r => { resolve = r; });
     const view = render(<OfficeStage model={model()} onSelect={noop} createRenderer={late} />);
     view.unmount();
-    const fake: Fake = { apply: vi.fn(), setPaused: vi.fn(), destroy: vi.fn() };
+    const fake = newFake();
     await act(async () => { resolve(fake); await Promise.resolve(); });
     expect(fake.destroy).toHaveBeenCalledTimes(1);
     expect(fake.apply).not.toHaveBeenCalled();
@@ -94,6 +103,41 @@ describe('OfficeStage lifecycle', () => {
 });
 
 describe('OfficeStage cues', () => {
+  const at = (state: OfficeHandoff['state']): ReactElement => <OfficeStage model={model({ handoffs: [handoff(state)] })} onSelect={noop} createRenderer={factory} />;
+  test('a walk dropped while the tab is hidden stays eligible', async () => {
+    const view = render(at('queued'));
+    await settle();
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    view.rerender(at('accepted')); // dropped by the paused renderer
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); });
+    view.rerender(at('queued'));
+    view.rerender(at('accepted'));
+    expect(lastCues(fakes[0]!).map(c => c.kind)).toEqual(['walk']);
+  });
+
+  test('a walk seen before the renderer is ready stays eligible', async () => {
+    let resolve!: (r: OfficeRenderer) => void;
+    const late: CreateRenderer = () => new Promise<OfficeRenderer>(r => { resolve = r; });
+    const el = (s: OfficeHandoff['state']): ReactElement => <OfficeStage model={model({ handoffs: [handoff(s)] })} onSelect={noop} createRenderer={late} />;
+    const view = render(el('queued'));
+    view.rerender(el('accepted'));
+    const fake = newFake();
+    await act(async () => { resolve(fake); await Promise.resolve(); });
+    view.rerender(el('queued'));
+    view.rerender(el('accepted'));
+    expect(lastCues(fake).map(c => c.kind)).toEqual(['walk']);
+  });
+
+  test('a throwing destroy on context loss still shows the notice', async () => {
+    render(<OfficeStage model={model()} onSelect={noop} createRenderer={factory} />);
+    await settle();
+    fakes[0]!.destroy.mockImplementation(() => { throw new Error('gone'); });
+    act(() => lost!());
+    expect(screen.getAllByText(/mất ngữ cảnh/).length).toBeGreaterThan(0);
+  });
+
   test('first model gives no cues and a receipt later gives one walk', async () => {
     const view = render(<OfficeStage model={model({ handoffs: [handoff('queued')] })} onSelect={noop} createRenderer={factory} />);
     await settle();
@@ -124,9 +168,10 @@ describe('AccessibleOffice mirror', () => {
     await settle();
     expect(screen.getByRole('region', { name: 'Bản văn bản của văn phòng' }).className).toMatch(/sr-only/);
     const buttons = screen.getAllByRole('button');
-    expect(buttons).toHaveLength(7);
+    expect(buttons).toHaveLength(9); // 2 agents + 7 objects
     await userEvent.click(screen.getByRole('button', { name: /Hộp thư.*2 đang chờ/ }));
-    expect(picked).toEqual([{ kind: 'object', object: 'mailbox' }]);
+    await userEvent.click(screen.getByRole('button', { name: /Developer #1/ }));
+    expect(picked).toEqual([{ kind: 'object', object: 'mailbox' }, { kind: 'agent', instanceId: 'b' }]);
   });
 
   test('live region announces new decisions and errors once per 5 s window', async () => {

@@ -10,7 +10,8 @@ import { cameraKey, clampCamera, fitCamera, panBy, pinchStep, zoomBy, type Camer
 import { ATLAS_URL_PATH, BUBBLE_FRAME, DESK_CELLS, GRID_H, GRID_W, OBJECT_CELLS, PLANT_CELLS, TILE_H, TILE_W, WORLD, cellCentre, depth, isRug, type Cell, type Point } from './layers';
 
 export interface OfficeRenderer {
-  apply(model: OfficeModel, cues: VisualCue[]): void;
+  /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
+  apply(model: OfficeModel, cues: VisualCue[]): string[];
   setPaused(paused: boolean): void;
   destroy(): void;
 }
@@ -110,7 +111,9 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
   let fitted = sized();
   let camera: Camera = fitted ? fitCamera(size(), WORLD) : { zoom: 1, x: 0, y: 0 };
   const view = (): { w: number; h: number } => size();
-  const place = (): void => { world.position.set(camera.x, camera.y); world.scale.set(camera.zoom); dirty = true; };
+  // The ticker sleeps when nothing can change before the next apply or gesture; anything that sets `dirty` wakes it.
+  const wake = (): void => { if (!paused && !destroyed && !app.ticker.started) app.ticker.start(); };
+  const place = (): void => { world.position.set(camera.x, camera.y); world.scale.set(camera.zoom); dirty = true; wake(); };
   place();
 
   const renderNow = (): void => {
@@ -166,6 +169,7 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
     app.ticker.maxFPS = moving ? 30 : 8;
     if (changed) { syncActors(); dirty = true; }
     if (dirty) { dirty = false; renderNow(); }
+    if (!choreo.busy()) app.ticker.stop();
   });
   app.ticker.start();
 
@@ -252,20 +256,22 @@ function build(app: Application, sheet: Spritesheet, release: () => void, host: 
   });
   observer.observe(host);
   const onLost = (e: Event): void => { e.preventDefault(); if (!destroyed) onContextLost?.(); };
-  const onRestored = (): void => { dirty = true; };
+  const onRestored = (): void => { dirty = true; wake(); };
   canvas.addEventListener('webglcontextlost', onLost);
   canvas.addEventListener('webglcontextrestored', onRestored);
 
   return {
     apply(model, cues) {
-      if (destroyed) return;
+      if (destroyed) return [];
       // Hidden tab: cues are dropped, only the latest pose matters.
-      choreo.apply(model, paused ? [] : cues);
+      const accepted = choreo.apply(model, paused ? [] : cues);
       syncActors();
       syncBubbles(model);
       // Closed session: the office is dark. The last saved data stays visible.
       world.tint = model.tier === 'closed' ? 0x6a6a80 : 0xffffff;
       dirty = true;
+      wake();
+      return accepted;
     },
     setPaused(next) {
       if (next === paused) return;

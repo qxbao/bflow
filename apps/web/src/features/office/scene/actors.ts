@@ -55,7 +55,7 @@ export class Choreographer {
   constructor(animateFrames = true) { this.animateFrames = animateFrames; }
 
   /** Poses and seats always follow the model at once. Only walk cues are queued, and only when the caller allows motion. */
-  apply(model: OfficeModel, cues: readonly VisualCue[]): void {
+  apply(model: OfficeModel, cues: readonly VisualCue[]): string[] {
     const seen = new Set<string>();
     for (const agent of model.agents) {
       const home = agent.seat ? seatCell(agent.seat) : undefined;
@@ -67,8 +67,18 @@ export class Choreographer {
       this.actors.set(agent.instanceId, actor);
     }
     for (const id of this.actors.keys()) if (!seen.has(id)) this.actors.delete(id);
+    // A cue for an actor that left the model can never play: purge it so it cannot start later or hold budget.
+    this.queue = this.queue.filter(c => c.kind !== 'walk' || this.actors.has(c.actor));
     const walks = cues.filter(c => c.kind === 'walk');
     if (walks.length > 0) this.queue = enqueue(this.queue, walks, WALK_LIMITS);
+    return walks.map(c => c.handoffId);
+  }
+
+  /** True while a later tick can still change what is shown (a trip, a queued cue, or looping clip frames). Otherwise only the next apply can. */
+  busy(): boolean {
+    if (this.queue.length > 0 || (this.animateFrames && this.actors.size > 0)) return true;
+    for (const actor of this.actors.values()) if (actor.trip) return true;
+    return false;
   }
 
   /** Hidden tab: discard every pending walk and put walkers back; on return only the latest pose is shown, with no replay. */
@@ -99,6 +109,7 @@ export class Choreographer {
 
   /** Advances time. `moving` asks for the 30 fps budget; `changed` says some actor looks different from last tick. */
   tick(dtMs: number): { moving: boolean; changed: boolean } {
+    if (!this.busy()) return { moving: false, changed: false };
     this.time += dtMs;
     let moving = false;
     for (const actor of this.actors.values()) {

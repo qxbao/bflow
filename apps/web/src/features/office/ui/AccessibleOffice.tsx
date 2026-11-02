@@ -3,7 +3,7 @@ import { roleLabel } from '../model/labels';
 import type { Certainty, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 
 const CERTAINTY: Readonly<Record<Certainty, string>> = { confirmed: 'Đã xác nhận', inferred: 'Suy luận', unknown: 'Chưa xác định' };
-/** The seven interactive objects of §5.3 (the eighth row, the characters, is the agent list). Navigation arrives with the panel wiring (V7.2). */
+/** The seven interactive objects of §5.3 (the eighth row, the characters, is the agent list, one button each). Navigation arrives with the panel wiring (V7.2). */
 const OBJECTS: readonly [OfficeObjectId, string][] = [
   ['counter', 'Quầy Conversation (trò chuyện)'], ['board', 'Bảng nhiệm vụ (công việc)'], ['mailbox', 'Hộp thư (quyết định)'],
   ['cabinet', 'Tủ tài liệu (bằng chứng)'], ['server', 'Máy chủ (phiên)'], ['settings', 'Bảng cài đặt'], ['door', 'Cửa ra vào (danh sách dự án)'],
@@ -63,7 +63,9 @@ export function AccessibleOffice({ model, onSelect, visible, notice, extra }: { 
         <h3 className="m-0 text-base font-semibold">Nhân viên</h3>
         {model.agents.length === 0 ? <p className="m-0 text-sm text-muted">Chưa có nhân viên nào.</p> : <ul className="my-2 list-none p-0">
           {model.agents.map(a => <li key={a.instanceId} className="border-t border-line py-1.5 first:border-t-0">
-            <span className="font-semibold">{a.label}</span> ({roleLabel(a.role)}): {a.statusText}. Mức tin cậy: {CERTAINTY[a.certainty]}{a.observedAt ? `, quan sát lúc ${a.observedAt}` : ''}. Việc: {taskTitle(a.runId, a.taskId)}.
+            <button type="button" className="text-left" onClick={() => onSelect({ kind: 'agent', instanceId: a.instanceId })}>
+              <span className="font-semibold">{a.label}</span> ({roleLabel(a.role)}): {a.statusText}. Mức tin cậy: {CERTAINTY[a.certainty]}{a.observedAt ? `, quan sát lúc ${a.observedAt}` : ''}. Việc: {taskTitle(a.runId, a.taskId)}.
+            </button>
           </li>)}
         </ul>}
         <h3 className="m-0 text-base font-semibold">Đối tượng</h3>

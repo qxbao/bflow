@@ -36,9 +36,11 @@ export function OfficeStage({ model, onSelect, links, createRenderer = lazyRende
     const visibility = (): void => renderer.current?.setPaused(document.hidden);
     const lose = (): void => {
       if (dead) return;
-      renderer.current?.destroy();
+      const lostRenderer = renderer.current;
       renderer.current = undefined;
+      // Notice first: a throwing destroy must still leave the visible list.
       setNotice(LOST);
+      try { lostRenderer?.destroy(); } catch { /* the context is gone; nothing left to release */ }
     };
     latest.current.createRenderer(el, target => latest.current.onSelect(target), abort.signal, lose)
       .then(created => {
@@ -63,9 +65,12 @@ export function OfficeStage({ model, onSelect, links, createRenderer = lazyRende
     previous.current = model;
     // Reduced motion: no walking at all, so the scene never sees a walk cue and poses change instantly.
     const send = reducedMotion() ? cues.filter(c => c.kind !== 'walk') : cues;
+    // Forget handoffs that left the model.
+    const present = new Set(model.handoffs.map(h => h.handoffId));
+    for (const id of walked.current) if (!present.has(id)) walked.current.delete(id);
     if (!renderer.current) return;
-    for (const cue of send) if (cue.kind === 'walk') walked.current.add(cue.handoffId);
-    renderer.current.apply(model, send);
+    // Only walks the renderer accepted count as walked; ones it dropped (hidden tab) stay eligible.
+    for (const id of renderer.current.apply(model, send) ?? []) walked.current.add(id);
   }, [model]);
 
   const degraded = notice !== undefined;

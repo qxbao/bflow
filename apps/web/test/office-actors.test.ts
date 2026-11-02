@@ -74,6 +74,29 @@ describe('Choreographer', () => {
     expect(c.views().every(v => !v.walking)).toBe(true);
     expect(c.tick(50).moving).toBe(false);
   });
+  test('an actor that vanishes mid-walk drops its queued cues', () => {
+    const c = new Choreographer(false);
+    c.apply(model, [walk('h1'), walk('h2')]);
+    c.tick(100);
+    const without = { ...model, agents: model.agents.filter(a => a.instanceId !== 'a') };
+    c.apply(without, []);
+    expect(c.views().map(v => v.instanceId)).toEqual(['b']);
+    expect(c.busy()).toBe(false); // trip and queued cues are gone (frames frozen, so nothing else keeps it busy)
+    c.apply(model, []); // the actor returns: nothing replays
+    expect(c.views().every(v => !v.walking)).toBe(true);
+    expect(c.tick(100).moving).toBe(false);
+  });
+  test('apply reports the walk cues it took', () => {
+    expect(new Choreographer().apply(model, [walk('h1')])).toEqual(['h1']);
+  });
+  test('under reduced motion nothing is busy at idle, and a cue wakes it', () => {
+    const c = new Choreographer(false);
+    c.apply(model, []);
+    expect(c.busy()).toBe(false);
+    expect(c.tick(1000)).toEqual({ moving: false, changed: false });
+    c.apply(model, [walk('h1')]);
+    expect(c.busy()).toBe(true);
+  });
   test('reduced frames stay on frame 0', () => {
     const c = new Choreographer(false);
     c.apply(model, []);
