@@ -1700,16 +1700,29 @@ idempotent launch revocation; dirty worktrees or a replaced binding stay blocked
 An expired Registry grant is reported separately from a successful release
 receipt. Core cancellation is confirmed only after the remaining blockers clear.
 
-**Current live limitation:** the Herdr adapter returns `correlationVerified:false`
-for lifecycle observations. Idle/done, an interrupt acknowledgement, lease expiry,
-a diagnostic note, or a cancellation-time `/proc`/shell snapshot cannot be
-promoted to authenticated process-exit evidence. This command therefore cannot
-clear a legacy Herdr writer solely because an operator has exited its CLI. It
-retains the blocker until a supported stop-evidence source exists. Tests of the
-positive recovery path use correlated fake-transport evidence, not live Herdr
-process-containment acceptance. A launch-bound process-supervision/stop-proof
-integration requires a separate architecture/contract decision; this change does
-not introduce one or claim the current live session is recovered.
+**Stop evidence without process supervision:** the Herdr adapter returns
+`correlationVerified:false` for lifecycle observations, so idle/done, an interrupt
+acknowledgement, lease expiry or a `/proc` snapshot never count as process-exit
+evidence. On a host without a process scope (macOS, for example) the exit is:
+
+- **Developer at rest (idle/done, or its pane already gone):** after the five
+  observations, or at once on an explicit reconcile, Runtime closes that exact pane
+  and proves it is gone (`pane_closed`). This ends the provider CLI, then the lease
+  and Core settle and the run finishes cancelling. The worktree stays on disk, dirty
+  or not.
+- **Still working, replaced binding or uncertain delivery:** nothing is closed and
+  the run stays blocked. The report says to wait until the execution is idle and
+  reconcile again.
+- **Specialist with an accepted request:** its shared pane is never closed and it
+  still needs correlated evidence, so it stays reported as an outstanding item.
+
+`pane_closed` is **not** proof that every descendant exited: a detached process can
+outlive its pane. The safety argument is containment. The lease is settled, the
+binding is gone, late results are fenced, and the worktree is never reused or
+integrated. Full process containment still needs the launch-bound scope in
+`CANCELLATION-RECOVERY-DESIGN.md`. A run whose final report already went out is not
+retried automatically: it needs an explicit reconcile. Tests use fake transports,
+not live Herdr process-containment acceptance.
 
 **Developer process supervision availability:** on a Linux host whose Bubblewrap
 user namespaces (including AppArmor `apparmor_restrict_unprivileged_userns`) and
@@ -1768,6 +1781,29 @@ Before an effect and after restart, changed observations require re-resolution; 
 metadata uses its separate explicit input watches. Legacy callers omitting `repositoryRoot` retain
 file-watch compatibility without claiming Git drift coverage. Git optional writes, fsmonitor,
 external diff and textconv are disabled; unsafe/oversized relevant files fail closed.
+
+Git moving no longer blocks work that has not accepted a plan. Host inputs (config, policy, skills,
+profiles) are still compared with the host's startup baseline, but the repository is read live and
+only a run's own accepted `executionSourceDigests` pin it. So a commit on main does not stop a new
+delegation or a pending design approval.
+
+For an accepted run, Coordinator's `reresolve_execution_plan` (also applied by `resume_run` on a
+plan-drift blocker) rebinds the pinned repository snapshot. A run with no Developer worktree moves
+`baseRevision` to the new HEAD, which must descend from the old base; a started run keeps its base.
+Approvals are never created or changed, and any other changed input stays blocked (EP-01 still
+applies to it).
+
+### Coordinator repository setup
+
+Coordinator stays read-only natively. `repository_setup` is a Runtime tool with no command string:
+`git_status`, `git_log`, `npm_init`, `npm_install_dev`, `gitignore_add`, `create_directories`, `git_add`,
+`git_commit`. Packages are registry names and ranges only, and installs run with `--ignore-scripts`
+after ignoring `node_modules/`. Paths are literal and repository-relative; `.git`, `.bflow`, credential
+files and symlinks are refused. Commits run no repository hooks and carry a `Bflow-Run:` trailer.
+Each mutation is journaled in `run.repositorySetupLog` before it starts and after it ends, and it is
+refused once this run or another live run has Developer work. `withdraw_workflow_proposal` retracts a
+design still awaiting approval; the next proposal gets a new approval id and a notice naming which
+card replaced which.
 
 Custom skill dependency receipts can be passed separately as `dependencySkillApprovals` in role
 platform options (`dependencyApprovals` on the SkillManager request). These exact pins and receipt

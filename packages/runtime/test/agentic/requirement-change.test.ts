@@ -432,7 +432,9 @@ describe('accepted execution resolution binding and side-effect fencing', () => 
     let worktrees = 0, launches = 0, leases = 0;
     f.ports.policies.git.prepareTask = async () => { worktrees++; throw Error('unexpected worktree'); };
     f.ports.panes.allocateDeveloper = async () => { launches++; throw Error('unexpected launch'); };
-    f.ports.registry.acquireLease = async () => { leases++; throw Error('unexpected lease'); };
+    // The drift wake reaches Coordinator through its own lease; no work may acquire one.
+    const acquireLease = f.ports.registry.acquireLease.bind(f.ports.registry);
+    f.ports.registry.acquireLease = async (request: { agentId: string }) => { if (request.agentId === 'coordinator') return acquireLease(request as never); leases++; throw Error('unexpected lease'); };
     if (change === 'head') git(f.repository, 'commit', '--allow-empty', '-m', 'changed-base');
     else {
       await writeFile(join(f.repository, 'guide.md'), 'changed source\n');
@@ -453,7 +455,8 @@ describe('accepted execution resolution binding and side-effect fencing', () => 
     const original = await f.run();
     let worktrees = 0, leases = 0;
     f.ports.policies.git.prepareTask = async () => { worktrees++; throw Error('unexpected worktree'); };
-    f.ports.registry.acquireLease = async () => { leases++; throw Error('unexpected lease'); };
+    const acquireLease = f.ports.registry.acquireLease.bind(f.ports.registry);
+    f.ports.registry.acquireLease = async (request: { agentId: string }) => { if (request.agentId === 'coordinator') return acquireLease(request as never); leases++; throw Error('unexpected lease'); };
     await writeFile(path, JSON.stringify({ model: 'new-model' }));
     await f.runtime.tick();
     expect(worktrees).toBe(0); expect(leases).toBe(0);

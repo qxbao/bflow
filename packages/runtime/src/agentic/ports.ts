@@ -91,6 +91,8 @@ export interface PanePolicy {
   releaseDeveloper(request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions): Promise<OperationResult<unknown>>;
   /** Cancelled, proven-stopped allocation: retain the pane/worktree for idempotent manifest cleanup. */
   releaseCancelledDeveloper?: (request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
+  /** Closes the exact pane of a cancelled Developer and proves it is gone. Never touches its worktree, even when dirty. */
+  closeCancelledDeveloper?: (request: { taskId: string; paneId: string }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
 }
 export interface AgenticPolicies {
   specification: SpecificationPolicy;

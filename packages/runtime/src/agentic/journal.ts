@@ -82,7 +82,9 @@ export interface RunRecord {
   /** Earlier admitted revisions of the requirement, oldest first. Absent in journals written before requirement changes. */
   delegationHistory?: DelegationRequest[];
   /** Approvals a later requirement revision made obsolete; their decisions are refused with the revision that superseded them. */
-  supersededApprovals?: { approvalId: string; supersededByRevision: number }[];
+  supersededApprovals?: { approvalId: string; supersededByRevision?: number; withdrawn?: boolean; replacedByApprovalId?: string }[];
+  proposalWithdrawals?: number;
+  repositorySetupLog?: { id: string; operation: string; input: string; startedAt: string; status: "started" | "completed" | "failed"; finishedAt?: string; head?: string; error?: string }[];
   /** Durable semantic next action for a live run; optional for version-1 journals written before workflow liveness tracking. */
   pendingAction?: {
     actionId: string; kind: "coordinator_continuation" | "resume_coordinator" | "reconcile_delivery"; owner: "coordinator";
@@ -136,6 +138,8 @@ export interface ReviewTiming {
   startedAt: string; completedAt?: string | undefined; timeoutMs: number;
   outcome?: "verdict" | "rejected" | "timeout" | "aborted" | undefined; nearDeadlineAt?: string | undefined;
 }
+const RepositorySetupLogSchema = z.array(z.object({ id: z.string().min(1), operation: z.string().min(1), input: z.string(), startedAt: IsoDateTimeSchema,
+  status: z.enum(["started", "completed", "failed"]), finishedAt: IsoDateTimeSchema.optional(), head: z.string().optional(), error: z.string().optional() }).strict()).max(200);
 const ReviewTimingSchema = z.object({
   key: z.string().min(1), gateId: z.string().min(1), role: z.string().min(1), taskId: z.string().min(1).optional(),
   agentId: z.string().min(1).optional(), provider: z.string().min(1).optional(), startedAt: IsoDateTimeSchema,
@@ -410,8 +414,12 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       if (new Set(run.invalidMessages.map(item => item.key)).size !== run.invalidMessages.length) throw new Error("Duplicate message failure key");
     }
     if (run.supersededApprovals !== undefined) for (const item of run.supersededApprovals) {
-      textField(item.approvalId); if (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision < 2) throw new Error("Invalid superseded approval");
+      textField(item.approvalId);
+      if (item.withdrawn !== true && (!Number.isSafeInteger(item.supersededByRevision) || item.supersededByRevision! < 2)) throw new Error("Invalid superseded approval");
+      if (item.replacedByApprovalId !== undefined) textField(item.replacedByApprovalId);
     }
+    if (run.proposalWithdrawals !== undefined && (!Number.isSafeInteger(run.proposalWithdrawals) || run.proposalWithdrawals < 0)) throw new Error("Invalid proposal withdrawal count");
+    if (run.repositorySetupLog !== undefined) RepositorySetupLogSchema.parse(run.repositorySetupLog);
     if (run.conflictResolution !== undefined) parseConflictResolution(run.conflictResolution);
     if (run.fastPath !== undefined) run.fastPath = FastPathRecordSchema.parse(run.fastPath);
     if (run.reviewTimings !== undefined) run.reviewTimings = z.array(ReviewTimingSchema).max(200).parse(run.reviewTimings);
