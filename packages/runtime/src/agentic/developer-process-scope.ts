@@ -188,6 +188,16 @@ export class DeveloperProcessScopes {
     }
     throw new Error("Developer has no started, authenticated process-scope witness; reconcile launch readiness before dispatch");
   }
+  /** Historical instruction pins may continue only the exact persisted execution in its still-live namespace. */
+  async assertRetainedBindingReady(bindingInput: PaneBinding): Promise<void> {
+    const binding = PaneBindingSchema.parse(bindingInput), entry = await this.scope(binding);
+    if (!entry) throw new Error("Retained Developer has no authenticated execution scope");
+    const execution = ExecutionSchema.parse(await privateJSON(join(entry.root, "execution.json")));
+    const native = NativeSchema.parse(await privateJSON(join(entry.root, "native.json")));
+    if (!ownsCancellationPane(execution.handle, binding) || execution.nativeDigest !== hash(canonicalReceiptJson(native)))
+      throw new Error("Retained Developer execution binding differs from its namespace");
+    await this.assertBindingReady(binding);
+  }
   async pinDispatch(requestInput: AgentRequest, bindingInput: PaneBinding): Promise<void> {
     const request = AgentRequestSchema.parse(requestInput), binding = PaneBindingSchema.parse(bindingInput);
     if (request.role !== "developer" || binding.metadata?.runId !== request.runId || request.target.paneId !== binding.paneId || request.target.agentId !== binding.agentId ||
