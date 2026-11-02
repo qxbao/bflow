@@ -3,11 +3,14 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router';
 import type { WebProject } from '@bflow/contracts/web';
 import { FieldHelp } from './FieldHelp';
 
-export function AppShell({projects,projectId,children}:{projects:WebProject[];projectId?:string;children:ReactNode}) {
+export type VisualShell={panelOpen:boolean;onClose:()=>void;hostRef:(element:HTMLElement|null)=>void};
+export function AppShell({projects,projectId,visual,children}:{projects:WebProject[];projectId?:string;visual?:VisualShell|undefined;children:ReactNode}) {
   const navigate=useNavigate(), location=useLocation(), main=useRef<HTMLElement>(null);
   const [menuOpen,setMenuOpen]=useState(false);
   const menuButton=useRef<HTMLButtonElement>(null),menu=useRef<HTMLElement>(null);
-  useEffect(()=>{setMenuOpen(false);main.current?.focus();},[location.pathname]);
+  const panelClosed=Boolean(visual && !visual.panelOpen),panelClosedRef=useRef(panelClosed);panelClosedRef.current=panelClosed;
+  // A closed visual panel is hidden: focus stays with whatever OfficeFrame restores instead of being pulled to <main>.
+  useEffect(()=>{setMenuOpen(false);if(!panelClosedRef.current)main.current?.focus();},[location.pathname]);
   const base=projectId?`/projects/${encodeURIComponent(projectId)}`:undefined;
   const project=projects.find(item=>item.projectId===projectId);
   function toggleMenu(){if(menuOpen && menu.current?.contains(document.activeElement))menuButton.current?.focus();setMenuOpen(value=>!value);}
@@ -37,7 +40,8 @@ export function AppShell({projects,projectId,children}:{projects:WebProject[];pr
         </nav>
         <p className="mt-6 border-t border-line pt-4 text-xs leading-relaxed text-muted">Đóng trình duyệt không dừng công việc. Trạng thái được đọc từ phiên dự án.</p>
       </aside>
-      <main id="main" ref={main} tabIndex={-1} className="min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-8">{children}</main>
+      {visual && <section ref={visual.hostRef} aria-label="Văn phòng" className="min-w-0 px-4 pt-5 pb-12 sm:px-6 lg:px-8"/>}
+      <main id="main" ref={main} tabIndex={-1} onKeyDown={visual?e=>{if(e.key==='Escape' && !e.defaultPrevented){e.preventDefault();visual.onClose();}}:undefined} className={visual?`min-w-0 overflow-y-auto border-l border-line bg-surface px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 fixed inset-y-0 right-0 z-20 w-full md:w-[720px] md:max-w-full ${visual.panelOpen?'':'hidden'}`:'min-w-0 px-4 pt-5 pb-12 [overflow-wrap:anywhere] focus:outline-none sm:px-6 lg:px-8'}>{visual && <div className="mb-3 flex justify-end"><button type="button" onClick={visual.onClose}>Đóng bảng</button></div>}{children}</main>
     </div>
     <footer className="border-t border-line px-4 py-4 font-data text-xs text-muted sm:px-6">Bflow · Web cục bộ · Theo dõi và xem xét công việc</footer>
   </div>;

@@ -1,6 +1,6 @@
 import { LoadingState } from './components/LoadingState';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, Route, Routes, useParams } from 'react-router';
+import { Link, Route, Routes, useMatch, useNavigate, useParams } from 'react-router';
 import type { WebEvent, WebProject } from '@bflow/contracts/web';
 import { ApiClient, ApiError, consumeBootstrap } from './api/client';
 import { subscribeEvents, type Connection } from './api/events';
@@ -16,6 +16,9 @@ import { Settings } from './features/settings';
 import { useRead } from './features/data';
 import { Operations } from './features/operations';
 import { Overview } from './features/overview';
+import { useUiMode, type UiMode } from './features/office/mode';
+import { OfficeFrame, OverviewOutlet } from './features/office/ui/OfficeFrame';
+import { ModeSwitch } from './features/office/ui/ModeSwitch';
 
 export function App({api,bootstrap}:{api:ApiClient;bootstrap?:string|undefined}) {
   const [ready,setReady]=useState(false),[error,setError]=useState<unknown>(),[attempt,setAttempt]=useState(0),[revision,setRevision]=useState(0);
@@ -34,9 +37,17 @@ function Workspace({api,revision,refresh,onPair}:{api:ApiClient;revision:number;
 }
 function Project({api,projects,projectsLoading,projectsError,revision,refresh,onPair}:{api:ApiClient;projects:WebProject[];projectsLoading:boolean;projectsError:unknown;revision:number;refresh:()=>void;onPair:(secret:string)=>Promise<void>}) {
   const {projectId=''}=useParams(); const project=projects.find(project=>project.projectId===projectId);
-  return <AppShell projects={projects} projectId={projectId}>{project?<ProjectContent key={projectId} api={api} project={project} revision={revision} refresh={refresh}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
+  const [mode,setMode]=useUiMode(),[overviewOpen,setOverviewOpen]=useState(false),[host,setHost]=useState<HTMLElement|null>(null);
+  const navigate=useNavigate(),isIndex=Boolean(useMatch({path:'/projects/:projectId',end:true})),base=`/projects/${encodeURIComponent(projectId)}`;
+  useEffect(()=>setOverviewOpen(false),[projectId]);
+  // Visual mode: the index path closes the panel (or shows the HUD-opened overview); every other route opens it.
+  const visual=mode==='visual' && Boolean(project),panelOpen=!isIndex || overviewOpen;
+  const close=useCallback(()=>{if(isIndex)setOverviewOpen(false);else navigate(base);},[isIndex,navigate,base]);
+  const openOverview=useCallback(()=>{setOverviewOpen(true);if(!isIndex)navigate(base);},[isIndex,navigate,base]);
+  return <AppShell projects={projects} projectId={projectId} visual={visual?{panelOpen,onClose:close,hostRef:setHost}:undefined}>{project?<ProjectContent key={projectId} api={api} project={project} revision={revision} refresh={refresh} frame={{mode,setMode,overviewOpen,panelOpen,host,openOverview}}/>:projectsError?<ErrorState error={projectsError} retry={refresh} onPair={onPair}/>:projectsLoading?<LoadingState loading initial label="Đang tải dự án…"/>:<EmptyState title="Dự án chưa được đăng ký"><Link to="/">Mở quản lý dự án</Link></EmptyState>}</AppShell>;
 }
-function ProjectContent({api,project,revision,refresh}:{api:ApiClient;project:WebProject;revision:number;refresh:()=>void}) {
+type Frame={mode:UiMode;setMode:(mode:UiMode)=>void;overviewOpen:boolean;panelOpen:boolean;host:HTMLElement|null;openOverview:()=>void};
+function ProjectContent({api,project,revision,refresh,frame}:{api:ApiClient;project:WebProject;revision:number;refresh:()=>void;frame:Frame}) {
   const id=project.projectId;
   const [connection,setConnection]=useState<Connection>('connecting'),[events,setEvents]=useState<WebEvent[]>([]);
   const hadDisconnect=useRef(false);
@@ -63,6 +74,9 @@ function ProjectContent({api,project,revision,refresh}:{api:ApiClient;project:We
     return()=>{close();clearTimeout(timer);window.removeEventListener('online',online);};
   },[id,refresh,reconnectEpoch]);
   useEffect(()=>{if(connection==='connected')return;const poll=setInterval(refresh,15000);return()=>clearInterval(poll);},[connection,refresh]);
-  return <Operations api={api} id={id} revision={revision} refresh={refresh}><div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm"><div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div><Routes><Route index element={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></Operations>;
+  const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div>;
+  const visual=frame.mode==='visual';
+  const stage=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['review','Cần bạn quyết định'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
+  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':'inline'}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen} host={frame.host} stage={stage} mark={<>{mark}<button type="button" onClick={refresh}>Tải lại dữ liệu</button></>} onMode={frame.setMode} onOverview={frame.openOverview}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame></Operations>;
 }
 function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) { const {runId=''}=useParams();return <RunView key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh}/>; }
