@@ -188,7 +188,6 @@ describe.skipIf(process.platform !== "linux")("P30 T9b runtime user decisions", 
       await save();
     });
     f.setNow("2026-10-25T10:00:00.000Z");
-    await f.runtime().tick();
     await deliver(f.runtime(), answer(approvalId, { decidedAt: "2026-10-25T10:00:00.000Z" }));
     const full = await f.journal.exclusive(async s => s);
     expect((full.runs[0] as unknown as { userDecisions: Record<string, { status: string }> }).userDecisions[approvalId]!.status).toBe("answered");
