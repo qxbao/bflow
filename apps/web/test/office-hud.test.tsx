@@ -73,7 +73,7 @@ test('Classic | 3D switch, right rail with the decision badge, and refresh', () 
   fireEvent.click(within(group).getByRole('button', { name: '3D' }));
   expect(p.onMode).toHaveBeenCalledTimes(1);
   const rail = within(screen.getByRole('navigation', { name: 'Lối tắt' }));
-  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Tài liệu', 'Cài đặt', 'Tải lại dữ liệu']);
+  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Nhân viên', 'Tài liệu', 'Cài đặt', 'Tải lại dữ liệu']);
   fireEvent.click(rail.getByRole('button', { name: /Quyết định/ }));
   expect(p.onNavigate).toHaveBeenCalledWith('review');
   fireEvent.click(rail.getByRole('button', { name: 'Tổng quan' }));

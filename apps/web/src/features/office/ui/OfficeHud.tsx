@@ -30,7 +30,7 @@ export function agentCounts(model: OfficeModel | undefined): string[] {
   return (Object.keys(n) as Bucket[]).filter(k => n[k] > 0).map(k => `${n[k]} ${BUCKET_TEXT[k]}`);
 }
 
-type IconName = 'overview' | 'tasks' | 'decision' | 'chat' | 'docs' | 'settings' | 'refresh' | 'send' | 'all' | 'coordinator' | 'developer' | 'qa';
+type IconName = 'overview' | 'tasks' | 'decision' | 'chat' | 'docs' | 'settings' | 'refresh' | 'send' | 'agents' | 'all' | 'coordinator' | 'developer' | 'qa';
 const PATHS: Readonly<Record<IconName, ReactNode>> = {
   overview: <><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></>,
   tasks: <><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h4"/></>,
@@ -39,6 +39,7 @@ const PATHS: Readonly<Record<IconName, ReactNode>> = {
   docs: <><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h5M10 16h5"/></>,
   settings: <><path d="M5 7h9M18 7h1M5 17h1M10 17h9"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></>,
   refresh: <path d="M19 12a7 7 0 11-2.1-5M19 4v4h-4"/>,
+  agents: <><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.2"/><path d="M16 14.2c2.8-.4 5 1.6 5 4.8"/></>,
   send: <path d="M4 12l16-8-6 16-2-6z"/>,
   all: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>,
   coordinator: <><circle cx="12" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M12 8v4M12 12H6v4M12 12h6v4"/></>,
@@ -75,7 +76,7 @@ export interface OfficeHudProps {
   onOverview: () => void;
   /** Opens the cabinet inspector (the Tài liệu button). */
   onDocuments: () => void;
-  onNavigate: (path: '' | 'runs' | 'review' | 'chat' | 'settings') => void;
+  onNavigate: (path: '' | 'runs' | 'review' | 'chat' | 'agents' | 'settings') => void;
   onRefresh: () => void;
   onFocusZone: (zone: OfficeFocusZone) => void;
   onAgentList: () => void;
@@ -126,7 +127,7 @@ export function OfficeHud(p: OfficeHudProps) {
   };
   const rail: [IconName, string, () => void, number?, string?][] = [
     ['overview', 'Tổng quan', p.onOverview, clarifications, 'Câu hỏi chờ trả lời: '], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending, 'Đang chờ: '],
-    ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
+    ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['agents', 'Nhân viên', () => p.onNavigate('agents')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
   ];
   const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', 'Conversation'], ['coordinator', 'coordinator', 'Coordinator'], ['developer', 'developer', 'Developer'], ['qa', 'qa', 'QA']];
   return <>
