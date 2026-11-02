@@ -38,12 +38,14 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    let dead = false;
+    let dead = false, failed = false;
     let labelLayer: ReturnType<typeof createLabelLayer> | undefined;
     const abort = new AbortController();
     const visibility = (): void => renderer.current?.setPaused(document.hidden);
     const lose = (): void => {
-      if (dead) return;
+      if (dead || failed) return;
+      failed = true;
+      abort.abort();
       const lostRenderer = renderer.current;
       renderer.current = undefined;
       labelLayer?.destroy();
@@ -53,7 +55,7 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
     };
     latest.current.createRenderer(el, target => latest.current.onSelect(target), abort.signal, lose)
       .then(created => {
-        if (dead) { created.destroy(); return; }
+        if (dead || failed) { created.destroy(); return; }
         renderer.current = created;
         labelLayer = createLabelLayer(el);
         if (inset.current) created.setInset?.(inset.current);
@@ -61,7 +63,7 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
         created.apply(latest.current.model, []);
         visibility();
       })
-      .catch(() => { if (!dead) setNotice(FAILED); });
+      .catch(() => { if (!dead && !failed) setNotice(FAILED); });
     document.addEventListener('visibilitychange', visibility);
     return () => {
       dead = true;

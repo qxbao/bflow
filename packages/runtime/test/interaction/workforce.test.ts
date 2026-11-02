@@ -213,3 +213,16 @@ it("workforce change publishes one invalidate; repeated reads and lease heartbea
     handled(out("verification.requested", "agent-id-a", "queued"), "agent-id-a")] }))]);
   expect(extra).not.toBe(first);
 });
+
+it("never reassigns an explicitly addressed retired agent's work to its replacement", () => {
+  const assignment = handled(out("task.assignment", "agent-id-old", "accepted"), "agent-id-old");
+  const view = projectWorkforce(base([pane("developer", "new", { permanent: false })], { outbound: [assignment] }));
+  expect(view.agents[0]!.work).toEqual([]);
+  expect(view.handoffs[0]!.to).toEqual({ role: "developer" });
+});
+it("an explicit agent identity cannot resolve across roles", () => {
+  const assignment = handled(out("task.assignment", "agent-id-coord", "accepted"), "agent-id-coord");
+  const view = projectWorkforce(base([coordinator(), pane("developer", "new", { permanent: false })], { outbound: [assignment] }));
+  expect(view.agents.flatMap(agent => agent.work)).toEqual([]);
+  expect(view.handoffs[0]!.to).toEqual({ role: "developer" });
+});

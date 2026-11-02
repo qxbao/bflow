@@ -78,8 +78,13 @@ export function projectWorkforce(s: ReadSources): WebWorkforceView {
     const live = shown.filter(item => item.role === role && item.allocation === "active");
     return live.length === 1 ? live[0] : undefined;
   };
-  const resolve = (role: string, agentId?: string): Listed | undefined =>
-    (agentId === undefined ? undefined : byAgent.get(agentId)) ?? uniqueByRole(role);
+  const resolve = (role: string, agentId?: string): Listed | undefined => {
+    // An explicit identity is authoritative even when its pane has left the view.
+    // Falling back to a role would attach historical work to a replacement instance.
+    if (agentId === undefined) return uniqueByRole(role);
+    const found = byAgent.get(agentId);
+    return found?.role === role ? found : undefined;
+  };
 
   const sessionRuns = new Set(s.state.runs.filter(r => r.delegation.sessionId === s.sessionId).map(r => r.runId));
   const inSession = (message: RoleMessage) => message.run_id !== undefined && sessionRuns.has(message.run_id);

@@ -249,3 +249,23 @@ describe('label layer', () => {
     expect(parent.children).toHaveLength(0);
   });
 });
+
+test('context loss during pending creation aborts and destroys the late renderer without adopting it', async () => {
+  let resolve!: (r: OfficeRenderer) => void;
+  let creationSignal!: AbortSignal;
+  let onLost!: () => void;
+  const pending: CreateRenderer = (_host, _select, signal, lose) => {
+    creationSignal = signal; onLost = lose;
+    return new Promise<OfficeRenderer>(r => { resolve = r; });
+  };
+  const view = render(<OfficeStage model={model()} onSelect={noop} createRenderer={pending} />);
+  act(() => onLost());
+  expect(screen.queryByLabelText('Cảnh văn phòng')).toBeNull();
+  const late = newFake();
+  await act(async () => { resolve(late); await Promise.resolve(); });
+  expect(late.destroy).toHaveBeenCalledTimes(1);
+  expect(late.apply).not.toHaveBeenCalled();
+  expect(creationSignal.aborted).toBe(true);
+  view.unmount();
+  expect(late.destroy).toHaveBeenCalledTimes(1);
+});
