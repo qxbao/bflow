@@ -1025,9 +1025,11 @@ export class DefaultPlatformReadinessService implements PlatformReadinessService
     const launchEnvironmentValues: Record<string, string> = {
       // Native Claude otherwise inherits these selectors from Herdr's host process.
       // Pin the same effective locations so transcript registration uses validated launch material.
+      // Never synthesize CLAUDE_CONFIG_DIR: setting it, even to ~/.claude, moves Claude Code off the account's
+      // default Keychain entry and ~/.claude.json, which logs the pane out. Transcripts fall back to HOME/.claude.
       ...(requirement.provider === "claude" && isolatorProfile === undefined ? {
         HOME: process.env["HOME"] ?? homedir(),
-        CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] ?? join(process.env["HOME"] ?? homedir(), ".claude")
+        ...(process.env["CLAUDE_CONFIG_DIR"] ? { CLAUDE_CONFIG_DIR: process.env["CLAUDE_CONFIG_DIR"] } : {})
       } : {}),
       ...(codexLaunchEnvironment ?? {}),
       ...(preparedCodexHome !== undefined
