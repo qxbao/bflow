@@ -134,6 +134,7 @@ function relativeSafe(path: string): string {
  * deploy work, and roles receive no write/command authority: only Runtime publishes the approved handoff.
  */
 export class AnalysisWorkflowRuntime {
+  private saveTail: Promise<void> = Promise.resolve();
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
   private constructor(private readonly ports: AnalysisRuntimePorts) {
@@ -859,11 +860,15 @@ export class AnalysisWorkflowRuntime {
     if (!allowTerminal && (run.status === "published" || run.status === "failed")) throw new Error(`Analysis run ${runId} is ${run.status}`);
     return run;
   }
-  private async save() {
-    await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    await rename(temporary, this.ports.journalPath);
+  private save(): Promise<void> {
+    const saved = this.saveTail.then(async () => {
+      await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
+      const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      await rename(temporary, this.ports.journalPath);
+    });
+    this.saveTail = saved.catch(() => undefined);
+    return saved;
   }
 }
 

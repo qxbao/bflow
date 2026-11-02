@@ -191,6 +191,7 @@ function alternativeMethods(strategy: TestStrategy): string[] {
  * workspace. Nothing in the workflow creates, requests or authorizes a product change.
  */
 export class QaWorkflowRuntime {
+  private saveTail: Promise<void> = Promise.resolve();
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
   private readonly sanitizers = new Map<string, QaSanitizer>();
@@ -1347,10 +1348,14 @@ export class QaWorkflowRuntime {
     if (run.status === "reported" || run.status === "failed") throw new Error(`QA run ${runId} is ${run.status}`);
     return run;
   }
-  private async save() {
-    await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    await rename(temporary, this.ports.journalPath);
+  private save(): Promise<void> {
+    const saved = this.saveTail.then(async () => {
+      await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
+      const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      await rename(temporary, this.ports.journalPath);
+    });
+    this.saveTail = saved.catch(() => undefined);
+    return saved;
   }
 }
