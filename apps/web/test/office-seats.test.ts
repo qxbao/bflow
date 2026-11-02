@@ -54,24 +54,23 @@ describe('assignSeats', () => {
   });
 
   test('overflow beyond capacity reports count', () => {
-    // 6 main + 12 annex = 18 Developer seats; main seats fill before annex.
-    const twenty = assignSeats({ entries: [], overflow: 0 }, devs(20));
-    expect(twenty.entries).toHaveLength(18);
-    expect(twenty.overflow).toBe(2);
-    const seats = twenty.entries.map(e => e.seat);
-    expect(new Set(seats).size).toBe(18);
-    expect(seats.filter(s => s.startsWith('developer:'))).toHaveLength(6);
-    expect(seats.filter(s => s.startsWith('annex:'))).toHaveLength(12);
-    expect(seatOf(twenty, 'dev-19')).toBeUndefined();
+    // 20 Developer seats, filled in order.
+    const many = assignSeats({ entries: [], overflow: 0 }, devs(22));
+    expect(many.entries).toHaveLength(20);
+    expect(many.overflow).toBe(2);
+    const seats = many.entries.map(e => e.seat);
+    expect(new Set(seats).size).toBe(20);
+    expect(seats.every(s => /^developer:\d+$/.test(s))).toBe(true);
+    expect(seatOf(many, 'dev-21')).toBeUndefined();
 
-    // Exactly 18 Developers: no overflow.
-    expect(assignSeats({ entries: [], overflow: 0 }, devs(18)).overflow).toBe(0);
+    // Exactly 20 Developers: no overflow.
+    expect(assignSeats({ entries: [], overflow: 0 }, devs(20)).overflow).toBe(0);
 
     // A seated Developer leaves: the unseated one takes the freed seat and the overflow drops.
-    const after = assignSeats(twenty, devs(20).filter(a => a.instanceId !== 'dev-1'));
+    const after = assignSeats(many, devs(22).filter(a => a.instanceId !== 'dev-1'));
     expect(after.overflow).toBe(1);
     expect(seatOf(after, 'dev-1')).toBeUndefined();
-    expect(seatOf(after, 'dev-19')).toBeDefined();
+    expect(seatOf(after, 'dev-21')).toBeDefined();
   });
 
   test('fixed roles take numbered seats in their zone and do not count as overflow', () => {
@@ -80,7 +79,7 @@ describe('assignSeats', () => {
       agent('rev-1', 'reviewer'),
       agent('rev-2', 'reviewer'),
       agent('conv', 'conversation'),
-      ...devs(19),
+      ...devs(21),
     ]);
     expect(seatOf(map, 'coord')).toBe('coordination:coordinator');
     expect(seatOf(map, 'rev-1')).toBe('verification:reviewer');
@@ -94,7 +93,7 @@ describe('assignSeats', () => {
     const custom: OfficeAgent = agent('custom-1', 'developer', 'Kiểm thử bảo mật');
     const before = structuredClone(custom);
     const map = assignSeats({ entries: [], overflow: 0 }, [custom]);
-    expect(seatOf(map, 'custom-1')).toMatch(/^(developer|annex):\d+$/);
+    expect(seatOf(map, 'custom-1')).toMatch(/^developer:\d+$/);
     // Seat assignment does not alter the agent: sprite role and label stay as they were.
     expect(custom).toEqual(before);
     expect(custom.role).toBe('developer');

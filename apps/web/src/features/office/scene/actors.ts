@@ -1,16 +1,17 @@
-// Actor animation (§5.2, §5.7). A plain state machine: no Pixi, no clock, no randomness, so jsdom can test it.
+// Actor choreography (§5.2, §5.7). A plain state machine: no three.js, no clock, no randomness, so jsdom can test it.
 // Poses come only from the OfficeModel; the only motion is a walk cue for a handoff that has a receipt. No wandering,
 // and no success animation: a finished turn has no clip of its own.
 import { dropBacklog, enqueue, type VisualCue, type VisualEndpoint, type VisualLimits } from '../model/timeline';
 import type { OfficeAgent, OfficeModel, OfficePose } from '../model/types';
-import { OBJECT_CELLS, cellCentre, routeBetween, seatCell, type Cell, type Point } from './layers';
+import { OBJECT_CELLS, cellCentre, routeBetween, seatCell, type Cell, type Vec2 } from './world';
 
 export type Clip = 'sleep' | 'idle' | 'type' | 'type_fast' | 'walk' | 'carry' | 'raise_hand' | 'blocked' | 'ghost';
-/** Frames per clip. Must equal the clips of scripts/generate-office-atlas.mjs (office-actors.test compares them with the atlas). */
-export const CLIP_FRAMES: Readonly<Record<Clip, number>> = { sleep: 2, idle: 2, type: 2, type_fast: 2, walk: 4, carry: 4, raise_hand: 2, blocked: 2, ghost: 2 };
-/** Clip frame rate, inside the 6-8 fps of §5.2. */
-export const CLIP_FPS = 7;
-export const frameName = (role: string, clip: Clip, index: number): string => `agent_${role}_${clip}_${index}`;
+/** Clip names of character.glb (office-actors.test compares them with the file). */
+export const CLIPS: readonly Clip[] = ['sleep', 'idle', 'type', 'type_fast', 'walk', 'carry', 'raise_hand', 'blocked', 'ghost'];
+/** A seated character sits this far (world units) south of its desk, facing north (its back to the camera, like the audience in the reference); the offset fades out while it walks. */
+export const SEAT_OFFSET_Z = 0.6;
+/** Heading of a seated character: facing -z, towards its monitor. */
+export const SEATED_HEADING = Math.PI;
 
 /** One clip per pose. A pose with no distinct clip (question, preparing) stands still and shows its desk bubble instead. */
 export function clipFor(pose: OfficePose): Clip {
@@ -34,25 +35,27 @@ export interface ActorView {
   certainty: OfficeAgent['certainty'];
   pose: OfficePose;
   clip: Clip;
-  frame: number;
-  /** World position of the cell centre the actor is on. */
-  point: Point;
-  /** Nearest cell, for draw order. */
-  cell: Cell;
+  /** World floor position (x, z) of the character. */
+  point: Vec2;
+  /** Direction the character faces, radians about the y axis (0 faces +z, towards the camera; a seated character faces -z). */
+  heading: number;
   walking: boolean;
+  /** True while the walk carries a document (outbound leg). */
+  carrying: boolean;
 }
 
 interface Trip { cells: Cell[]; elapsed: number }
 interface Actor { instanceId: string; role: string; certainty: OfficeAgent['certainty']; pose: OfficePose; home: Cell; trip?: Trip; key: string }
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+const SEATED_AT = (c: Cell): Vec2 => { const p = cellCentre(c); return { x: p.x, z: p.z + SEAT_OFFSET_Z }; };
 
 export class Choreographer {
   private readonly actors = new Map<string, Actor>();
   private queue: VisualCue[] = [];
-  private time = 0;
-  private readonly animateFrames: boolean;
-  constructor(animateFrames = true) { this.animateFrames = animateFrames; }
+  private readonly animateClips: boolean;
+  /** `animateClips` false (reduced motion) leaves every clip frozen on its first pose, so nothing is busy at idle. */
+  constructor(animateClips = true) { this.animateClips = animateClips; }
 
   /** Poses and seats always follow the model at once. Only walk cues are queued, and only when the caller allows motion. */
   apply(model: OfficeModel, cues: readonly VisualCue[]): string[] {
@@ -74,9 +77,9 @@ export class Choreographer {
     return walks.map(c => c.handoffId);
   }
 
-  /** True while a later tick can still change what is shown (a trip, a queued cue, or looping clip frames). Otherwise only the next apply can. */
+  /** True while a later tick can still change what is shown (a trip, a queued cue, or looping clips). Otherwise only the next apply can. */
   busy(): boolean {
-    if (this.queue.length > 0 || (this.animateFrames && this.actors.size > 0)) return true;
+    if (this.queue.length > 0 || (this.animateClips && this.actors.size > 0)) return true;
     for (const actor of this.actors.values()) if (actor.trip) return true;
     return false;
   }
@@ -110,7 +113,6 @@ export class Choreographer {
   /** Advances time. `moving` asks for the 30 fps budget; `changed` says some actor looks different from last tick. */
   tick(dtMs: number): { moving: boolean; changed: boolean } {
     if (!this.busy()) return { moving: false, changed: false };
-    this.time += dtMs;
     let moving = false;
     for (const actor of this.actors.values()) {
       if (!actor.trip) this.start(actor);
@@ -128,29 +130,27 @@ export class Choreographer {
     return { moving, changed };
   }
 
-  private frameOf(clip: Clip): number {
-    return this.animateFrames ? Math.floor((this.time * CLIP_FPS) / 1000) % CLIP_FRAMES[clip] : 0;
-  }
-
   private viewOf(actor: Actor): ActorView {
     const base = { instanceId: actor.instanceId, role: actor.role, certainty: actor.certainty, pose: actor.pose };
     const trip = actor.trip;
-    if (!trip) {
-      const clip = clipFor(actor.pose);
-      return { ...base, clip, frame: this.frameOf(clip), point: cellCentre(actor.home), cell: actor.home, walking: false };
-    }
+    if (!trip) return { ...base, clip: clipFor(actor.pose), point: SEATED_AT(actor.home), heading: SEATED_HEADING, walking: false, carrying: false };
     const steps = trip.cells.length - 1;
     const p = Math.min(1, trip.elapsed / WALK_LIMITS.walkMs) * steps;
     const i = Math.min(steps - 1, Math.floor(p));
     const a = cellCentre(trip.cells[i] as Cell), b = cellCentre(trip.cells[i + 1] as Cell), f = p - i;
+    // The seat offset fades over the first and last step, so the character stands up and sits down instead of jumping.
+    const seat = i === 0 ? 1 - f : i === steps - 1 ? f : 0;
     const out = trip.elapsed < WALK_LIMITS.walkMs / 2;
-    const clip: Clip = out ? 'carry' : 'walk';
-    return { ...base, clip, frame: this.frameOf(clip), point: { x: lerp(a.x, b.x, f), y: lerp(a.y, b.y, f) }, cell: trip.cells[f < 0.5 ? i : i + 1] as Cell, walking: true };
+    return {
+      ...base, clip: out ? 'carry' : 'walk', walking: true, carrying: out,
+      point: { x: lerp(a.x, b.x, f), z: lerp(a.z, b.z, f) + SEAT_OFFSET_Z * seat },
+      heading: Math.atan2(b.x - a.x, b.z - a.z),
+    };
   }
 
   private keyOf(actor: Actor): string {
     const v = this.viewOf(actor);
-    return `${v.clip}:${v.frame}:${Math.round(v.point.x)}:${Math.round(v.point.y)}:${v.certainty}`;
+    return `${v.clip}:${Math.round(v.point.x * 20)}:${Math.round(v.point.z * 20)}:${v.certainty}`;
   }
 
   views(): ActorView[] { return [...this.actors.values()].map(a => this.viewOf(a)); }

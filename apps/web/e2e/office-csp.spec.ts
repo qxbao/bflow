@@ -15,7 +15,7 @@ const DYNAMIC_EDGE = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
 const resolveFrom = (from: string, spec: string): string => new URL(spec, `http://chunk.invalid/${from}`).pathname.slice(1);
 const edges = (re: RegExp, c: Chunk): string[] => [...c.text.matchAll(re)].map(m => resolveFrom(c.file, m[1]!));
 
-test('classic bundle contains no pixi chunk', async () => {
+test('classic bundle contains no three.js chunk', async () => {
   const html = await readFile(join(CLIENT, 'index.html'), 'utf8');
   const rootsFromHtml = [...html.matchAll(/<(?:script|link)\b[^>]*?(?:src|href)="([^"]+\.js)"/g)].map(m => resolveFrom('index.html', m[1]!));
   expect(rootsFromHtml.length).toBeGreaterThan(0);
@@ -33,17 +33,17 @@ test('classic bundle contains no pixi chunk', async () => {
     }
     return seen;
   };
-  // Pixi chunks are found by content, plus everything reachable (static or dynamic) from a chunk the entry loads through import() whose closure holds Pixi: the lazy scene chunk and its renderer back ends.
-  const marker = (f: string): boolean => chunks.get(f)?.text.includes('pixijs.com') === true;
-  const pixi = new Set(files.filter(marker));
-  expect(pixi.size).toBeGreaterThan(0);
+  // three.js chunks are found by content, plus everything reachable (static or dynamic) from a chunk the entry loads through import() whose closure holds three.js: the lazy scene chunk and its helpers.
+  const marker = (f: string): boolean => chunks.get(f)?.text.includes('THREE.WebGLRenderer') === true;
+  const three = new Set(files.filter(marker));
+  expect(three.size).toBeGreaterThan(0);
   const eager = closure(rootsFromHtml);
   expect(eager.size).toBeGreaterThan(0);
   const lazyTargets = [...eager].flatMap(f => edges(DYNAMIC_EDGE, chunks.get(f)!));
-  const lazyPixi = lazyTargets.filter(t => [...closure([t], true)].some(marker));
-  expect(lazyPixi.length, 'the entry must reach the scene only through import()').toBeGreaterThan(0);
-  for (const t of lazyPixi) for (const f of closure([t], true)) if (!eager.has(f)) pixi.add(f); // shared code (the entry itself) is legitimately eager
-  const leaked = [...eager].filter(f => pixi.has(f));
+  const lazyThree = lazyTargets.filter(t => [...closure([t], true)].some(marker));
+  expect(lazyThree.length, 'the entry must reach the scene only through import()').toBeGreaterThan(0);
+  for (const t of lazyThree) for (const f of closure([t], true)) if (!eager.has(f)) three.add(f); // shared code (the entry itself) is legitimately eager
+  const leaked = [...eager].filter(f => three.has(f));
   expect(leaked).toEqual([]);
   expect(html).not.toMatch(/modulepreload/);
 });
@@ -98,7 +98,39 @@ test('office renders with zero CSP violations', async ({ page }) => {
   // Camera keys act on the scene and never throw.
   await page.getByLabel('Cảnh văn phòng').focus();
   for (const key of ['+', 'ArrowLeft', '-', '0']) await page.keyboard.press(key);
-  await page.screenshot({ path: 'dist/test-results/office-static.png' });
+  await page.screenshot({ path: 'dist/test-results/office-3d.png' });
   expect(await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp)).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test('toggling the mode many times does not leak WebGL contexts', async ({ page }) => {
+  test.setTimeout(120000);
+  // Record every WebGL context the page creates; a destroyed renderer must have lost its context (forceContextLoss).
+  await page.addInitScript(() => {
+    const all: WebGLRenderingContext[] = [];
+    (window as unknown as { __gl: WebGLRenderingContext[] }).__gl = all;
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, type: string, ...rest: unknown[]) {
+      const ctx = (original as (...a: unknown[]) => RenderingContext | null).call(this, type, ...rest);
+      if (ctx && /webgl/.test(type)) all.push(ctx as WebGLRenderingContext);
+      return ctx;
+    } as typeof original;
+  });
+  await page.goto(host.pairing);
+  await page.getByLabel('Đường dẫn Git tuyệt đối').fill(host.repository);
+  await page.getByRole('button', { name: 'Đăng ký dự án' }).click();
+  await page.getByRole('link', { name: /thư viện.*Xem dự án/ }).click();
+  const TOGGLES = 12;
+  for (let i = 0; i < TOGGLES; i++) {
+    await page.getByRole('button', { name: 'Trực quan' }).click();
+    await expect(page.getByLabel('Cảnh văn phòng')).toHaveAttribute('data-office-renderer', 'ready', { timeout: 20000 });
+    await page.getByRole('button', { name: 'Cổ điển' }).click();
+    await expect(page.getByLabel('Cảnh văn phòng')).toHaveCount(0);
+  }
+  const { created, alive } = await page.evaluate(() => {
+    const all = (window as unknown as { __gl: WebGLRenderingContext[] }).__gl;
+    return { created: all.length, alive: all.filter(g => !g.isContextLost()).length };
+  });
+  expect(created).toBeGreaterThanOrEqual(TOGGLES);
+  expect(alive).toBe(0);
 });

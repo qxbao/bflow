@@ -1,11 +1,8 @@
-// Pure seat assignment. No React, Pixi, fetch or clock; the result is plain data and inputs are never mutated.
+// Pure seat assignment. No React, three.js, fetch or clock; the result is plain data and inputs are never mutated.
 import type { OfficeAgent, OfficeModel, OfficeRole, SeatMap } from './types';
 
-/** Developer pool: 6 main seats, then 12 annex seats. Main seats fill first. */
-export const DEVELOPER_SEATS: readonly string[] = [
-  ...Array.from({ length: 6 }, (_, i) => `developer:${i + 1}`),
-  ...Array.from({ length: 12 }, (_, i) => `annex:${i + 1}`),
-];
+/** Developer pool: 20 seats, filled in order (the 3D Developer zone adds a row of five per fifth agent). */
+export const DEVELOPER_SEATS: readonly string[] = Array.from({ length: 20 }, (_, i) => `developer:${i + 1}`);
 
 /** Zone of each fixed (non-Developer) role, following the §5.1 rooms. */
 const FIXED_ZONE: Readonly<Record<Exclude<OfficeRole, 'developer'>, string>> = {
@@ -31,7 +28,7 @@ function fits(role: OfficeRole, seat: string): boolean {
 /**
  * Stable seat assignment keyed by instanceId only. A surviving instance keeps its seat; a seat is released
  * when its instance disappears and is then reusable by a later new instance. Failover is a new instance,
- * so it is never merged with the instance it replaces. Developers beyond the 18 Developer seats are counted
+ * so it is never merged with the instance it replaces. Developers beyond the 20 Developer seats are counted
  * in `overflow`.
  *
  * @param previous The map returned by the last call (or an empty map). Never mutated.

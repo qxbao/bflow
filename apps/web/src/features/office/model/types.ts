@@ -1,4 +1,4 @@
-// Pure presentation model. Types only from @bflow/contracts/web; no React, Pixi, fetch or clock.
+// Pure presentation model. Types only from @bflow/contracts/web; no React, three.js, fetch or clock.
 import type { WebAgentView, WebDecision, WebHandoffView, WebProjectSession, WebRunView, WebTaskView, WebWorkforceView } from '@bflow/contracts/web';
 
 export type OfficeRole = WebAgentView['role'];
@@ -63,7 +63,7 @@ export interface OfficeModel {
 /** One seated instance. Plain data: JSON round-trips unchanged. */
 export interface SeatEntry {
   instanceId: string;
-  /** Seat id, e.g. `developer:3`, `annex:5`, `verification:reviewer`, `verification:reviewer:2`. */
+  /** Seat id, e.g. `developer:3`, `verification:reviewer`, `verification:reviewer:2`. */
   seat: string;
 }
 

@@ -45,7 +45,7 @@ const matchesPkg = (spec: string, name: string): boolean =>
 const rel = (file: string): string => relative(SRC, file).split(sep).join('/');
 
 const REACT_PKGS = ['react', 'react-dom', 'react-router', 'react-router-dom'];
-const PIXI_PKGS = ['pixi.js', '@pixi/'];
+const THREE_PKGS = ['three', '@types/three'];
 
 function resolveRelative(from: string, spec: string, read: Reader): string | undefined {
   const base = resolve(dirname(from), spec);
@@ -142,15 +142,15 @@ const RULES: Record<Rule, {
       return undefined;
     },
   },
-  // Model is pure: no React, no Pixi, no clock or network access.
+  // Model is pure: no React, no three.js, no clock or network access.
   model: {
     hazards: true,
     blocked: edge => {
-      const pkg = [...REACT_PKGS, ...PIXI_PKGS].find(name => matchesPkg(edge.spec, name));
+      const pkg = [...REACT_PKGS, ...THREE_PKGS].find(name => matchesPkg(edge.spec, name));
       return pkg;
     },
   },
-  // UI may reach Pixi only through a dynamic import of scene/renderer; every other path to Pixi
+  // UI may reach three.js only through a dynamic import of scene/renderer; every other path to three.js
   // (static or dynamic, direct or transitive) is a violation.
   ui: {
     lazyOk: target => target !== undefined && isRendererModule(target),
@@ -158,7 +158,7 @@ const RULES: Record<Rule, {
     blocked: (edge, target) => {
       // Type-only imports and type queries of the renderer are permitted explicitly; any value import is not.
       if (edge.typeOnly && target !== undefined && isRendererModule(target)) return undefined;
-      if (PIXI_PKGS.some(name => matchesPkg(edge.spec, name))) return 'pixi.js';
+      if (THREE_PKGS.some(name => matchesPkg(edge.spec, name))) return 'three';
       if (edge.kind === 'static' && target !== undefined && isRendererModule(target)) {
         return 'scene/renderer (static)';
       }
@@ -200,7 +200,7 @@ export function collectViolations(read: Reader, roots: Record<Rule, string[]>): 
         if (edge.kind === 'dynamic' && spec.lazyOk?.(target)) continue;
         const reason = spec.blocked(edge, target);
         if (reason) report(reason);
-        // A permitted type-only renderer edge is not followed, or the walk would reach Pixi through erased code.
+        // A permitted type-only renderer edge is not followed, or the walk would reach three.js through erased code.
         if (rule === 'ui' && edge.typeOnly && target && isRendererModule(target)) continue;
         if (target && !seen.has(target)) {
           seen.add(target);
@@ -234,9 +234,9 @@ describe('features/office import boundaries', () => {
   test('detector flags synthetic violations and allows the lazy renderer import in ui', () => {
     const fixture: Record<string, string> = {
       'api/client.ts': 'export const ApiClient = {};',
-      'features/office/scene/renderer.ts': "import { Application } from 'pixi.js';\nexport const r = Application;",
-      'features/office/scene/renderer/index.ts': "import { Application } from 'pixi.js';\nexport const idx = Application;",
-      'features/office/scene/hud.ts': "import { Application } from 'pixi.js';\nexport const hud = Application;",
+      'features/office/scene/renderer.ts': "import { WebGLRenderer } from 'three';\nexport const r = WebGLRenderer;",
+      'features/office/scene/renderer/index.ts': "import { Scene } from 'three/src/Three.js';\nexport const idx = Scene;",
+      'features/office/scene/hud.ts': "import { Scene } from 'three';\nexport const hud = Scene;",
       'features/office/scene/bad-api.ts': "import { ApiClient } from '../../../api/client';\nexport const c = ApiClient;",
       'features/office/scene/bad-router.ts': "export { useNavigate } from 'react-router';",
       'features/office/model/bad-react.ts': "import { useState } from 'react';\nexport const s = useState;",
@@ -244,7 +244,9 @@ describe('features/office import boundaries', () => {
       'features/office/model/ok-date.ts': 'export const at = (ms: number) => new Date(ms);',
       'features/office/model/bad-transitive.ts': "import { x } from './helper';\nexport const y = x;",
       'features/office/model/helper.ts': "import 'react-dom';\nexport const x = 1;",
-      'features/office/ui/bad-pixi.tsx': "import { Application } from 'pixi.js';\nexport const A = Application;",
+      'features/office/ui/bad-three.tsx': "import { Scene } from 'three';\nexport const A = Scene;",
+      'features/office/ui/bad-three-loader.tsx': "import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';\nexport const L = GLTFLoader;",
+      'features/office/model/bad-three.ts': "import { Vector3 } from 'three';\nexport const v = Vector3;",
       'features/office/ui/bad-renderer.tsx': "import { r } from '../scene/renderer';\nexport const R = r;",
       'features/office/ui/bad-computed.tsx': 'export const load = (p: string) => import(p);',
       'features/office/ui/bad-renderer-index.tsx': "import { idx } from '../scene/renderer/index';\nexport const I = idx;",
@@ -267,17 +269,19 @@ describe('features/office import boundaries', () => {
       'model features/office/model/bad-clock.ts Date.now',
       'model features/office/model/bad-clock.ts new Date()',
       'model features/office/model/bad-react.ts react',
+      'model features/office/model/bad-three.ts three',
       'model features/office/model/helper.ts react-dom',
       'scene features/office/scene/bad-api.ts api/**',
       'scene features/office/scene/bad-router.ts react-router',
-      'ui features/office/scene/hud.ts pixi.js',
-      'ui features/office/scene/renderer.ts pixi.js',
-      'ui features/office/scene/renderer/index.ts pixi.js',
+      'ui features/office/scene/hud.ts three',
+      'ui features/office/scene/renderer.ts three',
+      'ui features/office/scene/renderer/index.ts three',
       'ui features/office/ui/bad-computed.tsx computed dynamic import',
       'ui features/office/ui/bad-mixed.tsx scene/renderer (static)',
-      'ui features/office/ui/bad-pixi.tsx pixi.js',
       'ui features/office/ui/bad-renderer-index.tsx scene/renderer (static)',
       'ui features/office/ui/bad-renderer.tsx scene/renderer (static)',
+      'ui features/office/ui/bad-three-loader.tsx three',
+      'ui features/office/ui/bad-three.tsx three',
     ]);
   });
 });

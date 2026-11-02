@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { diffVisual } from '../model/timeline';
 import type { OfficeModel, OfficeTarget } from '../model/types';
-// Type-only: erased at build, so Pixi stays behind the dynamic import below.
+// Type-only: erased at build, so three.js stays behind the dynamic import below.
 import type { OfficeRenderer } from '../scene/renderer';
 import { AccessibleOffice } from './AccessibleOffice';
 
@@ -13,7 +13,7 @@ const LOST = 'Cảnh đồ họa bị mất ngữ cảnh hiển thị nên đã 
 const reducedMotion = (): boolean => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * Hosts the Pixi scene plus its DOM mirror. The renderer module (and Pixi with it) is reached only through a dynamic import, so the
+ * Hosts the 3D scene plus its DOM mirror. The renderer module (and three.js with it) is reached only through a dynamic import, so the
  * Classic bundle never references it. If creation rejects (no WebGL, blocked asset) or the context is lost later, the mirror becomes
  * the visible list and nothing else in the panel is touched. There is no retry loop.
  * `links` is extra navigation shown with the mirror until the scene objects navigate (V7.2).
@@ -75,7 +75,7 @@ export function OfficeStage({ model, onSelect, links, createRenderer = lazyRende
 
   const degraded = notice !== undefined;
   return <div className="relative">
-    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-[min(60vh,520px)] min-h-64 w-full overflow-hidden bg-[#2b2733]" />}
-    <AccessibleOffice model={model} onSelect={target => latest.current.onSelect(target)} visible={degraded} notice={notice} extra={links} />
+    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-[min(60vh,520px)] min-h-64 w-full overflow-hidden bg-[#121418]" />}
+    <AccessibleOffice model={model} onSelect={target => { renderer.current?.focus?.(target); latest.current.onSelect(target); }} visible={degraded} notice={notice} extra={links} />
   </div>;
 }

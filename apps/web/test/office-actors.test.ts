@@ -2,12 +2,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { CLIP_FRAMES, Choreographer, WALK_LIMITS, clipFor, frameName, type Clip } from '../src/features/office/scene/actors';
-import { GRID_H, GRID_W, routeBetween, seatCell } from '../src/features/office/scene/layers';
+import { CLIPS, Choreographer, SEAT_OFFSET_Z, WALK_LIMITS, clipFor } from '../src/features/office/scene/actors';
+import { GRID_H, GRID_W, cellCentre, routeBetween, seatCell } from '../src/features/office/scene/world';
 import type { VisualCue } from '../src/features/office/model/timeline';
 import type { OfficeModel, OfficePose } from '../src/features/office/model/types';
 
-const atlas = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../public/office/atlas.json'), 'utf8')) as { frames: Record<string, { frame: { w: number; h: number } }> };
 const model: OfficeModel = {
   tier: 'full', certainty: 'confirmed', statusText: '', pendingDecisions: 0, connection: 'connected', handoffs: [], tasks: [],
   agents: [
@@ -17,17 +16,41 @@ const model: OfficeModel = {
 };
 const walk = (id: string): VisualCue => ({ kind: 'walk', handoffId: id, actor: 'a', from: { kind: 'instance', instanceId: 'a' }, to: { kind: 'instance', instanceId: 'b' } });
 
-describe('clips and atlas', () => {
-  test('every clip frame of every role exists at 32x48 in the atlas', () => {
-    const roles = ['conversation', 'coordinator', 'planner', 'architect', 'specifier', 'reviewer', 'qa', 'tester', 'security', 'developer'];
-    for (const role of roles) for (const [clip, n] of Object.entries(CLIP_FRAMES) as [Clip, number][]) for (let i = 0; i < n; i++) {
-      expect(atlas.frames[frameName(role, clip, i)]?.frame, frameName(role, clip, i)).toMatchObject({ w: 32, h: 48 });
-    }
-    expect(Object.keys(atlas.frames)).toEqual(expect.arrayContaining(['bubble_waiting', 'bubble_question', 'bubble_blocked']));
+interface Glb { nodes: { name: string }[]; materials: { name: string }[]; animations: { name: string; channels: { target: { node: number } }[] }[]; images?: unknown[]; textures?: unknown[] }
+/** Reads the JSON chunk of a GLB: the models are the contract between the generator and the scene code. */
+const readGlb = (file: string): Glb => {
+  const buf = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../public/office', file));
+  expect(buf.toString('ascii', 0, 4)).toBe('glTF');
+  expect(buf.readUInt32LE(8)).toBe(buf.length);
+  const length = buf.readUInt32LE(12);
+  return JSON.parse(buf.toString('utf8', 20, 20 + length)) as Glb;
+};
+
+describe('models', () => {
+  test('character.glb has the rig nodes, the role-colour material and exactly the nine clips, and no embedded images', () => {
+    const glb = readGlb('character.glb');
+    const names = glb.nodes.map(n => n.name);
+    for (const n of ['character', 'hips', 'torso', 'head', 'arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'shin_l', 'shin_r', 'paper']) expect(names).toContain(n);
+    expect(glb.materials.map(m => m.name)).toEqual(expect.arrayContaining(['outfit', 'skin', 'hair', 'tag']));
+    expect(glb.animations.map(a => a.name).sort()).toEqual([...CLIPS].sort());
+    expect(glb.images ?? []).toEqual([]);
+    expect(glb.textures ?? []).toEqual([]);
+    // Every clip drives the same nodes, so a cross-fade never leaves a stale pose.
+    const driven = (a: Glb['animations'][number]): string => [...new Set(a.channels.map(c => glb.nodes[c.target.node]!.name))].sort().join();
+    expect(new Set(glb.animations.map(driven)).size).toBe(1);
   });
+  test('furniture.glb carries every node the scene instantiates and no images', () => {
+    const glb = readGlb('furniture.glb');
+    const names = glb.nodes.map(n => n.name);
+    for (const n of ['floor_tile', 'wall', 'wall_led', 'spot', 'trim_bar', 'desk', 'chair', 'counter', 'board', 'server', 'cabinet', 'mailbox', 'settings', 'door', 'plant']) expect(names).toContain(n);
+    expect(glb.images ?? []).toEqual([]);
+  });
+});
+
+describe('poses', () => {
   test('every pose maps to a clip and none is a success animation', () => {
     const poses: OfficePose[] = ['disconnected', 'question', 'hand_raised', 'working', 'typing', 'preparing', 'sleeping', 'ghost'];
-    for (const p of poses) expect(Object.keys(CLIP_FRAMES)).toContain(clipFor(p));
+    for (const p of poses) expect(CLIPS).toContain(clipFor(p));
     expect(clipFor('sleeping')).toBe('sleep');
     expect(clipFor('typing')).toBe('type_fast');
   });
@@ -47,6 +70,7 @@ describe('Choreographer', () => {
     const c = new Choreographer();
     c.apply(model, []);
     const before = c.views().map(v => v.point);
+    expect(before.map(p => p.z)).toEqual(before.map((_, i) => cellCentre(seatCell(model.agents[i]!.seat!)!).z + SEAT_OFFSET_Z));
     for (let i = 0; i < 100; i++) expect(c.tick(100).moving).toBe(false);
     expect(c.views().map(v => v.point)).toEqual(before);
   });
@@ -65,6 +89,7 @@ describe('Choreographer', () => {
     expect(done.walking).toBe(false);
     expect(done.point).toEqual(home);
     expect(done.clip).toBe('sleep');
+    expect(done.heading).toBe(Math.PI);
   });
   test('pause drops the backlog and walkers, and nothing replays', () => {
     const c = new Choreographer();
@@ -97,11 +122,16 @@ describe('Choreographer', () => {
     c.apply(model, [walk('h1')]);
     expect(c.busy()).toBe(true);
   });
-  test('reduced frames stay on frame 0', () => {
-    const c = new Choreographer(false);
-    c.apply(model, []);
-    c.tick(1000);
-    expect(c.views().every(v => v.frame === 0)).toBe(true);
+  test('a walker carries a document out and walks back empty-handed, facing its direction', () => {
+    const c = new Choreographer();
+    c.apply(model, [walk('h1')]);
+    c.tick(16);
+    c.tick(WALK_LIMITS.walkMs / 4);
+    const out = c.views().find(v => v.instanceId === 'a')!;
+    expect(out.carrying).toBe(true);
+    expect(Number.isFinite(out.heading)).toBe(true);
+    c.tick(WALK_LIMITS.walkMs / 2);
+    expect(c.views().find(v => v.instanceId === 'a')!.carrying).toBe(false);
   });
   test('a pose change is immediate', () => {
     const c = new Choreographer();
