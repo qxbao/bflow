@@ -460,6 +460,13 @@ export async function readPinnedInstructionReply(input: { role: AgentRole; skill
 
 /** Long-lived composition owner. Startup is separate from activation to support provider MCP startup. */
 export async function runAgenticHost(configuration: HostConfiguration): Promise<void> {
+  if (process.platform !== "win32") {
+    const limit = process.platform === "linux" ? 107 : 103;
+    const paths = [configuration.socketPath, configuration.socketPath.replace(/\.sock$/, ".native.sock")];
+    if (paths.some(path => Buffer.byteLength(path) > limit))
+      throw new Error("Host Unix socket path is too long; reconcile the stopped host with a short owned endpoint before startup");
+  }
+  let controlReady = false;
   const readExecutionResolution = configuration.executionResolution === undefined ? undefined : await createExecutionResolutionReader(configuration.executionResolution);
   await assertPrivateExecutionSources(readExecutionResolution, configuration.executionSourceDigests);
   const binary = configuration.herdrBinary ?? "herdr";
@@ -2180,6 +2187,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
   };
   const dispatch = async (token: string, method: string, params: unknown, operation?: OperationOptions): Promise<unknown> => {
+    if (!controlReady) throw new Error("Host control endpoint is still initializing; retry its readiness observation");
     if (token !== configuration.token) {
       const web = webCredentials.get(token);
       if (web) {
@@ -3035,6 +3043,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   };
   // Abrupt process signals are crashes, never graceful-shutdown receipts.
   process.once("SIGTERM", () => { void close().then(() => process.exit(0), () => process.exit(1)); });
+  controlReady = true;
 }
 
 /** Pre-transport normalization of a role-supplied RoleMessage: the authenticated pane fills identity; the idempotency key defaults to message_id. */
