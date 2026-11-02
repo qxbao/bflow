@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostReceiptJournal, MAX_NOTICE_REBLOCKS, parseConversationResumeRequest } from "../../src/agentic/host-receipts.js";
 import { TaskActivityLog } from "../../src/agentic/task-activity-log.js";
 import { isProviderInputEmpty, reminderDelayMs, reminderDue, afterReminder } from "../../src/agentic/conversation-inbox.js";
-import { blockedNoticeFields, containsCode, FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE, FAST_PATH_TASK_WAIVER_NOTICE, formatFastPathDowngradeNotice, formatFriendlyExpiry, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice, sanitizeCardProse } from "../../src/agentic/conversation-notice-render.js";
+import { blockedNoticeFields, containsCode, FAST_PATH_DESIGN_AUTO_APPROVED_NOTICE, FAST_PATH_TASK_WAIVER_NOTICE, formatFastPathDowngradeNotice, lastAssistantText, mustShowSection, noticeDisplayed, notificationBody, renderConversationNotice, sanitizeCardProse } from "../../src/agentic/conversation-notice-render.js";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { vi.useRealTimers(); for (const action of cleanups.splice(0).reverse()) await action(); });
@@ -140,8 +140,8 @@ describe("Conversation notice rendering", () => {
     expect(rendered.display).toContain("🔔 Cần bạn quyết định · #2");
     expect(rendered.display).toContain("Việc #1: Thêm trang đăng nhập");
     expect(rendered.display).toContain("Trưởng nhóm kỹ thuật hỏi: Dùng schema v2 hay giữ v1?\n  1. Schema v2\n  2. Giữ v1\n  3. Hoãn");
-    expect(rendered.display).toContain(`Bạn trả lời: "#2: 1" — ${formatFriendlyExpiry(decisionPayload.expiresAt)}`);
-    expect(rendered.display).toContain("còn 43 phút");
+    expect(rendered.display).toContain(`Bạn trả lời: "#2: 1"`);
+    expect(rendered.display).not.toMatch(/hết hạn|còn \d+ phút|giới hạn thời gian/);
     expect(rendered.display).not.toContain("apr-");
     expect(rendered.display).not.toContain("run-42");
     expect(rendered.display).not.toContain("approval.request");
@@ -176,11 +176,6 @@ describe("Conversation notice rendering", () => {
     expect(rendered.display).not.toContain('{"');
   });
 
-  it("says there is no expiry when the request has none", () => {
-    const { expiresAt: _omit, ...payload } = decisionPayload;
-    const rendered = renderConversationNotice(notice("decision-" + APPROVAL_ID, "approval.request", payload));
-    expect(rendered.display).toContain("chưa giới hạn thời gian — đang chờ bạn trả lời");
-  });
   it("falls back to a truncated update when the stored summary is cut off", () => {
     const full = JSON.stringify(decisionPayload);
     const rendered = renderConversationNotice({ messageId: "decision-" + APPROVAL_ID, type: "approval.request", summary: full.slice(0, 40), truncated: true });
@@ -299,13 +294,6 @@ describe("review fixes: aliases, display acknowledgement and expiry", () => {
     const identity = { approvalId: APPROVAL_ID, code: "#2", runId: "run-42", workTag: "Việc #1" };
     expect(sanitizeCardProse(`Giống ${APPROVAL_ID} trong run run-42`, identity)).toBe("Giống #2 trong Việc #1");
     expect(sanitizeCardProse("Giống apr-other-1 trong run run-99", identity)).toBe("Giống một yêu cầu duyệt khác trong một công việc khác");
-  });
-  it("formats expiry in the local time zone and measures remaining time at render time", () => {
-    const expiresAt = "2026-10-20T04:00:00.000Z", zone = "Asia/Ho_Chi_Minh";
-    expect(formatFriendlyExpiry(expiresAt, Date.parse("2026-10-20T03:17:00.000Z"), zone)).toBe("còn 43 phút (hết hạn lúc 11:00)");
-    expect(formatFriendlyExpiry(expiresAt, Date.parse("2026-10-20T03:50:00.000Z"), zone)).toBe("còn 10 phút (hết hạn lúc 11:00)");
-    expect(formatFriendlyExpiry(expiresAt, Date.parse("2026-10-20T04:05:00.000Z"), zone)).toBe("đã hết hạn lúc 11:00");
-    expect(formatFriendlyExpiry("2026-10-22T04:00:00.000Z", Date.parse("2026-10-20T03:00:00.000Z"), zone)).toBe("hết hạn lúc 11:00 ngày 22/10");
   });
   it("assigns distinct #n aliases to concurrently appended decisions", async () => {
     const root = await directory();
@@ -469,6 +457,8 @@ describe("structured decision fields and assistant text", () => {
     expect(rendered.display).toContain("  1. Schema v2\n  2. Giữ v1");
     expect(rendered.display).toContain(`Bạn trả lời: "${APPROVAL_ID}: 1"`);
     expect(rendered.display).not.toContain("#1");
+    expect(rendered.display).not.toContain("hết hạn");
+    expect(rendered).not.toHaveProperty("expiresAt");
   });
   it("degrades a malformed structured field to an update that says it was cut short", () => {
     const rendered = renderConversationNotice({ messageId: "m-1", type: "approval.request", summary: undefined, truncated: true,

@@ -22,12 +22,11 @@ import {
 
 export const USER_DECISION_TOOL = "request_user_decision";
 export const USER_DECISION_METADATA_KIND = "user_decision";
-/** `conversation.progress` payload kind telling Conversation that a user decision expired (Runtime-owned). */
+/** `conversation.progress` payload kind telling Conversation that a user decision closed because its run ended (Runtime-owned). */
 export const USER_DECISION_EXPIRED_KIND = "user_decision_expired";
 
 const MAX_OPTIONS = 6;
-const MAX_EXPIRES_MINUTES = 1440;
-const ALLOWED_INPUT_KEYS = ["runId", "taskId", "question", "options", "context", "expiresInMinutes"] as const;
+const ALLOWED_INPUT_KEYS = ["runId", "taskId", "question", "options", "context"] as const;
 
 export interface UserDecisionToolInput {
   readonly runId: string;
@@ -35,7 +34,6 @@ export interface UserDecisionToolInput {
   readonly question: string;
   readonly options?: readonly string[];
   readonly context?: string;
-  readonly expiresInMinutes?: number;
 }
 
 export type RoleParticipant = RoleMessage["sender"];
@@ -92,19 +90,10 @@ export function parseUserDecisionToolInput(raw: unknown): UserDecisionToolInput 
     if (typeof record.context !== "string" || record.context.length > 4000) throw new Error("context must be at most 4000 characters");
     context = record.context;
   }
-  let expiresInMinutes: number | undefined;
-  if (record.expiresInMinutes !== undefined) {
-    const minutes = record.expiresInMinutes;
-    if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < 1 || minutes > MAX_EXPIRES_MINUTES) {
-      throw new Error(`expiresInMinutes must be an integer 1..${MAX_EXPIRES_MINUTES}`);
-    }
-    expiresInMinutes = minutes;
-  }
   return {
     runId, taskId, question,
     ...(options !== undefined ? { options } : {}),
-    ...(context !== undefined ? { context } : {}),
-    ...(expiresInMinutes !== undefined ? { expiresInMinutes } : {})
+    ...(context !== undefined ? { context } : {})
   };
 }
 
@@ -123,11 +112,7 @@ export function buildUserDecisionRequest(params: UserDecisionRequestParams): App
   const input = parseUserDecisionToolInput(params.input);
   const options = input.options ?? [];
   const hash = digestParts([input.runId, input.taskId, role.data, input.question, options, params.revision, params.generation]);
-  const requestedAtMs = Date.parse(params.now);
-  if (!Number.isFinite(requestedAtMs)) throw new Error("now must be an ISO-8601 timestamp");
-  const expiresAt = input.expiresInMinutes === undefined
-    ? undefined
-    : new Date(requestedAtMs + input.expiresInMinutes * 60_000).toISOString();
+  if (!Number.isFinite(Date.parse(params.now))) throw new Error("now must be an ISO-8601 timestamp");
 
   const metadata: Record<string, unknown> = {
     kind: USER_DECISION_METADATA_KIND,
@@ -143,7 +128,6 @@ export function buildUserDecisionRequest(params: UserDecisionRequestParams): App
     runId: input.runId,
     sessionId: params.sessionId,
     status: "pending",
-    ...(expiresAt !== undefined ? { expiresAt } : {}),
     target: { type: "task", taskId: input.taskId },
     revision: params.revision,
     generation: params.generation,
@@ -177,7 +161,7 @@ function sameTarget(left: unknown, right: unknown): boolean {
 
 /**
  * Validates a human answer against the exact user-decision request. Throws on any mismatch,
- * expiry, out-of-band option or invalid timestamp. Never selects a default option.
+ * out-of-band option or invalid timestamp. Never selects a default option.
  */
 export function validateUserDecisionAnswer(
   request: ApprovalRequest,
@@ -198,9 +182,6 @@ export function validateUserDecisionAnswer(
   if (!Number.isFinite(current)) throw new Error("now must be an ISO-8601 timestamp");
   if (decidedAt < requestedAt) throw new Error("Decision predates the user-decision request");
   if (decidedAt > current) throw new Error("Decision is dated in the future");
-  if (request.expiresAt !== undefined && current >= Date.parse(request.expiresAt)) {
-    throw new Error("User decision request has expired");
-  }
 
   const options = optionsOf(request);
   const selectedRaw = decision.metadata?.selectedOption;

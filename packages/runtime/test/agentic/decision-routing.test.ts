@@ -18,8 +18,7 @@ const baseInput = {
   taskId: "task-1",
   question: "Which storage backend should we use?",
   options: ["SQLite", "Postgres"],
-  context: "Both are supported by the existing adapters.",
-  expiresInMinutes: 30
+  context: "Both are supported by the existing adapters."
 };
 
 function makeRequest(overrides: Record<string, unknown> = {}): ApprovalRequest {
@@ -60,7 +59,7 @@ describe("P30 T8 user decision routing", () => {
       expect(parsed.options).toEqual(["SQLite", "Postgres"]);
     });
 
-    it("accepts the minimal input without options, context or expiry", () => {
+    it("accepts the minimal input without options or context", () => {
       const parsed = parseUserDecisionToolInput({ runId: "run-1", taskId: "task-1", question: "Proceed?" });
       expect(parsed).toEqual({ runId: "run-1", taskId: "task-1", question: "Proceed?" });
     });
@@ -83,12 +82,9 @@ describe("P30 T8 user decision routing", () => {
       expect(() => parseUserDecisionToolInput({ ...baseInput, options: ["ok", "x".repeat(201)] })).toThrow(/options\[1\]/);
     });
 
-    it("enforces context and expiry bounds", () => {
+    it("enforces context bounds and refuses a reply deadline", () => {
       expect(() => parseUserDecisionToolInput({ ...baseInput, context: "x".repeat(4001) })).toThrow(/context/);
-      expect(() => parseUserDecisionToolInput({ ...baseInput, expiresInMinutes: 0 })).toThrow(/expiresInMinutes/);
-      expect(() => parseUserDecisionToolInput({ ...baseInput, expiresInMinutes: 1441 })).toThrow(/expiresInMinutes/);
-      expect(() => parseUserDecisionToolInput({ ...baseInput, expiresInMinutes: 1.5 })).toThrow(/expiresInMinutes/);
-      expect(() => parseUserDecisionToolInput({ ...baseInput, expiresInMinutes: 1440 })).not.toThrow();
+      expect(() => parseUserDecisionToolInput({ ...baseInput, expiresInMinutes: 30 })).toThrow(/Unknown user decision input key: expiresInMinutes/);
     });
 
     it("rejects non-object input", () => {
@@ -107,7 +103,7 @@ describe("P30 T8 user decision routing", () => {
       expect(request.reason).toBe(baseInput.question);
       expect(request.evidence).toEqual([]);
       expect(request.requestedAt).toBe(NOW);
-      expect(request.expiresAt).toBe(LATER.replace("10:05", "10:30"));
+      expect(request).not.toHaveProperty("expiresAt");
       expect(request.metadata).toMatchObject({
         kind: "user_decision",
         question: baseInput.question,
@@ -118,7 +114,7 @@ describe("P30 T8 user decision routing", () => {
       expect(isUserDecisionRequest(request)).toBe(true);
     });
 
-    it("omits expiresAt and optional metadata when not requested", () => {
+    it("omits optional metadata when not requested", () => {
       const request = buildUserDecisionRequest({
         input: { runId: "run-1", taskId: "task-1", question: "Proceed?" },
         role: "reviewer",
@@ -135,7 +131,7 @@ describe("P30 T8 user decision routing", () => {
 
     it("derives deterministic approvalId and idempotencyKey from the bound identity", () => {
       const first = makeRequest();
-      const second = makeRequest({ expiresInMinutes: 5 });
+      const second = makeRequest({ context: "Other context" });
       expect(second.approvalId).toBe(first.approvalId);
       expect(second.idempotencyKey).toBe(first.idempotencyKey);
 
@@ -228,11 +224,10 @@ describe("P30 T8 user decision routing", () => {
       expect(() => validateUserDecisionAnswer(request, decision, LATER)).toThrow(/future/);
     });
 
-    it("rejects an answer once expiry is reached", () => {
-      const request = makeRequest();
-      const decision = makeDecision(request, { decidedAt: "2026-10-18T10:20:00.000Z" });
-      expect(() => validateUserDecisionAnswer(request, decision, "2026-10-18T10:30:00.000Z")).toThrow(/expired/);
-      expect(() => validateUserDecisionAnswer(request, decision, "2026-10-18T10:29:59.000Z")).not.toThrow();
+    it("accepts a late answer, even to a request persisted with a deadline", () => {
+      const request = { ...makeRequest(), expiresAt: "2026-10-18T10:30:00.000Z" };
+      const decision = makeDecision(request, { decidedAt: "2027-01-01T00:00:00.000Z" });
+      expect(validateUserDecisionAnswer(request, decision, "2027-01-01T00:00:00.000Z")).toMatchObject({ outcome: "approved" });
     });
 
     it("rejects an approval that selects no option", () => {

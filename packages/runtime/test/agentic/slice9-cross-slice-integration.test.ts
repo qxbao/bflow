@@ -1038,7 +1038,7 @@ describe("Slice 9 (Wave 3) cross-slice integration & glue hardening", () => {
 
     const at = fx.clock().toISOString();
     const reqA = buildUserDecisionRequest({
-      input: { runId: "run-chat-race", taskId: "task-a", question: "Câu hỏi A?", options: ["Phương án A1", "Phương án A2"], expiresInMinutes: 20 },
+      input: { runId: "run-chat-race", taskId: "task-a", question: "Câu hỏi A?", options: ["Phương án A1", "Phương án A2"] },
       role: "coordinator",
       sessionId: "session-1",
       revision: 1,
@@ -1046,7 +1046,7 @@ describe("Slice 9 (Wave 3) cross-slice integration & glue hardening", () => {
       now: at
     });
     const reqB = buildUserDecisionRequest({
-      input: { runId: "run-chat-race", taskId: "task-b", question: "Câu hỏi B?", options: ["Phương án B1", "Phương án B2"], expiresInMinutes: 20 },
+      input: { runId: "run-chat-race", taskId: "task-b", question: "Câu hỏi B?", options: ["Phương án B1", "Phương án B2"] },
       role: "coordinator",
       sessionId: "session-1",
       revision: 1,

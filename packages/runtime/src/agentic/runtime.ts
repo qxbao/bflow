@@ -3299,7 +3299,7 @@ export class AgenticWorkflowRuntime {
       const request = buildUserDecisionRequest({ role: "reviewer", sessionId: run.delegation.sessionId, revision,
         generation: run.approval?.generation ?? 0, now: this.now(), input: { runId: run.runId, taskId: exception.taskId,
           question: `Test-integrity exception ${exception.findingId} for ${exception.scope} ${exception.baseRevision} → ${exception.candidateRevision}: ${args.reason}`,
-          options: [TEST_INTEGRITY_APPROVE_OPTION, TEST_INTEGRITY_REJECT_OPTION], context: JSON.stringify(exception), expiresInMinutes: 60 } });
+          options: [TEST_INTEGRITY_APPROVE_OPTION, TEST_INTEGRITY_REJECT_OPTION], context: JSON.stringify(exception) } });
       request.metadata = { ...request.metadata, testIntegrityException: json(exception) };
       request.evidence = [args.evidence];
       const existing = decisions[request.approvalId];
@@ -3344,9 +3344,6 @@ export class AgenticWorkflowRuntime {
     if (!entry || entry.status !== "pending") throw new Error("User decision is not pending");
     if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
     const now = this.now();
-    if (entry.request.expiresAt !== undefined && Date.parse(now) >= Date.parse(entry.request.expiresAt)) {
-      this.expireUserDecision(state, outbox, run, entry); await save(); return;
-    }
     // Throws on any approvalId, revision, generation, target, option or timing mismatch; nothing is mutated before this.
     const answer = validateUserDecisionAnswer(entry.request, decision, now);
     // An answered decision selects one offered option; only the approve option can later grant the exception.
@@ -3367,16 +3364,10 @@ export class AgenticWorkflowRuntime {
   /** Conversation must drop the prompt, otherwise the user keeps answering a question Runtime no longer accepts. */
   private notifyUserDecisionClosed(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
     this.emit(state, outbox, run, "conversation.progress", { kind: USER_DECISION_EXPIRED_KIND, approvalId: entry.request.approvalId,
-      requestedByRole: entry.role, taskId: entry.taskId, headline: `User decision expired [${entry.request.approvalId}]` },
+      requestedByRole: entry.role, taskId: entry.taskId, headline: `User decision closed [${entry.request.approvalId}]` },
     `user-decision-expired:${entry.request.approvalId}`, "conversation");
   }
-  private expireUserDecision(state: JournalState, outbox: HerdrOutbox, run: RunRecord, entry: UserDecisionRecord): void {
-    entry.status = "expired";
-    this.notifyUserDecisionClosed(state, outbox, run, entry);
-    this.resumeUserDecisionAsker(state, outbox, run, entry, { kind: "user_decision_answer", approvalId: entry.request.approvalId, outcome: "expired" });
-  }
-  private expireUserDecisions(state: JournalState, outbox: HerdrOutbox): boolean {
-    const now = Date.parse(this.now());
+  private closeUserDecisionsOfEndedRuns(state: JournalState, outbox: HerdrOutbox): boolean {
     let changed = false;
     for (const run of state.runs) for (const entry of Object.values(run.userDecisions ?? {})) {
       if (entry.status !== "pending") continue;
@@ -3385,11 +3376,9 @@ export class AgenticWorkflowRuntime {
           // A terminal run never resumes its askers, but Conversation still drops the now-unanswerable prompt.
           entry.status = run.cancelled ? "cancelled" : "expired"; changed = true;
           this.notifyUserDecisionClosed(state, outbox, run, entry);
-        } else if (entry.request.expiresAt !== undefined && now >= Date.parse(entry.request.expiresAt)) {
-          this.expireUserDecision(state, outbox, run, entry); changed = true;
         }
       } catch {
-        // Isolate per-decision expiry failure so sibling runs and outbox flush are never starved.
+        // Isolate per-decision closure failure so sibling runs and outbox flush are never starved.
       }
     }
     return changed;
@@ -3476,7 +3465,7 @@ export class AgenticWorkflowRuntime {
     if (!request || run.status !== "awaiting_approval" || decision.approvalId !== request.approvalId || decision.runId !== request.runId ||
         decision.sessionId !== request.sessionId || decision.revision !== request.revision || decision.generation !== request.generation ||
         digest(decision.target) !== digest(request.target) || Date.parse(decision.decidedAt) < Date.parse(request.requestedAt) - 30_000 ||
-        Date.parse(decision.decidedAt) > Date.parse(this.now()) + 30_000 || request.expiresAt && Date.parse(this.now()) >= Date.parse(request.expiresAt))
+        Date.parse(decision.decidedAt) > Date.parse(this.now()) + 30_000)
       throw new Error("Stale or mismatched approval decision");
     if (!await this.ports.authorizeHuman(decision)) throw new Error("Human approval is not authenticated");
     if (decision.decision === "changes_requested" && (run.approvalKind === "design" || run.approvalKind === "delivery") &&
@@ -4779,7 +4768,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     });
     try { await this.continueProviderFailovers(); } catch { /* isolate failover continuation errors so sibling runs still tick */ }
     await this.recoverMissingCoordinatorWakeups();
-    await this.transaction(async (state, save, _core, outbox) => { if (this.expireUserDecisions(state, outbox)) await save(); });
+    await this.transaction(async (state, save, _core, outbox) => { if (this.closeUserDecisionsOfEndedRuns(state, outbox)) await save(); });
     const pending = await this.transaction(async state => structuredClone(state.pendingVerifications));
     for (const item of pending) {
       if (item.stuck) continue; // waits for an explicit retry_verification

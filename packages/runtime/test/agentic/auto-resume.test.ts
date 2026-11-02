@@ -274,7 +274,7 @@ describe("bounded automatic resume", () => {
         await f.runtime.flushOutbound();
       }
       if (fence === "decision") await f.runtime.requestUserDecision(f.coordinator(), "coordinator", parseUserDecisionToolInput({
-        runId: "run-1", taskId: "planning", question: "Choose backend", options: ["SQLite", "Postgres"], expiresInMinutes: 60
+        runId: "run-1", taskId: "planning", question: "Choose backend", options: ["SQLite", "Postgres"]
       }));
       await f.journal.exclusive(async (state, save) => {
         const current = state.runs[0]!;
@@ -502,7 +502,7 @@ describe("bounded automatic resume", () => {
 
     const pendingDecision = await fixture();
     await pendingDecision.runtime.requestUserDecision(pendingDecision.coordinator(), "coordinator", parseUserDecisionToolInput({ runId: "run-1",
-      taskId: "planning", question: "Which storage backend?", options: ["SQLite", "Postgres"], expiresInMinutes: 60 }));
+      taskId: "planning", question: "Which storage backend?", options: ["SQLite", "Postgres"] }));
     await block(pendingDecision, () => undefined);
     await expectWaiting(pendingDecision);
     expect(Object.values((await pendingDecision.record()).userDecisions ?? {}).map(item => item.status)).toEqual(["pending"]);

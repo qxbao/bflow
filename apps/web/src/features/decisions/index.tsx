@@ -13,12 +13,11 @@ const isSettled=(cmd:{operation?:{state:string}|undefined})=>Boolean(cmd.operati
 function authorized(decision:WebDecision,actions:WebAction[]){return actions.some(action=>action.kind==='answer_decision' && action.enabled && JSON.stringify(action.expectedVersion)===JSON.stringify(decision.expectedVersion));}
 export type DecisionDraft={review:WebDecision|undefined;reason:string;option:string};
 export function DecisionReview({api,id,decision,actions,fresh,refreshing=false,refresh,draft,onDraftChange}:{api:ApiClient;id:string;decision:WebDecision;actions:WebAction[];fresh:boolean;refreshing?:boolean;refresh:()=>void;draft?:DecisionDraft|undefined;onDraftChange?:((draft:DecisionDraft)=>void)|undefined}) {
-  const [review,setReview]=useState<WebDecision|undefined>(()=>draft?.review),[reason,setReason]=useState(draft?.reason??''),[option,setOption]=useState(draft?.option??''),[error,setError]=useState(''),[stale,setStale]=useState(false),[clock,setClock]=useState(Date.now()),[submittedVersionKey,setSubmittedVersionKey]=useState('');const uid=useId();
+  const [review,setReview]=useState<WebDecision|undefined>(()=>draft?.review),[reason,setReason]=useState(draft?.reason??''),[option,setOption]=useState(draft?.option??''),[error,setError]=useState(''),[stale,setStale]=useState(false),[submittedVersionKey,setSubmittedVersionKey]=useState('');const uid=useId();
   const commands=useCommands(`decision:${decision.decisionId}`);
   const handledStaleOp=useRef<string|undefined>(undefined);
   const report=useRef(onDraftChange);report.current=onDraftChange;
   useEffect(()=>{report.current?.({review,reason,option});},[review,reason,option]);
-  useEffect(()=>{if(!decision.expiresAt)return;const timer=setInterval(()=>setClock(Date.now()),1000);return()=>clearInterval(timer);},[decision.expiresAt]);
   useEffect(()=>{
     const op=commands.operation;
     if(op?.error?.code==='stale_version' && handledStaleOp.current!==op.operationId){
@@ -26,10 +25,10 @@ export function DecisionReview({api,id,decision,actions,fresh,refreshing=false,r
       setStale(true);
     }
   },[commands.operation]);
-  const changed=Boolean(review && !same(review,decision)),expired=Boolean(decision.expiresAt && Date.parse(decision.expiresAt)<=clock);
+  const changed=Boolean(review && !same(review,decision));
   const decisionVersionKey=JSON.stringify(decision.expectedVersion);
   const alreadyApplied=commands.operation?.state==='applied' && submittedVersionKey===decisionVersionKey;
-  const canReview=(fresh || refreshing) && decision.status==='pending' && !expired && authorized(decision,actions) && commands.online && !unsettled(commands) && !alreadyApplied;
+  const canReview=(fresh || refreshing) && decision.status==='pending' && authorized(decision,actions) && commands.online && !unsettled(commands) && !alreadyApplied;
   async function decide(outcome:'approved'|'rejected'|'changes_requested'){
     if(!review || !canReview || changed || stale || commands.busy || unsettled(commands))return;
     const validOption=review.kind==='user_decision' && review.options.includes(option)?option:'';
@@ -38,7 +37,7 @@ export function DecisionReview({api,id,decision,actions,fresh,refreshing=false,r
     if(review.kind==='user_decision' && outcome==='approved' && validOption==='Approve test-integrity exception' && !reason.trim()){setError('Cần nêu lý do chấp thuận ngoại lệ toàn vẹn kiểm thử.');return;}
     try{
       const current=await api.run(id,review.runId),live=current.decisions.find(d=>d.decisionId===review.decisionId);
-      if(!live || !same(live,review) || live.status!=='pending' || (live.expiresAt && Date.parse(live.expiresAt)<=Date.now())){
+      if(!live || !same(live,review) || live.status!=='pending'){
         // The review form may disappear after refresh; keep an explicit not-sent notice outside it.
         commands.notify(`Lựa chọn “${outcomeLabels[outcome]}” cho gói phiên bản ${review.expectedVersion.revision} chưa được gửi: gói đã được quyết định hoặc đã đổi phiên bản (có thể từ tab hoặc terminal khác). Đọc lại công việc để xem kết quả hiện hành.`);
         setStale(true);refresh();return;}
