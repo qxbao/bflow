@@ -117,14 +117,17 @@ function scan(file: string, source: string): Facts {
   return { edges, hazards };
 }
 
+// `scene/renderer` may be a file or a directory with an index; both name the same module.
+const isRendererModule = (file: string): boolean => stripExt(file).replace(/\/index$/, '') === RENDERER;
+
 const RULES: Record<Rule, {
-  follow: 'all' | 'static';
+  // Dynamic edges the rule accepts as lazy entry points; they are neither followed nor reported.
+  lazyOk?: (target: string | undefined) => boolean;
   hazards: boolean;
   blocked: (edge: Edge, target: string | undefined) => string | undefined;
 }> = {
   // Scene may draw and emit selections only: no API layer, no command hook, no router.
   scene: {
-    follow: 'all',
     hazards: false,
     blocked: (edge, target) => {
       if (target && isInside(target, API_DIR)) return 'api/**';
@@ -135,20 +138,22 @@ const RULES: Record<Rule, {
   },
   // Model is pure: no React, no Pixi, no clock or network access.
   model: {
-    follow: 'all',
     hazards: true,
     blocked: edge => {
       const pkg = [...REACT_PKGS, ...PIXI_PKGS].find(name => matchesPkg(edge.spec, name));
       return pkg;
     },
   },
-  // UI may reach Pixi only lazily through scene/renderer; any static path is a violation.
+  // UI may reach Pixi only through a dynamic import of scene/renderer; every other path to Pixi
+  // (static or dynamic, direct or transitive) is a violation.
   ui: {
-    follow: 'static',
+    lazyOk: target => target !== undefined && isRendererModule(target),
     hazards: false,
     blocked: (edge, target) => {
       if (PIXI_PKGS.some(name => matchesPkg(edge.spec, name))) return 'pixi.js';
-      if (target && stripExt(target) === RENDERER) return 'scene/renderer (static)';
+      if (edge.kind === 'static' && target !== undefined && isRendererModule(target)) {
+        return 'scene/renderer (static)';
+      }
       return undefined;
     },
   },
@@ -183,8 +188,8 @@ export function collectViolations(read: Reader, roots: Record<Rule, string[]>): 
           report('computed dynamic import');
           continue;
         }
-        if (edge.kind === 'dynamic' && spec.follow === 'static') continue;
         const target = isRelative(edge.spec) ? resolveRelative(file, edge.spec, read) : undefined;
+        if (edge.kind === 'dynamic' && spec.lazyOk?.(target)) continue;
         const reason = spec.blocked(edge, target);
         if (reason) report(reason);
         if (target && !seen.has(target)) {
@@ -220,6 +225,8 @@ describe('features/office import boundaries', () => {
     const fixture: Record<string, string> = {
       'api/client.ts': 'export const ApiClient = {};',
       'features/office/scene/renderer.ts': "import { Application } from 'pixi.js';\nexport const r = Application;",
+      'features/office/scene/renderer/index.ts': "import { Application } from 'pixi.js';\nexport const idx = Application;",
+      'features/office/scene/hud.ts': "import { Application } from 'pixi.js';\nexport const hud = Application;",
       'features/office/scene/bad-api.ts': "import { ApiClient } from '../../../api/client';\nexport const c = ApiClient;",
       'features/office/scene/bad-router.ts': "export { useNavigate } from 'react-router';",
       'features/office/model/bad-react.ts': "import { useState } from 'react';\nexport const s = useState;",
@@ -230,7 +237,10 @@ describe('features/office import boundaries', () => {
       'features/office/ui/bad-pixi.tsx': "import { Application } from 'pixi.js';\nexport const A = Application;",
       'features/office/ui/bad-renderer.tsx': "import { r } from '../scene/renderer';\nexport const R = r;",
       'features/office/ui/bad-computed.tsx': 'export const load = (p: string) => import(p);',
+      'features/office/ui/bad-renderer-index.tsx': "import { idx } from '../scene/renderer/index';\nexport const I = idx;",
+      'features/office/ui/bad-lazy-hud.tsx': "export const load = () => import('../scene/hud');",
       'features/office/ui/ok-lazy.tsx': "export const load = () => import('../scene/renderer');",
+      'features/office/ui/ok-lazy-index.tsx': "export const load = () => import('../scene/renderer/index');",
     };
     const fixtureRead: Reader = file => fixture[rel(file)];
     const inDir = (dir: string) => Object.keys(fixture)
@@ -248,9 +258,12 @@ describe('features/office import boundaries', () => {
       'model features/office/model/helper.ts react-dom',
       'scene features/office/scene/bad-api.ts api/**',
       'scene features/office/scene/bad-router.ts react-router',
+      'ui features/office/scene/hud.ts pixi.js',
       'ui features/office/scene/renderer.ts pixi.js',
+      'ui features/office/scene/renderer/index.ts pixi.js',
       'ui features/office/ui/bad-computed.tsx computed dynamic import',
       'ui features/office/ui/bad-pixi.tsx pixi.js',
+      'ui features/office/ui/bad-renderer-index.tsx scene/renderer (static)',
       'ui features/office/ui/bad-renderer.tsx scene/renderer (static)',
     ]);
   });
