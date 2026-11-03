@@ -14,7 +14,7 @@
 - Tệp trạng thái riêng: thư mục mode `0o700`, tệp mode `0o600`, chủ sở hữu là UID hiện tại. Ghi JSON theo kiểu tmp + `rename`.
 - Không no-op, không implementation luôn-thành-công chỉ để test qua.
 - Subagent **không chạy git**. Controller review và commit.
-- Lệnh test có mục tiêu: `pnpm exec vitest run <tệp test>` từ gốc worktree; sau khi sửa source, chạy `pnpm exec tsc -b packages/<pkg> --pretty false` (hoặc `apps/cli`). Không chạy cả bộ test.
+- Lệnh test có mục tiêu: `pnpm exec vitest run <tệp test>` từ gốc worktree; sau khi sửa source, chạy `./node_modules/.bin/tsc -b packages/<pkg> --pretty false` (hoặc `apps/cli`). Không chạy cả bộ test.
 - Nhãn hiển thị cho người dùng bằng tiếng Việt có dấu đúng như chép trong brief.
 
 ---
@@ -174,7 +174,7 @@ Test `packages/contracts/test/director.test.ts` (vitest, `import * as contracts 
 7. `DirectorProgressSnapshotSchema` chấp nhận snapshot có một run với một task `status: "running", role: "developer"`, và từ chối `director.presence: "online"`.
 8. `DIRECTOR_LIMITS.waitDefaultMs === 45000` và `DIRECTOR_LIMITS.waitMaxMs === 300000`.
 
-Kiểm: `pnpm exec tsc -b packages/contracts --pretty false` và `pnpm exec vitest run packages/contracts/test/director.test.ts`.
+Kiểm: `./node_modules/.bin/tsc -b packages/contracts --pretty false` và `pnpm exec vitest run packages/contracts/test/director.test.ts`.
 
 ---
 
@@ -238,7 +238,7 @@ Test (dùng `mkdtemp` trong `os.tmpdir()`, `now` giả lập được) cho từn
 8. Trần 500 issue: 500 issue `open` rồi thêm một ⇒ ném "Director issue queue is full" và `listIssues().length === 500`; nếu một issue đã `resolved` thì thêm được và issue resolved cũ nhất bị bỏ.
 9. waitForChange: trả `true` khi có `appendMessage` trong lúc chờ; trả `false` khi hết 50 ms; trả `false` khi abort; trả `true` ngay khi `since` đã cũ.
 
-Kiểm: `pnpm exec tsc -b packages/runtime --pretty false` và `pnpm exec vitest run packages/runtime/test/director/store.test.ts`.
+Kiểm: `./node_modules/.bin/tsc -b packages/runtime --pretty false` và `pnpm exec vitest run packages/runtime/test/director/store.test.ts`.
 
 ---
 
@@ -305,7 +305,7 @@ Test dùng `DirectorStore` thật trên thư mục tạm và port giả (ghi l�
 9. `director_note_user_message` khử trùng lặp trong 10 s, sau 10 s thì ghi.
 10. `set_issue_status` với `"open"` bị từ chối.
 
-Kiểm: `pnpm exec tsc -b packages/runtime --pretty false` và `pnpm exec vitest run packages/runtime/test/director/tools.test.ts packages/runtime/test/director/store.test.ts`.
+Kiểm: `./node_modules/.bin/tsc -b packages/runtime --pretty false` và `pnpm exec vitest run packages/runtime/test/director/tools.test.ts packages/runtime/test/director/store.test.ts`.
 
 ---
 
@@ -342,7 +342,7 @@ Test (snapshot tự dựng, `now` cố định):
 6. `width: 20` ⇒ mọi dòng có tối đa 20 code point, dòng bị cắt kết thúc bằng `…`.
 7. Snapshot sai schema ⇒ ném lỗi Zod.
 
-Kiểm: `pnpm exec tsc -b packages/runtime --pretty false` và `pnpm exec vitest run packages/runtime/test/director/progress.test.ts`.
+Kiểm: `./node_modules/.bin/tsc -b packages/runtime --pretty false` và `pnpm exec vitest run packages/runtime/test/director/progress.test.ts`.
 
 ---
 
@@ -417,7 +417,7 @@ Test:
 4. `[]` và `["node"]` ⇒ ném lỗi đã nêu.
 5. Chứa `1.0.0`.
 
-Kiểm: `pnpm exec tsc -b apps/cli --pretty false` và `pnpm exec vitest run apps/cli/test/director-skill.test.ts`.
+Kiểm: `./node_modules/.bin/tsc -b apps/cli --pretty false` và `pnpm exec vitest run apps/cli/test/director-skill.test.ts`.
 
 ---
 
@@ -478,4 +478,4 @@ Test trên repo tạm (`mkdtemp`, không cần git):
 7. remove sau khi sửa tay `SKILL.md` của claude ⇒ tệp đó nằm trong `kept`, các tệp khác bị gỡ, `.mcp.json` có server `other` vẫn còn với `other`, `.gitignore` không còn khối marker, receipt bị xóa.
 8. Symlink: `.claude` là symlink ra ngoài repo ⇒ ném "Refusing to write through a symlink".
 
-Kiểm: `pnpm exec tsc -b apps/cli --pretty false` và `pnpm exec vitest run apps/cli/test/director-repo-files.test.ts apps/cli/test/director-skill.test.ts`.
+Kiểm: `./node_modules/.bin/tsc -b apps/cli --pretty false` và `pnpm exec vitest run apps/cli/test/director-repo-files.test.ts apps/cli/test/director-skill.test.ts`.
