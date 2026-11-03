@@ -245,3 +245,33 @@ Thiết kế theo dependency injection để test không cần host thật: `dir
 **Tệp:** `packages/runtime/README.md` và `apps/cli/README.md`, nếu tồn tại. Đây là README thuộc package owner, không phải README gốc.
 
 Thêm mục "Director (thử nghiệm, lát B1)" gồm: các lệnh mới, luồng `/bflow-start`, giới hạn đã biết (cùng tồn tại với Conversation/Coordinator v2, tin vai chuyên trách vẫn tới Coordinator, Codex/Agy chưa kiểm live), và bậc bằng chứng "nguồn + test cục bộ". Không sửa README gốc, AGENTS.md hay `docs/**`.
+
+---
+
+### Task 8: Director tạo run mới (`start_work`)
+
+**Mô hình:** Sonnet. **Lý do bổ sung:** chủ dự án yêu cầu Director có toàn quyền, gồm cả khởi tạo công việc (2026-11-03). Ruling cũ "B1 chưa tạo run" bị huỷ.
+
+**Tệp:** `packages/runtime/src/director/tools.ts` (tool mới + mô tả), `packages/runtime/src/director/endpoint.ts`, `packages/runtime/src/agentic/host.ts` (cổng tạo việc), có thể `packages/runtime/src/agentic/conversation.ts` (xuất hàm dùng chung). Test trong `packages/runtime/test/director/`. Skill `apps/cli/src/director-skill.ts` (bước làm việc mới) và test skill.
+
+1. **Tool `start_work`** (thuộc `DIRECTOR_OWN_TOOLS`, nên có trong `tools/list`). Đối số, parse strict bằng Zod:
+   - `{ title, objective, acceptanceCriteria: AcceptanceCriterion[] (≥1, schema contracts), sddLevel: SddPolicyLevel, priority?: "low"|"normal"|"high"|"critical" (mặc định "normal"), userMessageSeq: number }`.
+   - `userMessageSeq` phải trỏ tới một tin `author: "user"` có thật trong transcript Director. Đây là bằng chứng ý định của người: thiếu, không tồn tại, hoặc là tin của Director đều bị từ chối.
+2. **Một đường tạo duy nhất.** Dựng `DelegationRequest` bằng **đúng** `buildDelegationRequest` của `@bflow/conversation`, như `conversation-gateway.ts:422`/`:1111`. Gửi bằng **đúng** `handOffToCoordinator` của bridge bền trong `packages/runtime/src/agentic/conversation.ts` (gọi `runtime.queueHerdr`).
+   - Không tự ghi state run, không bỏ qua `admitDelegation`.
+   - Nếu host chưa có lối gọi bridge từ ngoài Conversation, xuất một hàm nhỏ từ phần ghép Conversation, ví dụ `delegateWork(input)`. Hàm này dùng lại bridge và `sessionId: manifest.conversationSessionId`.
+3. **Idempotent.**
+   - Khoá: `director:<tokenId của phiên>:<userMessageSeq>`. Từ khoá này suy ra `idempotencyKey`, `messageId`, `correlationId` và `runId` (`run-<correlationId>`) một cách tất định.
+   - Gọi lại cùng `userMessageSeq` thì trả lại cùng `runId`, không tạo run thứ hai. Nếu lần đầu gặp `unknown_delivery`, không gửi lại.
+4. **Nguồn gốc.** `metadata.origin = "director"` (giữ metadata lineage nếu builder có). Activity log ghi `director:start_work:completed|failed`, không ghi đối số.
+5. **Kết quả.**
+   - Thành công: `{ runId, correlationId, status: "queued" }`.
+   - `AdmissionRejectedError`: lỗi tool kèm lý do admission nguyên văn, đã redact.
+6. **B1 cùng tồn tại.** Ở B1, pane Coordinator nhận delegation và phân rã. Director giám sát và thông luồng bằng các tool sẵn có. Mô tả tool nói rõ điều này. Lát B2 sẽ chuyển việc phân rã về Director.
+7. **Skill** (`BFLOW_START_SKILL_VERSION` → `"1.2.0"`). Mục "Work loop" thêm bước: với yêu cầu việc mới, làm rõ tiêu chí chấp nhận với người, rồi gọi `start_work` với `userMessageSeq` của tin người (lấy từ `director_wait` hoặc kết quả `director_note_user_message`), rồi theo dõi bằng `director_wait`/`inspect`. Không thêm đường dẫn tệp trong backtick.
+8. **Test:**
+   - `start_work` từ chối `userMessageSeq` của tin Director, seq không tồn tại, hoặc thiếu đối số.
+   - Gọi hai lần cùng seq: một lần handoff, cùng `runId`.
+   - Delegation dựng ra parse được qua `DelegationRequestSchema`, với `requestedBy: "conversation"`, `targetRole: "coordinator"`, `metadata.origin: "director"`.
+   - Lỗi admission được chuyển lên.
+   - Test kiểm danh sách tool (mcp/tools) cập nhật cho khớp.
