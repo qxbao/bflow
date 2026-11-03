@@ -1726,6 +1726,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--config",
         "--name",
         "--provider",
+        "--preset",
         "--force",
         "-f",
         "--yes",
@@ -1770,11 +1771,16 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         return makeValidationError("Option '--name' cannot be empty.", json, "init");
       }
       const projectName = rawName?.trim();
-      const rawProvider = optRes.value.flags.get("--provider");
+      const providerFlag = optRes.value.flags.get("--provider");
+      const presetFlag = optRes.value.flags.get("--preset");
+      if (providerFlag !== undefined && presetFlag !== undefined && providerFlag !== presetFlag) {
+        return makeValidationError("Options '--provider' and '--preset' select the same CLI preset and must not differ.", json, "init");
+      }
+      const rawProvider = providerFlag ?? presetFlag;
       let provider: "claude" | "codex" | "agy" | undefined;
       if (rawProvider !== undefined) {
         if (rawProvider !== "claude" && rawProvider !== "codex" && rawProvider !== "agy") {
-          return makeValidationError("--provider must be 'claude', 'codex', or 'agy'.", json, "init");
+          return makeValidationError(`${providerFlag !== undefined ? "--provider" : "--preset"} must be 'claude', 'codex', or 'agy'.`, json, "init");
         }
         provider = rawProvider;
       }
@@ -1801,7 +1807,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       }
       if ((check || remove) && (force || update || noGitnexus || acceptGitnexusLicense || projectName !== undefined || provider !== undefined)) {
         return makeValidationError(
-          `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--accept-gitnexus-license', '--name', or '--provider'.`,
+          `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--accept-gitnexus-license', '--name', '--provider', or '--preset'.`,
           json,
           "init"
         );

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ProviderFailoverPolicySchema } from "@bflow/contracts";
+import { presetAssignment, roleModelPreset } from "@bflow/agent-providers";
 import { lstatSync } from "node:fs";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
@@ -248,6 +249,52 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
   };
 }
 
+/** Role → provider/model rows written by `bflow init`, as shown in its summary table. */
+export interface RolePresetSummaryRow {
+  readonly role: EnvironmentRoleName;
+  readonly cli: string;
+  readonly model?: string | undefined;
+  readonly required: boolean;
+  readonly note?: string | undefined;
+}
+export interface RolePresetReport {
+  /** The CLI preset that produced (or would produce) the rows; absent when an update kept every saved choice. */
+  readonly provider?: EnvironmentProvider | undefined;
+  readonly applied: boolean;
+  readonly roles: readonly RolePresetSummaryRow[];
+}
+
+/** Replaces each role's provider/model with the static preset of the chosen CLI; other role fields are kept. */
+export function applyRoleModelPreset(config: EnvironmentConfig, provider: EnvironmentProvider): EnvironmentConfig {
+  const roles = config.environment.roles.map(role => presetRole(role, provider));
+  return EnvironmentConfigSchema.parse({ ...config, environment: { ...config.environment, roles } });
+}
+
+function presetRole(role: EnvironmentRoleConfig, provider: EnvironmentProvider): EnvironmentRoleConfig {
+  const assignment = presetAssignment(provider, role.role);
+  const { model: _model, effort: _effort, ...rest } = role;
+  return EnvironmentRoleConfigSchema.parse({ ...rest, cli: assignment.cli, ...(assignment.model ? { model: assignment.model } : {}) });
+}
+
+export function summarizeRolePresets(config: BflowRepositoryConfig, provider: EnvironmentProvider | undefined, applied: boolean): RolePresetReport {
+  const environment = (config as Partial<EnvironmentConfig>).environment;
+  const preset = provider ? roleModelPreset(provider) : undefined;
+  return {
+    ...(provider ? { provider } : {}),
+    applied,
+    roles: (environment?.roles ?? []).map(role => {
+      const fallback = preset?.roles[role.role]?.fallbackReason;
+      return {
+        role: role.role,
+        cli: role.cli,
+        ...(role.model ? { model: role.model } : {}),
+        required: role.required ?? (role.role !== "developer" && role.role !== "sos"),
+        ...(applied && fallback && role.cli !== provider ? { note: fallback } : {})
+      };
+    })
+  };
+}
+
 export function upsertEnvironmentConfig(
   base: EnvironmentConfig,
   saved: EnvironmentConfig,
@@ -259,30 +306,31 @@ export function upsertEnvironmentConfig(
   const baseEnv = base.environment;
   const savedEnv = saved.environment;
   const baseRoleNames = new Set(baseEnv.roles.map((r) => r.role));
+  // Without --provider every saved choice is kept. With it, a role whose CLI changes takes the preset's CLI and model,
+  // because a model or effort chosen for another CLI is not valid for the new one; a role already on that CLI keeps its model.
+  const mergeSavedRole = (savedRole: EnvironmentRoleConfig, baseRole?: EnvironmentRoleConfig): EnvironmentRoleConfig => {
+    const baseFields = baseRole ? (({ model: _model, effort: _effort, ...rest }: EnvironmentRoleConfig) => rest)(baseRole) : {};
+    const mergedRole: Record<string, unknown> = { ...baseFields, ...savedRole };
+    if (options?.provider) {
+      const assignment = presetAssignment(options.provider, savedRole.role);
+      if (assignment.cli !== savedRole.cli) {
+        mergedRole["cli"] = assignment.cli;
+        delete mergedRole["model"];
+        delete mergedRole["effort"];
+        if (assignment.model) mergedRole["model"] = assignment.model;
+      }
+    }
+    if (mergedRole["cli"] === "agy") delete mergedRole["effort"];
+    return EnvironmentRoleConfigSchema.parse(mergedRole);
+  };
   const mergedRoles: EnvironmentRoleConfig[] = [
     ...baseEnv.roles.map((baseRole) => {
       const savedRole = savedEnv.roles.find((r) => r.role === baseRole.role);
-      if (!savedRole) return baseRole;
-      const cli = options?.provider ?? savedRole.cli;
-      const mergedRole: Record<string, unknown> = {
-        ...baseRole,
-        ...savedRole,
-        cli
-      };
-      if (cli === "agy") delete mergedRole["effort"];
-      return EnvironmentRoleConfigSchema.parse(mergedRole);
+      return savedRole ? mergeSavedRole(savedRole, baseRole) : baseRole;
     }),
     ...savedEnv.roles
       .filter((savedRole) => !baseRoleNames.has(savedRole.role))
-      .map((savedRole) => {
-        const cli = options?.provider ?? savedRole.cli;
-        const mergedRole: Record<string, unknown> = {
-          ...savedRole,
-          cli
-        };
-        if (cli === "agy") delete mergedRole["effort"];
-        return EnvironmentRoleConfigSchema.parse(mergedRole);
-      })
+      .map((savedRole) => mergeSavedRole(savedRole))
   ];
 
   const mergedEnv: z.infer<typeof EnvironmentConfigEnvironmentSchema> = {
@@ -444,9 +492,11 @@ export async function initializeEnvironmentConfig(options: {
     const ignore = await open(ignorePath, "a", 0o600);
     try { await ignore.writeFile(`${existing && !existing.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`); } finally { await ignore.close(); }
   }
-  const config = defaultEnvironmentConfig(repository, options.projectName, options.clock?.(), options.provider);
+  const presetProvider = options.provider ?? "codex";
+  const config = applyRoleModelPreset(defaultEnvironmentConfig(repository, options.projectName, options.clock?.(), presetProvider), presetProvider);
   if (options.update) {
     let mergedConfig = config;
+    let reportProvider: EnvironmentProvider | undefined = presetProvider;
     if (configExists) {
       // 0. A configuration from an earlier release is migrated first: a timestamped backup, then context7 becomes deepwiki.
       await migrateLegacyContext7Config(repository.root);
@@ -464,33 +514,43 @@ export async function initializeEnvironmentConfig(options: {
           sessionName: repository.sessionName
         }
       });
+      // Roles new to this release follow the CLI the saved Coordinator already uses unless --provider picks another preset.
+      const savedCoordinator = EnvironmentProviderSchema.safeParse(savedConfig.environment.roles.find(role => role.role === "coordinator")?.cli);
+      const savedProvider = savedCoordinator.success ? savedCoordinator.data : undefined;
+      const baseProvider = options.provider ?? savedProvider ?? presetProvider;
+      const base = baseProvider === presetProvider ? config
+        : applyRoleModelPreset(defaultEnvironmentConfig(repository, options.projectName, options.clock?.(), baseProvider), baseProvider);
+      reportProvider = options.provider;
       // 2. Xoá file config cũ đi.
       await unlink(configPath);
       // 3. Upsert giá trị cũ vào cấu trúc default mới (kèm comment và các trường mới).
-      mergedConfig = upsertEnvironmentConfig(config, savedConfig, {
+      mergedConfig = upsertEnvironmentConfig(base, savedConfig, {
         projectName: options.projectName,
         provider: options.provider
       });
     }
     const file = await open(configPath, "wx", 0o600);
     try { await file.writeFile(renderEnvironmentConfigYaml(mergedConfig)); } finally { await file.close(); }
-    return { configPath, config: mergedConfig, overwritten: configExists, updated: true };
+    return { configPath, config: mergedConfig, overwritten: configExists, updated: true,
+      rolePresets: summarizeRolePresets(mergedConfig, reportProvider, reportProvider !== undefined) };
   }
   if (options.force) {
     const existed = configExists;
     const file = await open(configPath, "w", 0o600);
     try { await file.writeFile(renderEnvironmentConfigYaml(config)); } finally { await file.close(); }
-    return { configPath, config, overwritten: existed };
+    return { configPath, config, overwritten: existed, rolePresets: summarizeRolePresets(config, presetProvider, true) };
   }
   try {
     const file = await open(configPath, "wx", 0o600);
     try { await file.writeFile(renderEnvironmentConfigYaml(config)); } finally { await file.close(); }
-    return { configPath, config, overwritten: false };
+    return { configPath, config, overwritten: false, rolePresets: summarizeRolePresets(config, presetProvider, true) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const saved = await loadRepositoryConfig(configPath);
     if (!saved.ok) throw new Error(`Existing configuration was preserved: ${saved.error.message}`);
-    return { configPath, config: saved.value, overwritten: false };
+    const savedEnvironment = await readEnvironmentConfig(repository).catch(() => undefined);
+    return { configPath, config: saved.value, overwritten: false,
+      ...(savedEnvironment ? { rolePresets: summarizeRolePresets(savedEnvironment, undefined, false) } : {}) };
   }
 }
 

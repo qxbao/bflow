@@ -541,6 +541,35 @@ function summarizeRoleProviders(config: unknown): string | undefined {
   return [...counts].map(([provider, count]) => `${provider} ×${count}`).join(", ");
 }
 
+function formatGitExcludeLine(output: InitCommandOutput): string | undefined {
+  const exclude = output.gitExclude;
+  if (!exclude) return undefined;
+  const state = exclude.status === "bflow" ? (exclude.changed ? "đã thêm .bflow/" : "đã có .bflow/")
+    : exclude.status === "user" ? "đã có quy tắc .bflow do người dùng thêm"
+    : exclude.changed ? "đã gỡ .bflow/" : "chưa có .bflow/";
+  return `Git exclude:  ${state} (${sanitizeIdentifier(exclude.path)})`;
+}
+
+function formatRolePresetTable(output: InitCommandOutput): string[] {
+  const report = output.rolePresets;
+  if (!report || report.roles.length === 0) return [];
+  const heading = report.applied && report.provider
+    ? `Model theo role (preset ${sanitizeIdentifier(report.provider)}):`
+    : "Model theo role (giữ nguyên cấu hình hiện có):";
+  const rows = report.roles.map(row => [
+    sanitizeIdentifier(row.role),
+    sanitizeIdentifier(row.cli),
+    row.model ? sanitizeIdentifier(row.model) : "(mặc định của CLI)",
+    row.required ? "pane cố định" : "spawn động"
+  ]);
+  const header = ["Role", "CLI", "Model", "Khởi tạo"];
+  const widths = header.map((title, column) => Math.max(title.length, ...rows.map(row => row[column]!.length)));
+  const render = (cells: readonly string[]) => `  ${cells.map((cell, column) => cell.padEnd(widths[column]!)).join("  ")}`.trimEnd();
+  const notes = [...new Set(report.roles.flatMap(row => row.note ? [`${row.role}: ${humanText(row.note, 200)}`] : []))];
+  return ["", heading, render(header), render(widths.map(width => "-".repeat(width))), ...rows.map(render),
+    ...notes.map(note => `  * ${note}`)];
+}
+
 function formatInitOutput(output: InitCommandOutput, useColor = false, debug = false): string {
   const lines: string[] = [];
   const projName = output.config?.projectName
@@ -557,6 +586,8 @@ function formatInitOutput(output: InitCommandOutput, useColor = false, debug = f
         `GitNexus:     ${sanitizeIdentifier(output.gitnexus.serviceId)} (${sanitizeIdentifier(output.gitnexus.status)})`
       );
     }
+    const removeExclude = formatGitExcludeLine(output);
+    if (removeExclude) lines.push(removeExclude);
     if (debug && output.diagnostics && output.diagnostics.length > 0) {
       lines.push("", "Chẩn đoán:");
       for (const diag of output.diagnostics) {
@@ -592,6 +623,9 @@ function formatInitOutput(output: InitCommandOutput, useColor = false, debug = f
         }${output.gitnexus.status === "ready" ? ` ${greenTick(useColor)}` : ""}`
       );
     }
+    const checkExclude = formatGitExcludeLine(output);
+    if (checkExclude) lines.push(checkExclude);
+    lines.push(...formatRolePresetTable(output));
     if ((!isHealthy || debug) && output.diagnostics && output.diagnostics.length > 0) {
       lines.push("", "Chẩn đoán:");
       for (const diag of output.diagnostics) {
@@ -635,6 +669,9 @@ function formatInitOutput(output: InitCommandOutput, useColor = false, debug = f
       }`
     );
   }
+  const initExclude = formatGitExcludeLine(output);
+  if (initExclude) lines.push(initExclude);
+  lines.push(...formatRolePresetTable(output));
 
   if (debug) {
     if (output.config?.defaultWorkflow) {

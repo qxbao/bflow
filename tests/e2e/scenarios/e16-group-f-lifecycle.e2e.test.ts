@@ -621,7 +621,9 @@ describe("E16 — Group F: End-to-End Lifecycle (bflow init, up, attach, Convers
     expect(bflowGitignore).toContain("state/");
     expect(bflowGitignore).toContain("logs/");
 
-    git(repoDir, "add", ".bflow");
+    // `bflow init` adds .bflow/ to the repository's git exclude; committing the config is opt-in.
+    expect(git(repoDir, "check-ignore", ".bflow")).toContain(".bflow");
+    git(repoDir, "add", "-f", ".bflow");
     git(repoDir, "commit", "-m", "chore: initialize bflow config");
 
     const repository = await identifyRepository(repoDir);

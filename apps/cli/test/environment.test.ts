@@ -727,7 +727,7 @@ describe("P12 repository environment lifecycle", () => {
       const config = EnvironmentConfigSchema.parse(parseConfigYaml(before));
       expect(config.environment.roles.every(role => role.cli === "claude")).toBe(true);
       expect(config.environment.roles.filter(role => role.role === "developer")).toEqual([
-        { role: "developer", cli: "claude", required: false }
+        { role: "developer", cli: "claude", model: "claude-sonnet-4-6", required: false }
       ]);
       expect((await runCli(["init", "--provider", "codex"], { cwd: other })).ok).toBe(true);
       expect(await readFile(path, "utf8")).toBe(before);

@@ -262,7 +262,7 @@ describe('label layer', () => {
     expect(parent.children).toHaveLength(0);
   });
 
-  test('bubble and Zzz labels get their kind and class, hold only inert text and no child elements', async () => {
+  test('bubble and sleep labels get their kind and class; the bubble holds only inert text, the sleep label three z letters', async () => {
     const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');
     const parent = document.createElement('div');
     const layer = createLabelLayer(parent);
@@ -272,7 +272,10 @@ describe('label layer', () => {
     expect(bubble!.classList.contains('office-bubble')).toBe(true);
     expect(zzz!.dataset['kind']).toBe('sleep');
     expect(zzz!.classList.contains('office-zzz')).toBe(true);
-    expect(parent.querySelectorAll('[data-kind] *')).toHaveLength(0);
+    expect(bubble!.children).toHaveLength(0);
+    expect([...zzz!.children].map(c => `${c.tagName}:${c.textContent}`)).toEqual(['SPAN:z', 'SPAN:z', 'SPAN:z']);
+    layer.update([{ id: 'sleep:b', kind: 'sleep', text: 'Zzz', x: 31, y: 40 }]);
+    expect(zzz!.children).toHaveLength(3);
     expect(parent.querySelector('img')).toBeNull();
     expect(bubble!.textContent).toContain('<img');
     layer.destroy();

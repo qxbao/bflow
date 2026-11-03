@@ -79,8 +79,9 @@ describe('decor', () => {
   test('floor decor blocks its cells; wall, ceiling, rug and table pieces do not', () => {
     const blocked = new Set(DECOR_CELLS.map(key));
     for (const d of floorItems) expect(blocked.has(key(d.cell)), `${d.node} ${key(d.cell)}`).toBe(true);
-    expect(blocked.has('1,6') && blocked.has('2,6') && blocked.has('3,6')).toBe(true); // the sofa is two wide
-    expect(blocked.has('4,6')).toBe(true); // the coffee table (its plant sits on it)
+    for (const gy of [5, 6, 7]) expect(blocked.has(`1,${gy}`) && blocked.has(`3,${gy}`), `sofas at row ${gy}`).toBe(true); // the long sofas face each other
+    expect(blocked.has('2,6')).toBe(true); // the tea table between them
+    for (const gx of [1, 2, 3, 4, 5, 6, 7]) expect(blocked.has(`${gx},0`), `back wall ${gx}`).toBe(true); // bookcases and statue span the back wall
     const lamp = DECOR.find(d => d.node === 'pendant_lamp')!;
     expect(decorPlacement(lamp).y).toBeGreaterThan(2.5);
   });

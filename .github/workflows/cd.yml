@@ -53,8 +53,21 @@ jobs:
           # Ubuntu's opt-in bwrap profile permits user namespaces while restricting
           # capabilities in its children; keep the system-wide restriction enabled.
           restriction=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          # The profile's location differs between apparmor-profiles releases; newer images
+          # may already ship and load it. The bwrap preflight below proves the result either way.
           if [[ -r "$restriction" && "$(cat "$restriction")" == "1" ]]; then
-            sudo apparmor_parser --replace /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+            profile=""
+            for candidate in /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict; do
+              if [[ -f "$candidate" ]]; then profile="$candidate"; break; fi
+            done
+            if [[ -z "$profile" ]]; then
+              profile="$(dpkg -L apparmor-profiles apparmor 2>/dev/null | grep -E '/bwrap-userns-restrict$' | head -n 1 || true)"
+            fi
+            if [[ -n "$profile" ]]; then
+              sudo apparmor_parser --replace "$profile"
+            else
+              echo "bwrap-userns-restrict profile not packaged; relying on the bwrap preflight"
+            fi
           fi
 
           /usr/bin/bwrap --version

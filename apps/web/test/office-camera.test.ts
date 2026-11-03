@@ -179,7 +179,7 @@ describe('layout', () => {
   });
   test('the mailbox and cabinet stand against walls, away from the board', () => {
     expect(OBJECT_CELLS.mailbox.gx).toBe(0);
-    expect(OBJECT_CELLS.cabinet.gy).toBe(0);
+    expect(OBJECT_CELLS.cabinet.gx).toBe(0);
     expect(OBJECT_CELLS.server.gy).toBe(0);
     // The board (8.4 wide) spans the Task Board zone; no wall object stands in front of it.
     const board = { x0: BOARD_X - 4.2, x1: BOARD_X + 4.2 };
