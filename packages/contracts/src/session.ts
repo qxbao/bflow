@@ -306,7 +306,7 @@ export type SessionManifest = SessionManifestV2 | SessionManifestV3;
 
 /** Reads `schemaVersion` first so an unknown version yields one readable error instead of merged union issues. */
 export const SessionManifestSchema = z.unknown().transform((value, context): SessionManifest => {
-  const version = typeof value === "object" && value !== null ? (value as { schemaVersion?: unknown }).schemaVersion : undefined;
+  const version = typeof value === "object" && value !== null && "schemaVersion" in value ? value.schemaVersion : undefined;
   if (version !== 2 && version !== 3) {
     context.addIssue({ code: "custom", message: `unsupported session manifest schemaVersion: ${String(version)}`, path: ["schemaVersion"] });
     return z.NEVER;
