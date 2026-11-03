@@ -183,8 +183,11 @@ export { buildSosProviderArguments, newSosAgentName, resolveSosRoleConfig, spawn
   type SpawnedSosAgentResult } from "./agentic/sos-agent.js";
 
 export { openUserInteractionClient, interactionProjectId } from "./interaction/client.js";
-export { registerUserInteractionIssuer } from "./agentic/host-controller.js";
+export { registerUserInteractionIssuer, callDirectorOwnerHost, callDirectorTool } from "./agentic/host-controller.js";
 
 // Opt-in, Runtime-owned data snapshot verification. No daemon/CLI configuration adapter.
 export { DataVerificationHost, specificationContent as dataSpecificationContent } from "./data/host.js";
 export { digest as dataVerificationDigest, contractDigest as dataContractDigest } from "./data/contract.js";
+
+// Director agent facade and state (ADR 0009).
+export * from "./director/index.js";

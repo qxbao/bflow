@@ -101,7 +101,12 @@ describe("bflow init Git exclude", () => {
     const exclude = join(dir, ".git/info/exclude");
     for (const args of [["init"], ["init"], ["init", "--update"], ["init", "--force"]])
       expect((await runCli([...args, "--no-gitnexus"], { cwd: dir })).ok).toBe(true);
-    expect(await excludeLines(exclude)).toEqual([BFLOW_EXCLUDE_MARKER, BFLOW_EXCLUDE_ENTRY]);
+    // Director files are hidden through their own marked block in the same exclude file (D-DIR-05).
+    const lines = await excludeLines(exclude);
+    const start = lines.indexOf("# >>> bflow director >>>");
+    const end = lines.indexOf("# <<< bflow director <<<");
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect([...lines.slice(0, start), ...lines.slice(end + 1)]).toEqual([BFLOW_EXCLUDE_MARKER, BFLOW_EXCLUDE_ENTRY]);
     expect(git(dir, "status", "--porcelain", "--untracked-files=all")).toBe("");
     expect(await readFile(join(dir, ".gitignore"), "utf8").catch(() => "absent")).toBe("absent");
   });

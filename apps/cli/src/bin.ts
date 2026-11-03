@@ -54,6 +54,59 @@ export async function main(
     stderr: (msg) => process.stderr.write(msg + "\n")
   };
 
+  // Director subcommands own raw stdout (MCP protocol lines, one JSON object, or nothing for hooks).
+  if (args[0] === "director" && args[1] === "hook" && args.length === 3 && (args[2] === "claude" || args[2] === "codex")) {
+    try {
+      const m = await import("./director-commands.js");
+      await m.runDirectorHookSafely(args[2], () => m.defaultDirectorDeps(context?.cwd ?? process.cwd()));
+    } catch (error) {
+      if (process.env.BFLOW_DEBUG) { try { process.stderr.write(`director hook: ${error instanceof Error ? error.message : String(error)}\n`); } catch {} }
+    }
+    // A hook must never linger on an open stdin pipe.
+    if (context === undefined) process.exit(0);
+    process.exitCode = 0;
+    return { ok: true, command: "director", exitCode: 0, stdout: "", stderr: "" };
+  }
+  if (args[0] === "director" || (args[0] === "help" && args[1] === "director")) {
+    const { parseDirectorArgs, runDirectorCommand, defaultDirectorDeps, DIRECTOR_HELP } = await import("./director-commands.js");
+    const parsed = parseDirectorArgs(args[0] === "help" ? [] : args.slice(1));
+    if (!parsed.ok && args[0] === "director" && args[1] === "call") {
+      // Shell path of the Director skill parses stdout: one JSON object, exit 1.
+      realIo.stdout(`${JSON.stringify({ ok: false, message: parsed.message })}\n`);
+      process.exitCode = CLI_EXIT_CODES.RUNTIME_ERROR;
+      return { ok: false, command: "director", exitCode: CLI_EXIT_CODES.RUNTIME_ERROR, stdout: "", stderr: "" };
+    }
+    if (!parsed.ok) {
+      realIo.stderr(`${parsed.message}\n${DIRECTOR_HELP}`);
+      process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;
+      return { ok: false, command: "director", exitCode: CLI_EXIT_CODES.USAGE_ERROR, stdout: "", stderr: parsed.message };
+    }
+    const exitCode = await runDirectorCommand(parsed.value, await defaultDirectorDeps(context?.cwd ?? process.cwd()));
+    process.exitCode = exitCode;
+    return { ok: exitCode === 0, command: "director", exitCode, stdout: "", stderr: "" };
+  }
+
+  if (args[0] === "progress" || args[0] === "queue") {
+    const m = await import("./director-progress.js");
+    const cmd = args[0];
+    const wantsHelp = args[1] === "--help" || args[1] === "-h" || (cmd === "queue" && args.length === 1);
+    if (wantsHelp) {
+      const text = cmd === "progress" ? m.PROGRESS_HELP : m.QUEUE_HELP;
+      realIo.stdout(text);
+      return { ok: true, command: cmd, exitCode: 0, stdout: text, stderr: "" };
+    }
+    const parsed = m.parseProgressCliArgs(cmd, args.slice(1));
+    if (!parsed.ok) {
+      realIo.stderr(parsed.message);
+      process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;
+      return { ok: false, command: cmd, exitCode: CLI_EXIT_CODES.USAGE_ERROR, stdout: "", stderr: parsed.message };
+    }
+    const deps = await m.defaultDirectorProgressDeps(context?.cwd ?? process.cwd(), parsed.value.cmd === "progress" && parsed.value.follow);
+    const exitCode = parsed.value.cmd === "progress" ? await m.runProgressCommand(parsed.value, deps) : await m.runQueueCommand(parsed.value, deps);
+    process.exitCode = exitCode;
+    return { ok: exitCode === 0, command: cmd, exitCode, stdout: "", stderr: "" };
+  }
+
   // Web owns its foreground HTTP lifetime. Never route it through legacy RuntimeService.
   if (args[0] === "web" || (args[0] === "help" && args[1] === "web")) {
     const { parseWebArgs, runWebCommand, WEB_HELP } = await import("./web-command.js");

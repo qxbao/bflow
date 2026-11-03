@@ -9,6 +9,12 @@ Lệnh / Commands:
   init            Khởi tạo cấu hình kho mã bflow và quy trình mặc định
   config-migrate  Chuyển đổi tệp cấu hình cũ sang .bflow/config.yml
   setup           Lập kế hoạch và cài đặt môi trường máy cùng các thành phần nền tảng
+  director start  Director: đăng ký phiên Director và in token (--provider, --json)
+  director call   Director: gọi một tool qua BFLOW_DIRECTOR_TOKEN (bflow director call <tool> [argsJson])
+  director mcp    Director: máy chủ MCP qua stdio cho CLI của nhà cung cấp
+  director hook   Director: hook ghi tin nhắn người dùng (bflow director hook claude|codex)
+  progress        Director: xem tiến độ (bflow progress [--follow] [--json])
+  queue           Director: hàng đợi lỗi (bflow queue list|show|retry|dismiss)
   web             Mở web localhost: bflow web [--port N] [--no-open]
   up              Khởi động/đồng bộ môi trường làm việc của kho mã
   down            Tạo checkpoint và dừng môi trường làm việc của kho mã
@@ -72,6 +78,8 @@ Tùy chọn (Options):
   --check               Kiểm tra chỉ đọc đối với .bflow/config.yml và mức sẵn sàng GitNexus của kho mã
   --remove              Gỡ đăng ký dịch vụ GitNexus của kho mã này khỏi Gateway dùng chung
   --no-gitnexus         Bỏ qua lập chỉ mục GitNexus và đăng ký dịch vụ trên Gateway
+  --no-director         Không ghi skill/MCP/hook Director vào kho mã nguồn
+  --commit-skills       Giữ skill Director để commit (không thêm khối git exclude)
   -f, --force           Ghi đè cấu hình hiện có bằng các giá trị mặc định mới
   -y, --yes             Tương đương --force, đồng thời chấp nhận giấy phép GitNexus PolyForm-Noncommercial không cần hỏi lại
   --accept-gitnexus-license Chấp nhận giấy phép GitNexus PolyForm-Noncommercial và tạo chỉ mục mà không ghi đè cấu hình hiện có
