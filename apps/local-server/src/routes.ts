@@ -7,13 +7,19 @@ import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { join, extname, sep } from 'node:path';
 import { WebHttpContracts, WebHttpPathParamsSchema, WebProjectInspectionResultSchema, WebProjectPreviewResultSchema,
-  WebProjectMutationStatusResultSchema, WebProjectConfigurationResultSchema, WebProjectInitializationResultSchema, WebProjectSessionResultSchema, WebRunPageResultSchema, WebRunViewResultSchema, WebDecisionPageResultSchema, WEB_LIMITS,
+  WebProjectMutationStatusResultSchema, WebProjectConfigurationResultSchema, WebProjectInitializationResultSchema, WebProjectSessionResultSchema, WebRunPageResultSchema, WebRunViewResultSchema, WebDecisionPageResultSchema, WebWorkforceViewSchema, WebActivityEntrySchema, WebWorkforceExcerptsSchema, WebAgentTranscriptSchema, WebPageSchema, WEB_LIMITS,
   type UserInteractionClient } from '@bflow/contracts/web';
 import { WebAuthenticatedContextSchema, type WebAuthenticatedContext } from '@bflow/contracts/web-host';
 import { BrowserSessions } from './session.js';
 import { ProjectRegistry } from './project-registry.js';
 import { Operations } from './lifecycle-operations.js';
+import { OperationResultSchema } from '@bflow/contracts';
 import { HttpError, unwrap, observeWithinDeadline } from './errors.js';
+
+const WebExcerptsResultSchema=OperationResultSchema(WebWorkforceExcerptsSchema);
+const WebTranscriptResultSchema=OperationResultSchema(WebAgentTranscriptSchema);
+const WebWorkforceResultSchema=OperationResultSchema(WebWorkforceViewSchema);
+const WebActivityPageResultSchema=OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
 
 export function json(res:ServerResponse,status:number,body:unknown):void{
   res.statusCode=status;if(status===204){res.end();return;}res.setHeader('Content-Type','application/json; charset=utf-8');res.end(JSON.stringify(body));
@@ -112,6 +118,29 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       if(name==='runs'){respond(unwrap(WebRunPageResultSchema.parse(await observeWithinDeadline(()=>client.listRuns(id,WebHttpContracts.runs.query.parse(query))))));return;}
       if(name==='run'){const value=unwrap(WebRunViewResultSchema.parse(await observeWithinDeadline(()=>client.readRun(id,params.runId!))));if(value.runId!==params.runId)throw new HttpError('unavailable');respond(value);return;}
       if(name==='decisions'){respond(unwrap(WebDecisionPageResultSchema.parse(await observeWithinDeadline(()=>client.listDecisions(id)))));return;}
+      // D-WEB-03 optional read ports: a backend without them answers operation_not_allowed.
+      if(name==='workforce'){
+        if(!client.readWorkforce)throw new HttpError('operation_not_allowed');
+        const read=client.readWorkforce.bind(client);
+        const value=unwrap(WebWorkforceResultSchema.parse(await observeWithinDeadline(()=>read(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+      }
+      if(name==='workforceExcerpts'){
+        if(!client.readWorkforceExcerpts)throw new HttpError('operation_not_allowed');
+        const read=client.readWorkforceExcerpts.bind(client);
+        const value=unwrap(WebExcerptsResultSchema.parse(await observeWithinDeadline(()=>read(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+      }
+      if(name==='agentTranscript'){
+        if(!client.readAgentTranscript)throw new HttpError('operation_not_allowed');
+        const read=client.readAgentTranscript.bind(client);
+        const value=unwrap(WebTranscriptResultSchema.parse(await observeWithinDeadline(()=>read(id,params.instanceId!))));
+        if(value.projectId!==id||value.instanceId!==params.instanceId)throw new HttpError('unavailable');respond(value);return;
+      }
+      if(name==='activity'){
+        if(!client.readRunActivity)throw new HttpError('operation_not_allowed');
+        const read=client.readRunActivity.bind(client),q=WebHttpContracts.activity.query.parse(parsedQuery);
+        const value=unwrap(WebActivityPageResultSchema.parse(await observeWithinDeadline(()=>read(id,params.runId!,q.cursor))));
+        if(value.items.some(entry=>entry.runId!==params.runId))throw new HttpError('unavailable');respond(value);return;
+      }
       if(name==='events'){
         const header=uniqueHeader(req,'last-event-id'),q=WebEventsQuerySchema.parse(parsedQuery);
         if(header!==undefined && q.cursor!==undefined && header!==q.cursor)throw new HttpError('invalid_request');

@@ -239,6 +239,15 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
       pending.delete(request.taskId); ready.delete(request.taskId);
       return released;
     },
+    async closeCancelledDeveloper(request, callOptions) {
+      if (!base.closeCancelledDeveloper) return { ok: false, error: { code: "conflict", retryable: true, message: "This pane manager cannot close a cancelled Developer pane" } };
+      const closed = await base.closeCancelledDeveloper(request, callOptions);
+      if (!closed.ok) return closed;
+      try { await launches.release(request.taskId); }
+      catch (error) { return { ok: false, error: { code: "conflict", retryable: true, message: String(error) } }; }
+      pending.delete(request.taskId); ready.delete(request.taskId);
+      return closed;
+    },
     async releaseDeveloper(request, callOptions) {
       pending.delete(request.taskId); ready.delete(request.taskId);
       const released = await base.releaseDeveloper({ ...request, closePane: true }, callOptions);

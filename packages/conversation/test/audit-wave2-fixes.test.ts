@@ -5,7 +5,6 @@ import {
   HerdrConversationBridge,
   InMemoryConversationContextStore,
   MockHerdrAgentTransport,
-  NO_DEADLINE_TEXT,
   formatCoordinatorMessageForUser,
   type UserTurnInput
 } from "../src/index.js";
@@ -255,7 +254,7 @@ describe("Wave 2 audit: formatting failures never reject a valid RoleMessage", (
 });
 
 describe("Wave 2 audit: design/task approval prompt", () => {
-  it("shows target, reason, requester, evidence, deadline and the exact reply syntax", () => {
+  it("shows target, reason, requester, evidence and the exact reply syntax, without any deadline", () => {
     const approval = designApproval({
       expiresAt: "2031-03-04T05:06:07.000Z",
       evidence: [{ trust: "stored", artifactId: "art-spec-1", runId: "run-audit-1", kind: "specification",
@@ -275,12 +274,12 @@ describe("Wave 2 audit: design/task approval prompt", () => {
     expect(content).toContain("Phê duyệt đặc tả lưu trữ");
     expect(content).toContain("coordinator");
     expect(content).toContain("artifact://sha256/spec-storage-v1");
-    expect(content).toContain("Hết hạn:** 2031-03-04T05:06:07.000Z");
+    expect(content).not.toContain("Hết hạn");
     expect(content).toContain("`apr-design-1: approve`");
     expect(content).toContain("`apr-design-1: reject <lý do>`");
   });
 
-  it("states that there is no deadline when the request has no expiry", () => {
+  it("never mentions a deadline when the request has no expiry", () => {
     const result = formatCoordinatorMessageForUser({ sessionId: SESSION_ID, turnSequence: 1, createdAt: new Date().toISOString(),
       roleMessage: {
         schema_version: 2, message_id: "msg-prompt-2", correlation_id: "corr-1", run_id: "run-audit-1",
@@ -289,7 +288,7 @@ describe("Wave 2 audit: design/task approval prompt", () => {
       } as unknown as RoleMessage });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.message.content).toContain(`Hết hạn:** ${NO_DEADLINE_TEXT}`);
+    expect(result.value.message.content).not.toContain("Hết hạn");
     expect(result.value.message.content).toContain("Bằng chứng đính kèm:** không có");
   });
 });

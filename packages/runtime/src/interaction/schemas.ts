@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { IdentifierSchema, WebRunQuerySchema, WebCommandSchema } from "@bflow/contracts";
+import { IdentifierSchema, WebCursorSchema, WebRunQuerySchema, WebCommandSchema } from "@bflow/contracts";
 import { WebPrincipalSchema } from "@bflow/contracts/web-host";
 export const InteractionExecuteSchema = z.object({ command: WebCommandSchema, principal: WebPrincipalSchema }).strict();
 export const InteractionOperationSchema = z.object({ projectId: IdentifierSchema, operationId: z.string().uuid() }).strict();
@@ -24,5 +24,17 @@ export const InteractionQuerySchema = z.discriminatedUnion("kind", [
     .strict(),
   z
     .object({ kind: z.literal("decisions"), projectId: IdentifierSchema })
+    .strict(),
+  z
+    .object({ kind: z.literal("workforce"), projectId: IdentifierSchema })
+    .strict(),
+  z
+    .object({ kind: z.literal("workforce_excerpts"), projectId: IdentifierSchema })
+    .strict(),
+  z
+    .object({ kind: z.literal("agent_transcript"), projectId: IdentifierSchema, instanceId: IdentifierSchema })
+    .strict(),
+  z
+    .object({ kind: z.literal("activity"), projectId: IdentifierSchema, runId: IdentifierSchema, cursor: WebCursorSchema.optional() })
     .strict(),
 ]);

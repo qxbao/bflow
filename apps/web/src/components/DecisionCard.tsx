@@ -94,7 +94,7 @@ export function Evidence({api,projectId,evidence}:{api:ApiClient;projectId:strin
     if(lastIdentity.current!==identity){lastIdentity.current=identity;reqGen.current+=1;setText(undefined);setError(undefined);setLoading(false);}
   },[identity]);
   useEffect(()=>()=>{reqGen.current+=1;},[]);
-  return <section className="evidence my-2.5 min-w-0 border-t border-line pt-2.5 text-sm">
+  return <section data-component="Evidence" className="evidence my-2.5 min-w-0 border-t border-line pt-2.5 text-sm">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="m-0">Tài liệu kiểm chứng · {evidence.mediaType}{evidence.sizeBytes!==undefined?` · ${new Intl.NumberFormat('vi').format(evidence.sizeBytes)} byte`:''}</p>
       <div className="flex flex-wrap items-center gap-2">
@@ -112,7 +112,6 @@ export function DecisionCard({decision,api,projectId,headingLevel=3}:{decision:W
   const visiblePending=decision.status==='pending' && decision.evidence.length>3?decision.evidence.slice(0,3):decision.evidence;
   const extraPending=decision.status==='pending' && decision.evidence.length>3?decision.evidence.slice(3):[];
   return <article className="panel min-w-0 border border-line bg-surface p-3.5 sm:p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">{packageLabel(decision)} · Phiên bản {decision.expectedVersion.revision}</div><StatusBadge value={decision.status}/></div><Heading className="mt-1 mb-1.5">{decisionQuestionLabel(decision.question)}</Heading>
-    {decision.expiresAt && <p className="my-1 text-sm">Hạn xem xét: {new Date(decision.expiresAt).toLocaleString('vi')}</p>}
     {decision.options.length>0 && <ul>{decision.options.map(option=><li key={option}>{option}</li>)}</ul>}
     {decision.status==='pending' && <p className="my-1.5 text-sm text-muted">Đọc tài liệu và đối chiếu phiên bản trước khi quyết định.</p>}
     {decision.evidence.length===0?<p className="my-2 text-sm text-muted">Chưa có tài liệu đính kèm.</p>:collapseSettled?<details className="mt-2.5 border-t border-line pt-2.5"><summary className="cursor-pointer text-sm font-medium text-ink">Tài liệu kiểm chứng đính kèm ({decision.evidence.length})</summary>{decision.evidence.map(item=><Evidence key={item.artifactId} api={api} projectId={projectId} evidence={item}/>)}</details>:<>{visiblePending.map(item=><Evidence key={item.artifactId} api={api} projectId={projectId} evidence={item}/>)}{extraPending.length>0 && <details className="mt-2 border-t border-line pt-2"><summary className="cursor-pointer text-sm font-medium text-ink">Xem thêm {extraPending.length} tài liệu kiểm chứng khác</summary>{extraPending.map(item=><Evidence key={item.artifactId} api={api} projectId={projectId} evidence={item}/>)}</details>}</>}

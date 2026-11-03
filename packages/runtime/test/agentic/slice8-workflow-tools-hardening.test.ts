@@ -416,7 +416,7 @@ describe("Slice 8.1: static imports eliminate ERR_VM_DYNAMIC_IMPORT_CALLBACK_MIS
 });
 
 describe("Slice 8.2: parent lease validation & per-run isolation prevent Task notice parent lease crashes", () => {
-  it("expires a Developer user decision after the 5-minute task lease expired without crashing tick() or starving sibling runs", async () => {
+  it("keeps a Developer user decision pending after the 5-minute task lease expired without crashing tick() or starving sibling runs", async () => {
     const f = await createFixture();
     const { developer } = await f.dispatch("run-1");
     const devBinding = f.panes.bindings.find(p => p.paneId === developer.handle.target.paneId)!;
@@ -428,8 +428,7 @@ describe("Slice 8.2: parent lease validation & per-run isolation prevent Task no
         runId: "run-1",
         taskId: "implement",
         question: "Which markdown heading level should guide.md use?",
-        options: ["Use H1", "Use H2"],
-        expiresInMinutes: 30
+        options: ["Use H1", "Use H2"]
       })
     )) as any;
     expect(decisionRes.status).toBe("pending");
@@ -437,16 +436,17 @@ describe("Slice 8.2: parent lease validation & per-run isolation prevent Task no
     const run2 = await f.intake("run-2");
     await f.runtime.proposeWorkflow("run-2", run2.spec, run2.def);
 
-    // Advance 35 minutes: both Developer's 5-min task.assignment lease and the 30-min user decision have expired.
+    // Advance 35 minutes: Developer's 5-min task.assignment lease has expired; the user decision has no deadline.
     f.advance(35 * 60_000);
 
     await expect(f.runtime.tick()).resolves.toBeDefined();
 
     const state = await f.state();
     const firstRun = state.runs.find((r: any) => r.runId === "run-1");
-    expect(firstRun.userDecisions[decisionRes.approvalId].status).toBe("expired");
-    expect(firstRun.status).toBe("escalated");
-    expect(firstRun.pendingAction).toMatchObject({ kind: "resume_coordinator", state: "pending" });
+    expect(firstRun.userDecisions[decisionRes.approvalId].status).toBe("pending");
+    // Waiting for the user is not a failure: the run keeps waiting and nothing resumes the Coordinator.
+    expect(firstRun.status).toBe("implementing");
+    expect(firstRun.pendingAction?.kind).not.toBe("resume_coordinator");
 
     // Sibling run-2 must still have been scheduled and flushed without starvation.
     const run2Dev = state.outbound.find(
@@ -467,12 +467,11 @@ describe("Slice 8.2: parent lease validation & per-run isolation prevent Task no
         runId: "run-1",
         taskId: "implement",
         question: "Confirm guide format?",
-        options: ["Short", "Full"],
-        expiresInMinutes: 60
+        options: ["Short", "Full"]
       })
     )) as any;
 
-    // 6 minutes later: decision is still valid (60m), but Developer's 5m task lease has expired.
+    // 6 minutes later: decision is still pending, but Developer's 5m task lease has expired.
     f.advance(6 * 60_000);
     const now = f.ports.clock().toISOString();
 

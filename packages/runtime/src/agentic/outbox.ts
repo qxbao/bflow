@@ -173,18 +173,25 @@ export class HerdrOutbox {
     for (const child of this.state.outbound) if (child.parentAssignmentId === owner.message.message_id) child.lease = acquired;
     await this.save();
   }
-  /** A durable explicit phase resume may continue the exact live execution under a new Registry fence, at most three times. */
+  /** A durable explicit phase/owner resume may continue the exact live execution under a new Registry fence, at most three times. */
   async recoverTaskLease(owner: Outbound, authorization: Outbound): Promise<void> {
     const run = this.state.runs.find(item => item.runId === owner.message.run_id);
     const task = run?.tasks.find(item => item.taskId === owner.taskId);
     const payload = record(authorization.message.payload);
+    const ownerResume = run !== undefined && authorization.message.type === "task.status" && authorization.message.sender.role === "runtime" &&
+      authorization.message.recipient.role === "coordinator" && payload.kind === "resume_run" && payload.automatic === false &&
+      (typeof payload.webCommandId === "string" && payload.webCommandId.length > 0 ||
+        typeof payload.conversationUserMessageId === "string" && payload.conversationUserMessageId.length > 0) &&
+      run?.pendingAction?.actionId === payload.actionId && run.resumeReceipts?.some(receipt =>
+        receipt.actionId === payload.actionId && receipt.messageId === authorization.message.message_id) === true;
+    const phaseResume = authorization.message.type === "verification.requested" && payload.kind === "conditional_evidence" &&
+      payload.taskId === owner.taskId && payload.implementationAttemptId === owner.attemptId &&
+      !!(authorization.phaseRetirement?.resumeAuthorizedBy || (authorization.phaseFailure?.repairable === false || authorization.phaseFailure?.leaseRecoveryRequired === true) && authorization.phaseFailure!.applied && authorization.phaseFailure!.retryAuthorized === true);
     if (!this.state.outbound.includes(owner) || !this.state.outbound.includes(authorization) || owner.parentAssignmentId ||
         owner.message.type !== "task.assignment" || owner.status !== "accepted" || !owner.lease || !owner.assignment ||
         !owner.handle?.target.session || owner.cancelRequested || owner.leaseRelease || !task || task.writerReleased || task.result ||
         !run || run.cancelled || run.status !== "implementing" || authorization.message.run_id !== run.runId ||
-        authorization.message.type !== "verification.requested" || payload.kind !== "conditional_evidence" ||
-        payload.taskId !== owner.taskId || payload.implementationAttemptId !== owner.attemptId ||
-        !(authorization.phaseRetirement?.resumeAuthorizedBy || (authorization.phaseFailure?.repairable === false || authorization.phaseFailure?.leaseRecoveryRequired === true) && authorization.phaseFailure!.applied && authorization.phaseFailure!.retryAuthorized === true) || run.nativeDeliveries?.length ||
+        !(ownerResume || phaseResume) || run.nativeDeliveries?.length ||
         run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
         Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         this.state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)))
@@ -193,7 +200,7 @@ export class HerdrOutbox {
     if (!Array.isArray(rawReceipts)) throw new Error("Corrupt policy measurement history");
     const receipts = rawReceipts.map(item => VerificationResultSchema.parse(item));
     const expected = task.spec.strategy.tddDecision.mode === "required" ? ["red", "green", "refactor"][receipts.length] : receipts.length === 0 ? "verification" : undefined;
-    if (payload.phase !== expected) throw new Error("Task lease resume authority belongs to an earlier policy phase");
+    if (!ownerResume && payload.phase !== expected) throw new Error("Task lease resume authority belongs to an earlier policy phase");
     const raw = unwrap(await this.ports.panes.getRoleBinding(owner.selector));
     if (!raw) throw new Error("Task lease recipient disappeared");
     const pane = PaneBindingSchema.parse(raw), health = unwrap(await this.ports.panes.inspectRoleHealth(owner.selector));

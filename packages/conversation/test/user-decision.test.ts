@@ -145,7 +145,7 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(isUserDecisionRequest({ metadata: { bundleFingerprint: "x" } })).toBe(false);
     });
 
-    it("renders asking role, question, numbered options and expiry, distinct from design approval wording", () => {
+    it("renders asking role, question and numbered options without a deadline, distinct from design approval wording", () => {
       const request = userDecisionRequest();
       const text = renderUserDecisionPrompt(JSON.parse(JSON.stringify(request)) as Record<string, unknown>);
       expect(text).toContain("CẦN QUYẾT ĐỊNH CỦA BẠN");
@@ -154,7 +154,7 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(text).toContain("Which storage backend?");
       expect(text).toContain("1. SQLite");
       expect(text).toContain("2. Postgres");
-      expect(text).toContain(`Hết hạn:** ${request.expiresAt}`);
+      expect(text).not.toContain("Hết hạn");
       expect(text).not.toContain("YÊU CẦU PHÊ DUYỆT");
     });
 
@@ -346,9 +346,9 @@ describe("P30 T8 conversation user-decision relay", () => {
     }
 
     it.each([
-      { label: "with an expiry", expiresAt: "2031-03-04T05:06:07.000Z", deadline: "Hết hạn:** 2031-03-04T05:06:07.000Z" },
-      { label: "without an expiry", expiresAt: undefined, deadline: "Hết hạn:** Không có hạn — đang chờ bạn trả lời" }
-    ])("status report shows the full pending user decision $label", async ({ expiresAt, deadline }) => {
+      { label: "persisted with an expiry", expiresAt: "2031-03-04T05:06:07.000Z" },
+      { label: "without an expiry", expiresAt: undefined }
+    ])("status report shows the full pending user decision $label", async ({ expiresAt }) => {
       const request = userDecisionRequest({ runId: "run-status-1", expiresAt });
       const { gateway } = await openGatewayWithDecision(request);
       const correlationId = gateway.getContextSnapshot().runIdToCorrelationId["run-status-1"]!;
@@ -367,7 +367,7 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(text).toContain("Which storage backend?");
       expect(text).toContain("1. SQLite");
       expect(text).toContain("2. Postgres");
-      expect(text).toContain(deadline);
+      expect(text).not.toContain("Hết hạn");
       expect(text).toContain(`\`${request.approvalId}: <số>\``);
     });
 
@@ -412,7 +412,7 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(prompt).toContain("Which storage backend?");
       expect(prompt).toContain("1. SQLite");
       expect(prompt).toContain("2. Postgres");
-      expect(prompt).toContain(`Hết hạn:** ${request.expiresAt}`);
+      expect(prompt).not.toContain("Hết hạn");
     });
 
     it("sends the user's option reply to Coordinator as a user-scoped approval.decision", async () => {
@@ -444,23 +444,19 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(gateway.getContextSnapshot().pendingApprovals[request.approvalId]).toBeDefined();
     });
 
-    it("rejects an answer to a user decision after its expiry", async () => {
+    it("accepts an answer to a user decision persisted with a past deadline", async () => {
       const request = userDecisionRequest({
         runId: "run-gw-3",
         expiresAt: new Date(Date.now() - 1000).toISOString()
       });
       const { gateway } = await openGatewayWithDecision(request);
       const late = await gateway.handleUserTurn(turn("1"));
-      // The refusal is visible to the user as a Conversation reply; no decision is recorded.
       expect(late.ok).toBe(true);
       if (!late.ok) return;
-      expect(late.value.approvalDecision).toBeUndefined();
-      expect(late.value.agentReply.intent).toBe("error_report");
-      expect(late.value.agentReply.content).toContain("hết hạn");
-      expect(gateway.getContextSnapshot().approvalDecisions[request.approvalId]).toBeUndefined();
+      expect(late.value.approvalDecision).toMatchObject({ approvalId: request.approvalId, decision: "approved" });
     });
 
-    it("drops an expired prompt on Runtime's expiry notice and tells the user", async () => {
+    it("drops a prompt when Runtime closes it because its run ended and tells the user", async () => {
       const request = userDecisionRequest({ runId: "run-gw-4" });
       const { gateway, correlationId } = await openGatewayWithDecision(request);
       expect(gateway.getContextSnapshot().pendingApprovals[request.approvalId]).toBeDefined();
@@ -478,7 +474,8 @@ describe("P30 T8 conversation user-decision relay", () => {
       } as RoleMessage);
       expect(notice.ok).toBe(true);
       if (!notice.ok) return;
-      expect(notice.value.userNotification?.content).toContain("HẾT HẠN");
+      expect(notice.value.userNotification?.content).toContain("ĐÃ ĐÓNG");
+      expect(notice.value.userNotification?.content).not.toMatch(/hết hạn/i);
       expect(gateway.getContextSnapshot().pendingApprovals[request.approvalId]).toBeUndefined();
       expect(gateway.getContextSnapshot().session.activeApprovalIds).not.toContain(request.approvalId);
 
@@ -486,7 +483,7 @@ describe("P30 T8 conversation user-decision relay", () => {
       expect(late.ok && late.value.approvalDecision).toBeFalsy();
     });
 
-    it("never drops a design approval on an expiry notice that names a non-user request", async () => {
+    it("never drops a design approval on a closure notice that names a non-user request", async () => {
       const request = userDecisionRequest({ runId: "run-gw-5" });
       const { gateway, correlationId } = await openGatewayWithDecision(request);
       await gateway.handleCoordinatorRoleMessage({
@@ -504,16 +501,7 @@ describe("P30 T8 conversation user-decision relay", () => {
     });
   });
 
-  describe("expired entries and design approvals sharing the queue", () => {
-    function expiredRequest(overrides: Partial<ApprovalRequest> = {}, metadataOverrides: Record<string, unknown> = {}): ApprovalRequest {
-      return userDecisionRequest({
-        approvalId: "apr-user-decision-expired",
-        runId: "run-ud-old",
-        expiresAt: new Date(Date.now() - 60_000).toISOString(),
-        ...overrides
-      }, metadataOverrides);
-    }
-
+  describe("old entries and design approvals sharing the queue", () => {
     function designApproval(): ApprovalRequest {
       return {
         schemaVersion: 2,
@@ -533,19 +521,18 @@ describe("P30 T8 conversation user-decision relay", () => {
       } as ApprovalRequest;
     }
 
-    it("does not count an expired user decision as one of several pending questions", () => {
-      const live = userDecisionRequest();
-      const expired = expiredRequest({}, { question: "Which cache?", options: ["Redis", "Memory"] });
+    it("counts a decision persisted with a past deadline as still pending", () => {
+      const first = userDecisionRequest();
+      const old = userDecisionRequest({
+        approvalId: "apr-user-decision-old", runId: "run-ud-old", expiresAt: new Date(Date.now() - 60_000).toISOString()
+      }, { question: "Which cache?", options: ["Redis", "Memory"] });
       const context = {
-        ...contextWith(live),
-        pendingApprovals: { [live.approvalId]: live, [expired.approvalId]: expired }
+        ...contextWith(first),
+        pendingApprovals: { [first.approvalId]: first, [old.approvalId]: old }
       } as unknown as ConversationContextSnapshot;
 
       const result = classifyUserIntent(turn("2"), context);
-      expect(result.ok).toBe(true);
-      if (!result.ok) return;
-      expect(result.value.intent).toBe("approval_response");
-      expect(result.value.approvalInput).toMatchObject({ approvalId: live.approvalId, selectedOption: "Postgres" });
+      expect(result.ok && result.value.intent).not.toBe("approval_response");
     });
 
     it("lets a design approval receive 'approve' while a user decision is also pending", () => {

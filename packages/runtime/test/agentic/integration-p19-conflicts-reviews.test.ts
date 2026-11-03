@@ -165,6 +165,8 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
   });
   it("renews an accepted review's lease while the verifier awaits a reply longer than one lease period", async () => {
     const f = await fixture({ remoteReview: true });
+    // The wait below can take seconds on a loaded machine; the fixture's 3 s review budget must not end the review first.
+    (f.ports as any).taskChecks.find((check: any) => check.id === "review").timeout.executionTimeoutMs = 30_000;
     await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
     await f.evidence("implement"); await f.submit();
     let delivered!: (request: AgentRequest) => void;

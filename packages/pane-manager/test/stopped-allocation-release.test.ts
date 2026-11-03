@@ -47,3 +47,42 @@ describe("stopped retained Developer allocations", () => {
     expect(f.proof).not.toHaveBeenCalled(); expect(f.run).not.toHaveBeenCalled();
   });
 });
+describe("closing a cancelled Developer pane", () => {
+  const closable = async (pane: { present?: boolean; closeFails?: boolean } = {}) => {
+    const f = await fixture();
+    const calls: string[][] = [];
+    const ok = { exitCode: 0, stdout: JSON.stringify({ id: "1", result: { type: "ok" } }), stderr: "" };
+    const missing = { exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code: "pane_not_found", message: "pane not found" } }) };
+    const manager = new RolePaneManager({ config: { sessionId: "session-1", projectName: "test", workspaceRoot: "/repo", conversationSessionId: "conv-1" }, store: f.store,
+      runner: { run: async (invocation: { args: readonly string[] }) => {
+        calls.push([...invocation.args]);
+        if (invocation.args.includes("close")) return pane.closeFails ? { exitCode: 1, stdout: "", stderr: "busy" } : ok;
+        return pane.present ? { exitCode: 0, stdout: JSON.stringify({ id: "1", result: { type: "pane_info", pane: { pane_id: "w1:p2" } } }), stderr: "" } : missing;
+      } } as never,
+      worktreeInspector: { inspect: async () => { throw new Error("Closing a cancelled pane must not inspect the worktree"); } } });
+    return { ...f, manager, calls };
+  };
+  it("closes the exact pane with a dirty worktree, proves it is gone and drops the binding", async () => {
+    const f = await closable();
+    expect((await f.manager.closeCancelledDeveloper({ taskId: "run-1-task", paneId: "w1:p2" })).ok).toBe(true);
+    expect(f.calls.map(args => args.join(" "))).toEqual(expect.arrayContaining([expect.stringContaining("pane close w1:p2"), expect.stringContaining("pane get w1:p2")]));
+    const saved = await f.store.load("session-1");
+    expect(saved.ok && saved.value?.panes.some(pane => pane.paneId === "w1:p2")).toBe(false);
+  });
+  it("fails and keeps the binding when the pane is still present after close", async () => {
+    const f = await closable({ present: true });
+    expect((await f.manager.closeCancelledDeveloper({ taskId: "run-1-task", paneId: "w1:p2" })).ok).toBe(false);
+    const saved = await f.store.load("session-1");
+    expect(saved.ok && saved.value?.panes.some(pane => pane.paneId === "w1:p2")).toBe(true);
+  });
+  it("is idempotent when a crashed retry finds the pane already gone", async () => {
+    const f = await closable({ closeFails: true });
+    expect((await f.manager.closeCancelledDeveloper({ taskId: "run-1-task", paneId: "w1:p2" })).ok).toBe(true);
+    expect((await f.manager.closeCancelledDeveloper({ taskId: "run-1-task", paneId: "w1:p2" })).ok).toBe(true);
+  });
+  it("refuses a pane that now belongs to another task, without running Herdr", async () => {
+    const f = await closable();
+    expect(await f.manager.closeCancelledDeveloper({ taskId: "run-2-task", paneId: "w1:p2" })).toMatchObject({ ok: false, error: { code: "conflict" } });
+    expect(f.calls).toEqual([]);
+  });
+});

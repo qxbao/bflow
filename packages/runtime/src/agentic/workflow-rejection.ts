@@ -12,9 +12,9 @@ export type WorkflowRejectionCode = z.infer<typeof WorkflowRejectionCodeSchema>;
 
 /**
  * Coordinator-fixable refusals: the structured error is the instruction for the Coordinator, so Conversation gets no notice.
- * Only the remaining classes (including `no_test_runner_detected`) are reported to the user.
+ * Coordinator sets up a missing runner itself through repository_setup. Only the remaining classes are reported to the user.
  */
-export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["runner_setup_required", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method",
+export const AGENT_FIXABLE_REJECTIONS: readonly WorkflowRejectionCode[] = ["no_test_runner_detected", "runner_setup_required", "missing_test_paths", "missing_test_mapping", "unknown_test_command", "unsupported_method",
   "invalid_specification"];
 
 /** Whether Runtime should tell Conversation (and through it the user) about this refusal. */

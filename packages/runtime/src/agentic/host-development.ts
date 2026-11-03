@@ -2,7 +2,7 @@ import { deferredTaskHandover } from "./task-handover-view.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile, realpath, type FileHandle } from "node:fs/promises";
+import { mkdir, lstat, open, readFile, realpath, type FileHandle } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -277,8 +277,8 @@ export class HostDevelopment {
     });
   }
   /** Linux descriptor-relative traversal pins every directory; no check-path-then-open-path authorization gap.
-   * Other platforms fail closed. Parent directories must already exist; these tools never create them. */
-  private async withFileParent<T>(cwd: string, path: string, use: (file: string) => Promise<T>): Promise<T> {
+   * Other platforms fail closed. Parent directories must already exist unless `createParents` is set for a new file. */
+  private async withFileParent<T>(cwd: string, path: string, use: (file: string) => Promise<T>, createParents = false): Promise<T> {
     if (process.platform !== "linux") throw new Error("Host workspace file operations are unsupported without Linux descriptor-relative access");
     const root = await realpath(cwd);
     if (root !== resolve(cwd)) throw new Error("Developer workspace may not traverse symlinks");
@@ -287,8 +287,11 @@ export class HostDevelopment {
       directories.push(await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
       if (await realpath(`/proc/self/fd/${directories[0]!.fd}`) !== root) throw new Error("Developer workspace moved during file access");
       const parts = path.split("/");
-      for (const part of parts.slice(0, -1)) directories.push(await open(`/proc/self/fd/${directories.at(-1)!.fd}/${part}`,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
+      for (const part of parts.slice(0, -1)) {
+        const next = `/proc/self/fd/${directories.at(-1)!.fd}/${part}`;
+        if (createParents) await mkdir(next, { mode: 0o755 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+        directories.push(await open(next, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW));
+      }
       return await use(`/proc/self/fd/${directories.at(-1)!.fd}/${parts.at(-1)!}`);
     } finally { for (const directory of directories.reverse()) await directory.close(); }
   }
@@ -365,7 +368,7 @@ export class HostDevelopment {
         await syncFileHandle(handle);
         return json({ path, written: true, created: creating, bytes: bytes.length, sha256: sha256(bytes) });
       } finally { await handle.close(); }
-      });
+      }, args.expectedSha256 === null);
     });
   }
   async status(binding: PaneBinding, input: unknown) {
