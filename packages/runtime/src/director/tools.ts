@@ -87,7 +87,7 @@ export class DirectorTools {
         return json({ seq: message.seq, messageId: message.messageId });
       }
       case "director_note_user_message":
-        return this.noteUserMessage(NoteArgs.parse(input));
+        return this.noteUserMessage(NoteArgs.parse(input).text);
       case "list_issues": {
         const args = ListArgs.parse(input ?? {});
         return json(await this.store.listIssues({ status: args.status ?? ["open", "retrying"] }));
@@ -108,7 +108,9 @@ export class DirectorTools {
     }
   }
 
-  private async noteUserMessage(args: z.infer<typeof NoteArgs>): Promise<JsonValue> {
+  /** Records a user message typed in the CLI (channel cli) unless the same text was recorded within 10 s. Caller authenticates. */
+  async noteUserMessage(text: string): Promise<{ recorded: boolean; duplicate?: true; seq?: number }> {
+    const args = { text };
     const messages = await this.store.readMessages({ afterSeq: 0 });
     // readMessages is paged; walk to the tail so the last user message is the true last one.
     let tail = messages;
