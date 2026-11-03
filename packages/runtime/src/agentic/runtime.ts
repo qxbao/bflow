@@ -1712,7 +1712,9 @@ export class AgenticWorkflowRuntime {
           out.handle!.executionId === entry.sourceHandle.executionId && out.parkStop?.proof)))
         return { parked: false, runStatus: run.status, reason: "Failover còn execution cũ chưa xác nhận dừng; giữ nguyên task" };
       // Allocation precedes enqueue/send. An unsent attempt still owns a pane and capacity even without a Core execution handle.
-      if (!task.writerReleased && !executions.some(out => out.message.recipient.role === "developer") && current.attemptId && task.worktrees.length) {
+      if (task.parkSettlement || !task.writerReleased && !executions.some(out => out.message.recipient.role === "developer") && current.attemptId && task.worktrees.length) {
+        if (!current.attemptId || current.agentExecution || task.parkSettlement && task.parkSettlement.attemptId !== current.attemptId)
+          return { parked: false, runStatus: run.status, reason: "Intent treo không còn khớp attempt chưa giao; cần đối soát" };
         const tree = task.worktrees.at(-1)!, allocationTaskId = `${run.runId}-${task.taskId}`;
         const rawManifest = unwrap(await this.ports.panes.getManifest());
         if (!rawManifest) return { parked: false, runStatus: run.status, reason: "Chưa quan sát được allocation Developer; giữ nguyên task" };
@@ -1724,7 +1726,16 @@ export class AgenticWorkflowRuntime {
             !ownsCancelledAllocation(run.runId, pane) || pane.metadata?.taskId !== allocationTaskId || pane.agentId !== agentId ||
             pane.worktreePath !== tree.worktreePath || pane.cwd !== tree.worktreePath))
           return { parked: false, runStatus: run.status, reason: "Allocation Developer chưa khớp đúng owner, attempt và worktree; cần đối soát" };
-        const pane = candidates[0];
+        const settlement = task.parkSettlement;
+        const pane = candidates[0] ?? (settlement ? manifest.panes.find(item => item.bindingId === settlement.binding.bindingId) : undefined);
+        if (settlement && pane && (pane.role !== "developer" || pane.bindingId !== settlement.binding.bindingId || pane.agentId !== settlement.binding.agentId ||
+            pane.paneId !== settlement.binding.paneId || pane.worktreePath !== settlement.binding.worktreePath ||
+            pane.cwd !== settlement.binding.cwd || pane.workspaceId !== settlement.binding.workspaceId || pane.tabId !== settlement.binding.tabId ||
+            pane.terminalId !== settlement.binding.terminalId || pane.provider !== settlement.binding.provider || pane.model !== settlement.binding.model ||
+            !sameRoleProfilePin(pane.roleProfile, settlement.binding.roleProfile) ||
+            pane.metadata?.runId !== run.runId || pane.metadata?.taskId !== allocationTaskId ||
+            pane.metadata?.launchId !== settlement.binding.metadata?.launchId || digest(pane.session) !== digest(settlement.binding.session)))
+          return { parked: false, runStatus: run.status, reason: "Allocation đang settle đã bị thay thế; giữ fence và cần đối soát" };
         if (pane) {
           const assignments = related.filter(out => out.message.type === "task.assignment" && out.attemptId === current.attemptId);
           if (assignments.some(out => out.handle || !["queued", "cancelled", "failed"].includes(out.status) || out.selector !== pane.bindingId ||
@@ -1735,8 +1746,19 @@ export class AgenticWorkflowRuntime {
                 (out.handle?.target.paneId === pane.paneId || out.request?.target.paneId === pane.paneId || out.message.recipient.pane_id === pane.paneId)) ||
               this.uncertainDeliveryTo(state, run, "developer", { paneId: pane.paneId, taskId: allocationTaskId }))
             return { parked: false, runStatus: run.status, reason: "Allocation Developer chưa có bằng chứng chưa giao; giữ nguyên writer và lease" };
-          // Metadata-only release retains the worktree. Record writerReleased only after the owned release succeeds.
-          await this.releaseCancelledAllocation(allocationTaskId, tree.worktreePath);
+          if (!task.parkSettlement) {
+            task.parkSettlement = { attemptId: current.attemptId, binding: pane, park: {
+              at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source,
+              episode: Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1,
+              ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) } };
+            for (const out of queued) { out.status = "cancelled"; out.error = "Task parked"; }
+            // Authority and delivery fence must be durable before PaneManager can relinquish capacity (including a lost reply).
+            await save();
+          }
+          if (pane.metadata?.allocationStatus !== "released") await this.releaseCancelledAllocation(allocationTaskId, tree.worktreePath);
+          task.writerReleased = true;
+        } else if (settlement) {
+          // The exact owned allocation has disappeared and no competing owner matched; nothing remains to release.
           task.writerReleased = true;
         }
       }
@@ -1764,9 +1786,10 @@ export class AgenticWorkflowRuntime {
         entry.stopProof ??= executions.find(out => out.handle!.executionId === entry.sourceHandle.executionId)?.parkStop?.proof;
         entry.phase = "cancelled";
       }
-      const episode = Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1;
-      task.parked = { at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source, episode,
+      const episode = task.parkSettlement?.park.episode ?? Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1;
+      task.parked = task.parkSettlement?.park ?? { at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source, episode,
         ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) };
+      delete task.parkSettlement;
       const after = await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId,
         expectedVersion: snapshot.version, from: current.status, to: "parked", intent: "park", generationFrom: current.generation, generationTo: current.generation,
         reason: task.parked!.reason, occurredAt: task.parked!.at, idempotencyKey: `park:${run.runId}:${task.taskId}:${episode}`,
@@ -1782,6 +1805,17 @@ export class AgenticWorkflowRuntime {
       await save();
       return { parked: true, runStatus: run.status, episode };
     }, false);
+  }
+
+  /** One recovery pass over durable, already-authorized park intents. Failed settlement keeps both task and outbound fenced. */
+  private async recoverParkSettlements(): Promise<void> {
+    const pending = await this.journal.exclusive(async state => state.runs.filter(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status))
+      .flatMap(run => run.tasks.flatMap(task => task.parkSettlement ? [{ runId: run.runId, taskId: task.taskId, ...task.parkSettlement.park }] : [])));
+    for (const item of pending) {
+      try { await this.parkTask({ runId: item.runId, taskId: item.taskId, reason: item.reason, kind: item.kind, source: item.source,
+        ...(item.episodeKey ? { episodeKey: item.episodeKey } : {}) }); }
+      catch { /* The durable intent remains; do not manufacture a successful park or dispatch through its relinquished allocation. */ }
+    }
   }
 
   async unparkTask(input: { runId: string; taskId: string; source: "director" | "user" }): Promise<{ unparked: boolean; runStatus: SdlcWorkStatus }> {
@@ -4277,6 +4311,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const snapshot = await core.snapshot(run.runId);
     for (const taskState of snapshot.tasks.filter(task => task.status === "running" && !task.agentExecution)) {
       const task = run.tasks.find(item => item.taskId === taskState.taskId)!;
+      if (task.parkSettlement) continue;
       const definition = run.definition!.tasks.find(item => item.id === task.taskId)!;
       const rawTaskCaps = definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : [];
       const requiredCapabilities = rawTaskCaps.length ? rawTaskCaps : ["implementation"];
@@ -5297,6 +5332,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   async tick(): Promise<JsonValue> {
     await this.initialize();
     if (this.quiesced) return this.inspect();
+    await this.recoverParkSettlements();
     await this.transaction(async (state, save, core, outbox) => {
       await this.drainCancellationControls(state, save, core, outbox);
       await this.cleanupProfileSpecialists(state, save);

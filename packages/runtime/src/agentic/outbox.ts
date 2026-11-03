@@ -447,6 +447,10 @@ export class HerdrOutbox {
       }
     }
     const run = this.state.runs.find(item => item.runId === out.message.run_id);
+    if (out.message.type === "task.assignment" && run?.tasks.some(task => task.taskId === out.taskId && task.parkSettlement)) {
+      out.status = "cancelled"; out.error = "Task đang settle intent treo; chưa được giao lại";
+      await this.save(); return;
+    }
     if (run?.nativeDeliveries?.length && ["delegation.request", "task.assignment", "verification.requested"].includes(out.message.type)) {
       out.error = "Unknown native delivery must be reconciled before another work dispatch";
       await this.save(); return;
@@ -460,6 +464,11 @@ export class HerdrOutbox {
     const bindingValue = unwrap(await this.ports.panes.getRoleBinding(out.selector));
     if (!bindingValue) { out.error = "Recipient pane unavailable"; return; }
     const pane = PaneBindingSchema.parse(bindingValue);
+    if (pane.role === "developer" && pane.metadata?.allocationStatus === "released") {
+      out.status = "cancelled"; out.error = "Allocation Developer đã được nhả; cần cấp phát có thẩm quyền trước khi giao lại";
+      if (out.lease) await this.release(out);
+      out.status = "cancelled"; await this.save(); return;
+    }
     const profileRun = this.state.runs.find(run => run.runId === out.message.run_id);
     const payloadPin = out.message.type === "task.assignment" ? profileRun?.definition?.tasks.find(task => task.id === out.taskId)?.roleProfile ??
       (profileRun?.conflictResolution?.attempts.some(attempt => attempt.messageId === out.message.message_id) ? profileRun.conflictResolution.roleProfile : undefined)

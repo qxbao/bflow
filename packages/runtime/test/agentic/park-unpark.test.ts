@@ -110,6 +110,47 @@ describe("Runtime park/unpark", () => {
     expect(binding.metadata?.allocationStatus).toBe("active");
   });
 
+  it.each([false, true])("recovers a park release that applied before its response was lost (before enqueue=%s), without sending the released binding", async beforeEnqueue => {
+    const { f, binding, release } = await queuedAllocation(beforeEnqueue);
+    const applyRelease = release.getMockImplementation()!;
+    release.mockImplementation(async request => { await applyRelease(request); throw new Error("Controlled lost response after allocation release applied"); });
+    await expect(park(f)).rejects.toThrow("Controlled lost response");
+    expect(binding.metadata?.allocationStatus).toBe("released");
+    const beforeRestart = JSON.parse(await readFile(join(f.runtimeOptions.journalDirectory, "state.json"), "utf8"));
+    release.mockImplementation(applyRelease);
+    f.panes.busy.delete("developer");
+    f.restart(); await f.runtime.tick();
+    expect(f.transport.sentRequests.filter(request => request.role === "developer" && request.target.paneId === binding.paneId)).toHaveLength(0);
+    const after = await state(f);
+    expect(after.runs[0].tasks[0]).toMatchObject({ writerReleased: true, parked: { episode: 1 } });
+    expect(after.runs[0].tasks[0].parkSettlement).toBeUndefined();
+    expect(beforeRestart.runs[0].tasks[0].parkSettlement).toMatchObject({ attemptId: expect.any(String), binding: { bindingId: binding.bindingId } });
+    expect(beforeRestart.outbound.filter((item: any) => item.message.type === "task.assignment").every((item: any) => item.status === "cancelled")).toBe(true);
+    expect(release).toHaveBeenCalledTimes(1); // recovery observes the manifest receipt; it does not repeat the release side effect
+  });
+
+  it("does not dispatch a legacy queued assignment through an already released Developer binding", async () => {
+    const { f, binding } = await queuedAllocation();
+    binding.metadata = { ...binding.metadata, allocationStatus: "released" };
+    f.panes.busy.delete("developer");
+    await f.runtime.flushOutbound();
+    expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(0);
+  });
+
+  it("keeps delivery and reallocation fenced after restart while park settlement still fails", async () => {
+    const { f, release } = await queuedAllocation();
+    release.mockImplementation(async () => ({ ok: false, error: { code: "conflict", retryable: true, message: "Controlled release still blocked" } }));
+    await expect(park(f)).rejects.toThrow("Controlled release still blocked");
+    f.panes.busy.delete("developer");
+    f.restart(); await f.runtime.tick();
+    expect(f.transport.sentRequests.filter(request => request.role === "developer")).toHaveLength(0);
+    expect(f.ports.panes.allocateDeveloper).toHaveBeenCalledTimes(1);
+    const task = (await state(f)).runs[0].tasks[0];
+    expect(task.parkSettlement).toBeDefined();
+    expect(task.parked).toBeUndefined();
+    expect(task.writerReleased).not.toBe(true);
+  });
+
   it("parks a confirmed-stopped writer, releases its lease and dispatches an independent task on the next tick", async () => {
     const { f, out } = await running(true);
     await journal(f).exclusive(async (s, save) => {

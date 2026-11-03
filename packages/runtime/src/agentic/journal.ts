@@ -55,9 +55,14 @@ const TaskParkSchema = z.object({
   episodeKey: z.string().min(1).optional()
 }).strict();
 export type TaskPark = z.infer<typeof TaskParkSchema>;
+const TaskParkSettlementSchema = z.object({
+  attemptId: z.string().min(1), binding: PaneBindingSchema, park: TaskParkSchema
+}).strict();
 export interface TaskRecord {
   parked?: TaskPark;
   parkHistory?: TaskPark[];
+  /** Private v8 write-ahead authority to settle an unsent allocation; dispatch stays fenced until park commits. */
+  parkSettlement?: z.infer<typeof TaskParkSettlementSchema>;
   failovers?: TaskFailover[];
   taskId: string; spec: SpecRecord; worktrees: TaskWorktree[]; outboundIds: string[];
   changeSet?: GitChangeSet; cycle?: VerificationCycle; result?: AgentResult;
@@ -322,7 +327,7 @@ export function isInProcessDelivery(out: Outbound): boolean {
 export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
   return state.outbound.some(out => out.delivery !== undefined || out.parkStop !== undefined) ||
     state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
-      run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined));
+      run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined));
 }
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
@@ -458,11 +463,14 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
-      if (task.parked !== undefined || task.parkHistory !== undefined) {
+      if (task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined) {
         if (state.version < 8) throw new Error("Task parking requires private journal v8");
         if (task.parked !== undefined) task.parked = TaskParkSchema.parse(task.parked);
         if (task.parkHistory !== undefined) task.parkHistory = z.array(TaskParkSchema).max(20).parse(task.parkHistory);
-        const episodes = [...(task.parkHistory ?? []), ...(task.parked ? [task.parked] : [])].map(entry => entry.episode);
+        if (task.parkSettlement !== undefined) task.parkSettlement = TaskParkSettlementSchema.parse(task.parkSettlement);
+        if (task.parked && task.parkSettlement) throw new Error("Task park and allocation settlement cannot coexist");
+        const pendingPark = task.parked ?? task.parkSettlement?.park;
+        const episodes = [...(task.parkHistory ?? []), ...(pendingPark ? [pendingPark] : [])].map(entry => entry.episode);
         if (episodes.some((episode, i) => i > 0 && episode <= episodes[i - 1]!)) throw new Error("Invalid task park episode history");
       }
       if (task.failovers !== undefined) {
@@ -474,6 +482,14 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       textField(task.taskId); parseSpec(task.spec); strings(task.outboundIds);
       if (!Array.isArray(task.worktrees)) throw new Error("Invalid worktree history");
       for (const tree of task.worktrees) { textField(tree.key); textField(tree.worktreePath); textField(tree.branchName); textField(tree.baseCommitHash); }
+      if (task.parkSettlement) {
+        const binding = task.parkSettlement.binding;
+        if (binding.role !== "developer" || binding.sessionId !== run.delegation.sessionId || binding.metadata?.runId !== run.runId ||
+            binding.metadata?.taskId !== `${run.runId}-${task.taskId}` || !binding.worktreePath || binding.cwd !== binding.worktreePath ||
+            !task.worktrees.some(tree => tree.worktreePath === binding.worktreePath) ||
+            binding.agentId !== `dev-${digest([run.runId, task.parkSettlement.attemptId]).slice(0, 20)}`)
+          throw new Error("Invalid unsent park allocation settlement ownership");
+      }
       if (task.changeSet) task.changeSet = GitChangeSetSchema.parse(task.changeSet);
       if (task.cycle) task.cycle = VerificationCycleSchema.parse(task.cycle);
       if (task.result) task.result = AgentResultSchema.parse(task.result);
