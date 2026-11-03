@@ -1,0 +1,111 @@
+import { PassThrough } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
+import { parseDirectorArgs, runDirectorCommand, detectProvider, type DirectorCommandDeps } from "../src/director-commands.js";
+
+function make(over: Partial<DirectorCommandDeps> & { stdinText?: string } = {}) {
+  const out: string[] = []; const err: string[] = [];
+  const stdin = new PassThrough();
+  if (over.stdinText !== undefined) { stdin.end(over.stdinText); }
+  const ownerCall = vi.fn(async (_o: unknown, method: string) => method === "director_register" ? { token: "tid.secretsecretsecretsecret", session: { presence: "present" } } : { recorded: true });
+  const deps: DirectorCommandDeps = {
+    cwd: "/repo",
+    identify: async () => ({ root: "/repo", sessionName: "bf-abc" }),
+    ensureUp: async () => {},
+    ownerCall: ownerCall as never,
+    toolCall: vi.fn(async () => ({ ok: true })) as never,
+    runMcp: vi.fn(async () => {}) as never,
+    env: {},
+    stdin,
+    stdout: { write: (c: string) => { out.push(c); } },
+    stderr: { write: (c: string) => { err.push(c); } },
+    ...over
+  };
+  return { deps, out, err, ownerCall };
+}
+const parse = (a: string[]) => { const r = parseDirectorArgs(a); if (!r.ok) throw new Error(r.message); return r.value; };
+
+describe("director parser", () => {
+  it("accepts the four subcommands and rejects unknown ones", () => {
+    expect(parse(["start", "--provider", "codex", "--json"])).toMatchObject({ sub: "start", provider: "codex", json: true });
+    expect(parse(["call", "inspect", "--json", "{}"])).toMatchObject({ sub: "call", tool: "inspect", argsJson: "{}" });
+    expect(parse(["mcp"])).toEqual({ sub: "mcp" });
+    expect(parse(["hook", "codex"])).toEqual({ sub: "hook", provider: "codex" });
+    expect(parseDirectorArgs(["bogus"]).ok).toBe(false);
+    expect(parseDirectorArgs(["hook", "agy"]).ok).toBe(false);
+    expect(parseDirectorArgs(["start", "--provider", "x"]).ok).toBe(false);
+  });
+  it("detects provider from the environment", () => {
+    expect(detectProvider({ CLAUDECODE: "1" })).toBe("claude");
+    expect(detectProvider({ CODEX_HOME: "/x" })).toBe("codex");
+    expect(detectProvider({ AGY_FOO: "1" })).toBe("agy");
+    expect(detectProvider({})).toBe("claude");
+  });
+});
+
+describe("director start", () => {
+  it("prints one JSON object with the token", async () => {
+    const { deps, out, ownerCall } = make({ env: { CODEX_HOME: "/h" } });
+    expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(0);
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0]!)).toMatchObject({ ok: true, token: "tid.secretsecretsecretsecret", cursor: "", sessionId: "bf-abc", repositoryRoot: "/repo", provider: "codex", presence: "present" });
+    expect(ownerCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "director_register", { provider: "codex" });
+  });
+  it("reports a fix when ensureUp fails", async () => {
+    const { deps, out } = make({ ensureUp: async () => { throw new Error("Host unavailable"); } });
+    expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(1);
+    const body = JSON.parse(out[0]!);
+    expect(body.ok).toBe(false);
+    expect(body.fix).toContain("bflow");
+  });
+});
+
+describe("director call", () => {
+  it("requires BFLOW_DIRECTOR_TOKEN", async () => {
+    const { deps, out } = make();
+    expect(await runDirectorCommand(parse(["call", "inspect", "--json"]), deps)).toBe(1);
+    expect(out.join("")).toContain("BFLOW_DIRECTOR_TOKEN chưa được đặt");
+  });
+  it("rejects a token key in args", async () => {
+    const { deps } = make({ env: { BFLOW_DIRECTOR_TOKEN: "a.b" } });
+    expect(await runDirectorCommand(parse(["call", "inspect", '{"token":"x"}']), deps)).toBe(2);
+    expect(deps.toolCall).not.toHaveBeenCalled();
+  });
+  it("forwards a valid call", async () => {
+    const { deps, out } = make({ env: { BFLOW_DIRECTOR_TOKEN: "a.b" } });
+    expect(await runDirectorCommand(parse(["call", "inspect", '{"x":1}']), deps)).toBe(0);
+    expect(deps.toolCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "a.b", "inspect", { x: 1 });
+    expect(JSON.parse(out[0]!)).toEqual({ ok: true });
+  });
+});
+
+describe("director hook", () => {
+  it("skips inside a Herdr pane", async () => {
+    const { deps, out, ownerCall } = make({ env: { HERDR_PANE_ID: "p1" }, stdinText: '{"prompt":"hi"}' });
+    expect(await runDirectorCommand(parse(["hook", "claude"]), deps)).toBe(0);
+    expect(ownerCall).not.toHaveBeenCalled(); expect(out).toEqual([]);
+  });
+  it("records the prompt with a 3s timeout", async () => {
+    const { deps, out, ownerCall } = make({ stdinText: '{"prompt":"hello"}' });
+    expect(await runDirectorCommand(parse(["hook", "codex"]), deps)).toBe(0);
+    expect(ownerCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "director_hook_note", { provider: "codex", prompt: "hello" }, 3000);
+    expect(out).toEqual([]);
+  });
+  it("swallows ownerCall errors", async () => {
+    const { deps, out } = make({ stdinText: '{"prompt":"hello"}', ownerCall: (async () => { throw new Error("boom"); }) as never });
+    expect(await runDirectorCommand(parse(["hook", "claude"]), deps)).toBe(0);
+    expect(out).toEqual([]);
+  });
+  it("swallows broken stdin", async () => {
+    const { deps, out, ownerCall } = make({ stdinText: "{not json" });
+    expect(await runDirectorCommand(parse(["hook", "claude"]), deps)).toBe(0);
+    expect(ownerCall).not.toHaveBeenCalled(); expect(out).toEqual([]);
+  });
+});
+
+describe("director mcp", () => {
+  it("delegates to runMcp without writing to stdout", async () => {
+    const { deps, out } = make();
+    expect(await runDirectorCommand(parse(["mcp"]), deps)).toBe(0);
+    expect(deps.runMcp).toHaveBeenCalled(); expect(out).toEqual([]);
+  });
+});

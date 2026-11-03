@@ -54,6 +54,20 @@ export async function main(
     stderr: (msg) => process.stderr.write(msg + "\n")
   };
 
+  // Director subcommands own raw stdout (MCP protocol lines, one JSON object, or nothing for hooks).
+  if (args[0] === "director" || (args[0] === "help" && args[1] === "director")) {
+    const { parseDirectorArgs, runDirectorCommand, defaultDirectorDeps, DIRECTOR_HELP } = await import("./director-commands.js");
+    const parsed = parseDirectorArgs(args[0] === "help" ? [] : args.slice(1));
+    if (!parsed.ok) {
+      realIo.stderr(`${parsed.message}\n${DIRECTOR_HELP}`);
+      process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;
+      return { ok: false, command: "director", exitCode: CLI_EXIT_CODES.USAGE_ERROR, stdout: "", stderr: parsed.message };
+    }
+    const exitCode = await runDirectorCommand(parsed.value, await defaultDirectorDeps(context?.cwd ?? process.cwd()));
+    process.exitCode = exitCode;
+    return { ok: exitCode === 0, command: "director", exitCode, stdout: "", stderr: "" };
+  }
+
   // Web owns its foreground HTTP lifetime. Never route it through legacy RuntimeService.
   if (args[0] === "web" || (args[0] === "help" && args[1] === "web")) {
     const { parseWebArgs, runWebCommand, WEB_HELP } = await import("./web-command.js");
