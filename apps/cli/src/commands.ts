@@ -1,3 +1,4 @@
+import { checkDirectorFiles, installDirectorFiles, removeDirectorFiles } from "./init-director.js";
 import { prepareExecutionExpectation } from "./execution-expectation.js";
 import { EnvironmentLifecycle } from "./environment.js";
 import { randomUUID } from "node:crypto";
@@ -373,8 +374,10 @@ async function executeCommandWithProgress(
               status: "skipped" as const,
               diagnostics: ["GitNexus is disabled in .bflow/config.yml (tools.gitnexus.enabled: false)."]
             };
-        const healthy = configValid && (!gitnexusEnabled || gitnexus.status === "ready");
+        const directorCheck = await checkDirectorFiles(repository.root);
+        const healthy = configValid && (!gitnexusEnabled || gitnexus.status === "ready") && directorCheck.healthy;
         const diagnostics = [
+          ...directorCheck.diagnostics,
           ...(!configValid
             ? [`Repository configuration is missing or invalid (${configDiagnostics.join("; ") || configPath}); run 'bflow init' in '${repository.root}'.`]
             : []),
@@ -389,6 +392,7 @@ async function executeCommandWithProgress(
           healthy,
           configValid,
           gitnexus,
+          director: directorCheck.report,
           diagnostics
         };
         return makeResult(
@@ -417,6 +421,7 @@ async function executeCommandWithProgress(
         const configPath = resolve(workspaceRoot, parsed.configPath ?? ENVIRONMENT_CONFIG_PATH);
         const platform = resolveSetupPlatform(context);
         const gitnexus = await removeRepositoryGitNexus({ workspaceRoot, platform });
+        const directorRemoval = await removeDirectorFiles(workspaceRoot);
         const loaded = repository ? await loadRepositoryConfig(configPath) : undefined;
         const config = loaded?.ok ? loaded.value : undefined;
         const output: InitCommandOutput = {
@@ -426,7 +431,8 @@ async function executeCommandWithProgress(
           mode: "remove",
           healthy: true,
           gitnexus,
-          diagnostics: gitnexus.diagnostics
+          director: directorRemoval.report,
+          diagnostics: [...gitnexus.diagnostics, ...directorRemoval.diagnostics]
         };
         return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", output, undefined, isJson, io, presentation);
       } catch (error) {
@@ -499,13 +505,17 @@ async function executeCommandWithProgress(
           ]
         };
 
+    const directorInstall = parsed.noDirector
+      ? undefined
+      : await installDirectorFiles(repository.root);
     const output: InitCommandOutput = {
       ...initRes.value,
       mode: "init",
       healthy: !gitnexusEnabled || gitnexus.status === "ready",
       configValid: true,
       gitnexus,
-      diagnostics: gitnexus.diagnostics
+      ...(directorInstall ? { director: directorInstall.report } : {}),
+      diagnostics: [...gitnexus.diagnostics, ...(directorInstall?.diagnostics ?? [])]
     };
 
     if (showProgress) {

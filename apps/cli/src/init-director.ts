@@ -1,0 +1,104 @@
+import { realpath } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+import {
+  applyDirectorRepoFiles,
+  checkDirectorRepoFiles,
+  removeDirectorRepoFiles,
+  type DirectorProvider
+} from "./director-repo-files.js";
+
+export const DIRECTOR_PROVIDERS: readonly DirectorProvider[] = ["claude", "codex", "agy"];
+
+export interface InitDirectorFile {
+  readonly path: string;
+  readonly action: string;
+}
+
+export interface InitDirectorReport {
+  readonly status: "ready" | "installed" | "missing" | "modified" | "removed" | "skipped" | "failed";
+  readonly files: readonly InitDirectorFile[];
+}
+
+export interface ResolveBflowCommandDeps {
+  readonly execPath?: string | undefined;
+  readonly argv1?: string | undefined;
+  readonly realpath?: ((path: string) => Promise<string>) | undefined;
+}
+
+/**
+ * Absolute argv prefix used by the generated Director skill, MCP and hook files.
+ * There is no deterministic helper for the managed shell launcher path, so the running
+ * entrypoint is pinned: [node, realpath(bin.js)].
+ */
+export async function resolveBflowCommand(deps: ResolveBflowCommandDeps = {}): Promise<string[]> {
+  const execPath = deps.execPath ?? process.execPath;
+  const argv1 = deps.argv1 ?? process.argv[1];
+  if (!argv1) throw new Error("Cannot determine the bflow entrypoint (process.argv[1] is empty).");
+  const resolveReal = deps.realpath ?? realpath;
+  const entry = await resolveReal(resolve(argv1));
+  if (!isAbsolute(execPath) || !isAbsolute(entry)) throw new Error("bflow command must resolve to absolute paths.");
+  return [execPath, entry];
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function installDirectorFiles(
+  repositoryRoot: string,
+  deps?: ResolveBflowCommandDeps
+): Promise<{ report: InitDirectorReport; diagnostics: string[] }> {
+  try {
+    const bflowCommand = await resolveBflowCommand(deps);
+    const { written } = await applyDirectorRepoFiles({ repositoryRoot, bflowCommand, providers: DIRECTOR_PROVIDERS });
+    const report: InitDirectorReport = { status: "installed", files: written.map(path => ({ path, action: "written" })) };
+    return { report, diagnostics: [] };
+  } catch (error) {
+    return {
+      report: { status: "failed", files: [] },
+      diagnostics: [`Không thể cài tệp Director: ${errorMessage(error)}. Sửa hoặc xoá khối/tệp bị lỗi rồi chạy 'bflow init --update'.`]
+    };
+  }
+}
+
+export async function checkDirectorFiles(
+  repositoryRoot: string,
+  deps?: ResolveBflowCommandDeps
+): Promise<{ report: InitDirectorReport; healthy: boolean; diagnostics: string[] }> {
+  try {
+    const bflowCommand = await resolveBflowCommand(deps);
+    const checks = await checkDirectorRepoFiles({ repositoryRoot, bflowCommand, providers: DIRECTOR_PROVIDERS });
+    const files = checks.map(c => ({ path: c.path, action: c.status }));
+    const status = checks.some(c => c.status === "modified") ? "modified"
+      : checks.some(c => c.status === "missing") ? "missing" : "ready";
+    return {
+      report: { status, files },
+      healthy: status === "ready",
+      diagnostics: status === "ready" ? [] : ["Chạy `bflow init --update` để cài lại skill Director."]
+    };
+  } catch (error) {
+    return {
+      report: { status: "failed", files: [] },
+      healthy: false,
+      diagnostics: [`Không kiểm tra được tệp Director: ${errorMessage(error)}. Chạy \`bflow init --update\` để cài lại skill Director.`]
+    };
+  }
+}
+
+export async function removeDirectorFiles(repositoryRoot: string): Promise<{ report: InitDirectorReport; diagnostics: string[] }> {
+  try {
+    const { removed, kept } = await removeDirectorRepoFiles(repositoryRoot);
+    return {
+      report: {
+        status: "removed",
+        files: [...removed.map(path => ({ path, action: "removed" })), ...kept.map(path => ({ path, action: "kept" }))]
+      },
+      diagnostics: kept.length > 0 ? [`Giữ lại tệp Director đã bị chỉnh sửa: ${kept.join(", ")}.`] : []
+    };
+  } catch (error) {
+    return {
+      report: { status: "failed", files: [] },
+      diagnostics: [`Không gỡ được tệp Director: ${errorMessage(error)}.`]
+    };
+  }
+}

@@ -1152,6 +1152,25 @@ export async function runDoctorDiagnostics(
     remediation: ""
   });
 
+  // director-skill-installed: repo files for the Director are advisory, never fatal.
+  try {
+    const { checkDirectorFiles } = await import("./init-director.js");
+    const director = await checkDirectorFiles(repository.root);
+    skillChecks.push({
+      checkId: "director-skill-installed",
+      group: "skills",
+      component: "director",
+      status: director.healthy ? "pass" : "warning",
+      detected_version: null,
+      reason: director.healthy ? "Director skill, MCP and hook files are installed." : `Director repository files are ${director.report.status}.`,
+      remediation: director.healthy ? "" : "Run 'bflow init --update' to install the Director skill.",
+      ...(director.healthy ? {} : { repair_command: "bflow init --update" })
+    });
+  } catch (error) {
+    skillChecks.push({ checkId: "director-skill-installed", group: "skills", component: "director", status: "warning", detected_version: null,
+      reason: `Director files could not be checked: ${error instanceof Error ? error.message : String(error)}`, remediation: "Run 'bflow init --update'.", repair_command: "bflow init --update" });
+  }
+
   // deepwiki: the shared documentation service. Required: failures fail the doctor. Optional: failures are warnings (degraded).
   if ((config?.environment && config.environment.deepwiki?.enabled !== false) || dependencies?.deepwikiHealth !== undefined) {
     const required = config?.environment?.deepwiki?.required === true;

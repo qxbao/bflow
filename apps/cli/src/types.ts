@@ -97,6 +97,8 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly check?: boolean | undefined;
   readonly remove?: boolean | undefined;
   readonly noGitnexus?: boolean | undefined;
+  /** Skips writing the Director skill, MCP and hook files. */
+  readonly noDirector?: boolean | undefined;
   /** Accepts the GitNexus license and repository index without prompting. */
   readonly yes?: boolean | undefined;
   /** Accepts the GitNexus license and repository index only; unlike yes, never implies force. */
@@ -434,6 +436,7 @@ export interface InitCommandOutput {
   readonly healthy?: boolean | undefined;
   readonly configValid?: boolean | undefined;
   readonly gitnexus?: import("./gateway-repositories.js").RepositoryGitNexusReport | undefined;
+  readonly director?: import("./init-director.js").InitDirectorReport | undefined;
   readonly diagnostics?: readonly string[] | undefined;
 }
 

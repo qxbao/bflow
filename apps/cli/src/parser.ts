@@ -1715,6 +1715,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--check",
         "--remove",
         "--no-gitnexus",
+        "--no-director",
         "--accept-gitnexus-license",
         "--json",
         "-j",
@@ -1735,6 +1736,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--check",
         "--remove",
         "--no-gitnexus",
+        "--no-director",
         "--accept-gitnexus-license",
         "--json",
         "-j",
@@ -1790,6 +1792,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       const check = optRes.value.flags.has("--check");
       const remove = optRes.value.flags.has("--remove");
       const noGitnexus = optRes.value.flags.has("--no-gitnexus");
+      const noDirector = optRes.value.flags.has("--no-director");
       const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
       const acceptGitnexusLicense = optRes.value.flags.has("--accept-gitnexus-license");
 
@@ -1799,7 +1802,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       if (acceptGitnexusLicense && noGitnexus) {
         return makeValidationError("Option '--accept-gitnexus-license' cannot be combined with '--no-gitnexus'.", json, "init");
       }
-      if ((check || remove) && (force || update || noGitnexus || acceptGitnexusLicense || projectName !== undefined || provider !== undefined)) {
+      if ((check || remove) && (force || update || noGitnexus || noDirector || acceptGitnexusLicense || projectName !== undefined || provider !== undefined)) {
         return makeValidationError(
           `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--accept-gitnexus-license', '--name', or '--provider'.`,
           json,
@@ -1818,6 +1821,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         ...(check ? { check: true } : {}),
         ...(remove ? { remove: true } : {}),
         ...(noGitnexus ? { noGitnexus: true } : {}),
+        ...(noDirector ? { noDirector: true } : {}),
         ...(yes ? { yes: true } : {}),
         ...(acceptGitnexusLicense ? { acceptGitnexusLicense: true } : {}),
         json,

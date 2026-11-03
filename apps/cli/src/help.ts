@@ -75,6 +75,7 @@ Tùy chọn (Options):
   --check               Kiểm tra chỉ đọc đối với .bflow/config.yml và mức sẵn sàng GitNexus của kho mã
   --remove              Gỡ đăng ký dịch vụ GitNexus của kho mã này khỏi Gateway dùng chung
   --no-gitnexus         Bỏ qua lập chỉ mục GitNexus và đăng ký dịch vụ trên Gateway
+  --no-director         Không ghi skill/MCP/hook Director vào kho mã nguồn
   -f, --force           Ghi đè cấu hình hiện có bằng các giá trị mặc định mới
   -y, --yes             Tương đương --force, đồng thời chấp nhận giấy phép GitNexus PolyForm-Noncommercial không cần hỏi lại
   --accept-gitnexus-license Chấp nhận giấy phép GitNexus PolyForm-Noncommercial và tạo chỉ mục mà không ghi đè cấu hình hiện có

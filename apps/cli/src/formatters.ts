@@ -541,7 +541,32 @@ function summarizeRoleProviders(config: unknown): string | undefined {
   return [...counts].map(([provider, count]) => `${provider} ×${count}`).join(", ");
 }
 
+function directorSummaryLine(director: NonNullable<InitCommandOutput["director"]>): string {
+  const count = director.files.length;
+  switch (director.status) {
+    case "installed":
+      return `Director: đã cài skill/MCP/hook cho Claude Code, Codex, Agy (${count} tệp)`;
+    case "ready":
+      return `Director: skill/MCP/hook đã đầy đủ (${count} tệp)`;
+    case "removed":
+      return `Director: đã gỡ ${director.files.filter(f => f.action === "removed").length} tệp, giữ lại ${director.files.filter(f => f.action === "kept").length} tệp`;
+    case "failed":
+      return "Director: chưa cài được (xem chẩn đoán)";
+    default:
+      return `Director: ${director.status} (${count} tệp)`;
+  }
+}
+
 function formatInitOutput(output: InitCommandOutput, useColor = false, debug = false): string {
+  const text = formatInitOutputBase(output, useColor, debug);
+  if (!output.director) return text;
+  const line = directorSummaryLine(output.director);
+  const marker = "\n\n";
+  const at = text.lastIndexOf(marker);
+  return at < 0 ? `${text}\n${line}` : `${text.slice(0, at)}\n${line}${text.slice(at)}`;
+}
+
+function formatInitOutputBase(output: InitCommandOutput, useColor = false, debug = false): string {
   const lines: string[] = [];
   const projName = output.config?.projectName
     ? ` (${sanitizeIdentifier(output.config.projectName)})`
