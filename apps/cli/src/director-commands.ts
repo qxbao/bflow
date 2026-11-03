@@ -157,7 +157,7 @@ async function runStart(args: Extract<DirectorArgs, { sub: "start" }>, deps: Dir
     const registered = await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_register", { provider });
     if (!isRecord(registered) || typeof registered.token !== "string") throw new Error("Host trả về phản hồi đăng ký không hợp lệ.");
     const presence = isRecord(registered.session) ? registered.session.presence : undefined;
-    const out = { ok: true, token: registered.token, cursor: "", sessionId: repository.sessionName, repositoryRoot: repository.root, provider, presence };
+    const out = { ok: true, token: registered.token, cursor: typeof registered.cursor === "string" ? registered.cursor : "", sessionId: repository.sessionName, repositoryRoot: repository.root, provider, presence };
     deps.stdout.write(args.json ? `${JSON.stringify(out)}\n` : `Director đã sẵn sàng (nhà cung cấp ${provider}, phiên ${repository.sessionName}).\n`);
     return 0;
   } catch (error) {

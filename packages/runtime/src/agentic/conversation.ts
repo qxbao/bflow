@@ -34,7 +34,7 @@ export interface AgenticConversationHost {
   delegateDirectorWork(input: DirectorWorkDelegation): Promise<OperationResult<{ runId: string; correlationId: string }>>;
 }
 export interface DirectorWorkDelegation {
-  key: string; title: string; objective: string;
+  key: string; title: string; objective: string; kind: "feature" | "bugfix" | "refactor" | "spike";
   acceptanceCriteria: readonly { description: string; verificationMethod: string }[];
   sddLevel: "lightweight" | "full"; priority: "low" | "normal" | "high" | "critical"; requestedAt: string;
 }
@@ -461,7 +461,7 @@ export async function createAgenticConversationHost(options: {
         const built = module.buildDelegationRequest({ sessionId: manifest.conversationSessionId, correlationId, runId,
           messageId: `msg-director-${hash}`, previousDelegationId: `del-director-${hash}`, idempotencyKey: `idemp-director-${hash}`,
           requestedAt: input.requestedAt, revision: 1,
-          draft: { title: input.title, objective: input.objective, kind: "feature", sddLevel: input.sddLevel, priority: input.priority,
+          draft: { title: input.title, objective: input.objective, kind: input.kind, sddLevel: input.sddLevel, priority: input.priority,
             scopeDefined: true, isLargeTask: false, affectedPaths: [], acceptanceCriteriaDescriptions: [],
             acceptanceCriteria: input.acceptanceCriteria, isRequirementChange: false } });
         if (!built.ok) return built as OperationResult<never>;

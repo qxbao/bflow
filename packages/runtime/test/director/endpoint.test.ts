@@ -113,6 +113,9 @@ describe("DirectorEndpoint", () => {
   it("start output cursor and an empty cursor both work for the first director_wait", async () => {
     const { endpoint } = await make();
     const start = await endpoint.register({ provider: "claude" });
+    expect(start.cursor).toMatch(/^m\d+\.i\d+\.r$/);
+    const viaStartCursor = (await endpoint.call(start.token, "director_wait", { cursor: start.cursor, timeoutMs: 1 })) as { timedOut: boolean };
+    expect(viaStartCursor.timedOut).toBe(true);
     const first = (await endpoint.call(start.token, "director_wait", { cursor: "", timeoutMs: 1 })) as { cursor: string; timedOut: boolean };
     expect(first.timedOut).toBe(true);
     expect(first.cursor).not.toBe("");

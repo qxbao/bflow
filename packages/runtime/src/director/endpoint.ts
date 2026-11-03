@@ -96,14 +96,14 @@ export class DirectorEndpoint {
     return TOKEN_SHAPE.test(token);
   }
 
-  async register(input: { provider: AgentProviderId }): Promise<{ token: string; session: DirectorSession }> {
+  async register(input: { provider: AgentProviderId }): Promise<{ token: string; session: DirectorSession; cursor: string }> {
     const result = await this.store.register({ provider: input.provider, repositoryRoot: this.options.repositoryRoot });
     const candidate = this.candidate;
     this.candidate = undefined;
     this.bound = candidate && candidate.provider === input.provider && this.now().getTime() - candidate.at <= START_CANDIDATE_TTL_MS
       ? { provider: candidate.provider, sessionId: candidate.sessionId }
       : undefined;
-    return result;
+    return { ...result, cursor: await this.tools.startCursor() };
   }
 
   revoke(): Promise<void> {

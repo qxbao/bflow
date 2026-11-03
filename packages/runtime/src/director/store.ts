@@ -43,6 +43,8 @@ export interface IssueInput {
 const TokenFileSchema = z.object({ tokenId: z.string().min(1), secretSha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict();
 const IssuesFileSchema = z.object({ revision: z.number().int().min(0), issues: z.array(ParkedIssueSchema) }).strict();
 type IssuesFile = z.infer<typeof IssuesFileSchema>;
+const StartedWorkFileSchema = z.object({ works: z.record(z.object({ runId: z.string().min(1), correlationId: z.string().min(1) }).strict()) }).strict();
+export interface StartedWork { readonly runId: string; readonly correlationId: string }
 
 const sha256 = (value: string): Buffer => createHash("sha256").update(value, "utf8").digest();
 const isEnoent = (error: unknown): boolean => (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
@@ -132,6 +134,24 @@ export class DirectorStore {
       }
       this.events.emit("revoked");
     });
+  }
+
+  /** Run already created for a user message (by its stable messageId); survives Director re-registration and host restarts. */
+  async startedWork(messageId: string): Promise<StartedWork | undefined> {
+    return this.serial(async () => (await this.readStartedWork()).works[messageId]);
+  }
+
+  async recordStartedWork(messageId: string, work: StartedWork): Promise<void> {
+    await this.serial(async () => {
+      const file = await this.readStartedWork();
+      if (file.works[messageId]) return;
+      await this.writeJson("started-work.json", { works: { ...file.works, [messageId]: work } });
+    });
+  }
+
+  private async readStartedWork(): Promise<z.infer<typeof StartedWorkFileSchema>> {
+    const raw = await this.readJson("started-work.json");
+    return raw === undefined ? { works: {} } : StartedWorkFileSchema.parse(raw);
   }
 
   async appendMessage(input: { author: "user" | "director"; channel: DirectorChannel; text: string; runId?: string }): Promise<DirectorMessage> {

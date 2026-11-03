@@ -4,7 +4,10 @@ import {
   DirectorWaitResultSchema,
   JsonValueSchema,
   ParkedIssueStatusSchema,
+  AcceptanceCriterionSchema,
+  DelegationRequestSchema,
   SddPolicyLevelSchema,
+  WebRequestKindSchema,
   type DirectorMessage,
   type DirectorRuntimeEvent,
   type JsonValue,
@@ -17,17 +20,18 @@ export interface DirectorCoordinatorPort {
   invoke(name: string, input: unknown): Promise<JsonValue>;
 }
 export interface DirectorWorkStart {
-  /** director:<tokenId>:<userMessageSeq>; the host derives every id of the delegation from it. */
+  /** director:<messageId of the user message>; the host derives every id of the delegation from it. */
   readonly key: string;
   readonly title: string;
   readonly objective: string;
+  readonly kind: z.infer<typeof WebRequestKindSchema>;
   readonly acceptanceCriteria: readonly { description: string; verificationMethod: AcceptanceCriterionVerificationMethod }[];
-  readonly sddLevel: "lightweight" | "full";
-  readonly priority: "low" | "normal" | "high" | "critical";
+  readonly sddLevel: z.infer<typeof SddPolicyLevelSchema>;
+  readonly priority: z.infer<typeof DelegationRequestSchema>["priority"];
   /** Timestamp of the user message that authorized the work, so a replay builds the identical delegation. */
   readonly requestedAt: string;
 }
-type AcceptanceCriterionVerificationMethod = "unit_test" | "integration_test" | "e2e_test" | "typecheck" | "lint" | "static_analysis" | "manual_review";
+type AcceptanceCriterionVerificationMethod = z.infer<typeof AcceptanceCriterionSchema>["verificationMethod"];
 /** Hands a new run to the same delegation path Conversation uses. Throws with a redacted reason on admission refusal. */
 export interface DirectorWorkPort {
   start(input: DirectorWorkStart): Promise<JsonValue>;
@@ -53,7 +57,7 @@ export const DIRECTOR_OWN_TOOLS: readonly { name: string; description: string }[
   { name: "list_issues", description: "List the issue queue. Arguments: status (optional array of open|retrying|resolved|dismissed; default open and retrying)." },
   { name: "inspect_issue", description: "Read one queued issue with its evidence references. Arguments: issueId." },
   { name: "set_issue_status", description: "Mark a queued issue retrying, resolved or dismissed after you acted on it. Arguments: issueId, status." },
-  { name: "start_work", description: "Create a new run through the same delegation path Conversation uses. In slice B1 the Coordinator pane receives the delegation and decomposes it; you monitor and steer it with the other tools. Clarify acceptance criteria with the user first. Arguments: title, objective, acceptanceCriteria (array of {description, verificationMethod: unit_test|integration_test|e2e_test|typecheck|lint|static_analysis|manual_review}, at least one), sddLevel (lightweight|full), priority (optional low|normal|high|critical, default normal), userMessageSeq (seq of the user message that asked for this work; it must be a real user message in the transcript). Calling again with the same userMessageSeq returns the same runId and creates no second run. Returns {runId, correlationId, status: queued}." }
+  { name: "start_work", description: "Create a new run through the same delegation path Conversation uses. In slice B1 the Coordinator pane receives the delegation and decomposes it; you monitor and steer it with the other tools. Clarify acceptance criteria with the user first. Arguments: title, objective, acceptanceCriteria (array of {description, verificationMethod: unit_test|integration_test|e2e_test|typecheck|lint|static_analysis|manual_review}, at least one), sddLevel (lightweight|full), kind (optional feature|bugfix|refactor|spike, default feature), priority (optional low|normal|high|critical, default normal), userMessageSeq (seq of the user message that asked for this work; it must be a real user message in the transcript). Calling again for the same user message, even from a new Director session, returns the same runId and creates no second run. Returns {runId, correlationId, status: queued}." }
 ];
 
 /** Host-served planning guidance; needs no pane binding. Shared with the Coordinator implementation in the host. */
@@ -79,13 +83,15 @@ const ListArgs = z.object({ status: z.array(ParkedIssueStatusSchema).optional() 
 const InspectArgs = z.object({ issueId: z.string().min(1) }).strict();
 const SetStatusArgs = z.object({ issueId: z.string().min(1), status: z.enum(["retrying", "resolved", "dismissed"]) }).strict();
 
-const ACCEPTANCE_METHODS = ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] as const;
+const VerificationMethodSchema = AcceptanceCriterionSchema.innerType().shape.verificationMethod;
+const PrioritySchema = DelegationRequestSchema.innerType().shape.priority;
 const StartWorkArgs = z.object({
   title: z.string().trim().min(1),
   objective: z.string().trim().min(1),
-  acceptanceCriteria: z.array(z.object({ description: z.string().trim().min(1), verificationMethod: z.enum(ACCEPTANCE_METHODS) }).strict()).min(1),
+  acceptanceCriteria: z.array(z.object({ description: z.string().trim().min(1), verificationMethod: VerificationMethodSchema }).strict()).min(1),
   sddLevel: SddPolicyLevelSchema,
-  priority: z.enum(["low", "normal", "high", "critical"]).default("normal"),
+  kind: WebRequestKindSchema.default("feature"),
+  priority: PrioritySchema.default("normal"),
   userMessageSeq: z.number().int().positive()
 }).strict();
 
@@ -101,8 +107,8 @@ export class DirectorTools {
   private readonly coordinator: DirectorCoordinatorPort;
   private readonly runtimeEvents: DirectorRuntimeEventsPort | undefined;
   private readonly work: DirectorWorkPort | undefined;
-  /** Replays of a started key answer from here; the host's own outbox dedupe covers a restart. */
-  private readonly started = new Map<string, JsonValue>();
+  /** Concurrent calls for one message share a single handoff. */
+  private readonly inFlight = new Map<string, Promise<JsonValue>>();
   private readonly maxWaitMs: number;
   private readonly now: () => Date;
 
@@ -116,7 +122,7 @@ export class DirectorTools {
   }
 
   async invoke(name: string, input: unknown, token: string, signal?: AbortSignal): Promise<JsonValue> {
-    const session = await this.store.authenticate(token);
+    await this.store.authenticate(token);
     if (name !== "director_wait") await this.store.heartbeat(token, false);
     switch (name) {
       case "director_wait":
@@ -143,32 +149,48 @@ export class DirectorTools {
         return json(await this.store.setIssueStatus(args.issueId, args.status));
       }
       case "start_work":
-        return this.startWork(StartWorkArgs.parse(input), session.tokenId);
+        return this.startWork(StartWorkArgs.parse(input));
       default:
         if (COORDINATOR_NAMES.has(name)) return json(await this.coordinator.invoke(name, input));
         throw new Error(`Unknown Director tool: ${name}`);
     }
   }
 
-  private async startWork(args: z.infer<typeof StartWorkArgs>, tokenId: string): Promise<JsonValue> {
+  private async startWork(args: z.infer<typeof StartWorkArgs>): Promise<JsonValue> {
     if (!this.work) throw new Error("start_work is unavailable: the host has no delegation path");
     const evidence = (await this.store.readMessages({ afterSeq: args.userMessageSeq - 1, limit: 1 }))[0];
     if (!evidence || evidence.seq !== args.userMessageSeq) throw new Error(`userMessageSeq ${args.userMessageSeq} does not exist in the Director transcript`);
     if (evidence.author !== "user") throw new Error(`userMessageSeq ${args.userMessageSeq} is not a user message; start_work needs the user's own message as evidence of intent`);
-    const key = `director:${tokenId}:${args.userMessageSeq}`;
-    const known = this.started.get(key);
-    if (known !== undefined) return known;
-    const result = json(await this.work.start({
-      key,
-      title: args.title,
-      objective: args.objective,
-      acceptanceCriteria: args.acceptanceCriteria,
-      sddLevel: args.sddLevel,
-      priority: args.priority,
-      requestedAt: evidence.at
-    }));
-    this.started.set(key, result);
-    return result;
+    const work = this.work;
+    const key = `director:${evidence.messageId}`;
+    const pending = this.inFlight.get(key);
+    if (pending) return pending;
+    const run = (async (): Promise<JsonValue> => {
+      const known = await this.store.startedWork(evidence.messageId);
+      if (known) return json({ runId: known.runId, correlationId: known.correlationId, status: "queued" });
+      const result = json(await work.start({
+        key,
+        title: args.title,
+        objective: args.objective,
+        kind: args.kind,
+        acceptanceCriteria: args.acceptanceCriteria,
+        sddLevel: args.sddLevel,
+        priority: args.priority,
+        requestedAt: evidence.at
+      }));
+      if (typeof result === "object" && result !== null && !Array.isArray(result) && typeof result.runId === "string" && typeof result.correlationId === "string") {
+        await this.store.recordStartedWork(evidence.messageId, { runId: result.runId, correlationId: result.correlationId });
+      }
+      return result;
+    })().finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, run);
+    return run;
+  }
+
+  /** Cursor meaning "from now": the first director_wait after start sees only what happens afterwards. */
+  async startCursor(): Promise<string> {
+    const version = await this.store.version();
+    return `m${version.messageSeq}.i${version.issuesRevision}.r`;
   }
 
   /** Records a user message typed in the CLI (channel cli) unless the same text was recorded within 10 s. Caller authenticates. */
@@ -188,7 +210,7 @@ export class DirectorTools {
       lastUser && lastUser.channel === "cli" && lastUser.text.trim() === args.text.trim() &&
       Math.abs(this.now().getTime() - Date.parse(lastUser.at)) <= NOTE_DEDUPE_MS
     ) {
-      return { recorded: false, duplicate: true };
+      return { recorded: false, duplicate: true, seq: lastUser.seq };
     }
     const message = await this.store.appendMessage({ author: "user", channel: "cli", text: args.text });
     return { recorded: true, seq: message.seq };

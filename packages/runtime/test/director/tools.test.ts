@@ -184,7 +184,7 @@ describe("DirectorTools", () => {
     h.setNow(new Date("2026-11-03T00:00:00.000Z"));
     expect(await h.tools.invoke("director_note_user_message", { text: "hello" }, h.token)).toEqual({ recorded: true, seq: 1 });
     h.setNow(new Date("2026-11-03T00:00:05.000Z"));
-    expect(await h.tools.invoke("director_note_user_message", { text: " hello " }, h.token)).toEqual({ recorded: false, duplicate: true });
+    expect(await h.tools.invoke("director_note_user_message", { text: " hello " }, h.token)).toEqual({ recorded: false, duplicate: true, seq: 1 });
     h.setNow(new Date("2026-11-03T00:00:11.000Z"));
     expect(await h.tools.invoke("director_note_user_message", { text: "hello" }, h.token)).toEqual({ recorded: true, seq: 2 });
   });
@@ -232,7 +232,20 @@ describe("DirectorTools", () => {
       expect(second).toEqual(first);
       expect(starts).toHaveLength(1);
       expect(starts[0]).toMatchObject({ priority: "normal", requestedAt: msg.at });
-      expect(starts[0]!.key).toMatch(/^director:[^:]+:1$/);
+      expect(starts[0]!.key).toBe(`director:${msg.messageId}`);
+      expect(starts[0]!.kind).toBe("feature");
+    });
+
+    it("returns the same run after the Director registers again, without a second handoff", async () => {
+      const { starts, work } = fakeWork();
+      const h = await harness({ work });
+      const msg = await user(h, "làm X");
+      const first = await h.tools.invoke("start_work", args(msg.seq, { kind: "bugfix" }), h.token);
+      expect(starts[0]).toMatchObject({ kind: "bugfix" });
+      const again = await h.store.register({ provider: "claude", repositoryRoot: "/repo" });
+      expect(again.token).not.toBe(h.token);
+      expect(await h.tools.invoke("start_work", args(msg.seq), again.token)).toEqual(first);
+      expect(starts).toHaveLength(1);
     });
 
     it("surfaces an admission refusal and allows a retry", async () => {
@@ -249,5 +262,21 @@ describe("DirectorTools", () => {
       const msg = await user(h, "x");
       await expect(h.tools.invoke("start_work", args(msg.seq), h.token)).rejects.toThrow(/unavailable/);
     });
+  });
+
+  it("returns the existing seq when a duplicate note is ignored", async () => {
+    const h = await harness();
+    const first = await h.tools.invoke("director_note_user_message", { text: "same" }, h.token) as { recorded: boolean; seq: number };
+    const dup = await h.tools.invoke("director_note_user_message", { text: "same" }, h.token);
+    expect(dup).toEqual({ recorded: false, duplicate: true, seq: first.seq });
+  });
+
+  it("startCursor does not skip a message appended before the first wait", async () => {
+    const h = await harness();
+    await user(h, "old");
+    const cursor = await h.tools.startCursor();
+    await user(h, "between start and wait");
+    const result = await wait(h, { cursor });
+    expect(result.messages.map(m => m.text)).toEqual(["between start and wait"]);
   });
 });

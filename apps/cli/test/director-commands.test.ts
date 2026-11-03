@@ -6,7 +6,7 @@ function make(over: Partial<DirectorCommandDeps> & { stdinText?: string } = {}) 
   const out: string[] = []; const err: string[] = [];
   const stdin = new PassThrough();
   if (over.stdinText !== undefined) { stdin.end(over.stdinText); }
-  const ownerCall = vi.fn(async (_o: unknown, method: string) => method === "director_register" ? { token: "tid.secretsecretsecretsecret", session: { presence: "present" } } : { recorded: true });
+  const ownerCall = vi.fn(async (_o: unknown, method: string) => method === "director_register" ? { token: "tid.secretsecretsecretsecret", cursor: "m4.i0.r", session: { presence: "present" } } : { recorded: true });
   const deps: DirectorCommandDeps = {
     cwd: "/repo",
     identify: async () => ({ root: "/repo", sessionName: "bf-abc" }),
@@ -47,7 +47,7 @@ describe("director start", () => {
     const { deps, out, ownerCall } = make({ env: { CODEX_HOME: "/h" } });
     expect(await runDirectorCommand(parse(["start", "--json"]), deps)).toBe(0);
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0]!)).toMatchObject({ ok: true, token: "tid.secretsecretsecretsecret", cursor: "", sessionId: "bf-abc", repositoryRoot: "/repo", provider: "codex", presence: "present" });
+    expect(JSON.parse(out[0]!)).toMatchObject({ ok: true, token: "tid.secretsecretsecretsecret", cursor: "m4.i0.r", sessionId: "bf-abc", repositoryRoot: "/repo", provider: "codex", presence: "present" });
     expect(ownerCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "director_register", { provider: "codex" });
   });
   it("reports a fix when ensureUp fails", async () => {

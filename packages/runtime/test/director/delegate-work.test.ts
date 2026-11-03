@@ -26,7 +26,7 @@ async function host(queue: (message: unknown) => Promise<unknown>) {
   return createAgenticConversationHost({ runtime, manifest, contextDirectory: dir });
 }
 
-const input = { key: "director:tok:3", title: "T", objective: "O", acceptanceCriteria: [{ description: "Endpoint trả 200", verificationMethod: "integration_test" }],
+const input = { key: "director:msg-3", kind: "feature" as const, title: "T", objective: "O", acceptanceCriteria: [{ description: "Endpoint trả 200", verificationMethod: "integration_test" }],
   sddLevel: "lightweight" as const, priority: "normal" as const, requestedAt: "2026-11-03T00:00:00.000Z" };
 
 describe("delegateDirectorWork", () => {
