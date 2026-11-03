@@ -198,3 +198,20 @@ Chạy `apps/web/scripts/measure-office.mjs` trên cây main sau bản sửa war
 | Heap sau 20 lần bật/tắt | 8,0 → 9,0 MiB, `liveGlContexts` = 0 | ổn định | đạt |
 
 Không nới ngưỡng. Số FPS cả cửa sổ thấp hơn các lần đo trước (22,1 fps ở `15cc644b`); chưa xác định nguyên nhân (hồi quy hay tải máy), cần đo lại khi máy rảnh. Mục tiêu 30 fps và ngân sách long task vẫn **chưa đạt**; tính năng chưa đủ điều kiện nghiệm thu hiệu năng.
+
+## V9 chạy lại với Claude Haiku — 2026-11-03
+
+Phạm vi: **một provider** (Claude Code `2.1.317`, model `claude-haiku-5-5` cho cả bảy role thường trực và Developer; effort Coordinator `high`, Reviewer `medium`, còn lại `low`), Herdr `0.9.5`, `maxConcurrency=2`, source `b9f39695`. Môi trường cô lập `/tmp/bfo-v9-9r739p5a`, fixture `repo-haiku` (hai test chủ dự án `double.test.js`/`triple.test.js`). Chỉ dùng chế độ 3D để tạo việc, duyệt thiết kế, trả lời quyết định, hủy và duyệt bàn giao; không chạy Classic (chủ dự án đã bỏ phép so sánh).
+
+**Kết quả: run `run-web-a86eb1ca-0768-46ae-8fb6-ec7644fad673` `succeeded` / host `completed`, 2/2 task, hai Developer chạy song song trên hai worktree, Red/Green qua gate độc lập, workflow verification `passed`, bàn giao được duyệt qua 3D.** Patch chỉ thêm `double.js` và `triple.js`; không sửa test.
+
+Hai run đầu thất bại và được hủy qua UI, không dùng force:
+
+| Run | Nguyên nhân | Xử lý |
+| --- | --- | --- |
+| `run-web-c890e95f` | Fixture: `.bflow/` chưa bị ignore nên cây Git bẩn, Runtime chặn trước Developer. Thẻ quyết định bấm qua panel bị `unknown delivery`; trả lời qua chat sau đó gặp xung đột đối chiếu. | Hủy qua UI; owner commit `.gitignore` baseline (`9ffdf73`). |
+| `run-web-b6f9f22f` | Coordinator (Haiku) map tiêu chí ac-3/ac-4 vào cả hai file test nên Red bị từ chối; Runtime không nhận re-plan trên cùng run. Hai Developer đã chạy song song nhưng chưa triển khai. | Hủy qua UI; tạo lại với hai tiêu chí, mỗi tiêu chí map đúng một test. |
+
+Lỗi chủ động đã làm trên run thành công: tải lại trang giữa verification (giữ URL/3D/việc) và tắt/mở lại Local Server (pairing mới, UI phục hồi ở 3D, thẻ bàn giao vẫn còn). Chưa làm lại lần này: đóng pane Developer (đã có bằng chứng ở các run Luna), đối chiếu DOM với manifest/telemetry ở đủ năm mốc, và truy ngược từng cue ra `handoffId` — chỉ có snapshot workforce (có snapshot với hai Developer) và telemetry cuối (`succeeded`, cohort 2/0/0/0). Vì vậy V9 chỉ đạt ở mức: hai Developer song song, luồng 3D từ tạo việc tới duyệt bàn giao, hai lỗi chủ động; chưa tuyên bố đủ các mục §8.4.
+
+Ghi chú vận hành: HOME cô lập cần `~/.zshrc` rỗng (wizard zsh nuốt ký tự đầu lệnh `claude`) và đăng nhập Claude tối thiểu (credentials/tài khoản được copy tạm, đã xóa sau run). Phát hiện sản phẩm: sau lần bấm quyết định `user_decision` ở panel bị `unknown delivery`, Runtime từ chối trả lời tiếp cho cùng approval đến khi đối chiếu; chưa điều tra sâu.
