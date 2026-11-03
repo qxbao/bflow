@@ -95,7 +95,7 @@ export async function main(
       process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;
       return { ok: false, command: cmd, exitCode: CLI_EXIT_CODES.USAGE_ERROR, stdout: "", stderr: parsed.message };
     }
-    const deps = await m.defaultDirectorProgressDeps(context?.cwd ?? process.cwd());
+    const deps = await m.defaultDirectorProgressDeps(context?.cwd ?? process.cwd(), parsed.value.cmd === "progress" && parsed.value.follow);
     const exitCode = parsed.value.cmd === "progress" ? await m.runProgressCommand(parsed.value, deps) : await m.runQueueCommand(parsed.value, deps);
     process.exitCode = exitCode;
     return { ok: exitCode === 0, command: cmd, exitCode, stdout: "", stderr: "" };

@@ -76,14 +76,17 @@ export interface DirectorProgressDeps {
   readonly signal: AbortSignal;
   readonly stdout: { write(chunk: string): unknown; columns?: number | undefined; rows?: number | undefined };
   readonly stderr: { write(chunk: string): unknown };
+  /** Releases process-level resources (signal handlers); called once when a follow loop ends. */
+  readonly dispose?: (() => void) | undefined;
 }
 
-export async function defaultDirectorProgressDeps(cwd: string): Promise<DirectorProgressDeps> {
+export async function defaultDirectorProgressDeps(cwd: string, follow = false): Promise<DirectorProgressDeps> {
   const runtime = await import("@bflow/runtime");
   const controller = new AbortController();
   const stop = () => controller.abort();
-  process.once("SIGINT", stop); process.once("SIGTERM", stop);
+  if (follow) { process.on("SIGINT", stop); process.on("SIGTERM", stop); }
   return {
+    dispose: () => { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); },
     cwd,
     identify: async dir => (await import("./repository.js")).identifyRepository(dir),
     ownerCall: (opts, method, input, timeoutMs) => runtime.callDirectorOwnerHost(opts, method as never, input, timeoutMs),
@@ -121,12 +124,16 @@ export async function runProgressCommand(args: ProgressArgs, deps: DirectorProgr
     deps.stdout.write(args.json ? `${f.json}\n` : `${f.lines.join("\n")}\n`);
     return 0;
   }
-  while (!deps.signal.aborted) {
-    const f = await frame();
-    if (deps.signal.aborted) break;
-    if (args.json) deps.stdout.write(f.ok ? `${f.json}\n` : `${JSON.stringify({ ok: false, message: NO_SESSION })}\n`);
-    else deps.stdout.write(`${CLEAR}${f.ok ? f.lines.join("\n") : f.message}\n`);
-    await deps.sleep(FOLLOW_INTERVAL_MS, deps.signal);
+  try {
+    while (!deps.signal.aborted) {
+      const f = await frame();
+      if (deps.signal.aborted) break;
+      if (args.json) deps.stdout.write(f.ok ? `${f.json}\n` : `${JSON.stringify({ ok: false, message: NO_SESSION })}\n`);
+      else deps.stdout.write(`${CLEAR}${f.ok ? f.lines.join("\n") : f.message}\n`);
+      await deps.sleep(FOLLOW_INTERVAL_MS, deps.signal);
+    }
+  } finally {
+    deps.dispose?.();
   }
   return 0;
 }

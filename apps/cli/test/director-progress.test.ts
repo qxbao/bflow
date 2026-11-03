@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseProgressCliArgs, runProgressCommand, runQueueCommand, type DirectorProgressDeps } from "../src/director-progress.js";
+import { defaultDirectorProgressDeps, parseProgressCliArgs, runProgressCommand, runQueueCommand, type DirectorProgressDeps } from "../src/director-progress.js";
 
 const T = "2026-11-03T00:00:00.000Z";
 const issue = (over: Record<string, unknown> = {}) => ({ schemaVersion: 1, issueId: "iss-1", runId: "run-1", taskKey: "t1", kind: "transport_failure", status: "open", summary: "Lỗi mạng", attempts: 1, evidence: [], createdAt: T, updatedAt: T, ...over });
-const snapshot = { x: 1 };
+const snapshot = { schemaVersion: 1, generatedAt: T, director: { presence: "active" }, runs: [], pendingApprovals: 0, pendingQuestions: 0, issues: [] };
 
 function make(over: Partial<DirectorProgressDeps> = {}, ownerImpl?: (m: string, i: unknown) => unknown) {
   const out: string[] = []; const err: string[] = [];
@@ -23,11 +23,6 @@ function make(over: Partial<DirectorProgressDeps> = {}, ownerImpl?: (m: string, 
   };
   return { deps, out, err, ownerCall, ac };
 }
-vi.mock("@bflow/contracts", async orig => {
-  const m = await orig<typeof import("@bflow/contracts")>();
-  return { ...m, DirectorProgressSnapshotSchema: { parse: (v: unknown) => v } };
-});
-
 describe("progress", () => {
   it("renders once as text and as one JSON value", async () => {
     const a = make();
@@ -53,6 +48,41 @@ describe("progress", () => {
     expect(a.out[0]).toContain("\x1b[H\x1b[2J");
     expect(a.out[0]).toContain("Chưa có phiên");
     expect(a.out[1]).toContain("line A");
+  });
+});
+
+describe("progress garbage response and signals", () => {
+  it("garbage response without follow exits 1", async () => {
+    const a = make({}, () => ({ nope: true }));
+    expect(await runProgressCommand({ cmd: "progress", follow: false, json: false }, a.deps)).toBe(1);
+    expect(a.err.join("")).toContain("Chưa có phiên");
+  });
+  it("garbage response with follow draws unavailable line and continues", async () => {
+    const a = make({}, () => ({ nope: true }));
+    let sleeps = 0;
+    a.deps = { ...a.deps, sleep: async () => { if (++sleeps === 2) a.ac.abort(); } };
+    expect(await runProgressCommand({ cmd: "progress", follow: true, json: false }, a.deps)).toBe(0);
+    expect(a.out).toHaveLength(2);
+    expect(a.out.every(o => o.includes("Chưa có phiên"))).toBe(true);
+  });
+  it("non-follow adds no signal listeners; follow adds then removes them", async () => {
+    const count = () => process.listenerCount("SIGINT") + process.listenerCount("SIGTERM");
+    const base = count();
+    await defaultDirectorProgressDeps("/repo");
+    expect(count()).toBe(base);
+    const deps = await defaultDirectorProgressDeps("/repo", true);
+    expect(count()).toBe(base + 2);
+    const mine = process.listeners("SIGINT").at(-1) as () => void;
+    const out: string[] = [];
+    const run = runProgressCommand({ cmd: "progress", follow: true, json: false }, {
+      ...deps,
+      identify: async () => ({ root: "/repo", sessionName: "bf" }),
+      ownerCall: async () => snapshot,
+      sleep: async () => { mine(); },
+      stdout: { write: c => { out.push(c); } }
+    });
+    expect(await run).toBe(0);
+    expect(count()).toBe(base);
   });
 });
 
