@@ -26,6 +26,9 @@ export interface DependencyIndex {
   readonly dependents: ReadonlyMap<string, readonly TaskDependency[]>;
 }
 
+// R-B2-14: `parked` is deliberately in neither set. It is not terminal (a `completed` dependent waits), takes no
+// capacity, and is not success (a `succeeded` dependent waits). dependencyPermanentlyUnsatisfied treats it as
+// still open, so dependents stay `pending` instead of being cancelled.
 const completedStatuses = new Set<TaskState["status"]>(["succeeded", "failed", "cancelled"]);
 const capacityStatuses = new Set<TaskState["status"]>(["running", "waiting", "blocked", "cancelling"]);
 

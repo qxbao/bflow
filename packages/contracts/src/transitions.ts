@@ -1,6 +1,11 @@
 import type { RunStatus, TaskStatus } from "./execution.js";
 
-export type TaskTransitionIntent = "normal" | "retry" | "rework" | "cancel";
+export type TaskTransitionIntent = "normal" | "retry" | "rework" | "cancel" | "park" | "unpark";
+
+/** Every task transition intent, for ingress schemas (`park`/`unpark` are B2b, R-B2-14). */
+export const TASK_TRANSITION_INTENTS = ["normal", "retry", "rework", "cancel", "park", "unpark"] as const;
+
+const parkableTaskStatuses: readonly TaskStatus[] = ["pending", "ready", "blocked", "waiting", "running"];
 
 const normalTaskTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   pending: ["ready", "cancelled"],
@@ -12,7 +17,9 @@ const normalTaskTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>>
   succeeded: [],
   failed: [],
   cancelling: ["cancelled", "succeeded", "failed"],
-  cancelled: []
+  cancelled: [],
+  // Every move out of parked is an explicit unpark or cancel intent.
+  parked: []
 };
 
 const normalRunTransitions: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
@@ -51,8 +58,21 @@ export function validateTaskTransition(
       ? { valid: true }
       : { valid: false, reason: "rework must transition succeeded to ready with generation incremented by one" };
   }
+  if (intent === "park") {
+    return to === "parked" && parkableTaskStatuses.includes(from)
+      ? { valid: true }
+      : { valid: false, reason: "park must transition pending, ready, blocked, waiting or running to parked" };
+  }
+  if (intent === "unpark") {
+    return from === "parked" && to === "ready"
+      ? { valid: true }
+      : { valid: false, reason: "unpark must transition parked to ready" };
+  }
   if (intent === "cancel" && to !== "cancelling" && to !== "cancelled") {
     return { valid: false, reason: "cancel intent must enter a cancellation state" };
+  }
+  if (intent === "cancel" && from === "parked") {
+    return to === "cancelled" ? { valid: true } : { valid: false, reason: "a parked task can only be cancelled directly" };
   }
   return normalTaskTransitions[from].includes(to)
     ? { valid: true }

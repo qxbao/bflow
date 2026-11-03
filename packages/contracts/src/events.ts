@@ -26,7 +26,7 @@ import {
   TaskStatusSchema
 } from "./execution.js";
 import { QualityGateResultSchema } from "./quality.js";
-import { validateRunTransition, validateTaskTransition } from "./transitions.js";
+import { TASK_TRANSITION_INTENTS, validateRunTransition, validateTaskTransition } from "./transitions.js";
 
 export const CURRENT_DOMAIN_EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -110,7 +110,7 @@ export const TaskStatusChangedEventSchema = z
       .object({
         from: TaskStatusSchema,
         to: TaskStatusSchema,
-        intent: z.enum(["normal", "retry", "rework", "cancel"]),
+        intent: z.enum(TASK_TRANSITION_INTENTS),
         attempt: z.number().int().nonnegative(),
         generationFrom: z.number().int().nonnegative(),
         generationTo: z.number().int().nonnegative(),

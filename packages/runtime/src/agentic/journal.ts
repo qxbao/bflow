@@ -308,10 +308,11 @@ export function isConversationDelivery(out: Outbound): boolean {
 export function isInProcessDelivery(out: Outbound): boolean {
   return isConversationDelivery(out) || out.delivery === "director_mailbox";
 }
-/** Fields only a Director-mode host writes; their presence requires private journal v8 (R-B2-5). */
+/** Fields only a Director-mode host writes; their presence requires private journal v8 (R-B2-5, B2b `completed_with_parked`). */
 export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
   return state.outbound.some(out => out.delivery !== undefined) ||
-    state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director"));
+    state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
+      run.status === "completed_with_parked");
 }
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
@@ -324,6 +325,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.delegation.runId !== run.runId) throw new Error("Journal run/delegation mismatch");
     if (state.version < 8 && run.delegation.requestedBy === "director") throw new Error("Director journal fields require private journal v8");
     run.status = SdlcWorkStatusSchema.parse(run.status);
+    if (state.version < 8 && run.status === "completed_with_parked") throw new Error("Director journal fields require private journal v8");
     if (run.lastWorkflowRejection !== undefined) {
       const proof = ProposalRejectionSchema.parse(run.lastWorkflowRejection);
       const revisionValue = run.delegation.metadata?.revision;

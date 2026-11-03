@@ -23,7 +23,7 @@ import {
   TaskStatusSchema
 } from "./execution.js";
 import { QualityGateResultSchema } from "./quality.js";
-import { validateTaskTransition } from "./transitions.js";
+import { TASK_TRANSITION_INTENTS, validateTaskTransition } from "./transitions.js";
 import { WorkflowDefinitionSchema, WorkflowRunSnapshotSchema } from "./workflow.js";
 
 export const CreateRunCommandSchema = z
@@ -53,7 +53,7 @@ export const TaskTransitionCommandSchema = z
     expectedVersion: z.number().int().nonnegative(),
     from: TaskStatusSchema,
     to: TaskStatusSchema,
-    intent: z.enum(["normal", "retry", "rework", "cancel"]),
+    intent: z.enum(TASK_TRANSITION_INTENTS),
     generationFrom: z.number().int().nonnegative(),
     generationTo: z.number().int().nonnegative(),
     reason: z.string().min(1).optional(),

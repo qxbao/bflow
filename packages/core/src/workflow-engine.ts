@@ -3,7 +3,9 @@ import {
   authenticateBindingReceipt,
   canonicalReceiptJson,
   requiresAuthenticatedBindingCodec,
+  requiresParkedTaskCodec,
   type AgentBindingVerification,
+  type TaskTransitionIntent,
   type VerifyAgentBindingCommand,
   AdvanceRunCommandSchema,
   ApplyApprovalCommandSchema,
@@ -211,6 +213,13 @@ function taskState(aggregate: WorkflowAggregate, taskId: string): TaskState | un
 
 function taskDefinition(aggregate: WorkflowAggregate, taskId: string) {
   return aggregate.definition.tasks.find((task) => task.id === taskId);
+}
+
+/** A task-scoped cancellation confirmed the stop of exactly the task's bound execution (cancel and park share it). */
+function hasConfirmedTaskStop(aggregate: WorkflowAggregate, task: TaskState): boolean {
+  return [...aggregate.cancellations.values()].some((record) => record.request.taskId === task.taskId &&
+    record.confirmations.some((confirmation) => confirmation.terminalStatus === "cancelled" &&
+      confirmation.executionId === task.agentExecution?.executionId));
 }
 
 function taskHasSuccessfulResult(aggregate: WorkflowAggregate, task: TaskState): boolean {
@@ -470,10 +479,16 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         }
         if (data.to === "cancelled" && current.agentExecution !== undefined &&
             ["running", "waiting", "blocked", "cancelling"].includes(current.status) &&
-            ![...aggregate.cancellations.values()].some((record) => record.request.taskId === current.taskId &&
-              record.confirmations.some((confirmation) => confirmation.terminalStatus === "cancelled" &&
-                confirmation.executionId === current.agentExecution?.executionId))) {
+            !hasConfirmedTaskStop(aggregate, current)) {
           return validation("Cancellation of a bound execution requires confirmed stop");
+        }
+        if (data.intent === "park" && aggregate.snapshot.status === "cancelling") {
+          return conflict("A cancelling workflow cannot park tasks");
+        }
+        // R-B2-14: parking a bound execution reuses the cancellation confirmed-stop rule for that exact execution.
+        if (data.intent === "park" && current.agentExecution !== undefined &&
+            ["running", "waiting", "blocked"].includes(current.status) && !hasConfirmedTaskStop(aggregate, current)) {
+          return validation("Parking a bound execution requires confirmed stop");
         }
         if (data.to === "succeeded" &&
             (!taskHasSuccessfulResult(aggregate, current) ||
@@ -636,6 +651,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         if (["succeeded", "failed", "cancelled"].includes(task.status)) {
           return conflict(`Task ${data.taskId} is already terminal`);
         }
+        if (task.status === "parked") return conflict(`Task ${data.taskId} is parked`);
         const recorded = this.#emit(aggregate, emitted, {
           type: "agent.result_recorded", taskId: data.taskId, occurredAt: data.occurredAt,
           commandKey: data.idempotencyKey, payload: data.result
@@ -964,7 +980,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
           aggregate.snapshot.tasks.filter((task) => task.taskId === data.taskId);
         for (const task of targets) {
           if (["succeeded", "failed", "cancelled"].includes(task.status)) continue;
-          const target = task.status === "pending" || task.status === "retrying" || task.status === "ready"
+          const target = task.status === "pending" || task.status === "retrying" || task.status === "ready" ||
+            task.status === "parked"
             ? "cancelled"
             : "cancelling";
           const transitioned = this.#transitionTask(aggregate, emitted, task.taskId, target, "cancel", data.requestedAt,
@@ -1269,7 +1286,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     const state = this.#checkpointState(aggregate);
     const checkpoint = RecoveryCheckpointSchema.safeParse({
       checkpointSchemaVersion: 1,
-      codec: { name: "bflow.workflow-aggregate+json", version: requiresAuthenticatedBindingCodec(state) ? 2 : 1 },
+      codec: { name: "bflow.workflow-aggregate+json",
+        version: requiresParkedTaskCodec(state) ? 3 : requiresAuthenticatedBindingCodec(state) ? 2 : 1 },
       checkpointId: parsed.data.checkpointId,
       runId: parsed.data.runId,
       eventSequence: aggregate.snapshot.lastEventSequence,
@@ -1336,7 +1354,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         throw new Error("Illegal run transition in event history");
       }
       if (["succeeded", "failed", "cancelled"].includes(event.payload.to) &&
-          before.tasks.some((task) => ["pending", "ready", "running", "retrying", "cancelling"].includes(task.status))) {
+          before.tasks.some((task) => ["pending", "ready", "running", "retrying", "cancelling", "parked"].includes(task.status))) {
         throw new Error("Terminal run would contain an active task");
       }
       if (event.payload.to === "succeeded" && !before.tasks.every((task) =>
@@ -1354,7 +1372,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     if (["succeeded", "failed", "cancelled"].includes(before!.status)) {
       throw new Error("Terminal run contains a later task transition");
     }
-    if (event.payload.to === "ready" && event.payload.from === "pending" &&
+    if (event.payload.to === "ready" && (event.payload.from === "pending" || event.payload.from === "parked") &&
         !dependenciesSatisfied(aggregate.definition, before!, task.taskId, schedulingContext(aggregate))) {
       throw new Error("Task became ready before dependencies were satisfied");
     }
@@ -1417,6 +1435,17 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
           record.confirmations.some((confirmation) => confirmation.terminalStatus === "cancelled" &&
             confirmation.executionId === task.agentExecution?.executionId))) {
       throw new Error("Bound task cancelled without verified stop evidence");
+    }
+    if (event.payload.intent === "park" && before!.status === "cancelling") {
+      throw new Error("A cancelling workflow parked a task");
+    }
+    if (event.payload.to === "parked" && task.agentExecution !== undefined &&
+        ["running", "waiting", "blocked"].includes(task.status) &&
+        !aggregate.pendingCommandEvents.some((prior) =>
+          prior.type === "cancellation.stop_confirmed" && prior.payload.terminalStatus === "cancelled" &&
+            prior.payload.executionId === task.agentExecution?.executionId) &&
+        !hasConfirmedTaskStop(aggregate, task)) {
+      throw new Error("Bound task parked without verified stop evidence");
     }
   }
 
@@ -1747,7 +1776,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     emitted: DomainEvent[],
     taskId: string,
     to: TaskState["status"],
-    intent: "normal" | "retry" | "rework" | "cancel",
+    intent: TaskTransitionIntent,
     occurredAt: string,
     commandKey: string,
     reason?: string,
@@ -1862,6 +1891,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         !requiredGatesSatisfied(aggregate.definition, task, aggregate.gateOutcomes, ["after_result", "before_completion"]))));
     const hasFailure = tasks.some((task) => task.status === "failed" || task.status === "cancelled") ||
       rejectedApproval || exhaustedRework.includes("fail");
+    // R-B2-14: parked work is neither queued, running nor failed, and keeps the run from going terminal.
+    const hasParked = tasks.some((task) => task.status === "parked");
     if (allBusinessSucceeded) target = "succeeded";
     else if (hasNonTerminalQueueOrRunning) {
       if (hasProgressableActive) target = "running";
@@ -1869,7 +1900,9 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
       else if (hasWaiting) target = "waiting";
       else target = activeCapacity === 0 ? "blocked" : "running";
     } else if (exhaustedRework.includes("require_human")) target = "blocked";
-    else if (exhaustedRework.includes("fail")) target = "failed";
+    else if (hasParked) {
+      target = hasWaiting && !hasBlocked && !(hasFailure && aggregate.definition.failurePolicy === "block") ? "waiting" : "blocked";
+    } else if (exhaustedRework.includes("fail")) target = "failed";
     else if (hasBlocked || (hasFailure && aggregate.definition.failurePolicy === "block")) target = "blocked";
     else if (hasWaiting) target = "waiting";
     else if (hasFailure) target = "failed";
