@@ -17,6 +17,7 @@ import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProc
 import { openLifecycleHost, providerRoleArguments, type LifecycleHost, type LifecycleHostFactory } from "./agentic-host.js";
 import { RoleStartupChecks } from "./role-startup-checks.js";
 import { formatPlatformNotReady } from "./platform-options.js";
+import { V2_SESSION_RUNNING_MESSAGE } from "./director-messages.js";
 import { isGovernanceRoleConfig, isLegacyDirectorRole } from "./environment-config.js";
 
 function failure<T>(message: string): OperationResult<T> {
@@ -141,6 +142,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     if (!this.matches(sessionId)) return failure("Cannot inspect another repository's session");
     const stored = await this.store.load(sessionId, options);
     if (!stored.ok || stored.value === null || stored.value.status === "down") return stored;
+    // A running v2 session stays readable (status, doctor, down); the Director layout never refreshes its health.
+    if (stored.value.schemaVersion === 2) return stored;
     // P12 calls this before server startup as well as for live status. Offline reads retain persisted facts.
     const probe = await this.runner.run({ executable: this.input.config.environment.herdrBinary, args: ["status", "server", "--json"],
       cwd: this.input.repository.root, env: namedSessionEnvironment(sessionId, this.input.env),
@@ -161,6 +164,7 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     if (!this.matches(sessionId)) return failure("Cannot focus another repository's session");
     const stored = await this.store.load(sessionId, options);
     if (stored.ok && stored.value?.schemaVersion === 3) return failure("Director session: use attachProgress");
+    if (stored.ok && stored.value?.schemaVersion === 2) return failure(V2_SESSION_RUNNING_MESSAGE);
     const result = await this.panes.focusConversationPane(options);
     if (!result.ok) return result;
     if (this.persistenceFailure) return { ok: false, error: this.persistenceFailure };
@@ -190,6 +194,8 @@ export class PaneManagerLifecycleAdapter implements SessionLifecycleManager {
     else if (!current.value) checks.push({ checkId: "p13-manifest", name: "P13 manifest", status: "warn", message: "No topology manifest yet. Run bflow up." });
     else {
       const stopped = current.value.status === "down";
+      if (current.value.schemaVersion === 2 && !stopped)
+        checks.push({ checkId: "p13-v2-session", name: "Phiên v2", status: "warn", message: V2_SESSION_RUNNING_MESSAGE });
       if (stopped) checks.push({ checkId: "p13-stopped", name: "Session lifecycle", status: "passed",
         message: "Session is stopped; cancelled pane records describe completed shutdown, not current readiness." });
       if (current.value.schemaVersion === 3 && !stopped) {

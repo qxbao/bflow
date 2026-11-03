@@ -14,6 +14,7 @@ export interface DirectorRolesMigrationOutput {
   readonly backupPath?: string;
 }
 
+export const EMPTY_ROLES_AFTER_MIGRATION_MESSAGE = "Cấu hình chỉ có vai conversation/coordinator; gỡ chúng sẽ không còn vai nào. Chạy `bflow init --update` để tạo lại các vai chuyên trách. Không có tệp nào bị thay đổi.";
 const REMOVED = ["conversation", "coordinator"] as const;
 const stamp = (date: Date) => date.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 
@@ -23,7 +24,7 @@ const stamp = (date: Date) => date.toISOString().replace(/[-:]/g, "").replace(/\
  * then the rewritten file replaces it by an atomic rename. A file without those entries is not touched, so repeating
  * the migration writes nothing and no further backup.
  */
-export async function migrateDirectorRoles(repositoryRoot: string, options: { readonly now?: () => Date } = {}): Promise<DirectorRolesMigrationOutput> {
+export async function migrateDirectorRoles(repositoryRoot: string, options: { readonly now?: () => Date; readonly skipWhenEmpty?: boolean } = {}): Promise<DirectorRolesMigrationOutput> {
   const configPath = join(repositoryRoot, ".bflow", "config.yml");
   let source: string;
   try {
@@ -45,6 +46,11 @@ export async function migrateDirectorRoles(repositoryRoot: string, options: { re
     return true;
   });
   if (removed.length === 0) return { configPath, migrated: false, removedRoles: [] };
+  if (kept.length === 0) {
+    // `init --update` re-seeds the specialist defaults itself, so it asks to leave the file alone here.
+    if (options.skipWhenEmpty) return { configPath, migrated: false, removedRoles: [] };
+    throw new Error(EMPTY_ROLES_AFTER_MIGRATION_MESSAGE);
+  }
   roles.items = kept;
 
   const backupPath = `${configPath}.director-${stamp((options.now ?? (() => new Date()))())}.bak`;

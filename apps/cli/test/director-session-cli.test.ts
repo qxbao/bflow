@@ -17,11 +17,12 @@ const linuxIt = it.skipIf(process.platform !== "linux");
 
 class Herdr implements EnvironmentProcessRunner {
   readonly calls: EnvironmentProcessRequest[] = [];
-  constructor(private readonly session: string, private readonly running = true) {}
+  constructor(private readonly session: string, private running = true) {}
   async run(request: EnvironmentProcessRequest) {
     if (request.executable === "git") return environmentProcessRunner.run(request);
     this.calls.push(request);
     const args = request.args.join(" ");
+    if (request.args[0] === "session" && request.args[1] === "stop") this.running = false;
     const value = args === "status server --json" ? { running: this.running, session: this.session, protocol: 22, compatible: true } : {};
     return { exitCode: 0, stdout: JSON.stringify(value), stderr: "" };
   }
@@ -212,6 +213,71 @@ describe("Director session CLI (B2a task 8)", () => {
       expect(check?.message).toContain("bflow up");
       expect(report.healthy).toBe(true);
     });
+  });
+
+
+  describe("a running v2 session stays operable and read-only", () => {
+    async function v2Adapter() {
+      await writeFile(stateFile("session.json"), JSON.stringify(v2("up")));
+      await writeFile(join(dir, ".bflow/state/panes", `${repository.sessionName}.manifest.json`), JSON.stringify(v2("up")));
+      const config = await readEnvironmentConfig(repository);
+      return new PaneManagerLifecycleAdapter({ repository, env: {}, config, progressCommand: ["/usr/bin/node", "/x/bin.js", "progress", "--follow"] },
+        new Herdr(repository.sessionName, true));
+    }
+
+    it("getManifest returns the stored v2 manifest", async () => {
+      const result = await (await v2Adapter()).getManifest(repository.sessionName);
+      expect(result.ok && result.value?.schemaVersion).toBe(2);
+    });
+
+    it("attach prints the Vietnamese upgrade instruction", async () => {
+      const result = await (await v2Adapter()).attach(repository.sessionName);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.message).toBe(V2_SESSION_RUNNING_MESSAGE);
+    });
+
+    it("doctor has no failed manifest check and carries the Vietnamese note", async () => {
+      const report = await (await v2Adapter()).doctorSession({ workspaceRoot: repository.root });
+      expect(report.checks.some(check => check.checkId === "p13-manifest" && check.status === "failed")).toBe(false);
+      expect(report.checks.find(check => check.checkId === "p13-v2-session")?.message).toBe(V2_SESSION_RUNNING_MESSAGE);
+    });
+
+    linuxIt("status returns the stored manifest and down succeeds without --force", async () => {
+      const adapter = await v2Adapter();
+      const stoppedAt = new Date().toISOString();
+      const down = vi.fn(async () => ({ ok: true as const, value: SessionManifestSchema.parse({ ...v2("down"), stoppedAt }) }));
+      const manager: SessionLifecycleManager = {
+        init: vi.fn(async manifest => ({ ok: true as const, value: manifest })), up: vi.fn(), down, attach: vi.fn(),
+        getManifest: (id, options) => adapter.getManifest(id, options), doctorSession: options => adapter.doctorSession(options)
+      };
+      const integration = { manager, runtime: { findRuns: vi.fn(async () => ({ ok: true as const, value: { items: [] } })), getRun: vi.fn() } as never,
+        quiesce: async () => ({ ok: true as const, value: undefined }) };
+      const lifecycle = new EnvironmentLifecycle(dir, { runner: new Herdr(repository.sessionName, true), integration });
+      const status = await lifecycle.status();
+      expect(status.manifest?.schemaVersion).toBe(2);
+      const stopped = await lifecycle.down(true);
+      expect(down).toHaveBeenCalledOnce();
+      expect((stopped as SessionManifest).status).toBe("down");
+    });
+  });
+
+  it("config-migrate refuses to leave no roles and the read path points to init --update", async () => {
+    const config = await readEnvironmentConfig(repository);
+    const onlyLegacy = { ...config, environment: { ...config.environment, roles: [
+      { role: "conversation" as const, cli: "codex", required: true }, { role: "coordinator" as const, cli: "codex", required: true }] } };
+    delete (onlyLegacy as { diagnostics?: unknown }).diagnostics;
+    const path = join(dir, ".bflow/config.yml");
+    await writeFile(path, renderEnvironmentConfigYaml(onlyLegacy));
+    const before = await readFile(path, "utf8");
+    const result = await runCli(["config-migrate", "--json"], { cwd: dir });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("bflow init --update");
+    expect(await readFile(path, "utf8")).toBe(before);
+    expect((await readdir(join(dir, ".bflow"))).filter(name => name.endsWith(".bak"))).toHaveLength(0);
+    await expect(readEnvironmentConfig(repository)).rejects.toThrow("bflow init --update");
+    const update = await runCli(["init", "--update", "--no-gitnexus", "--json"], { cwd: dir });
+    expect(update.exitCode).toBe(0);
+    expect((await readEnvironmentConfig(repository)).environment.roles.length).toBeGreaterThan(0);
   });
 
   describe("formatters", () => {

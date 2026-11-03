@@ -6,7 +6,7 @@ import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema, RoleProfilePinSchema } from "@bflow/contracts";
 import { migrateLegacyContext7Config } from "./deepwiki-migration.js";
-import { migrateDirectorRoles } from "./director-roles-migration.js";
+import { EMPTY_ROLES_AFTER_MIGRATION_MESSAGE, migrateDirectorRoles } from "./director-roles-migration.js";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, parseRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
@@ -436,6 +436,7 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity, cont
       return EnvironmentRoleConfigSchema.parse(value, { path: ["environment", "roles", index] });
     });
     const roles = parsedRoles.filter(role => !isLegacyDirectorRole(role.role));
+    if (roles.length === 0 && parsedRoles.length > 0) throw new Error(EMPTY_ROLES_AFTER_MIGRATION_MESSAGE.replace(" Không có tệp nào bị thay đổi.", ""));
     const diagnostics = roles.length !== parsedRoles.length ? [LEGACY_ROLES_IGNORED_WARNING] : [];
     if (new Set(parsedRoles.map((r) => r.role)).size !== parsedRoles.length) throw new Error("Unique roles are mandatory");
     const sdd = record(env["sdd"]);
@@ -508,7 +509,7 @@ export async function initializeEnvironmentConfig(options: {
     let removedRoles: readonly string[] = [];
     if (configExists) {
       // The retired conversation/coordinator roles are removed first, with a backup (Director replaces them).
-      removedRoles = (await migrateDirectorRoles(repository.root)).removedRoles;
+      removedRoles = (await migrateDirectorRoles(repository.root, { skipWhenEmpty: true })).removedRoles;
       // 0. A configuration from an earlier release is migrated first: a timestamped backup, then context7 becomes deepwiki.
       await migrateLegacyContext7Config(repository.root);
       // 1. Lưu tạm các giá trị config hiện tại trong bộ nhớ (validate trước khi xoá).
