@@ -253,6 +253,11 @@ export interface Outbound {
   deliveryAttempts?: number;
   /** Earliest time a failed Conversation inbox write may be retried (backoff). */
   nextAttemptAt?: string;
+  /**
+   * Director mode only (private journal v8): this Coordinator-bound outbound goes to the in-process Director mailbox, never
+   * Herdr. Like a Conversation inbox write it has no lease, capability check, dispatch request or `unknown_delivery`.
+   */
+  delivery?: "director_mailbox";
   /** Conversation-bound notices are delivered through the trusted inbox: terminal, with no dispatch handle, lease or request. */
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
@@ -288,7 +293,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -299,15 +304,25 @@ export interface JournalState {
 export function isConversationDelivery(out: Outbound): boolean {
   return !out.parentAssignmentId && out.message.recipient.role === "conversation";
 }
+/** Any in-process inbox write (Conversation Gateway or Director mailbox): `sending` is a local write-ahead, never an uncertain delivery. */
+export function isInProcessDelivery(out: Outbound): boolean {
+  return isConversationDelivery(out) || out.delivery === "director_mailbox";
+}
+/** Fields only a Director-mode host writes; their presence requires private journal v8 (R-B2-5). */
+export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
+  return state.outbound.some(out => out.delivery !== undefined) ||
+    state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director"));
+}
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
     textField(run.runId); run.delegation = DelegationRequestSchema.parse(run.delegation);
     if (run.delegation.runId !== run.runId) throw new Error("Journal run/delegation mismatch");
+    if (state.version < 8 && run.delegation.requestedBy === "director") throw new Error("Director journal fields require private journal v8");
     run.status = SdlcWorkStatusSchema.parse(run.status);
     if (run.lastWorkflowRejection !== undefined) {
       const proof = ProposalRejectionSchema.parse(run.lastWorkflowRejection);
@@ -363,6 +378,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       }
     }
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
+    if (state.version < 8 && run.delegationHistory?.some(item => item.requestedBy === "director")) throw new Error("Director journal fields require private journal v8");
     if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
     if (run.cancelledAllocations !== undefined) {
       const records = z.array(z.object({ binding: PaneBindingSchema, proof: NamespaceExitProofSchema, released: z.boolean().optional() }).strict()).parse(run.cancelledAllocations);
@@ -471,6 +487,13 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (out.executorLineage !== undefined) out.executorLineage = ExecutorLineageSchema.parse(out.executorLineage);
     if (state.version < 7 && (out.roleProfile || out.executorLineage || out.profileAllocationTaskId))
       throw new Error("Profile authority requires private journal v7");
+    if (out.delivery !== undefined) {
+      if (state.version < 8) throw new Error("Director journal fields require private journal v8");
+      if (out.delivery !== "director_mailbox" || out.message.recipient.role !== "coordinator" || out.parentAssignmentId !== undefined ||
+          out.handle !== undefined || out.lease !== undefined || out.request !== undefined || out.capabilities.length > 0 ||
+          ["accepted", "unknown_delivery"].includes(out.status))
+        throw new Error("Invalid Director mailbox outbound");
+    }
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.prelaunchFailure) {
       out.prelaunchFailure = { request: AgentRequestSchema.parse(out.prelaunchFailure.request), reconciledAt: IsoDateTimeSchema.parse(out.prelaunchFailure.reconciledAt),
@@ -574,7 +597,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
           out.leaseRelease.expectedVersion !== out.lease.version) throw new Error("Invalid pending outbound lease release");
     }
     // An inbox delivery's write-ahead intent is the message itself; it never has a transport request.
-    if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request && !(isConversationDelivery(out) && out.status !== "accepted"))
+    if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request && !(isInProcessDelivery(out) && out.status !== "accepted"))
       throw new Error("Missing outbound dispatch intent");
     if (out.status === "accepted" && (!out.handle || !out.lease)) throw new Error("Missing outbound binding/lease");
   }
@@ -695,8 +718,10 @@ export class AgenticJournal {
         state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
       }
       return await action(state, async () => {
-        if (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
-            state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId)) state.version = 7;
+        // Only ever raised: a v8 journal written by a Director host must not be relabelled v7 by a later profile write.
+        if (state.version < 7 && (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
+            state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;
+        if (state.version < 8 && requiresDirectorJournal(state)) state.version = 8;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }

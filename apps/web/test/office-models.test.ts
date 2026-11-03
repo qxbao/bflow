@@ -13,7 +13,7 @@ function readJson(file: string): GltfJson {
 }
 
 const NEW_NODES = ['partition', 'partition_end', 'sign_board', 'sofa', 'armchair', 'coffee_table', 'rug', 'bookshelf', 'water_cooler', 'floor_lamp', 'printer', 'whiteboard', 'window', 'pendant_lamp', 'plant_tall', 'plant_small', 'wall_art',
-  'exec_chair', 'bookcase_lux_w', 'bookcase_lux_e', 'statue', 'sofa_lux', 'tea_table', 'rug_lux', 'globe', 'painting', 'desk_pc', 'meeting_chair'];
+  'exec_chair', 'bookcase_lux_w', 'bookcase_lux_e', 'statue', 'sofa_lux', 'tea_table', 'rug_lux', 'globe', 'painting', 'desk_pc', 'desk_dual', 'paper_cabinet', 'meeting_chair'];
 const OLD_NODES = ['floor_tile', 'wall', 'wall_led', 'spot', 'trim_bar', 'desk', 'chair', 'counter', 'board', 'table', 'server', 'cabinet', 'mailbox', 'settings', 'door', 'plant'];
 const CLIPS = ['sleep', 'idle', 'type', 'type_fast', 'raise_hand', 'blocked', 'ghost', 'walk', 'carry'];
 

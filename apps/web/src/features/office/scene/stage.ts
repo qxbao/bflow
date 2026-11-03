@@ -121,6 +121,7 @@ export class Stage {
   private readonly floor: Instances;
   private readonly trim: Instances;
   private readonly desks: Instances;
+  private readonly dualDesks: Instances;
   private readonly pcDesks: Instances;
   private readonly chairs: Instances;
   private readonly glowTex = glowTexture();
@@ -152,6 +153,7 @@ export class Stage {
     this.trim = make('trim_bar', 420, false, false);
     this.desks = make('desk', CAP);
     this.pcDesks = make('desk_pc', CAP);
+    this.dualDesks = make('desk_dual', CAP);
     this.chairs = make('chair', CAP);
 
     // Walls: north (back), west and east. The south side stays open so the camera sees into the room.
@@ -258,7 +260,7 @@ export class Stage {
     for (const [zone, x, z, w, h] of [['conversation', 4.5, 4, 8, 7], ['coordination', 13.5, 4, 10, 7], ['verification', 23.5, 13, 10, 9]] as const) {
       this.pools.push({ zone, mesh: glow('#ff9d4d', 0.05, w, h, new Vector3(x, 0.02, z), true) });
     }
-    this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.045, 18, 9, new Vector3(9, 0.02, 13), true) });
+    this.pools.push({ zone: 'developer', mesh: glow('#ff9d4d', 0.045, 18, 9, new Vector3(9.5, 0.02, 13), true) });
     this.deskGlowMat = new MeshBasicMaterial({ map: this.glowTex, color: '#6fb4e8', transparent: true, opacity: 0.1, blending: AdditiveBlending, depthWrite: false, fog: false });
     const dg = new InstancedMesh(this.glowGeo, this.deskGlowMat, CAP);
     dg.frustumCulled = false; dg.count = 0; dg.renderOrder = 1;
@@ -284,14 +286,15 @@ export class Stage {
       for (let y = y0; y < y1; y++) { bars.push(m4(x0, 0, y + 0.5, Math.PI / 2)); bars.push(m4(x1, 0, y + 0.5, Math.PI / 2)); }
     }
     this.trim.set(bars, bars.map(() => TRIM_TONE));
-    // The Conversation seat has its own executive chair (placed once in the constructor). Developers work at desktop PCs, everyone else at laptops.
-    const desks: Matrix4[] = [], pcDesks: Matrix4[] = [], chairs: Matrix4[] = [], glows: Matrix4[] = [];
+    // The Conversation seat has its own executive chair (placed once in the constructor). Developers work at desktop PCs, QA / Reviewer at PCs
+    // with two monitors, everyone else at laptops.
+    const desks: Matrix4[] = [], pcDesks: Matrix4[] = [], dualDesks: Matrix4[] = [], chairs: Matrix4[] = [], glows: Matrix4[] = [];
     for (const cell of plan.desks) {
-      const p = cellCentre(cell);
-      (zoneAt(cell) === 'developer' ? pcDesks : desks).push(m4(p.x, 0, p.z)); chairs.push(m4(p.x, 0, p.z));
+      const p = cellCentre(cell), zone = zoneAt(cell);
+      (zone === 'developer' ? pcDesks : zone === 'verification' ? dualDesks : desks).push(m4(p.x, 0, p.z)); chairs.push(m4(p.x, 0, p.z));
       glows.push(new Matrix4().compose(new Vector3(p.x, 0.03, p.z + 0.1), new Quaternion().setFromEuler(new Euler(-Math.PI / 2, 0, 0)), new Vector3(1.9, 1.3, 1)));
     }
-    this.desks.set(desks); this.pcDesks.set(pcDesks); this.chairs.set(chairs);
+    this.desks.set(desks); this.pcDesks.set(pcDesks); this.dualDesks.set(dualDesks); this.chairs.set(chairs);
     this.deskGlow.count = Math.min(glows.length, this.deskGlow.instanceMatrix.count);
     glows.forEach((m, i) => { if (i < this.deskGlow.count) this.deskGlow.setMatrixAt(i, m); });
     this.deskGlow.instanceMatrix.needsUpdate = true;

@@ -22,6 +22,9 @@ export const PERMANENT_TOPOLOGY_ROLES = [
   "qa-verifier"
 ] as const;
 
+/** Director layout (manifest v3): no Conversation/Coordinator panes; the Director runs outside Herdr. */
+export const DIRECTOR_PERMANENT_TOPOLOGY_ROLES = ["planner", "analyst", "architect", "reviewer", "qa-verifier"] as const;
+
 export const TOPOLOGY_ROLES = [
   ...PERMANENT_TOPOLOGY_ROLES,
   "developer"
@@ -250,6 +253,10 @@ export interface RolePaneManagerConfig {
   readonly maxDeveloperCapacity?: number;
   readonly reuseIdleDeveloperPanes?: boolean;
   readonly tabLabels?: Partial<Record<"conversation" | "coordination" | "verification", string>>;
+  /** `legacy_v2` (default) builds the v2 Conversation/Coordinator topology; `director` builds a v3 session with a progress tab. */
+  readonly layout?: "legacy_v2" | "director";
+  /** Command run in the Director progress pane (e.g. `bflow progress --follow`); required when layout is `director`. */
+  readonly progressCommand?: readonly string[];
 }
 
 export interface CommandInvocation {
