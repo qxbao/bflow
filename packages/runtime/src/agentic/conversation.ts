@@ -26,6 +26,17 @@ export interface AgenticConversationHost {
   flush(): Promise<unknown>;
   /** Registers Runtime-pending approvals Conversation missed; read-only toward Runtime, never decides anything. */
   reconcileApprovals(): Promise<unknown>;
+  /**
+   * Director-originated delegation. Builds the DelegationRequest with Conversation's own builder and hands it to the same
+   * durable bridge (Runtime admission included). Every id derives from `key`, so a replay is the identical message.
+   * Resolves with an OperationResult; an admission refusal is a validation error carrying Runtime's reason.
+   */
+  delegateDirectorWork(input: DirectorWorkDelegation): Promise<OperationResult<{ runId: string; correlationId: string }>>;
+}
+export interface DirectorWorkDelegation {
+  key: string; title: string; objective: string;
+  acceptanceCriteria: readonly { description: string; verificationMethod: string }[];
+  sddLevel: "lightweight" | "full"; priority: "low" | "normal" | "high" | "critical"; requestedAt: string;
 }
 export interface StructuredConversationCallbacks {
   authorize(command: WebCommand, principal: WebPrincipal): Promise<boolean>;
@@ -442,7 +453,24 @@ export async function createAgenticConversationHost(options: {
       });
     },
     setBusy: busy => exclusive(() => gateway.setAgentBusyState(busy)),
-    flush: () => exclusive(() => gateway.flushPendingInboundQueue())
+    flush: () => exclusive(() => gateway.flushPendingInboundQueue()),
+    delegateDirectorWork(input) {
+      return exclusive(async () => {
+        const hash = digest(input.key).replace(/[^A-Za-z0-9]/g, "").slice(0, 24);
+        const correlationId = `director-${hash}`, runId = `run-${correlationId}`;
+        const built = module.buildDelegationRequest({ sessionId: manifest.conversationSessionId, correlationId, runId,
+          messageId: `msg-director-${hash}`, previousDelegationId: `del-director-${hash}`, idempotencyKey: `idemp-director-${hash}`,
+          requestedAt: input.requestedAt, revision: 1,
+          draft: { title: input.title, objective: input.objective, kind: "feature", sddLevel: input.sddLevel, priority: input.priority,
+            scopeDefined: true, isLargeTask: false, affectedPaths: [], acceptanceCriteriaDescriptions: [],
+            acceptanceCriteria: input.acceptanceCriteria, isRequirementChange: false } });
+        if (!built.ok) return built as OperationResult<never>;
+        const delegation = DelegationRequestSchema.parse({ ...built.value, metadata: { ...built.value.metadata, origin: "director" } });
+        const sent: OperationResult<void> = await bridge.handOffToCoordinator(delegation);
+        if (!sent.ok) return sent as OperationResult<never>;
+        return { ok: true, value: { runId, correlationId } };
+      });
+    }
   };
 }
 

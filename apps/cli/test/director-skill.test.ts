@@ -31,9 +31,9 @@ describe("bflow-start director skill", () => {
   });
 
   it("embeds the skill version", () => {
-    expect(BFLOW_START_SKILL_VERSION).toBe("1.1.0");
+    expect(BFLOW_START_SKILL_VERSION).toBe("1.2.0");
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("1.1.0");
+    expect(text).toContain("1.2.0");
     expect(text).toContain("BFLOW_DIRECTOR_TOKEN=<token> '/usr/bin/node' director call <tool> --json");
     expect(text).not.toContain("--token");
   });
@@ -50,5 +50,7 @@ describe("bflow-start director skill", () => {
     expect(text).not.toContain("resume_run");
     expect(text).toContain("planning_reference");
     expect(text).not.toContain("cannot create a new run");
+    expect(text).toContain("start_work");
+    expect(text).toContain("userMessageSeq");
   });
 });

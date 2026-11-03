@@ -4,6 +4,7 @@ import {
   DirectorWaitResultSchema,
   JsonValueSchema,
   ParkedIssueStatusSchema,
+  SddPolicyLevelSchema,
   type DirectorMessage,
   type DirectorRuntimeEvent,
   type JsonValue,
@@ -15,6 +16,22 @@ import type { DirectorStore } from "./store.js";
 export interface DirectorCoordinatorPort {
   invoke(name: string, input: unknown): Promise<JsonValue>;
 }
+export interface DirectorWorkStart {
+  /** director:<tokenId>:<userMessageSeq>; the host derives every id of the delegation from it. */
+  readonly key: string;
+  readonly title: string;
+  readonly objective: string;
+  readonly acceptanceCriteria: readonly { description: string; verificationMethod: AcceptanceCriterionVerificationMethod }[];
+  readonly sddLevel: "lightweight" | "full";
+  readonly priority: "low" | "normal" | "high" | "critical";
+  /** Timestamp of the user message that authorized the work, so a replay builds the identical delegation. */
+  readonly requestedAt: string;
+}
+type AcceptanceCriterionVerificationMethod = "unit_test" | "integration_test" | "e2e_test" | "typecheck" | "lint" | "static_analysis" | "manual_review";
+/** Hands a new run to the same delegation path Conversation uses. Throws with a redacted reason on admission refusal. */
+export interface DirectorWorkPort {
+  start(input: DirectorWorkStart): Promise<JsonValue>;
+}
 export interface DirectorRuntimeEventsPort {
   /** Returns at most `limit` events after `cursor` ("" = from now). Waits at most timeoutMs when none are available; resolves early on abort. */
   wait(cursor: string, timeoutMs: number, signal: AbortSignal, limit: number): Promise<{ cursor: string; events: DirectorRuntimeEvent[] }>;
@@ -23,6 +40,7 @@ export interface DirectorToolsOptions {
   readonly store: DirectorStore;
   readonly coordinator: DirectorCoordinatorPort;
   readonly runtimeEvents?: DirectorRuntimeEventsPort;
+  readonly work?: DirectorWorkPort;
   /** Provider-specific upper bound; clamped to [DIRECTOR_LIMITS.waitMinMs, DIRECTOR_LIMITS.waitMaxMs]. Default DIRECTOR_LIMITS.waitDefaultMs. */
   readonly maxWaitMs?: number;
   readonly now?: () => Date;
@@ -34,7 +52,8 @@ export const DIRECTOR_OWN_TOOLS: readonly { name: string; description: string }[
   { name: "director_note_user_message", description: "Record a message the user typed in this CLI when no hook recorded it. Arguments: text." },
   { name: "list_issues", description: "List the issue queue. Arguments: status (optional array of open|retrying|resolved|dismissed; default open and retrying)." },
   { name: "inspect_issue", description: "Read one queued issue with its evidence references. Arguments: issueId." },
-  { name: "set_issue_status", description: "Mark a queued issue retrying, resolved or dismissed after you acted on it. Arguments: issueId, status." }
+  { name: "set_issue_status", description: "Mark a queued issue retrying, resolved or dismissed after you acted on it. Arguments: issueId, status." },
+  { name: "start_work", description: "Create a new run through the same delegation path Conversation uses. In slice B1 the Coordinator pane receives the delegation and decomposes it; you monitor and steer it with the other tools. Clarify acceptance criteria with the user first. Arguments: title, objective, acceptanceCriteria (array of {description, verificationMethod: unit_test|integration_test|e2e_test|typecheck|lint|static_analysis|manual_review}, at least one), sddLevel (lightweight|full), priority (optional low|normal|high|critical, default normal), userMessageSeq (seq of the user message that asked for this work; it must be a real user message in the transcript). Calling again with the same userMessageSeq returns the same runId and creates no second run. Returns {runId, correlationId, status: queued}." }
 ];
 
 /** Host-served planning guidance; needs no pane binding. Shared with the Coordinator implementation in the host. */
@@ -60,6 +79,16 @@ const ListArgs = z.object({ status: z.array(ParkedIssueStatusSchema).optional() 
 const InspectArgs = z.object({ issueId: z.string().min(1) }).strict();
 const SetStatusArgs = z.object({ issueId: z.string().min(1), status: z.enum(["retrying", "resolved", "dismissed"]) }).strict();
 
+const ACCEPTANCE_METHODS = ["unit_test", "integration_test", "e2e_test", "typecheck", "lint", "static_analysis", "manual_review"] as const;
+const StartWorkArgs = z.object({
+  title: z.string().trim().min(1),
+  objective: z.string().trim().min(1),
+  acceptanceCriteria: z.array(z.object({ description: z.string().trim().min(1), verificationMethod: z.enum(ACCEPTANCE_METHODS) }).strict()).min(1),
+  sddLevel: SddPolicyLevelSchema,
+  priority: z.enum(["low", "normal", "high", "critical"]).default("normal"),
+  userMessageSeq: z.number().int().positive()
+}).strict();
+
 const NOTE_DEDUPE_MS = 10_000;
 const HEARTBEAT_SLICE_MS = 60_000;
 const RUNTIME_EVENTS_LIMIT = 200;
@@ -71,6 +100,9 @@ export class DirectorTools {
   private readonly store: DirectorStore;
   private readonly coordinator: DirectorCoordinatorPort;
   private readonly runtimeEvents: DirectorRuntimeEventsPort | undefined;
+  private readonly work: DirectorWorkPort | undefined;
+  /** Replays of a started key answer from here; the host's own outbox dedupe covers a restart. */
+  private readonly started = new Map<string, JsonValue>();
   private readonly maxWaitMs: number;
   private readonly now: () => Date;
 
@@ -78,12 +110,13 @@ export class DirectorTools {
     this.store = options.store;
     this.coordinator = options.coordinator;
     this.runtimeEvents = options.runtimeEvents;
+    this.work = options.work;
     this.maxWaitMs = Math.min(Math.max(options.maxWaitMs ?? DIRECTOR_LIMITS.waitDefaultMs, DIRECTOR_LIMITS.waitMinMs), DIRECTOR_LIMITS.waitMaxMs);
     this.now = options.now ?? (() => new Date());
   }
 
   async invoke(name: string, input: unknown, token: string, signal?: AbortSignal): Promise<JsonValue> {
-    await this.store.authenticate(token);
+    const session = await this.store.authenticate(token);
     if (name !== "director_wait") await this.store.heartbeat(token, false);
     switch (name) {
       case "director_wait":
@@ -109,10 +142,33 @@ export class DirectorTools {
         const args = SetStatusArgs.parse(input);
         return json(await this.store.setIssueStatus(args.issueId, args.status));
       }
+      case "start_work":
+        return this.startWork(StartWorkArgs.parse(input), session.tokenId);
       default:
         if (COORDINATOR_NAMES.has(name)) return json(await this.coordinator.invoke(name, input));
         throw new Error(`Unknown Director tool: ${name}`);
     }
+  }
+
+  private async startWork(args: z.infer<typeof StartWorkArgs>, tokenId: string): Promise<JsonValue> {
+    if (!this.work) throw new Error("start_work is unavailable: the host has no delegation path");
+    const evidence = (await this.store.readMessages({ afterSeq: args.userMessageSeq - 1, limit: 1 }))[0];
+    if (!evidence || evidence.seq !== args.userMessageSeq) throw new Error(`userMessageSeq ${args.userMessageSeq} does not exist in the Director transcript`);
+    if (evidence.author !== "user") throw new Error(`userMessageSeq ${args.userMessageSeq} is not a user message; start_work needs the user's own message as evidence of intent`);
+    const key = `director:${tokenId}:${args.userMessageSeq}`;
+    const known = this.started.get(key);
+    if (known !== undefined) return known;
+    const result = json(await this.work.start({
+      key,
+      title: args.title,
+      objective: args.objective,
+      acceptanceCriteria: args.acceptanceCriteria,
+      sddLevel: args.sddLevel,
+      priority: args.priority,
+      requestedAt: evidence.at
+    }));
+    this.started.set(key, result);
+    return result;
   }
 
   /** Records a user message typed in the CLI (channel cli) unless the same text was recorded within 10 s. Caller authenticates. */

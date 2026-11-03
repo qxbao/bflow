@@ -11,7 +11,7 @@ import {
 } from "@bflow/contracts";
 import { buildDirectorProgressSnapshot } from "./snapshot.js";
 import { DirectorStore } from "./store.js";
-import { DirectorTools, type DirectorCoordinatorPort, type DirectorRuntimeEventsPort } from "./tools.js";
+import { DirectorTools, type DirectorCoordinatorPort, type DirectorRuntimeEventsPort, type DirectorWorkPort } from "./tools.js";
 
 export interface DirectorFeedPort {
   /** Same contract as ProjectionFeed.read (packages/runtime/src/interaction/events.ts): non-blocking page after cursor. */
@@ -21,6 +21,7 @@ export interface DirectorEndpointOptions {
   readonly directory: string;
   readonly repositoryRoot: string;
   readonly coordinator: DirectorCoordinatorPort;
+  readonly work?: DirectorWorkPort;
   readonly feed: DirectorFeedPort;
   readonly inspect: () => Promise<unknown>;
   readonly maxWaitMs?: number;
@@ -84,6 +85,7 @@ export class DirectorEndpoint {
     this.tools = new DirectorTools({
       store: this.store,
       coordinator: options.coordinator,
+      ...(options.work ? { work: options.work } : {}),
       runtimeEvents: feedEvents(options.feed, options.pollMs ?? 1000),
       ...(options.maxWaitMs !== undefined ? { maxWaitMs: options.maxWaitMs } : {}),
       now: this.now

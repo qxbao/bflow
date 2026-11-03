@@ -1724,6 +1724,23 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     repositoryRoot: configuration.repositoryPath,
     feed: webFeed,
     inspect: () => requireWorkspace().runtime.inspect(),
+    work: {
+      start: async ({ key, ...delegation }) => {
+        let outcome: Awaited<ReturnType<ReturnType<typeof requireWorkspace>["conversation"]["delegateDirectorWork"]>>;
+        try {
+          outcome = await requireWorkspace().conversation.delegateDirectorWork({ key, ...delegation });
+        } catch (error) {
+          await activityLog.record({ kind: "error", role: "coordinator", action: "director:start_work:failed", outcome: error instanceof Error ? error.name : "HostToolError" });
+          throw error;
+        }
+        if (!outcome.ok) {
+          await activityLog.record({ kind: "error", role: "coordinator", action: "director:start_work:failed", outcome: outcome.error.code });
+          throw new Error(`start_work refused: ${redactString(outcome.error.message)}`);
+        }
+        await activityLog.record({ kind: "tool", role: "coordinator", action: "director:start_work:completed" });
+        return { runId: outcome.value.runId, correlationId: outcome.value.correlationId, status: "queued" };
+      }
+    },
     coordinator: {
       invoke: async (name, input) => {
         if (!isDirectorCoordinatorTool(name)) throw new Error("Tool is unavailable to the Director");
