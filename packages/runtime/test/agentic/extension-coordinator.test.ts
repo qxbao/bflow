@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { AgentExecutionHandleSchema, DelegationRequestSchema, PaneBindingSchema, RoleMessageSchema } from "@bflow/contracts";
 import { selectExtensionCoordinatorDelivery } from "../../src/agentic/extension-coordinator.js";
+import { digest } from "../../src/agentic/journal.js";
 
 function fixture() {
   const at = "2026-11-03T02:50:00.000Z";
@@ -59,4 +60,24 @@ it.each(["original", "resume"])("refuses %s delivery while a native operation re
   expect(() => selectExtensionCoordinatorDelivery({ ...f, outbound, run })).toThrow("Uncertain extension delivery must reconcile before starting");
   expect(selectExtensionCoordinatorDelivery({ ...f, outbound, run: { ...run, nativeDeliveries: [] } })).toEqual(
     kind === "original" ? f.originalMessage : f.wake.message);
+});
+
+it("accepts the exact Runtime idle wake for an authenticated user after a clarification released the delegation", () => {
+  const f = fixture(), userMessageId = "user-resume-ba";
+  const messageId = `resume-idle-${digest([f.run.runId, userMessageId])}`;
+  const message = RoleMessageSchema.parse({ ...f.wake.message, message_id: messageId, causation_id: undefined,
+    idempotency_key: messageId, payload: { kind: "user_resume_requested", runId: f.run.runId,
+      actionId: `idle-${digest(f.run.runId)}`, conversationUserMessageId: userMessageId, sdlcStatus: "clarifying" } });
+  const run = { ...f.run, status: "clarifying", pendingAction: undefined }, wake = f.delivery(message, "accepted");
+  const input = { ...f, run, outbound: [f.original, wake] };
+  expect(selectExtensionCoordinatorDelivery(input)).toEqual(message);
+  const changed = (payload: object) => ({ ...input, outbound: [f.original, f.delivery(RoleMessageSchema.parse({ ...message,
+    payload: { ...message.payload as object, ...payload } }), "accepted")] });
+  expect(() => selectExtensionCoordinatorDelivery(changed({ conversationUserMessageId: "another-user-turn" }))).toThrow();
+  expect(() => selectExtensionCoordinatorDelivery(changed({ conversationUserMessageId: "" }))).toThrow();
+  expect(() => selectExtensionCoordinatorDelivery(changed({ actionId: "different-action" }))).toThrow();
+  expect(() => selectExtensionCoordinatorDelivery(changed({ runId: "another-run" }))).toThrow();
+  expect(() => selectExtensionCoordinatorDelivery({ ...input, run: f.run })).toThrow();
+  expect(() => selectExtensionCoordinatorDelivery({ ...input, run: { ...run, approval: { approvalId: "pending-human-gate" } } })).toThrow();
+  expect(() => selectExtensionCoordinatorDelivery({ ...input, run: { ...run, nativeDeliveries: [{ operationId: "uncertain", message }] } })).toThrow();
 });

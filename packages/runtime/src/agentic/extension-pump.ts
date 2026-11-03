@@ -20,6 +20,11 @@ export class WorkflowExtensionPump {
     if (this.quiesced || this.quiescing) throw new Error("Extension pump is quiesced");
     this.held.delete(IdentifierSchema.parse(runId)); this.requested.add(runId);
   }
+  async wakeStarted(runId: string): Promise<boolean> {
+    const run = WorkView.parse(await this.host.inspect(IdentifierSchema.parse(runId)));
+    if (!run.coreCreated) return false;
+    this.wake(runId); return true;
+  }
   async tick(): Promise<void> {
     if (this.quiesced || this.quiescing) return;
     const state = z.object({ runs: z.array(WorkView) }).passthrough().parse(await this.host.inspect());

@@ -39,6 +39,22 @@ async function fixture(sessionId = "session-native") {
 }
 
 describe("workflow extension host routing", () => {
+  it("leaves an admitted but unstarted resume with Coordinator, then wakes the started native workflow", async () => {
+    const f = await fixture(), host = await f.create(), Pump = Reflect.get(runtime, "WorkflowExtensionPump");
+    await host.admit(delegation());
+    const failures: unknown[] = [], pump = new Pump(host, async (_id: string, error: unknown) => { failures.push(error); });
+    expect(await pump.wakeStarted("run-native")).toBe(false);
+    await pump.tick(); await pump.drain();
+    expect((await host.inspect("run-native")).coreCreated).toBe(false);
+    expect(f.a.transport.sentRequests).toHaveLength(0);
+    await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,
+      packPin: { id: f.pack.id, version: f.pack.version, digest: f.pack.digest } });
+    expect(await pump.wakeStarted("run-native")).toBe(true);
+    await pump.tick(); await pump.drain();
+    expect(failures).toEqual([]);
+    expect((await host.inspect("run-native")).extensionStatus).toBe("awaiting_business_decision");
+  });
+
   it("refuses shutdown with unresolved native delivery without freezing explicit reconciliation", async () => {
     const f = await fixture(), host = await f.create(); await host.admit(delegation());
     await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,

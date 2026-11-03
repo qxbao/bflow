@@ -1842,8 +1842,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           throw new Error("Resume request belongs to another Conversation session");
         if (await host.extensions.owns(runId)) {
           if (!extensionPump) throw new Error("Extension pump is not active");
-          extensionPump.wake(runId);
-          return json({ queued: true, runId, conversationUserMessageId: resumeTurn.messageId });
+          if (await extensionPump.wakeStarted(runId))
+            return json({ queued: true, runId, conversationUserMessageId: resumeTurn.messageId });
         }
         if (run.pendingAction === undefined) return host.runtime.resumeIdleRun(runId, resumeTurn.messageId);
         const action = record(run.pendingAction);
@@ -1852,7 +1852,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (role !== "coordinator") throw new Error("Only Coordinator or an authenticated Conversation resume request may resume a blocked run");
       if (await host.extensions.owns(runId)) {
         if (!extensionPump) throw new Error("Extension pump is not active");
-        extensionPump.wake(runId); return json({ queued: true, runId });
+        if (await extensionPump.wakeStarted(runId)) return json({ queued: true, runId });
       }
       if (parameters.actionId === undefined || parameters.actionId === null ||
           (typeof parameters.actionId === "string" && parameters.actionId.trim() === "")) {

@@ -35,6 +35,10 @@ export function selectExtensionCoordinatorDelivery(input: {
     if (message.sender.role === "runtime" && message.type === "task.status" && payload.kind === "resume_run" &&
         action.kind === "resume_coordinator" && action.owner === "coordinator" && action.state === "queued" &&
         payload.actionId === action.actionId && message.causation_id === action.sourceMessageId) return message;
+    if (message.sender.role === "runtime" && message.type === "task.status" && payload.kind === "user_resume_requested" &&
+        run.pendingAction === undefined && payload.runId === delegation.runId && payload.actionId === `idle-${digest(delegation.runId)}` &&
+        typeof payload.conversationUserMessageId === "string" && payload.conversationUserMessageId.trim() &&
+        message.message_id === `resume-idle-${digest([delegation.runId, payload.conversationUserMessageId])}`) return message;
   }
   throw new Error("No current accepted Coordinator delivery authorizes this extension");
 }
