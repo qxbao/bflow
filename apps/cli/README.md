@@ -176,7 +176,7 @@ kể cả giá trị có dấu nháy mà dấu nháy đóng bị thiếu trong �
 | `bflow config-migrate` | Xác thực một `.bflow/config.yaml` hoặc `.bflow/config.json` cũ, ghi `.bflow/config.yml`, lưu các byte gốc thành `<legacy-path>.bak`, rồi xóa file cũ đang hoạt động. Nguồn hoặc đích xung đột sẽ fail mà không ghi đè. |
 | `bflow setup --codex-hooks --plan\|--check\|--apply` | Kiểm tra Codex home đã chọn và chỉ review các global hook. Plan/check chỉ đọc; apply yêu cầu một quyết định tương tác hoặc `--yes --hook-digest <sha256>`. Không bao giờ cài tool hay service. |
 | `bflow up [--timeout <ms>]` | Kiểm tra executable, xác thực provider và protocol Herdr; khởi động một server có tên, chuẩn bị persistent P19 host cùng platform readiness (từ chối khởi động pane khi một role bắt buộc bị chặn), rồi gọi P13. Chờ mọi role bắt buộc và xác nhận kích hoạt host trước khi ghi nhận ready. Lưu các binding đã xác thực và tái dùng các role đang sống. |
-| `bflow attach` | Yêu cầu một manifest sẵn có và một session khớp đang chạy. Gọi P13 để focus/xác thực Conversation, rồi chạy `herdr session attach <name>` với terminal I/O được kế thừa. |
+| `bflow attach` | Yêu cầu một manifest sẵn có và một session khớp đang chạy. Gọi P13 để focus/xác thực pane Conversation (phiên v2), hoặc mở tab `progress` (phiên Director, manifest v3), rồi chạy `herdr session attach <name>` với terminal I/O được kế thừa. |
 | `bflow down [--yes] [--force] [--timeout <ms>]` | Kiểm tra các run đang hoạt động và file dirty. Quiesce intake/dispatch của Runtime, thu thập lại các run và yêu cầu aggregate checkpoint bền vững. Shutdown thông thường gọi dọn dẹp graceful của P13. `--force` bao gồm xác nhận và chỉ dừng trực tiếp session có tên do repository sở hữu, cho phép khôi phục khi tra cứu pane/workspace bị kẹt. Không xóa worktree, database, artifact, commit hay source file nào. |
 | `bflow status` | Báo cáo cấu hình, server có tên, pane/agent và executable bị thiếu. Gắn nhãn các quan sát đã lưu là có thể đã cũ. Không mở workflow Runtime cũ. |
 | `bflow recover --yes` | Sau khi dừng các lệnh CLI cũ, chỉ migrate một lifecycle lock cũ rỗng. Giữ nguyên state, pane, source và worktree. |
@@ -267,7 +267,7 @@ Next: <specific actionable next step>
 - `formatDownOutput` thực thi nghiêm ngặt rằng trạng thái môi trường chỉ cho phép tuyên bố `[OK] Environment stopped` khi process server Herdr được xác nhận đã dừng (`server: "stopped"`). Một server đang chạy với manifest thiếu hoặc `down` không bao giờ được báo là đã dừng. Với session manifest, yêu cầu `status: "down"`.
 
 ### Hạn chế của Interactive Attach
-`bflow attach` focus pane Conversation và gọi interactive terminal attach của Herdr (`herdr session attach <name>`).
+`bflow attach` focus pane Conversation trong phiên v2, hoặc tab `progress` trong phiên Director (manifest v3), rồi gọi interactive terminal attach của Herdr (`herdr session attach <name>`).
 - **Hạn chế**: Trong khi `attach --json` trả về error envelope khi thất bại không tương tác, một phiên interactive attach kế thừa các stream I/O chuẩn của TUI tương tác Herdr và không thể cung cấp một stream JSON thuần headless, an toàn với pipe trong lúc đang attach.
 - Khi thoát session, CLI cho người dùng báo trung thực `[OK] Returned from Conversation attach.`.
 
@@ -758,6 +758,7 @@ Director cho phép người dùng trò chuyện với một agent qua CLI provid
 Lệnh:
 
 - `bflow up`: dựng hạ tầng (daemon, Herdr, vai chuyên trách và tab `progress`), không tạo phiên làm việc. Nếu manifest đã lưu là phiên v2 đang chạy, lệnh từ chối và yêu cầu `bflow down` rồi `bflow up`.
+- `bflow attach`: trong phiên Director (manifest v3) mở tab `progress`; trong phiên v2 focus pane Conversation.
 - `bflow director start [--provider claude|codex|agy] --json`: bắt đầu phiên Director và trả về thông tin phiên dạng JSON. Lệnh vẫn gọi lại `up` khi cần.
 - `bflow director call <tool> [<argsJson>]`: gọi một tool Director. Token được đọc từ biến môi trường `BFLOW_DIRECTOR_TOKEN`.
 - `bflow director mcp`: chạy MCP server stdio của Director.
