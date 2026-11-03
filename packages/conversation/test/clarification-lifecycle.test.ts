@@ -34,7 +34,7 @@ function setup(clock: { nowMs: number }) {
   return { gateway, transport, turn };
 }
 
-describe("A2: pending clarifications are scoped and expire", () => {
+describe("A2: pending clarifications are scoped and never time out", () => {
   it("maps an answer without a correlation id only to the newest open clarification", async () => {
     const clock = { nowMs: START };
     const { gateway, turn } = setup(clock);
@@ -56,23 +56,20 @@ describe("A2: pending clarifications are scoped and expire", () => {
     expect(snapshot.pendingClarifications[older.value.correlationId]?.originalRequestText).toBe("Thêm tính năng mới");
   });
 
-  it("closes a clarification that has gone unanswered for 24 hours", async () => {
+  it("keeps an unanswered clarification open however long the user takes to reply", async () => {
     const clock = { nowMs: START };
     const { gateway, turn } = setup(clock);
     const asked = await turn({ content: "Thêm tính năng mới" });
     if (!asked.ok) throw new Error("setup failed");
-    clock.nowMs += 25 * 60 * 60 * 1000;
+    clock.nowMs += 30 * 24 * 60 * 60 * 1000;
 
     const answer = await turn({ content: SCOPE_ANSWER });
 
     expect(answer.ok).toBe(true);
     if (!answer.ok) return;
-    expect(answer.value.recognizedIntent).not.toBe("workflow_request");
-    expect(answer.value.correlationId).not.toBe(asked.value.correlationId);
-    const snapshot = gateway.getContextSnapshot();
-    expect(snapshot.pendingClarifications[asked.value.correlationId]).toBeUndefined();
-    expect(snapshot.session.unresolvedQuestions).toEqual([]);
-    expect(snapshot.session.status).not.toBe("awaiting_user_clarification");
+    expect(answer.value.recognizedIntent).toBe("workflow_request");
+    expect(answer.value.correlationId).toBe(asked.value.correlationId);
+    expect(gateway.getContextSnapshot().pendingClarifications[asked.value.correlationId]).toBeUndefined();
   });
 
   it("keeps a clarification answerable just inside the 24-hour window", async () => {

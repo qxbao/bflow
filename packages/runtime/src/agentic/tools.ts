@@ -31,7 +31,11 @@ export const COORDINATOR_TOOLS = [
   { name: "retry_verification", description: "Resume verification of an escalated run whose verification could not be delivered or stored; finishes durable outcomes and re-runs only unfinished checks." },
   { name: "authorize_implementation", description: "Check accepted specification and the required independent Red evidence before implementation." },
   { name: "accept_conflict_resolution", description: "Validate a committed scoped conflict resolution using P18; never auto-resolve conflicts." },
-  { name: "cancel", description: "Persist cancellation intent, stop new dispatch and request interrupts without inventing stop confirmations." }
+  { name: "cancel", description: "Persist cancellation intent, stop new dispatch and request interrupts without inventing stop confirmations." },
+  { name: "reconcile_cancellation", description: "Re-observe an already cancelled run. A Developer at rest has its pane closed and its worktree kept, then the run finishes cancelling; the result lists anything still blocking. Parameters: runId." },
+  { name: "repository_setup", description: "Set up the repository yourself before implementation starts; never ask the user to run these. operation: git_status, git_log(limit?), npm_init, npm_install_dev(packages; lifecycle scripts are disabled and node_modules/ is ignored first), gitignore_add(patterns), create_directories(paths; adds .gitkeep), git_add(paths), git_commit(message). No shell. Each change is logged against runId; protected paths and hooks are refused." },
+  { name: "reresolve_execution_plan", description: "After a commit moved the repository under an accepted run: rebind its pinned repository snapshot, move an unstarted run to the new HEAD, and clear a plan-drift blocker. Other changed inputs stay blocked. Grants no approval. Parameters: runId." },
+  { name: "withdraw_workflow_proposal", description: "Withdraw a design proposal still awaiting human approval so you can run repository_setup and call propose_workflow again; the new proposal gets a new approval card and the user is told which card replaced which. Parameters: runId, reason." }
 ] as const;
 
 /** Host injects the authenticated role; an agent may not choose its own principal in tool arguments. */
@@ -104,6 +108,13 @@ export class CoordinatorTools {
       case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId ?? args.run_id), textField(args.taskId ?? args.task_id));
       case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId ?? args.run_id), textField(args.taskKey ?? args.task_key), textField(args.resolutionCommitHash ?? args.resolution_commit_hash));
       case "cancel": return this.runtime.cancel(textField(args.runId ?? args.run_id), textField(args.reason));
+      case "reconcile_cancellation": return JsonValueSchema.parse(await this.runtime.reconcileCancellation(textField(args.runId ?? args.run_id)));
+      case "repository_setup": {
+        const { runId, run_id: runIdAlias, ...setup } = args;
+        return this.runtime.repositorySetup(textField(runId ?? runIdAlias), setup);
+      }
+      case "reresolve_execution_plan": return this.runtime.reresolveExecutionPlan(textField(args.runId ?? args.run_id));
+      case "withdraw_workflow_proposal": return this.runtime.withdrawWorkflowProposal(textField(args.runId ?? args.run_id), textField(args.reason));
       default: throw new Error(`Unknown Coordinator tool: ${name}`);
     }
   }

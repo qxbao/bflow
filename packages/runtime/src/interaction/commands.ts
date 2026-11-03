@@ -137,7 +137,7 @@ export class HostStructuredCommands {
     if (!action.enabled) throw new Refusal("operation_not_allowed");
     if (command.kind === "answer_decision") {
       const decision = view.decisions.find(decision => decision.decisionId === command.decisionId);
-      if (!decision || decision.status !== "pending" || decision.expiresAt && Date.parse(decision.expiresAt) <= Date.now() ||
+      if (!decision || decision.status !== "pending" ||
         canonicalWebJson(decision.expectedVersion) !== canonicalWebJson(command.expectedVersion)) throw new Refusal("stale_version");
       if (decision.kind === "user_decision" && command.outcome === "changes_requested" ||
         decision.kind !== "user_decision" && command.selectedOption !== undefined ||

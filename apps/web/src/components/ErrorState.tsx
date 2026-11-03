@@ -50,7 +50,7 @@ export function ErrorState({
   }
 
   return (
-    <section className="my-4 border border-line border-l-3 border-l-danger bg-surface p-4" role="alert">
+    <section data-component="ErrorState" className="my-4 border border-line border-l-3 border-l-danger bg-surface p-4" role="alert">
       <h2>Chưa tải được dữ liệu</h2>
       <p>{explain(error)}</p>
       {error instanceof ApiError && error.code === 'unavailable' && (
@@ -82,7 +82,7 @@ export function ErrorState({
             <button
               type="submit"
               disabled={pairing || !token.trim()}
-              className="border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface"
+              className="border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface"
             >
               {pairing ? 'Đang ghép nối…' : 'Ghép nối lại'}
             </button>

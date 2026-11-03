@@ -26,7 +26,8 @@
     "@bflow/contracts": "workspace:*",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "react-router": "7.9.5"
+    "react-router": "7.9.5",
+    "three": "0.187.0"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
@@ -36,6 +37,7 @@
     "@testing-library/user-event": "14.6.1",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
+    "@types/three": "0.187.0",
     "@vitejs/plugin-react": "4.7.0",
     "jsdom": "26.1.0",
     "tailwindcss": "4.3.3",

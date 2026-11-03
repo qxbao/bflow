@@ -156,13 +156,14 @@ describe("per-candidate test-integrity owner authority", () => {
     expect(entry.answer).toMatchObject({ selectedOption: "Reject test-integrity exception" });
   });
 
-  it("never grants a rejected request or an expired unanswered request", async () => {
+  it("never grants a rejected or unanswered request, and honors a late approval", async () => {
     const f = await fixture(), receipt = await request(f); f.setNow(T1);
     await answer(f.runtime(), decision(receipt.approvalId, { decision: "rejected", metadata: { selectedOption: "Reject test-integrity exception" } }));
     expect(await f.runtime().testIntegrityExceptions(query)).toEqual([]);
-    const g = await fixture(), expired = await request(g); g.setNow("2026-10-20T10:00:00.000Z");
-    await answer(g.runtime(), decision(expired.approvalId, { decidedAt: "2026-10-20T10:00:00.000Z" }));
+    const g = await fixture(), late = await request(g); g.setNow("2026-10-20T10:00:00.000Z");
     expect(await g.runtime().testIntegrityExceptions(query)).toEqual([]);
+    await answer(g.runtime(), decision(late.approvalId, { decidedAt: "2026-10-20T10:00:00.000Z" }));
+    expect(await g.runtime().testIntegrityExceptions(query)).toHaveLength(1);
   });
 
   it("ignores generic user decisions even when their question mentions the same finding", async () => {

@@ -46,6 +46,13 @@ patch. It cannot retroactively create missing launch evidence for existing
 legacy sessions. Source/local tests of this branch must not be advertised as
 live Herdr process-containment acceptance.
 
+## Interim exit for hosts without a process scope
+
+Runtime now closes the exact pane of a Developer at rest (`pane_closed`, see the
+Runtime README). That is a containment decision, not the process proof this
+document proposes: a detached descendant can survive, and the acceptance below
+still stands for any claim of full process containment.
+
 ## Compatibility and legacy-session migration
 
 Existing v2 handles and v1–v5 journals are retained without fabricated process
@@ -53,9 +60,10 @@ scope bindings. The current Runtime recovery patch writes private journal v6
 only after genuine correlated evidence; older binaries reject v6. A later process
 proof format needs its own explicit private-codec compatibility review.
 
-Legacy sessions without launch-bound scope have no automatic positive proof.
-Keep their worktrees and unresolved ownership. An operator must provide a
-supported externally verifiable stop source; for example, a controlled machine
+Legacy sessions without launch-bound scope have no automatic positive process
+proof. Their exit is an explicit `bflow cancel <run-id> --reconcile`, which applies
+the interim pane close above and keeps their worktrees. Process-level proof still
+needs a supported externally verifiable stop source; for example, a controlled machine
 reboot with a trusted boot witness recorded beforehand could prove all processes
 from that witnessed boot have ended. Such a reboot is a separate operator action,
 never performed by this patch. Repeating cancel, resetting counters, expiring a

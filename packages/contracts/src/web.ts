@@ -4,6 +4,7 @@ import { IdentifierSchema, IsoDateTimeSchema } from "./common.js";
 import { ApprovalStatusSchema, ApprovalTargetSchema } from "./approval.js";
 import { ArtifactChecksumSchema, ArtifactIdSchema, ArtifactKindSchema } from "./artifact.js";
 import { AgentTransportStateSchema } from "./agent.js";
+import { AgentRoleSchema } from "./agent-roles.js";
 import { RunStatusSchema, TaskStatusSchema } from "./execution.js";
 import { AcceptanceCriterionSchema, SdlcWorkStatusSchema } from "./sdlc.js";
 import { ConversationSessionStatusSchema } from "./conversation-status.js";
@@ -220,6 +221,57 @@ export interface LocalWorkspaceServices {
   reconcileSessionOperation(operation: WebOperation): Promise<OperationResult<WebOperation>>;
   preview(projectId: string): Promise<OperationResult<WebProjectPreview>>;
 }
+// D-WEB-03 workforce projection: read-only, additive. The workforce view carries no pane, cwd, worktree, session metadata, token or RoleMessage payload.
+// The excerpt and transcript routes (ADR 0008 amendment 2026-11-02) carry redacted terminal text only: an unverified snapshot, never task evidence.
+export const WebAgentWorkSchema = z.object({
+  messageId: id, kind: z.enum(["assignment", "delegation", "verification"]),
+  runId: id, taskId: id.optional(), attemptId: id.optional(),
+  delivery: z.enum(["queued", "sending", "accepted", "released", "unknown_delivery", "failed", "cancelled"]),
+  acceptedAt: time.optional(), turnSeenAt: time.optional(), leaseExpiresAt: time.optional()
+}).strict();
+export const WebAgentViewSchema = z.object({
+  instanceId: id, role: AgentRoleSchema, profileId: id.optional(), displayName: nonblank(200),
+  group: z.enum(["conversation", "coordination", "verification", "developer_worktree"]).optional(),
+  permanent: z.boolean(), provider: nonblank(100), model: nonblank(200).optional(),
+  allocation: z.enum(["active", "released", "stopped_retained"]),
+  transport: z.object({ state: AgentTransportStateSchema, observedAt: time }).strict(),
+  boundAt: time, work: z.array(WebAgentWorkSchema).max(8)
+}).strict();
+export const WebHandoffViewSchema = z.object({
+  handoffId: id, ordinal: z.number().int().nonnegative(), runId: id, taskId: id.optional(),
+  messageType: nonblank(80), direction: z.enum(["outbound", "inbound"]),
+  from: z.object({ role: nonblank(32), instanceId: id.optional() }).strict(),
+  to: z.object({ role: nonblank(32), instanceId: id.optional() }).strict(),
+  state: z.enum(["queued", "sending", "accepted", "delivered", "released", "applied",
+    "rejected", "unknown_delivery", "failed", "cancelled"]),
+  evidence: z.array(WebEvidenceReferenceSchema).max(20)
+}).strict();
+export const WebWorkforceViewSchema = z.object({
+  apiVersion: version, projectId: id, sessionId: id, revisionToken: token,
+  agents: z.array(WebAgentViewSchema).max(100), handoffs: z.array(WebHandoffViewSchema).max(100),
+  truncated: z.boolean(), observedAt: time
+}).strict();
+export const WebActivityEntrySchema = z.object({
+  entryId: uuid, occurredAt: time, kind: nonblank(32), role: nonblank(32), action: nonblank(80),
+  runId: id, taskId: id.optional(), outcome: nonblank(240).optional()
+}).strict();
+export const WebAgentExcerptSchema = z.object({ instanceId: id, text: z.string().min(1).max(600), observedAt: time }).strict();
+export const WebWorkforceExcerptsSchema = z.object({
+  apiVersion: version, projectId: id, sessionId: id, items: z.array(WebAgentExcerptSchema).max(100), observedAt: time
+}).strict();
+export const WebAgentTranscriptSchema = z.object({
+  apiVersion: version, projectId: id, sessionId: id, instanceId: id, source: z.literal("terminal_snapshot"),
+  text: z.string().max(64000), truncated: z.boolean(), observedAt: time
+}).strict();
+export const WebActivityQuerySchema = z.object({ cursor: WebCursorSchema.optional() }).strict();
+export type WebAgentWork = z.infer<typeof WebAgentWorkSchema>;
+export type WebAgentView = z.infer<typeof WebAgentViewSchema>;
+export type WebHandoffView = z.infer<typeof WebHandoffViewSchema>;
+export type WebWorkforceView = z.infer<typeof WebWorkforceViewSchema>;
+export type WebActivityEntry = z.infer<typeof WebActivityEntrySchema>;
+export type WebAgentExcerpt = z.infer<typeof WebAgentExcerptSchema>;
+export type WebWorkforceExcerpts = z.infer<typeof WebWorkforceExcerptsSchema>;
+export type WebAgentTranscript = z.infer<typeof WebAgentTranscriptSchema>;
 export interface UserInteractionClient {
   readProjectSession(projectId: string): Promise<OperationResult<WebProjectSession>>;
   listRuns(projectId: string, query: WebRunQuery): Promise<OperationResult<WebPage<WebRunView>>>;
@@ -232,6 +284,11 @@ export interface UserInteractionClient {
   listMessages(projectId: string, sessionId: string, cursor?: string): Promise<OperationResult<WebPage<WebChatMessage>>>;
   sendMessage(input: WebChatSend): Promise<OperationResult<WebChatMessage>>;
   readArtifact(projectId: string, artifactId: string): Promise<OperationResult<WebArtifactRead>>;
+  /** D-WEB-03 optional read ports; a backend without them answers operation_not_allowed. */
+  readWorkforce?(projectId: string): Promise<OperationResult<WebWorkforceView>>;
+  readRunActivity?(projectId: string, runId: string, cursor?: string): Promise<OperationResult<WebPage<WebActivityEntry>>>;
+  readWorkforceExcerpts?(projectId: string): Promise<OperationResult<WebWorkforceExcerpts>>;
+  readAgentTranscript?(projectId: string, instanceId: string): Promise<OperationResult<WebAgentTranscript>>;
 }
 export const WebProjectInspectionResultSchema = OperationResultSchema(WebProjectInspectionSchema);
 export const WebProjectSessionResultSchema = OperationResultSchema(WebProjectSessionSchema);
@@ -277,7 +334,11 @@ export const WebHttpContracts = {
   events: { method: "GET", path: "/api/v1/projects/:id/events", body: noBody, query: WebEventsQuerySchema, response: WebEventSchema, statuses: [200], stream: "sse" },
   noticeDisplayed: { method: "POST", path: "/api/v1/projects/:id/notices/:noticeId/displayed", body: WebNoticeDisplayedRequestSchema, query: noQuery, response: WebNoticeDisplayedSchema, statuses: [200] },
   messages: { method: "GET", path: "/api/v1/projects/:id/sessions/:sessionId/messages", body: noBody, query: WebMessagesQuerySchema, response: WebPageSchema(WebChatMessageSchema), statuses: [200] },
-  sendMessage: { method: "POST", path: "/api/v1/projects/:id/sessions/:sessionId/messages", body: WebChatSendSchema, query: noQuery, response: WebChatMessageSchema, statuses: [202] }
+  sendMessage: { method: "POST", path: "/api/v1/projects/:id/sessions/:sessionId/messages", body: WebChatSendSchema, query: noQuery, response: WebChatMessageSchema, statuses: [202] },
+  workforce: { method: "GET", path: "/api/v1/projects/:id/workforce", body: noBody, query: noQuery, response: WebWorkforceViewSchema, statuses: [200] },
+  activity: { method: "GET", path: "/api/v1/projects/:id/runs/:runId/activity", body: noBody, query: WebActivityQuerySchema, response: WebPageSchema(WebActivityEntrySchema), statuses: [200] },
+  workforceExcerpts: { method: "GET", path: "/api/v1/projects/:id/workforce/excerpts", body: noBody, query: noQuery, response: WebWorkforceExcerptsSchema, statuses: [200] },
+  agentTranscript: { method: "GET", path: "/api/v1/projects/:id/agents/:instanceId/transcript", body: noBody, query: noQuery, response: WebAgentTranscriptSchema, statuses: [200] }
 } as const;
 export const WebHttpPathParamsSchema = z.object({ id, runId: id.optional(), operationId: uuid.optional(),
-  artifactId: ArtifactIdSchema.optional(), noticeId: id.optional(), sessionId: id.optional() }).strict();
+  artifactId: ArtifactIdSchema.optional(), noticeId: id.optional(), sessionId: id.optional(), instanceId: id.optional() }).strict();

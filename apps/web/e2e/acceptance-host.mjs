@@ -4,7 +4,7 @@
 // host semantics it models (first decision wins, operation receipts survive restart)
 // are owned and tested by Runtime, not proven here.
 import { createLocalWebServer } from '@bflow/local-server';
-import { WebCommandSchema, WebRunViewSchema, WebDecisionSchema, WebEventSchema } from '@bflow/contracts/web';
+import { WebCommandSchema, WebRunViewSchema, WebDecisionSchema, WebEventSchema, WebWorkforceViewSchema, WebActivityEntrySchema } from '@bflow/contracts/web';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -30,6 +30,15 @@ const run=()=>{readRuns++;return WebRunViewSchema.parse({apiVersion:1,runId:'run
   availableActions:[{kind:'answer_decision',actionId:'decide',enabled:status==='pending',...(status!=='pending'?{disabledReason:'no_pending_decision'}:{}),expectedVersion:version()},
     {kind:'resume',actionId:'resume',enabled:false,disabledReason:'not_resumable',expectedVersion:{revisionToken:`v${revision}`}},
     {kind:'cancel',actionId:'cancel',enabled:!cancelled,...(cancelled?{disabledReason:'terminal_run'}:{}),expectedVersion:{revisionToken:`v${revision}`}}],updatedAt:now()});};
+// D-WEB-03 deterministic workforce/activity (workforce-full fixture shape, ids bound to this host's session and run).
+const workforce=id=>WebWorkforceViewSchema.parse({apiVersion:1,projectId:id,sessionId:'fixture-host',revisionToken:`w${revision}`,
+  agents:[
+    {instanceId:'agent-conversation-1',role:'conversation',displayName:'Conversation',group:'conversation',permanent:true,provider:'claude',model:'fixture-model',allocation:'active',transport:{state:'idle',observedAt:'2026-11-02T00:00:00.000Z'},boundAt:'2026-11-01T23:00:00.000Z',work:[]},
+    {instanceId:'agent-coordinator-1',role:'coordinator',displayName:'Coordinator',group:'coordination',permanent:true,provider:'codex',allocation:'active',transport:{state:'working',observedAt:'2026-11-02T00:00:00.000Z'},boundAt:'2026-11-01T23:00:01.000Z',
+      work:[{messageId:'fixture-delegation-1',kind:'delegation',runId:'run',delivery:'accepted',acceptedAt:'2026-11-01T23:30:00.000Z',turnSeenAt:'2026-11-01T23:30:05.000Z'}]}],
+  handoffs:[{handoffId:'handoff-out-0',ordinal:0,runId:'run',messageType:'delegation_request',direction:'outbound',from:{role:'conversation',instanceId:'agent-conversation-1'},to:{role:'coordinator',instanceId:'agent-coordinator-1'},state:'accepted',evidence:[]}],
+  truncated:false,observedAt:'2026-11-02T00:00:00.000Z'});
+const activity=()=>[WebActivityEntrySchema.parse({entryId:'6f1f1d7e-3b1a-4c53-9a58-0d2f5d6a7b01',occurredAt:'2026-11-01T23:30:00.000Z',kind:'handoff',role:'coordinator',action:'accepted_delegation',runId:'run',outcome:'Đã nhận yêu cầu'})];
 const session=id=>({apiVersion:1,projectId:id,sessionId:'fixture-host',state:'ready',pendingIntakes:[],blockers:[],updatedAt:now()});
 const client={
  readProjectSession:async id=>ok(session(id)),listRuns:async()=>ok({apiVersion:1,items:[run()]}),readRun:async()=>ok(run()),listDecisions:async()=>ok({apiVersion:1,items:status==='pending'?[decision()]:[]}),
@@ -66,7 +75,9 @@ const client={
   return ok({metadata:{apiVersion:1,artifactId,runId:'run',mediaType:a.mediaType,checksum:checksum(a.body),sizeBytes:bytes.byteLength,
     disposition:a.mediaType==='text/markdown'?'inline':'attachment',previewLimitBytes:1048576},chunks:(async function*(){yield bytes;})()});
  },
- acknowledgeNotice:unavailable,listMessages:unavailable,sendMessage:unavailable
+ acknowledgeNotice:unavailable,listMessages:unavailable,sendMessage:unavailable,
+ readWorkforce:async id=>ok(workforce(id)),
+ readRunActivity:async(_id,runId)=>ok({apiVersion:1,items:runId==='run'?activity():[]})
 };
 const workspace={inspectProject:async id=>ok({apiVersion:1,projectId:id,ready:true,checks:[],observedAt:now()}),preview:async id=>ok({apiVersion:1,projectId:id,available:true,summary:'Fixture',blockers:[],observedAt:now()}),
  startSession:async id=>{lifecycleCalls.push('start');return ok(session(id));},stopSession:async id=>{lifecycleCalls.push('stop');return ok(session(id));},

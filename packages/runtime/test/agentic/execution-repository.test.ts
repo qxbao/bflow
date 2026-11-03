@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { createExecutionResolutionReader, readExecutionRepositorySnapshot } from '../../src/agentic/execution-binding.js';
+import { assertPrivateExecutionSources, createExecutionResolutionReader, readExecutionRepositorySnapshot } from '../../src/agentic/execution-binding.js';
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 function git(root: string, ...args: string[]): string {
@@ -23,6 +23,7 @@ async function fixture() {
 it.each(['head', 'index', 'dirty', 'untracked'] as const)('fences %s drift using real repository state before the next effect', async change => {
   const { root, repository, sources } = await fixture();
   const read = await createExecutionResolutionReader(sources); await read();
+  const pinned = await read.readPrivateSources!();
   if (change === 'head') git(root, 'commit', '--allow-empty', '-m', 'new revision');
   else if (change === 'untracked') await writeFile(join(root, 'new.ts'), 'export const newValue=1;\n');
   else {
@@ -30,7 +31,9 @@ it.each(['head', 'index', 'dirty', 'untracked'] as const)('fences %s drift using
     if (change === 'index') { git(root, 'add', 'source.ts'); await writeFile(join(root, 'source.ts'), 'export const value=1;\n'); }
   }
   expect(await readExecutionRepositorySnapshot(root)).not.toEqual(repository);
-  const launch = vi.fn(); await expect(read().then(launch)).rejects.toMatchObject({ code: 'execution_plan_drift' }); expect(launch).not.toHaveBeenCalled();
+  // A run or host pin is what fences Git: a reader alone reports the live repository, so a commit cannot block work with no accepted plan.
+  await expect(read()).resolves.toMatchObject({ repository: await readExecutionRepositorySnapshot(root) });
+  const launch = vi.fn(); await expect(assertPrivateExecutionSources(read, pinned).then(launch)).rejects.toMatchObject({ code: 'execution_plan_drift' }); expect(launch).not.toHaveBeenCalled();
   await expect(createExecutionResolutionReader(sources)).rejects.toMatchObject({ code: 'execution_plan_drift' });
 });
 it('leaves index/worktree untouched, ignores credential files and refuses unsafe source files', async () => {

@@ -32,7 +32,7 @@ import {
 import { HerdrConversationBridge } from "./herdr-bridge.js";
 import { classifyUserIntent } from "./intent-classifier.js";
 import { resolveChatDecision } from "./chat-decision.js";
-import { closeClarificationsForApproval, closeSettledApprovalClarifications, expireStaleClarifications } from "./clarification-lifecycle.js";
+import { closeClarificationsForApproval, closeSettledApprovalClarifications } from "./clarification-lifecycle.js";
 import { closedApprovalNotice, isTerminalRunStatus, supersededApprovals } from "./approval-lifecycle.js";
 import {
   isUserDecisionRequest,
@@ -448,7 +448,6 @@ export class ConversationGateway {
           version.revision !== pending.revision || version.generation !== pending.generation ||
           !isDeepStrictEqual(version.target, pending.target) || version.evidenceDigest !== this.structuredHash(pending.evidence))
           return fail("conflict", "Approval version/target/evidence is stale or already settled");
-        if (pending.expiresAt && Date.parse(pending.expiresAt) <= Date.parse(now)) return fail("conflict", "Approval has expired");
         const options = Array.isArray(pending.metadata?.options) ? pending.metadata.options.filter((value): value is string => typeof value === "string") : [];
         if (isUserDecisionRequest(pending) && command.outcome === "changes_requested")
           return fail("validation", "User decisions only accept approved or rejected outcomes");
@@ -874,10 +873,10 @@ export class ConversationGateway {
         };
       }
 
-      // Clarifications idle past their TTL, or about an already settled approval, are closed before any reply can be matched to them.
-      const unexpired = closeSettledApprovalClarifications(expireStaleClarifications(this.snapshot!, now), now);
-      if (unexpired !== this.snapshot) {
-        const pruned = await this.persistUpdatedSnapshot(unexpired);
+      // Clarifications about an already settled approval are closed before any reply can be matched to them.
+      const unsettled = closeSettledApprovalClarifications(this.snapshot!, now);
+      if (unsettled !== this.snapshot) {
+        const pruned = await this.persistUpdatedSnapshot(unsettled);
         if (!pruned.ok) return pruned;
       }
 
@@ -1426,10 +1425,6 @@ export class ConversationGateway {
               return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
                 "Lựa chọn bạn gửi không nằm trong danh sách đã đưa ra.", offered));
             }
-            if (targetApproval.expiresAt !== undefined && Date.parse(now) >= Date.parse(targetApproval.expiresAt)) {
-              return this.answerWithNotice(input, correlationId, this.rejectedReplyNotice(targetApproval.approvalId,
-                "Câu hỏi này đã hết hạn và không còn nhận trả lời.", undefined));
-            }
             if (targetApproval.metadata?.testIntegrityException !== undefined &&
               approvalInput.decision === "approved" &&
               selected === "Approve test-integrity exception") {
@@ -1915,7 +1910,6 @@ export class ConversationGateway {
       if (request.sessionId !== this.config.sessionId) { reject("approval thuộc session khác"); continue; }
       if (this.snapshot!.approvalDecisions[request.approvalId]) { reject("approval đã được quyết định"); continue; }
       if (this.snapshot!.closedApprovals?.[request.approvalId]) { reject("approval đã đóng vì run kết thúc hoặc được thay thế"); continue; }
-      if (isUserDecisionRequest(request) && request.expiresAt !== undefined && Date.parse(now) >= Date.parse(request.expiresAt)) { reject("approval đã hết hạn"); continue; }
       const knownWorkflow = Object.values(workflows).find(item => item.runId === request.runId);
       if (knownWorkflow && isTerminalRunStatus(knownWorkflow.sdlcStatus)) { reject("run đã kết thúc"); continue; }
       const existing = pending[request.approvalId];
@@ -2236,7 +2230,7 @@ export class ConversationGateway {
         }
       }
 
-      // Runtime closed a specialist question: drop the prompt so it no longer counts as pending.
+      // Runtime closed a specialist question because its run ended: drop the prompt so it no longer counts as pending.
       // Only user-decision entries are removed; a design/task approval is never touched here.
       const expiredApprovalId = userDecisionExpiredApprovalId(message.type, message.payload);
       if (expiredApprovalId !== undefined) {

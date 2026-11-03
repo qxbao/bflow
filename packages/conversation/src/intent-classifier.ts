@@ -10,7 +10,7 @@ import type {
   WorkflowRequestKind
 } from "./types.js";
 import { newestClarification } from "./clarification-lifecycle.js";
-import { isExpiredUserDecision, isUserDecisionRequest, resolveUserDecisionReply } from "./user-decision.js";
+import { isUserDecisionRequest, resolveUserDecisionReply } from "./user-decision.js";
 
 const ZERO_WIDTH_STRIP_REGEX = /[\u200B-\u200D\uFEFF\u00AD]/g;
 
@@ -358,12 +358,8 @@ function detectUserDecision(
   rawContent: string,
   context: ConversationContextSnapshot
 ): { matched: boolean; result?: IntentClassificationResult } {
-  const userDecisions = Object.values(context.pendingApprovals).filter((request) => isUserDecisionRequest(request));
-  if (userDecisions.length === 0) return { matched: false };
-  // Expired requests do not count. When all of them have expired, keep them so the gateway refuses the reply with its expiry error.
-  const now = Date.now();
-  const live = userDecisions.filter((request) => !isExpiredUserDecision(request, now));
-  const pending = live.length > 0 ? live : userDecisions;
+  const pending = Object.values(context.pendingApprovals).filter((request) => isUserDecisionRequest(request));
+  if (pending.length === 0) return { matched: false };
   const designApprovalPending = Object.values(context.pendingApprovals).some((request) => !isUserDecisionRequest(request));
 
   const explicitId = namedApprovalId(rawContent, context);

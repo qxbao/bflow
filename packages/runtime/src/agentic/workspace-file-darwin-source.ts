@@ -58,11 +58,13 @@ static size_t bounded_read(int fd, unsigned char *bytes) {
     fail("Developer file changed during read; inspect before retrying");
   utf8(bytes, length); return length;
 }
-static int directory(int parent, const char *part) {
+static int directory_at(int parent, const char *part, int create) {
+  if (create && mkdirat(parent, part, 0755) && errno != EEXIST) fail("Cannot create Developer parent directory");
   int fd = openat(parent, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   if (fd < 0) fail("Developer directory access refused (missing parent or symlink)");
   return fd;
 }
+static int directory(int parent, const char *part) { return directory_at(parent, part, 0); }
 int main(int argc, char **argv) {
   if (argc != 5 || (strcmp(argv[1], "read") && strcmp(argv[1], "write"))) fail("Invalid workspace operation");
   const int writing = !strcmp(argv[1], "write"), creating = !strcmp(argv[4], "new");
@@ -88,7 +90,7 @@ int main(int argc, char **argv) {
     if (!cursor) break;
     if (strlen(expected) + strlen(leaf) + 2 >= PATH_MAX) fail("Workspace path exceeds bound");
     strcat(expected, "/"); strcat(expected, leaf);
-    int next = directory(parent, leaf); close(parent); parent = next;
+    int next = directory_at(parent, leaf, writing && creating); close(parent); parent = next;
     path_matches(parent, expected);
   }
   path_matches(rootfd, argv[2]); path_matches(parent, expected);

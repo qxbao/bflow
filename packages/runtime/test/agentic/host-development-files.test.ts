@@ -50,6 +50,23 @@ describe("guarded host workspace files", () => {
   });
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
+  it("creates missing parent directories for a new owned file, and never for a replacement or a path outside ownership", async () => {
+    evidence.push({ phase: "red" });
+    expect(await development.writeWorkspaceFile(binding, { path: "src/deep/er/new.ts", content: "new", expectedSha256: null })).toMatchObject({ written: true, created: true });
+    expect(await readFile(join(root, "src/deep/er/new.ts"), "utf8")).toBe("new");
+    expect(await development.writeWorkspaceFile(binding, { path: "src/deep/er/sibling.ts", content: "second", expectedSha256: null })).toMatchObject({ created: true });
+    await expect(development.writeWorkspaceFile(binding, { path: "src/absent/old.ts", content: "x", expectedSha256: digest("x") })).rejects.toThrow();
+    await expect(stat(join(root, "src/absent"))).rejects.toThrow();
+    await expect(development.writeWorkspaceFile(binding, { path: "outside/new/file.ts", content: "x", expectedSha256: null })).rejects.toThrow("outside the accepted task ownership");
+    await expect(stat(join(root, "outside"))).rejects.toThrow();
+    await expect(development.writeWorkspaceFile(binding, { path: "src/private/new/file.ts", content: "x", expectedSha256: null })).rejects.toThrow("outside the accepted task ownership");
+    await expect(stat(join(root, "src/private"))).rejects.toThrow();
+    const elsewhere = await realpath(await mkdtemp(join(tmpdir(), "bflow-workspace-elsewhere-")));
+    await symlink(elsewhere, join(root, "src/link"));
+    await expect(development.writeWorkspaceFile(binding, { path: "src/link/new/file.ts", content: "x", expectedSha256: null })).rejects.toThrow();
+    await expect(stat(join(elsewhere, "new"))).rejects.toThrow();
+    await rm(elsewhere, { recursive: true, force: true });
+  });
   it("reads scoped source before Red and permits a new test, but blocks implementation until Red and freezes tests afterwards", async () => {
     expect(await development.readWorkspaceFile(binding, { path: "src/math.ts" })).toMatchObject({ exists: true, content: "original", sha256: digest("original") });
     expect(await development.readWorkspaceFile(binding, { path: "test/math.test.ts" })).toMatchObject({ exists: false, sha256: null });
@@ -123,11 +140,11 @@ describe("guarded host workspace files", () => {
     await expect(development.authorizeFileEdit(binding, { tool_name: "Write", tool_input: { file_path: join(root, "test/ınput.ts") } })).rejects.toThrow(/Red/);
     expect(await readFile(join(root, "test/ınput.ts"), "utf8")).toBe("implementation");
   });
-  it("refuses stale digests, blind writes, missing parents and unknown arguments without overwriting", async () => {
+  it("refuses stale digests, blind writes, a replacement under missing parents and unknown arguments without overwriting", async () => {
     evidence.push({});
     for (const args of [ { path: "src/math.ts", content: "bad", expectedSha256: digest("old") },
       { path: "src/math.ts", content: "bad", expectedSha256: null }, { path: "src/math.ts", content: "bad" },
-      { path: "src/new/file", content: "bad", expectedSha256: null }, { path: "src/math.ts", content: "bad", expectedSha256: digest("original"), shell: "anything" } ])
+      { path: "src/new/file", content: "bad", expectedSha256: digest("old") }, { path: "src/math.ts", content: "bad", expectedSha256: digest("original"), shell: "anything" } ])
       await expect(development.writeWorkspaceFile(binding, args)).rejects.toThrow();
     expect(await readFile(join(root, "src/math.ts"), "utf8")).toBe("original");
   });

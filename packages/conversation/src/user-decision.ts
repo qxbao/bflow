@@ -27,13 +27,8 @@ export function isUserDecisionRequest(request: { readonly metadata?: unknown } |
     (metadata as Record<string, unknown>).kind === USER_DECISION_KIND;
 }
 
-/** True when the request has an expiry that has passed at `nowMs`. Requests without expiry never expire here. */
-export function isExpiredUserDecision(request: { readonly expiresAt?: string | undefined }, nowMs: number): boolean {
-  return request.expiresAt !== undefined && nowMs >= Date.parse(request.expiresAt);
-}
-
 /**
- * Returns the approvalId when a Runtime `conversation.progress` payload announces an expired user decision.
+ * Returns the approvalId when a Runtime `conversation.progress` payload announces a user decision closed by its run ending.
  * Ignores every other payload, so it can never remove a design/task approval.
  */
 export function userDecisionExpiredApprovalId(messageType: string, payload: unknown): string | undefined {
@@ -47,8 +42,8 @@ export function userDecisionExpiredApprovalId(messageType: string, payload: unkn
 /** User-facing notice that a specialist question is closed and will not be accepted any more. */
 export function renderUserDecisionExpiredNotice(approvalId: string): string {
   return [
-    `⌛ **CÂU HỎI QUYẾT ĐỊNH ĐÃ HẾT HẠN [${approvalId}]**`,
-    "Câu hỏi này không còn nhận trả lời. Tác tử đã được thông báo và sẽ không tiếp tục theo lựa chọn nào của câu hỏi này."
+    `🔒 **CÂU HỎI QUYẾT ĐỊNH ĐÃ ĐÓNG [${approvalId}]**`,
+    "Công việc chứa câu hỏi này đã kết thúc nên câu hỏi không còn nhận trả lời. Tác tử đã được thông báo và sẽ không tiếp tục theo lựa chọn nào của câu hỏi này."
   ].join("\n");
 }
 
@@ -86,7 +81,6 @@ export function renderUserDecisionPrompt(payload: Record<string, unknown>): stri
   const taskId = stringOf(target.taskId);
   const question = stringOf(metadata.question) ?? stringOf(payload.reason) ?? "(không có nội dung câu hỏi)";
   const context = stringOf(metadata.context);
-  const expiresAt = stringOf(payload.expiresAt);
   const options = optionsOf({ metadata });
 
   const lines = [
@@ -95,7 +89,6 @@ export function renderUserDecisionPrompt(payload: Record<string, unknown>): stri
     ...(taskId ? [`- **Tác vụ:** ${taskId}`] : []),
     `- **Câu hỏi:** ${question}`,
     ...(context ? [`- **Ngữ cảnh:** ${wrapUntrustedRepositoryContent(context)}`] : []),
-    `- **Hết hạn:** ${expiresAt ? formatDeadline(expiresAt) : NO_DEADLINE_TEXT}`,
     ""
   ];
   if (options) {
@@ -114,22 +107,13 @@ export function renderUserDecisionPrompt(payload: Record<string, unknown>): stri
   return lines.join("\n");
 }
 
-/** Deadline text shown when a user decision carries no expiry. */
-export const NO_DEADLINE_TEXT = "Không có hạn — đang chờ bạn trả lời";
-
-/** Human-readable deadline (UTC ISO) for a user-facing prompt. Unparseable values are shown verbatim. */
-export function formatDeadline(expiresAt: string): string {
-  const millis = Date.parse(expiresAt);
-  return Number.isNaN(millis) ? expiresAt : new Date(millis).toISOString();
-}
-
 /**
  * Renders one pending approval for a user-facing status report. User decisions get the full question
  * rendering; design/task approvals keep their one-line form.
  */
 export function renderPendingApprovalForStatus(request: {
   readonly approvalId: string; readonly reason: string; readonly requestedBy: string; readonly metadata?: unknown;
-  readonly expiresAt?: string | undefined; readonly target?: unknown;
+  readonly target?: unknown;
 }, indent = "  "): string[] {
   if (!isUserDecisionRequest(request)) {
     return [`${indent}- **\`${request.approvalId}\`**: ${request.reason} (gửi bởi ${request.requestedBy})`];

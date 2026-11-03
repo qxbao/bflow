@@ -9,7 +9,9 @@ export const NamespaceExitProofSchema = z.object(namespaceFields).strict();
 export type NamespaceExitProof = z.infer<typeof NamespaceExitProofSchema>;
 export const CancellationStopProofSchema = z.discriminatedUnion("source", [
   z.object({ source: z.literal("correlated_transport"), handle: AgentExecutionHandleSchema, observedAt: IsoDateTimeSchema }).strict(),
-  z.object({ ...namespaceFields, handle: AgentExecutionHandleSchema }).strict()
+  z.object({ ...namespaceFields, handle: AgentExecutionHandleSchema }).strict(),
+  /** Runtime closed the exact pane of an execution at rest. Ends the provider CLI, but is no proof about detached descendants. */
+  z.object({ source: z.literal("pane_closed"), handle: AgentExecutionHandleSchema, observedAt: IsoDateTimeSchema }).strict()
 ]);
 export type CancellationStopProof = z.infer<typeof CancellationStopProofSchema>;
 export const CancellationReconciliationReportSchema = z.object({ runId: z.string().min(1), fullyStopped: z.boolean(),

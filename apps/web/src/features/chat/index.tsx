@@ -37,13 +37,13 @@ function Status({value}:{value:Delivery}){
   return <span className={`inline-flex items-center gap-1 ${status.tone}`}><span aria-hidden="true">{status.icon}</span><span>{status.label}</span></span>;
 }
 /** Normalized session history narrowed to one run; the host rechecks send authority independently. */
-export function ChatHistory({api,projectId,sessionId,runId,revision,title}:{
-  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string;
+export function ChatHistory({api,projectId,sessionId,runId,revision,title,initialDraft}:{
+  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string;initialDraft?:string;
 }) {
-  return <RunThread key={JSON.stringify([projectId,sessionId,runId])} api={api} projectId={projectId} sessionId={sessionId} runId={runId} revision={revision} title={title}/>;
+  return <RunThread key={JSON.stringify([projectId,sessionId,runId])} api={api} projectId={projectId} sessionId={sessionId} runId={runId} revision={revision} title={title} {...(initialDraft?{initialDraft}:{})}/>;
 }
-function RunThread({api,projectId,sessionId,runId,revision,title}:{
-  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string|undefined;
+function RunThread({api,projectId,sessionId,runId,revision,title,initialDraft}:{
+  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string|undefined;initialDraft?:string|undefined;
 }) {
   const [reload,setReload]=useState(0),[limit,setLimit]=useState(PAGE_MESSAGES),[pending,setPending]=useState<PendingMessage>(),[clock,setClock]=useState(()=>Date.now());
   const refresh=()=>setReload(value=>value+1);
@@ -116,6 +116,6 @@ function RunThread({api,projectId,sessionId,runId,revision,title}:{
       </ol>
       {composing&&<div role="status" className="mt-2 inline-flex items-center gap-2 rounded-2xl rounded-bl-sm bg-faint px-3 py-2 font-data text-xs text-muted"><span aria-hidden="true" className="flex gap-1">{['','[animation-delay:150ms]','[animation-delay:300ms]'].map((delay,index)=><span key={index} className={`size-1.5 animate-bounce rounded-full bg-muted ${delay}`.trim()}/>)}</span>Đang soạn tin</div>}
     </div>
-    <ChatComposer api={api} projectId={projectId} sessionId={sessionId} runId={runId} ready={ready} sessionFresh={Boolean(session.data && !session.error)} refresh={refresh} onPending={value=>{if(value)pinned.current=true;setPending(value);}}/>
+    <ChatComposer {...(initialDraft?{initialDraft}:{})} api={api} projectId={projectId} sessionId={sessionId} runId={runId} ready={ready} sessionFresh={Boolean(session.data && !session.error)} refresh={refresh} onPending={value=>{if(value)pinned.current=true;setPending(value);}}/>
   </section>;
 }

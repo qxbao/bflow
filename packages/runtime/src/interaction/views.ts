@@ -10,6 +10,7 @@ import {
   type WorkflowRunSnapshot,
   type ApprovalRequest,
   type AgentTransportState,
+  type SessionManifest,
 } from "@bflow/contracts";
 import {
   digest,
@@ -28,6 +29,9 @@ export interface ReadSources {
   transport?: { states: AgentTransportState[]; observedAt: string };
   commandsSupported?: boolean;
   pendingClarifications?: import("@bflow/conversation").ConversationContextSnapshot["pendingClarifications"] | undefined;
+  /** Workforce only: the Session Manifest and project scope. Never feeds a run revisionToken or ReadSources.transport. */
+  manifest?: SessionManifest | undefined;
+  projectId?: string | undefined;
   redact?: (text: string) => string;
   redactOption?: (text: string) => string;
 }
@@ -56,14 +60,11 @@ export function projectDecision(
     checksum: e.checksum,
     ...(e.sizeBytes === undefined ? {} : { sizeBytes: e.sizeBytes }),
   }));
-  const expired =
-    request.expiresAt !== undefined &&
-    Date.parse(request.expiresAt) <= Date.parse(s.observedAt);
   return WebDecisionSchema.parse({
     decisionId: request.approvalId,
     runId: r.runId,
     kind,
-    status: expired ? "expired" : (request.status ?? "pending"),
+    status: request.status ?? "pending",
     question: safe(s, request.reason),
     options: Array.isArray(request.metadata?.options)
       ? request.metadata.options
@@ -80,7 +81,6 @@ export function projectDecision(
       evidenceDigest: digest(request.evidence),
     },
     evidence,
-    ...(request.expiresAt ? { expiresAt: request.expiresAt } : {}),
   });
 }
 function pendingActionBlocker(action: NonNullable<RunRecord["pendingAction"]>): string {
@@ -294,13 +294,25 @@ import {
   WebRunPageResultSchema,
   WebRunViewResultSchema,
   WebDecisionPageResultSchema,
+  WebWorkforceViewSchema,
+  WebActivityEntrySchema,
+  WebWorkforceExcerptsSchema,
+  WebAgentTranscriptSchema,
+  OperationResultSchema,
 } from "@bflow/contracts";
 import { ConversationContextSnapshotSchema } from "@bflow/conversation";
 import { ProjectionSnapshots } from "./projection-snapshots.js";
 import type { HostConfiguration } from "../agentic/host-controller.js";
 import { InteractionQuerySchema } from "./schemas.js";
 import { interactionProjectId } from "./client.js";
+import { projectWorkforce } from "./workforce.js";
+import { readRunActivityPage } from "./activity.js";
+import { readAgentTranscript, readWorkforceExcerpts } from "./transcript.js";
 const projectionSnapshots = new ProjectionSnapshots();
+const WebWorkforceResultSchema = OperationResultSchema(WebWorkforceViewSchema);
+const WebExcerptsResultSchema = OperationResultSchema(WebWorkforceExcerptsSchema);
+const WebTranscriptResultSchema = OperationResultSchema(WebAgentTranscriptSchema);
+const WebActivityResultSchema = OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
 async function readSnapshot(path: string): Promise<unknown | undefined>;
 async function readSnapshot<T>(path: string, decode: (bytes: Buffer) => T, maxBytes?: number): Promise<T | undefined>;
 async function readSnapshot(path: string, decode?: (bytes: Buffer) => unknown, maxBytes = 16 * 1024 * 1024): Promise<unknown | undefined> {
@@ -333,6 +345,8 @@ export async function hostInteractionQuery(
     ready: boolean;
     commandsSupported?: boolean;
     readCore?: (runId: string) => Promise<WorkflowRunSnapshot | undefined>;
+    /** Terminal snapshot of one pane for the excerpt and transcript queries; without it those answer operation_not_allowed. */
+    readPane?: (paneId: string, lines: number) => Promise<string>;
   },
 ) {
   const query = InteractionQuerySchema.parse(input),
@@ -409,7 +423,8 @@ export async function hostInteractionQuery(
         }
       : journal;
   const core = new Map<string, WorkflowRunSnapshot>();
-  for (const r of state.runs.filter(
+  // The workforce projection needs only the manifest and journal; skipping Core reads keeps its 1 s polling cheap.
+  for (const r of query.kind === "workforce" || query.kind === "activity" || query.kind === "workforce_excerpts" || query.kind === "agent_transcript" ? [] : state.runs.filter(
     (r) => r.delegation.sessionId === sessionId && r.coreCreated,
   )) {
     const value = await options.readCore?.(r.runId);
@@ -440,6 +455,29 @@ export async function hostInteractionQuery(
       /\/(?:[^\s/]+\/)+[^\s]*/gi,
       "[redacted]",
     );
+  if (query.kind === "workforce")
+    return WebWorkforceResultSchema.parse({
+      ok: true,
+      value: projectWorkforce({ state, sessionId, observedAt, core: new Map(), ready: options.ready, manifest, projectId,
+        redact, redactOption: redactSecrets }),
+    });
+  if (query.kind === "workforce_excerpts" || query.kind === "agent_transcript") {
+    const readPane = options.readPane;
+    if (!readPane || !manifest)
+      return { ok: false as const, error: { code: "unsupported_version" as const, retryable: false as const, supportedVersions: [1], receivedVersion: 0,
+        message: "Terminal transcripts are not supported by this host." } };
+    const sources = { manifest, state, sessionId, projectId, observedAt, redact, readPane };
+    return query.kind === "workforce_excerpts"
+      ? WebExcerptsResultSchema.parse(await readWorkforceExcerpts(sources))
+      : WebTranscriptResultSchema.parse(await readAgentTranscript(sources, query.instanceId));
+  }
+  if (query.kind === "activity") {
+    if (!state.runs.some(r => r.runId === query.runId && r.delegation.sessionId === sessionId))
+      return { ok: false as const, error: { code: "not_found" as const, retryable: false as const, message: "Run not found in this session." } };
+    return WebActivityResultSchema.parse({
+      ok: true, value: await readRunActivityPage(join(root, "agentic/task-activity.jsonl"), query.runId, query.cursor, redact),
+    });
+  }
   const rawContext = await readSnapshot(join(root, "agentic/conversation", sessionId + ".context.json"));
   const context = rawContext === undefined ? undefined : ConversationContextSnapshotSchema.parse(rawContext);
   if (context && (context.session.sessionId !== sessionId || context.session.herdrSessionId !== configuration.sessionId))

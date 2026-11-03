@@ -77,7 +77,7 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
  }
  async function unregister(){if(busy||running)return;setBusy(true);setError(undefined);try{await api.unregister(id);refresh();navigate('/');}catch(e){setError(e);}finally{setBusy(false);}}
  const attentionChecks=inspection?.checks.filter(c=>c.state!=='passed')??[],passedChecks=inspection?.checks.filter(c=>c.state==='passed')??[];
- return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Thông tin trên máy này</div><h1>Cài đặt dự án</h1>
+ return <><div className="font-data text-xs font-semibold uppercase tracking-widest text-muted">Thông tin trên máy này</div><h1 data-component="Settings">Cài đặt dự án</h1>
  <nav aria-label="Các phần cài đặt" className="my-3 flex flex-wrap gap-x-5 gap-y-2 border-b border-line pb-2.5 font-data text-sm"><a href="#settings-readiness">Điều kiện sẵn sàng</a><a href="#settings-configuration">Cấu hình</a><a href="#settings-initialize">Khởi tạo</a><a href="#settings-remove" className="text-danger">Hủy đăng ký</a></nav>
  {Boolean(error) && <p role="alert" className="my-3 border border-danger border-l-3 bg-surface p-3 text-sm">{explain(error)}</p>}
 
@@ -121,7 +121,7 @@ export function Settings({api,project,refresh=()=>{}}:{api:ApiClient;project:Web
     <FieldLabel htmlFor="init-provider" label="Provider khi tạo / cập nhật cấu hình" help="Chọn công cụ AI mặc định (claude, codex hoặc agy) khi khởi tạo tệp .bflow/config.yml lần đầu hoặc khi chạy cập nhật. Để mặc định nếu muốn giữ nguyên cấu hình hiện tại."/>
     <select id="init-provider" disabled={busy||running} value={provider} onChange={e=>setProvider(e.target.value)}><option value="">Giữ cấu hình hiện tại / mặc định</option>{['claude','codex','agy'].map(cli=><option key={cli}>{cli}</option>)}</select>
    </div>
-   <div><button className="min-w-48 border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface" disabled={busy||running||configDirty||(!license&&!skipGitNexus)} onClick={()=>void initialize()}>{running?'Đang khởi tạo…':'Khởi tạo / sửa GitNexus'}</button></div>
+   <div><button className="min-w-48 border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface" disabled={busy||running||configDirty||(!license&&!skipGitNexus)} onClick={()=>void initialize()}>{running?'Đang khởi tạo…':'Khởi tạo / sửa GitNexus'}</button></div>
   </div>
   {configDirty && <p className="my-1.5 text-xs text-warning">Bạn đang có thay đổi cấu hình chưa lưu. Hãy lưu hoặc bỏ thay đổi ở mục Cấu hình trước.</p>}
   <details className="my-2"><summary>Lưu ý giấy phép GitNexus & quy tắc Commit</summary><p className="my-1 text-xs text-muted">GitNexus dùng giấy phép PolyForm-Noncommercial-1.0.0 (phi thương mại), ghi .gitnexus/ và .git/info/exclude. Tùy chọn Commit chỉ ghi .bflow/config.yml và .bflow/.gitignore; nếu kho đang có file khác staged thì thao tác sẽ dừng an toàn.</p></details>

@@ -72,6 +72,14 @@ export class ApiClient {
     if (value.runId !== runId) throw new ApiError('invalid_response');
     return value;
   }
+  /** D-WEB-03 read-only workforce projection. Backends without it answer 422 `operation_not_allowed` or 404 `not_found`. */
+  readWorkforce(id: string) { return this.request(`${projectPath(id)}/workforce`, contracts.workforce.response); }
+  readRunActivity(id: string, runId: string, cursor?: string) {
+    const query = cursor ? `?${new URLSearchParams({cursor})}` : '';
+    return this.request(`${projectPath(id)}/runs/${encodeURIComponent(runId)}/activity${query}`, contracts.activity.response);
+  }
+  readWorkforceExcerpts(id: string) { return this.request(`${projectPath(id)}/workforce/excerpts`, contracts.workforceExcerpts.response); }
+  readAgentTranscript(id: string, instanceId: string) { return this.request(`${projectPath(id)}/agents/${encodeURIComponent(instanceId)}/transcript`, contracts.agentTranscript.response); }
   decisions(id: string) { return this.request(`${projectPath(id)}/decisions`, contracts.decisions.response); }
   inspect(id: string) { return this.request(`${projectPath(id)}/session/inspect`, contracts.inspectSession.response, 'POST', contracts.inspectSession.body.parse({apiVersion:1}), 50000); }
   async artifact(id: string, artifactId: string): Promise<string> {

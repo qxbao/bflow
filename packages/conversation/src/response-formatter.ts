@@ -1,5 +1,5 @@
 import { ConversationMessageSchema } from "@bflow/contracts";
-import { formatDeadline, isUserDecisionRequest, NO_DEADLINE_TEXT, renderPendingApprovalForStatus, renderUserDecisionExpiredNotice, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
+import { isUserDecisionRequest, renderPendingApprovalForStatus, renderUserDecisionExpiredNotice, renderUserDecisionPrompt, userDecisionExpiredApprovalId } from "./user-decision.js";
 import { sanitizeReasonForUser, wrapUntrustedRepositoryContent } from "./safety.js";
 
 import type {
@@ -136,13 +136,12 @@ function describeApprovalTarget(target: unknown): string {
 
 /**
  * Renders a design/task approval request with everything needed to decide: target, reason,
- * requester, evidence artifacts, deadline and the exact reply syntax.
+ * requester, evidence artifacts and the exact reply syntax.
  */
 function renderDesignApprovalPrompt(p: Record<string, unknown>): string {
   const approvalId = safeString(p.approvalId) ?? "apr-unknown";
   const reason = sanitizeReasonForUser(safeString(p.reason), 600);
   const requestedBy = sanitizeReasonForUser(safeString(p.requestedBy) ?? "Coordinator", 120);
-  const expiresAt = safeString(p.expiresAt);
   const evidence = Array.isArray(p.evidence) ? p.evidence : [];
   const evidenceLines = evidence.map((item) => {
     const ref = getPayloadRecord(item);
@@ -158,7 +157,6 @@ function renderDesignApprovalPrompt(p: Record<string, unknown>): string {
     `- **Người yêu cầu:** ${requestedBy}`,
     evidenceLines.length > 0 ? "- **Bằng chứng đính kèm:**" : "- **Bằng chứng đính kèm:** không có",
     ...evidenceLines,
-    `- **Hết hạn:** ${expiresAt ? formatDeadline(expiresAt) : NO_DEADLINE_TEXT}`,
     "",
     "👉 Trả lời đúng cú pháp:",
     `- \`${approvalId}: approve\` — chấp thuận để quy trình tiếp tục.`,
@@ -215,7 +213,7 @@ export function formatCoordinatorMessageForUser(params: {
   ] as const;
   const isBlockedKind = typeof p.kind === "string" && (BLOCKED_KINDS as readonly string[]).includes(p.kind);
 
-  // An expired user decision or blocked event always reaches the user, whatever the progress fingerprint says.
+  // A closed user decision or blocked event always reaches the user, whatever the progress fingerprint says.
   const expiredApprovalId = userDecisionExpiredApprovalId(params.roleMessage.type, params.roleMessage.payload);
   const substantive = expiredApprovalId !== undefined || isBlockedKind || isSubstantiveCoordinatorUpdate(
     params.roleMessage,
@@ -243,7 +241,7 @@ export function formatCoordinatorMessageForUser(params: {
   let messageIntent: ConversationMessage["intent"] = "progress_update";
   let formattedContent = "";
 
-  // 0. Expired user decision notice from Runtime
+  // 0. Closed user decision notice from Runtime
   if (expiredApprovalId !== undefined) {
     messageIntent = "progress_update";
     formattedContent = renderUserDecisionExpiredNotice(expiredApprovalId);

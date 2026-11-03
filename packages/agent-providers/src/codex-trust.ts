@@ -3,8 +3,31 @@ import { constants } from "node:fs";
 import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parse } from "smol-toml";
+import { isDeepStrictEqual } from "node:util";
 
 export type CodexTrustResult = "already_trusted" | "trusted" | "skipped";
+
+/** @internal Pure comparison helper; the caller must separately verify Bflow worktree ownership. */
+export function stripCodexWorkspaceTrustForComparison(text: string, workspaceRoot: string, worktreePath: string): string | undefined {
+  if (Buffer.byteLength(text, "utf8") > 256 * 1024) return undefined;
+  try {
+    const before = record(parse(text, { unsafeKeyBehaviour: "throw" }));
+    const projects = record(before?.["projects"]), entry = record(projects?.[worktreePath]);
+    if (!before || !projects || !candidatePathKeys(workspaceRoot).some(path => record(projects[path])?.["trust_level"] === "trusted") ||
+      !entry || Object.keys(entry).length !== 1 || entry["trust_level"] !== "trusted") return undefined;
+    const table = `[projects.${tomlBasicString(worktreePath)}]\ntrust_level = "trusted"\n`;
+    const at = text.indexOf(table);
+    if (at < 0 || at > 0 && text[at - 1] !== "\n" || text.indexOf(table, at + table.length) >= 0) return undefined;
+    const rest = text.slice(at + table.length);
+    if (rest !== "" && !/^\n?\[/.test(rest)) return undefined;
+    const candidate = text.slice(0, at > 0 ? at - 1 : 0) + rest;
+    const expected = Object.assign(Object.create(Object.getPrototypeOf(before)), before);
+    expected.projects = Object.assign(Object.create(Object.getPrototypeOf(projects)), projects);
+    delete expected.projects[worktreePath];
+    // A table-shaped fragment inside a multiline string must never disappear from another setting.
+    return isDeepStrictEqual(expected, parse(candidate, { unsafeKeyBehaviour: "throw" })) ? candidate : undefined;
+  } catch { return undefined; }
+}
 
 const LOCK_RETRY_LIMIT = 240;
 const CAS_RETRY_LIMIT = 6;

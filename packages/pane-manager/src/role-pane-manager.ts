@@ -3153,6 +3153,34 @@ export class RolePaneManager {
     }
   }
 
+  /**
+   * Closes the exact pane of a cancelled Developer and proves it is gone. Unlike a release this never inspects the worktree:
+   * uncommitted work stays on disk, and dropping the binding means no later allocation can reuse that pane.
+   */
+  async closeCancelledDeveloper(request: { taskId: string; paneId: string }, options?: OperationOptions): Promise<OperationResult<undefined>> {
+    return this.#serializeAllocation(async () => {
+      try {
+        const loaded = await this.#store.load(this.#config.sessionId, options);
+        if (!loaded.ok) return loaded;
+        const manifest = loaded.value;
+        if (!manifest) return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
+        const binding = manifest.panes.find(pane => pane.paneId === request.paneId);
+        if (binding && (binding.role !== "developer" || binding.metadata?.["taskId"] !== request.taskId))
+          return conflictError(`Pane '${request.paneId}' is no longer the cancelled Developer of task '${request.taskId}'`);
+        const closed = await this.#runHerdr(["pane", "close", request.paneId], options);
+        const probe = await this.#runHerdr(["pane", "get", request.paneId], options);
+        if (mapCommandFailure(probe)?.code !== "not_found") return toCommandError(closed, `Pane '${request.paneId}' is still present after close`);
+        if (binding) {
+          const saved = await this.#store.save({ ...manifest, panes: manifest.panes.filter(pane => pane.bindingId !== binding.bindingId), updatedAt: this.#clock().toISOString() }, options);
+          if (!saved.ok) return saved;
+        }
+        return ok(undefined);
+      } catch (err) {
+        return toProtocolError(err, "Failed to close cancelled developer pane");
+      }
+    });
+  }
+
   async moveRolePane(
     selector: RoleSelector | string,
     destination: PaneMoveDestinationSpec,

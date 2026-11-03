@@ -287,7 +287,7 @@ describe.skipIf(process.platform === "win32")("Conversation user decision displa
     const stopJson = JSON.parse(stopResult.stdout);
     expect(stopJson.decision).toBe("block");
     expect(stopJson.reason).toContain("Dùng schema v2 hay giữ v1?");
-    expect(stopJson.reason).toMatch(/còn \d+ phút \(hết hạn lúc /u);
+    expect(stopJson.reason).not.toMatch(/hết hạn/u);
     expect(userFixture.calls.at(-1)).toMatchObject({ method: "conversation_notices_surfaced", params: { messageIds: [expiringDecision.messageId] } });
   });
 

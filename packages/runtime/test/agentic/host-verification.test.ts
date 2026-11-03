@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { TestStrategyResolver } from "@bflow/test-strategy";
+import { spec as behavioralSpec } from "../../../test-strategy/test/fixtures.js";
+import { VerificationResultSchema, QualityGateResultSchema } from "@bflow/contracts";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,8 +30,9 @@ async function fixture() {
   const outbound:Record<string,any>[]=[{status:"accepted",message:{message_id:"request",type:"verification.requested",payload:context},handle:{target:{paneId:binding.paneId,agentId:binding.agentId,session:binding.session}}}];
   const state: { outbound: typeof outbound; runs: any[] } = {outbound, runs: []};
   const runtime={inspect:async()=>state} as unknown as AgenticWorkflowRuntime;
-  const restore=()=>new HostVerification(()=>runtime,()=>opened.value,new HostReceiptJournal(join(root,"receipts"),repository,"session"));
-  return {repository,head,base,git,binding,context,outbound,state,artifacts:opened.value,restore,host:restore()};
+  const receipts=new HostReceiptJournal(join(root,"receipts"),repository,"session");
+  const restore=()=>new HostVerification(()=>runtime,()=>opened.value,receipts);
+  return {repository,head,base,git,binding,context,outbound,state,receipts,artifacts:opened.value,restore,host:restore()};
 }
 describe("trusted host observations",()=>{
   it("captures the actual pinned diff before accepting an independent verdict and rejects altered receipts",async()=>{
@@ -318,4 +323,57 @@ it("gives independent Reviewer and QA checks the owner-configured review budget,
   expect(reviews(defaultHostChecks({ verification: { reviewTimeoutMs: 1_800_000 } })).map(check => check.timeout.executionTimeoutMs)).toEqual([1_800_000, 1_800_000]);
   expect(reviews(defaultHostChecks({ verification: {} })).map(check => check.timeout.executionTimeoutMs)).toEqual([900_000, 900_000]);
   expect(defaultHostChecks({ verification: { reviewTimeoutMs: 120_000 } }).find(check => check.evaluator === "host-git-diff")?.timeout.executionTimeoutMs).toBe(30_000);
+});
+
+async function candidateEvidenceFixture() {
+  const f=await fixture();
+  const specification={...behavioralSpec(),runId:"run"};
+  const strategy=new TestStrategyResolver().resolve(specification);
+  strategy.criterionMappings=[{criterionId:"ac-1",testNames:["criterion"]}];
+  const bytes=Buffer.from('{"measurement":"test-only"}');
+  const stored=await f.artifacts.put({options:{artifactId:"measured-unit",runId:"run",taskId:"task",kind:"test-result",mediaType:"application/json",idempotencyKey:"measured-unit",expectedIntegrity:{checksum:{algorithm:"sha256",value:createHash("sha256").update(bytes).digest("hex")},sizeBytes:bytes.length}},content:(async function*(){yield bytes;})()});
+  if(!stored.ok)throw new Error(stored.error.message);
+  const result=VerificationResultSchema.parse({schemaVersion:2,verificationId:"measured-green",runId:"run",taskId:"task",attemptId:"original-attempt",cycleNumber:1,status:"passed",independentExecution:true,evaluatedCriteria:[{criterionId:"ac-1",passed:true,command:"node --test",exitCode:0,evidenceArtifactId:stored.value.artifactId,summary:"1/1 tests passed"}],qualityGateResults:[],evidenceArtifacts:[stored.value],findings:[],verifiedBy:"qa",startedAt:new Date().toISOString(),completedAt:new Date().toISOString(),metadata:{conditionalTdd:{phase:"green",decisionId:strategy.tddDecision.decisionId,specId:strategy.specId,sourceRevision:f.head,testRevision:f.base,testNames:["criterion"],observations:[{method:"unit_test",criterionId:"ac-1",evidenceArtifactId:stored.value.artifactId,command:"node --test",exitCode:0,summary:"1/1 tests passed"}]}}});
+  strategy.metadata={...strategy.metadata,tddEvidence:[result]};
+  f.state.runs.push({runId:"run",tasks:[{taskId:"task",spec:{strategy},result:{attemptId:"attempt"},cycle:{history:[]}}]});
+  const context={...f.context,input:{...f.context.input as object,specId:strategy.specId}};
+  f.outbound[0]!.message.payload=context;
+  await f.receipts.recordEvidence(result);
+  return {...f,strategy,result,context};
+}
+describe("task review candidate behavioral evidence",()=>{
+  it("exposes authenticated exact-source evidence while keeping the frozen test revision and original attempt",async()=>{
+    const f=await candidateEvidenceFixture();
+    const view=await f.host.inspectReview(f.binding,{messageId:"request"}) as any;
+    expect(view.candidateBehavioralEvidence.entries).toHaveLength(1);
+    expect(view.candidateBehavioralEvidence.entries[0]).toMatchObject({sourceRevision:f.head,testRevision:f.base,attemptId:"original-attempt",receiptId:f.result.verificationId});
+    expect(view.candidateBehavioralEvidence.entries[0].receiptDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(view.context.input.hostCandidateBehavioralEvidence).toEqual(view.candidateBehavioralEvidence);
+    const completed=await f.restore().completeReview(f.binding,{reviewId:view.reviewId,criteria:[{criterionId:"ac-1",passed:true,summary:"Independently assessed exact receipt and diff"}],summary:"Independent verdict remains required"});
+    expect(await f.host.authenticateGate(completed.result)).toBe(true);
+  });
+  it.each(["foreign-task","stale-revision","self-check","missing-artifact","unauthenticated","wrong-spec"])("does not present %s as trusted candidate measurement",async mode=>{
+    const f=await candidateEvidenceFixture();const result=structuredClone(f.result);
+    if(mode==="foreign-task")result.taskId="foreign";
+    if(mode==="stale-revision")(result.metadata!.conditionalTdd as any).sourceRevision=f.base;
+    if(mode==="self-check")result.independentExecution=false;
+    if(mode==="wrong-spec")(result.metadata!.conditionalTdd as any).specId="foreign-spec";
+    if(mode==="missing-artifact")await f.artifacts.delete(result.evidenceArtifacts[0]!.artifactId);
+    if(!["unauthenticated","self-check"].includes(mode))await f.receipts.recordEvidence({...result,verificationId:"other-green"});
+    else result.verificationId="untrusted-self-report";
+    f.strategy.metadata!.tddEvidence=[mode==="unauthenticated"?result:{...result,verificationId:"other-green"}];
+    const view=await f.host.inspectReview(f.binding,{messageId:"request"}) as any;
+    expect(view.candidateBehavioralEvidence.entries).toEqual([]);
+    expect(view.candidateBehavioralEvidence.status).toBe("missing");
+  });
+});
+
+it.each(["valid","stale-revision","foreign-task","wrong-spec","self-check"])("task review handles %s behavioral gate receipt without treating a Developer check as acceptance",async mode=>{
+  const f=await candidateEvidenceFixture();f.strategy.metadata!.tddEvidence=[];
+  const measured={schemaVersion:2,checkId:"host-behavioral-auto-unit",runId:"run",taskId:mode==="foreign-task"?"foreign":"task",attemptId:"previous-attempt",sourceRevision:mode==="stale-revision"?f.base:f.head,specFingerprint:mode==="wrong-spec"?"b".repeat(64):"a".repeat(64),scope:"task",independentExecution:true,isolated:true,executorId:mode==="self-check"?"developer":"bflow-host-behavioral-check",method:"unit_test",command:"node --test",exitCode:0,testNames:["criterion"],criteria:[{criterionId:"ac-1",passed:true,summary:"1/1 tests passed"}]};
+  const gate=QualityGateResultSchema.parse({gateId:"host-behavioral-auto-unit",runId:"run",taskId:measured.taskId,evaluationId:"measured-gate",status:"passed",findings:[],producedArtifacts:[],evaluatedAt:new Date().toISOString(),metadata:{verification:measured}});
+  await f.receipts.recordGate(gate);f.state.runs[0].tasks[0].cycle.history=[{qualityGateResults:[gate]}];
+  const view=await f.host.inspectReview(f.binding,{messageId:"request"}) as any;
+  expect(view.candidateBehavioralEvidence.entries).toHaveLength(mode==="valid"?1:0);
+  if(mode==="valid")expect(view.candidateBehavioralEvidence.entries[0]).toMatchObject({source:"host_behavioral_gate",receiptId:"measured-gate",attemptId:"previous-attempt",sourceRevision:f.head});
 });

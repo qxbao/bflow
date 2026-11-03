@@ -117,7 +117,7 @@ describe("automatic test runner proposals (no owner configuration)", () => {
     const rejection = rejectionOf(() => verificationWith(runners).assertSupported(specification, strategy)).rejection;
     expect(rejection).toMatchObject({ code: "runner_setup_required" });
     expect(reportsToUser(rejection)).toBe(false);
-    expect(rejection.options).toEqual(["Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"]);
+    expect(rejection.options).toEqual(["Coordinator tự thiết lập runner bằng repository_setup (npm_init, npm_install_dev, git_add, git_commit) rồi đề xuất lại workflow; không nhờ người dùng chạy lệnh", "Hủy run"]);
     expect(JSON.stringify(rejection)).not.toContain("verification.json");
   });
 

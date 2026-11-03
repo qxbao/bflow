@@ -130,7 +130,7 @@ const sentTo = (transport: FakeAgentTransport, role: string, type?: string) =>
 
 async function request(instance: AgenticWorkflowRuntime, developer: PaneBinding, extra: Record<string, unknown> = {}): Promise<string> {
   const receipt = await instance.requestUserDecision(developer, "developer", parseUserDecisionToolInput({ runId: RUN, taskId: TASK,
-    question: "Which storage backend should we use?", options: ["SQLite", "Postgres"], expiresInMinutes: 30, ...extra }));
+    question: "Which storage backend should we use?", options: ["SQLite", "Postgres"], ...extra }));
   return (receipt as unknown as { approvalId: string }).approvalId;
 }
 
@@ -269,39 +269,24 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
     expect(await userDecisions(runtime, approvalId)).toMatchObject({ status: "answered" });
   });
 
-  it("expires a pending decision on tick, resumes the asker once and rejects a late reply without state change", async () => {
+  it("keeps a pending decision open indefinitely and still accepts a late reply", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const start = Date.now(); vi.setSystemTime(start);
     const f = await fixture(); const runtime = f.runtime();
-    const approvalId = await request(runtime, f.developer, { expiresInMinutes: 1 });
+    const approvalId = await request(runtime, f.developer);
     await runtime.flushOutbound();
     const host = await f.chat(runtime);
     await host.receiveHerdr(await promptOf(runtime));
-    vi.setSystemTime(start + 2 * 60_000);
-    await runtime.tick();
-    expect(await userDecisions(runtime, approvalId)).toMatchObject({ status: "expired" });
-    await runtime.flushOutbound(); await runtime.tick(); await runtime.flushOutbound();
-    const delivered = sentTo(f.transport, "developer", "task.status");
-    expect(delivered).toHaveLength(1);
-    expect(JSON.parse(delivered[0]!.instruction).payload).toMatchObject({ kind: "user_decision_answer", outcome: "expired" });
-
-    // A late reply is refused by Conversation (expired) and never queued as an approval.decision.
-    const late = await reply(host, "1", "late-reply");
-    // The refusal is a visible Conversation reply, never a silent error.
-    expect(late.ok).toBe(true);
-    expect(JSON.stringify(late.value)).toMatch(/chưa được ghi nhận/);
-    expect((await outbound(runtime)).some(entry => entry.message.type === "approval.decision")).toBe(false);
-    // Even a directly delivered late decision is refused by the Runtime, which keeps the expired state.
-    const lateDecision = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId, runId: RUN, sessionId: SESSION,
-      target: { type: "task", taskId: TASK }, revision: 1, generation: 0, decision: "approved", decidedBy: "human-1",
-      decidedAt: new Date().toISOString(), feedbackArtifacts: [], idempotencyKey: "late-direct", metadata: { selectedOption: "SQLite" } });
-    await f.receipts.recordHuman(lateDecision, f.provenance("late-direct"));
-    await expect(runtime.receiveHerdr(RoleMessageSchema.parse({ schema_version: 2, message_id: "late-direct", correlation_id: "correlation",
-      run_id: RUN, sender: { role: "conversation" }, recipient: { role: "coordinator" }, type: "approval.decision", payload: lateDecision,
-      artifact_references: [], occurred_at: lateDecision.decidedAt, idempotency_key: "late-direct" }))).rejects.toThrow("not pending");
-    expect(await userDecisions(runtime, approvalId)).toMatchObject({ status: "expired" });
+    vi.setSystemTime(start + 30 * 24 * 60 * 60_000);
     await runtime.tick(); await runtime.flushOutbound();
-    expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(1);
+    expect(await userDecisions(runtime, approvalId)).toMatchObject({ status: "pending" });
+    expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(0);
+    expect(inboxTo(f.inbox, "conversation.progress")
+      .some(message => (message.payload as { kind?: string }).kind === "user_decision_expired")).toBe(false);
+
+    const late = await reply(host, "1", "late-reply");
+    expect(late.ok).toBe(true);
+    expect(late.value?.approvalDecision).toBeDefined();
   });
 
   it("refuses a Conversation reply for a decision the Runtime already answered out of band", async () => {
@@ -404,29 +389,6 @@ describe.skipIf(process.platform !== "linux")("P30 user decisions end to end", (
       artifact_references: [], occurred_at: rejected.decidedAt, idempotency_key: "design-reject-msg" }));
     expect(await runtime.inspect(RUN)).toMatchObject({ status: "failed", error: "Not this design" });
     expect(sentTo(f.transport, "developer", "task.status")).toHaveLength(0);
-  });
-
-  it("tells Conversation about an expired decision, which then drops the prompt and says so", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    const start = Date.now(); vi.setSystemTime(start);
-    const f = await fixture(); const runtime = f.runtime();
-    const approvalId = await request(runtime, f.developer, { expiresInMinutes: 1 });
-    await runtime.flushOutbound();
-    const host = await f.chat(runtime);
-    await host.receiveHerdr(await promptOf(runtime));
-    vi.setSystemTime(start + 2 * 60_000);
-    await runtime.tick(); await runtime.flushOutbound();
-
-    const notice = inboxTo(f.inbox, "conversation.progress")
-      .find(message => (message.payload as { kind?: string }).kind === "user_decision_expired");
-    expect(notice).toMatchObject({ type: "conversation.progress", recipient: { role: "conversation" },
-      payload: { kind: "user_decision_expired", approvalId } });
-
-    const result = await host.receiveHerdr(notice) as { value: { userNotification?: { content: string } } };
-    expect(result.value.userNotification?.content).toContain("HẾT HẠN");
-    const late = await reply(host, "1", "reply-after-notice");
-    expect(late.value?.approvalDecision).toBeUndefined();
-    expect((await outbound(runtime)).some(entry => entry.message.type === "approval.decision")).toBe(false);
   });
 
   it("closes the decisions of a completed or cancelled run without resuming askers and tells Conversation", async () => {
@@ -604,10 +566,10 @@ const payloadKind = (message: RoleMessage) => (message.payload as { kind?: strin
 const idle = [{ role: "coordinator", status: "idle" }, { role: "developer", status: "done" }];
 
 describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog end to end", () => {
-  it("shows a Coordinator decision with numbered options and a deadline, and a numbered answer wakes the Coordinator", async () => {
+  it("shows a Coordinator decision with numbered options and no deadline, and a numbered answer wakes the Coordinator", async () => {
     const f = await fixture(); const runtime = f.runtime();
     const receipt = await runtime.requestUserDecision(f.coordinator, "coordinator", parseUserDecisionToolInput({ runId: RUN, taskId: TASK,
-      question: "Which storage backend should we use?", options: ["SQLite", "Postgres"], expiresInMinutes: 30 }));
+      question: "Which storage backend should we use?", options: ["SQLite", "Postgres"] }));
     const approvalId = (receipt as unknown as { approvalId: string }).approvalId;
     await runtime.flushOutbound();
     const host = await f.chat(runtime);
@@ -619,7 +581,7 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
     expect(rendered.display).toContain("🔔 Cần bạn quyết định · #1");
     expect(rendered.display).toContain("Trưởng nhóm kỹ thuật hỏi: Which storage backend should we use?");
     expect(rendered.display).toContain("  1. SQLite\n  2. Postgres");
-    expect(rendered.display).toMatch(/hết hạn lúc \d{2}:\d{2}/);
+    expect(rendered.display).not.toMatch(/hết hạn/);
     expect(rendered.display).toContain('Bạn trả lời: "#1: 1"');
 
     const response = await reply(host, `${approvalId}: 1`);
@@ -736,25 +698,13 @@ describe.skipIf(process.platform !== "linux")("Conversation notices and watchdog
       rejection = (error as WorkflowProposalRejected).rejection; message = (error as Error).message;
     }
     expect(rejection).toMatchObject({ code: "no_test_runner_detected" });
-    expect(rejection!.options).toEqual(["Coordinator tự thiết lập runner phù hợp qua một task có review rồi đề xuất lại workflow", "Hủy run"]);
+    expect(rejection!.options[0]).toContain("repository_setup");
     expect(JSON.parse(message)).toEqual(rejection);
 
-    await runtime.reportWorkflowRejected(RUN, rejection!);
+    // Coordinator's job: the structured error is its instruction, so the user sees no blocker.
     await runtime.reportWorkflowRejected(RUN, rejection!);
     await runtime.flushOutbound();
-    const rejected = f.inbox.filter(item => payloadKind(item) === "workflow_rejected");
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.payload).toMatchObject({ code: "no_test_runner_detected", reason: rejection!.reason, runId: RUN });
-    expect((rejected[0]!.payload as { options: string[] }).options).toEqual(rejection!.options);
-
-    await persistNotices(f);
-    const notice = (await f.receipts.unsurfacedConversationNotices()).find(item => renderConversationNotice(item).display.includes("thiết lập runner"))!;
-    const rendered = renderConversationNotice(notice);
-    expect(rendered.kind).toBe("blocked");
-    expect(rendered.display).toContain("- Trưởng nhóm kỹ thuật tự thiết lập runner");
-    expect(rendered.display).toContain("- Hủy run");
-    expect(rendered.display).not.toContain("<số lựa chọn>");
-    expect(rendered.display).not.toContain("verification.json");
+    expect(f.inbox.filter(item => payloadKind(item) === "workflow_rejected")).toHaveLength(0);
 
     expect(specification).toEqual(before);
     expect(specification.acceptanceCriteria[0]!.verificationMethod).toBe("unit_test");
