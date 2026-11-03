@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { createOfficeRenderer } from '../src/features/office/scene/renderer';
 import type { OfficeModel } from '../src/features/office/model/types';
