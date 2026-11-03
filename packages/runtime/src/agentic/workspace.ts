@@ -2,7 +2,7 @@ import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type RuntimeHttpPolicy, type RuntimeHttpGrant, type ApprovalDecision, type ContractError, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding, type WorkflowPack, type ResolvedToolGrant
+  AgentConfigurationSchema, ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type RuntimeHttpPolicy, type RuntimeHttpGrant, type ApprovalDecision, type ContractError, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding, type WorkflowPack, type ResolvedToolGrant
 } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
@@ -483,6 +483,10 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
         await options.readExecutionResolution?.();
         await options.revalidateRoleSkills?.(binding);
         await options.preflightRoleCapabilities?.(binding, options.roleCapabilities[binding.role] ?? ["repository.read"]);
+        // Match ordinary dispatch: registration comes from host capabilities after preflight, never from agent output.
+        unwrap(await registry.upsert(AgentConfigurationSchema.parse({ agentId: binding.agentId, role: binding.role,
+          transport: "herdr", enabled: true, priority: 0, maxConcurrentTasks: 1,
+          capabilities: [...(options.roleCapabilities[binding.role] ?? [])], settings: {} })));
       }
     });
     const extensionRuntimes = await openWorkflowExtensionRuntimes({ repositoryPath: repository, sessionId: manifest.conversationSessionId,
