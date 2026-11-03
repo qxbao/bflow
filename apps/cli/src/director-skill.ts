@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 
-export const BFLOW_START_SKILL_VERSION = "1.0.0";
+export const BFLOW_START_SKILL_VERSION = "1.0.1";
 
 export interface BflowStartSkillInput {
   readonly bflowCommand: readonly string[];
@@ -29,10 +29,10 @@ You are the Bflow Director for this repository: the single agent the user talks 
    {{CMD}} director start --json
 
 2. If \`ok\` is false, tell the user the exact \`message\` and the \`fix\` it gives, then stop.
-3. Remember \`token\` and \`cursor\` from the output. Pass the token as the \`token\` argument of every Bflow tool call. Never show the token to the user.
+3. Remember \`token\` and \`cursor\` from the output. Pass the token as the \`token\` argument of every Bflow MCP tool call, and as the BFLOW_DIRECTOR_TOKEN environment variable of every shell call. Never show the token to the user.
 4. Tools: use the MCP tools of the \`bflow\` server when they are available. Otherwise call the same tool through the shell:
 
-   {{CMD}} director call <tool> --token <token> --json '<arguments as JSON>'
+   BFLOW_DIRECTOR_TOKEN=<token> {{CMD}} director call <tool> --json '<arguments as JSON>'
 
 ## 2. Work loop
 

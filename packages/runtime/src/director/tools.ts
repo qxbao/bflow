@@ -16,8 +16,8 @@ export interface DirectorCoordinatorPort {
   invoke(name: string, input: unknown): Promise<JsonValue>;
 }
 export interface DirectorRuntimeEventsPort {
-  /** Returns events after `cursor` ("" = from now). Waits at most timeoutMs when none are available; resolves early on abort. */
-  wait(cursor: string, timeoutMs: number, signal: AbortSignal): Promise<{ cursor: string; events: DirectorRuntimeEvent[] }>;
+  /** Returns at most `limit` events after `cursor` ("" = from now). Waits at most timeoutMs when none are available; resolves early on abort. */
+  wait(cursor: string, timeoutMs: number, signal: AbortSignal, limit: number): Promise<{ cursor: string; events: DirectorRuntimeEvent[] }>;
 }
 export interface DirectorToolsOptions {
   readonly store: DirectorStore;
@@ -55,6 +55,7 @@ const SetStatusArgs = z.object({ issueId: z.string().min(1), status: z.enum(["re
 
 const NOTE_DEDUPE_MS = 10_000;
 const HEARTBEAT_SLICE_MS = 60_000;
+const RUNTIME_EVENTS_LIMIT = 200;
 const CURSOR = /^m(\d+)\.i(\d+)\.r([A-Za-z0-9_-]*)$/;
 
 const json = (value: unknown): JsonValue => JsonValueSchema.parse(value);
@@ -158,6 +159,8 @@ export class DirectorTools {
           issues = await this.store.listIssues({ status: ["open", "retrying"] });
           revision = version.issuesRevision;
         }
+        // A full page without a user message means more transcript is already waiting: read on without blocking.
+        if (fresh.length >= DIRECTOR_LIMITS.transcriptPage && messages.length === 0 && issues.length === 0 && runtimeEvents.length === 0) continue;
         const remaining = deadline - Date.now();
         if (messages.length > 0 || issues.length > 0 || runtimeEvents.length > 0 || remaining <= 0) {
           const timedOut = messages.length === 0 && issues.length === 0 && runtimeEvents.length === 0;
@@ -174,7 +177,7 @@ export class DirectorTools {
         const controller = new AbortController();
         const since = { messageSeq: version.messageSeq, issuesRevision: version.issuesRevision };
         const storeWake = this.store.waitForChange(since, slice, controller.signal);
-        const runtimeWake = this.runtimeEvents?.wait(runtimeCursor, slice, controller.signal);
+        const runtimeWake = this.runtimeEvents?.wait(runtimeCursor, slice, controller.signal, RUNTIME_EVENTS_LIMIT);
         try {
           if (runtimeWake) {
             await Promise.race([
@@ -189,6 +192,9 @@ export class DirectorTools {
         }
         const [, runtimeResult] = await Promise.all([storeWake, runtimeWake]);
         if (runtimeResult) {
+          if (runtimeResult.events.length > RUNTIME_EVENTS_LIMIT) {
+            throw new Error(`Runtime events port returned more than ${RUNTIME_EVENTS_LIMIT} events`);
+          }
           runtimeCursor = runtimeResult.cursor;
           runtimeEvents.push(...runtimeResult.events);
         }

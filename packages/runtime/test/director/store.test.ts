@@ -149,4 +149,16 @@ describe("DirectorStore", () => {
     expect(await aborted).toBe(false);
     expect(await store.waitForChange(since, 50)).toBe(true);
   });
+
+  it("wakes waiters on revoke", async () => {
+    const { store } = await fresh();
+    await reg(store);
+    const since = await store.version();
+    const started = Date.now();
+    const waiting = store.waitForChange(since, 5000);
+    await new Promise(r => setTimeout(r, 20));
+    await store.revoke();
+    await waiting;
+    expect(Date.now() - started).toBeLessThan(200);
+  });
 });

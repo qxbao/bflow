@@ -31,9 +31,11 @@ describe("bflow-start director skill", () => {
   });
 
   it("embeds the skill version", () => {
-    expect(BFLOW_START_SKILL_VERSION).toBe("1.0.0");
+    expect(BFLOW_START_SKILL_VERSION).toBe("1.0.1");
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("1.0.0");
+    expect(text).toContain("1.0.1");
+    expect(text).toContain("BFLOW_DIRECTOR_TOKEN=<token> '/usr/bin/node' director call <tool> --json");
+    expect(text).not.toContain("--token");
   });
 
   it("quotes each argv element with POSIX single quoting joined by spaces", () => {

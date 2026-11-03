@@ -52,6 +52,14 @@ function elapsed(startedAt: string, now: Date): string {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}p`;
 }
 
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
+function sanitize(text: string): string {
+  const indent = /^ */.exec(text)![0];
+  return indent + text.slice(indent.length).replace(/\s+/g, " ").replace(CONTROL_CHARS, "");
+}
+
 function truncate(text: string, width: number): string {
   const points = Array.from(text);
   return points.length > width ? `${points.slice(0, width - 1).join("")}…` : text;
@@ -121,5 +129,5 @@ export function renderDirectorProgress(snapshot: DirectorProgressSnapshot, optio
       }
     }
   }
-  return kept.map(line => truncate(line.text, width));
+  return kept.map(line => truncate(sanitize(line.text), width));
 }

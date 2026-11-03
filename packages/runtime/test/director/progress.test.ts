@@ -99,6 +99,14 @@ describe("renderDirectorProgress", () => {
     expect(out[0]!.endsWith("…")).toBe(true);
   });
 
+  it("sanitises titles: whitespace runs collapse and control characters are removed", () => {
+    const bad = { runId: "run-1", title: "a\nb\x1b[31mc", sdlcStatus: "implementing", tasks: [] } as DirectorProgressSnapshot["runs"][number];
+    const out = renderDirectorProgress(snap({ runs: [bad] }), { width: 80, height: 20, now });
+    expect(out).toHaveLength(3);
+    expect(out[2]).toContain("▸ a b[31mc");
+    expect(out.join("")).not.toMatch(/[\u0000-\u0009\u000b-\u001f]/);
+  });
+
   it("throws on an invalid snapshot", () => {
     expect(() => renderDirectorProgress({ ...snap(), pendingApprovals: -1 }, { width: 80, height: 10, now })).toThrow();
   });

@@ -130,6 +130,7 @@ export class DirectorStore {
           if (!isEnoent(error)) throw error;
         }
       }
+      this.events.emit("revoked");
     });
   }
 
@@ -275,10 +276,12 @@ export class DirectorStore {
       const onAbort = (): void => resolve(false);
       const timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
       this.events.on("change", onChange);
+      this.events.on("revoked", onAbort);
       signal?.addEventListener("abort", onAbort, { once: true });
       cleanup = () => {
         clearTimeout(timer);
         this.events.off("change", onChange);
+        this.events.off("revoked", onAbort);
         signal?.removeEventListener("abort", onAbort);
       };
     });

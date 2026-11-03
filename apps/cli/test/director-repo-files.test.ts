@@ -144,4 +144,46 @@ describe("director repo files", () => {
       await rm(outside, { recursive: true, force: true });
     }
   });
+
+  it("treats a dangling START marker as malformed in apply, check and remove", async () => {
+    const dangling = "node_modules\n# >>> bflow director >>>\nmy-secret.env\ndist/\n";
+    await writeFile(join(root, ".gitignore"), dangling);
+    await expect(applyDirectorRepoFiles(input({ providers: ["agy"] }))).rejects.toThrow(
+      "Cannot merge .gitignore: malformed bflow director block",
+    );
+    expect(await read(".gitignore")).toBe(dangling);
+    expect(await exists(".bflow/director-files.json")).toBe(false);
+    expect((await checkDirectorRepoFiles(input({ providers: ["agy"] }))).find(c => c.path === ".gitignore")?.status).toBe("modified");
+
+    await rm(join(root, ".gitignore"));
+    await applyDirectorRepoFiles(input({ providers: ["agy"] }));
+    const broken = (await read(".gitignore")).replace("# <<< bflow director <<<\n", "");
+    await writeFile(join(root, ".gitignore"), broken);
+    const result = await removeDirectorRepoFiles(root);
+    expect(result.kept).toContain(".gitignore");
+    expect(await read(".gitignore")).toBe(broken);
+  });
+
+  it("removes units of dropped providers on re-apply and keeps hand-modified ones", async () => {
+    await applyDirectorRepoFiles(input());
+    const second = await applyDirectorRepoFiles(input({ providers: ["claude"] }));
+    expect(second.written).toEqual(expect.arrayContaining([".agents/skills/bflow-start/SKILL.md", ".codex/config.toml", ".codex/hooks.json"]));
+    expect(await exists(".agents/skills/bflow-start/SKILL.md")).toBe(false);
+    expect(await exists(".codex/config.toml")).toBe(false);
+    expect(await exists(".codex/hooks.json")).toBe(false);
+    const receipt = await readJson(".bflow/director-files.json");
+    expect(receipt.providers).toEqual(["claude"]);
+    expect(receipt.units.map((u: { path: string }) => u.path).every((p: string) => !p.startsWith(".codex") && !p.startsWith(".agents"))).toBe(true);
+    const ignore = await read(".gitignore");
+    expect(ignore).not.toContain(".codex");
+    expect(ignore).toContain(".mcp.json");
+
+    await rm(root, { recursive: true, force: true });
+    await mkdir(root, { recursive: true });
+    await applyDirectorRepoFiles(input());
+    await writeFile(join(root, ".codex/hooks.json"), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: "mine director hook codex" }] }] } }));
+    await applyDirectorRepoFiles(input({ providers: ["claude"] }));
+    expect(await exists(".codex/hooks.json")).toBe(true);
+    expect(await exists(".codex/config.toml")).toBe(false);
+  });
 });

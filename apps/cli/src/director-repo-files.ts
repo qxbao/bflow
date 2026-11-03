@@ -74,11 +74,23 @@ interface BlockMatch {
   readonly inner: string;
 }
 
+class MalformedBlockError extends Error {}
+
+function countOccurrences(text: string, needle: string): number {
+  let count = 0;
+  for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length)) count += 1;
+  return count;
+}
+
+/** Returns the single valid block, null when there is no marker at all; throws MalformedBlockError otherwise. */
 function findBlock(text: string): BlockMatch | null {
+  const starts = countOccurrences(text, START);
+  const ends = countOccurrences(text, END);
+  if (starts === 0 && ends === 0) return null;
+  if (starts !== 1 || ends !== 1) throw new MalformedBlockError();
   const start = text.indexOf(START);
-  if (start < 0) return null;
-  const endMarker = text.indexOf(END, start + START.length);
-  if (endMarker < 0) return null;
+  const endMarker = text.indexOf(END);
+  if (endMarker < start + START.length) throw new MalformedBlockError();
   let innerStart = start + START.length;
   if (text[innerStart] === "\n") innerStart += 1;
   let inner = text.slice(innerStart, endMarker);
@@ -239,18 +251,28 @@ function fileSpec(path: string, content: string): FileSpec {
   };
 }
 
+function guardBlock<T>(path: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch (error) {
+    if (error instanceof MalformedBlockError) throw new Error(`Cannot merge ${path}: malformed bflow director block`);
+    throw error;
+  }
+}
+
 function blockSpec(path: string, kind: "toml-block" | "gitignore-block", inner: string): FileSpec {
   return {
     path,
     expected: [{ kind, sha256: sha256(inner) }],
-    current: text => {
-      const found = text === null ? null : findBlock(text);
-      return [found ? sha256(found.inner) : undefined];
-    },
-    merge: text => upsertBlock(text, inner),
+    current: text =>
+      guardBlock(path, () => {
+        const found = text === null ? null : findBlock(text);
+        return [found ? sha256(found.inner) : undefined];
+      }),
+    merge: text => guardBlock(path, () => upsertBlock(text, inner)),
     remove: (text, flags) => {
       if (!flags[0]) return text;
-      const rest = removeBlock(text);
+      const rest = guardBlock(path, () => removeBlock(text));
       return rest.trim() === "" ? null : rest;
     },
   };
@@ -386,11 +408,55 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
     null,
     2,
   )}\n`;
-  const receiptChanged = (await readIfExists(root, RECEIPT_PATH)) !== receipt;
+  const previousText = await readIfExists(root, RECEIPT_PATH);
+  const unitId = (u: ReceiptUnit): string => `${u.path}\0${u.kind}\0${u.key ?? ""}`;
+  const newIds = new Set(units.map(unitId));
+  const specPaths = new Set(specs.map(spec => spec.path));
+  const orphans: { path: string; text: string | null }[] = [];
+  const finalReceipt = receipt;
+  if (previousText !== null) {
+    let previous: ReceiptUnit[] = [];
+    try {
+      previous = parseReceipt(previousText);
+    } catch {
+      previous = [];
+    }
+    const dropped = previous.filter(u => !newIds.has(unitId(u)) && !specPaths.has(u.path));
+    const allSpecs = new Map(buildSpecs(ALL_PROVIDERS, ["/bflow"]).map(spec => [spec.path, spec]));
+    for (const path of [...new Set(dropped.map(u => u.path))]) {
+      const spec = allSpecs.get(path);
+      const pathUnits = dropped.filter(u => u.path === path);
+      if (!spec) continue;
+      await assertNoSymlink(root, path);
+      const text = await readIfExists(root, path);
+      if (text === null) continue;
+      let current: (string | undefined)[];
+      try {
+        current = spec.current(text);
+      } catch {
+        continue;
+      }
+      const flags = spec.expected.map((expected, i) => {
+        const unit = pathUnits.find(u => u.kind === expected.kind && u.key === expected.key);
+        return unit !== undefined && current[i] !== undefined && current[i] === unit.sha256;
+      });
+      if (flags.some(Boolean)) orphans.push({ path, text: spec.remove(text, flags) });
+    }
+  }
+  const receiptChanged = (await readIfExists(root, RECEIPT_PATH)) !== finalReceipt;
 
   for (const item of pending) await writeText(root, item.path, item.text);
-  if (receiptChanged) await writeText(root, RECEIPT_PATH, receipt, 0o644);
-  return { written: pending.map(item => item.path).sort() };
+  for (const item of orphans) {
+    if (item.text === null) await unlink(join(root, item.path));
+    else await writeText(root, item.path, item.text);
+  }
+  if (orphans.length > 0) {
+    for (const dir of [".claude/skills/bflow-start", ".agents/skills/bflow-start", ".codex", ".claude"]) {
+      await rmdir(join(root, dir)).catch(() => undefined);
+    }
+  }
+  if (receiptChanged) await writeText(root, RECEIPT_PATH, finalReceipt, 0o644);
+  return { written: [...pending.map(item => item.path), ...orphans.map(item => item.path)].sort() };
 }
 
 export async function checkDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<DirectorRepoFileCheck[]> {

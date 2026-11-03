@@ -117,6 +117,28 @@ describe("DirectorTools", () => {
     expect(seen).toEqual(["", "rt-1"]);
   });
 
+  it("reads full transcript pages without blocking until a user message is found", async () => {
+    const h = await harness({ maxWaitMs: 5000 });
+    for (let i = 0; i < 250; i += 1) await h.store.appendMessage({ author: "director", channel: "cli", text: `d${i}` });
+    await user(h, "late");
+    const started = Date.now();
+    const result = await wait(h, { timeoutMs: 5000 });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(result.messages.map(m => m.text)).toEqual(["late"]);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it("fails when the runtime events port exceeds the limit", async () => {
+    const event: DirectorRuntimeEvent = { type: "run-updated", runId: "run-1", summary: "progress" };
+    let received = 0;
+    const port: DirectorRuntimeEventsPort = {
+      wait: async (_c, _t, _s, limit) => { received = limit; return { cursor: "x", events: Array.from({ length: limit + 1 }, () => event) }; }
+    };
+    const h = await harness({ runtimeEvents: port });
+    await expect(wait(h)).rejects.toThrow("Runtime events port returned more than 200 events");
+    expect(received).toBe(200);
+  });
+
   it("rejects an invalid cursor and clamps timeoutMs to maxWaitMs", async () => {
     const h = await harness({ maxWaitMs: 1000 });
     await expect(wait(h, { cursor: "garbage" })).rejects.toThrow("Invalid director cursor");
