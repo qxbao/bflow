@@ -541,7 +541,7 @@ export interface CliContext {
 export interface CliExecutionResult {
   readonly exitCode: CliExitCode;
   readonly ok: boolean;
-  readonly command?: CliCommandName | "iso" | "web" | "director" | undefined;
+  readonly command?: CliCommandName | "iso" | "web" | "director" | "progress" | "queue" | undefined;
   readonly stdout: string;
   readonly stderr: string;
   readonly data?: CliCommandData | undefined;

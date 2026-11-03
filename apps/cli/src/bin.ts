@@ -80,6 +80,27 @@ export async function main(
     return { ok: exitCode === 0, command: "director", exitCode, stdout: "", stderr: "" };
   }
 
+  if (args[0] === "progress" || args[0] === "queue") {
+    const m = await import("./director-progress.js");
+    const cmd = args[0];
+    const wantsHelp = args[1] === "--help" || args[1] === "-h" || (cmd === "queue" && args.length === 1);
+    if (wantsHelp) {
+      const text = cmd === "progress" ? m.PROGRESS_HELP : m.QUEUE_HELP;
+      realIo.stdout(text);
+      return { ok: true, command: cmd, exitCode: 0, stdout: text, stderr: "" };
+    }
+    const parsed = m.parseProgressCliArgs(cmd, args.slice(1));
+    if (!parsed.ok) {
+      realIo.stderr(parsed.message);
+      process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;
+      return { ok: false, command: cmd, exitCode: CLI_EXIT_CODES.USAGE_ERROR, stdout: "", stderr: parsed.message };
+    }
+    const deps = await m.defaultDirectorProgressDeps(context?.cwd ?? process.cwd());
+    const exitCode = parsed.value.cmd === "progress" ? await m.runProgressCommand(parsed.value, deps) : await m.runQueueCommand(parsed.value, deps);
+    process.exitCode = exitCode;
+    return { ok: exitCode === 0, command: cmd, exitCode, stdout: "", stderr: "" };
+  }
+
   // Web owns its foreground HTTP lifetime. Never route it through legacy RuntimeService.
   if (args[0] === "web" || (args[0] === "help" && args[1] === "web")) {
     const { parseWebArgs, runWebCommand, WEB_HELP } = await import("./web-command.js");

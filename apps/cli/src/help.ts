@@ -13,6 +13,8 @@ Lệnh / Commands:
   director call   Director: gọi một tool qua BFLOW_DIRECTOR_TOKEN (bflow director call <tool> [argsJson])
   director mcp    Director: máy chủ MCP qua stdio cho CLI của nhà cung cấp
   director hook   Director: hook ghi tin nhắn người dùng (bflow director hook claude|codex)
+  progress        Director: xem tiến độ (bflow progress [--follow] [--json])
+  queue           Director: hàng đợi lỗi (bflow queue list|show|retry|dismiss)
   web             Mở web localhost: bflow web [--port N] [--no-open]
   up              Khởi động/đồng bộ môi trường làm việc của kho mã
   down            Tạo checkpoint và dừng môi trường làm việc của kho mã
