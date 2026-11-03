@@ -11,6 +11,7 @@ import { isHumanApprover } from "@bflow/runtime";
 import type {
   AgentCheckCommandArgs,
   ApproveCommandArgs,
+  ApproveCardCommandArgs,
   CancelCommandArgs,
   ConfigMigrateCommandArgs,
   CliCommandName,
@@ -140,6 +141,53 @@ function makeValidationError(
 interface ParsedOptions {
   readonly flags: Map<string, string | true>;
   readonly positional: readonly string[];
+}
+
+/** Value-taking options of both `approve` forms; their values are never the card argument. */
+const APPROVE_VALUE_FLAGS: ReadonlySet<string> = new Set(["--run", "--run-id", "--by", "--decided-by", "--actor", "--decision", "--reason",
+  "--approval-id", "--revision", "--generation", "--idempotency-key", "--changes", "--choice"]);
+/** `#3`, `3` or `n3` (an unquoted `#` starts a shell comment) name a card; anything else keeps `approve <task-id>`. */
+const APPROVE_CARD_PATTERN = /^(?:#|[nN])?([1-9]\d*)$/;
+export const APPROVE_CARD_CONFLICT_MESSAGE = "Chỉ chọn một: --reject, --changes hoặc --choice";
+
+function approveCardCandidate(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--") return APPROVE_CARD_PATTERN.test(args[i + 1] ?? "") ? args[i + 1] : undefined;
+    if (isFlag(arg)) { if (!arg.includes("=") && APPROVE_VALUE_FLAGS.has(arg)) i++; continue; }
+    return APPROVE_CARD_PATTERN.test(arg) ? arg : undefined;
+  }
+  return undefined;
+}
+
+function parseApproveCard(args: readonly string[], json: boolean): ParseCliResult {
+  const booleanFlags = new Set(["--json", "-j", "--help", "-h", "--reject"]);
+  const allowedFlags = new Set(["--reject", "--changes", "--choice", "--json", "-j", "--help", "-h"]);
+  const optRes = extractOptionsAndPositional(args, booleanFlags, allowedFlags, "approve", json);
+  if (!optRes.ok) return optRes.result;
+  const { flags, positional } = optRes.value;
+  if (positional.length > 1)
+    return makeValidationError(`Unexpected positional argument '${positional[1]}' for 'bflow approve'.`, json, "approve");
+  const card = `#${APPROVE_CARD_PATTERN.exec(positional[0] ?? "")![1]}`;
+  const chosen = ["--reject", "--changes", "--choice"].filter(flag => flags.has(flag));
+  if (chosen.length > 1) return makeValidationError(APPROVE_CARD_CONFLICT_MESSAGE, json, "approve");
+  const rawReason = flags.get("--changes") as string | undefined;
+  if (rawReason !== undefined && (rawReason.trim().length === 0 || rawReason.trim().length > 2000))
+    return makeValidationError("Lý do --changes phải có từ 1 đến 2000 ký tự.", json, "approve");
+  const rawChoice = flags.get("--choice") as string | undefined;
+  let choice: number | undefined;
+  if (rawChoice !== undefined) {
+    if (!/^[1-6]$/.test(rawChoice.trim())) return makeValidationError("--choice phải là số phương án từ 1 đến 6.", json, "approve");
+    choice = Number(rawChoice.trim());
+  }
+  const value: ApproveCardCommandArgs = {
+    command: "approve", card,
+    outcome: flags.has("--reject") ? "rejected" : rawReason !== undefined ? "changes_requested" : choice !== undefined ? "answer" : "approved",
+    ...(rawReason !== undefined ? { reason: rawReason.trim() } : {}),
+    ...(choice !== undefined ? { choice } : {}),
+    json, help: false
+  };
+  return { ok: true, value };
 }
 
 function extractOptionsAndPositional(
@@ -2164,6 +2212,8 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
     }
 
     case "approve": {
+      const card = approveCardCandidate(commandArgs);
+      if (card !== undefined) return parseApproveCard(commandArgs, json);
       const booleanFlags = new Set(["--json", "-j", "--help", "-h"]);
       const allowedFlags = new Set([
         "--run",

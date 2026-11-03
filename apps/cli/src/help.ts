@@ -23,7 +23,7 @@ Lệnh / Commands:
   recover         Khôi phục khóa vòng đời cũ mà không xóa trạng thái dự án
   run             Bắt đầu một lượt chạy quy trình mới từ yêu cầu đầu vào
   status          Hiển thị trạng thái môi trường; truyền mã lượt chạy hoặc bộ lọc để tra cứu lượt chạy
-  approve         Ghi nhận quyết định phê duyệt, từ chối hoặc yêu cầu làm lại của con người cho một tác vụ
+  approve         Ghi quyết định của bạn cho thẻ #n đang chờ (bflow approve '#3'), hoặc cho một tác vụ
   resume          Tiếp tục một lượt chạy quy trình đang hoạt động hoặc đang chờ
   cancel          Hủy một lượt chạy quy trình hoặc tác vụ đang hoạt động
   iso             Chạy hồ sơ nhà cung cấp cô lập thông qua ai-isolator đi kèm
@@ -57,6 +57,7 @@ Ví dụ / Examples:
   bflow agent check codex
   bflow status
   bflow status run-123
+  bflow approve '#3'
   bflow approve qa --decision approved
   bflow resume run-123
   bflow cancel run-123 --reason "Requirements changed"
@@ -189,8 +190,19 @@ Ví dụ / Examples:
   bflow status --status waiting,blocked
   bflow status --limit 10`;
 
-const APPROVE_HELP = `Cách dùng: bflow approve <task-id> [options] (Usage: bflow approve <task-id> [options])
+const APPROVE_HELP = `Cách dùng: bflow approve '<#n>' [--reject | --changes <lý do> | --choice <n>] [--json]
+          bflow approve <task-id> [options] (Usage: bflow approve <task-id> [options])
 
+Thẻ đang chờ (#n trong Web/tiến trình):
+  Ghi quyết định của bạn cho thẻ #n của phiên Bflow đang chạy. Chỉ bạn gõ lệnh này hoặc dùng Web mới duyệt được; Director không thể duyệt.
+  Quote '#3' trong zsh/bash (dấu # không quote là chú thích). Cũng nhận 3 hoặc n3.
+  (mặc định)            Duyệt thẻ
+  --reject              Từ chối
+  --changes <lý do>     Yêu cầu sửa, kèm lý do (thẻ phê duyệt)
+  --choice <n>          Chọn phương án n (1..6) cho câu hỏi của agent
+  Chỉ chọn một trong --reject, --changes, --choice.
+
+Tác vụ (luồng cũ):
 Ghi nhận quyết định phê duyệt, từ chối hoặc yêu cầu sửa đổi của con người cho một tác vụ.
 
 Tham số (Arguments):
@@ -211,6 +223,10 @@ Tùy chọn (Options):
   -h, --help            Hiển thị trợ giúp cho lệnh approve
 
 Ví dụ / Examples:
+  bflow approve '#3'
+  bflow approve '#3' --changes "Thêm kiểm thử cho lỗi đăng nhập"
+  bflow approve '#4' --choice 2
+  bflow approve 5 --reject
   bflow approve qa
   bflow approve qa --run run-123 --decision approved
   bflow approve review --decision changes_requested --reason "Fix lint issues"

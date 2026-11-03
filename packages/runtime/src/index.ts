@@ -183,7 +183,8 @@ export { buildSosProviderArguments, newSosAgentName, resolveSosRoleConfig, spawn
   type SpawnedSosAgentResult } from "./agentic/sos-agent.js";
 
 export { openUserInteractionClient, interactionProjectId } from "./interaction/client.js";
-export { registerUserInteractionIssuer, callDirectorOwnerHost, callDirectorTool } from "./agentic/host-controller.js";
+export { registerUserInteractionIssuer, callDirectorOwnerHost, callDirectorTool, callHumanDecisionHost } from "./agentic/host-controller.js";
+export { HumanDecisionCliValueSchema, type HumanDecisionCliValue } from "./agentic/human-decision-cli.js";
 
 // Opt-in, Runtime-owned data snapshot verification. No daemon/CLI configuration adapter.
 export { DataVerificationHost, specificationContent as dataSpecificationContent } from "./data/host.js";

@@ -643,6 +643,16 @@ async function executeCommandWithProgress(
       return makeResult(CLI_EXIT_CODES.RUNTIME_ERROR, false, "cancel", undefined, toContractError(error), isJson, io, presentation);
     }
   }
+  // D-DIR-02: `bflow approve <#n>` is the user's own decision, sent to the running host with the owner token (no legacy Runtime).
+  if (parsed.command === "approve" && "card" in parsed) {
+    const { defaultApproveCardDeps, describeApproveCard, executeApproveCard } = await import("./approve-card.js");
+    if (showProgress) emitProgress(`Đang ghi quyết định cho thẻ ${parsed.card}...`);
+    const result = await executeApproveCard(parsed, context?.approveCard ?? await defaultApproveCardDeps(cwd));
+    if (!result.ok) return makeResult(result.exitCode, false, "approve", undefined, result.error, isJson, io, presentation);
+    const stdout = isJson ? JSON.stringify({ ok: true, command: "approve", data: result.data }, null, 2) : describeApproveCard(result.data);
+    io?.stdout(stdout);
+    return { exitCode: result.exitCode, ok: true, command: "approve", stdout, stderr: "" };
+  }
   if (context?.runtime === undefined) {
     const error: ContractError = {
       code: "transport_unavailable",

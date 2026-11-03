@@ -58,6 +58,7 @@ import { assertManifestLayout, directorDefaultAgentKind, ensureDirectorProgressP
   startDirectorWork, type DelegationBuilder } from "./host-director-mode.js";
 import { DirectorAuthError } from "../director/store.js";
 import { DIRECTOR_OWNER_METHODS, isDirectorCoordinatorTool, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
+import { handleHumanDecisionCli } from "./human-decision-cli.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS, type AgenticWorkflowRuntime } from "./runtime.js";
 import { guardNativeShell, NATIVE_READ_GUIDANCE, NATIVE_SHELL_TOOLS } from "./read-only-commands.js";
@@ -69,7 +70,7 @@ import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./convers
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, defaultHostChecks } from "./host-verification.js";
-import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
+import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanPromptHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { parseMutationChecks } from "./mutation-check.js";
 import { parseAppChecks } from "./app-check-config.js";
@@ -1436,7 +1437,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return null;
   };
   const deliveredMessageIds = new Set<string>();
-  let humanHookProvenance: HumanHookProvenance | undefined;
+  let humanHookProvenance: HumanPromptHookProvenance | undefined;
   let userQueue: Promise<unknown> = Promise.resolve();
   const preflightRoleCapabilities = async (binding: PaneBinding, required: readonly string[]): Promise<void> => {
     await verifyDispatchPinnedSkills(platformSession, configuration.platform, binding);
@@ -2619,6 +2620,18 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       case "director_issues": return directorEndpoint.listIssues(DIRECTOR_OWNER_METHODS.director_issues.parse(params).status);
       case "director_issue": return directorEndpoint.inspectIssue(DIRECTOR_OWNER_METHODS.director_issue.parse(params).issueId);
       case "director_mailbox": return directorEndpoint.readMailbox(DIRECTOR_OWNER_METHODS.director_mailbox.parse(params));
+      // D-DIR-02: a human decision typed as `bflow approve <#n>`. Owner token only; Director and role tokens never reach this switch.
+      case "human_decision_cli": {
+        const work = userQueue.catch(() => undefined).then(() => handleHumanDecisionCli(params, {
+          conversationSessionId: requireManifest().conversationSessionId, now: () => new Date().toISOString(),
+          aliases: () => receipts.noticeAliases(),
+          pendingApprovals: query => requireWorkspace().runtime.pendingApprovals(query),
+          inspect: () => requireWorkspace().runtime.inspect(),
+          existingDecision: approvalId => receipts.humanDecision(approvalId),
+          recordHuman: (decision, provenance) => receipts.recordHuman(decision, provenance),
+          receiveOwnerDecision: (decision, record) => requireWorkspace().conversation.receiveOwnerDecision(decision, record) }));
+        userQueue = work; return work;
+      }
       case "director_issue_status": { const input = DIRECTOR_OWNER_METHODS.director_issue_status.parse(params); return directorEndpoint.setIssueStatus(input.issueId, input.status); }
       case "interaction_register": {
         const input = OwnerKeySchema.parse(params), principalId = `local-user-${process.getuid?.() ?? "local"}`;

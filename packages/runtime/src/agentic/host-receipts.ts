@@ -22,11 +22,21 @@ import type { AgyNativeAnchor } from "./agy-native-transcript.js";
 type Kind = "chat-assistant" | "provider-error-signal" | "provider-error-signal-handled" | "provider-failure" | "provider-failure-handled" | "native-rejection" | "approval-failure" | "runtime-nudge" | "conversation-turn" | "conversation-intent" | "conversation-result" | "conversation-notice" | "notice-surfaced" | "notice-displayed" | "notice-reblock" | "notice-resurfaced" | "notification-failure" | "notice-nudge" | "decision-reblock" | "human" | "gate" | "evidence" | "review" | "alternative" | "native-intent" | "native-ack" | "coordinator-boundary" | "coordinator-start" | "coordinator-stop" | "coordinator-stop-handled" | "specialist-stop" | "specialist-settled" | "agy-admission" | "agy-admission-stop" | "agy-native-turn" | "agy-native-turn-stop" | "agy-native-prompt-handled" | "agy-native-turn-superseded";
 export const AgyNativeAnchorSchema = z.object({ transcriptPath: z.string().min(1), device: z.string().min(1), inode: z.string().min(1),
   stepIndex: z.number().int().nonnegative(), rowDigest: z.string().regex(/^[a-f0-9]{64}$/), prefixDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
-export interface HumanHookProvenance {
+/** A physical user prompt observed by the Conversation pane's input hook. */
+export interface HumanPromptHookProvenance {
+  kind?: undefined;
   origin: "UserPromptSubmit" | "PreInvocation"; binding: PaneBinding; nativeSessionId: string;
   conversationSessionId: string; userId: string; messageId: string; promptDigest: string;
   agyLaunchId?: string; agyAnchor?: AgyNativeAnchor;
 }
+/**
+ * D-DIR-02: a `bflow approve <#n>` the user typed. Only the owner-token host method records it; a Director credential can
+ * never reach that method. `pid`/`tty` describe the calling CLI process and are diagnostics, not an extra proof.
+ */
+export interface HumanCliOwnerProvenance { kind: "cli_owner"; pid: number; tty: boolean; at: string }
+export type HumanHookProvenance = HumanPromptHookProvenance | HumanCliOwnerProvenance;
+export const HumanCliOwnerProvenanceSchema = z.object({ kind: z.literal("cli_owner"), pid: z.number().int().positive(), tty: z.boolean(),
+  at: z.string().datetime() }).strict();
 export const TrustedConversationTurnSchema = z.object({
   binding: PaneBindingSchema, messageId: z.string().min(1), conversationSessionId: z.string().min(1),
   content: z.string().min(1), occurredAt: z.string().datetime(), userId: z.string().min(1), sequence: z.number().int().positive(),
@@ -304,6 +314,12 @@ export class HostReceiptJournal {
     if (kind === "evidence") return json(VerificationResultSchema.parse(input));
     if (kind === "human") {
       const value = record(input), decision = ApprovalDecisionSchema.parse(value.decision), raw = record(value.provenance);
+      if (raw.kind !== undefined) {
+        const provenance = HumanCliOwnerProvenanceSchema.parse(raw);
+        if (decision.decidedBy !== "human_operator" || !decision.idempotencyKey.startsWith("cli-"))
+          throw new Error("Human receipt has mismatched CLI owner provenance");
+        return json({ decision, provenance });
+      }
       const binding = PaneBindingSchema.parse(raw.binding);
       const origin = raw.origin === "PreInvocation" ? "PreInvocation" : "UserPromptSubmit";
       const agyLaunchId = raw.agyLaunchId === undefined ? undefined : textField(raw.agyLaunchId);
@@ -797,6 +813,11 @@ export class HostReceiptJournal {
   }
   async recordHuman(decision: ApprovalDecision, provenance: HumanHookProvenance): Promise<void> {
     const parsed = ApprovalDecisionSchema.parse(decision); await this.write("human", parsed.approvalId, { decision: parsed, provenance });
+  }
+  /** The trusted human receipt of an approval, whatever its provenance; undefined when none was recorded. */
+  async humanDecision(approvalId: string): Promise<ApprovalDecision | undefined> {
+    const receipt = await this.read("human", textField(approvalId));
+    return receipt === undefined ? undefined : ApprovalDecisionSchema.parse(record(receipt).decision);
   }
   async authenticateHuman(input: ApprovalDecision): Promise<boolean> {
     const decision = ApprovalDecisionSchema.parse(input), receipt = await this.read("human", decision.approvalId);

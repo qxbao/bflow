@@ -32,6 +32,13 @@ export interface AgenticConversationHost {
    * Resolves with an OperationResult; an admission refusal is a validation error carrying Runtime's reason.
    */
   delegateDirectorWork(input: DirectorWorkDelegation): Promise<OperationResult<{ runId: string; correlationId: string }>>;
+  /**
+   * D-DIR-02: an owner-authenticated human decision (`bflow approve <#n>`). Same admission as a Web `answer_decision`:
+   * a closed (expired/superseded) or differently settled approval and a stale request are refused before `record` runs;
+   * `record` persists the trusted human receipt before the decision is queued. An identical retry queues nothing new.
+   */
+  receiveOwnerDecision(decision: unknown, record: (decision: import("@bflow/contracts").ApprovalDecision) => Promise<void>):
+    Promise<OperationResult<{ queued: boolean }>>;
 }
 export interface DirectorWorkDelegation {
   key: string; title: string; objective: string; kind: "feature" | "bugfix" | "refactor" | "spike";
@@ -210,18 +217,18 @@ export async function createAgenticConversationHost(options: {
     } });
   const initialized = await gateway.initializeOrRecoverSession();
   if (!initialized.ok) throw new Error(initialized.error.message);
-  for (const decision of options.recoveredHumanDecisions ?? []) {
-    const result = await enqueueDecision(decision);
-    if (!result.ok) throw new Error(result.error.message);
-    // A crash can happen after the trusted receipt/outbox write but before P14 saves its turn.
-    // Restore governance state without inventing a user message or resubmitting the decision.
+  /**
+   * Records a trusted human decision in the persisted Gateway context exactly like the Web path does after its admission:
+   * the approval leaves pending and the decision is kept. Never invents a user message; the caller refreshes the Gateway.
+   */
+  const settleContextDecision = async (decision: import("@bflow/contracts").ApprovalDecision): Promise<void> => {
     const loaded = await contextStore.load(manifest.conversationSessionId);
     if (!loaded.ok) throw new Error(loaded.error.message);
     if (!loaded.value) throw new Error("Conversation context disappeared during approval recovery");
     const snapshot = loaded.value, cached = snapshot.approvalDecisions[decision.approvalId];
     if (cached && digest(cached) !== digest(decision)) throw new Error("Cached decision conflicts with trusted human receipt");
     const pending = snapshot.pendingApprovals[decision.approvalId];
-    if (!pending) continue;
+    if (!pending) return;
     if (pending.runId !== decision.runId || pending.sessionId !== decision.sessionId || pending.revision !== decision.revision ||
         pending.generation !== decision.generation || digest(pending.target) !== digest(decision.target)) throw new Error("Cached approval request conflicts with trusted human receipt");
     const pendingApprovals = { ...snapshot.pendingApprovals }; delete pendingApprovals[decision.approvalId];
@@ -234,6 +241,13 @@ export async function createAgenticConversationHost(options: {
       session: { ...snapshot.session, activeApprovalIds,
         status: activeApprovalIds.length ? "awaiting_user_approval" : "reporting_progress" } }, decision.approvalId, new Date().toISOString()));
     if (!saved.ok) throw new Error(saved.error.message);
+  };
+  for (const decision of options.recoveredHumanDecisions ?? []) {
+    const result = await enqueueDecision(decision);
+    if (!result.ok) throw new Error(result.error.message);
+    // A crash can happen after the trusted receipt/outbox write but before P14 saves its turn.
+    // Restore governance state without inventing a user message or resubmitting the decision.
+    await settleContextDecision(decision);
   }
   if (options.recoveredHumanDecisions?.length) {
     const refreshed = await gateway.initializeOrRecoverSession();
@@ -469,6 +483,34 @@ export async function createAgenticConversationHost(options: {
     },
     setBusy: busy => exclusive(() => gateway.setAgentBusyState(busy)),
     flush: () => exclusive(() => gateway.flushPendingInboundQueue()),
+    receiveOwnerDecision(input, recordReceipt) {
+      return exclusive(async () => {
+        const decision = ApprovalDecisionSchema.parse(input);
+        await reconcileApprovals().catch(() => undefined);
+        const context = gateway.getContextSnapshot();
+        const settled = context.approvalDecisions[decision.approvalId];
+        if (settled && digest(settled) !== digest(decision)) return conflictError("Approval is already settled by another decision");
+        const closed = context.closedApprovals?.[decision.approvalId];
+        if (closed) return conflictError(String(closed.reason));
+        const prepared = await prepareDecisionEnvelope(decision);
+        if (!prepared.ok) return prepared;
+        await recordReceipt(decision);
+        if (prepared.value) {
+          const sent = await enqueue(prepared.value);
+          if (!sent.ok) return sent;
+        }
+        // Reloading the Gateway from its store resets its in-memory busy/transport observation; restore it afterwards.
+        const before = gateway.getContextSnapshot();
+        await settleContextDecision(decision);
+        const refreshed = await gateway.initializeOrRecoverSession();
+        if (!refreshed.ok) return refreshed;
+        if (before.agentBusy) {
+          const restored = await gateway.setAgentBusyState(true, before.transportState);
+          if (!restored.ok) return restored;
+        }
+        return { ok: true, value: { queued: prepared.value !== undefined } };
+      });
+    },
     delegateDirectorWork(input) {
       if (director) return Promise.reject(new Error("Use admitDirectorWork in a Director session"));
       return exclusive(async () => {

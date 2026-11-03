@@ -227,6 +227,11 @@ export async function callDirectorOwnerHost(options: { repositoryPath: string; s
   const configuration = await locateDirectorHost(options);
   return callHost(configuration.socketPath, configuration.token, method, input, timeoutMs);
 }
+/** D-DIR-02: owner-token `bflow approve <#n>` on an already running host; never starts a host. */
+export async function callHumanDecisionHost(options: { repositoryPath: string; sessionId: string }, input: unknown, timeoutMs = 30_000): Promise<unknown> {
+  const configuration = await locateDirectorHost(options);
+  return callHost(configuration.socketPath, configuration.token, "human_decision_cli", input, timeoutMs);
+}
 /** Director-token tool call; the long `director_wait` gets its maximum wait plus slack. */
 export async function callDirectorTool(options: { repositoryPath: string; sessionId: string }, token: string, name: string,
   args: Record<string, JsonValue>): Promise<unknown> {

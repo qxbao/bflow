@@ -243,6 +243,16 @@ export interface ApproveCommandArgs extends GlobalCliFlags {
   readonly idempotencyKey?: string | undefined;
 }
 
+/** D-DIR-02: `bflow approve <#n>` — a human decision on a Conversation card, sent to the running host with the owner token. */
+export interface ApproveCardCommandArgs extends GlobalCliFlags {
+  readonly command: "approve";
+  /** Normalised card alias, e.g. `#3`. */
+  readonly card: string;
+  readonly outcome: "approved" | "rejected" | "changes_requested" | "answer";
+  readonly reason?: string | undefined;
+  readonly choice?: number | undefined;
+}
+
 export interface ResumeCommandArgs extends GlobalCliFlags {
   readonly command: "resume";
   readonly runId: string;
@@ -395,6 +405,7 @@ export type CoreParsedCliCommand =
   | RunCommandArgs
   | StatusCommandArgs
   | ApproveCommandArgs
+  | ApproveCardCommandArgs
   | ResumeCommandArgs
   | CancelCommandArgs
   | HelpCommandArgs
@@ -536,6 +547,8 @@ export interface CliContext {
   /** Test/embedded override for the bundled isolation engine location. */
   readonly isoEnginePath?: string | undefined;
   readonly runtime?: RuntimeService | ConcreteRuntimeService | undefined;
+  /** Test seam for `bflow approve <#n>`; defaults to the running host's owner endpoint. */
+  readonly approveCard?: import("./approve-card.js").ApproveCardDeps | undefined;
   readonly io?: CliIo | undefined;
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
