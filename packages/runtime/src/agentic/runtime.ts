@@ -185,6 +185,13 @@ function resumablyPaused(run: RunRecord): boolean {
     ["resume_coordinator", "reconcile_delivery"].includes(run.pendingAction.kind);
 }
 const FINAL_TASK = "workflow-verification";
+/** Durable provenance that ties the run's pending action to one task (identity fields or deterministic source IDs), never message text. */
+function pendingActionOwnedByTask(run: RunRecord, taskId: string, related: readonly { message: { message_id: string } }[]): boolean {
+  const action = run.pendingAction;
+  return action !== undefined && (action.verificationTaskId === taskId || action.invalidAssignment?.taskId === taskId ||
+    related.some(out => out.message.message_id === action.sourceMessageId) ||
+    ["verification-retry", "workflow-blocked"].some(prefix => action.sourceMessageId === `${prefix}-${digest([run.runId, taskId, action.reason])}`));
+}
 /** Prefix of run errors that a Coordinator retry_verification can resume. */
 const VERIFICATION_RETRY_PREFIX = "Verification delivery/storage requires reconciliation:";
 /** Informational Conversation traffic never carries resume, approval or task-result authority. */
@@ -1683,7 +1690,7 @@ export class AgenticWorkflowRuntime {
     if (!this.ports.director || !policy.enabled || this.quiesced) return { parked };
     await this.initialize();
     const selected = await this.transaction(async (state, save, core, outbox) => {
-      const snapshots: Record<string, import("@bflow/contracts").WorkflowRunSnapshot> = {};
+      const snapshots: Record<string, WorkflowRunSnapshot> = {};
       for (const run of state.runs) if (run.coreCreated && run.delegation.requestedBy === "director" && !run.cancelled)
         snapshots[run.runId] = await core.snapshot(run.runId);
       const facts = { ...state, snapshots };
@@ -1873,9 +1880,7 @@ export class AgenticWorkflowRuntime {
         task.verificationPending = false;
       }
       const action = run.pendingAction;
-      const ownsAction = action && (action.verificationTaskId === task.taskId || action.invalidAssignment?.taskId === task.taskId ||
-        related.some(out => out.message.message_id === action.sourceMessageId) ||
-        ["verification-retry", "workflow-blocked"].some(prefix => action.sourceMessageId === `${prefix}-${digest([run.runId, task.taskId, action.reason])}`));
+      const ownsAction = action && pendingActionOwnedByTask(run, task.taskId, related);
       if (ownsAction) {
         if (run.status === "escalated") run.status = action.previousStatus ?? "implementing";
         delete run.pendingAction;
@@ -1923,8 +1928,19 @@ export class AgenticWorkflowRuntime {
       task.writerReleased = false; task.verificationPending = false;
       // The next candidate builds a fresh plan/cycle after its new implementer is known; old evidence cannot authorize it.
       delete task.cycle; delete task.verificationPlan;
-      if (run.status === "completed_with_parked") run.status = "implementing";
-      delete run.error;
+      // run.error/pendingAction may be another task's control state (e.g. B's verification-retry prefix and auto_resume budget).
+      // Only a partial-completion reopen or provenance owned by this task may clear them; never infer ownership from text.
+      if (run.status === "completed_with_parked") { run.status = "implementing"; delete run.error; }
+      else {
+        const action = run.pendingAction;
+        const related = state.outbound.filter(out => out.message.run_id === run.runId &&
+          (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
+        if (action && pendingActionOwnedByTask(run, task.taskId, related)) {
+          if (run.status === "escalated") run.status = action.previousStatus ?? "implementing";
+          delete run.pendingAction;
+          if (run.error?.slice(0, 2000) === action.reason) delete run.error;
+        }
+      }
       // Persist reset metadata with the Core event's write-ahead batch, so a restart cannot pair ready with stale parked/result data.
       await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId, expectedVersion: snapshot.version,
         from: "parked", to: "ready", intent: "unpark", generationFrom: current.generation, generationTo: current.generation,

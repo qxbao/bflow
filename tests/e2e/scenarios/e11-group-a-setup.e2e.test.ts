@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, rmdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { runCli } from "@bflow/cli";
 import {
@@ -325,14 +325,36 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
       ).toContain("control character");
 
       // Live systemd --user registration, start, status check, and cleanup via BflowOSServiceManager
-      const unitDir = join(process.env["HOME"] ?? "/root", ".config/systemd/user");
-      mkdirSync(unitDir, { recursive: true });
       const osSvcManager = new BflowOSServiceManager({
         platform: "linux",
         homeDir: process.env["HOME"]
       });
       const testServiceId = `qa-e11-${process.pid}`;
+      const unitName = `bflow-${testServiceId}.service`;
+      // The manager owns the unit location (XDG_CONFIG_HOME/systemd/user, isolated with HOME in this harness).
+      const unitFile = osSvcManager.unitPath(testServiceId);
+      const unitDir = dirname(unitFile);
+      expect(unitFile.endsWith(`/systemd/user/${unitName}`)).toBe(true);
+      mkdirSync(unitDir, { recursive: true });
+      // With an isolated HOME the running user manager never searches that HOME's unit directory. Expose only this QA unit
+      // through the manager's runtime-only search path ($XDG_RUNTIME_DIR/systemd/user, tmpfs) instead of the real HOME,
+      // provider settings or the session-wide manager environment; finally removes exactly the link this test created.
+      const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+      const runtimeDir = process.env["XDG_RUNTIME_DIR"] ?? (uid !== undefined ? `/run/user/${uid}` : undefined);
+      const runtimeUnitDir = runtimeDir ? join(runtimeDir, "systemd", "user") : undefined;
+      const runtimeLink = runtimeUnitDir ? join(runtimeUnitDir, unitName) : undefined;
+      let createdRuntimeUnitDir = false;
+      let createdRuntimeLink = false;
       try {
+        const unitPathProperty = execFileSync("systemctl", ["--user", "show", "--property=UnitPath"], { encoding: "utf8" });
+        const searchPath = unitPathProperty.replace(/^UnitPath=/, "").trim().split(/\s+/);
+        if (!searchPath.includes(unitDir)) {
+          expect(runtimeUnitDir && searchPath.includes(runtimeUnitDir)).toBe(true);
+          expect(existsSync(runtimeLink!)).toBe(false); // never adopt or replace a unit this test does not own
+          if (!existsSync(runtimeUnitDir!)) { mkdirSync(runtimeUnitDir!, { recursive: true, mode: 0o700 }); createdRuntimeUnitDir = true; }
+          symlinkSync(unitFile, runtimeLink!);
+          createdRuntimeLink = true;
+        }
         const installRes = await osSvcManager.install({
           schemaVersion: 3,
           serviceId: testServiceId,
@@ -363,9 +385,20 @@ describe("Scenario E11 (Group A) — Machine Setup, Doctor, Binary Discovery & O
         }
       } finally {
         await osSvcManager.stop(testServiceId).catch(() => {});
-        const unitFile = join(unitDir, `bflow-${testServiceId}.service`);
+        let reload = false;
+        if (createdRuntimeLink && runtimeLink) {
+          try {
+            if (lstatSync(runtimeLink).isSymbolicLink() && readlinkSync(runtimeLink) === unitFile) { rmSync(runtimeLink, { force: true }); reload = true; }
+          } catch {}
+          if (createdRuntimeUnitDir && runtimeUnitDir) {
+            try { rmdirSync(runtimeUnitDir); } catch {} // only when empty; other units there are not this test's
+          }
+        }
         if (existsSync(unitFile)) {
           rmSync(unitFile, { force: true });
+          reload = true;
+        }
+        if (reload) {
           try {
             execFileSync("systemctl", ["--user", "daemon-reload"]);
           } catch {}

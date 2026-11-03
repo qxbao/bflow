@@ -189,6 +189,10 @@ describe("Scenario E17 — Director session (manifest v3, fake runner)", () => {
     for (let pass = 0; pass < 5 && (await session.inspect(runId)).status !== "completed_with_parked"; pass++) await session.tickWithReviewer();
     expect((await session.inspect(runId)).status).toBe("completed_with_parked");
     const partial = unwrapSnapshot(await session.ports.engine.getSnapshot(runId));
+    // The authoritative Core snapshot must exist for a completed_with_parked run; a missing run is a failure, not a pass.
+    expect(partial).not.toBeNull();
+    if (partial === null) throw new Error(`Core has no snapshot for completed_with_parked run ${runId}`);
+    expect(partial.runId).toBe(runId);
     expect(partial.tasks.map(task => [task.taskId, task.status])).toEqual([["implement", "parked"], ["after", "pending"], ["independent", "succeeded"]]);
     expect((await session.endpoint.readMailbox({ audience: "user" })).some(item => item.type === "conversation.progress" && item.runId === runId)).toBe(true);
     const issues = await session.endpoint.listIssues(); expect(issues).toHaveLength(1);

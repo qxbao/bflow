@@ -388,3 +388,89 @@ describe("Runtime park/unpark", () => {
     expect(stop).not.toHaveBeenCalled();
   });
 });
+
+/** Final review I1: unparking A must keep B's verification-retry control state (error prefix, pending action, phase). */
+describe("unpark keeps another task's verification retry", () => {
+  async function parkedAWithVerifyingB() {
+    const f = await fixture({ director: true, parallel: true });
+    f.def.dependencies = [];
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    const outbound = (await state(f)).outbound;
+    const a = outbound.find((out: any) => out.message.type === "task.assignment" && out.taskId === "implement");
+    expect(outbound.find((out: any) => out.message.type === "task.assignment" && out.taskId === "other").status).toBe("accepted");
+    for (const pane of f.panes.bindings.filter(item => item.role === "developer"))
+      pane.metadata = { taskId: `run-1-${pane.paneId === a.handle.target.paneId ? "implement" : "other"}`, runId: "run-1" };
+    f.ports.stopDeveloperExecutionScope = async handle => ({ source: "linux_pid_namespace", handle, observedAt: new Date().toISOString(),
+      scopeId: randomUUID(), bootId: randomUUID(), initPid: 123, initStartTime: "1", namespace: "pid:[123]", receiptDigest: "a".repeat(64) });
+    expect(await park(f)).toMatchObject({ parked: true });
+    await f.evidence("other"); await f.submit("other", "Independent B update\n");
+    return f;
+  }
+  async function unparkA(f: Fixture) {
+    const before = (await state(f)).runs[0];
+    expect(before).toMatchObject({ status: "escalated", error: expect.stringMatching(/^Verification delivery\/storage requires reconciliation:/),
+      pendingAction: { kind: "resume_coordinator", state: "pending", verificationTaskId: "other", recovery: "auto_resume" } });
+    const tick = vi.spyOn(f.runtime, "tick");
+    expect(await f.runtime.unparkTask({ runId: "run-1", taskId: "implement", source: "director" })).toMatchObject({ unparked: true, runStatus: "escalated" });
+    await Promise.all(tick.mock.results.map(result => result.value));
+    tick.mockRestore();
+    const after = (await state(f)).runs[0];
+    expect((await snapshot(f)).tasks.find(task => task.taskId === "implement")!.status).not.toBe("parked");
+    expect(after.status).toBe("escalated"); expect(after.error).toBe(before.error); expect(after.pendingAction).toEqual(before.pendingAction);
+  }
+
+  it("with B's durable outcome stuck after repeated finish failures, retry_verification still applies it", async () => {
+    const f = await parkedAWithVerifyingB();
+    const request = f.ports.engine.requestQualityGateEvaluation.bind(f.ports.engine);
+    let failing = true;
+    vi.spyOn(f.ports.engine, "requestQualityGateEvaluation").mockImplementation(async input => {
+      if (failing && input.taskId === "other") throw new Error("Injected gate storage failure after durable outcome");
+      return request(input);
+    });
+    const verify = vi.spyOn(f.ports.policies.verification, "verify");
+    for (let n = 0; n < 4; n++) await f.runtime.tick();
+    await journal(f).exclusive(async s => {
+      expect(s.pendingVerifications).toHaveLength(1);
+      expect(s.pendingVerifications[0]).toMatchObject({ stuck: true, attempts: 3 });
+    });
+    expect(verify).toHaveBeenCalledTimes(1);
+    await unparkA(f);
+    failing = false;
+    await expect(f.runtime.retryVerification("run-1")).resolves.toMatchObject({ retried: true });
+    await f.runtime.tick();
+    expect(verify).toHaveBeenCalledTimes(1); // the durable outcome is applied, not re-produced
+    const run = (await state(f)).runs[0];
+    expect(run.tasks.find((task: any) => task.taskId === "other").cycle.status).toBe("passed");
+    expect(run.status).not.toBe("escalated"); expect(run.error).toBeUndefined();
+    await journal(f).exclusive(async s => { expect(s.pendingVerifications).toHaveLength(0); });
+  });
+
+  it("with no outcome from B's crashed verifier, retry_verification re-runs B's frozen plan", async () => {
+    const f = await parkedAWithVerifyingB();
+    const verify = vi.spyOn(f.ports.policies.verification, "verify").mockRejectedValueOnce(new Error("Injected verifier crash before an outcome"));
+    await f.runtime.tick();
+    expect(verify).toHaveBeenCalledTimes(1);
+    await journal(f).exclusive(async s => { expect(s.pendingVerifications).toHaveLength(0); });
+    await unparkA(f);
+    await expect(f.runtime.retryVerification("run-1")).resolves.toMatchObject({ retried: true });
+    await f.runtime.tick();
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(verify.mock.calls[1]![0].taskId).toBe("other");
+    const run = (await state(f)).runs[0];
+    expect(run.tasks.find((task: any) => task.taskId === "other").cycle.status).toBe("passed");
+    expect(run.status).not.toBe("escalated"); expect(run.error).toBeUndefined();
+  });
+
+  it("clears only its own reopen state for a completed_with_parked run", async () => {
+    const f = await fixture({ director: true });
+    await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+    for (const pane of f.panes.bindings.filter(item => item.role === "developer")) pane.metadata = { taskId: "run-1-implement", runId: "run-1" };
+    f.ports.stopDeveloperExecutionScope = async handle => ({ source: "linux_pid_namespace", handle, observedAt: new Date().toISOString(),
+      scopeId: randomUUID(), bootId: randomUUID(), initPid: 123, initStartTime: "1", namespace: "pid:[123]", receiptDigest: "a".repeat(64) });
+    expect(await park(f)).toMatchObject({ parked: true, runStatus: "completed_with_parked" });
+    const tick = vi.spyOn(f.runtime, "tick");
+    expect(await f.runtime.unparkTask({ runId: "run-1", taskId: "implement", source: "director" })).toMatchObject({ unparked: true, runStatus: "implementing" });
+    await Promise.all(tick.mock.results.map(result => result.value));
+    expect((await state(f)).runs[0].error).toBeUndefined();
+  });
+});
