@@ -60,12 +60,15 @@ Chạy 'bflow help <command>' hoặc 'bflow <command> --help' để xem các tù
 const INIT_HELP = `Cách dùng: bflow init [options] (Usage: bflow init [options])
 
 Khởi tạo .bflow/config.yml tại thư mục gốc chuẩn của kho Git và đăng ký dịch vụ GitNexus của kho mã trên Gateway dùng chung. An toàn khi chạy lặp lại.
+Bộ preset tĩnh của CLI được chọn điền sẵn provider + model cho từng role; terminal tương tác sẽ hỏi chọn CLI (gợi ý CLI đã cài) khi tạo cấu hình mới.
+Thêm '.bflow/' vào <git-common-dir>/info/exclude (không sửa .gitignore của dự án); --remove gỡ đúng dòng Bflow đã thêm.
 
 Tùy chọn (Options):
   --dir <path>          Thư mục đích để khởi tạo (mặc định: thư mục hiện tại)
   --config <path>       Đường dẫn tệp cấu hình tùy chỉnh (mặc định: .bflow/config.yml)
   --name <name>         Tên dự án
-  --provider <kind>     Nhà cung cấp vai trò: claude, codex hoặc agy (mặc định: codex)
+  --provider <kind>     CLI chủ đạo và bộ preset model theo role: claude, codex hoặc agy (mặc định: codex)
+  --preset <kind>       Tên gọi khác của --provider
   --check               Kiểm tra chỉ đọc đối với .bflow/config.yml và mức sẵn sàng GitNexus của kho mã
   --remove              Gỡ đăng ký dịch vụ GitNexus của kho mã này khỏi Gateway dùng chung
   --no-gitnexus         Bỏ qua lập chỉ mục GitNexus và đăng ký dịch vụ trên Gateway
@@ -85,6 +88,7 @@ Ví dụ / Examples:
   bflow init --update
   bflow init --name my-project
   bflow init --provider claude
+  bflow init --update --preset codex
   bflow init --dir ./subproject --force`;
 
 const CONFIG_MIGRATE_HELP = `Cách dùng: bflow config-migrate [--json] [--debug] (Usage: bflow config-migrate [--json])

@@ -18,3 +18,4 @@ export * from "./codex-hook-toml.js";
 export * from "./agy-adapter.js";
 export * from "./registry.js";
 export * from "./execution-probe-coalescer.js";
+export * from "./role-model-presets.js";
