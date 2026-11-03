@@ -48,6 +48,7 @@ export interface AgenticHostOptions {
   progressCommand?: readonly string[];
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
     tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope; reviewTimeoutMs?: number };
+    issueQueue?: { autoPark: boolean; maxAutoResumesBeforePark: number };
     fastPath?: { mode: FastPathMode };
     concurrency: { maxConcurrency: number } };
   impactIndex?: { executable: string; home: string; storageLockPath: string };
@@ -93,6 +94,7 @@ function compatiblePersistedPolicy(
       : requested.fastPath?.mode === "auto"
         ? { fastPath: { mode: "auto" } }
         : {}),
+    ...((persisted.issueQueue ?? requested.issueQueue) ? { issueQueue: persisted.issueQueue ?? requested.issueQueue! } : {}),
     concurrency: persisted.concurrency
   };
   return digest(normalizedPersisted) === digest(requested);
@@ -147,6 +149,12 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
         (verification.regressionScope !== undefined && !["affected", "full", "mapped_only"].includes(String(verification.regressionScope))) ||
         (verification.reviewTimeoutMs !== undefined && (!Number.isSafeInteger(verification.reviewTimeoutMs) || Number(verification.reviewTimeoutMs) < 60_000 || Number(verification.reviewTimeoutMs) > 3_600_000)) ||
         !Number.isInteger(concurrency.maxConcurrency) || Number(concurrency.maxConcurrency) < 1 || Number(concurrency.maxConcurrency) > 32) throw new Error("Invalid persisted host policy");
+    if (policy.issueQueue !== undefined) {
+      const queue = record(policy.issueQueue);
+      if (Object.keys(queue).some(key => !["autoPark", "maxAutoResumesBeforePark"].includes(key)) || typeof queue.autoPark !== "boolean" ||
+          !Number.isInteger(queue.maxAutoResumesBeforePark) || Number(queue.maxAutoResumesBeforePark) < 0 || Number(queue.maxAutoResumesBeforePark) > 3)
+        throw new Error("issueQueue.maxAutoResumesBeforePark phải trong khoảng 0–3");
+    }
     if (policy.fastPath !== undefined) {
       if (policy.fastPath === null || typeof policy.fastPath !== "object" || Array.isArray(policy.fastPath)) throw new Error("Invalid persisted host policy");
       const fastPath = policy.fastPath as Record<string, unknown>;

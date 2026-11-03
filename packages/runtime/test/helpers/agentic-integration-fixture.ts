@@ -67,6 +67,8 @@ export class Panes implements PanePolicy {
 
 /** In-memory Director mailbox port: records every delivery call; `fail` makes the next calls throw, `presence` drives resume gating. */
 export class FakeDirectorPort implements DirectorRuntimePort {
+  readonly issues = new Map<string, import("../../src/director/store.js").IssueInput>();
+  async upsertIssue(input: import("../../src/director/store.js").IssueInput): Promise<void> { this.issues.set(input.key ?? input.issueId!, input); }
   readonly delivered: RoleMessage[] = [];
   deliverCalls = 0;
   presentCalls = 0;

@@ -33,7 +33,7 @@ export const DIRECTOR_OWNER_METHODS = {
 
 /** Coordinator orchestration tools the Director may use: everything but report_progress (which targets Conversation). */
 export function isDirectorCoordinatorTool(name: string): boolean {
-  return name !== "report_progress" && (name === "planning_reference" || COORDINATOR_TOOLS.some(tool => tool.name === name));
+  return name !== "report_progress" && (["planning_reference", "park_task", "unpark_task"].includes(name) || COORDINATOR_TOOLS.some(tool => tool.name === name));
 }
 
 /** R-B1-1: a non-owner token that has the Director `<id>.<secret>` shape is routed to the Director branch. */

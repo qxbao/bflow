@@ -1,3 +1,4 @@
+import { selectAutoParkCandidates, selectAutoParkStopCandidates, autoParkRelated, autoParkSuggestedAction, exhaustedTaskVerification, STRUCTURAL_DELIVERY_BLOCKERS, VERIFICATION_ATTEMPT_LIMIT, type AutoParkPolicy } from "./auto-park.js";
 import { reviewCandidateEvidence, candidateEvidenceContext, hasCandidateGateReceipt } from "./review-candidate-evidence.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -194,7 +195,6 @@ function isConversationContext(message: RoleMessage): boolean {
 function isConversationContextWake(message: RoleMessage): boolean {
   return message.sender.role === "runtime" && message.recipient.role === "coordinator" && message.type === "task.status" && record(message.payload).kind === "conversation_context_ready";
 }
-const VERIFICATION_ATTEMPT_LIMIT = 3;
 const RUN_STEP_FAILURE_PREFIX = "Run step failed:";
 /**
  * Stop observations per cancelled execution before it is reported for manual reconciliation. Bounded so an unresponsive pane is
@@ -216,7 +216,6 @@ const UNCERTAIN_DELIVERY_OPTIONS = ["Ask Coordinator to reconcile the uncertain 
 const INBOUND_FAILURE_OPTIONS = ["Ask Coordinator to inspect the failed handoff and request a schema-valid resend from the sender", "Cancel this run"];
 const VERIFICATION_RETRY_OPTIONS = ["Retry verification for this run (Coordinator retry_verification)", "Cancel this run"];
 /** Structural blockers that never clear on their own; the user hears about them at once. */
-const STRUCTURAL_DELIVERY_BLOCKERS = /^(Recipient pane unavailable|No capable agent in recipient pane|Pinned request or recipient changed|Recipient [\w-]+ not ready since )/;
 function conversationRetryDelayMs(attempts: number): number { return Math.min(60_000, 1_000 * 2 ** (attempts - 1)); }
 function objectField(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>)[key] : undefined;
@@ -1661,9 +1660,64 @@ export class AgenticWorkflowRuntime {
     return true;
   }
 
-  async parkTask(input: { runId: string; taskId: string; reason: string; kind: ParkedIssueKind; source: "director" | "auto"; episodeKey?: string }): Promise<{ parked: boolean; runStatus: SdlcWorkStatus; reason?: string; episode?: number }> {
+  /** Bounded stop preparation uses the same write-ahead park intent and exact execution proof as explicit park. */
+  async autoParkPass(policy: AutoParkPolicy): Promise<{ parked: { runId: string; taskId: string; kind: ParkedIssueKind }[] }> {
+    const parked: { runId: string; taskId: string; kind: ParkedIssueKind }[] = [];
+    policy = z.object({ enabled: z.boolean(), maxAutoResumesBeforePark: z.number().int().min(0).max(3) }).strict().parse(policy);
+    if (!this.ports.director || !policy.enabled || this.quiesced) return { parked };
+    await this.initialize();
+    const selected = await this.transaction(async (state, save, core, outbox) => {
+      const snapshots: Record<string, import("@bflow/contracts").WorkflowRunSnapshot> = {};
+      for (const run of state.runs) if (run.coreCreated && run.delegation.requestedBy === "director" && !run.cancelled)
+        snapshots[run.runId] = await core.snapshot(run.runId);
+      const facts = { ...state, snapshots };
+      for (const candidate of selectAutoParkStopCandidates(facts, policy, Date.parse(this.now()))) {
+        const run = this.run(state, candidate.runId), current = snapshots[run.runId]!.tasks.find(task => task.taskId === candidate.taskId)!;
+        for (const out of autoParkRelated(facts, run, candidate.taskId).filter(out => !out.parentAssignmentId && out.handle &&
+            (out.status === "accepted" || out.handle.executionId === current.agentExecution?.executionId))) {
+          const originalError = out.error;
+          try {
+            await this.requestStop(state, core, outbox, save, run, out, "Task parked", "park");
+            if (originalError === undefined) delete out.error; else out.error = originalError;
+            if (out.parkStop && !out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
+              out.parkStop.observations++; await save();
+              const observed = await this.stopObserved({ ...out });
+              if (observed.proof) out.parkStop.proof = observed.proof;
+              await save();
+            }
+          } catch {
+            // Preserve the durable stop intent and its spent observation budget; other independent tasks may still progress.
+          } finally {
+            if (originalError === undefined) delete out.error; else out.error = originalError;
+          }
+        }
+      }
+      return selectAutoParkCandidates(facts, policy, Date.parse(this.now()));
+    });
+    for (const candidate of selected) {
+      try {
+        const result = await this.parkTask({ runId: candidate.runId, taskId: candidate.taskId, reason: candidate.reason, kind: candidate.kind, episodeKey: candidate.episodeKey, resumeAttempts: candidate.resumeAttempts, source: "auto" });
+        if (!result.parked) continue;
+        parked.push({ runId: candidate.runId, taskId: candidate.taskId, kind: candidate.kind });
+        await this.activityLog.record({ kind: "tool", role: "runtime", action: `auto_park:${candidate.kind}`, runId: candidate.runId, taskId: candidate.taskId });
+      } catch {
+        // A changed fence or an unavailable stop remains waiting. A later pass reselects against current durable facts.
+      }
+    }
+    // Replay after a lost upsert response or host crash: the durable park episode is the receipt, the store key deduplicates it.
+    const issues = await this.journal.exclusive(async state => state.runs.filter(run => run.delegation.requestedBy === "director")
+      .flatMap(run => run.tasks.flatMap(task => task.parked?.source === "auto" ? [{ runId: run.runId, taskId: task.taskId, park: task.parked,
+        evidence: (task.reworkResolutions ?? []).map(item => item.artifactRef.uri) }] : [])));
+    for (const item of issues) await this.ports.director.upsertIssue({ key: `park:${item.park.episodeKey ?? `${item.runId}:${item.taskId}:${item.park.episode}`}`,
+      runId: item.runId, taskKey: item.taskId, kind: item.park.kind, summary: item.park.reason,
+      attempts: item.park.resumeAttempts ?? 0,
+      evidence: item.evidence, suggestedAction: autoParkSuggestedAction[item.park.kind] });
+    return { parked };
+  }
+
+  async parkTask(input: { runId: string; taskId: string; reason: string; kind: ParkedIssueKind; source: "director" | "auto"; episodeKey?: string; resumeAttempts?: number }): Promise<{ parked: boolean; runStatus: SdlcWorkStatus; reason?: string; episode?: number }> {
     const args = z.object({ runId: IdentifierSchema, taskId: IdentifierSchema, reason: z.string().trim().min(1).max(2000),
-      kind: ParkedIssueKindSchema, source: z.enum(["director", "auto"]), episodeKey: z.string().min(1).optional() }).strict().parse(input);
+      kind: ParkedIssueKindSchema, source: z.enum(["director", "auto"]), resumeAttempts: z.number().int().min(0).max(3).optional(), episodeKey: z.string().min(1).optional() }).strict().parse(input);
     await this.initialize();
     return this.transaction(async (state, save, core, outbox) => {
       const run = this.run(state, args.runId);
@@ -1685,7 +1739,8 @@ export class AgenticWorkflowRuntime {
           (run.approval.target.type !== "task" || run.approval.target.taskId === task.taskId) ||
           Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending" && entry.taskId === task.taskId))
         throw new Error("Task đang chờ phê duyệt hoặc quyết định của người dùng");
-      if (task.verificationPending || state.pendingVerifications.some(item => pendingRunId(item) === run.runId && pendingTaskId(item) === task.taskId))
+      const pendingVerification = state.pendingVerifications.filter(item => pendingRunId(item) === run.runId && pendingTaskId(item) === task.taskId);
+      if (pendingVerification.some(item => !exhaustedTaskVerification(item, run, task, current.attemptId)) || task.verificationPending && !pendingVerification.length)
         throw new Error("Task còn kiểm chứng đang chạy; cần chờ kiểm chứng kết thúc");
       const executions = related.filter(out => !out.parentAssignmentId && out.handle &&
         (out.status === "accepted" || out.handle.executionId === current.agentExecution?.executionId));
@@ -1750,6 +1805,7 @@ export class AgenticWorkflowRuntime {
             task.parkSettlement = { attemptId: current.attemptId, binding: pane, park: {
               at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source,
               episode: Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1,
+              ...(args.resumeAttempts !== undefined ? { resumeAttempts: args.resumeAttempts } : {}),
               ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) } };
             for (const out of queued) { out.status = "cancelled"; out.error = "Task parked"; }
             // Authority and delivery fence must be durable before PaneManager can relinquish capacity (including a lost reply).
@@ -1788,6 +1844,7 @@ export class AgenticWorkflowRuntime {
       }
       const episode = task.parkSettlement?.park.episode ?? Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1;
       task.parked = task.parkSettlement?.park ?? { at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source, episode,
+        ...(args.resumeAttempts !== undefined ? { resumeAttempts: args.resumeAttempts } : {}),
         ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) };
       delete task.parkSettlement;
       const after = await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId,
@@ -1795,6 +1852,13 @@ export class AgenticWorkflowRuntime {
         reason: task.parked!.reason, occurredAt: task.parked!.at, idempotencyKey: `park:${run.runId}:${task.taskId}:${episode}`,
         ...(bound?.parkStop?.proof ? { stopConfirmation: { schemaVersion: 1, cancellationId: `park-${digest([run.runId, task.taskId, episode])}`,
           executionId: bound.handle!.executionId, stoppedAt: bound.parkStop.proof.observedAt, terminalStatus: "cancelled" } } : {}) }));
+      state.pendingVerifications = state.pendingVerifications.filter(item => !pendingVerification.includes(item));
+      if (pendingVerification.length) {
+        task.parkedVerifications = [...(task.parkedVerifications ?? []), ...pendingVerification.map(item => ({
+          episode, settledAt: task.parked!.at, job: item.job, outcome: item.outcome, attempts: item.attempts!,
+          ...(item.lastError !== undefined ? { lastError: item.lastError } : {}) }))].slice(-20);
+        task.verificationPending = false; run.status = "implementing"; delete run.pendingAction; delete run.error;
+      }
       if (run.status === "escalated" && run.pendingAction && related.some(out =>
           [run.pendingAction!.sourceMessageId, ...(run.pendingAction!.relatedMessageIds ?? [])].includes(out.message.message_id))) {
         run.status = run.pendingAction.previousStatus ?? "implementing";
@@ -2667,7 +2731,7 @@ export class AgenticWorkflowRuntime {
    * once spent, the action becomes `manual` and Conversation is told once, with how to resume it explicitly. An explicit user
    * resume has its own bound (`manualResumeAttempts`, 3) and grants a fresh automatic budget. Human decisions are never answered here.
    */
-  async resumeRecoverableRuns(): Promise<JsonValue> {
+  async resumeRecoverableRuns(parkPolicy?: AutoParkPolicy): Promise<JsonValue> {
     if (this.quiesced) return json({ resumed: 0, reason: "quiesced" });
     const coordinatorReadable = this.ports.roleCapabilities.coordinator?.includes("repository.read") === true;
     const candidates = await this.transaction(async (state, save, _core, outbox) => {
@@ -2677,16 +2741,19 @@ export class AgenticWorkflowRuntime {
         (!this.ports.director || run.delegation.requestedBy === "director") &&
         run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending" &&
         ["auto_resume", "capability_repair"].includes(run.pendingAction.recovery ?? "manual"));
+      const limit = (run: RunRecord) => this.ports.director && parkPolicy?.enabled && run.delegation.requestedBy === "director" &&
+        run.pendingAction?.recovery === "auto_resume" && !run.error?.startsWith(VERIFICATION_RETRY_PREFIX)
+        ? parkPolicy.maxAutoResumesBeforePark : AUTO_RESUME_LIMIT;
       let changed = false;
-      for (const run of recoverable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT)) {
+      for (const run of recoverable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= limit(item))) {
         // Budget spent: stop automatic resumes and say so once; an explicit user resume/cancel decides from here.
         const action = run.pendingAction!, actionId = action.actionId, manual = action.manualResumeAttempts ?? 0;
         const manualLeft = Math.max(0, MANUAL_RESUME_LIMIT - manual);
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
           actionId, reason: action.reason, blockageReason: action.reason, manualResumesLeft: manualLeft,
           headline: manualLeft > 0
-            ? `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. Type \`tiếp tục ${run.runId}\` to resume it (${manualLeft} of ${MANUAL_RESUME_LIMIT} user resumes left)`
-            : `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. All ${MANUAL_RESUME_LIMIT} user resumes are used: fix the cause with an operator or cancel`,
+            ? `Runtime đã dừng tự tiếp tục sau ${limit(run)} lần; cùng nguyên nhân vẫn lặp lại. Gõ \`tiếp tục ${run.runId}\` để thử lại (còn ${manualLeft}/${MANUAL_RESUME_LIMIT} lần do người dùng yêu cầu)`
+            : `Runtime đã dừng tự tiếp tục sau ${limit(run)} lần; đã dùng hết ${MANUAL_RESUME_LIMIT} lần do người dùng yêu cầu. Cần khắc phục nguyên nhân với operator hoặc hủy run`,
           options: manualLeft > 0
             ? [`Gõ \`tiếp tục ${run.runId}\` để Runtime tiếp tục run (còn ${manualLeft}/${MANUAL_RESUME_LIMIT} lần)`, "Khắc phục nguyên nhân (capability/pane) với operator", "Hủy run"]
             : ["Khắc phục nguyên nhân (capability/pane) với operator; run không tự tiếp tục nữa", "Hủy run"] },
@@ -2698,7 +2765,7 @@ export class AgenticWorkflowRuntime {
       if (changed) await save();
       return recoverable.filter(run => {
         const action = run.pendingAction!;
-        if ((action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) return false;
+        if ((action.resumeAttempts ?? 0) >= limit(run)) return false;
         // Human gates and unknown deliveries are durable waits: never answered, resent or bypassed automatically.
         if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
             run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;

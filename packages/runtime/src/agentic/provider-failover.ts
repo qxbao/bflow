@@ -136,7 +136,7 @@ export class TaskProviderFailover {
       entry.phase = "stopping"; entry.stopAttempts++; await this.save();
       let proof;
       try { proof = await this.ports.stopDeveloperExecutionScope?.(entry.sourceHandle, entry.sourceBinding); }
-      catch { this.hold(run, entry, "old_execution_stop_requires_reconciliation", entry.stopAttempts >= 3); return; }
+      catch { this.hold(run, entry, entry.stopAttempts >= 3 ? "old_execution_stop_budget_exhausted" : "old_execution_stop_requires_reconciliation", entry.stopAttempts >= 3); return; }
       if (!proof) { this.hold(run, entry, "old_execution_not_stopped"); return; }
       const stopped = CancellationStopProofSchema.parse(proof);
       if (digest(stopped.handle) !== digest(entry.sourceHandle) || Date.parse(stopped.observedAt) < Date.parse(entry.sourceHandle.acceptedAt) || Date.parse(stopped.observedAt) > Date.parse(this.now()))

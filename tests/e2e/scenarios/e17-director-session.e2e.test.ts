@@ -15,6 +15,7 @@ afterEach(async () => { for (const session of sessions.splice(0)) await session.
 const LEGACY_REFUSAL = "Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work";
 const CRITERION = "The requested outcome is independently verifiable";
 const NOW = () => new Date().toISOString();
+function unwrapSnapshot<T>(value: { ok: true; value: T } | { ok: false; error: { message: string } }): T { if (!value.ok) throw new Error(value.error.message); return value.value; }
 
 /** The Gateway's projection token (localeCompare key order), as the Web client echoes it back. */
 function token(value: unknown): string {
@@ -151,6 +152,57 @@ describe("Scenario E17 — Director session (manifest v3, fake runner)", () => {
     expect(session.transport.messages().some(message => message.recipient.role === "reviewer" && message.type === "verification.requested")).toBe(true);
     expect(session.director.deliveries.length).toBeGreaterThan(0);
     expect(JSON.parse(await readFile(join(session.journalDirectory, "state.json"), "utf8")).version).toBe(8);
+  }, 120_000);
+
+  it("auto-parks a stalled A, completes independent C, keeps B pending and retries the queue through completion", async () => {
+    const authorized: ApprovalDecision[] = [];
+    const session = await createDirectorSession({ authorizeHuman: async decision => {
+      const exact = session.humanDecisions.some(recorded => isDeepStrictEqual(recorded, decision));
+      if (exact) authorized.push(decision); return exact;
+    } }); sessions.push(session);
+    const registered = await session.endpoint.register({ provider: "claude" });
+    const { runId } = await startWork(session, registered.token);
+    const specificationId = (await session.inspect(runId)).delegation.specificationId as string;
+    const spec = documentationSpecification(runId, specificationId);
+    spec.affectedPaths = ["guide.md", "after.md", "independent.md"]; spec.traceabilityTaskIds = ["implement", "after", "independent"];
+    (spec.metadata!.sdd as any).traceability[0].taskIds = spec.traceabilityTaskIds;
+    const definition = singleTaskWorkflow();
+    definition.tasks = [definition.tasks[0]!, ...["after", "independent"].map(id => ({ ...structuredClone(definition.tasks[0]!), id, title: id,
+      metadata: { ownedPaths: [id === "after" ? "after.md" : "independent.md"] } }))];
+    (definition.dependencies as any[]) = [{ taskId: "after", dependsOnTaskId: "implement", condition: "succeeded" }];
+    await session.endpoint.call(registered.token, "propose_workflow", { runId, specification: spec, definition });
+    await session.runtime.tick();
+    const assigned = (await session.state()).outbound.find((out: any) => out.taskId === "implement" && out.message.type === "task.assignment");
+    expect(assigned.status).toBe("accepted");
+    const binding = session.panes.bindings.find(pane => pane.paneId === assigned.handle.target.paneId)!;
+    binding.metadata = { runId, taskId: `${runId}-implement` };
+    session.ports.stopDeveloperExecutionScope = async handle => ({ source: "linux_pid_namespace", handle, observedAt: new Date().toISOString(),
+      scopeId: randomUUID(), bootId: randomUUID(), initPid: 123, initStartTime: "1", namespace: "pid:[123]", receiptDigest: "a".repeat(64) });
+    await session.runtime.reportRunStalled(runId, "stall-reminder"); await session.runtime.flushOutbound();
+    await session.runtime.reportRunStalled(runId, "stall-escalated");
+    expect((await session.inspect(runId)).pendingAction).toMatchObject({ sourceMessageId: assigned.message.message_id, recovery: "auto_resume" });
+    const reduced = { enabled: true, maxAutoResumesBeforePark: 0 };
+    expect(await session.runtime.resumeRecoverableRuns(reduced)).toEqual({ resumed: 0 });
+    expect(await session.runtime.autoParkPass(reduced)).toMatchObject({ parked: [{ taskId: "implement", kind: "transport_failure" }] });
+    await session.runtime.tick();
+    await session.evidence(runId, "independent"); await session.submit(runId, "independent", "independent.md");
+    for (let pass = 0; pass < 5 && (await session.inspect(runId)).status !== "completed_with_parked"; pass++) await session.tickWithReviewer();
+    expect((await session.inspect(runId)).status).toBe("completed_with_parked");
+    const partial = unwrapSnapshot(await session.ports.engine.getSnapshot(runId));
+    expect(partial.tasks.map(task => [task.taskId, task.status])).toEqual([["implement", "parked"], ["after", "pending"], ["independent", "succeeded"]]);
+    expect((await session.endpoint.readMailbox({ audience: "user" })).some(item => item.type === "conversation.progress" && item.runId === runId)).toBe(true);
+    const issues = await session.endpoint.listIssues(); expect(issues).toHaveLength(1);
+    // Same owner operation as director_issue_status / bflow queue retry; no Director approval or evidence authority.
+    await session.endpoint.setIssueStatus(issues[0]!.issueId, "retrying");
+    await session.runtime.tick();
+    await session.evidence(runId); await session.submit(runId);
+    for (let pass = 0; pass < 4 && !(await session.state()).outbound.some((out: any) => out.taskId === "after" && out.status === "accepted"); pass++) await session.tickWithReviewer();
+    await session.evidence(runId, "after"); await session.submit(runId, "after", "after.md");
+    for (let pass = 0; pass < 8 && !["completed", "awaiting_approval"].includes((await session.inspect(runId)).status); pass++) await session.tickWithReviewer();
+    if ((await session.inspect(runId)).status === "awaiting_approval") await answerDecision(session, runId, authorized);
+    await session.runtime.tick();
+    await session.runtime.flushOutbound();
+    expect((await session.inspect(runId)).status).toBe("completed");
   }, 120_000);
 
   it("does not auto-resume a Director run while the Director is absent and resumes it once present", async () => {

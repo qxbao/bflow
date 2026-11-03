@@ -144,6 +144,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,
           verification: input.config.environment.verification,
+          issueQueue: input.config.environment.issueQueue,
           fastPath: input.config.environment.fastPath,
           concurrency: input.config.environment.concurrency
         }
@@ -191,6 +192,7 @@ export const openLifecycleHost: LifecycleHostFactory = async input => {
           sdd: input.config.environment.sdd,
           tdd: input.config.environment.tdd,
           verification: input.config.environment.verification,
+          issueQueue: input.config.environment.issueQueue,
           fastPath: input.config.environment.fastPath,
           concurrency: input.config.environment.concurrency
         }

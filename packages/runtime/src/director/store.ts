@@ -34,6 +34,7 @@ export interface DirectorVersion {
 }
 export type MailboxAppendInput = Omit<DirectorMailboxItem, "schemaVersion" | "seq">;
 export interface IssueInput {
+  readonly key?: string;
   readonly issueId?: string;
   readonly runId: string;
   readonly taskKey?: string;
@@ -247,7 +248,8 @@ export class DirectorStore {
     return this.serial(async () => {
       const file = await this.readIssues();
       const at = this.iso();
-      const existing = input.issueId !== undefined ? file.issues.find(issue => issue.issueId === input.issueId) : undefined;
+      const issueId = input.key === undefined ? input.issueId : `park-${sha256(input.key).toString("hex")}`;
+      const existing = issueId !== undefined ? file.issues.find(issue => issue.issueId === issueId) : undefined;
       let saved: ParkedIssue;
       let issues: ParkedIssue[];
       if (existing) {
@@ -262,11 +264,12 @@ export class DirectorStore {
           suggestedAction: input.suggestedAction,
           updatedAt: at
         });
+        if (JSON.stringify({ ...saved, updatedAt: existing.updatedAt }) === JSON.stringify(existing)) return existing;
         issues = file.issues.map(issue => (issue.issueId === saved.issueId ? saved : issue));
       } else {
         saved = ParkedIssueSchema.parse({
           schemaVersion: DIRECTOR_SCHEMA_VERSION,
-          issueId: input.issueId ?? randomUUID(),
+          issueId: issueId ?? randomUUID(),
           runId: input.runId,
           ...(input.taskKey !== undefined ? { taskKey: input.taskKey } : {}),
           kind: input.kind,

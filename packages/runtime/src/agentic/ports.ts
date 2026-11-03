@@ -1,3 +1,4 @@
+import type { IssueInput } from "../director/store.js";
 import type {
   AgentExecutionHandle, AgentRegistry, AgentRequest, AgentResult, AgentRole, AgentTransport, ApprovalDecision,
   ApprovalRequest, ArtifactStore, DeveloperContinuationAllocation, ExecutorLineage, FailoverCandidate, GitChangeSet,
@@ -120,6 +121,8 @@ export interface DirectorRuntimePort {
   deliver(message: RoleMessage): Promise<void>;
   /** Director presence is not `absent`; gates automatic resume, which only spends budget when someone can read the wake. */
   present(): Promise<boolean>;
+  /** Durable, idempotent per park episode key. */
+  upsertIssue(input: IssueInput): Promise<void>;
 }
 export interface AgenticRuntimePorts {
   /** Director session mode; absent in v2 (Conversation/Coordinator pane) sessions. */

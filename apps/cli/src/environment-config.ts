@@ -128,6 +128,10 @@ export const EnvironmentConfigEnvironmentSchema = z
         reviewTimeoutMs: z.number().int().min(60_000).max(3_600_000).optional()
       })
       .strict(),
+    issueQueue: z.object({
+      autoPark: z.boolean().default(true),
+      maxAutoResumesBeforePark: z.number().int("issueQueue.maxAutoResumesBeforePark phải trong khoảng 0–3").min(0, "issueQueue.maxAutoResumesBeforePark phải trong khoảng 0–3").max(3, "issueQueue.maxAutoResumesBeforePark phải trong khoảng 0–3").default(3)
+    }).strict().default({ autoPark: true, maxAutoResumesBeforePark: 3 }),
     fastPath: z
       .object({
         mode: z.enum(["auto", "off"]).default("auto")
@@ -228,6 +232,7 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
       sdd: { minimumLevel: "lightweight", approvalRequired: true },
       tdd: { policy: "conditional" },
       verification: { maxIterations: 3, onExhausted: "require_human", regressionScope: "affected" },
+      issueQueue: { autoPark: true, maxAutoResumesBeforePark: 3 },
       fastPath: { mode: "auto" },
       concurrency: { maxConcurrency: 2 },
       startupTimeoutMs: 300_000,
@@ -356,6 +361,7 @@ export function upsertEnvironmentConfig(
     sdd: { ...baseEnv.sdd, ...savedEnv.sdd },
     tdd: { ...baseEnv.tdd, ...savedEnv.tdd },
     verification: { ...baseEnv.verification, ...savedEnv.verification },
+    issueQueue: { ...baseEnv.issueQueue, ...savedEnv.issueQueue },
     fastPath: { ...baseEnv.fastPath, ...savedEnv.fastPath },
     concurrency: { ...baseEnv.concurrency, ...savedEnv.concurrency },
     startupTimeoutMs: savedEnv.startupTimeoutMs ?? baseEnv.startupTimeoutMs,

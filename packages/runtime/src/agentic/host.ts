@@ -134,6 +134,7 @@ export function shouldRunWatchdog(input: {
 
 export interface HostWatchdogWorkspaceLike {
   readonly runtime: Pick<AgenticWorkflowRuntime, "resumeRecoverableRuns" | "watchdogSnapshot" | "reportWorkflowBlocked" | "reportRunStalled"> & {
+    autoParkPass?: AgenticWorkflowRuntime["autoParkPass"];
     readonly ports: { readonly panes: Pick<AgenticRuntimePorts["panes"], "getManifest"> };
   };
   readonly conversation: { reconcileApprovals(): Promise<unknown> };
@@ -162,6 +163,7 @@ export async function executeHostWatchdogPass(deps: {
    * notices (no reconcile_notice, resurface or display-ack `blocked` actions); automatic resume and stall reports still run.
    */
   directorSession?: boolean;
+  issueQueue?: { autoPark: boolean; maxAutoResumesBeforePark: number };
 }): Promise<void> {
   const activeState = () => {
     const current = deps.readState();
@@ -180,9 +182,12 @@ export async function executeHostWatchdogPass(deps: {
   // Bounded automatic resume pass: `auto_resume` blockers (no-next-action stops, Coordinator blockers, verification
   // delivery/storage escalations) after backoff, and `capability_repair` once the current role session proves the capability.
   // Approvals, user decisions, cancellation, manual blockers and unknown deliveries remain waiting for action.
-  await initial.workspace.runtime.resumeRecoverableRuns();
+  const parkPolicy = { enabled: deps.issueQueue?.autoPark ?? true, maxAutoResumesBeforePark: deps.issueQueue?.maxAutoResumesBeforePark ?? 3 };
+  await initial.workspace.runtime.resumeRecoverableRuns(deps.directorSession ? parkPolicy : undefined);
   const afterResume = activeState();
   if (!afterResume) return;
+  if (deps.directorSession && parkPolicy.enabled) await afterResume.workspace.runtime.autoParkPass?.(parkPolicy);
+  if (!activeState()) return;
   const runs = await afterResume.workspace.runtime.watchdogSnapshot(afterResume.manifest.conversationSessionId);
   if (!activeState() || !runs.some(run => run.live)) return;
   const notices = deps.directorSession === true ? [] : await deps.receipts.conversationNoticeStates();
@@ -238,6 +243,7 @@ export async function executeHostWatchdogPass(deps: {
 
 export interface HostIdleCheckWorkspaceLike {
   readonly runtime: Pick<AgenticWorkflowRuntime, "watchdogSnapshot"> & {
+    autoParkPass?: AgenticWorkflowRuntime["autoParkPass"];
     readonly ports: { readonly panes: Pick<AgenticRuntimePorts["panes"], "getManifest"> };
   };
 }
@@ -1275,7 +1281,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         ...(configuration.progressCommand ? { progressCommand: configuration.progressCommand } : {}),
         // R-B2-5: every outbound for the logical Coordinator goes to the Director mailbox. The endpoint is built once, below.
         director: { deliver: message => directorEndpoint.deliverRuntimeMessage(message),
-          present: async () => (await directorEndpoint.presence()) !== "absent" }
+          present: async () => (await directorEndpoint.presence()) !== "absent",
+          upsertIssue: async input => { await directorEndpoint.upsertIssue(input); } }
       } : {}),
       ...(platformSession ? { developerLaunches: {
         allocate: async request => {
@@ -1423,7 +1430,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     for (const commandId of await workspace.runtime.recoverUnqueuedWebCancellations(webStore))
       process.stderr.write(`Bflow web cancellation ${commandId}: not enqueued before daemon restart; no command replayed\n`);
     for (const turn of await receipts.recoverAgyNativeTurns()) queueAgyNativePrompt(turn);
-    await workspace.runtime.resumeRecoverableRuns();
+    await workspace.runtime.resumeRecoverableRuns(directorLayout ? { enabled: configuration.policy?.issueQueue?.autoPark ?? true, maxAutoResumesBeforePark: configuration.policy?.issueQueue?.maxAutoResumesBeforePark ?? 3 } : undefined);
     manifest = accepted;
     await taskLogPane.ensure(accepted.herdrWorkspaceId);
     if (directorLayout) await ensureProgressPane(workspace);
@@ -3031,7 +3038,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     activeHostVerifications,
     watchdogReported,
     observeAgent,
-    directorSession: directorLayout
+    directorSession: directorLayout,
+    ...(configuration.policy?.issueQueue ? { issueQueue: configuration.policy.issueQueue } : {})
   });
   /**
    * Surfaces native deliveries whose acknowledgement was never observed, once per operation, and never resends them.

@@ -188,6 +188,8 @@ export class DirectorEndpoint {
     return { recorded: result.recorded };
   }
 
+  upsertIssue(input: import("./store.js").IssueInput): Promise<ParkedIssue> { return this.store.upsertIssue(input); }
+
   listIssues(status?: readonly ParkedIssueStatus[]): Promise<ParkedIssue[]> {
     return this.store.listIssues(status ? { status } : undefined);
   }

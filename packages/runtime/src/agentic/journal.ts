@@ -52,13 +52,20 @@ export interface SpecRecord {
 const TaskParkSchema = z.object({
   at: IsoDateTimeSchema, reason: z.string().trim().min(1).max(2000), kind: ParkedIssueKindSchema,
   source: z.enum(["director", "auto"]), episode: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  resumeAttempts: z.number().int().min(0).max(3).optional(),
   episodeKey: z.string().min(1).optional()
 }).strict();
 export type TaskPark = z.infer<typeof TaskParkSchema>;
 const TaskParkSettlementSchema = z.object({
   attemptId: z.string().min(1), binding: PaneBindingSchema, park: TaskParkSchema
 }).strict();
+const ParkedVerificationSchema = z.object({
+  episode: z.number().int().positive(), settledAt: IsoDateTimeSchema,
+  job: JsonValueSchema, outcome: JsonValueSchema, attempts: z.number().int().min(3), lastError: z.string().optional()
+}).strict();
 export interface TaskRecord {
+  /** Durable audit of exhausted verification outcomes settled by park; never replayed as pending work. */
+  parkedVerifications?: z.infer<typeof ParkedVerificationSchema>[];
   parked?: TaskPark;
   parkHistory?: TaskPark[];
   /** Private v8 write-ahead authority to settle an unsent allocation; dispatch stays fenced until park commits. */
@@ -327,7 +334,7 @@ export function isInProcessDelivery(out: Outbound): boolean {
 export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
   return state.outbound.some(out => out.delivery !== undefined || out.parkStop !== undefined) ||
     state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
-      run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined));
+      run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined));
 }
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
@@ -463,8 +470,9 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
-      if (task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined) {
+      if (task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined) {
         if (state.version < 8) throw new Error("Task parking requires private journal v8");
+        if (task.parkedVerifications !== undefined) task.parkedVerifications = z.array(ParkedVerificationSchema).max(20).parse(task.parkedVerifications);
         if (task.parked !== undefined) task.parked = TaskParkSchema.parse(task.parked);
         if (task.parkHistory !== undefined) task.parkHistory = z.array(TaskParkSchema).max(20).parse(task.parkHistory);
         if (task.parkSettlement !== undefined) task.parkSettlement = TaskParkSettlementSchema.parse(task.parkSettlement);

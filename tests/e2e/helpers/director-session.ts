@@ -221,7 +221,8 @@ export async function createDirectorSession(options: DirectorSessionOptions = {}
   /** Mailbox port: the real endpoint; `absent` presence blocks automatic resume. */
   const director: DirectorRuntimePort & { deliveries: RoleMessage[] } = { deliveries: [],
     async deliver(message) { this.deliveries.push(message); await endpoint.deliverRuntimeMessage(message); },
-    present: async () => (await endpoint.presence()) !== "absent" };
+    present: async () => (await endpoint.presence()) !== "absent",
+    upsertIssue: async input => { await endpoint.upsertIssue(input); } };
   const ports: AgenticRuntimePorts = { engine: new DeterministicWorkflowEngine({ bindingReceiptKeys: {} }), runStore: store, artifactStore: artifacts,
     registry: new FileAgentRegistry({ stateFile: join(root, "registry.json"), clock: () => new Date(Date.now() + clockOffsetMs) }), transport, panes, policies,
     clock: () => new Date(Date.now() + clockOffsetMs),
@@ -254,11 +255,11 @@ export async function createDirectorSession(options: DirectorSessionOptions = {}
   const inspect = async (runId: string) => await runtime.inspect(runId) as any;
   const state = async () => await runtime.inspect() as any;
   /** Developer fake: commits in its worktree and submits a correlated AgentResult for the current assignment. */
-  async function submit(runId: string, taskId = "implement") {
+  async function submit(runId: string, taskId = "implement", filename = "guide.md") {
     const outbound = [...(await state()).outbound].reverse().find((out: any) => out.taskId === taskId && out.message.type === "task.assignment" && out.message.run_id === runId);
     if (!outbound?.handle) throw new Error("No accepted Developer assignment");
     const handle = outbound.handle as AgentExecutionHandle; const path = handle.target.worktreePath!;
-    await writeFile(join(path, "guide.md"), "updated\n"); git(path, "add", "guide.md"); git(path, "commit", "-m", "implement");
+    await writeFile(join(path, filename), "updated\n"); git(path, "add", filename); git(path, "commit", "-m", "implement");
     const snapshot = unwrap(await ports.engine.getSnapshot(runId))!;
     const correlation = snapshot.tasks.find(task => task.taskId === taskId)!.bindingVerification?.receipt.correlation ?? handle.correlation;
     const result = AgentResultSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId, taskId, executionId: handle.executionId,

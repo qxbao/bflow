@@ -27,6 +27,10 @@ describe("director host wiring helpers", () => {
     expect(isDirectorCoordinatorTool("inspect")).toBe(true);
     expect(isDirectorCoordinatorTool("propose_workflow")).toBe(true);
     expect(isDirectorCoordinatorTool("planning_reference")).toBe(true);
+    expect(isDirectorCoordinatorTool("park_task")).toBe(true);
+    expect(isDirectorCoordinatorTool("unpark_task")).toBe(true);
+    expect(isDirectorCoordinatorTool("approve")).toBe(false);
+    expect(isDirectorCoordinatorTool("record_verification")).toBe(false);
     expect(isDirectorCoordinatorTool("report_progress")).toBe(false);
     expect(isDirectorCoordinatorTool("repository_read")).toBe(false);
   });
@@ -52,7 +56,7 @@ describe("director host wiring helpers", () => {
       inspect: async () => ({}), coordinator: { invoke: async () => null } });
     // The same composition the host passes as ports.director in a v3 session.
     const port = { deliver: (message: RoleMessage) => endpoint.deliverRuntimeMessage(message),
-      present: async () => (await endpoint.presence()) !== "absent" };
+      present: async () => (await endpoint.presence()) !== "absent", upsertIssue: async (input: import("../../src/director/store.js").IssueInput) => { await endpoint.upsertIssue(input); } };
     expect(await endpoint.presence()).toBe("absent");
     expect(await port.present()).toBe(false);
     await endpoint.register(DIRECTOR_OWNER_METHODS.director_register.parse({ provider: "claude" }));
