@@ -22,6 +22,24 @@ vi.mock("node:fs/promises", async original => {
 });
 
 describe.each(["analysis", "qa"] as const)("%s native SDK durable writes", family => {
+  it("restores a blocked Core aggregate on reopen before checkpointing, without resending native work", async () => {
+    const f = await nativeExtensionFixture(family), { sdk } = await f.open(); await f.start(sdk);
+    f.native.waitResult = async () => { throw new Error("native result remains unresolved"); };
+    await expect(sdk.drive("run-native")).rejects.toThrow("native result remains unresolved");
+    const stored = await f.runStore.get("run-native");
+    if (!stored.ok || !stored.value) throw new Error("Missing authoritative stored run");
+    const eventsBefore = await f.runStore.readEvents("run-native", { limit: 100 });
+    const sent = f.transport.sentRequests.length, recovered = await f.open();
+    expect(recovered.sdk.status("run-native").status).toBe("blocked");
+    expect(await recovered.engine.getSnapshot("run-native")).toEqual({ ok: true, value: stored.value.snapshot });
+    const checkpoint = await recovered.engine.createCheckpoint({ runId: "run-native", checkpointId: "shutdown-checkpoint",
+      expectedVersion: stored.value.snapshot.version, createdAt: new Date().toISOString() });
+    expect(checkpoint).toMatchObject({ ok: true, value: { runId: "run-native", version: stored.value.snapshot.version } });
+    expect(f.transport.sentRequests).toHaveLength(sent);
+    expect(await f.runStore.readEvents("run-native", { limit: 100 })).toEqual(eventsBefore);
+    expect((await f.native.snapshot()).outbound[0]!.status).toBe("accepted");
+  });
+
   it("cannot overwrite a newer run with a delayed earlier approval snapshot", async () => {
     const f = await nativeExtensionFixture(family), { sdk } = await f.open(); await f.start(sdk);
     const before = JSON.parse(await readFile(f.journalPath, "utf8"));

@@ -160,6 +160,8 @@ export class AnalysisWorkflowRuntime {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    if (ports.roles.native)
+      for (const run of runtime.journal.runs) if (run.coreCreated) await runtime.restoreCore(run);
     return runtime;
   }
 
