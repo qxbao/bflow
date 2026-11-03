@@ -239,6 +239,8 @@ function specialistBlockage(payload: unknown): string | undefined {
  * Runtime refused an inbound request for a reason that retrying cannot change (stale or foreign revision, terminal run, superseded
  * approval). Hosts must not resend it, and must not report it as an uncertain delivery: its refusal is already a Conversation notice.
  */
+/** R-B2-12: shown whenever a Director session is asked to change a run created by a v2 Conversation. */
+export const DIRECTOR_LEGACY_RUN_MESSAGE = "Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work";
 export class AdmissionRejectedError extends Error {
   readonly retryable = false;
   constructor(message: string) { super(message); this.name = "AdmissionRejectedError"; }
@@ -516,7 +518,14 @@ export class AgenticWorkflowRuntime {
   /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
   private assertDirectorWritable(run: RunRecord): void {
     if (this.ports.director && run.delegation.requestedBy !== "director")
-      throw new AdmissionRejectedError("Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work");
+      throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+  }
+  /** Tool-layer guard (Director principal): true when the run was created by a v2 Conversation. */
+  async assertDirectorRunWritable(runId: string): Promise<void> {
+    await this.journal.exclusive(async state => {
+      const run = state.runs.find(item => item.runId === runId);
+      if (run) this.assertDirectorWritable(run);
+    });
   }
   private run(state: JournalState, runId: string): RunRecord {
     const run = state.runs.find(item => item.runId === runId);
@@ -1021,6 +1030,33 @@ export class AgenticWorkflowRuntime {
     // A Gateway inbox callback may itself enqueue this control. Do not await that same in-flight delivery recursively.
     if (isCancellationHandoff(message)) void this.deliverInProcessInbox().catch(() => undefined);
     return result;
+  }
+  /**
+   * R-B2-4: the Director opens a run itself. It uses the same admission rules as a Conversation delegation but involves no RoleMessage,
+   * no outbox entry for the Coordinator (the Director is the Coordinator authority) and no rejection notice: the caller sees the error.
+   */
+  async admitDirectorWork(input: unknown): Promise<{ runId: string; correlationId: string; admission: "new" | "duplicate" }> {
+    if (this.quiesced) throw new Error("Runtime is quiesced");
+    const delegation = DelegationRequestSchema.parse(input);
+    if (delegation.requestedBy !== "director" || delegation.targetRole !== "coordinator" || delegation.runId === undefined)
+      throw new Error("Director work envelope mismatch");
+    const runId = delegation.runId;
+    return this.transaction(async (state, save, _core, outbox) => {
+      const manifest = SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
+      if (manifest.schemaVersion !== 3) throw new Error("Director work requires an active Director session");
+      if (manifest.conversationSessionId !== delegation.sessionId) throw new Error("Cross-session delegation");
+      const admission = this.admitDelegation(state, delegation, []);
+      if (admission.kind === "rejected") throw new AdmissionRejectedError(admission.reason);
+      if (admission.kind === "revision")
+        throw new AdmissionRejectedError("Director requirement revisions are not supported in slice B2; cancel the run and call start_work again");
+      if (admission.kind === "duplicate") return { runId, correlationId: delegation.correlationId, admission: "duplicate" as const };
+      const run: RunRecord = { runId, delegation, status: "intake", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3 };
+      state.runs.push(run);
+      this.emit(state, outbox, run, "delegation.accepted", { delegationId: delegation.delegationId, revision: 1, sdlcStatus: "intake",
+        headline: "Director đã nhận việc" }, "accepted");
+      await save();
+      return { runId, correlationId: delegation.correlationId, admission: "new" as const };
+    });
   }
   /**
    * Decides whether a Conversation delegation opens a run, repeats one already known, revises the run's requirement, or is refused.
