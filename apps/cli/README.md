@@ -773,7 +773,7 @@ Luồng sử dụng:
 `bflow init` ghi skill `bflow-start`, cấu hình MCP và hook cho Claude Code, Codex và Agy:
 
 - `--no-director`: bỏ qua phần Director.
-- `--commit-skills`: không ghi khối Director vào `.gitignore` (mặc định các tệp Director bị gitignore), để nhóm commit skill/MCP/hook vào repo; nếu khối đã có thì được gỡ.
+- `--commit-skills`: không ghi khối Director vào `<git-common-dir>/info/exclude` (mặc định các tệp Director bị git bỏ qua qua exclude, không sửa `.gitignore`), để nhóm commit skill/MCP/hook vào repo; nếu khối đã có thì được gỡ.
 - `--check`: chỉ báo không khỏe khi đã có receipt `.bflow/director-files.json`.
 - `--remove`: gỡ các tệp do bflow tạo, giữ nguyên tệp người dùng đã sửa.
 

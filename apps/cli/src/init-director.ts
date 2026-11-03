@@ -52,7 +52,7 @@ export interface DirectorFilesOptions {
 export const DIRECTOR_NOT_INSTALLED_NOTICE =
   "Director chưa được cài trong kho này; chạy `bflow init --update` nếu muốn dùng /bflow-start";
 
-/** Reads the install receipt: whether it exists and whether it was written with --commit-skills (no .gitignore unit). */
+/** Reads the install receipt: whether it exists and whether it was written with --commit-skills (no git exclude unit). */
 async function readDirectorReceipt(repositoryRoot: string): Promise<{ installed: boolean; commitSkills: boolean }> {
   let text: string;
   try {
@@ -62,7 +62,7 @@ async function readDirectorReceipt(repositoryRoot: string): Promise<{ installed:
   }
   try {
     const units = (JSON.parse(text) as { units?: { path?: unknown }[] }).units;
-    const hasIgnore = Array.isArray(units) && units.some(u => u?.path === ".gitignore");
+    const hasIgnore = Array.isArray(units) && units.some(u => u?.path === ".git/info/exclude" || u?.path === ".gitignore");
     return { installed: true, commitSkills: Array.isArray(units) && !hasIgnore };
   } catch {
     return { installed: true, commitSkills: false };

@@ -48,12 +48,13 @@ describe("bflow init Director files", () => {
     expect(data.diagnostics.join("\n")).not.toContain("cài lại skill");
   });
 
-  it("--commit-skills writes no .gitignore block and removes a previous one", async () => {
+  it("--commit-skills writes no exclude block and removes a previous one", async () => {
     const res = await run(["--commit-skills"]);
     expect(res.exitCode).toBe(0);
     expect(await exists(".gitignore")).toBe(false);
+    expect(await readFile(join(repo, ".git/info/exclude"), "utf8")).not.toContain("bflow director");
     const check = await runCli(["init", "--check", "--json"], ctx());
-    expect(JSON.parse(check.stdout).data.director.files.map((f: { path: string }) => f.path)).not.toContain(".gitignore");
+    expect(JSON.parse(check.stdout).data.director.files.map((f: { path: string }) => f.path)).not.toContain(".git/info/exclude");
   });
 
   it("--check is unhealthy after the skill is deleted, and --remove deletes files", async () => {
@@ -72,14 +73,14 @@ describe("bflow init Director files", () => {
     expect(await exists(".mcp.json")).toBe(false);
   });
 
-  it("a malformed .gitignore block does not fail init", async () => {
-    await writeFile(join(repo, ".gitignore"), "# >>> bflow director >>>\nfoo\n");
+  it("a malformed exclude block does not fail init", async () => {
+    await writeFile(join(repo, ".git/info/exclude"), "# >>> bflow director >>>\nfoo\n");
     const res = await run([]);
     expect(res.exitCode).toBe(0);
     const data = JSON.parse(res.stdout).data;
     expect(data.director.status).toBe("failed");
     expect(data.diagnostics.join("\n")).toContain("malformed bflow director block");
-    expect(await readFile(join(repo, ".gitignore"), "utf8")).toContain("foo");
+    expect(await readFile(join(repo, ".git/info/exclude"), "utf8")).toContain("foo");
     await mkdir(join(repo, "x"), { recursive: true });
   });
 

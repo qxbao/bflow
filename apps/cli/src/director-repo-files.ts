@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { resolveGitExcludePath } from "./git-exclude.js";
 import { BFLOW_START_SKILL_VERSION, renderBflowStartSkill, shellQuoteArgv } from "./director-skill.js";
 
 export type DirectorProvider = "claude" | "codex" | "agy";
@@ -8,7 +9,7 @@ export interface DirectorRepoFilesInput {
   readonly repositoryRoot: string;
   readonly bflowCommand: readonly string[];
   readonly providers: readonly DirectorProvider[];
-  /** When true the skill files are meant to be committed: no managed .gitignore block. */
+  /** When true the skill files are meant to be committed: no managed git exclude block. */
   readonly commitSkills?: boolean;
 }
 export type DirectorRepoFileStatus = "missing" | "current" | "modified";
@@ -17,7 +18,7 @@ export interface DirectorRepoFileCheck {
   readonly status: DirectorRepoFileStatus;
 }
 
-type UnitKind = "file" | "json-key" | "toml-block" | "gitignore-block";
+type UnitKind = "file" | "json-key" | "toml-block" | "exclude-block" | "gitignore-block";
 interface Expectation {
   readonly kind: UnitKind;
   readonly key?: string;
@@ -28,7 +29,14 @@ interface ReceiptUnit extends Expectation {
 }
 
 const RECEIPT_PATH = ".bflow/director-files.json";
+/** Legacy (pre-exclude) location of the managed block; only read to migrate/remove it. */
 const GITIGNORE_PATH = ".gitignore";
+/**
+ * Logical, repository-stable name recorded in the receipt for the Git exclude file. The real file is
+ * `<git-common-dir>/info/exclude` (shared by linked worktrees) and is resolved at run time, so no
+ * absolute path is persisted.
+ */
+const EXCLUDE_LOGICAL_PATH = ".git/info/exclude";
 const START = "# >>> bflow director >>>";
 const END = "# <<< bflow director <<<";
 const ALL_PROVIDERS: readonly DirectorProvider[] = ["claude", "codex", "agy"];
@@ -49,7 +57,7 @@ function canonicalProviders(providers: readonly DirectorProvider[]): DirectorPro
   return ALL_PROVIDERS.filter(p => providers.includes(p));
 }
 
-/** Repository-relative files (excluding `.gitignore` and the receipt) written for the providers, sorted. */
+/** Repository-relative files (excluding the git exclude file and the receipt) written for the providers, sorted. */
 export function directorRepoFilePaths(providers: readonly DirectorProvider[]): string[] {
   const paths = new Set<string>();
   for (const provider of canonicalProviders(providers)) {
@@ -262,7 +270,7 @@ function guardBlock<T>(path: string, fn: () => T): T {
   }
 }
 
-function blockSpec(path: string, kind: "toml-block" | "gitignore-block", inner: string): FileSpec {
+function blockSpec(path: string, kind: "toml-block" | "exclude-block" | "gitignore-block", inner: string): FileSpec {
   return {
     path,
     expected: [{ kind, sha256: sha256(inner) }],
@@ -347,7 +355,7 @@ function buildSpecs(providers: readonly DirectorProvider[], bflowCommand: readon
     specs.push(jsonSpec(".codex/hooks.json", [hookDef(bflowCommand, "codex")]));
   }
   const ignored = [...directorRepoFilePaths(selected), RECEIPT_PATH].sort();
-  if (!commitSkills) specs.push(blockSpec(GITIGNORE_PATH, "gitignore-block", ignored.join("\n")));
+  if (!commitSkills) specs.push(blockSpec(EXCLUDE_LOGICAL_PATH, "exclude-block", ignored.join("\n")));
   return specs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
@@ -357,8 +365,36 @@ function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined;
 }
 
-/** Throws if any existing component of `rel` below `root` is a symlink. */
-async function assertNoSymlink(root: string, rel: string): Promise<void> {
+/** Maps a receipt/spec path to a filesystem path; the logical exclude path resolves through Git. */
+type Locator = (rel: string) => string;
+
+async function makeLocator(root: string): Promise<Locator> {
+  let exclude: string | undefined;
+  let failure: unknown;
+  try {
+    exclude = await resolveGitExcludePath(root);
+  } catch (error) {
+    failure = error;
+  }
+  return rel => {
+    if (rel !== EXCLUDE_LOGICAL_PATH) return join(root, rel);
+    if (exclude === undefined) throw failure instanceof Error ? failure : new Error("Cannot resolve the Git exclude file.");
+    return exclude;
+  };
+}
+
+/** Throws if any existing component of `rel` below `root` is a symlink (the exclude file: the file itself). */
+async function assertNoSymlink(root: string, rel: string, locate: Locator): Promise<void> {
+  if (rel === EXCLUDE_LOGICAL_PATH) {
+    const full = locate(rel);
+    try {
+      if ((await lstat(full)).isSymbolicLink()) throw new Error(`Refusing to write through a symlink: ${full}`);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return;
+      throw error;
+    }
+    return;
+  }
   let current = root;
   for (const part of rel.split("/")) {
     current = join(current, part);
@@ -372,19 +408,26 @@ async function assertNoSymlink(root: string, rel: string): Promise<void> {
   }
 }
 
-async function readIfExists(root: string, rel: string): Promise<string | null> {
+async function readIfExists(locate: Locator, rel: string): Promise<string | null> {
   try {
-    return await readFile(join(root, rel), "utf8");
+    return await readFile(locate(rel), "utf8");
   } catch (error) {
     if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") return null;
     throw error;
   }
 }
 
-async function writeText(root: string, rel: string, text: string, mode?: number): Promise<void> {
-  const full = join(root, rel);
+async function writeText(locate: Locator, rel: string, text: string, mode?: number): Promise<void> {
+  const full = locate(rel);
   await mkdir(dirname(full), { recursive: true });
   await writeFile(full, text, mode === undefined ? "utf8" : { encoding: "utf8", mode });
+}
+
+/** Every spec Bflow may ever have written (all providers plus the legacy `.gitignore` block), keyed by path. */
+function allKnownSpecs(): Map<string, FileSpec> {
+  const map = new Map(buildSpecs(ALL_PROVIDERS, ["/bflow"]).map(spec => [spec.path, spec]));
+  map.set(GITIGNORE_PATH, blockSpec(GITIGNORE_PATH, "gitignore-block", ""));
+  return map;
 }
 
 // ---------- public API ----------
@@ -392,13 +435,14 @@ async function writeText(root: string, rel: string, text: string, mode?: number)
 export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<{ written: string[] }> {
   const { repositoryRoot: root } = input;
   const specs = buildSpecs(input.providers, input.bflowCommand, input.commitSkills === true);
+  const locate = await makeLocator(root);
 
   // Plan phase: check every path and compute every new text before the first write.
-  await assertNoSymlink(root, RECEIPT_PATH);
+  await assertNoSymlink(root, RECEIPT_PATH, locate);
   const pending: { path: string; text: string }[] = [];
   for (const spec of specs) {
-    await assertNoSymlink(root, spec.path);
-    const existing = await readIfExists(root, spec.path);
+    await assertNoSymlink(root, spec.path, locate);
+    const existing = await readIfExists(locate, spec.path);
     const next = spec.merge(existing);
     if (next !== existing) pending.push({ path: spec.path, text: next });
   }
@@ -410,7 +454,7 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
     null,
     2,
   )}\n`;
-  const previousText = await readIfExists(root, RECEIPT_PATH);
+  const previousText = await readIfExists(locate, RECEIPT_PATH);
   const unitId = (u: ReceiptUnit): string => `${u.path}\0${u.kind}\0${u.key ?? ""}`;
   const newIds = new Set(units.map(unitId));
   const specPaths = new Set(specs.map(spec => spec.path));
@@ -424,13 +468,13 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
       previous = [];
     }
     const dropped = previous.filter(u => !newIds.has(unitId(u)) && !specPaths.has(u.path));
-    const allSpecs = new Map(buildSpecs(ALL_PROVIDERS, ["/bflow"]).map(spec => [spec.path, spec]));
+    const allSpecs = allKnownSpecs();
     for (const path of [...new Set(dropped.map(u => u.path))]) {
       const spec = allSpecs.get(path);
       const pathUnits = dropped.filter(u => u.path === path);
       if (!spec) continue;
-      await assertNoSymlink(root, path);
-      const text = await readIfExists(root, path);
+      await assertNoSymlink(root, path, locate);
+      const text = await readIfExists(locate, path);
       if (text === null) continue;
       let current: (string | undefined)[];
       try {
@@ -445,27 +489,35 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
       if (flags.some(Boolean)) orphans.push({ path, text: spec.remove(text, flags) });
     }
   }
-  const receiptChanged = (await readIfExists(root, RECEIPT_PATH)) !== finalReceipt;
+  const receiptChanged = (await readIfExists(locate, RECEIPT_PATH)) !== finalReceipt;
 
-  for (const item of pending) await writeText(root, item.path, item.text);
+  for (const item of pending) await writeText(locate, item.path, item.text);
   for (const item of orphans) {
-    if (item.text === null) await unlink(join(root, item.path));
-    else await writeText(root, item.path, item.text);
+    if (item.text === null) await unlink(locate(item.path));
+    else await writeText(locate, item.path, item.text);
   }
   if (orphans.length > 0) {
     for (const dir of [".claude/skills/bflow-start", ".agents/skills/bflow-start", ".codex", ".claude"]) {
       await rmdir(join(root, dir)).catch(() => undefined);
     }
   }
-  if (receiptChanged) await writeText(root, RECEIPT_PATH, finalReceipt, 0o644);
+  if (receiptChanged) await writeText(locate, RECEIPT_PATH, finalReceipt, 0o644);
   return { written: [...pending.map(item => item.path), ...orphans.map(item => item.path)].sort() };
 }
 
 export async function checkDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<DirectorRepoFileCheck[]> {
   const specs = buildSpecs(input.providers, input.bflowCommand, input.commitSkills === true);
   const results: DirectorRepoFileCheck[] = [];
+  const locate = await makeLocator(input.repositoryRoot);
   for (const spec of specs) {
-    const text = await readIfExists(input.repositoryRoot, spec.path);
+    let text: string | null;
+    try {
+      text = await readIfExists(locate, spec.path);
+    } catch (error) {
+      if (spec.path !== EXCLUDE_LOGICAL_PATH) throw error;
+      results.push({ path: spec.path, status: "missing" });
+      continue;
+    }
     let current: (string | undefined)[];
     try {
       current = spec.current(text);
@@ -501,13 +553,14 @@ function parseReceipt(text: string): ReceiptUnit[] {
 
 export async function removeDirectorRepoFiles(repositoryRoot: string): Promise<{ removed: string[]; kept: string[] }> {
   const root = repositoryRoot;
-  await assertNoSymlink(root, RECEIPT_PATH);
-  const receiptText = await readIfExists(root, RECEIPT_PATH);
+  const locate = await makeLocator(root);
+  await assertNoSymlink(root, RECEIPT_PATH, locate);
+  const receiptText = await readIfExists(locate, RECEIPT_PATH);
   if (receiptText === null) return { removed: [], kept: [] };
   const units = parseReceipt(receiptText);
 
   // Structure only; the command value is irrelevant for locating Bflow-owned units.
-  const specs = new Map(buildSpecs(ALL_PROVIDERS, ["/bflow"]).map(spec => [spec.path, spec]));
+  const specs = allKnownSpecs();
   const removed = new Set<string>();
   const kept = new Set<string>();
   const plans: { path: string; text: string | null }[] = [];
@@ -518,8 +571,8 @@ export async function removeDirectorRepoFiles(repositoryRoot: string): Promise<{
       kept.add(path);
       continue;
     }
-    await assertNoSymlink(root, path);
-    const text = await readIfExists(root, path);
+    await assertNoSymlink(root, path, locate);
+    const text = await readIfExists(locate, path);
     if (text === null) continue;
     let current: (string | undefined)[];
     try {
@@ -542,8 +595,8 @@ export async function removeDirectorRepoFiles(repositoryRoot: string): Promise<{
   }
 
   for (const plan of plans) {
-    if (plan.text === null) await unlink(join(root, plan.path));
-    else await writeText(root, plan.path, plan.text);
+    if (plan.text === null) await unlink(locate(plan.path));
+    else await writeText(locate, plan.path, plan.text);
   }
   await unlink(join(root, RECEIPT_PATH)).catch(() => undefined);
   for (const dir of [".claude/skills/bflow-start", ".agents/skills/bflow-start", ".bflow"]) {
