@@ -164,7 +164,8 @@ export async function createAgenticConversationHost(options: {
     async handOffToCoordinator(input: unknown): Promise<OperationResult<void>> {
       const request = DelegationRequestSchema.parse(input);
       const runId = request.runId ?? `run-${request.correlationId}`;
-      await options.extensions?.admit({ ...request, runId });
+      // Cancellation is an existing-run control; Runtime validates its exact target and session.
+      if (request.metadata?.action !== "cancel") await options.extensions?.admit({ ...request, runId });
       return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: request.messageId, correlation_id: request.correlationId,
         run_id: runId, sender: { role: "conversation", agent_id: conversation!.agentId, pane_id: conversation!.paneId },
         recipient: { role: "coordinator", agent_id: coordinator!.agentId, pane_id: coordinator!.paneId }, type: "delegation.request",

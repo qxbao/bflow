@@ -170,10 +170,20 @@ describe("workflow extension host routing", () => {
     expect(implementation.transport.sentRequests.some(item => item.role === "developer")).toBe(false);
     implementation.ports.cancelWorkflowExtension = (runId, reason) => extension.cancel(runId, reason);
     implementation.ports.inspectWorkflowExtension = runId => extension.inspect(runId);
-    await implementation.runtime.cancel(request.runId, "Owner stopped the native run");
+    const cancellation = { sessionId: "session-1", messageId: "real-user-cancel-analysis", content: "Hủy probe phân tích này",
+      provenance: { origin: "user", authenticatedUser: true }, conversationDecision: { intent: "cancellation_request",
+        cancellationInput: { runId: request.runId, reason: "Owner stopped the native run" } } };
+    const cancelled = await chat.handleUserTurn(cancellation) as any;
+    expect(cancelled.ok).toBe(true);
+    expect(cancelled.value.agentReply.metadata.cancellationBatch.items).toEqual([expect.objectContaining({ runId: request.runId, status: "queued" })]);
     expect(await extension.inspect(request.runId)).toMatchObject({ extensionStatus: "cancelled", cancelled: true });
+    expect((await extension.inspect(request.runId)).delegation).toEqual(request);
     expect(await implementation.runtime.reconcileCancellation(request.runId)).toMatchObject({ fullyStopped: true });
     expect(await extension.pendingApprovals()).toEqual([]);
+    await chat.handleUserTurn(cancellation);
+    const after = await implementation.runtime.inspect() as any;
+    expect(after.outbound.filter((item: any) => item.message.payload.metadata?.action === "cancel")).toHaveLength(1);
+    expect(after.runs).toHaveLength(1);
   });
   it("freezes exact family/pin at trusted intake and refuses configuration drift, ambiguous identity and conflicting replay", async () => {
     const f = await fixture(), host = await f.create(), request = delegation();
