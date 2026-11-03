@@ -31,7 +31,7 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
   const registry = new FileAgentRegistry({ stateFile: join(root, "registry.json") });
   const transport = new FakeAgentTransport();
   const panes = new Map<string, ReturnType<typeof PaneBindingSchema.parse>>();
-  for (const [role, capability] of [["architect", "architecture"], ["specifier", "specification"], ["reviewer", "review"], ["tester", "testing"], ["qa", "testing"]]) {
+  for (const [role, capability] of [["architect", "architecture"], ["specifier", "specification"], ["reviewer", "review"], ["qa", "testing"]]) {
     const pane = PaneBindingSchema.parse({ schemaVersion: 2, bindingId: `binding-${role}`, sessionId: sessionId, role,
       agentId: `actual-${role}`, paneId: `w:${role}`, workspaceId: "w", tabId: "w:t", provider: "codex", agentKind: "codex",
       cwd: repo, isolationMode: "dedicated_pane", readOnlyWorkspace: true, permanent: true, transportState: "idle",

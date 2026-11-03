@@ -260,6 +260,13 @@ export class QaWorkflowRuntime {
       access = { decidedBy: decision.decidedBy, decidedAt: decision.decidedAt };
     }
     const definition = input.definition === undefined ? planQaWorkflow(intake, input.maxIterations) : assertQaOnlyWorkflow(input.definition, intake, input.maxIterations);
+    if (this.ports.roles.native && input.definition === undefined) {
+      // Herdr's tester selector aliases the QA pane. Keep adjudication on a different real actor.
+      for (const task of definition.tasks) {
+        if (task.id === "design") task.role = "qa";
+        if (task.id === "adjudication") task.role = "reviewer";
+      }
+    }
     const run: RunRecord = { runId: input.runId, intake, intakeDigest: qaDigest(intake), definition, status: "running", createdAt,
       strategy: this.resolveStrategy(input.runId, intake, createdAt), coreCreated: false, ...(access ? { access } : {}), executions: [], designs: [],
       designChecks: [], adjudications: [], denials: [], rejections: [], blockers: [] };

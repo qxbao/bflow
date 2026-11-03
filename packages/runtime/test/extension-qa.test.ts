@@ -11,10 +11,10 @@ import { nativeExtensionFixture } from "./helpers/native-extension.js";
 const shutdown: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const stop of shutdown.splice(0)) await stop(); });
 
-async function qaFlow(options: { sharedSession?: "reviewer" | "qa"; hostSession?: string; revokeAfterReadiness?: boolean; legacyGrantOnly?: boolean;
+async function qaFlow(options: { shareReviewSession?: boolean; hostSession?: string; revokeAfterReadiness?: boolean; legacyGrantOnly?: boolean;
   interruptAfterIntent?: "policy" | "lease"; cancelBeforeHttp?: boolean } = {}) {
   const f = await nativeExtensionFixture("qa", options.hostSession), { engine } = await f.open();
-  if (options.sharedSession) f.panes.get(options.sharedSession)!.session = structuredClone(f.panes.get("tester")!.session);
+  if (options.shareReviewSession) f.panes.get("reviewer")!.session = structuredClone(f.panes.get("qa")!.session);
   const calls: string[] = [], server = createServer((request, response) => {
     calls.push(`${request.method} ${request.url}`);
     response.setHeader("content-type", "application/json"); response.setHeader("x-build", "accepted-fixture-revision");
@@ -134,7 +134,9 @@ describe("native QA host behavior (local transport fixture)", () => {
     expect(result.extension.execution.build).toMatchObject({ status: "identified", value: "accepted-fixture-revision" });
     expect(result.extension.execution.productUnchanged).toBe(true); expect(f.calls).toEqual(["GET /health", "GET /health"]);
     expect(await readFile(join(f.repo, "src/health.ts"))).toEqual(before);
-    expect(f.transport.sentRequests.map(request => request.role)).toEqual(["tester", "reviewer", "qa"]);
+    expect(f.transport.sentRequests.map(request => request.role)).toEqual(["qa", "reviewer", "reviewer"]);
+    expect(f.transport.sentRequests[0]!.target.paneId).not.toBe(f.transport.sentRequests[2]!.target.paneId);
+    expect(f.transport.sentRequests[0]!.target.session).not.toEqual(f.transport.sentRequests[2]!.target.session);
     const core = await f.engine.getSnapshot("run-native"); if (!core.ok || !core.value) throw new Error("Missing Core state");
     expect(core.value.status).toBe("succeeded");
     const views = await extensionReadViews(f);
@@ -147,12 +149,13 @@ describe("native QA host behavior (local transport fixture)", () => {
     const count = f.calls.length; await f.host.decide(decision); await f.host.drive("run-native"); expect(f.calls).toHaveLength(count);
   });
 
-  it.each(["reviewer", "qa"] as const)("refuses %s sharing the designer's authenticated native session", async sharedSession => {
-    const f = await qaFlow({ sharedSession }); const waiting = await f.host.drive("run-native") as any;
-    if (sharedSession === "reviewer") {
+  it.each(["design-review", "adjudication"] as const)("refuses %s sharing the designer's authenticated native session", async phase => {
+    const f = await qaFlow({ shareReviewSession: phase === "design-review" }); const waiting = await f.host.drive("run-native") as any;
+    if (phase === "design-review") {
       expect(waiting.extensionStatus).toBe("needs_revision"); expect(f.calls).toEqual([]);
       expect(await f.host.pendingApprovals()).toEqual([]);
     } else {
+      f.panes.get("reviewer")!.session = structuredClone(f.panes.get("qa")!.session);
       await f.host.decide(f.approve((await f.host.pendingApprovals())[0]!)); const result = await f.host.drive("run-native") as any;
       expect(result.extension.report).toBeUndefined(); expect(result.extension.classifications).toEqual({});
     }
