@@ -751,26 +751,30 @@ the existing Git engine's no-hook/fsmonitor/signing execution policy. It does no
 commit application edits or push. Commit configuration before workflow admission;
 changing HEAD later correctly invalidates the pinned execution plan.
 
-## Director (thử nghiệm, lát B1)
+## Director (thử nghiệm, lát B2a)
 
-Director cho phép người dùng trò chuyện với một agent qua CLI provider đang chạy (Claude Code, Codex hoặc Agy), không cần cấu hình vai `director` trong `.bflow/config.yml`. Provider chính là CLI đang chạy skill.
+Director cho phép người dùng trò chuyện với một agent qua CLI provider đang chạy (Claude Code, Codex hoặc Agy), không cần cấu hình vai `director` trong `.bflow/config.yml`. Provider chính là CLI đang chạy skill. Từ B2a, phiên Director thay thế Conversation và Coordinator v2: `bflow up` chỉ dựng hạ tầng, còn phiên làm việc bắt đầu khi người dùng chạy `/bflow-start`.
 
-Lệnh mới:
+Lệnh:
 
-- `bflow director start [--provider claude|codex|agy] --json`: bắt đầu phiên Director và trả về thông tin phiên dạng JSON.
+- `bflow up`: dựng hạ tầng (daemon, Herdr, vai chuyên trách và tab `progress`), không tạo phiên làm việc. Nếu manifest đã lưu là phiên v2 đang chạy, lệnh từ chối và yêu cầu `bflow down` rồi `bflow up`.
+- `bflow director start [--provider claude|codex|agy] --json`: bắt đầu phiên Director và trả về thông tin phiên dạng JSON. Lệnh vẫn gọi lại `up` khi cần.
 - `bflow director call <tool> [<argsJson>]`: gọi một tool Director. Token được đọc từ biến môi trường `BFLOW_DIRECTOR_TOKEN`.
 - `bflow director mcp`: chạy MCP server stdio của Director.
 - `bflow director hook <claude|codex>`: chỉ ghi nhận sự kiện từ hook của provider. Lệnh luôn thoát với mã 0 và bỏ qua khi có `HERDR_PANE_ID`.
-- `bflow progress [--follow] [--json]`: hiển thị tiến độ workflow; `--follow` theo dõi liên tục.
+- `bflow progress [--follow] [--json]`: hiển thị tiến độ workflow; `--follow` theo dõi liên tục (đây là lệnh tab `progress` chạy).
 - `bflow queue list|show|retry|dismiss`: xem, thử lại hoặc bỏ qua các mục trong hàng đợi lỗi.
+- `bflow approve '#n' [--reject | --changes <lý do> | --choice <n>] [--json]`: người dùng tự gõ lệnh này trong CLI để phê duyệt thẻ có mã `#n`. Director không chạy lệnh này thay người dùng. Dạng cũ `bflow approve <task-id>` vẫn được giữ.
+- `bflow config-migrate`: gỡ các mục vai `conversation` và `coordinator` khỏi `.bflow/config.yml`, có ghi bản `.bak`. Mục cũ không gây lỗi nhưng bị bỏ qua kèm cảnh báo cho đến khi được gỡ.
 
 Luồng sử dụng:
 
-1. Người dùng gõ `/bflow-start` trong CLI provider.
+1. Người dùng chạy `bflow up` (một lần), rồi gõ `/bflow-start` trong CLI provider.
 2. Skill chạy `bflow director start --json`.
-3. Skill lặp vòng `director_wait` (chờ tin nhắn mới, thay đổi issue hoặc sự kiện Runtime) và `director_say` (trả lời người dùng), truyền lại cursor mỗi lần.
+3. Skill lặp vòng `director_wait` (tin nhắn, thay đổi issue, sự kiện Runtime và mục trong hộp thư), `director_say` (trả lời người dùng) và các tool lập kế hoạch (`planning_reference`, `read_coordinator_guide`, `assess`, `propose_workflow`, `start_work`, `request_specialist`, `tick`, `inspect`, `retry_verification`). Cursor được truyền lại ở mỗi lần gọi.
+4. Khi run cần phê duyệt, Director đưa cho người dùng hai cách: nút phê duyệt trên Bflow Web, hoặc người dùng tự gõ `! bflow approve '#n'`.
 
-`bflow init` ghi skill `bflow-start`, cấu hình MCP và hook cho Claude Code, Codex và Agy:
+`bflow init` ghi skill `bflow-start` (phiên bản 1.3.0), cấu hình MCP và hook cho Claude Code, Codex và Agy:
 
 - `--no-director`: bỏ qua phần Director.
 - `--commit-skills`: không ghi khối Director vào `<git-common-dir>/info/exclude` (mặc định các tệp Director bị git bỏ qua qua exclude, không sửa `.gitignore`), để nhóm commit skill/MCP/hook vào repo; nếu khối đã có thì được gỡ.
@@ -779,13 +783,15 @@ Luồng sử dụng:
 
 Doctor có thêm check `director-skill-installed`.
 
-Giới hạn đã biết:
+Giới hạn đã biết sau B2:
 
-- Director cùng tồn tại với pane Conversation và Coordinator v2; việc thay thế hoàn chỉnh thuộc lát B2.
+- Phiên v2 đang chạy phải `bflow down` trước khi `bflow up`. Run tạo trong phiên v2 chỉ đọc được trong phiên Director; Director chỉ dùng `inspect`, `cancel`, `reconcile_cancellation` và `reconcile_delivery` trên các run đó. CLI không bao giờ tạo hay khởi động lại phiên v2.
+- Chat Web trong phiên Director báo `chat_adapter_unavailable`. Phê duyệt, resume và cancel qua Web vẫn dùng được.
+- `bflow approve '#n'` chạy cùng UID với Director nên host không phân biệt được người gõ với model chạy lệnh (rủi ro đã chấp nhận ở D-DIR-02).
 - Hook ghi tin nhắn chỉ ghi cho đúng phiên provider đã khởi động bằng `/bflow-start` (gắn theo `session_id` của hook, lưu trong bộ nhớ host). Phiên không có hook (ví dụ Agy) dùng `director_note_user_message`. Host khởi động lại thì chạy lại `director start`.
 - `tools/list` của MCP Director chỉ mô tả đối số `token`; các tham số còn lại nằm trong mô tả của từng tool. Hãy gọi `planning_reference` trước khi lập kế hoạch.
-- Token Director hiển thị trong transcript của provider và trong argv của lệnh shell (đường dự phòng); đây là thiết kế của B1.
-- Tin nhắn của các vai chuyên trách vẫn được gửi tới pane Coordinator.
+- Token Director hiển thị trong transcript của provider và trong argv của lệnh shell (đường dự phòng).
 - Codex và Agy chưa được kiểm live (hết hạn mức); chỉ Claude Code có spike live.
+- Hàng đợi `parked` (B2b) và trang Web cho hàng đợi lỗi thuộc các lát sau; B3 mới xoá mã Conversation/Coordinator cũ.
 
-Bậc bằng chứng: source và test cục bộ. Chưa chạy live end-to-end.
+Bậc bằng chứng: nguồn + test cục bộ (fake runner). Chưa có live Herdr hay provider cho chế độ Director; chưa chạy live end-to-end.
