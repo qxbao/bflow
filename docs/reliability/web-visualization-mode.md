@@ -1,6 +1,6 @@
-# Bflow Web Visualization Mode — xác nhận ngày 2026-11-02
+# Bflow Web Visualization Mode — cập nhật 2026-11-03
 
-Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Đã merge vào main theo yêu cầu chủ dự án; merge `42b526eb` cũng được quan sát trên origin/main. Không tạo PR. Báo cáo gồm source, test cục bộ, phép đo fixture GPU thật và các lần V9 live với hai Developer thật; phiên Golden đang được phục hồi sau fault, chưa có nghiệm thu SDLC đầu-cuối.
+Trạng thái: **chưa đủ điều kiện nghiệm thu/phát hành**. Đã merge vào main theo yêu cầu chủ dự án; merge `42b526eb` cũng được quan sát trên origin/main. Không tạo PR. Báo cáo gồm source, test cục bộ, phép đo fixture GPU thật và các lần V9 live với hai Developer thật; Golden đã nhận kết quả blocked có xác thực và dừng phiên bình thường; chưa có nghiệm thu SDLC đầu-cuối. Kết quả mới nhất và teardown ở cuối báo cáo.
 
 ## Phạm vi và revision
 
@@ -56,7 +56,7 @@ Không nới ngưỡng. `compileAsync` chưa giải quyết ngân sách load; `b
 
 ## Review và đợt sửa
 
-Hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo được verdict. Lần đầu dùng nhầm HOME của Codex; kiểm tra lại thấy Claude đã đăng nhập ở `/home/baodq/.claude`. Khi gọi đúng thư mục, Claude báo hết usage 5 giờ, reset lúc 19:00 Asia/Bangkok; chủ dự án đã xác nhận quota cạn. Không đổi sang model ngoài Sonnet/Haiku. Self-review có ghi rõ phạm vi, không thay thế review độc lập.
+Ở lần xác nhận `15cc644b`, hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo được verdict. Lần đầu dùng nhầm HOME của Codex; kiểm tra lại thấy Claude đã đăng nhập ở `/home/baodq/.claude`. Khi gọi đúng thư mục, Claude báo hết usage 5 giờ, reset lúc 19:00 Asia/Bangkok; chủ dự án đã xác nhận quota cạn. Không đổi sang model ngoài Sonnet/Haiku. Self-review có ghi rõ phạm vi, không thay thế review độc lập.
 
 - **F1 Important:** explicit agentId cũ không còn trong manifest bị fallback sang uniqueByRole. Hai test RED rồi GREEN (20/20 workforce), pin cả việc lẫn endpoint handoff. Sửa chỉ projection, không thay authority Runtime.
 - **F2 Important:** context-loss lúc factory pending vẫn nhận late renderer, làm giữ tài nguyên sau fallback. Test RED rồi GREEN (17/17 stage); kiểm abort, destroy đúng một lần và không apply.
@@ -64,7 +64,7 @@ Hai review độc lập Sonnet (scoped V8 fixes, toàn nhánh) không tạo đư
 - **Ảnh a11y tuyệt đối:** giữ nguyên, đã qua E2E mới; còn rủi ro máy chậm/settling, chưa có bằng chứng tái hiện flaky lần này.
 - **Minors:** triage đủ 12 dòng lịch sử trong `resume-deferred-triage.md`, phân biệt đã được xử lý/superseded với các mục còn để lại. F3 mới: Activity lấy 8 dòng cuối của trang newest-first; còn mismatch tên “gần đây”. Các thiếu sót coverage, duplicate Activity aria-label và canvas focus opener vẫn deferred.
 
-Re-review bản sửa: xem ledger; review độc lập vẫn mở đến khi có quota Sonnet/Haiku.
+Trạng thái review lịch sử tại `15cc644b` còn mở vì quota; kết quả Sonnet/Haiku bổ sung trên main và ruling cuối được ghi ở cuối báo cáo.
 
 ## V9 — phiên live Golden đang tiếp tục
 
@@ -163,3 +163,38 @@ Lượt live d5d829f0 đã khôi phục đúng writer từ fence1 lên fence2, k
 D-V9-04 cho phép nộp all-disputed proposal không đổi code chỉ với TDD đủ và stored **behavioral-gate** receipt đúng run/task/spec fingerprint/source/test identity. Xác thực stored receipt có port riêng, không giả native message. Recheck ở prepare, ingress, Git collect và verification; không có cờ JSON tự cấp. Git dùng diff thực so với baseline task ban đầu, metadata ghi assigned base và zero new repair commits; filesChanged/patch vẫn thật, nonempty. Verification vẫn kiểm receipt, attempt/changeSet mới, từng finding verdict, toàn bộ gate và maxIterations. Callback chỉ ở bộ nhớ, không lưu làm quyền trong artifact/job. Thiếu/sai proof giữ hành vi fail-closed.
 
 Local regression cuối: **131/131** (Git/Verification/Runtime host), guard/full-cycle cuối **2/2**, deps/typecheck/build/diff-check PASS. Full Runtime fixture đi từ proposal qua độc lập đóng finding, HEAD giữ nguyên. Các fixture lỗi bị integrity/observation validators từ chối đúng và đã sửa fixture, không giảm guard. Sonnet delta re-review cuối **PASS, không Important**. Live sau sửa còn chờ chạy lại; chưa tuyên bố V9 completed.
+
+
+## Kết quả tiếp tục trên main — 2026-11-03
+
+V9 Golden **chưa đạt**. Trên source `8f7f902f`, dùng lại đúng run/session/Developer, không tạo fixture mới: đường `request_user_decision` hiện có đã chuyển quyết định vận hành qua Conversation/3D tới Developer dưới writer lease còn hiệu lực. Không cần thêm API phục hồi hay ngoại lệ cho resume budget. Hai tin đầu chưa relay được (một trả lời trực tiếp, một nhầm thành workflow request và bị chặn đúng vì Core đang chạy); tin trao đổi trạng thái sau đó đến Coordinator hợp lệ.
+
+Thẻ vận hành được duyệt lúc `2026-11-02T18:54:20.531Z`. Developer đọc lại context; log tool thật lúc `18:54:47.811Z` hiển thị `noChangeDisputeProposalAllowed=true`, receipt đúng candidate và chỉ dẫn dùng `succeeded` để **đề xuất** disputed cho đánh giá độc lập. Model vẫn chọn nộp `blocked` với disposition `disputed`. Kết quả đã được xác thực và ghi vào Core lúc `18:55:03.821Z`; lỗi ZodError đã hết. Đây là giới hạn hành vi model trong mẫu này, không phải bằng chứng nhiệm vụ đạt gate. Không ghi đè kết quả bất biến, không reset attempt/rework/resume và không tự chuyển nó thành succeeded. Double chưa qua vòng độc lập cuối; triple đã qua; chưa tích hợp workflow hay duyệt bàn giao cuối.
+
+Checkpoint `n9-main-blocked-result` lưu kết quả, context tool thật, DOM, ảnh, workforce, manifest và telemetry cùng run; IDs workforce/manifest và mọi displayName trong DOM khớp. Đây là quan sát gần nhau, không phải snapshot nguyên tử. Cùng sáu mốc `n2`–`n7`, bằng chứng đối chiếu vượt yêu cầu năm mốc. Những khoảng trống capture cue đã nêu vẫn giữ nguyên; không tuyên bố mọi cue trong toàn thời gian dài của phiên đều được thu lại.
+
+Sau khi có kết quả tương quan, thao tác **Dừng phiên** bình thường qua 3D thành công, manifest `down`. Thu hồi hook trust bằng `revokeAllCodexHookTrust` ở store V9 cô lập: `policiesRemaining=0`; trạng thái kiểm hook sau thu hồi là `unsupported` do nguồn symlink chưa được tin cậy, không phải còn grant. Đã dừng riêng Web owner, Chrome và watcher của chiến dịch. Giữ nguyên run, fixture, worktree và ledger; không force-down, không sửa journal hay test frozen.
+
+Review độc lập Sonnet cho V8 và các đường projection/scene đã có verdict với phạm vi đọc ghi rõ. Một vòng sửa trên main xử lý warm treo (abort, context loss, timeout 15 giây và cleanup một chủ sở hữu), chặn frame trước warm và model đầu tiên, chỉ đặt `ready` sau render model. Quyết định ở cấp run chỉ tạo dáng hand-raised **inferred**, không khẳng định agent cụ thể đang chờ người dùng. Bốn regression lifecycle RED→GREEN; toàn Web **379/379** PASS, typecheck/build/deps/diff-check PASS. Sonnet re-review không có Critical/Important; các minor build-constructor exception/hidden timer được ghi để sau. Timeout warm là giới hạn fallback khởi tạo, không thay budget long task 50 ms. Đề xuất giảm sàn FPS xuống 29,5 bị từ chối; giữ nguyên 30.
+
+Bằng chứng chi tiết và review nằm trong ledger `.superpowers/sdd/2026-11-02-web-visualization-mode/`, đặc biệt `v9-golden-live/evidence/n9-main-blocked-result/`, `main-visualization-final-sonnet-review.md`, `main-renderer-sonnet-rereview.md` và `resume-deferred-triage.md`. Không xóa ledger trước khi chủ dự án đọc các ruling.
+
+E2E trên cây main sau sửa: **8/8** a11y/workflow và **11/11** CSP/recovery PASS, chạy nối tiếp. Haiku đã đọc bổ sung scene, HUD, hook, app, CSS, mirror và inspector; không có Critical/Important trong phạm vi công bố. Triage đầy đủ xem `main-final-review-ruling.md`; không áp các minor lịch sử đã superseded. Full affected cũ 126 lỗi vẫn chưa được đóng, nên không tuyên bố toàn monorepo xanh.
+
+## Đo hiệu năng trên main sau sửa vòng đời cảnh — 2026-11-03
+
+Chạy `apps/web/scripts/measure-office.mjs` trên cây main sau bản sửa warm/context-loss, giữ nguyên ngưỡng (log: `main-renderer-measurement.log` trong ledger). Phép đo **không đạt**:
+
+| Chỉ số | Kết quả | Ngưỡng | Verdict |
+| --- | --- | --- | --- |
+| Chunk đồ họa (gzip) | 171,3 KiB | 250 KiB | đạt |
+| Tổng asset | 0,657 MiB | 4 MiB | đạt |
+| FPS khi di chuyển (cả cửa sổ) | 3,27 | 30 | **vượt ngân sách** |
+| FPS burst khi di chuyển (chỉ tham khảo) | 26,93 (median gap 127,3 ms) | — | không phải verdict |
+| FPS idle | 1,5 | tối đa 8 (timer) | đạt |
+| Frame khi tab ẩn | 0 | 0 | đạt |
+| Long task lúc vào 3D | 82 ms (1 task) | 50 ms | **vượt ngân sách** |
+| Long task tổng | sau load 9; moving 2; idle 6 | — | **vượt ngân sách** |
+| Heap sau 20 lần bật/tắt | 8,0 → 9,0 MiB, `liveGlContexts` = 0 | ổn định | đạt |
+
+Không nới ngưỡng. Số FPS cả cửa sổ thấp hơn các lần đo trước (22,1 fps ở `15cc644b`); chưa xác định nguyên nhân (hồi quy hay tải máy), cần đo lại khi máy rảnh. Mục tiêu 30 fps và ngân sách long task vẫn **chưa đạt**; tính năng chưa đủ điều kiện nghiệm thu hiệu năng.

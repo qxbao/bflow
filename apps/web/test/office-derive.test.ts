@@ -43,7 +43,7 @@ describe('§4.3 table rows', () => {
 
   test('pending decision of the agent run raises hand; other run does not', () => {
     const a = agent({ transport: t('working'), work: [work({ taskId: 'fixture-task-1', leaseExpiresAt: at(5000) })] });
-    expect(one(a, { decisions: [decisionOf('fixture-run')] })).toMatchObject({ pose: 'hand_raised', certainty: 'confirmed', statusText: 'Chờ bạn quyết định' });
+    expect(one(a, { decisions: [decisionOf('fixture-run')] })).toMatchObject({ pose: 'hand_raised', certainty: 'inferred', statusText: 'Công việc có quyết định đang chờ' });
     expect(one(a, { decisions: [decisionOf('other')] }).pose).not.toBe('hand_raised');
     expect(one(a, { decisions: [decisionOf('fixture-run', 'approved')] }).pose).not.toBe('hand_raised');
   });
