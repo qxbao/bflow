@@ -127,6 +127,11 @@ test('a refused session opens re-pairing in the panel instead of stale data', as
   const main = document.getElementById('main')!;
   expect(await within(main).findByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Cần ghép nối lại');
+  // Toàn cảnh closes panels but the re-pair view cannot be dismissed.
+  fireEvent.click(screen.getByRole('button', { name: 'Toàn cảnh' }));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(within(main).getByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
+  expect(main.classList.contains('hidden')).toBe(false);
 });
 
 test('the skip link targets the HUD in 3D', async () => {
@@ -172,4 +177,12 @@ test('the re-pair view does not close on Esc or by button', async () => {
   expect(main.classList.contains('hidden')).toBe(false);
   expect((screen.getByRole('button', { name: 'Đóng bảng' }) as HTMLButtonElement).disabled).toBe(true);
   expect(within(main).getByLabelText(/Mã hoặc đường dẫn ghép nối/)).toBeTruthy();
+});
+
+test('shows the agent terminal text and a link to all staff', async () => {
+  installApi({ '/api/v1/projects/p/runs/run/activity': { apiVersion: 1, items: [] }, '/api/v1/projects/p/agents/dev-1/transcript': { apiVersion: 1, projectId: 'p', sessionId: 's', instanceId: 'dev-1', source: 'terminal_snapshot', text: '<b>dòng</b> cuối', truncated: false, observedAt: now } });
+  render(<MemoryRouter><AgentInspector api={new ApiClient()} projectId="p" agent={agent} view={view} handoffs={[]} revision={0} titleOf={() => 'x'} /></MemoryRouter>);
+  expect(screen.getByRole('heading', { name: 'Nội dung gần đây' })).toBeTruthy();
+  expect((await screen.findByRole('log')).textContent).toBe('<b>dòng</b> cuối');
+  expect(screen.getByRole('link', { name: 'Xem tất cả nhân viên →' }).getAttribute('href')).toBe('/projects/p/agents?agent=dev-1');
 });

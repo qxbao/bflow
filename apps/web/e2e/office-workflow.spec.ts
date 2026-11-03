@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { startAcceptanceHost } from './acceptance-fixture';
-import { browserOptions, enterVisual, mirror, openProject, rail, sceneReady, stableCount, startDirectHost, type DirectHost } from './office-fixture';
+import { browserOptions, enterVisual, mirror, openDock, openProject, rail, sceneReady, stableCount, startDirectHost, type DirectHost } from './office-fixture';
 // V8.2: the Classic direct-actions scenario (same W07 host) repeated only through the 3D mode: HUD rail, DOM mirror buttons, the panel and the HUD dock.
 // The Classic spec's final "Tổng quan" link expectation is stale at baseline and is deliberately not copied.
 test.use(browserOptions());
@@ -39,6 +39,7 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await rail(page, /^Tổng quan/).click();
   await expect(page.getByLabel('Tên công việc')).toHaveValue('Tìm sách nhanh');
   // The recovered operation is tracked by its stored ID: wait until the host's ACK arrives (condition, not a sleep); the form then refuses a second create while it is tracked.
+  await openDock(page);
   await expect(settledApplied).toBeVisible({ timeout: 30000 });
   await expect(page.getByRole('button', { name: 'Tạo công việc', exact: true })).toBeDisabled();
   await stableCount(() => effects('create_request'), 1);
@@ -81,6 +82,7 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await page.getByLabel('Lý do hủy').fill('Thay đổi ưu tiên');
   await page.getByRole('button', { name: 'Gửi yêu cầu hủy' }).click();
   await stableCount(() => effects('cancel'), 1);
+  await openDock(page);
   await expect(page.getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();
   expect((await host.call('inspect')).cancelled).toBe(false);
 
@@ -92,6 +94,7 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await page.goto(new URL(base + '/runs/run', repair).href);
   await expect(page.getByRole('button', { name: '3D', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await sceneReady(page);
+  await openDock(page);
   await expect(page.getByText('Yêu cầu hủy chưa xác nhận tiến trình đã dừng.')).toBeVisible();
   await host.call('configure', { cancelled: true });
   await expect(page.getByText('Yêu cầu hủy đã áp dụng; chỉ trạng thái công việc mới xác nhận đã hủy.')).toBeVisible({ timeout: 10000 });
@@ -106,6 +109,7 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
 
   // Request changes: the dock offers a fresh operation for the settled slot; the follow-up run opens from the panel.
   await host.call('configure', { phase: 'reviewing', revision: 3, cancelled: false });
+  await openDock(page);
   await page.getByRole('button', { name: 'Bắt đầu thao tác mới: Quyết định gói', exact: true }).click();
   await page.getByRole('button', { name: 'Xem xét gói' }).click();
   await page.getByLabel(/Lý do \(bắt buộc/).fill('Bổ sung tiêu chí hiệu năng');
@@ -113,6 +117,7 @@ test('3D: create, clarify, stale review, changes, resume, cancel and lost ACK us
   await expect.poll(async () => (await host.call('inspect')).currentRunId).toBe('follow-up');
   // RunView follows the continuation by itself once the old run stops being current (the Classic "Mở công việc hiện hành" link is only on screen for an instant, so it is not asserted); the dock keeps its own link.
   await expect(page).toHaveURL(/runs\/follow-up$/);
+  await openDock(page);
   await expect(page.getByRole('link', { name: 'Mở công việc tiếp nối →' }).first()).toBeVisible();
   await stableCount(() => effects('answer_decision'), 2);
 

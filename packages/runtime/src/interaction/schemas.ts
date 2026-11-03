@@ -29,6 +29,12 @@ export const InteractionQuerySchema = z.discriminatedUnion("kind", [
     .object({ kind: z.literal("workforce"), projectId: IdentifierSchema })
     .strict(),
   z
+    .object({ kind: z.literal("workforce_excerpts"), projectId: IdentifierSchema })
+    .strict(),
+  z
+    .object({ kind: z.literal("agent_transcript"), projectId: IdentifierSchema, instanceId: IdentifierSchema })
+    .strict(),
+  z
     .object({ kind: z.literal("activity"), projectId: IdentifierSchema, runId: IdentifierSchema, cursor: WebCursorSchema.optional() })
     .strict(),
 ]);

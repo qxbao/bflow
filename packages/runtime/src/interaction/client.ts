@@ -6,7 +6,7 @@ import {
   WebRunPageResultSchema,
   WebRunViewResultSchema,
   WebDecisionPageResultSchema,
-  WebWorkforceViewSchema, WebActivityEntrySchema, OperationResultSchema,
+  WebWorkforceViewSchema, WebActivityEntrySchema, WebWorkforceExcerptsSchema, WebAgentTranscriptSchema, OperationResultSchema,
   WebCommandSchema, WebOperationResponseSchema, type WebCommand,
   type UserInteractionClient,
   type OperationResult,
@@ -24,6 +24,8 @@ export function interactionProjectId(canonicalRepositoryPath: string): string {
       .slice(0, 32)
   );
 }
+const WebExcerptsResultSchema = OperationResultSchema(WebWorkforceExcerptsSchema);
+const WebTranscriptResultSchema = OperationResultSchema(WebAgentTranscriptSchema);
 const WebWorkforceResultSchema = OperationResultSchema(WebWorkforceViewSchema);
 const WebActivityResultSchema = OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
 const unavailable = <T>(): OperationResult<T> => ({
@@ -140,6 +142,10 @@ export async function openUserInteractionClient(options: {
       }),
     readWorkforce: id =>
       query({ kind: "workforce", projectId: id }, (v) => WebWorkforceResultSchema.parse(v)),
+    readWorkforceExcerpts: id =>
+      query({ kind: "workforce_excerpts", projectId: id }, (v) => WebExcerptsResultSchema.parse(v)),
+    readAgentTranscript: (id, instanceId) =>
+      query({ kind: "agent_transcript", projectId: id, instanceId }, (v) => WebTranscriptResultSchema.parse(v)),
     readRunActivity: (id, runId, cursor) =>
       query({ kind: "activity", projectId: id, runId, ...(cursor ? { cursor } : {}) }, (v) => {
         const result = WebActivityResultSchema.parse(v);

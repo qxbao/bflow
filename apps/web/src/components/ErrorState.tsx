@@ -82,7 +82,7 @@ export function ErrorState({
             <button
               type="submit"
               disabled={pairing || !token.trim()}
-              className="border-ink bg-brand font-semibold text-ink hover:bg-ink hover:text-surface"
+              className="border-ink bg-brand font-semibold text-on-brand hover:bg-ink hover:text-surface"
             >
               {pairing ? 'Đang ghép nối…' : 'Ghép nối lại'}
             </button>

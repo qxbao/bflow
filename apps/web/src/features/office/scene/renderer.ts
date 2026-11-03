@@ -6,22 +6,25 @@ import {
 import { acquireModels, type ModelLease } from './assets';
 import type { OfficeFocusZone, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 import { handoffMarks, type HandoffMark, type VisualCue } from '../model/timeline';
-import { agentTag } from '../model/labels';
+import { agentTag, poseLabel } from '../model/labels';
 import { Choreographer } from './actors';
+import { LabelPlacer } from './labelPlacement';
 import { AGENT_ZOOM, CameraIntent, CameraMove, FOV, NO_INSET, withInset, type Inset, type WorldBox, cameraKey, cameraPose, clampCamera, focusOn, homeCamera, HOME_ZOOM, panByPixels, pinchFactor, wheelFactor, zoomBy, type Camera } from './camera';
 import { Character, MarkKit } from './characters';
 import { FpsGovernor, initialTier, settingsFor, type QualitySettings } from './quality';
-import { BACKGROUND, Stage, setShadowCasting } from './stage';
-import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, ZONE_TITLES, cellCentre, contentBox, deskPlan, type Vec2 } from './world';
+import { BACKGROUND, HEMI_HIGH, HEMI_LOW, Stage, setShadowCasting } from './stage';
+import { FOCUS_POINTS, OBJECT_CELLS, OFFICE_ASSET_PATHS, WORLD, cellCentre, contentBox, deskPlan, type Vec2 } from './world';
 
 export interface OfficeRenderer {
   /** Returns the handoff ids of the walk cues it accepted; cues dropped (paused, destroyed) are not returned, so the caller may offer them again. */
   apply(model: OfficeModel, cues: VisualCue[]): string[];
   setPaused(paused: boolean): void;
-  /** DOM label anchors in host pixels for the current frame: zone titles and one tag per character. Text only; the caller draws them. */
+  /** DOM label anchors in host pixels for the current frame: one tag per character (zone titles are signs in the scene). Text only; the caller draws them. */
   projectLabels?(): ProjectedLabel[];
   /** Screen pixels the HUD or panel covers: labels hide inside it and selections centre in what is left. Setting it never moves the camera. */
   setInset?(inset: Inset): void;
+  /** Latest terminal text per agent instance, drawn in the message box over a working character. Stored and drawn on the next frame; wakes the scene. */
+  setExcerpts?(excerpts: ReadonlyMap<string, string>): void;
   /** Receives `projectLabels()` after every rendered frame (the same array, reused). */
   setLabelSink?(sink: ((labels: ProjectedLabel[]) => void) | undefined): void;
   /** Eases the camera to a target the user selected (also called for selections made in the DOM mirror). */
@@ -31,9 +34,12 @@ export interface OfficeRenderer {
   destroy(): void;
 }
 
-export interface ProjectedLabel { id: string; kind: 'zone' | 'agent'; text: string; x: number; y: number }
+/** Text the DOM draws over the canvas. `agent` is the name tag, `bubble` the message box over a working character, `sleep` the Zzz over a sleeping one; all anchored bottom-centre. */
+export interface ProjectedLabel { id: string; kind: 'agent' | 'bubble' | 'sleep'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
+const BUBBLE_W = 224, BUBBLE_H = 72;
+const EXPOSURE_OPEN = 1, EXPOSURE_CLOSED = 0.6;
 const MOVING_MS = 1000 / 30;
 const IDLE_MS = 1000 / 8;
 const alphaFor = (certainty: string, pose: string): number => (pose === 'ghost' ? 0.45 : certainty === 'confirmed' ? 1 : certainty === 'inferred' ? 0.88 : 0.6);
@@ -112,7 +118,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   // ---- renderer, quality ----
   gl.outputColorSpace = SRGBColorSpace;
   gl.toneMapping = ACESFilmicToneMapping;
-  gl.toneMappingExposure = 1.25;
+  gl.toneMappingExposure = EXPOSURE_OPEN;
   gl.shadowMap.type = PCFShadowMap;
   let quality: QualitySettings = settingsFor(initialTier(rendererName(gl)), window.devicePixelRatio);
   const governor = new FpsGovernor();
@@ -120,8 +126,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   // ---- scene ----
   const scene = new Scene();
   scene.background = new Color(BACKGROUND);
-  scene.fog = new FogExp2(BACKGROUND, 0.011);
-  const stage = new Stage(lease.models.furniture.scene as unknown as Group);
+  scene.fog = new FogExp2(BACKGROUND, 0.004);
+  const stage = new Stage(lease.models.furniture.scene as unknown as Group, () => { dirty = true; wake(); });
   scene.add(stage.group);
   const kit = new MarkKit();
   const proxyGeometry = new BoxGeometry(1, 1, 1);
@@ -140,7 +146,7 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     setShadowCasting(stage.lights.key, next.shadows);
     for (const l of stage.lights.accents) l.visible = next.accentLights;
     // The low tier has no spot pools, so its fill is lifted to keep the room readable.
-    stage.lights.hemi.intensity = next.tier === 'low' ? 2.4 : 1.25;
+    stage.lights.hemi.intensity = next.tier === 'low' ? HEMI_LOW : HEMI_HIGH;
     gl.setPixelRatio(next.pixelRatio);
     const v = size();
     gl.setSize(v.w, v.h, false);
@@ -210,8 +216,12 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
   let sink: ((labels: ProjectedLabel[]) => void) | undefined;
   const probe = new Vector3();
   const pool: ProjectedLabel[] = [], out: ProjectedLabel[] = [];
-  const rects: number[] = [];
-  const tags = new Map<string, { label: string; pose: string; text: string }>();
+  const placer = new LabelPlacer();
+  // Message boxes found in the first pass; placed in a second one, after every name tag.
+  const boxTag: Array<{ bubbleId: string }> = [], boxX: number[] = [], boxY: number[] = [], boxText: string[] = [];
+  let boxCount = 0;
+  const tags = new Map<string, { label: string; pose: string; text: string; id: string; bubbleId: string; sleepId: string }>();
+  let excerpts: ReadonlyMap<string, string> = new Map();
   let agentsById = new Map<string, OfficeModel['agents'][number]>();
   const pt = { x: 0, y: 0 };
   /** Projects to host pixels; false when behind the camera or outside the safe area (the HUD and panel inset). */
@@ -221,27 +231,33 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
     pt.x = (probe.x * 0.5 + 0.5) * w; pt.y = (-probe.y * 0.5 + 0.5) * h;
     return pt.x >= inset.left && pt.x <= w - inset.right && pt.y >= 0 && pt.y <= h - inset.bottom;
   };
-  const slot = (n: number, id: string, kind: 'zone' | 'agent', text: string): void => {
+  const slot = (n: number, id: string, kind: ProjectedLabel['kind'], text: string): void => {
     const l = pool[n] ?? (pool[n] = { id: '', kind, text: '', x: 0, y: 0 });
     l.id = id; l.kind = kind; l.text = text; l.x = pt.x; l.y = pt.y;
     out[n] = l;
   };
   const projectLabels = (): ProjectedLabel[] => {
     const v = size();
-    let n = 0, r = 0;
-    for (const zt of ZONE_TITLES) if (project(zt.at.x, 0.05, zt.at.z, v.w, v.h)) slot(n++, zt.id, 'zone', zt.text);
+    let n = 0;
+    boxCount = 0;
+    placer.begin();
+    const far = state.zoom < 1.8;
     for (const view of choreo.views()) {
       const a = agentsById.get(view.instanceId);
       if (!a || !project(view.point.x, 2.15, view.point.z, v.w, v.h)) continue;
       let tag = tags.get(a.instanceId);
-      if (!tag || tag.label !== a.label || tag.pose !== a.pose) { tag = { label: a.label, pose: a.pose, text: agentTag(a.label, a.pose) }; tags.set(a.instanceId, tag); }
-      const half = tag.text.length * 3.4 + 6, x0 = pt.x - half, x1 = pt.x + half, y0 = pt.y - 18, y1 = pt.y;
-      // Far out, tags that would overlap an earlier one are hidden; closer in everything shows.
-      let clash = false;
-      if (state.zoom < 1.8) for (let i = 0; i < r; i += 4) if (x0 < (rects[i + 1] as number) && x1 > (rects[i] as number) && y0 < (rects[i + 3] as number) && y1 > (rects[i + 2] as number)) { clash = true; break; }
-      if (clash) continue;
-      rects[r++] = x0; rects[r++] = x1; rects[r++] = y0; rects[r++] = y1;
-      slot(n++, `agent:${a.instanceId}`, 'agent', tag.text);
+      if (!tag || tag.label !== a.label || tag.pose !== a.pose) { tag = { label: a.label, pose: a.pose, text: agentTag(a.label, a.pose), id: `agent:${a.instanceId}`, bubbleId: `bubble:${a.instanceId}`, sleepId: `sleep:${a.instanceId}` }; tags.set(a.instanceId, tag); }
+      const tagX = pt.x, tagY = pt.y;
+      if (placer.tag(tagX, tagY, tag.text.length * 6.8 + 12, 18, far)) slot(n++, tag.id, 'agent', tag.text);
+      const extra = poseLabel(a.pose);
+      if (extra === 'bubble') { boxTag[boxCount] = tag; boxX[boxCount] = tagX; boxY[boxCount] = tagY - 22; boxText[boxCount] = excerpts.get(a.instanceId) ?? a.statusText; boxCount++; }
+      else if (extra === 'sleep') { pt.y = tagY - 22; slot(n++, tag.sleepId, 'sleep', 'Zzz'); }
+    }
+    // Message boxes go above their name tag; far out, one that would overlap any tag or an earlier box is hidden.
+    for (let i = 0; i < boxCount; i++) {
+      if (!placer.bubble(boxX[i] as number, boxY[i] as number, BUBBLE_W, BUBBLE_H, far)) continue;
+      pt.x = boxX[i] as number; pt.y = boxY[i] as number;
+      slot(n++, (boxTag[i] as { bubbleId: string }).bubbleId, 'bubble', boxText[i] as string);
     }
     out.length = n;
     return out;
@@ -425,14 +441,15 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       }
       syncActors();
       syncMarks(model);
-      // Closed session: the office is dark. The last saved data stays visible.
+      // Closed session: the office is dimmed but furniture stays visible. The last saved data stays visible.
       const off = model.tier === 'closed';
-      gl.toneMappingExposure = off ? 0.45 : 1.25;
+      gl.toneMappingExposure = off ? EXPOSURE_CLOSED : EXPOSURE_OPEN;
       dirty = true;
       wake();
       return accepted;
     },
     projectLabels,
+    setExcerpts(next) { excerpts = next; dirty = true; wake(); },
     setInset(next) { inset = next.right === 0 && next.bottom === 0 && next.left === 0 ? NO_INSET : next; dirty = true; wake(); },
     setLabelSink(next) { sink = next; if (next && ready) next(projectLabels()); },
     setPaused(next) {

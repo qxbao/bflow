@@ -22,11 +22,13 @@ const reducedMotion = (): boolean => typeof matchMedia === 'function' && matchMe
 /** What the HUD may ask of the scene. Present only while the stage is mounted; a missing or failed renderer ignores the call. */
 export interface StageControl { focusZone(zone: OfficeFocusZone): void; /** Pixels the HUD or panel covers; hides labels in it and centres selections in the rest. Never moves the camera. */ setInset(inset: { right: number; bottom: number; left: number }): void; /** Moves focus into the agent list (the DOM mirror), which shows itself while focused. */ openList(): void }
 
-export function OfficeStage({ model, onSelect, links, control, createRenderer = lazyRenderer }: { model: OfficeModel; onSelect: (target: OfficeTarget) => void; links?: ReactNode; control?: MutableRefObject<StageControl | null>; createRenderer?: CreateRenderer }) {
+export function OfficeStage({ model, onSelect, links, control, excerpts: excerptMap, createRenderer = lazyRenderer }: { model: OfficeModel; /** Latest terminal text per agent for the message boxes; kept for a renderer created later. */ excerpts?: ReadonlyMap<string, string>; onSelect: (target: OfficeTarget) => void; links?: ReactNode; control?: MutableRefObject<StageControl | null>; createRenderer?: CreateRenderer }) {
   const host = useRef<HTMLDivElement>(null);
   const root = useRef<HTMLDivElement>(null);
   // Remembered so a renderer created after the first inset still receives it.
   const inset = useRef<{ right: number; bottom: number; left: number } | undefined>(undefined);
+  const excerpts = useRef<ReadonlyMap<string, string> | undefined>(excerptMap);
+  excerpts.current = excerptMap;
   const renderer = useRef<OfficeRenderer | undefined>(undefined);
   const latest = useRef({ model, onSelect, createRenderer });
   latest.current = { model, onSelect, createRenderer };
@@ -59,6 +61,7 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
         renderer.current = created;
         labelLayer = createLabelLayer(el);
         if (inset.current) created.setInset?.(inset.current);
+        if (excerpts.current) created.setExcerpts?.(excerpts.current);
         created.setLabelSink?.(labels => labelLayer?.update(labels));
         created.apply(latest.current.model, []);
         visibility();
@@ -75,6 +78,8 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
       labelLayer?.destroy();
     };
   }, []);
+
+  useEffect(() => { if (excerptMap) renderer.current?.setExcerpts?.(excerptMap); }, [excerptMap]);
 
   useEffect(() => {
     if (!control) return;
@@ -98,7 +103,7 @@ export function OfficeStage({ model, onSelect, links, control, createRenderer = 
   const degraded = notice !== undefined;
   // Degraded: the visible list scrolls inside the full-screen stage, clear of the floating HUD.
   return <div ref={root} className={degraded ? 'relative h-full overflow-y-auto px-4 pt-32 pb-40 md:pr-24' : 'relative h-full'}>
-    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-full min-h-64 w-full overflow-hidden bg-[#121418]" />}
+    {!degraded && <div ref={host} tabIndex={0} aria-label="Cảnh văn phòng" className="relative h-full min-h-64 w-full overflow-hidden bg-[#dfe5e6]" />}
     <AccessibleOffice model={model} onSelect={target => { latest.current.onSelect(target); renderer.current?.focus?.(target); }} visible={degraded} notice={notice} extra={links} />
   </div>;
 }

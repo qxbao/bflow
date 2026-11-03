@@ -11,3 +11,5 @@ const SHORT_STATUS: Readonly<Record<string, string>> = {
 export const shortStatus = (pose: string): string => SHORT_STATUS[pose] ?? 'Chưa rõ';
 /** The tag drawn over a character: "Dev #1 · Đang làm". Text only. */
 export const agentTag = (label: string, pose: string): string => `${label.replace(/^Developer/, 'Dev')} · ${shortStatus(pose)}`;
+/** The extra in-scene label a pose gets: a message box while the agent works, a Zzz while it sleeps. */
+export const poseLabel = (pose: string): 'bubble' | 'sleep' | undefined => (pose === 'working' || pose === 'typing' || pose === 'preparing' ? 'bubble' : pose === 'sleeping' ? 'sleep' : undefined);

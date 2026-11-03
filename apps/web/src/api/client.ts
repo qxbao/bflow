@@ -78,6 +78,8 @@ export class ApiClient {
     const query = cursor ? `?${new URLSearchParams({cursor})}` : '';
     return this.request(`${projectPath(id)}/runs/${encodeURIComponent(runId)}/activity${query}`, contracts.activity.response);
   }
+  readWorkforceExcerpts(id: string) { return this.request(`${projectPath(id)}/workforce/excerpts`, contracts.workforceExcerpts.response); }
+  readAgentTranscript(id: string, instanceId: string) { return this.request(`${projectPath(id)}/agents/${encodeURIComponent(instanceId)}/transcript`, contracts.agentTranscript.response); }
   decisions(id: string) { return this.request(`${projectPath(id)}/decisions`, contracts.decisions.response); }
   inspect(id: string) { return this.request(`${projectPath(id)}/session/inspect`, contracts.inspectSession.response, 'POST', contracts.inspectSession.body.parse({apiVersion:1}), 50000); }
   async artifact(id: string, artifactId: string): Promise<string> {

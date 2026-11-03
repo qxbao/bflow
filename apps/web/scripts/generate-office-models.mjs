@@ -14,8 +14,8 @@ const OUT = join(dirname(fileURLToPath(import.meta.url)), '../public/office');
 // ---------- colour palette (harmonised with the Bflow tokens in src/styles/global.css) ----------
 const PALETTE = {
   canvas: '#ffffff', faint: '#e7e5de', line: '#d4d1c7', ink: '#1a1a1a', steel: '#3b536f', brand: '#ffc400', accent: '#ffb347',
-  wall: '#262a31', slat: '#31363e', trim: '#1c1f24', wood: '#3a3f47', woodDark: '#2a2e35', metal: '#6f7884', metalDark: '#2f343b', glass: '#4a6a80',
-  screen: '#bfe6ff', skin: '#f3c9a5', hair: '#2a1d19', paper: '#f5f1e6', white: '#e9e6dc', green: '#5aa56a', greenDark: '#2f6e3d',
+  wall: '#ece7dc', slat: '#e0d9ca', trim: '#b5ab97', wood: '#cfa97c', woodDark: '#a9825a', metal: '#6f7884', metalDark: '#6d747e', glass: '#4a6a80',
+  screen: '#bfe6ff', skin: '#f3c9a5', hair: '#2a1d19', paper: '#f5f1e6', white: '#e9e6dc', green: '#3fae5a', greenDark: '#1f7a3c',
   red: '#cf4a44', pot: '#4a4f58', dark: '#1d2025', ledGreen: '#52e08a', ledAmber: '#e08a2c', tag: '#f3ead0',
 };
 
@@ -286,7 +286,8 @@ function character() {
   });
   const merge = (base, extra) => { for (const k of Object.keys(extra)) base[k] = { ...base[k], ...extra[k] }; return base; };
 
-  clip('sleep', 3.2, (s, k) => merge(seated(), { hips: { t: [0, SEAT_Y + 0.004 * s, 0] }, head: { r: [28 + 2 * s, 0, 4] }, torso: { r: [8 + 1.5 * s, 0, 0] }, arm_l: { r: [-22, 0, 8] }, arm_r: { r: [-22, 0, -8] } }));
+  // Slumped forward: torso 22 deg, head 30 deg on top of it (about 52 deg overall) and rolled to one side, arms resting out towards the desk; slow breathing.
+  clip('sleep', 3.2, (s, k) => merge(seated(), { hips: { t: [0, SEAT_Y + 0.004 * s, 0] }, head: { r: [30 + 1.2 * s, 0, 10] }, torso: { r: [22 + 1.2 * s, 0, 0] }, arm_l: { r: [-100, 0, 8] }, arm_r: { r: [-100, 0, -8] } }));
   clip('idle', 2.4, (s, k) => merge(seated(), { hips: { t: [0, SEAT_Y + 0.004 * s, 0] }, head: { r: [2, 14 * s, 0] }, arm_l: { r: [-62, 0, 6] }, arm_r: { r: [-62, 0, -6] } }));
   clip('type', 1.0, (s, k) => merge(seated(), { head: { r: [10 + 2 * s, 0, 0] }, torso: { r: [4, 0, 0] }, arm_l: { r: [-66 + 7 * s, 0, 5] }, arm_r: { r: [-66 - 7 * s, 0, -5] } }));
   clip('type_fast', 0.5, (s, k) => merge(seated(), { hips: { t: [0, SEAT_Y + 0.005 * k, 0] }, head: { r: [12, 3 * s, 0] }, torso: { r: [6 + 2 * k, 0, 0] }, arm_l: { r: [-68 + 14 * s, 0, 5] }, arm_r: { r: [-68 - 14 * s, 0, -5] } }), 4);
@@ -311,19 +312,29 @@ function furniture() {
   M('wall', P.wall, { rough: 0.9 }); M('slat', P.slat, { rough: 0.8 }); M('wallTrim', P.trim, { rough: 0.8 }); M('floor', P.canvas, { rough: 0.95 });
   M('wood', P.wood, { rough: 0.7 }); M('woodDark', P.woodDark, { rough: 0.7 }); M('metal', P.metal, { rough: 0.45, metal: 0.4 }); M('metalDark', P.metalDark, { rough: 0.5, metal: 0.4 });
   M('white', P.white); M('dark', P.dark, { rough: 0.55 }); M('screen', P.screen, { rough: 0.3, emissive: '#6aa6cf' });
-  M('amber', '#b9772a', { rough: 0.4, emissive: '#6e4414' }); M('amberSoft', '#b9772a', { rough: 0.4, emissive: '#47290b' });
+  M('amber', '#b9772a', { rough: 0.4, emissive: '#2a190a' }); M('amberSoft', '#b9772a', { rough: 0.4, emissive: '#1c1006' });
   M('green', P.green); M('greenDark', P.greenDark); M('pot', P.pot); M('red', P.red); M('ledGreen', P.ledGreen, { emissive: '#2f9a5a' }); M('ledAmber', '#e08a2c', { emissive: '#a8651a' });
-  M('ink', P.ink, { rough: 0.5 }); M('cushion', '#56677a', { rough: 0.9 }); M('mint', '#7cc4a6', { emissive: '#244d3d' }); M('coral', '#ee8f86', { emissive: '#5a2b27' }); M('sky', '#8ec1ea', { emissive: '#27455d' });
+  M('ink', P.ink, { rough: 0.5 }); M('cushion', '#3f8f8c', { rough: 0.9 }); M('mint', '#7cc4a6', { emissive: '#244d3d' }); M('coral', '#ee8f86', { emissive: '#5a2b27' }); M('sky', '#8ec1ea', { emissive: '#27455d' });
   M('lemon', '#f2d479', { emissive: '#5c4d1c' }); M('lav', '#b4a7e0');
   M('boardFace', '#22324a', { rough: 0.35, emissive: '#3a5f95' }); M('line', '#7b8da8', { emissive: '#3b4b66' }); M('lamp', '#fff1c9', { emissive: '#d8b36a' });
+  M('cushionLight', '#5fb0ab', { rough: 0.9 }); M('greenLight', '#7ac96b'); M('key', '#e9e9ee', { rough: 0.6 }); M('panel', '#f4f0e6', { rough: 0.9 }); M('panelCap', '#fbf9f3', { rough: 0.8 });
+  M('rug', '#e0a458', { rough: 1 }); M('rugInner', '#f3dcae', { rough: 1 }); M('paper', P.paper); M('skyPane', '#9fd4f5', { rough: 0.2, emissive: '#5c9fcf' }); M('waterBlue', '#9fd3f0', { rough: 0.2, emissive: '#2c5d7d' });
+  M('bookRed', '#d9534f'); M('bookBlue', '#3d6fb5'); M('bookGreen', '#4aa66a'); M('bookYellow', '#f0c43c');
   const b = (w, h, d, t, m, r) => ({ g: place(box(w, h, d, r ?? 0.02), { t }), m });
   const c = (rt, rb, h, t, m, seg = 10) => ({ g: place(cyl(rt, rb, h, seg), { t }), m });
+  const bl = (rx, ry, rz, t, m, ws = 8, hs = 6) => ({ g: place(ball(rx, ry, rz, ws, hs), { t }), m });
+  /** Keyboard (dark tray, 3 rows of light key strips, 0.44 x 0.16) centred at (x, z) on a surface at height y, plus a small mouse beside it. */
+  const keyboard = (x, y, z, mouseDx = 0.34) => [
+    b(0.44, 0.014, 0.16, [x, y + 0.007, z], 'dark', 0.004),
+    ...[-1, 0, 1].map(row => b(0.4, 0.008, 0.03, [x, y + 0.018, z + row * 0.045], 'key', 0.002)),
+    b(0.06, 0.022, 0.09, [x + mouseDx, y + 0.011, z], 'key', 0.01),
+  ];
   const nodes = [];
   const add = spec => nodes.push(g.node(spec));
   const WALL_H = 3.6;
 
   add({ name: 'floor_tile', parts: [b(1, 0.1, 1, [0, -0.05, 0], 'floor', 0.001)] });
-  // Wall modules: dark panel with vertical slats; the front (+z) face is the room side.
+  // Wall modules: off-white panel with vertical slats; the front (+z) face is the room side.
   const slats = [-0.375, -0.125, 0.125, 0.375].map(x => b(0.18, WALL_H - 0.3, 0.05, [x, WALL_H / 2 + 0.1, 0.02], 'slat', 0.012));
   add({ name: 'wall', parts: [b(1, WALL_H, 0.2, [0, WALL_H / 2, -0.1], 'wall', 0.02), ...slats, b(1, 0.12, 0.26, [0, 0.06, -0.1], 'wallTrim', 0.012)] });
   add({ name: 'wall_led', parts: [b(1, WALL_H, 0.2, [0, WALL_H / 2, -0.1], 'wall', 0.02), ...slats.filter((_, i) => i !== 1 && i !== 2), b(0.04, WALL_H - 0.6, 0.04, [0, WALL_H / 2, 0.03], 'amberSoft', 0.01), b(1, 0.12, 0.26, [0, 0.06, -0.1], 'wallTrim', 0.012)] });
@@ -342,6 +353,7 @@ function furniture() {
     { g: place(box(0.45, 0.25, 0.01, 0.004), { t: [0, 0.9, 0.148], r: [-14, 0, 0] }), m: 'screen' },
     { g: place(box(0.07, 0.07, 0.008, 0.002), { t: [0, 0.9, 0.172], r: [-14, 0, 0] }), m: 'lamp' },
     b(0.14, 0.012, 0.1, [0.3, 0.737, -0.06], 'metal', 0.004), c(0.05, 0.05, 0.1, [-0.5, 0.78, 0.0], 'lemon'),
+    ...keyboard(-0.02, 0.73, -0.27, 0.36),
   ] });
   // Chair (seat on the -z side of the desk): low seat, tall back, swivel base.
   add({ name: 'chair', parts: [
@@ -353,7 +365,7 @@ function furniture() {
     b(2.0, 0.06, 0.9, [0, 0.72, 0], 'wood', 0.015), b(2.0, 0.68, 0.05, [0, 0.34, 0.42], 'woodDark', 0.012), b(0.05, 0.68, 0.8, [-0.97, 0.34, 0], 'woodDark', 0.012), b(0.05, 0.68, 0.8, [0.97, 0.34, 0], 'woodDark', 0.012),
     b(1.8, 0.035, 0.03, [0, 0.55, 0.45], 'amber', 0.006), b(0.5, 0.025, 0.34, [-0.45, 0.763, 0.05], 'metalDark', 0.01),
     { g: place(box(0.5, 0.3, 0.02, 0.008), { t: [-0.45, 0.92, 0.2], r: [-14, 0, 0] }), m: 'metalDark' }, { g: place(box(0.45, 0.25, 0.01, 0.004), { t: [-0.45, 0.92, 0.188], r: [-14, 0, 0] }), m: 'screen' },
-    b(0.4, 0.24, 0.03, [0.6, 0.86, 0.3], 'lemon', 0.01), c(0.06, 0.05, 0.12, [0.2, 0.81, 0.1], 'white'), c(0.055, 0.055, 0.14, [0.8, 0.82, 0], 'metal'),
+    b(0.4, 0.24, 0.03, [0.6, 0.86, 0.3], 'lemon', 0.01), ...keyboard(-0.45, 0.75, -0.3, 0.34), c(0.06, 0.05, 0.12, [0.2, 0.81, 0.1], 'white'), c(0.055, 0.055, 0.14, [0.8, 0.82, 0], 'metal'),
   ] });
   // Task Board: the hero wall screen, 8.4 wide, with a kanban of cards and a console below so nothing floats.
   const cards = [];
@@ -399,6 +411,65 @@ function furniture() {
     c(0.18, 0.14, 0.3, [0, 0.15, 0], 'pot', 10), c(0.15, 0.15, 0.03, [0, 0.3, 0], 'woodDark', 10),
     ...[[0, 0.58, 0, 0.15, 0.27, 0.15, 'green'], [-0.12, 0.5, 0.04, 0.11, 0.21, 0.11, 'greenDark'], [0.12, 0.52, -0.05, 0.12, 0.23, 0.12, 'green'], [0.03, 0.42, 0.12, 0.1, 0.18, 0.1, 'greenDark']]
       .map(([x, y, z, rx, ry, rz, m]) => ({ g: place(ball(rx, ry, rz, 8, 6), { t: [x, y, z] }), m })),
+  ] });
+
+  // ---------- scene dressing (all front +z, origin on the floor, one unit = one cell unless noted) ----------
+  add({ name: 'partition', parts: [b(1, 1.3, 0.16, [0, 0.65, 0], 'panel', 0.02), b(1, 0.12, 0.18, [0, 0.06, 0], 'wallTrim', 0.012), b(1, 0.04, 0.2, [0, 1.28, 0], 'panelCap', 0.01)] });
+  add({ name: 'partition_end', parts: [b(0.16, 1.35, 0.16, [0, 0.675, 0], 'panel', 0.02), b(0.18, 0.12, 0.18, [0, 0.06, 0], 'wallTrim', 0.012), b(0.2, 0.04, 0.2, [0, 1.33, 0], 'panelCap', 0.01)] });
+  // Sign board: a 1 x 1 dark frame centred on its own origin (the scene scales it and adds the text plane in front).
+  add({ name: 'sign_board', parts: [b(1, 1, 0.02, [0, 0, -0.005], 'dark', 0.004), b(1, 0.06, 0.03, [0, 0.47, 0], 'metalDark', 0.006), b(1, 0.06, 0.03, [0, -0.47, 0], 'metalDark', 0.006), b(0.06, 0.88, 0.03, [-0.47, 0, 0], 'metalDark', 0.006), b(0.06, 0.88, 0.03, [0.47, 0, 0], 'metalDark', 0.006)] });
+  add({ name: 'sofa', parts: [
+    b(2, 0.3, 0.9, [0, 0.25, 0], 'cushion', 0.04), b(2, 0.5, 0.22, [0, 0.65, -0.34], 'cushion', 0.05), b(0.2, 0.5, 0.9, [-0.9, 0.55, 0], 'cushion', 0.05), b(0.2, 0.5, 0.9, [0.9, 0.55, 0], 'cushion', 0.05),
+    b(0.78, 0.14, 0.62, [-0.38, 0.47, 0.08], 'cushionLight', 0.05), b(0.78, 0.14, 0.62, [0.38, 0.47, 0.08], 'cushionLight', 0.05),
+    ...[-0.85, 0.85].flatMap(x => [-0.35, 0.35].map(z => b(0.07, 0.1, 0.07, [x, 0.05, z], 'woodDark', 0.01))),
+  ] });
+  add({ name: 'armchair', parts: [
+    b(0.9, 0.3, 0.85, [0, 0.25, 0], 'cushion', 0.04), b(0.9, 0.5, 0.2, [0, 0.65, -0.32], 'cushion', 0.05), b(0.16, 0.45, 0.85, [-0.37, 0.52, 0], 'cushion', 0.05), b(0.16, 0.45, 0.85, [0.37, 0.52, 0], 'cushion', 0.05),
+    b(0.54, 0.13, 0.58, [0, 0.46, 0.08], 'cushionLight', 0.05),
+    ...[-0.38, 0.38].flatMap(x => [-0.33, 0.33].map(z => b(0.07, 0.1, 0.07, [x, 0.05, z], 'woodDark', 0.01))),
+  ] });
+  add({ name: 'coffee_table', parts: [
+    b(0.9, 0.05, 0.5, [0, 0.38, 0], 'wood', 0.015), b(0.8, 0.03, 0.4, [0, 0.12, 0], 'woodDark', 0.01),
+    ...[-0.38, 0.38].flatMap(x => [-0.2, 0.2].map(z => b(0.05, 0.36, 0.05, [x, 0.18, z], 'woodDark', 0.01))),
+    b(0.2, 0.02, 0.15, [-0.15, 0.415, 0.03], 'white', 0.004), c(0.04, 0.035, 0.07, [0.22, 0.445, -0.05], 'coral'),
+  ] });
+  add({ name: 'rug', parts: [b(3, 0.02, 2, [0, 0.01, 0], 'rug', 0.005), b(2.6, 0.024, 1.6, [0, 0.012, 0], 'rugInner', 0.004), b(1.8, 0.028, 0.9, [0, 0.014, 0], 'rug', 0.004)] });
+  const books = [];
+  [0.04, 0.47, 0.92, 1.37].forEach((y, row) => { // shelf tops; the gap above each is 0.39-0.41, so books (<= 0.36) stay inside it
+    let x = -0.4;
+    for (let i = 0; i < 6 - (row % 2); i++) { const w = 0.07 + ((i * 3 + row) % 3) * 0.02, h = 0.26 + ((i + row * 2) % 3) * 0.05; x += w / 2; books.push(b(w, h, 0.26, [x, y + h / 2, 0.0], ['coral', 'bookBlue', 'lemon', 'bookGreen', 'lav', 'bookRed'][(i + row) % 6], 0.006)); x += w / 2 + 0.005; }
+  });
+  add({ name: 'bookshelf', parts: [
+    b(0.05, 2.1, 0.35, [-0.475, 1.05, 0], 'wood', 0.01), b(0.05, 2.1, 0.35, [0.475, 1.05, 0], 'wood', 0.01), b(1, 2.1, 0.03, [0, 1.05, -0.16], 'woodDark', 0.008),
+    ...[0.02, 0.45, 0.9, 1.35, 1.8, 2.08].map(y => b(0.9, 0.04, 0.35, [0, y, 0], 'wood', 0.01)), ...books,
+  ] });
+  add({ name: 'water_cooler', parts: [
+    b(0.36, 0.9, 0.36, [0, 0.45, 0], 'white', 0.03), b(0.3, 0.22, 0.02, [0, 0.68, 0.18], 'metalDark', 0.008), b(0.06, 0.04, 0.05, [-0.06, 0.7, 0.21], 'red', 0.008), b(0.06, 0.04, 0.05, [0.06, 0.7, 0.21], 'sky', 0.008), b(0.2, 0.02, 0.12, [0, 0.55, 0.2], 'metalDark', 0.005),
+    c(0.15, 0.15, 0.4, [0, 1.12, 0], 'waterBlue', 12), c(0.07, 0.15, 0.08, [0, 1.36, 0], 'waterBlue', 12), c(0.18, 0.18, 0.02, [0, 0.91, 0], 'metalDark', 12),
+  ] });
+  add({ name: 'floor_lamp', parts: [c(0.17, 0.19, 0.04, [0, 0.02, 0], 'metalDark', 12), c(0.017, 0.017, 1.45, [0, 0.76, 0], 'metalDark', 6), c(0.17, 0.26, 0.32, [0, 1.62, 0], 'lamp', 12), c(0.1, 0.1, 0.02, [0, 1.79, 0], 'metalDark', 8)] });
+  add({ name: 'printer', parts: [
+    b(0.8, 0.72, 0.5, [0, 0.36, 0], 'wood', 0.02), b(0.74, 0.3, 0.02, [0, 0.5, 0.255], 'woodDark', 0.006), b(0.74, 0.3, 0.02, [0, 0.18, 0.255], 'woodDark', 0.006), b(0.2, 0.025, 0.03, [0, 0.58, 0.275], 'metalDark', 0.006),
+    b(0.7, 0.24, 0.42, [0, 0.84, 0], 'white', 0.03), b(0.5, 0.02, 0.3, [0, 0.97, -0.02], 'paper', 0.004), b(0.5, 0.03, 0.2, [0, 0.78, 0.26], 'paper', 0.004), b(0.2, 0.06, 0.02, [0.18, 0.88, 0.215], 'dark', 0.006), b(0.025, 0.025, 0.02, [0.28, 0.9, 0.215], 'ledGreen', 0.004),
+  ] });
+  const notes = [['lemon', -0.7, 1.95], ['sky', -0.3, 1.9], ['coral', 0.1, 1.97], ['mint', 0.55, 1.92], ['lemon', -0.55, 1.55], ['mint', -0.15, 1.5], ['sky', 0.35, 1.55], ['coral', 0.75, 1.5]].map(([m, x, y]) => b(0.28, 0.24, 0.012, [x, y, 0.066], m, 0.004));
+  add({ name: 'whiteboard', parts: [b(2, 1.2, 0.05, [0, 1.75, 0.025], 'metal', 0.015), b(1.9, 1.1, 0.02, [0, 1.75, 0.045], 'white', 0.006), b(1.6, 0.02, 0.01, [0, 2.1, 0.058], 'line', 0.003), b(1.2, 0.02, 0.01, [-0.2, 1.75, 0.058], 'line', 0.003), ...notes, b(1.9, 0.04, 0.08, [0, 1.13, 0.07], 'metal', 0.01), b(0.14, 0.03, 0.03, [-0.5, 1.165, 0.07], 'red', 0.006), b(0.14, 0.03, 0.03, [-0.3, 1.165, 0.07], 'bookBlue', 0.006)] });
+  add({ name: 'window', parts: [
+    // Frame as four border bars (z 0..0.06) so the pane is not buried; the pane (z 0.05..0.07) and thin mullions (z up to 0.065) sit inside the opening.
+    b(2, 0.1, 0.06, [0, 2.65, 0.03], 'wallTrim', 0.01), b(2, 0.1, 0.06, [0, 1.05, 0.03], 'wallTrim', 0.01), b(0.1, 1.5, 0.06, [-0.95, 1.85, 0.03], 'wallTrim', 0.01), b(0.1, 1.5, 0.06, [0.95, 1.85, 0.03], 'wallTrim', 0.01),
+    b(1.8, 1.5, 0.02, [0, 1.85, 0.06], 'skyPane', 0.004),
+    b(0.05, 1.5, 0.02, [0, 1.85, 0.055], 'wallTrim', 0.005), b(1.8, 0.05, 0.02, [0, 1.85, 0.055], 'wallTrim', 0.005), b(2.1, 0.05, 0.16, [0, 0.97, 0.08], 'wood', 0.01),
+  ] });
+  add({ name: 'pendant_lamp', parts: [c(0.1, 0.34, 0.24, [0, 0, 0], 'white', 14), c(0.1, 0.1, 0.02, [0, 0.12, 0], 'metalDark', 10), c(0.008, 0.008, 1.2, [0, 0.73, 0], 'dark', 4), bl(0.1, 0.1, 0.1, [0, -0.1, 0], 'lamp', 10, 6)] });
+  add({ name: 'plant_tall', parts: [
+    c(0.27, 0.2, 0.5, [0, 0.25, 0], 'pot', 12), c(0.25, 0.25, 0.03, [0, 0.5, 0], 'woodDark', 12), c(0.04, 0.05, 0.9, [0, 0.95, 0], 'woodDark', 6),
+    ...[[0, 1.75, 0, 0.36, 0.34, 0.36, 'green'], [-0.28, 1.45, 0.08, 0.28, 0.24, 0.28, 'greenDark'], [0.27, 1.4, -0.06, 0.3, 0.26, 0.3, 'green'], [0.05, 1.2, 0.26, 0.24, 0.2, 0.24, 'greenLight'], [-0.1, 1.15, -0.25, 0.26, 0.2, 0.26, 'greenDark'], [0.1, 2.0, 0.05, 0.24, 0.22, 0.24, 'greenLight']]
+      .map(([x, y, z, rx, ry, rz, m]) => bl(rx, ry, rz, [x, y, z], m, 10, 7)),
+  ] });
+  add({ name: 'plant_small', parts: [c(0.08, 0.06, 0.1, [0, 0.05, 0], 'white', 10), ...[[0, 0.16, 0, 0.06, 0.07, 0.06, 'greenLight'], [-0.06, 0.13, 0.03, 0.05, 0.05, 0.05, 'green'], [0.06, 0.13, -0.02, 0.05, 0.05, 0.05, 'greenDark'], [0.01, 0.12, 0.07, 0.045, 0.045, 0.045, 'green']].map(([x, y, z, rx, ry, rz, m]) => bl(rx, ry, rz, [x, y, z], m, 8, 5))] });
+  add({ name: 'wall_art', parts: [
+    b(0.9, 0.7, 0.03, [0, 1.75, 0.015], 'woodDark', 0.01), b(0.8, 0.6, 0.012, [0, 1.75, 0.03], 'paper', 0.003),
+    b(0.3, 0.4, 0.012, [-0.22, 1.75, 0.04], 'coral', 0.003), b(0.26, 0.26, 0.012, [0.1, 1.9, 0.04], 'sky', 0.003), b(0.26, 0.2, 0.012, [0.1, 1.6, 0.04], 'lemon', 0.003), b(0.14, 0.4, 0.012, [0.3, 1.75, 0.04], 'mint', 0.003),
   ] });
   return g.glb(nodes);
 }

@@ -135,6 +135,10 @@ without them answers `operation_not_allowed` (422). A response whose project
 (or, for activity, run) differs from the request, or that fails the strict
 schema, maps to `unavailable`.
 
+GET `projects/:id/workforce/excerpts` and GET `projects/:id/agents/:instanceId/transcript` are further read-only routes with the same checks. They call the
+optional `readWorkforceExcerpts` / `readAgentTranscript` ports and answer `operation_not_allowed` (422) without them. They return redacted, size-capped
+terminal snapshots, which are not task evidence (ADR 0008). Evidence level: source plus local tests with fake clients; no live Herdr or provider probe.
+
 ### Serving the 3D office assets
 
 The web build's 3D mode needs no Local Server change and no CSP change. Its two models (`office/character.glb`, `office/furniture.glb`) are ordinary

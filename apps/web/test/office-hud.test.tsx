@@ -16,7 +16,7 @@ const model = (agents: OfficeAgent[], pendingDecisions = 0): OfficeModel => ({ t
 function props(over: Partial<OfficeHudProps> = {}): OfficeHudProps {
   return {
     projectName: 'Vườn sách', projects: [{ projectId: 'p', displayName: 'Vườn sách' }, { projectId: 'q', displayName: 'Kho phim' }], projectId: 'p', onProject: vi.fn(), failed: false, authRequired: false, onDocuments: vi.fn(), session: ready, model: model([agent('a', 'working'), agent('b', 'typing'), agent('c', 'sleeping'), agent('d', 'hand_raised')], 2), runs: [run], connection: 'connected', stale: false, mode: 'visual', onMode: vi.fn(), panelOpen: false,
-    overflow: 0, onOverview: vi.fn(), onNavigate: vi.fn(), onRefresh: vi.fn(), onFocusZone: vi.fn(), onAgentList: vi.fn(), onChatDraft: vi.fn(), dock: null, ...over,
+    overflow: 0, onOverview: vi.fn(), onNavigate: vi.fn(), onRefresh: vi.fn(), onFocusZone: vi.fn(), onAgentList: vi.fn(), onChatDraft: vi.fn(), dock: null, dockSummary: { count: 0, attention: false }, ...over,
   };
 }
 beforeEach(() => { vi.stubGlobal('crypto', webcrypto); vi.stubGlobal('navigator', { onLine: true, locks: { request: async (_k: string, cb: () => unknown) => cb() } }); localStorage.clear(); sessionStorage.clear(); });
@@ -73,7 +73,7 @@ test('Classic | 3D switch, right rail with the decision badge, and refresh', () 
   fireEvent.click(within(group).getByRole('button', { name: '3D' }));
   expect(p.onMode).toHaveBeenCalledTimes(1);
   const rail = within(screen.getByRole('navigation', { name: 'Lối tắt' }));
-  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Tài liệu', 'Cài đặt', 'Tải lại dữ liệu']);
+  expect(rail.getAllByRole('button').map(b => b.textContent?.replace(/Đang chờ: /, ''))).toEqual(['Tổng quan', 'Công việc', 'Quyết định2', 'Trò chuyện', 'Nhân viên', 'Tài liệu', 'Cài đặt', 'Tải lại dữ liệu']);
   fireEvent.click(rail.getByRole('button', { name: /Quyết định/ }));
   expect(p.onNavigate).toHaveBeenCalledWith('review');
   fireEvent.click(rail.getByRole('button', { name: 'Tổng quan' }));
@@ -117,7 +117,8 @@ test('chat bar hands the draft over once, trimmed, and is disabled when chat is 
 });
 
 test('on a phone with the panel open only the operations dock stays in the HUD', () => {
-  render(<OfficeHud {...props({ panelOpen: true, dock: <section aria-label="Theo dõi thao tác">dock</section> })} />);
+  render(<OfficeHud {...props({ panelOpen: true, dock: <section aria-label="Theo dõi thao tác">dock</section>, dockSummary: { count: 1, attention: false } })} />);
+  fireEvent.click(screen.getByRole('button', { name: /Thao tác đã gửi/ }));
   expect(screen.getByRole('region', { name: 'Theo dõi thao tác' })).toBeTruthy();
   expect(screen.getByRole('navigation', { name: 'Lối tắt' }).className).toContain('max-md:hidden');
   expect(screen.getByLabelText('Trò chuyện với Bflow').closest('form')!.parentElement!.className).toContain('max-md:hidden');
@@ -155,4 +156,46 @@ test('the Tổng quan button badges waiting clarifications, and blockers show in
   rerender(<OfficeHud {...props({ session: { ...ready, pendingIntakes: [intake as never], blockers: [{ code: 'x', message: 'y' }] } })} />);
   expect(within(nav).getByRole('button', { name: /Tổng quan/ }).textContent).toContain('Câu hỏi chờ trả lời: 1');
   expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('1 điểm cần lưu ý');
+});
+
+const dockProps = (summary: OfficeHudProps['dockSummary'], over: Partial<OfficeHudProps> = {}) => props({ dock: <section aria-label="Theo dõi thao tác">dock</section>, dockSummary: summary, ...over });
+test('the operations dock is collapsed behind a toggle, stays mounted and opens on demand', () => {
+  render(<OfficeHud {...dockProps({ count: 2, attention: false })} />);
+  const toggle = screen.getByRole('button', { name: 'Thao tác đã gửi (2)' });
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  const dock = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+  expect(dock.hasAttribute('hidden')).toBe(true);
+  expect(dock.textContent).toBe('dock');
+  expect(screen.queryByRole('region', { name: 'Theo dõi thao tác' })).toBeNull();
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  expect(dock.hasAttribute('hidden')).toBe(false);
+  expect(screen.getByRole('region', { name: 'Theo dõi thao tác' })).toBeTruthy();
+  fireEvent.click(toggle);
+  expect(dock.hasAttribute('hidden')).toBe(true);
+});
+test('attention is announced and styled but never opens the dock; no toggle when nothing is tracked', () => {
+  const { rerender } = render(<OfficeHud {...dockProps({ count: 0, attention: false })} />);
+  expect(screen.queryByRole('button', { name: /Thao tác đã gửi/ })).toBeNull();
+  // The live region is already in the page (and empty) before attention starts, so the change is announced.
+  const live = screen.getByTestId('dock-attention');
+  expect(live.getAttribute('role')).toBe('status');
+  expect(live.textContent).toBe('');
+  rerender(<OfficeHud {...dockProps({ count: 0, attention: true })} />);
+  const toggle = screen.getByRole('button', { name: /Thao tác đã gửi/ });
+  expect(screen.getByTestId('dock-attention')).toBe(live);
+  expect(live.textContent).toContain('Có thao tác cần xem');
+  expect(toggle.className).toContain('text-warning');
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(document.getElementById(toggle.getAttribute('aria-controls')!)!.hasAttribute('hidden')).toBe(true);
+});
+test('Toàn cảnh collapses an open dock and still asks the scene for the overview', () => {
+  const p = dockProps({ count: 1, attention: false });
+  render(<OfficeHud {...p} />);
+  const toggle = screen.getByRole('button', { name: /Thao tác đã gửi/ });
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(screen.getByRole('button', { name: 'Toàn cảnh' }));
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(p.onFocusZone).toHaveBeenCalledWith('overview');
 });
