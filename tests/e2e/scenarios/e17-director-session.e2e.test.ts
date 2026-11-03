@@ -134,10 +134,10 @@ describe("Scenario E17 — Director session (manifest v3, fake runner)", () => {
     await session.runtime.flushOutbound();
     const waited = DirectorWaitResultSchema.parse(await session.endpoint.call(registered.token, "director_wait", { cursor: registered.cursor, timeoutMs: 1000 }));
     expect(waited.timedOut).toBe(false);
-    expect(waited.mailbox.some(item => item.kind === "specialist_result_ready" && item.runId === runId && item.audience === "director" &&
+    expect((waited.mailbox ?? []).some(item => item.kind === "specialist_result_ready" && item.runId === runId && item.audience === "director" &&
       item.fromRole === "runtime")).toBe(true);
     // director_wait only returns the Director audience; the user cards stay in the user audience.
-    expect(waited.mailbox.every(item => item.audience === "director")).toBe(true);
+    expect((waited.mailbox ?? []).every(item => item.audience === "director")).toBe(true);
 
     // Delivery approval, then the run completes.
     await answerDecision(session, runId, authorized);
@@ -172,7 +172,7 @@ describe("Scenario E17 — Director session (manifest v3, fake runner)", () => {
     expect(await session.runtime.resumeRecoverableRuns()).toEqual({ resumed: 1 });
     await session.runtime.flushOutbound();
     const waited = DirectorWaitResultSchema.parse(await session.endpoint.call(again.token, "director_wait", { timeoutMs: 1000 }));
-    expect(waited.mailbox.some(item => item.kind === "resume_run" && item.runId === runId)).toBe(true);
+    expect((waited.mailbox ?? []).some(item => item.kind === "resume_run" && item.runId === runId)).toBe(true);
     expect(session.transport.sentRequests).toEqual([]);
   }, 60_000);
 

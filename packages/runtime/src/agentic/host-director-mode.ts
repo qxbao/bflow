@@ -1,9 +1,10 @@
 import {
-  AgentProviderIdSchema, DelegationRequestSchema, SessionManifestSchema,
-  type AgentProviderId, type DelegationRequest, type OperationResult, type RoleMessage, type SessionManifest
+  AgentProviderIdSchema, DelegationRequestSchema, JsonValueSchema, SessionManifestSchema,
+  type AgentProviderId, type DelegationRequest, type JsonValue, type OperationResult, type RoleMessage, type SessionManifest
 } from "@bflow/contracts";
+import { isDirectorCoordinatorTool } from "../director/host-methods.js";
 import { redactString } from "../resilience/redaction.js";
-import { digest } from "./journal.js";
+import { digest, record } from "./journal.js";
 import { notificationBody, renderConversationNotice, type NoticeLike } from "./conversation-notice-render.js";
 import type { DirectorWorkStart } from "../director/tools.js";
 
@@ -153,4 +154,37 @@ export async function ensureDirectorProgressPane(panes: { ensureProgressPane?: (
   if (failure === undefined) return true;
   await log({ kind: "error", action: "progress_pane_unavailable", outcome: redactString(failure).slice(0, 240) }).catch(() => undefined);
   return false;
+}
+
+/** The principal a Director-token tool call runs under (R-B2-12): the logical Coordinator, marked as the Director. */
+export const DIRECTOR_TOOL_PRINCIPAL = { role: "coordinator", principal: "director" } as const;
+export type DirectorToolPrincipal = typeof DIRECTOR_TOOL_PRINCIPAL;
+
+export interface DirectorCoordinatorPortDeps {
+  /** The host's Coordinator tool path (guards + CoordinatorTools); always called with the Director principal. */
+  invoke: (name: string, parameters: Record<string, unknown>, principal: DirectorToolPrincipal) => Promise<unknown>;
+  planningReference: (parameters: Record<string, unknown>) => Promise<unknown>;
+  log: (entry: { kind: "tool" | "error"; action: string; outcome?: string }) => Promise<void>;
+}
+
+/**
+ * The DirectorEndpoint Coordinator port. Every call reaching it was authenticated with a Director token, so it always carries the
+ * Director principal: the legacy-run guard (R-B2-12) then refuses mutating tools on a v2 Conversation run. The v2 Coordinator pane
+ * path never goes through this port.
+ */
+export function directorCoordinatorPort(deps: DirectorCoordinatorPortDeps): { invoke(name: string, input: unknown): Promise<JsonValue> } {
+  return {
+    invoke: async (name, input) => {
+      if (!isDirectorCoordinatorTool(name)) throw new Error("Tool is unavailable to the Director");
+      const parameters = record(JsonValueSchema.parse(input ?? {}));
+      try {
+        const result = name === "planning_reference" ? await deps.planningReference(parameters) : await deps.invoke(name, parameters, DIRECTOR_TOOL_PRINCIPAL);
+        await deps.log({ kind: "tool", action: `director:${name}:completed` });
+        return JsonValueSchema.parse(result);
+      } catch (error) {
+        await deps.log({ kind: "error", action: `director:${name}:failed`, outcome: error instanceof Error ? error.name : "HostToolError" });
+        throw error;
+      }
+    }
+  };
 }

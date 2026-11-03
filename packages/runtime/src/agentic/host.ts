@@ -52,12 +52,12 @@ import { callHost } from "./host-protocol.js";
 import { effectiveFastPathMode, effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
-import { COORDINATOR_TOOLS } from "./tools.js";
+import { COORDINATOR_TOOLS, DIRECTOR_LEGACY_RUN_TOOLS } from "./tools.js";
 import { DirectorEndpoint } from "../director/endpoint.js";
-import { assertManifestLayout, directorDefaultAgentKind, ensureDirectorProgressPane, hostRolesFor, recordConversationNotice,
+import { assertManifestLayout, directorCoordinatorPort, directorDefaultAgentKind, ensureDirectorProgressPane, hostRolesFor, recordConversationNotice,
   startDirectorWork, type DelegationBuilder } from "./host-director-mode.js";
 import { DirectorAuthError } from "../director/store.js";
-import { DIRECTOR_OWNER_METHODS, isDirectorCoordinatorTool, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
+import { DIRECTOR_OWNER_METHODS, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
 import { handleHumanDecisionCli } from "./human-decision-cli.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS, type AgenticWorkflowRuntime } from "./runtime.js";
@@ -1710,9 +1710,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     });
   };
   /** Coordinator orchestration guards that need no pane binding; shared by Coordinator role_call and the Director endpoint. */
-  const invokeCoordinatorTool = async (name: string, parameters: Record<string, unknown>, role: AgentRole = "coordinator") => {
+  const invokeCoordinatorTool = async (name: string, parameters: Record<string, unknown>,
+    principal: { role: AgentRole; principal?: "director" } = { role: "coordinator" }) => {
     const host = requireWorkspace();
     if (quiesced && !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    // A Director call on a v2 Conversation run is refused before any host-side proposal handling can touch that run (R-B2-12).
+    if (principal.principal === "director" && !DIRECTOR_LEGACY_RUN_TOOLS.includes(name)) {
+      const runId = parameters.runId ?? parameters.run_id;
+      if (typeof runId === "string" && runId.trim() !== "") await host.runtime.assertDirectorRunWritable(runId);
+    }
     if (name === "propose_workflow") {
       if (configuration.policy?.verification.maxIterations !== undefined) {
         if (parameters.maxIterations !== undefined && parameters.maxIterations !== configuration.policy.verification.maxIterations) throw new Error("Verification limit is fixed by the project owner policy");
@@ -1751,7 +1757,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         throw error;
       }
     }
-    return host.tools.invoke(name, parameters, { role });
+    return host.tools.invoke(name, parameters, principal);
   };
   /** Planning guidance needs no pane binding; shared by the Coordinator role tool and the Director endpoint. */
   const readPlanningReference = async (parameters: Record<string, unknown>) => {
@@ -1797,20 +1803,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return { runId: outcome.value.runId, correlationId: outcome.value.correlationId, status: "queued" };
       }
     },
-    coordinator: {
-      invoke: async (name, input) => {
-        if (!isDirectorCoordinatorTool(name)) throw new Error("Tool is unavailable to the Director");
-        const parameters = record(JsonValueSchema.parse(input ?? {}));
-        try {
-          const value = name === "planning_reference" ? await readPlanningReference(parameters) : await invokeCoordinatorTool(name, parameters);
-          await activityLog.record({ kind: "tool", role: "coordinator", action: `director:${name}:completed` });
-          return JsonValueSchema.parse(value);
-        } catch (error) {
-          await activityLog.record({ kind: "error", role: "coordinator", action: `director:${name}:failed`, outcome: error instanceof Error ? error.name : "HostToolError" });
-          throw error;
-        }
-      }
-    }
+    // Director-token calls only: every Coordinator tool runs under the Director principal (R-B2-12 legacy-run guard).
+    coordinator: directorCoordinatorPort({ invoke: invokeCoordinatorTool, planningReference: readPlanningReference,
+      log: async entry => { await activityLog.record({ ...entry, role: "coordinator" }); } })
   });
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
@@ -2213,7 +2208,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         () => runnerBindings.run(binding, () => verification.alternativeEvidence(binding, parameters)));
       return nativeDeliver(envelope(RoleMessageSchema.parse(completed.assignment), "verification.result", completed.result, completed.result.evidenceArtifacts), `alternative:${textField(parameters.observationId)}`);
     }
-    return invokeCoordinatorTool(name, parameters, role);
+    return invokeCoordinatorTool(name, parameters, { role });
   };
   /** Best effort: a failure to report is logged, never thrown, so it cannot mask the original error. */
   /** Returns whether Runtime recorded the failure in its run; false means the caller must write a notice receipt itself. */

@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentResultSchema, AppendEventsRequestSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestV3Schema, StoredRunSchema, VerificationResultSchema, WorkflowDefinitionSchema,
+  AgentResultSchema, AppendEventsRequestSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestV3Schema, StoredRunSchema, QualityGateResultSchema, VerificationResultSchema, WorkflowDefinitionSchema,
   type AgentExecutionHandle, type AgentMessage, type AgentReconciliationRequest, type AgentReconciliationResult, type AgentRequest,
   type AgentSubmissionReceipt, type AgentTransport, type AgentTransportCapabilities, type AgentTransportObservation, type ApprovalDecision,
-  type CancellationRequest, type CancellationResult, type OperationResult, type PaneBinding, type QualityGate, type QualityGateContext,
+  type CancellationRequest, type CancellationResult, type OperationResult, type PaneBinding, type QualityGate, type QualityGateContext, type QualityGateResult,
   type RoleMessage, type SessionManifest, type Specification
 } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
@@ -18,7 +18,7 @@ import { buildDelegationRequest } from "@bflow/conversation";
 import { classifyChange, PolicyDetailsSchema } from "@bflow/specification";
 import {
   AgenticWorkflowRuntime, CoordinatorTools, DirectorEndpoint, HostReceiptJournal, createAgenticConversationHost, loadAgenticPolicies,
-  recordConversationNotice, startDirectorWork,
+  directorCoordinatorPort, recordConversationNotice, startDirectorWork,
   type AgenticConversationHost, type AgenticRuntimePorts, type DirectorRuntimePort, type DirectorStartWorkDeps, type PanePolicy
 } from "@bflow/runtime";
 
@@ -56,7 +56,7 @@ export class RecordingTransport implements AgentTransport {
     return { ok: true, value: { status: "bound", handle: this.handle(request, request.idempotencyKey) } };
   }
   async cancel(handle: AgentExecutionHandle, request: CancellationRequest): Promise<OperationResult<CancellationResult>> {
-    return { ok: true, value: { status: "accepted", cancellationId: request.cancellationId, executionId: handle.executionId, observedAt: new Date().toISOString() } };
+    return { ok: true, value: { schemaVersion: 1, status: "accepted", cancellationId: request.cancellationId, executionId: handle.executionId, observedAt: new Date().toISOString() } };
   }
   async wait(handle: AgentExecutionHandle): Promise<OperationResult<AgentTransportObservation>> {
     return { ok: true, value: { handle, state: "done", observedAt: new Date().toISOString(), correlationVerified: true } };
@@ -139,16 +139,18 @@ const CHECKS = [
 ];
 
 /** Scripted independent check outcome; the Reviewer fake sends the `review` one back as its verdict. */
-function scriptedCheck(context: QualityGateContext) {
+function scriptedCheck(context: QualityGateContext): QualityGateResult {
   const config = context.definition.configuration as { role: string; method: string; command?: string; criterionIds: string[]; testNames: string[] };
   const input = context.input as { sourceRevision?: string; specFingerprint?: string; scope?: string };
-  return { gateId: context.definition.id, runId: context.runId, taskId: context.taskId!, evaluationId: randomUUID(), status: "passed" as const,
+  // JSON round trip drops absent optional inputs; the exported schema validates the verdict at this fake's boundary.
+  return QualityGateResultSchema.parse(JSON.parse(JSON.stringify({ gateId: context.definition.id, runId: context.runId, taskId: context.taskId!,
+    evaluationId: randomUUID(), status: "passed",
     findings: [], producedArtifacts: [], evaluatedAt: new Date().toISOString(),
     metadata: { verification: { schemaVersion: 2, checkId: context.definition.id, runId: context.runId, taskId: context.taskId, attemptId: context.attemptId,
       sourceRevision: input.sourceRevision, specFingerprint: input.specFingerprint, scope: input.scope, independentExecution: true, isolated: true,
       executorId: "independent-test-host", role: config.role, method: config.method, ...(config.command ? { command: config.command, exitCode: 0 } : {}),
       testNames: config.testNames, criteria: config.criterionIds.map(criterionId => ({ criterionId, passed: true, summary: "Host independently checked the criterion" })),
-      summary: "Independent check" } } };
+      summary: "Independent check" } } })));
 }
 
 export interface DirectorSessionOptions {
@@ -211,9 +213,9 @@ export async function createDirectorSession(options: DirectorSessionOptions = {}
   const endpoint = new DirectorEndpoint({ directory: join(root, "director"), repositoryRoot: repository, feed: { read: () => ({ items: [] }) },
     inspect: () => runtime.inspect(), pollMs: 20,
     work: { start: async input => startDirectorWork(startWork, input) },
-    // The Director is the logical Coordinator: every Coordinator tool runs under the Director principal (R-B2-12), as the brief
-    // requires. NOTE: host.ts invokeCoordinatorTool currently passes only `{ role }` for the endpoint path (no Director principal).
-    coordinator: { invoke: (name, input) => tools().invoke(name, input, { role: "coordinator", principal: "director" }) } });
+    // The host's own Director Coordinator port: it supplies the Director principal (R-B2-12) for every Director-token call.
+    coordinator: directorCoordinatorPort({ invoke: (name, parameters, principal) => tools().invoke(name, parameters, principal),
+      planningReference: async () => { throw new Error("planning_reference is not used by this scenario"); }, log: async () => undefined }) });
   const receipts = new HostReceiptJournal(join(root, "host-receipts"), repository, "session-1");
   let chat: AgenticConversationHost | undefined;
   /** Mailbox port: the real endpoint; `absent` presence blocks automatic resume. */
