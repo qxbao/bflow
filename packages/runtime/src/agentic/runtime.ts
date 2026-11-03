@@ -1678,7 +1678,7 @@ export class AgenticWorkflowRuntime {
       if (!["pending", "ready", "blocked", "waiting", "running"].includes(current.status)) throw new Error(`Không thể treo task ở trạng thái ${current.status}`);
       const related = state.outbound.filter(out => out.message.run_id === run.runId &&
         (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
-      const queued = related.filter(out => out.status === "queued");
+      const queued = related.filter(out => out.status === "queued" || out.status === "cancelled" && !out.handle && out.lease && !out.parentAssignmentId);
       if (run.nativeDeliveries?.length || related.some(out => ["sending", "unknown_delivery"].includes(out.status)))
         throw new Error("Có delivery đang gửi hoặc giao chưa rõ; cần đối soát trước khi treo task");
       if (run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId &&
@@ -1711,6 +1711,35 @@ export class AgenticWorkflowRuntime {
       if (heldFailovers.some(entry => !entry.stopProof && !executions.some(out =>
           out.handle!.executionId === entry.sourceHandle.executionId && out.parkStop?.proof)))
         return { parked: false, runStatus: run.status, reason: "Failover còn execution cũ chưa xác nhận dừng; giữ nguyên task" };
+      // Allocation precedes enqueue/send. An unsent attempt still owns a pane and capacity even without a Core execution handle.
+      if (!task.writerReleased && !executions.some(out => out.message.recipient.role === "developer") && current.attemptId && task.worktrees.length) {
+        const tree = task.worktrees.at(-1)!, allocationTaskId = `${run.runId}-${task.taskId}`;
+        const rawManifest = unwrap(await this.ports.panes.getManifest());
+        if (!rawManifest) return { parked: false, runStatus: run.status, reason: "Chưa quan sát được allocation Developer; giữ nguyên task" };
+        const manifest = SessionManifestSchema.parse(rawManifest);
+        const agentId = `dev-${digest([run.runId, current.attemptId]).slice(0, 20)}`;
+        const candidates = manifest.panes.filter(pane => pane.role === "developer" && pane.metadata?.allocationStatus !== "released" &&
+          (pane.metadata?.taskId === allocationTaskId || pane.agentId === agentId || pane.worktreePath === tree.worktreePath));
+        if (manifest.sessionId !== run.delegation.sessionId || candidates.length > 1 || candidates.some(pane =>
+            !ownsCancelledAllocation(run.runId, pane) || pane.metadata?.taskId !== allocationTaskId || pane.agentId !== agentId ||
+            pane.worktreePath !== tree.worktreePath || pane.cwd !== tree.worktreePath))
+          return { parked: false, runStatus: run.status, reason: "Allocation Developer chưa khớp đúng owner, attempt và worktree; cần đối soát" };
+        const pane = candidates[0];
+        if (pane) {
+          const assignments = related.filter(out => out.message.type === "task.assignment" && out.attemptId === current.attemptId);
+          if (assignments.some(out => out.handle || !["queued", "cancelled", "failed"].includes(out.status) || out.selector !== pane.bindingId ||
+              out.message.recipient.agent_id !== pane.agentId || out.message.recipient.pane_id !== pane.paneId ||
+              out.request && (out.request.target.agentId !== pane.agentId || out.request.target.paneId !== pane.paneId ||
+                out.request.workingDirectory !== tree.worktreePath)) ||
+              state.outbound.some(out => out.message.recipient.role === "developer" && ["sending", "unknown_delivery", "accepted"].includes(out.status) &&
+                (out.handle?.target.paneId === pane.paneId || out.request?.target.paneId === pane.paneId || out.message.recipient.pane_id === pane.paneId)) ||
+              this.uncertainDeliveryTo(state, run, "developer", { paneId: pane.paneId, taskId: allocationTaskId }))
+            return { parked: false, runStatus: run.status, reason: "Allocation Developer chưa có bằng chứng chưa giao; giữ nguyên writer và lease" };
+          // Metadata-only release retains the worktree. Record writerReleased only after the owned release succeeds.
+          await this.releaseCancelledAllocation(allocationTaskId, tree.worktreePath);
+          task.writerReleased = true;
+        }
+      }
       for (const out of executions) {
         if (out.message.recipient.role === "developer" && !task.writerReleased) {
           await this.releaseCancelledAllocation(`${run.runId}-${task.taskId}`, out.handle!.target.worktreePath);
@@ -1721,6 +1750,8 @@ export class AgenticWorkflowRuntime {
         await this.releaseChildNotices(state, outbox, out);
       }
       for (const out of queued) {
+        // Fence unsent work before the lease-release write-ahead save can persist an allocation that has been relinquished.
+        out.status = "cancelled"; out.error = "Task parked";
         if (out.lease && !out.parentAssignmentId) {
           await outbox.release(out);
           delete out.lease; delete out.leaseRelease;

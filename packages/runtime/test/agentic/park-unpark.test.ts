@@ -33,7 +33,83 @@ async function running(parallel = false) {
   return { f, out };
 }
 
+/** Model the existing PaneManager's task/worktree ownership and one active-allocation capacity. */
+async function queuedAllocation(beforeEnqueue = false) {
+  const f = await fixture({ director: true, parallel: true });
+  f.def.dependencies = []; f.def.maxConcurrency = 1;
+  f.panes.busy.add("developer");
+  const allocate = f.ports.panes.allocateDeveloper.bind(f.panes);
+  let crashAfterAllocation = beforeEnqueue;
+  vi.spyOn(f.ports.panes, "allocateDeveloper").mockImplementation(async request => {
+    const active = f.panes.bindings.filter(binding => binding.role === "developer" && binding.metadata?.allocationStatus !== "released");
+    const existing = active.find(binding => binding.metadata?.taskId === request.taskId);
+    if (existing && existing.worktreePath !== request.worktreePath || !existing && active.length > 0)
+      return { ok: false, error: { code: "conflict", retryable: true, message: "An active Developer allocation still owns capacity or another worktree" } };
+    const result = await allocate(request);
+    if (result.ok) result.value.metadata = { ...result.value.metadata, taskId: request.taskId, runId: request.runId, allocationStatus: "active" };
+    if (crashAfterAllocation) { crashAfterAllocation = false; throw new Error("Controlled interruption after allocateDeveloper, before enqueue"); }
+    return result;
+  });
+  const release = vi.spyOn(f.ports.panes, "releaseDeveloper").mockImplementation(async request => {
+    const binding = f.panes.bindings.find(item => item.role === "developer" && item.metadata?.taskId === request.taskId && item.metadata?.allocationStatus !== "released");
+    if (!binding) return { ok: false, error: { code: "not_found", retryable: false, message: "No active owned allocation" } };
+    binding.metadata = { ...binding.metadata, allocationStatus: "released" };
+    return { ok: true, value: undefined };
+  });
+  await f.runtime.proposeWorkflow("run-1", f.spec, f.def); await f.runtime.tick();
+  const binding = f.panes.bindings.find(item => item.role === "developer")!;
+  expect(binding.metadata?.allocationStatus).toBe("active");
+  expect((await snapshot(f)).tasks[0]!.agentExecution).toBeUndefined();
+  return { f, binding, release };
+}
+
 describe("Runtime park/unpark", () => {
+  it.each([false, true])("releases an allocated unsent writer (before enqueue=%s), then dispatches a sibling and a new unpark attempt", async beforeEnqueue => {
+    const { f, binding, release } = await queuedAllocation(beforeEnqueue);
+    const oldWorktree = binding.worktreePath;
+    const oldOutbound = (await state(f)).outbound.find((item: any) => item.message.type === "task.assignment");
+    if (beforeEnqueue) expect(oldOutbound).toBeUndefined();
+    else { expect(oldOutbound.status).toBe("queued"); expect(oldOutbound.handle).toBeUndefined(); }
+    expect(await park(f)).toMatchObject({ parked: true, runStatus: "implementing" });
+    expect(release).toHaveBeenCalledWith({ taskId: "run-1-implement", closePane: false, removeWorktree: false });
+    expect(binding.metadata?.allocationStatus).toBe("released");
+    expect((await state(f)).runs[0].tasks[0]).toMatchObject({ writerReleased: true, parked: { episode: 1 } });
+    expect(f.transport.cancelledHandles).toEqual([]);
+    await readFile(join(oldWorktree!, "guide.md"), "utf8");
+    f.panes.busy.delete("developer"); await f.runtime.tick();
+    const sibling = (await state(f)).outbound.find((item: any) => item.taskId === "other" && item.message.type === "task.assignment");
+    expect(sibling.status).toBe("accepted");
+    f.transport.customWaitHandler = handle => ({ ok: true, value: { handle, state: "idle", correlationVerified: true, observedAt: new Date().toISOString() } });
+    await park(f, "other");
+    const tick = vi.spyOn(f.runtime, "tick");
+    await f.runtime.unparkTask({ runId: "run-1", taskId: "implement", source: "director" });
+    await Promise.all(tick.mock.results.map(result => result.value));
+    const latest = [...(await state(f)).outbound].reverse().find((item: any) => item.taskId === "implement" && item.message.type === "task.assignment");
+    expect(latest.status).toBe("accepted");
+    expect((await snapshot(f)).tasks[0]!.attempt).toBe(2);
+    expect(latest.handle.target.worktreePath).not.toBe(oldWorktree);
+    expect((await state(f)).runs[0].tasks[0].worktrees[0].worktreePath).toBe(oldWorktree);
+  });
+
+  it("retains an unsent allocation when owner/worktree is uncertain or release fails", async () => {
+    const { f, binding, release } = await queuedAllocation();
+    binding.metadata = { ...binding.metadata, runId: "foreign-run" };
+    expect(await park(f)).toMatchObject({ parked: false });
+    expect(release).not.toHaveBeenCalled();
+    binding.metadata = { ...binding.metadata, runId: "run-1" };
+    const worktree = binding.worktreePath!;
+    binding.worktreePath = `${worktree}-foreign`;
+    expect(await park(f)).toMatchObject({ parked: false });
+    expect(release).not.toHaveBeenCalled();
+    binding.worktreePath = worktree;
+    release.mockImplementation(async () => ({ ok: false, error: { code: "conflict", retryable: true, message: "Controlled allocation release failure" } }));
+    await expect(park(f)).rejects.toThrow("Controlled allocation release failure");
+    expect((await snapshot(f)).tasks[0]!.status).toBe("running");
+    expect((await state(f)).runs[0].tasks[0].writerReleased).not.toBe(true);
+    expect((await state(f)).runs[0].tasks[0].parked).toBeUndefined();
+    expect(binding.metadata?.allocationStatus).toBe("active");
+  });
+
   it("parks a confirmed-stopped writer, releases its lease and dispatches an independent task on the next tick", async () => {
     const { f, out } = await running(true);
     await journal(f).exclusive(async (s, save) => {
