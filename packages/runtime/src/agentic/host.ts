@@ -54,6 +54,8 @@ import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-ind
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { DirectorEndpoint } from "../director/endpoint.js";
+import { assertManifestLayout, directorDefaultAgentKind, ensureDirectorProgressPane, hostRolesFor, recordConversationNotice,
+  startDirectorWork, type DelegationBuilder } from "./host-director-mode.js";
 import { DirectorAuthError } from "../director/store.js";
 import { DIRECTOR_OWNER_METHODS, isDirectorCoordinatorTool, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
@@ -154,6 +156,11 @@ export async function executeHostWatchdogPass(deps: {
   watchdogReported: Set<string>;
   observeAgent: (paneId: string) => Promise<{ status: string }>;
   now?: number;
+  /**
+   * Director session (v3): no Conversation pane displays notices, so display-ack evidence is never collected. The pass sees no
+   * notices (no reconcile_notice, resurface or display-ack `blocked` actions); automatic resume and stall reports still run.
+   */
+  directorSession?: boolean;
 }): Promise<void> {
   const activeState = () => {
     const current = deps.readState();
@@ -177,7 +184,7 @@ export async function executeHostWatchdogPass(deps: {
   if (!afterResume) return;
   const runs = await afterResume.workspace.runtime.watchdogSnapshot(afterResume.manifest.conversationSessionId);
   if (!activeState() || !runs.some(run => run.live)) return;
-  const notices = await deps.receipts.conversationNoticeStates();
+  const notices = deps.directorSession === true ? [] : await deps.receipts.conversationNoticeStates();
   const beforeManifest = activeState();
   if (!beforeManifest) return;
   const manifestResult = await beforeManifest.workspace.runtime.ports.panes.getManifest();
@@ -191,7 +198,11 @@ export async function executeHostWatchdogPass(deps: {
   })));
   if (!activeState()) return;
   const activeVerificationRunIds = [...deps.activeHostVerifications.entries()].filter(([, count]) => count > 0).map(([id]) => id);
-  for (const action of evaluateWatchdog({ now, runs, notices, panes, activeVerificationRunIds })) {
+  // With no notice states, a pending decision would read as a lost notice (`reconcile_notice`); a Director session has no
+  // display-ack evidence at all, so only stall reports remain.
+  const actions = evaluateWatchdog({ now, runs, notices, panes, activeVerificationRunIds })
+    .filter(action => deps.directorSession !== true || action.kind === "stalled");
+  for (const action of actions) {
     const live = activeState();
     if (!live) return;
     try {
@@ -644,6 +655,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   await toolUsage.recoverInterrupted();
   const taskLogPane = new TaskLogPane({ directory: configuration.directory, repositoryPath: configuration.repositoryPath,
     sessionId: configuration.sessionId, logPath: activityLog.path, herdr });
+  // Director layout: the progress pane is reconciled on activation and on every watchdog pass. A failure is recorded once per
+  // failing episode (not every pass); the pane is a viewer only and never gates readiness or work.
+  let progressPaneFailing = false;
+  const ensureProgressPane = async (host: AgenticWorkspaceHandle): Promise<void> => {
+    const reconciled = await ensureDirectorProgressPane(host.runtime.ports.panes, async entry => {
+      if (!progressPaneFailing) await activityLog.record({ ...entry, role: "runtime" });
+    });
+    progressPaneFailing = !reconciled;
+  };
   const roleTokens = new Map<string, AgentRole>();
   const launch: Record<string, RoleLaunchDescriptor> = {};
   /** H1: per prepared role launch with Gateway registrations, what its provider process must prove reachable. */
@@ -662,6 +682,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const publicKey = await readFile(publicPath, "utf8");
   const promptAssets = await import("@bflow/pane-manager");
   const platformRoles = configuration.platform?.roles ?? [];
+  /** ADR 0009: a Director host has no Conversation/Coordinator pane; activation refuses any manifest of the other version. */
+  const directorLayout = configuration.layout === "director";
   const providerForRole = (role: AgentRole): AgentProviderId => platformRoles.find(option => option.role === role)?.provider ?? "claude";
   const hookRunners = new Map<string, string>();
   // Bind short paths to the full host directory (repository + complete session ID).
@@ -678,7 +700,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   } catch {
     useShortHook = false;
   }
-  for (const role of roles) {
+  // Director layout: no token, hook or launch descriptor (and no original prompt) for the replaced Conversation/Coordinator roles.
+  for (const role of hostRolesFor(configuration.layout, roles)) {
     const path = join(configuration.directory, role + ".json");
     const provider: AgentProviderId = platformRoles.find(option => option.role === role)?.provider ?? "claude";
     const hookRunnerPath = useShortHook
@@ -976,6 +999,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return principal("conversation", pane.paneId);
   };
   const webChat = new HostChat({directory:join(configuration.directory,"web-chat"),projectId:webProjectId,hostSessionId:configuration.sessionId,
+    // R-B2-7: a Director session has no Conversation pane to chat with; the Web reports chat_adapter_unavailable.
+    unavailable: () => directorLayout,
     session: async () => {
       const b=await chatBinding(), activeManifest=requireManifest(), native=nativeSessions.get(b.paneId);
       const live=record(record(record(JSON.parse(await herdr(["agent","get",b.paneId]))).result).agent);
@@ -1218,9 +1243,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const accepted = SessionManifestSchema.parse(input);
     attemptedManifest = accepted;
     if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || accepted.status !== "up") throw new Error("Foreign or unready session manifest");
+    assertManifestLayout(accepted, configuration.layout);
     if (workspace) {
       if (quiesced) throw new Error("Host is quiesced; reconcile and restart after shutdown");
       await taskLogPane.ensure(accepted.herdrWorkspaceId);
+      if (directorLayout) await ensureProgressPane(workspace);
       return null;
     }
     if (preparation || quiesced || closing) throw new Error("Host lifecycle transition prevents activation");
@@ -1238,6 +1265,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const hostChecks = defaultHostChecks(configuration.policy);
     workspace = await openAgenticWorkspace({ storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
+      ...(configuration.layout ? { layout: configuration.layout } : {}),
+      ...(directorLayout ? {
+        defaultAgentKind: directorDefaultAgentKind(platformRoles),
+        ...(configuration.progressCommand ? { progressCommand: configuration.progressCommand } : {}),
+        // R-B2-5: every outbound for the logical Coordinator goes to the Director mailbox. The endpoint is built once, below.
+        director: { deliver: message => directorEndpoint.deliverRuntimeMessage(message),
+          present: async () => (await directorEndpoint.presence()) !== "absent" }
+      } : {}),
       ...(platformSession ? { developerLaunches: {
         allocate: async request => {
           await readExecutionResolution?.();
@@ -1286,7 +1321,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       validateTaskCommands: (specification, strategy, ownedPaths) => verification.assertTaskSupported(specification, strategy, ownedPaths),
       authenticateMessage: authenticateNativeHerdrMessage,
       // Runtime outbox messages reach Conversation in-process; the model learns of them only through hook notices.
-      onConversationNotice: async message => { await receipts.appendConversationNotice(message); },
+      // Director session: the rendered notice is also copied into the Director mailbox for the user audience (R-B2-6).
+      onConversationNotice: message => recordConversationNotice({
+        appendNotice: notice => receipts.appendConversationNoticeReceipt(notice),
+        mirror: directorLayout ? (notice, rendered) => directorEndpoint.mirrorUserNotice(notice, rendered) : undefined,
+        log: async entry => { await activityLog.record({ ...entry, role: "runtime" }); }
+      }, message),
       authenticateResult: async (result, handle, message) => await authenticateNativeHerdrMessage(message) && result.requestId === handle.requestId && result.executionId === handle.executionId,
       authenticateStoredGate: result => verification.authenticateGate(result),
       authenticateStoredEvidence: result => verification.authenticateEvidence(result),
@@ -1382,6 +1422,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await workspace.runtime.resumeRecoverableRuns();
     manifest = accepted;
     await taskLogPane.ensure(accepted.herdrWorkspaceId);
+    if (directorLayout) await ensureProgressPane(workspace);
     if (taskLogPane.status().error) await activityLog.record({ kind: "error", role: "runtime", action: "task_log_pane_unavailable", outcome: "Pane reconcile failed; see host_status diagnostic." });
     if (verificationSandbox.status === "unsupported" && (testRunners.profiles.length || behavioralCommands.length)) {
       const id = `verification-sandbox-${configuration.sessionId}`;
@@ -1730,6 +1771,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     },
     work: {
       start: async ({ key, ...delegation }) => {
+        // R-B2-4: a Director session opens the run in Runtime itself; the Conversation bridge remains for v2 sessions only.
+        if (directorLayout) {
+          const conversationModule: { buildDelegationRequest: DelegationBuilder } = await import("@bflow/conversation") as never;
+          return startDirectorWork({ manifest: requireManifest, build: conversationModule.buildDelegationRequest,
+            admitDirectorWork: request => requireWorkspace().runtime.admitDirectorWork(request),
+            log: async entry => { await activityLog.record({ ...entry, role: "coordinator" }); } }, { key, ...delegation });
+        }
         let outcome: Awaited<ReturnType<ReturnType<typeof requireWorkspace>["conversation"]["delegateDirectorWork"]>>;
         try {
           outcome = await requireWorkspace().conversation.delegateDirectorWork({ key, ...delegation });
@@ -2848,7 +2896,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (work === "prompts") return;
       // Each unsettled Stop is settled on its own: one bad item never blocks the others or the generation.
       let retryNeeded = false;
-      for (const stopped of await receipts.pendingCoordinatorStops()) {
+      // A Director session has no Coordinator pane, hence no Coordinator Stop receipts to settle.
+      for (const stopped of directorLayout ? [] : await receipts.pendingCoordinatorStops()) {
         const key = digest(["coordinator", stopped.binding.paneId, stopped.message.message_id]);
         try { await settleCoordinatorStop(stopped, key); }
         catch (error) {
@@ -2918,7 +2967,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   };
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
-    if(!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
+    if(!directorLayout&&!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
     const task = (async () => { await pumpProviderFailures(); return workspace!.runtime.tick(); })(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
@@ -2952,8 +3001,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       process.stderr.write(`Bflow inbox delivery failed for ${messageIds.length} notice(s): ${redactString(reason)}\n`);
     },
     now: () => Date.now() };
+  // Director session: no Conversation pane to nudge, so the notifier never runs (R-B2-6).
   const inboxTimer = setInterval(() => {
-    if (!workspace || quiesced || closing || remindingInbox) return;
+    if (directorLayout || !workspace || quiesced || closing || remindingInbox) return;
     remindingInbox = true;
     void inbox.tick(inboxPorts).catch(error => { process.stderr.write(`Bflow inbox: ${redactString(String(error))}\n`); })
       .finally(() => { remindingInbox = false; });
@@ -2969,7 +3019,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     inbox,
     activeHostVerifications,
     watchdogReported,
-    observeAgent
+    observeAgent,
+    directorSession: directorLayout
   });
   /**
    * Surfaces native deliveries whose acknowledgement was never observed, once per operation, and never resends them.
@@ -3028,6 +3079,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const task = reconcileRuntimeDeliveries()
       .catch(error => { process.stderr.write(`Bflow delivery reconcile: ${redactString(String(error))}\n`); })
       .then(() => runWatchdog())
+      .then(async () => { if (directorLayout && watchdogReady() && workspace) await ensureProgressPane(workspace); })
       .catch(error => { process.stderr.write(`Bflow watchdog: ${redactString(String(error))}\n`); })
       .finally(() => { if (watchdogTask === task) watchdogTask = undefined; });
     watchdogTask = task;

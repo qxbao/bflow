@@ -42,11 +42,26 @@ export interface AgenticHostOptions {
   appChecks?: readonly AppCheckSuite[];
   /** P30 platform configuration; absent keeps the legacy Claude-native host behavior. */
   platform?: AgenticHostPlatformOptions;
+  /** Session layout (ADR 0009): `director` hosts no Conversation/Coordinator role and needs a v3 manifest. Absent means `legacy_v2`. */
+  layout?: "legacy_v2" | "director";
+  /** Director layout: argv of the non-LLM progress viewer pane (`bflow progress --follow`). */
+  progressCommand?: readonly string[];
   policy?: { sdd: { minimumLevel: "lightweight" | "full"; approvalRequired: boolean };
     tdd: { policy: "conditional" }; verification: { maxIterations: number; onExhausted: "require_human"; regressionScope?: RegressionScope; reviewTimeoutMs?: number };
     fastPath?: { mode: FastPathMode };
     concurrency: { maxConcurrency: number } };
   impactIndex?: { executable: string; home: string; storageLockPath: string };
+}
+
+/** Layout options are owner configuration: a malformed value or a platform that disagrees with the layout is refused. */
+export function assertHostLayoutOptions(value: { layout?: unknown; progressCommand?: unknown; platform?: unknown }): void {
+  if (value.layout !== undefined && value.layout !== "legacy_v2" && value.layout !== "director") throw new Error("Invalid host layout");
+  if (value.progressCommand !== undefined && (!Array.isArray(value.progressCommand) || value.progressCommand.length < 1 || value.progressCommand.length > 16 ||
+      value.progressCommand.some(item => typeof item !== "string" || item.length === 0 || item.length > 4096 || item.includes("\0"))))
+    throw new Error("Invalid host progress command");
+  const layout = value.layout ?? "legacy_v2";
+  const platform = value.platform as { layout?: unknown } | undefined;
+  if (platform !== undefined && (platform.layout ?? "legacy_v2") !== layout) throw new Error("Host platform layout does not match host layout");
 }
 
 export function effectiveRegressionScope(policy: AgenticHostOptions["policy"] | undefined, persisted: boolean): RegressionScope {
@@ -118,6 +133,7 @@ export async function readHostConfiguration(path: string): Promise<HostConfigura
   parseMutationChecks(value.mutationChecks, parseBehavioralCommands(value.behavioralCommands));
   parseAppChecks(value.appChecks);
   if (value.platform !== undefined) value.platform = AgenticHostPlatformOptionsSchema.parse(value.platform);
+  assertHostLayoutOptions(value);
   if (value.executionResolution !== undefined) value.executionResolution = ExecutionResolutionSourcesSchema.parse(value.executionResolution);
   if (value.executionSourceDigests !== undefined) {
     const sources = record(value.executionSourceDigests);
@@ -176,6 +192,8 @@ export async function openPersistedAgenticHost(options: Pick<AgenticHostOptions,
     ...(persisted.appChecks !== undefined ? { appChecks: persisted.appChecks } : {}),
     ...(persisted.policy !== undefined ? { policy: persisted.policy } : {}),
     ...(persisted.platform !== undefined ? { platform: persisted.platform } : {}),
+    ...(persisted.layout !== undefined ? { layout: persisted.layout } : {}),
+    ...(persisted.progressCommand !== undefined ? { progressCommand: persisted.progressCommand } : {}),
     ...(persisted.impactIndex !== undefined ? { impactIndex: persisted.impactIndex } : {}),
     ...(persisted.executionResolution !== undefined ? { executionResolution: persisted.executionResolution } : {}) }, true);
 }
@@ -324,6 +342,9 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
     throw new Error("Persisted real-app checks differ from owner configuration; quiesce and reconcile before changing verification authority");
   // Platform, policy and impactIndex changes are only admissible while no host process owns the endpoint.
   const requestedPlatform = options.platform === undefined ? undefined : AgenticHostPlatformOptionsSchema.parse(options.platform);
+  assertHostLayoutOptions({ ...options, ...(requestedPlatform ? { platform: requestedPlatform } : {}) });
+  const layoutChanged = (configuration.layout ?? "legacy_v2") !== (options.layout ?? "legacy_v2") ||
+    digest(configuration.progressCommand ?? null) !== digest(options.progressCommand ?? null);
   const platformChanged = digest(configuration.platform ?? null) !== digest(requestedPlatform ?? null);
   const policyChanged = options.policy !== undefined && digest(configuration.policy ?? null) !== digest(options.policy);
   const impactIndexChanged = options.impactIndex !== undefined && digest(configuration.impactIndex ?? null) !== digest(options.impactIndex);
@@ -345,6 +366,7 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
   if (alive && options.policy && !compatiblePersistedPolicy(configuration.policy, options.policy))
     throw new Error("Persisted host policy differs from project policy; quiesce and reconcile the existing host before changing it");
   if (alive && platformChanged) throw new Error("Persisted host platform differs; run bflow down before changing providers/roles");
+  if (alive && layoutChanged) throw new Error("Persisted host layout differs; run bflow down before changing the session layout");
   if (!alive) {
     // A new daemon still requires fresh execution inputs, including recovery after owner loss.
     if (reopening && options.executionResolution !== undefined) startupReader = await createExecutionResolutionReader(options.executionResolution);
@@ -360,10 +382,11 @@ async function ensureHost(options: AgenticHostOptions, reopening: boolean): Prom
       try { await unlink(configuration.socketPath.replace(/\.sock$/, ".native.sock")); }
       catch (nativeError) { if ((nativeError as NodeJS.ErrnoException).code !== "ENOENT") throw nativeError; }
     } catch (statError) { if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError; }
-    if (platformChanged || policyChanged || impactIndexChanged) {
+    if (platformChanged || policyChanged || impactIndexChanged || layoutChanged) {
       await rewritePersistedPlatform(configPath, requestedPlatform, {
         ...(options.policy !== undefined ? { policy: options.policy } : {}),
-        ...(options.impactIndex !== undefined ? { impactIndex: options.impactIndex } : {})
+        ...(options.impactIndex !== undefined ? { impactIndex: options.impactIndex } : {}),
+        ...(layoutChanged ? { layout: options.layout, progressCommand: options.progressCommand } : {})
       });
       configuration = await readHostConfiguration(configPath);
     }

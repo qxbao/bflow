@@ -93,6 +93,8 @@ export interface PanePolicy {
   releaseCancelledDeveloper?: (request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
   /** Closes the exact pane of a cancelled Developer and proves it is gone. Never touches its worktree, even when dirty. */
   closeCancelledDeveloper?: (request: { taskId: string; paneId: string }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
+  /** Director layout only: reconciles the non-LLM progress pane. Never a readiness or task-success signal. */
+  ensureProgressPane?: (options?: OperationOptions) => Promise<OperationResult<unknown>>;
 }
 export interface AgenticPolicies {
   specification: SpecificationPolicy;

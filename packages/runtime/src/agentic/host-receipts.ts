@@ -992,6 +992,19 @@ export class HostReceiptJournal {
     this.noticeAppends = next.catch(() => undefined);
     return next;
   }
+  /**
+   * Same serialized, idempotent append, also returning the stored receipt (with its #n alias). An existing receipt is
+   * returned unchanged, so a caller that failed after the first write can finish its follow-up work on retry.
+   */
+  appendConversationNoticeReceipt(message: RoleMessage): Promise<{ created: boolean; notice: ConversationNotice | undefined }> {
+    const next = this.noticeAppends.then(async () => {
+      const created = await this.appendConversationNoticeNow(message);
+      const stored = await this.read("conversation-notice", RoleMessageSchema.parse(message).message_id);
+      return { created, notice: stored === undefined ? undefined : ConversationNoticeSchema.parse(stored) };
+    });
+    this.noticeAppends = next.catch(() => undefined);
+    return next;
+  }
   private async appendConversationNoticeNow(message: RoleMessage): Promise<boolean> {
     const parsed = RoleMessageSchema.parse(message);
     if (await this.read("conversation-notice", parsed.message_id) !== undefined) return false;

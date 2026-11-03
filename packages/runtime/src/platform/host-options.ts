@@ -50,6 +50,8 @@ export type PlatformRoleOption = z.infer<typeof PlatformRoleOptionSchema>;
 
 export const AgenticHostPlatformOptionsSchema = z.object({
   schemaVersion: z.literal(3),
+  /** Session layout (ADR 0009). Absent means `legacy_v2` (Conversation/Coordinator panes); `director` has neither role. */
+  layout: z.enum(["legacy_v2", "director"]).optional(),
   machineId: IdentifierSchema,
   repositoryId: IdentifierSchema,
   roleProfiles: RoleProfileCatalogSchema.optional(),
@@ -84,8 +86,11 @@ export const AgenticHostPlatformOptionsSchema = z.object({
 }).strict().superRefine((options, ctx) => {
   const roles = options.roles.map(role => role.role);
   if (new Set(roles).size !== roles.length) ctx.addIssue({ code: "custom", message: "platform roles must be unique" });
-  for (const required of ["conversation", "coordinator"] as const)
-    if (!roles.includes(required)) ctx.addIssue({ code: "custom", message: `platform roles must include ${required}` });
+  for (const replaced of ["conversation", "coordinator"] as const) {
+    if (options.layout === "director") {
+      if (roles.includes(replaced)) ctx.addIssue({ code: "custom", message: `director layout platform roles must not include ${replaced}` });
+    } else if (!roles.includes(replaced)) ctx.addIssue({ code: "custom", message: `platform roles must include ${replaced}` });
+  }
   for (const [index, role] of options.roles.entries()) if (role.specialistProfile) {
     const snapshot = options.roleProfiles?.find(item => sameRoleProfilePin(item.pin, role.specialistProfile));
     if (!snapshot || snapshot.definition.baseRole !== role.role)

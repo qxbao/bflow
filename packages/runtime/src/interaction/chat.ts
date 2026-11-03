@@ -11,6 +11,8 @@ export interface ChatTransportPort {
  history?(sessionId:string):Promise<WebChatMessage[]>;
  approvalContext?(runId?:string):Promise<unknown[]>;
  observeAdmission?(record:Readonly<ChatRecord>):Promise<unknown|undefined>;
+ /** True when the session has no chat pane at all (Director session): chat is unsupported without probing a pane. */
+ unavailable?():boolean;
 }
 const marker='[bflow-web:';
 export class ChatApprovalRejectionError extends Error {
@@ -46,7 +48,7 @@ export class HostChat {
    }
   });
  }
- async supported(){const s=await this.port.session();return s.ready&&['claude','codex'].includes(s.provider);}
+ async supported(){if(this.port.unavailable?.())return false;const s=await this.port.session();return s.ready&&['claude','codex'].includes(s.provider);}
  async send(raw:unknown,principalId:string):Promise<WebChatMessage>{
   const input=WebChatSendSchema.parse(raw);
   if(input.content.trim()===BFLOW_INBOX_NUDGE||input.content.startsWith(marker))throw Error('Reserved non-human chat input');

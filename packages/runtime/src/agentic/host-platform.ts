@@ -1263,7 +1263,7 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
 export async function rewritePersistedPlatform(
   path: string,
   platform: AgenticHostPlatformOptions | undefined,
-  extras?: { readonly policy?: unknown; readonly impactIndex?: unknown }
+  extras?: { readonly policy?: unknown; readonly impactIndex?: unknown; readonly layout?: unknown; readonly progressCommand?: unknown }
 ): Promise<void> {
   const current = z.record(z.unknown()).parse(JSON.parse(await readBoundedRegularUtf8(path)));
   await writePrivateAtomic(
@@ -1272,7 +1272,10 @@ export async function rewritePersistedPlatform(
       ...current,
       platform,
       ...(extras && "policy" in extras ? { policy: extras.policy } : {}),
-      ...(extras && "impactIndex" in extras ? { impactIndex: extras.impactIndex } : {})
+      ...(extras && "impactIndex" in extras ? { impactIndex: extras.impactIndex } : {}),
+      // Undefined values are dropped by JSON.stringify, so a change back to the legacy layout removes the keys.
+      ...(extras && "layout" in extras ? { layout: extras.layout } : {}),
+      ...(extras && "progressCommand" in extras ? { progressCommand: extras.progressCommand } : {})
     })
   );
 }

@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { RoleMessageSchema, type RoleMessage } from "@bflow/contracts";
 import { DirectorEndpoint } from "../../src/director/endpoint.js";
 import { DIRECTOR_OWNER_METHODS, isDirectorCoordinatorTool, isDirectorCredential, parseDirectorCredentialCall } from "../../src/director/host-methods.js";
 
@@ -44,5 +45,23 @@ describe("director host wiring helpers", () => {
       inspect: async () => ({}), coordinator: { invoke: async () => null } });
     const { token } = await endpoint.register(DIRECTOR_OWNER_METHODS.director_register.parse({ provider: "claude" }));
     expect(isDirectorCredential(token, "f".repeat(64))).toBe(true);
+  });
+  it("presence() gates the Runtime director port and mailbox delivery is idempotent", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "director-wiring-")); dirs.push(directory);
+    const endpoint = new DirectorEndpoint({ directory, repositoryRoot: directory, feed: { read: () => ({ items: [] }) },
+      inspect: async () => ({}), coordinator: { invoke: async () => null } });
+    // The same composition the host passes as ports.director in a v3 session.
+    const port = { deliver: (message: RoleMessage) => endpoint.deliverRuntimeMessage(message),
+      present: async () => (await endpoint.presence()) !== "absent" };
+    expect(await endpoint.presence()).toBe("absent");
+    expect(await port.present()).toBe(false);
+    await endpoint.register(DIRECTOR_OWNER_METHODS.director_register.parse({ provider: "claude" }));
+    expect(await endpoint.presence()).toBe("active");
+    expect(await port.present()).toBe(true);
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "status-1", correlation_id: "corr-1", run_id: "run-1",
+      sender: { role: "planner" }, recipient: { role: "coordinator" }, type: "task.status", artifact_references: [],
+      payload: { status: "blocked", taskId: "task-1" }, occurred_at: "2026-11-03T10:00:00.000Z", idempotency_key: "status-1" });
+    await port.deliver(message); await port.deliver(message);
+    expect(await endpoint.readMailbox({ audience: "director" })).toEqual([expect.objectContaining({ messageId: "status-1", audience: "director", taskId: "task-1" })]);
   });
 });

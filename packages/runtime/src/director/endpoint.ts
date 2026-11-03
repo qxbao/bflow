@@ -5,6 +5,7 @@ import {
   AgentRoleSchema,
   IdentifierSchema,
   type DirectorMailboxItem,
+  type DirectorPresence,
   type DirectorProgressSnapshot,
   type DirectorRuntimeEvent,
   type DirectorSession,
@@ -145,6 +146,11 @@ export class DirectorEndpoint {
       fromRole,
       summary
     };
+  }
+
+  /** Director presence (`active`, `waiting`, `absent`); gates automatic resume of Director runs (R-B2-12). */
+  async presence(): Promise<DirectorPresence> {
+    return (await this.store.presence()).presence;
   }
 
   static isDirectorToken(token: string): boolean {
