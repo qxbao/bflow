@@ -17,6 +17,7 @@ export const DIRECTOR_OWNER_METHODS = {
   director_progress: z.object({}).strict(),
   director_hook_note: z.object({
     provider: AgentProviderIdSchema,
+    sessionId: z.string().min(1).max(200).optional(),
     prompt: z.string().min(1).refine(value => Buffer.byteLength(value, "utf8") <= DIRECTOR_LIMITS.messageBytes,
       `must be at most ${DIRECTOR_LIMITS.messageBytes} UTF-8 bytes`)
   }).strict(),
@@ -27,7 +28,7 @@ export const DIRECTOR_OWNER_METHODS = {
 
 /** Coordinator orchestration tools the Director may use: everything but report_progress (which targets Conversation). */
 export function isDirectorCoordinatorTool(name: string): boolean {
-  return name !== "report_progress" && COORDINATOR_TOOLS.some(tool => tool.name === name);
+  return name !== "report_progress" && (name === "planning_reference" || COORDINATOR_TOOLS.some(tool => tool.name === name));
 }
 
 /** R-B1-1: a non-owner token that has the Director `<id>.<secret>` shape is routed to the Director branch. */

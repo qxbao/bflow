@@ -56,4 +56,15 @@ describe("buildDirectorProgressSnapshot", () => {
     expect(result.runs).toHaveLength(100);
     expect(result.runs[0]!.runId).toBe("r20");
   });
+
+  it("shows live tasks of an ended run as cancelled and keeps terminal ones", () => {
+    const ended = buildDirectorProgressSnapshot({
+      state: { runs: [{ runId: "r", status: "cancelled", cancelled: true, definition: { id: "w" }, tasks: [
+        task("a", { status: "running" }), task("b", { status: "ready" }), task("c", { status: "pending" }),
+        task("d", { status: "succeeded" }), task("e", { status: "failed" })
+      ] }] },
+      presence: "waiting", session: null, issues: [], now: new Date("2026-11-03T00:00:00Z")
+    });
+    expect(ended.runs[0]!.tasks.map(t => t.status)).toEqual(["cancelled", "cancelled", "cancelled", "succeeded", "failed"]);
+  });
 });

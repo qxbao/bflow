@@ -782,6 +782,9 @@ Doctor có thêm check `director-skill-installed`.
 Giới hạn đã biết:
 
 - Director cùng tồn tại với pane Conversation và Coordinator v2; việc thay thế hoàn chỉnh thuộc lát B2.
+- Hook ghi tin nhắn chỉ ghi cho đúng phiên provider đã khởi động bằng `/bflow-start` (gắn theo `session_id` của hook, lưu trong bộ nhớ host). Phiên không có hook (ví dụ Agy) dùng `director_note_user_message`. Host khởi động lại thì chạy lại `director start`.
+- `tools/list` của MCP Director chỉ mô tả đối số `token`; các tham số còn lại nằm trong mô tả của từng tool. Hãy gọi `planning_reference` trước khi lập kế hoạch.
+- Token Director hiển thị trong transcript của provider và trong argv của lệnh shell (đường dự phòng); đây là thiết kế của B1.
 - Tin nhắn của các vai chuyên trách vẫn được gửi tới pane Coordinator.
 - Codex và Agy chưa được kiểm live (hết hạn mức); chỉ Claude Code có spike live.
 

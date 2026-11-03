@@ -70,6 +70,12 @@ export async function main(
   if (args[0] === "director" || (args[0] === "help" && args[1] === "director")) {
     const { parseDirectorArgs, runDirectorCommand, defaultDirectorDeps, DIRECTOR_HELP } = await import("./director-commands.js");
     const parsed = parseDirectorArgs(args[0] === "help" ? [] : args.slice(1));
+    if (!parsed.ok && args[0] === "director" && args[1] === "call") {
+      // Shell path of the Director skill parses stdout: one JSON object, exit 1.
+      realIo.stdout(`${JSON.stringify({ ok: false, message: parsed.message })}\n`);
+      process.exitCode = CLI_EXIT_CODES.RUNTIME_ERROR;
+      return { ok: false, command: "director", exitCode: CLI_EXIT_CODES.RUNTIME_ERROR, stdout: "", stderr: "" };
+    }
     if (!parsed.ok) {
       realIo.stderr(`${parsed.message}\n${DIRECTOR_HELP}`);
       process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;

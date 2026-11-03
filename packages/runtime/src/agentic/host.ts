@@ -54,6 +54,7 @@ import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-ind
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { DirectorEndpoint } from "../director/endpoint.js";
+import { DirectorAuthError } from "../director/store.js";
 import { DIRECTOR_OWNER_METHODS, isDirectorCoordinatorTool, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS, type AgenticWorkflowRuntime } from "./runtime.js";
@@ -1707,6 +1708,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     return host.tools.invoke(name, parameters, { role });
   };
+  /** Planning guidance needs no pane binding; shared by the Coordinator role tool and the Director endpoint. */
+  const readPlanningReference = async (parameters: Record<string, unknown>) => {
+    const query = PlanningReferenceInputSchema.parse(parameters);
+    await testRunners.refresh();
+    return planningReferenceView(query, {
+      runnerInfo: describeTestRunners(testRunners),
+      verificationSandbox,
+      behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
+        ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" }))
+    });
+  };
   const directorEndpoint = new DirectorEndpoint({
     directory: join(configuration.directory, "director"),
     repositoryRoot: configuration.repositoryPath,
@@ -1717,7 +1729,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         if (!isDirectorCoordinatorTool(name)) throw new Error("Tool is unavailable to the Director");
         const parameters = record(JsonValueSchema.parse(input ?? {}));
         try {
-          const value = await invokeCoordinatorTool(name, parameters);
+          const value = name === "planning_reference" ? await readPlanningReference(parameters) : await invokeCoordinatorTool(name, parameters);
           await activityLog.record({ kind: "tool", role: "coordinator", action: `director:${name}:completed` });
           return JsonValueSchema.parse(value);
         } catch (error) {
@@ -1855,14 +1867,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     if (name === "planning_reference") {
       if (role !== "coordinator") throw new Error("Only Coordinator reads host planning guidance");
-      const query = PlanningReferenceInputSchema.parse(parameters);
-      await testRunners.refresh();
-      return planningReferenceView(query, {
-        runnerInfo: describeTestRunners(testRunners),
-        verificationSandbox,
-        behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
-          ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" }))
-      });
+      return readPlanningReference(parameters);
     }
     if (name === "host_status") return json({ active: !!workspace, quiesced, taskLogPane: taskLogPane.status(), ...schedulerStatusReport({ timerAlive: schedulerTimerAlive, quiesced, workspaceOpen: !!workspace, tickInFlight: !!scheduler, lastTickAt: schedulerLastTickAt, error: schedulerError }), inboundError: inboundError ?? null, conversationDeliveryFailures: (await receipts.conversationDeliveryFailures()).slice(-5) });
     if (name === "read_role_pane") {
@@ -2198,8 +2203,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (isDirectorCredential(token, configuration.token)) {
         const call = parseDirectorCredentialCall(method, params);
-        try { return await directorEndpoint.call(token, call.name, call.arguments ?? {}); }
-        catch (error) { if (error instanceof Error && error.message.includes(token)) throw new Error("Director authentication failed"); throw error; }
+        try { return await directorEndpoint.call(token, call.name, call.arguments ?? {}, operation?.signal); }
+        catch (error) {
+          if (error instanceof DirectorAuthError || (error instanceof Error && error.message.includes(token))) throw new Error("Director authentication failed");
+          throw error;
+        }
       }
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
       if (method === "provider_tools_list") {

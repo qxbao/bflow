@@ -28,6 +28,9 @@ export interface DirectorEndpointOptions {
   readonly now?: () => Date;
 }
 
+const START_CANDIDATE_TTL_MS = 5 * 60_000;
+const START_PROMPT = /^[/$]bflow-start(?:\s|$)/;
+
 const TOKEN_SHAPE = /^[A-Za-z0-9_-]{8,128}\.[A-Za-z0-9_-]{16,256}$/;
 
 function summarize(item: { type: string; resourceIds: readonly string[] }): string {
@@ -70,6 +73,9 @@ export class DirectorEndpoint {
   private readonly tools: DirectorTools;
   private readonly options: DirectorEndpointOptions;
   private readonly now: () => Date;
+  /** In-memory only: a restarted host forgets the binding and the Director must run `director start` again. */
+  private candidate: { provider: AgentProviderId; sessionId: string; at: number } | undefined;
+  private bound: { provider: AgentProviderId; sessionId: string } | undefined;
 
   constructor(options: DirectorEndpointOptions) {
     this.options = options;
@@ -88,20 +94,33 @@ export class DirectorEndpoint {
     return TOKEN_SHAPE.test(token);
   }
 
-  register(input: { provider: AgentProviderId }): Promise<{ token: string; session: DirectorSession }> {
-    return this.store.register({ provider: input.provider, repositoryRoot: this.options.repositoryRoot });
+  async register(input: { provider: AgentProviderId }): Promise<{ token: string; session: DirectorSession }> {
+    const result = await this.store.register({ provider: input.provider, repositoryRoot: this.options.repositoryRoot });
+    const candidate = this.candidate;
+    this.candidate = undefined;
+    this.bound = candidate && candidate.provider === input.provider && this.now().getTime() - candidate.at <= START_CANDIDATE_TTL_MS
+      ? { provider: candidate.provider, sessionId: candidate.sessionId }
+      : undefined;
+    return result;
   }
 
   revoke(): Promise<void> {
     return this.store.revoke();
   }
 
-  call(token: string, name: string, args: unknown): Promise<JsonValue> {
-    return this.tools.invoke(name, args, token);
+  call(token: string, name: string, args: unknown, signal?: AbortSignal): Promise<JsonValue> {
+    return this.tools.invoke(name, args, token, signal);
   }
 
-  async noteHookPrompt(input: { provider: AgentProviderId; prompt: string }): Promise<{ recorded: boolean }> {
+  async noteHookPrompt(input: { provider: AgentProviderId; prompt: string; sessionId?: string | undefined }): Promise<{ recorded: boolean }> {
+    const prompt = input.prompt.trim();
+    if (START_PROMPT.test(prompt) || prompt === "bflow-start") {
+      // The start prompt only identifies the Director's provider session; it is never part of the transcript.
+      if (input.sessionId) this.candidate = { provider: input.provider, sessionId: input.sessionId, at: this.now().getTime() };
+      return { recorded: false };
+    }
     if ((await this.store.presence()).presence === "absent") return { recorded: false };
+    if (!this.bound || !input.sessionId || this.bound.provider !== input.provider || this.bound.sessionId !== input.sessionId) return { recorded: false };
     const result = await this.tools.noteUserMessage(input.prompt);
     return { recorded: result.recorded };
   }

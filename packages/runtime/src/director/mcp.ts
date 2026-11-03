@@ -44,9 +44,21 @@ export async function runDirectorMcp(options: DirectorMcpOptions): Promise<void>
   };
   const lines = createInterface({ input: options.input, crlfDelay: Infinity });
   for await (const line of lines) {
-    if (Buffer.byteLength(line) > MAX_LINE_BYTES) { process.stderr.write("Oversized Director MCP request ignored\n"); continue; }
+    if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
+      process.stderr.write("Oversized Director MCP request ignored\n");
+      // Recover the request id from the head of the line (never parse the whole line) so the client is not left waiting.
+      const head = line.slice(0, 256);
+      const match = /"id"\s*:\s*(-?\d{1,15}|"[A-Za-z0-9_.:-]{1,100}")/.exec(head);
+      let recovered: unknown = null;
+      if (match) { try { recovered = JSON.parse(match[1]!); } catch { recovered = null; } }
+      send({ jsonrpc: "2.0", id: recovered, error: { code: -32600, message: "Request too large" } });
+      continue;
+    }
     let request: unknown;
-    try { request = JSON.parse(line); } catch { continue; }
+    try { request = JSON.parse(line); } catch {
+      send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+      continue;
+    }
     if (!isRecord(request) || request.id === undefined) continue;
     const id = request.id;
     switch (request.method) {

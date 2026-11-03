@@ -65,10 +65,23 @@ describe("director call", () => {
     expect(await runDirectorCommand(parse(["call", "inspect", "--json"]), deps)).toBe(1);
     expect(out.join("")).toContain("BFLOW_DIRECTOR_TOKEN chưa được đặt");
   });
-  it("rejects a token key in args", async () => {
-    const { deps } = make({ env: { BFLOW_DIRECTOR_TOKEN: "a.b" } });
-    expect(await runDirectorCommand(parse(["call", "inspect", '{"token":"x"}']), deps)).toBe(2);
-    expect(deps.toolCall).not.toHaveBeenCalled();
+  it("reports every syntax error as one JSON object on stdout with exit 1", async () => {
+    for (const [argsJson, expected] of [['{"token":"x"}', "token"], ["[1]", "đối tượng"], ["{nope", "JSON"]] as const) {
+      const { deps, out, err } = make({ env: { BFLOW_DIRECTOR_TOKEN: "a.b" } });
+      expect(await runDirectorCommand(parse(["call", "inspect", argsJson]), deps)).toBe(1);
+      expect(out).toHaveLength(1);
+      const body = JSON.parse(out[0]!);
+      expect(body.ok).toBe(false);
+      expect(body.message).toContain(expected);
+      expect(err).toEqual([]);
+      expect(deps.toolCall).not.toHaveBeenCalled();
+    }
+    const { deps, out } = make();
+    expect(await runDirectorCommand(parse(["call", "inspect"]), deps)).toBe(1);
+    expect(JSON.parse(out[0]!)).toMatchObject({ ok: false });
+  });
+  it("a missing tool name fails to parse so the binary can print JSON", () => {
+    expect(parseDirectorArgs(["call"]).ok).toBe(false);
   });
   it("forwards a valid call", async () => {
     const { deps, out } = make({ env: { BFLOW_DIRECTOR_TOKEN: "a.b" } });
@@ -89,6 +102,11 @@ describe("director hook", () => {
     expect(await runDirectorCommand(parse(["hook", "codex"]), deps)).toBe(0);
     expect(ownerCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "director_hook_note", { provider: "codex", prompt: "hello" }, 3000);
     expect(out).toEqual([]);
+  });
+  it("sends the provider session_id when present", async () => {
+    const { deps, ownerCall } = make({ stdinText: '{"prompt":"hello","session_id":"sess-1"}' });
+    expect(await runDirectorCommand(parse(["hook", "claude"]), deps)).toBe(0);
+    expect(ownerCall).toHaveBeenCalledWith({ repositoryPath: "/repo", sessionId: "bf-abc" }, "director_hook_note", { provider: "claude", prompt: "hello", sessionId: "sess-1" }, 3000);
   });
   it("swallows ownerCall errors", async () => {
     const { deps, out } = make({ stdinText: '{"prompt":"hello"}', ownerCall: (async () => { throw new Error("boom"); }) as never });

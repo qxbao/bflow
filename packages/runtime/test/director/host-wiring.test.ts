@@ -25,6 +25,7 @@ describe("director host wiring helpers", () => {
   it("admits coordinator tools except report_progress", () => {
     expect(isDirectorCoordinatorTool("inspect")).toBe(true);
     expect(isDirectorCoordinatorTool("propose_workflow")).toBe(true);
+    expect(isDirectorCoordinatorTool("planning_reference")).toBe(true);
     expect(isDirectorCoordinatorTool("report_progress")).toBe(false);
     expect(isDirectorCoordinatorTool("repository_read")).toBe(false);
   });
@@ -32,6 +33,8 @@ describe("director host wiring helpers", () => {
     expect(() => DIRECTOR_OWNER_METHODS.director_register.parse({ provider: "claude", x: 1 })).toThrow();
     expect(() => DIRECTOR_OWNER_METHODS.director_hook_note.parse({ provider: "claude", prompt: "é".repeat(8193) })).toThrow();
     expect(DIRECTOR_OWNER_METHODS.director_hook_note.parse({ provider: "claude", prompt: "hi" }).prompt).toBe("hi");
+    expect(DIRECTOR_OWNER_METHODS.director_hook_note.parse({ provider: "claude", prompt: "hi", sessionId: "s1" }).sessionId).toBe("s1");
+    expect(() => DIRECTOR_OWNER_METHODS.director_hook_note.parse({ provider: "claude", prompt: "hi", sessionId: "s".repeat(201) })).toThrow();
     expect(() => DIRECTOR_OWNER_METHODS.director_issue_status.parse({ issueId: "i", status: "open" })).toThrow();
     expect(DIRECTOR_OWNER_METHODS.director_issue_status.parse({ issueId: "i", status: "dismissed" }).status).toBe("dismissed");
   });

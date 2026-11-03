@@ -48,11 +48,16 @@ function taskStatus(task: Record<string, unknown>): ReturnType<typeof TaskStatus
   return TaskStatusSchema.safeParse("pending");
 }
 
-function buildTask(value: unknown, roles: ReadonlyMap<string, string>): DirectorProgressTask | undefined {
+// TaskStatusSchema values that end a task; every other status is live.
+const TERMINAL_TASK: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled"]);
+
+function buildTask(value: unknown, roles: ReadonlyMap<string, string>, runEnded: boolean): DirectorProgressTask | undefined {
   const task = rec(value);
   const taskKey = text(task.taskId);
   const status = taskStatus(task);
   if (!taskKey || !status.success) return undefined;
+  // A run that has ended cannot have live tasks: show what was left unfinished as cancelled.
+  if (runEnded && !TERMINAL_TASK.has(status.data)) status.data = "cancelled";
   const spec = rec(rec(task.spec).specification);
   const role = AgentRoleSchema.safeParse(roles.get(taskKey));
   const parsed = DirectorProgressTaskSchema.safeParse({
@@ -82,7 +87,7 @@ function buildRun(value: unknown): DirectorProgressRun | undefined {
   if (Array.isArray(run.tasks)) {
     for (const raw of run.tasks) {
       if (tasks.length >= MAX_TASKS) break;
-      const built = buildTask(raw, roles);
+      const built = buildTask(raw, roles, run.cancelled === true || TERMINAL_RUN.has(String(run.status)));
       if (built) tasks.push(built);
     }
   }

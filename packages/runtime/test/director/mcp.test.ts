@@ -17,7 +17,8 @@ function harness(call: (name: string, token: string, args: Record<string, unknow
   const reply = async (id: number) => {
     for (;;) { const found = replies.find(r => r.id === id); if (found) return found; await new Promise<void>(r => waiters.push(r)); }
   };
-  return { send, reply, replies, end: async () => { input.end(); await done; } };
+  const raw = (text: string) => input.write(text + "\n");
+  return { send, raw, reply, replies, end: async () => { input.end(); await done; } };
 }
 
 describe("director MCP", () => {
@@ -62,6 +63,22 @@ describe("director MCP", () => {
     const r = await h.reply(1);
     expect(r.result.isError).toBe(true);
     expect(r.result.content[0].text).not.toContain("secretvalue");
+    await h.end();
+  });
+  it("answers unparseable and oversized lines with JSON-RPC errors and keeps serving", async () => {
+    const h = harness(async () => ({}));
+    h.raw("{not json");
+    const until = async (count: number) => { while (h.replies.length < count) await new Promise(r => setTimeout(r, 5)); };
+    await until(1);
+    expect(h.replies[0]).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+    h.raw(`{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"pad":"${"x".repeat(4 * 1024 * 1024 + 10)}"}}`);
+    await until(2);
+    expect(h.replies[1]).toEqual({ jsonrpc: "2.0", id: 77, error: { code: -32600, message: "Request too large" } });
+    h.raw(`{"method":"x","params":{"pad":"${"x".repeat(4 * 1024 * 1024 + 10)}"},"id":9}`);
+    await until(3);
+    expect(h.replies[2].id).toBeNull();
+    h.send({ jsonrpc: "2.0", id: 5, method: "ping" });
+    expect((await h.reply(5)).result).toEqual({});
     await h.end();
   });
 });

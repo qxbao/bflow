@@ -46,9 +46,39 @@ describe("DirectorTools", () => {
     const names = DIRECTOR_TOOLS.map(t => t.name);
     expect(names).not.toContain("report_progress");
     expect(names).toContain("propose_workflow");
+    expect(names).toContain("planning_reference");
     for (const own of DIRECTOR_OWN_TOOLS) expect(names).toContain(own.name);
     expect(DIRECTOR_OWN_TOOLS).toHaveLength(6);
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("passes planning_reference to the coordinator port", async () => {
+    const h = await harness();
+    await h.tools.invoke("planning_reference", { section: "workflow" }, h.token);
+    expect(h.calls).toEqual([{ name: "planning_reference", input: { section: "workflow" } }]);
+  });
+
+  it("accepts the empty first cursor from director start and returns a non-empty cursor", async () => {
+    const h = await harness();
+    await user(h, "before start");
+    const first = await wait(h, { cursor: "", timeoutMs: 1 });
+    expect(first.timedOut).toBe(true);
+    expect(first.cursor).toMatch(/^m\d+\.i\d+\.r/);
+    expect(first.cursor).not.toBe("");
+    await user(h, "after");
+    const second = await wait(h, { cursor: first.cursor });
+    expect(second.messages.map(m => m.text)).toEqual(["after"]);
+  });
+
+  it("returns early when the caller aborts the wait", async () => {
+    const h = await harness({ maxWaitMs: 1500 });
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = h.tools.invoke("director_wait", {}, h.token, controller.signal);
+    setTimeout(() => controller.abort(), 40);
+    const result = (await pending) as unknown as WaitResult;
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it("rejects a bad token without calling the coordinator", async () => {

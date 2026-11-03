@@ -60,12 +60,77 @@ describe("DirectorEndpoint", () => {
     expect(second.runtimeEvents).toEqual([{ type: "projection.workforce_changed", summary: "workforce_changed: a, b, c, d, e" }]);
   });
 
-  it("noteHookPrompt: absent -> not recorded; active -> recorded once within dedupe window", async () => {
-    const { endpoint } = await make();
-    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi" })).toEqual({ recorded: false });
+  it("noteHookPrompt: never records without a session bound by the start prompt", async () => {
+    const { endpoint, directory } = await make();
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi", sessionId: "s1" })).toEqual({ recorded: false });
     await endpoint.register({ provider: "claude" });
-    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi" })).toEqual({ recorded: true });
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi", sessionId: "s1" })).toEqual({ recorded: false });
     expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi" })).toEqual({ recorded: false });
+    const store = new DirectorStore({ directory });
+    expect(await store.readMessages({ afterSeq: 0 })).toEqual([]);
+  });
+
+  it("binds the session announced by /bflow-start and records only that session", async () => {
+    const { endpoint, directory } = await make();
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "  /bflow-start  ", sessionId: "s1" })).toEqual({ recorded: false });
+    await endpoint.register({ provider: "claude" });
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi", sessionId: "s1" })).toEqual({ recorded: true });
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi", sessionId: "s1" })).toEqual({ recorded: false });
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "other session", sessionId: "s2" })).toEqual({ recorded: false });
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "no session" })).toEqual({ recorded: false });
+    expect(await endpoint.noteHookPrompt({ provider: "codex", prompt: "wrong provider", sessionId: "s1" })).toEqual({ recorded: false });
+    const texts = (await new DirectorStore({ directory }).readMessages({ afterSeq: 0 })).map(m => m.text);
+    expect(texts).toEqual(["hi"]);
+  });
+
+  it("accepts the $bflow-start and bare skill name forms", async () => {
+    const { endpoint } = await make();
+    await endpoint.noteHookPrompt({ provider: "codex", prompt: "$bflow-start", sessionId: "c1" });
+    await endpoint.register({ provider: "codex" });
+    expect(await endpoint.noteHookPrompt({ provider: "codex", prompt: "go", sessionId: "c1" })).toEqual({ recorded: true });
+    await endpoint.noteHookPrompt({ provider: "codex", prompt: "bflow-start", sessionId: "c2" });
+    await endpoint.register({ provider: "codex" });
+    expect(await endpoint.noteHookPrompt({ provider: "codex", prompt: "go again", sessionId: "c2" })).toEqual({ recorded: true });
+  });
+
+  it("does not bind an expired or provider-mismatched start candidate", async () => {
+    let now = new Date("2026-11-03T00:00:00Z");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "director-endpoint-ttl-"));
+    dirs.push(root);
+    const endpoint = new DirectorEndpoint({
+      directory: path.join(root, "director"), repositoryRoot: "/repo", feed: new FakeFeed(), inspect: async () => ({}),
+      coordinator: { invoke: async () => null }, now: () => now
+    });
+    await endpoint.noteHookPrompt({ provider: "claude", prompt: "/bflow-start", sessionId: "s1" });
+    now = new Date(now.getTime() + 5 * 60_000 + 1);
+    await endpoint.register({ provider: "claude" });
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi", sessionId: "s1" })).toEqual({ recorded: false });
+    await endpoint.noteHookPrompt({ provider: "codex", prompt: "/bflow-start", sessionId: "s9" });
+    await endpoint.register({ provider: "claude" });
+    expect(await endpoint.noteHookPrompt({ provider: "claude", prompt: "hi", sessionId: "s9" })).toEqual({ recorded: false });
+  });
+
+  it("start output cursor and an empty cursor both work for the first director_wait", async () => {
+    const { endpoint } = await make();
+    const start = await endpoint.register({ provider: "claude" });
+    const first = (await endpoint.call(start.token, "director_wait", { cursor: "", timeoutMs: 1 })) as { cursor: string; timedOut: boolean };
+    expect(first.timedOut).toBe(true);
+    expect(first.cursor).not.toBe("");
+    const second = (await endpoint.call(start.token, "director_wait", { cursor: first.cursor, timeoutMs: 1 })) as { timedOut: boolean };
+    expect(second.timedOut).toBe(true);
+  });
+
+  it("an aborted director_wait returns early and presence leaves waiting", async () => {
+    const { endpoint } = await make();
+    const { token } = await endpoint.register({ provider: "claude" });
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = endpoint.call(token, "director_wait", { timeoutMs: 1500 }, controller.signal);
+    setTimeout(() => controller.abort(), 50);
+    const result = (await pending) as { timedOut: boolean };
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(result.timedOut).toBe(true);
+    expect((await endpoint.progress()).director.presence).not.toBe("waiting");
   });
 
   it("distinguishes Director tokens from 64-char hex", async () => {

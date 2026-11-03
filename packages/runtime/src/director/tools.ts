@@ -37,14 +37,21 @@ export const DIRECTOR_OWN_TOOLS: readonly { name: string; description: string }[
   { name: "set_issue_status", description: "Mark a queued issue retrying, resolved or dismissed after you acted on it. Arguments: issueId, status." }
 ];
 
+/** Host-served planning guidance; needs no pane binding. Shared with the Coordinator implementation in the host. */
+export const DIRECTOR_HOST_TOOLS: readonly { name: string; description: string }[] = [
+  { name: "planning_reference", description: "Read canonical shipped examples and exact metadata/contract definitions before planning or propose_workflow. Arguments: section (specification | test_strategy | workflow | all), view (optional: full | compact | schema_only), includeRunners (optional boolean)." }
+];
+
 export const DIRECTOR_TOOLS: readonly { name: string; description: string }[] = [
   ...COORDINATOR_TOOLS.filter(tool => tool.name !== "report_progress"),
+  ...DIRECTOR_HOST_TOOLS,
   ...DIRECTOR_OWN_TOOLS
 ];
 
-const COORDINATOR_NAMES: ReadonlySet<string> = new Set(
-  COORDINATOR_TOOLS.filter(tool => tool.name !== "report_progress").map(tool => tool.name)
-);
+const COORDINATOR_NAMES: ReadonlySet<string> = new Set([
+  ...COORDINATOR_TOOLS.filter(tool => tool.name !== "report_progress").map(tool => tool.name),
+  ...DIRECTOR_HOST_TOOLS.map(tool => tool.name)
+]);
 
 const WaitArgs = z.object({ cursor: z.string().optional(), timeoutMs: z.number().finite().positive().optional() }).strict();
 const SayArgs = z.object({ text: z.string(), runId: z.string().optional() }).strict();
@@ -75,12 +82,12 @@ export class DirectorTools {
     this.now = options.now ?? (() => new Date());
   }
 
-  async invoke(name: string, input: unknown, token: string): Promise<JsonValue> {
+  async invoke(name: string, input: unknown, token: string, signal?: AbortSignal): Promise<JsonValue> {
     await this.store.authenticate(token);
     if (name !== "director_wait") await this.store.heartbeat(token, false);
     switch (name) {
       case "director_wait":
-        return this.wait(WaitArgs.parse(input ?? {}), token);
+        return this.wait(WaitArgs.parse(input ?? {}), token, signal);
       case "director_say": {
         const args = SayArgs.parse(input);
         const message = await this.store.appendMessage({ author: "director", channel: "cli", text: args.text, ...(args.runId !== undefined ? { runId: args.runId } : {}) });
@@ -131,12 +138,13 @@ export class DirectorTools {
     return { recorded: true, seq: message.seq };
   }
 
-  private async wait(args: z.infer<typeof WaitArgs>, token: string): Promise<JsonValue> {
+  private async wait(args: z.infer<typeof WaitArgs>, token: string, signal?: AbortSignal): Promise<JsonValue> {
     const start = await this.store.version();
-    let seq = 0;
+    // An empty cursor (the first wait after `director start`) means "from now"; an omitted cursor reads the whole transcript.
+    let seq = args.cursor === "" ? start.messageSeq : 0;
     let revision = start.issuesRevision;
     let runtimeCursor = "";
-    if (args.cursor !== undefined) {
+    if (args.cursor !== undefined && args.cursor !== "") {
       const match = CURSOR.exec(args.cursor);
       if (!match) throw new Error("Invalid director cursor");
       seq = Number(match[1]);
@@ -164,7 +172,7 @@ export class DirectorTools {
         // A full page without a user message means more transcript is already waiting: read on without blocking.
         if (fresh.length >= DIRECTOR_LIMITS.transcriptPage && messages.length === 0 && issues.length === 0 && runtimeEvents.length === 0) continue;
         const remaining = deadline - Date.now();
-        if (messages.length > 0 || issues.length > 0 || runtimeEvents.length > 0 || remaining <= 0) {
+        if (messages.length > 0 || issues.length > 0 || runtimeEvents.length > 0 || remaining <= 0 || signal?.aborted) {
           const timedOut = messages.length === 0 && issues.length === 0 && runtimeEvents.length === 0;
           return json(DirectorWaitResultSchema.parse({
             cursor: `m${seq}.i${revision}.r${Buffer.from(runtimeCursor, "utf8").toString("base64url")}`,
@@ -177,6 +185,8 @@ export class DirectorTools {
 
         const slice = Math.min(remaining, HEARTBEAT_SLICE_MS);
         const controller = new AbortController();
+        const onClientAbort = (): void => controller.abort();
+        signal?.addEventListener("abort", onClientAbort, { once: true });
         const since = { messageSeq: version.messageSeq, issuesRevision: version.issuesRevision };
         const storeWake = this.store.waitForChange(since, slice, controller.signal);
         const runtimeWake = this.runtimeEvents?.wait(runtimeCursor, slice, controller.signal, RUNTIME_EVENTS_LIMIT);
@@ -190,6 +200,7 @@ export class DirectorTools {
             await storeWake;
           }
         } finally {
+          signal?.removeEventListener("abort", onClientAbort);
           controller.abort();
         }
         const [, runtimeResult] = await Promise.all([storeWake, runtimeWake]);

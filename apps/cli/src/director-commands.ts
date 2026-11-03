@@ -173,12 +173,17 @@ async function runCall(args: Extract<DirectorArgs, { sub: "call" }>, deps: Direc
     deps.stdout.write(args.json ? `${JSON.stringify({ ok: false, message })}\n` : `${message}\n`);
     return code;
   };
+  // Syntax errors are always one JSON object on stdout (the skill's shell path parses stdout) with a non-zero exit.
+  const syntax = (message: string): number => {
+    deps.stdout.write(`${JSON.stringify({ ok: false, message })}\n`);
+    return CLI_EXIT_CODES.RUNTIME_ERROR;
+  };
   const token = deps.env.BFLOW_DIRECTOR_TOKEN;
-  if (!token) return fail("BFLOW_DIRECTOR_TOKEN chưa được đặt. Chạy `bflow director start --json` và đặt biến này.");
+  if (!token) return syntax("BFLOW_DIRECTOR_TOKEN chưa được đặt. Chạy `bflow director start --json` và đặt biến này.");
   let parsed: unknown;
-  try { parsed = JSON.parse(args.argsJson); } catch { return fail("argsJson không phải JSON hợp lệ.", CLI_EXIT_CODES.USAGE_ERROR); }
-  if (!isRecord(parsed)) return fail("argsJson phải là một đối tượng JSON.", CLI_EXIT_CODES.USAGE_ERROR);
-  if (Object.prototype.hasOwnProperty.call(parsed, "token")) return fail("argsJson không được chứa khoá `token`; dùng BFLOW_DIRECTOR_TOKEN.", CLI_EXIT_CODES.USAGE_ERROR);
+  try { parsed = JSON.parse(args.argsJson); } catch { return syntax("argsJson không phải JSON hợp lệ."); }
+  if (!isRecord(parsed)) return syntax("argsJson phải là một đối tượng JSON.");
+  if (Object.prototype.hasOwnProperty.call(parsed, "token")) return syntax("argsJson không được chứa khoá `token`; dùng BFLOW_DIRECTOR_TOKEN.");
   try {
     const repository = await deps.identify(deps.cwd);
     const result = await deps.toolCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, token, args.tool, parsed as Record<string, JsonValue>);
@@ -212,8 +217,11 @@ async function runHook(provider: "claude" | "codex", deps: DirectorCommandDeps):
     const payload: unknown = JSON.parse(raw);
     const prompt = isRecord(payload) ? payload.prompt : undefined;
     if (typeof prompt !== "string" || prompt.trim() === "") return 0;
+    const providerSession = isRecord(payload) ? payload.session_id : undefined;
+    const sessionId = typeof providerSession === "string" && providerSession.length > 0 && providerSession.length <= 200 ? providerSession : undefined;
     const repository = await deps.identify(deps.cwd);
-    await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_hook_note", { provider, prompt }, HOOK_NOTE_TIMEOUT_MS);
+    await deps.ownerCall({ repositoryPath: repository.root, sessionId: repository.sessionName }, "director_hook_note",
+      { provider, prompt, ...(sessionId !== undefined ? { sessionId } : {}) }, HOOK_NOTE_TIMEOUT_MS);
   } catch (error) {
     if (deps.env.BFLOW_DEBUG) { try { deps.stderr.write(`director hook: ${scrub(error instanceof Error ? error.message : String(error))}\n`); } catch {} }
   }
