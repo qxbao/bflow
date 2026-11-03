@@ -64,6 +64,9 @@ export async function createAgenticConversationHost(options: {
     : { role: "conversation" as const, agent_id: conversation!.agentId, pane_id: conversation!.paneId };
   const coordinatorEndpoint = director ? { role: "coordinator" as const }
     : { role: "coordinator" as const, agent_id: coordinator!.agentId, pane_id: coordinator!.paneId };
+  // The exported ConversationSession contract requires a pane id. In a Director session these two values are the Director
+  // principal marker persisted in the session, not a pane or an agent: no pane exists and nothing may address it.
+  const DIRECTOR_PRINCIPAL_AGENT_ID = "director", DIRECTOR_PRINCIPAL_PANE_MARKER = "director:no-pane";
   const DIRECTOR_WEB_REFUSAL = "Phiên Director: hãy gửi yêu cầu cho Director trong CLI (chạy /bflow-start).";
   // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
   const module: any = await import("@bflow/conversation");
@@ -183,14 +186,14 @@ export async function createAgenticConversationHost(options: {
     }
   }
   const bridge = new DurableBridge({ transport: runtime.ports.transport, sessionId: manifest.conversationSessionId,
-    // Director: placeholders only. Every envelope this bridge sends is overridden above, and its transport targets are never used.
-    conversationAgentId: conversation?.agentId ?? "director-gateway", conversationPaneId: conversation?.paneId ?? "director-gateway",
-    coordinatorTarget: { transport: "herdr", agentId: coordinator?.agentId ?? "director-gateway", paneId: coordinator?.paneId ?? "director-gateway",
+    // Director: principal marker only. Every envelope this bridge sends is overridden above, and its transport targets are never used.
+    conversationAgentId: conversation?.agentId ?? DIRECTOR_PRINCIPAL_AGENT_ID, conversationPaneId: conversation?.paneId ?? DIRECTOR_PRINCIPAL_PANE_MARKER,
+    coordinatorTarget: { transport: "herdr", agentId: coordinator?.agentId ?? DIRECTOR_PRINCIPAL_AGENT_ID, paneId: coordinator?.paneId ?? DIRECTOR_PRINCIPAL_PANE_MARKER,
       workspaceId: coordinator?.workspaceId ?? manifest.herdrWorkspaceId, tabId: coordinator?.tabId ?? manifest.herdrTabId } });
   const contextStore = new module.FileConversationContextStore(options.contextDirectory);
   let structured: StructuredConversationCallbacks | undefined;
   const gateway = new module.ConversationGateway({ sessionId: manifest.conversationSessionId, herdrSessionId: manifest.sessionId,
-    conversationAgentId: conversation?.agentId ?? "director-gateway", paneId: conversation?.paneId ?? "director-gateway", bridge,
+    conversationAgentId: conversation?.agentId ?? DIRECTOR_PRINCIPAL_AGENT_ID, paneId: conversation?.paneId ?? DIRECTOR_PRINCIPAL_PANE_MARKER, bridge,
     contextStore, now: () => structured?.now() ?? new Date().toISOString(),
     authorizeStructuredInteraction: async (command: WebCommand, principal: WebPrincipal) => structured ? structured.authorize(command, principal) : false,
     onStructuredApproval: async (decision: unknown, command: WebCommand, principal: WebPrincipal) => {

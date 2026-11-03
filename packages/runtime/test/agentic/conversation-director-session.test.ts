@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RoleMessageSchema, WebCommandSchema, type SessionManifest } from "@bflow/contracts";
@@ -56,6 +57,22 @@ describe("Conversation gateway without a pane (Director session)", () => {
     }
     expect(((await f.runtime.inspect()) as any).outbound.length).toBe(outboundBefore);
     expect(f.transport.sentRequests).toEqual([]);
+  }, 60000);
+
+  it("persists the Director principal marker and never an invented Conversation identity", async () => {
+    const { f, host } = await directorHost();
+    await host.reconcileApprovals();
+    const context = await host.getContext() as any;
+    expect(context.session).toMatchObject({ conversationAgentId: "director", paneId: "director:no-pane" });
+    expect(JSON.stringify(context)).not.toContain("director-gateway");
+    const directory = join(f.root, "director-conversation");
+    const files = (await readdir(directory, { recursive: true })).map(String);
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const text = await readFile(join(directory, file), "utf8").catch(() => "");
+      expect(text).not.toContain("director-gateway");
+    }
+    expect(JSON.stringify(await f.runtime.inspect())).not.toContain("director-gateway");
   }, 60000);
 
   it("refuses the pane hook turn and the Conversation-bridge delegation in a Director session", async () => {
