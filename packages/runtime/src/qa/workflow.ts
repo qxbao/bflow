@@ -236,7 +236,7 @@ export class QaWorkflowRuntime {
       classifications: run.classifications ?? {}, verdict: run.report?.verdict,
       report: run.report ? { verdict: run.report.verdict, files: run.report.files, bugs: run.report.bugs, testDefects: run.report.testDefects,
         residualData: run.report.residualData, uncertainMutations: run.report.uncertainMutations, limitations: run.report.limitations,
-        artifactId: run.report.artifact.artifactId } : undefined });
+        artifactId: run.report.artifact.artifactId, artifact: run.report.artifact } : undefined });
   }
 
   /**

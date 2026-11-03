@@ -11,18 +11,19 @@ export class WorkflowExtensionPump {
   private readonly held = new Set<string>();
   private readonly requested = new Set<string>();
   private quiesced = false;
+  private quiescing = false;
   constructor(private readonly host: Pick<WorkflowExtensionHost, "inspect" | "drive">,
     private readonly reportFailure: (runId: string, error: unknown) => Promise<void>) {}
 
   snapshot() { return { activeRunIds: [...this.active.keys()], heldRunIds: [...this.held], quiesced: this.quiesced }; }
   wake(runId: string): void {
-    if (this.quiesced) throw new Error("Extension pump is quiesced");
+    if (this.quiesced || this.quiescing) throw new Error("Extension pump is quiesced");
     this.held.delete(IdentifierSchema.parse(runId)); this.requested.add(runId);
   }
   async tick(): Promise<void> {
-    if (this.quiesced) return;
+    if (this.quiesced || this.quiescing) return;
     const state = z.object({ runs: z.array(WorkView) }).passthrough().parse(await this.host.inspect());
-    if (this.quiesced) return;
+    if (this.quiesced || this.quiescing) return;
     for (const run of state.runs) {
       if (!run.coreCreated || run.cancelled || this.active.has(run.runId) || this.held.has(run.runId) ||
           run.extensionStatus !== "running" && !run.queuedDecisions.length && !this.requested.has(run.runId)) continue;
@@ -42,8 +43,10 @@ export class WorkflowExtensionPump {
     }
   }
   async drain(): Promise<void> { await Promise.allSettled([...this.active.values()]); }
-  async quiesce(): Promise<void> {
+  async quiesce(beforeCommit?: () => Promise<unknown>): Promise<void> {
     if (this.active.size) throw new Error("Native extension work is active; let it drain before quiescing");
-    this.quiesced = true;
+    this.quiescing = true;
+    try { await beforeCommit?.(); this.quiesced = true; }
+    finally { this.quiescing = false; }
   }
 }

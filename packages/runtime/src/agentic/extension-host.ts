@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
-import { ApprovalDecisionSchema, ApprovalRequestSchema, DelegationRequestSchema, DomainEventSchema, IdentifierSchema, JsonValueSchema,
+import { ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema, DelegationRequestSchema, DomainEventSchema, IdentifierSchema, JsonValueSchema,
   PaneBindingSchema, RoleMessageSchema, WorkflowRunSnapshotSchema, WorkflowPackSchema, type ApprovalDecision, type ApprovalRequest, type DelegationRequest, type JsonValue,
   type PaneBinding, type RoleMessage, type RunStore, type WorkflowEngine, type WorkflowPack } from "@bflow/contracts";
 import { AnalysisWorkflowRuntime } from "../analysis/workflow.js";
@@ -14,13 +14,15 @@ import { QA_WORKFLOW_ID, QA_WORKFLOW_VERSION } from "../qa/plan.js";
 import { canonicalPlanDigest, resolveWorkflowPack, verifyWorkflowPackDigest } from "../planning/index.js";
 import { AgenticJournal, digest, json, record } from "./journal.js";
 import type { NativeExtensionIntent, NativeExtensionRolePort } from "./extension-delivery.js";
+import { ExtensionProjectionSchema, extensionSdlcStatus } from "./extension-projection.js";
 
 export type WorkflowFamily = "implementation" | "analysis" | "qa";
 const PinSchema = z.object({ id: IdentifierSchema, version: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 const RouteSchema = z.object({ schemaVersion: z.literal(1), runId: IdentifierSchema,
   kind: z.enum(["implementation", "analysis", "qa"]), delegation: DelegationRequestSchema, pack: WorkflowPackSchema.optional(),
   decisions: z.array(z.object({ decision: ApprovalDecisionSchema, state: z.enum(["queued", "applied"]) }).strict()).default([]),
-  input: JsonValueSchema.optional(), started: z.boolean().default(false) }).strict();
+  input: JsonValueSchema.optional(), started: z.boolean().default(false), completionNotice: RoleMessageSchema.optional(),
+  completionNotified: z.boolean().default(false), projection: ExtensionProjectionSchema.optional() }).strict();
 type Route = z.infer<typeof RouteSchema>;
 export type ExtensionStart = { kind: "analysis"; runId: string; intake: AnalysisIntakeInput; packPin: AnalysisPackPin } |
   { kind: "qa"; runId: string; intake: QaIntakeInput; packPin: AnalysisPackPin };
@@ -93,7 +95,12 @@ export async function createWorkflowExtensionHost(options: {
         if (previous && digest(previous.decision) !== digest(incoming.decision)) throw new Error("Conflicting queued human decision");
         if (!previous) decisions.push(incoming); else if (incoming.state === "applied") previous.state = "applied";
       }
+      if (prior.completionNotice && entry.completionNotice && digest(prior.completionNotice) !== digest(entry.completionNotice))
+        throw new Error("Conflicting extension completion notice");
       message.payload = json({ kind: "extension.route", route: { ...entry, decisions, started: prior.started || entry.started,
+        completionNotified: prior.completionNotified || entry.completionNotified,
+        ...(prior.completionNotice ? { completionNotice: prior.completionNotice } : {}),
+        ...(prior.projection && (!entry.projection || prior.projection.coreVersion > entry.projection.coreVersion) ? { projection: prior.projection } : {}),
         ...(prior.input ? { input: prior.input } : {}) } });
       existing.message = RoleMessageSchema.parse(message);
     } else state.inbox.push({ message, status: "applied" });
@@ -131,14 +138,24 @@ export async function createWorkflowExtensionHost(options: {
     const entry = await route(runId);
     const state = entry.started ? runtime(entry).status(runId) : undefined;
     const status = state?.status;
-    const sdlc = status === "published" || status === "reported" ? "completed" : status?.startsWith("awaiting_") ? "awaiting_approval"
-      : status === "cancelled" || status === "cancelling" ? "cancelled" : status === "failed" ? "failed" : status === "blocked" || status === "needs_revision" ? "escalated" : entry.kind === "analysis" ? "specifying" : "verifying";
+    const sdlc = extensionSdlcStatus(status, entry.kind === "analysis" ? "analysis" : "qa");
     return json({ runId, kind: entry.kind, pack: entry.pack ? { id: entry.pack.id, version: entry.pack.version, digest: entry.pack.digest } : undefined,
       delegation: entry.delegation, status: sdlc, extensionStatus: status ?? "admitted", coreCreated: entry.started,
       cancelled: status === "cancelled" || status === "cancelling",
       queuedDecisions: entry.decisions.filter(item => item.state === "queued").map(item => item.decision.approvalId),
       outputType: entry.kind === "analysis" ? "analysis_document" : "qa_report", ...(state ? { extension: state } : {}),
       approval: (await pending(entry))[0] });
+  };
+  const saveProjection = async (entry: Route) => {
+    if (!entry.started || entry.kind === "implementation") return;
+    const state = runtime(entry).status(entry.runId), snapshot = await options.engine.getSnapshot(entry.runId);
+    if (!snapshot.ok || !snapshot.value) throw new Error("Extension Core read projection is unavailable");
+    const core = WorkflowRunSnapshotSchema.parse(snapshot.value);
+    entry.projection = ExtensionProjectionSchema.parse({ schemaVersion: 1, runId: entry.runId,
+      sessionId: entry.delegation.sessionId, delegationDigest: digest(entry.delegation), kind: entry.kind,
+      status: extensionSdlcStatus(state.status, entry.kind), cancelled: state.status === "cancelled" || state.status === "cancelling",
+      coreVersion: core.version, definition: state.definition, approvals: await pending(entry) });
+    await saveRoute(entry);
   };
   const publish = async (entry: Route) => {
     for (const request of await pending(entry)) {
@@ -147,6 +164,27 @@ export async function createWorkflowExtensionHost(options: {
         correlation_id: entry.delegation.correlationId, run_id: entry.runId, sender: { role: "runtime" }, recipient: { role: "conversation" },
         type: "approval.request", payload: json(request), artifact_references: request.evidence, occurred_at: request.requestedAt, idempotency_key: id }));
     }
+    if (!entry.started || entry.completionNotified) return;
+    const state = runtime(entry).status(entry.runId);
+    if (state.status !== "published" && state.status !== "reported") return;
+    if (!entry.completionNotice) {
+      const artifact = ArtifactReferenceSchema.parse("handoff" in state ? state.handoff?.artifact : state.report?.artifact);
+      if (artifact.runId !== entry.runId) throw new Error("Extension output artifact belongs to another run");
+      const snapshot = await options.engine.getSnapshot(entry.runId);
+      if (!snapshot.ok || !snapshot.value) throw new Error("Extension completion needs its authoritative successful Core run");
+      const core = WorkflowRunSnapshotSchema.parse(snapshot.value);
+      if (core.status !== "succeeded" || core.runId !== entry.runId) throw new Error("Extension completion needs its authoritative successful Core run");
+      const id = `extension-completed-${digest([entry.runId, artifact.checksum])}`;
+      entry.completionNotice = RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: entry.delegation.correlationId,
+        run_id: entry.runId, sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+        payload: { kind: "extension_completed", sdlcStatus: "completed", outputType: entry.kind === "analysis" ? "analysis_document" : "qa_report",
+          headline: entry.kind === "analysis" ? "Tài liệu phân tích đã được duyệt và xuất." : "Báo cáo QA đã sẵn sàng.",
+          ...(entry.kind === "analysis" ? { productAcceptance: "not_established" } : { productChange: "not_authorized" }) },
+        artifact_references: [artifact], occurred_at: core.updatedAt, idempotency_key: id });
+      await saveRoute(entry); // Replay the exact same envelope if delivery succeeds but its acknowledgement is lost.
+    }
+    await options.publishToConversation(entry.completionNotice);
+    entry.completionNotified = true; await saveRoute(entry);
   };
   const host: WorkflowExtensionHost = {
     async admit(input) {
@@ -158,7 +196,7 @@ export async function createWorkflowExtensionHost(options: {
       const legacy = await options.isLegacyImplementationRun?.(delegation.runId) ?? false;
       const inputPack = legacy ? undefined : await options.readPack(), pack = inputPack === undefined ? undefined : WorkflowPackSchema.parse(inputPack);
       const kind = workflowPackFamily(pack);
-      await saveRoute({ schemaVersion: 1, runId: delegation.runId, kind, delegation, ...(pack ? { pack } : {}), started: false, decisions: [] }); return kind;
+      await saveRoute({ schemaVersion: 1, runId: delegation.runId, kind, delegation, ...(pack ? { pack } : {}), started: false, decisions: [], completionNotified: false }); return kind;
     },
     async owns(runId) { return (await routes()).some(item => item.runId === runId && item.kind !== "implementation"); },
     async start(input) {
@@ -183,12 +221,13 @@ export async function createWorkflowExtensionHost(options: {
           if (input.kind === "analysis") await options.analysis.start({ runId: entry.runId, intake: AnalysisIntakeSchema.parse(intake), pack, packPin: pin });
           else await options.qa.start({ runId: entry.runId, intake: QaIntakeSchema.parse(intake) });
         }
-        entry.started = true; await saveRoute(entry);
+        entry.started = true; await saveProjection(entry);
       }
       return inspect(entry.runId);
     },
     async drive(runId) { assertActive(); const entry = await route(runId); await currentPack(entry);
       if (!entry.started) throw new Error("Coordinator has not started the admitted extension");
+      try {
       if (["cancelling", "cancelled"].includes(runtime(entry).status(runId).status)) {
         await runtime(entry).cancel(runId, "Run cancelled"); return inspect(runId);
       }
@@ -198,18 +237,25 @@ export async function createWorkflowExtensionHost(options: {
       }
       const status = runtime(entry).status(runId).status;
       if (status === "running" || status === "blocked") await runtime(entry).drive(runId);
+      } finally { await saveProjection(entry); }
       await publish(entry); return inspect(runId); },
     inspect,
     async cancel(runId, reason) {
       const entry = await route(runId);
       if (!entry.started) throw new Error("Extension has not started; cancel its admitted intake instead");
-      await runtime(entry).cancel(runId, reason);
+      try { await runtime(entry).cancel(runId, reason); }
+      finally { await saveProjection(entry); }
       return inspect(runId);
     },
     async recover() { assertActive(); const results: JsonValue[] = [];
       for (const entry of (await routes()).filter(item => item.kind !== "implementation" && item.started)) results.push(await host.drive(entry.runId));
       return json(results); },
-    async quiesce() { quiesced = true; return json({ quiesced: true }); },
+    async quiesce() {
+      const state = await options.native.snapshot();
+      if (state.outbound.some(out => ["sending", "unknown_delivery", "accepted"].includes(out.status) || out.status === "queued" && out.lease))
+        throw new Error("Native extension delivery is unsettled; reconcile or cancel it before shutdown");
+      quiesced = true; return json({ quiesced: true });
+    },
     async receive(input) { const message = RoleMessageSchema.parse(input);
       if (!message.run_id || !await host.owns(message.run_id)) throw new Error("Native output has no admitted extension run");
       await options.native.receive(message); },

@@ -1,8 +1,9 @@
+import { extensionReadViews } from "./helpers/extension-read-model.js";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ApprovalDecisionSchema, DelegationRequestSchema, ResolvedToolGrantSchema, RuntimeHttpGrantSchema, RuntimeHttpPolicySchema, type ApprovalRequest } from "@bflow/contracts";
+import { ApprovalDecisionSchema, DelegationRequestSchema, ResolvedToolGrantSchema, RuntimeHttpGrantSchema, RuntimeHttpPolicySchema, type ApprovalRequest, type RoleMessage } from "@bflow/contracts";
 import { buildAnalysisPack, canonicalPlanDigest, createRuntimeHttpAuthority, createHttpQaTool, openWorkflowExtensionRuntimes, workflowPackDigest } from "../src/index.js";
 import { AppCheckBrowserLeases } from "../src/agentic/app-check-lease.js";
 import { nativeExtensionFixture } from "./helpers/native-extension.js";
@@ -53,11 +54,12 @@ async function qaFlow(options: { sharedSession?: "reviewer" | "qa"; hostSession?
   const runtimePolicy = RuntimeHttpPolicySchema.parse({ ...policyBody, digest: canonicalPlanDigest(policyBody) });
   const runtimeGrants = options.legacyGrantOnly ? [] : [RuntimeHttpGrantSchema.parse({ schemaVersion: 3, grantId: "runtime-qa-grant", kind: "runtime_http",
     toolId: "qa-http", role: "qa", scope: grant.scope, policyDigest: runtimePolicy.digest, origins: [origin], operations: intake.allowedActions })];
+  const notices: RoleMessage[] = [];
   let current = true;
   let leaseNow = Date.now();
   const composed = await openWorkflowExtensionRuntimes({ repositoryPath: f.repo, sessionId: "session-native", directory: join(f.root, "host-sdk"),
     engine, runStore: f.runStore, artifactStore: f.artifactStore, native: f.native, authorizeHuman: () => true,
-    now: () => new Date().toISOString(), readPack: async () => pack, publishToConversation: async () => {},
+    now: () => new Date().toISOString(), readPack: async () => pack, publishToConversation: async message => { notices.push(message); },
     qa: { tools: { http: createHttpQaTool() }, grants: [grant], leases: new AppCheckBrowserLeases(join(f.root, "leases"), () => new Date(leaseNow)),
       runtimeHttpGrants: runtimeGrants,
       runtimeHttpAuthority: createRuntimeHttpAuthority({ policy: runtimePolicy, grants: runtimeGrants, machineId: "fixture-machine", repositoryId: "fixture-repo",
@@ -87,7 +89,7 @@ async function qaFlow(options: { sharedSession?: "reviewer" | "qa"; hostSession?
     runId: request.runId, sessionId: request.sessionId, target: request.target, revision: request.revision, generation: request.generation,
     decision: "approved", decidedBy: "user:owner", decidedAt: new Date().toISOString(), feedbackArtifacts: [],
     idempotencyKey: "exact-qa-owner", metadata: request.metadata });
-  return { ...f, ...composed, engine, calls, approve };
+  return { ...f, ...composed, engine, calls, approve, notices };
 }
 
 describe("native QA host behavior (local transport fixture)", () => {
@@ -124,13 +126,22 @@ describe("native QA host behavior (local transport fixture)", () => {
     expect(waiting.extensionStatus).toBe("awaiting_design_approval"); expect(f.calls).toEqual([]);
     const decision = f.approve((await f.host.pendingApprovals())[0]!);
     await f.host.decide(decision); const result = await f.host.drive("run-native") as any;
-    expect(result.extensionStatus).toBe("reported"); expect(result.extension.classifications).toEqual({ "TC-1": "passed" });
+    expect(result.extensionStatus).toBe("reported");
+    const completed = f.notices.filter(message => (message.payload as any).kind === "extension_completed");
+    expect(completed).toHaveLength(1);
+    expect(completed[0]!.payload).toMatchObject({ outputType: "qa_report", productChange: "not_authorized" });
+    expect(completed[0]!.artifact_references.map(ref => ref.artifactId)).toEqual([result.extension.report.artifactId]); expect(result.extension.classifications).toEqual({ "TC-1": "passed" });
     expect(result.extension.execution.build).toMatchObject({ status: "identified", value: "accepted-fixture-revision" });
     expect(result.extension.execution.productUnchanged).toBe(true); expect(f.calls).toEqual(["GET /health", "GET /health"]);
     expect(await readFile(join(f.repo, "src/health.ts"))).toEqual(before);
     expect(f.transport.sentRequests.map(request => request.role)).toEqual(["tester", "reviewer", "qa"]);
     const core = await f.engine.getSnapshot("run-native"); if (!core.ok || !core.value) throw new Error("Missing Core state");
     expect(core.value.status).toBe("succeeded");
+    const views = await extensionReadViews(f);
+    for (const response of [views.online, views.offline]) expect(response).toMatchObject({ ok: true,
+      value: { sdlcStatus: "completed", coreStatus: "succeeded", decisions: [], tasks: expect.arrayContaining([
+        expect.objectContaining({ taskId: "report", status: "succeeded" })]) } });
+    expect(views.unchanged).toBe(true);
     expect(core.value.tasks.filter(task => task.agentExecution?.target.transport === "herdr")).toHaveLength(3);
     expect(result.extension.execution.leases).toEqual([expect.objectContaining({ fencingToken: 1, released: true })]);
     const count = f.calls.length; await f.host.decide(decision); await f.host.drive("run-native"); expect(f.calls).toHaveLength(count);

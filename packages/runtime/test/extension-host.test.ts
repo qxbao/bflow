@@ -39,6 +39,15 @@ async function fixture(sessionId = "session-native") {
 }
 
 describe("workflow extension host routing", () => {
+  it("refuses shutdown with unresolved native delivery without freezing explicit reconciliation", async () => {
+    const f = await fixture(), host = await f.create(); await host.admit(delegation());
+    await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,
+      packPin: { id: f.pack.id, version: f.pack.version, digest: f.pack.digest } });
+    f.a.loseAck(); await expect(host.drive("run-native")).rejects.toThrow(/unknown|reconcile/);
+    await expect(host.quiesce()).rejects.toThrow(/unsettled|reconcil|native/i);
+    expect((await host.drive("run-native")).extensionStatus).toBe("awaiting_business_decision");
+  });
+
   it("projects actual cancellation, closes its human gates and refuses late decisions after reopening the host", async () => {
     const f = await fixture(), host = await f.create();
     await host.admit(delegation()); await host.start({ kind: "analysis", runId: "run-native", intake: f.intake,

@@ -227,3 +227,9 @@ riêng; source host hiện chỉ có đường smoke fixture, không tự cấp 
   có thể lọt qua.
 - Chưa có `revise`: thiết kế bị yêu cầu sửa (`needs_revision`) cần một run mới.
 - Journal là file JSON ghi nguyên tử, một writer, chưa có lock giữa nhiều process.
+
+### Native lifecycle and read projections
+
+Native cancellation now persists its intent before Core/transport effects, cancels the actual SDK Core run and interrupts each accepted native execution at most once. An interrupt acknowledgement or Herdr `done` does not establish stop: unresolved delivery and unconfirmed stop retain their authority/lease for reconciliation. Pending human gates close on cancellation; late answers cannot restart the run. Runtime publication and QA target access recheck cancellation before effects, and local Runtime work must drain before final stop confirmation. QA retains uncertainty for unresolved mutations.
+
+The extension route journal maintains a bounded read projection for the shared Web/session reader, including after shutdown; Core/storage remain authoritative. Successful publication/report completion produces one durable Conversation update with its trusted artifact reference. A crash after notice delivery replays the same immutable message, allowing the existing receipt journal to deduplicate it. Shutdown refuses unsettled native delivery without freezing explicit reconciliation. These guarantees have source and local test evidence; provider/Herdr live acceptance remains separate.

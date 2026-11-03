@@ -226,9 +226,11 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
   }
   private async put(out: Outbound, id: string, data: unknown): Promise<ArtifactReference> {
     const bytes = Buffer.from(canonicalReceiptJson(data)), checksum = sha(bytes);
+    // Identical output bytes may belong to distinct runs/tasks/attempts. Their trusted references retain that scope.
+    const identity = digest([out.request!.runId, out.taskId, out.request!.requestId, id, checksum]);
     const ref = ArtifactReferenceSchema.parse(value(await this.options.artifactStore.put({ options: ArtifactWriteOptionsSchema.parse({
-      artifactId: `native-${id}-${checksum}`, runId: out.request!.runId, taskId: out.taskId, kind: "report", mediaType: "application/json",
-      expectedIntegrity: { checksum: { algorithm: "sha256", value: checksum }, sizeBytes: bytes.length }, idempotencyKey: `native:${id}:${checksum}` }),
+      artifactId: `native-${id}-${identity}`, runId: out.request!.runId, taskId: out.taskId, kind: "report", mediaType: "application/json",
+      expectedIntegrity: { checksum: { algorithm: "sha256", value: checksum }, sizeBytes: bytes.length }, idempotencyKey: `native:${id}:${identity}` }),
       content: (async function* () { yield bytes; })() })));
     if (ref.checksum.value !== checksum || ref.sizeBytes !== bytes.length || ref.runId !== out.request!.runId || ref.taskId !== out.taskId)
       throw new Error("ArtifactStore returned an unrelated native evidence reference");

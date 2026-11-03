@@ -45,7 +45,7 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
   transport.customSendHandler = request => {
     const earlierTaskExecution = [...requests.values()].some(item => item.runId === request.runId && item.taskId === request.taskId && item.requestId !== request.requestId);
     requests.set(request.requestId, request);
-    const handle: AgentExecutionHandle = { executionId: `herdr-${request.taskId}${earlierTaskExecution ? `-${request.attemptId}` : ""}`, requestId: request.requestId, attemptId: request.attemptId,
+    const handle: AgentExecutionHandle = { executionId: `herdr-${request.taskId}${request.runId === "run-native" ? "" : `-${request.runId}`}${earlierTaskExecution ? `-${request.attemptId}` : ""}`, requestId: request.requestId, attemptId: request.attemptId,
       runId: request.runId, taskId: request.taskId, idempotencyKey: request.idempotency.key, target: request.target,
       correlation: { token: request.requestId, provenance: "orchestrator", verified: false }, acceptedAt: new Date().toISOString() };
     handles.set(request.requestId, handle);
@@ -100,15 +100,15 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
       tools: {}, grants: [], leases: new AppCheckBrowserLeases(join(root, "leases")) });
     return { sdk, engine };
   };
-  const start = async (sdk: AnalysisWorkflowRuntime | QaWorkflowRuntime) => {
+  const start = async (sdk: AnalysisWorkflowRuntime | QaWorkflowRuntime, runId = "run-native") => {
     if (sdk instanceof AnalysisWorkflowRuntime) {
       const pack = buildAnalysisPack({ id: "native-ba", version: "1" });
-      await sdk.start({ runId: "run-native", pack, packPin: { id: pack.id, version: pack.version, digest: pack.digest }, intake: {
+      await sdk.start({ runId, pack, packPin: { id: pack.id, version: pack.version, digest: pack.digest }, intake: {
         schemaVersion: 1, requestId: "ba-native", sessionId: sessionId, title: "Native BA", userStatements: [{ id: "U-1", text: "Specify health" }],
         deliverables: ["scope", "functional_requirements", "acceptance_criteria", "nfr", "business_flows", "glossary"],
         acceptanceCriteria: [{ id: "AC-1", description: "Traceable health specification", required: true }],
         requiredDecisions: [{ id: "D-1", question: "Who owns health?", blocking: true }], surveyPaths: ["src"], documentRoot: "docs/ba" } });
-    } else await sdk.start({ runId: "run-native", intake: { schemaVersion: 1, requestId: "qa-native", sessionId: sessionId, title: "Native QA",
+    } else await sdk.start({ runId, intake: { schemaVersion: 1, requestId: "qa-native", sessionId: sessionId, title: "Native QA",
       userStatements: [{ id: "U-1", text: "Check health without changing the product" }],
       target: { environmentId: "fixture", kind: "fixture", origins: ["http://127.0.0.1:8123"], readinessPath: "/health" },
       criteria: [{ id: "AC-1", description: "Health returns HTTP 200" }], allowedActions: ["http_read"], accountPolicy: { accounts: [] },

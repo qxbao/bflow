@@ -19,6 +19,7 @@ import {
 import { pendingPrototypeApprovals } from "../agentic/prototype-review.js";
 import { redactString } from "../resilience/redaction.js";
 import { availableActions, terminal } from "./actions.js";
+import { projectExtensionRoutes } from "../agentic/extension-projection.js";
 export interface ReadSources {
   state: JournalState;
   sessionId: string;
@@ -64,7 +65,7 @@ export function projectDecision(
     runId: r.runId,
     kind,
     status: expired ? "expired" : (request.status ?? "pending"),
-    question: safe(s, request.reason),
+    question: safe(s, request.metadata?.kind === "user_decision" && typeof request.metadata.question === "string" ? request.metadata.question : request.reason),
     options: Array.isArray(request.metadata?.options)
       ? request.metadata.options
           .filter((v): v is string => typeof v === "string")
@@ -107,7 +108,7 @@ export function projectRun(s: ReadSources, runId: string): WebRunView {
       r.status === "awaiting_approval" &&
       r.decision?.approvalId !== r.approval.approvalId
     )
-      decisions.push(projectDecision(s, r, r.approval, "approval"));
+      decisions.push(projectDecision(s, r, r.approval, r.approval.metadata?.kind === "user_decision" ? "user_decision" : "approval"));
     for (const d of Object.values(r.userDecisions ?? {}))
       if (d.status === "pending")
         decisions.push(projectDecision(s, r, d.request, "user_decision"));
@@ -396,7 +397,7 @@ export async function hostInteractionQuery(
   }
   const journalPath = join(root, "agentic/journal/state.json");
   const journal = await readSnapshot(journalPath, bytes => projectionSnapshots.parse(journalPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
-  const state =
+  let state =
     journal === undefined
       ? {
           version: 1 as const,
@@ -408,6 +409,9 @@ export async function hostInteractionQuery(
           pendingVerifications: [],
         }
       : journal;
+  const extensionPath = join(root, "agentic/extensions", digest(configuration.sessionId), "routes/state.json");
+  const extensionRoutes = await readSnapshot(extensionPath, bytes => projectionSnapshots.parse(extensionPath, configuration.repositoryPath, bytes), 64 * 1024 * 1024);
+  if (extensionRoutes) state = projectExtensionRoutes(state, extensionRoutes, sessionId);
   const core = new Map<string, WorkflowRunSnapshot>();
   for (const r of state.runs.filter(
     (r) => r.delegation.sessionId === sessionId && r.coreCreated,
