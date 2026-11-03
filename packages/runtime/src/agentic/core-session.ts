@@ -68,7 +68,7 @@ export class CoreSession {
     if (checkpoint) {
       if (checkpoint.runId !== run.runId || checkpoint.version > stored.snapshot.version || checkpoint.eventSequence > stored.snapshot.lastEventSequence)
         throw new Error("Checkpoint does not belong to the authoritative run history");
-      if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version))
+      if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2, 3].includes(checkpoint.codec.version))
         throw new Error("Core recovery requires a complete aggregate checkpoint");
       // The decoder preserves approvals, fencing, cancellation/retry and command outcomes; a query projection is never a substitute.
       unwrap(decodeWorkflowAggregateCheckpointState(checkpoint));

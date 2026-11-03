@@ -113,7 +113,81 @@ describe("parked tasks (R-B2-14)", () => {
     expect(statusOf(driver.state, "c")).toBe("running");
   });
 
-  it("accepts parking a bound execution once that exact execution's stop is confirmed (durable history)", async () => {
+  it("parks a bound running or blocked task through live commands with a park-scoped stop confirmation", async () => {
+    const workflow = definition(["a", "c"], [], { maxConcurrency: 2 });
+    const driver = await start(workflow, "run-live-park");
+    await driver.advance();
+    const handle = await driver.bind("a");
+    const stop = (executionId: string) => ({ schemaVersion: 1 as const, cancellationId: `park-stop-${executionId}`, executionId,
+      stoppedAt: later, terminalStatus: "cancelled" as const });
+    expect(await driver.transition("a", "parked", "park")).toMatchObject({ ok: false,
+      error: { code: "validation", message: "Parking a bound execution requires confirmed stop" } });
+    expect(await driver.transition("a", "parked", "park", { stopConfirmation: stop("another-execution") })).toMatchObject({ ok: false,
+      error: { code: "validation", message: "Parking a bound execution requires confirmed stop" } });
+    expect(statusOf(driver.state, "a")).toBe("running");
+
+    const parked = await driver.move("a", "parked", "park", { stopConfirmation: stop(handle.executionId) });
+    expect(taskOf(parked, "a")).toMatchObject({ status: "parked", agentExecution: handle });
+    // No cancellation record and no pass through `cancelling`: the only task event is running -> parked, carrying the proof.
+    expect(parked.emittedEvents.some((event) => event.type.startsWith("cancellation."))).toBe(false);
+    const taskEvents = parked.emittedEvents.filter((event) => event.type === "task.status_changed");
+    expect(taskEvents).toHaveLength(1);
+    expect(taskEvents[0]).toMatchObject({ taskId: "a", payload: { from: "running", to: "parked", intent: "park", stopConfirmation: stop(handle.executionId) } });
+    const checkpoint = unwrap(await driver.engine.createCheckpoint({ runId: driver.state.snapshot.runId,
+      expectedVersion: driver.state.snapshot.version, checkpointId: "cp-live-park", createdAt: later }));
+    const decoded = decodeWorkflowAggregateCheckpointState(checkpoint);
+    expect(decoded.ok && decoded.value.cancellations).toEqual([]);
+
+    // A blocked task keeps its bound execution; the same proof parks it.
+    const blockedHandle = await driver.bind("c");
+    await driver.block("c", blockedHandle);
+    expect(statusOf(driver.state, "c")).toBe("blocked");
+    expect(await driver.transition("c", "parked", "park")).toMatchObject({ ok: false,
+      error: { message: "Parking a bound execution requires confirmed stop" } });
+    await driver.move("c", "parked", "park", { stopConfirmation: stop(blockedHandle.executionId) });
+    expect(statusOf(driver.state, "c")).toBe("parked");
+    expect(driver.state.snapshot.status).toBe("blocked");
+
+    // Complete history replays to the same aggregate; without the proof the identical park event is corruption.
+    const history = await collect(driver);
+    const replayed = unwrap(await new DeterministicWorkflowEngine({ definitions: [workflow] }).recover({ runId: driver.state.snapshot.runId,
+      events: history, expectedVersion: driver.state.snapshot.version }));
+    expect(replayed.snapshot).toEqual(driver.state.snapshot);
+    const stripped = history.map((event) => event.type === "task.status_changed" && event.payload.stopConfirmation !== undefined
+      ? DomainEventSchema.parse({ ...event, payload: (({ stopConfirmation: _s, ...rest }) => rest)(event.payload) }) : event);
+    expect(await new DeterministicWorkflowEngine({ definitions: [workflow] }).recover({ runId: driver.state.snapshot.runId,
+      events: stripped, expectedVersion: driver.state.snapshot.version }))
+      .toMatchObject({ ok: false, error: { code: "corruption", message: "Bound task parked without verified stop evidence" } });
+    const foreign = history.map((event) => event.type === "task.status_changed" && event.payload.stopConfirmation !== undefined
+      ? DomainEventSchema.parse({ ...event, payload: { ...event.payload, stopConfirmation: stop("another-execution") } }) : event);
+    expect(await new DeterministicWorkflowEngine({ definitions: [workflow] }).recover({ runId: driver.state.snapshot.runId,
+      events: foreign, expectedVersion: driver.state.snapshot.version }))
+      .toMatchObject({ ok: false, error: { code: "corruption", message: "Bound task parked without verified stop evidence" } });
+
+    // A late result of the stopped execution never settles the parked task; unpark starts a fresh attempt.
+    const late = await driver.engine.recordAgentResult({ runId: driver.state.snapshot.runId, taskId: "a", expectedVersion: driver.state.snapshot.version,
+      idempotencyKey: "late-live-a", occurredAt: later, result: { requestId: handle.requestId, attemptId: handle.attemptId,
+        runId: handle.runId, taskId: "a", executionId: handle.executionId, status: "succeeded",
+        verification: { status: "verified", evidence: "signed-result", correlation: handle.correlation },
+        artifactProposals: [], retryable: false, startedAt: time, completedAt: later } });
+    expect(late).toMatchObject({ ok: false, error: { code: "conflict", message: "Task a is parked" } });
+    await driver.move("a", "ready", "unpark");
+    expect(taskOf(driver.state, "a").agentExecution).toBeUndefined();
+    await driver.advance();
+    expect(taskOf(driver.state, "a")).toMatchObject({ status: "running", attempt: 2 });
+    await driver.succeed("a");
+    expect(statusOf(driver.state, "a")).toBe("succeeded");
+  });
+
+  it("rejects a stop confirmation on a park of a task without a bound execution", async () => {
+    const driver = await start(definition(["a"]), "run-unbound-proof");
+    await driver.advance();
+    const refused = await driver.transition("a", "parked", "park", { stopConfirmation: { schemaVersion: 1, cancellationId: "s",
+      executionId: "ghost", stoppedAt: later, terminalStatus: "cancelled" } });
+    expect(refused).toMatchObject({ ok: false, error: { code: "validation", message: "Park stop confirmation does not match the bound execution" } });
+  });
+
+  it("replay also accepts a stop confirmed through a durable task-scoped cancellation record (history)", async () => {
     // The live cancellation commands move a stopped task straight to cancelled, so this state is built from a
     // durable history: a task-scoped cancellation request plus a stop confirmation for the bound execution.
     const workflow = definition(["a"]);

@@ -1,6 +1,7 @@
 import type {
   AgentExecutionHandle,
   AgentResult,
+  CancellationStopConfirmation,
   OperationResult,
   TaskDependency,
   TaskState,
@@ -76,15 +77,17 @@ export class Driver {
     return this.state;
   }
 
-  async transition(taskId: string, to: TaskState["status"], intent: "normal" | "park" | "unpark" | "cancel" | "retry" | "rework") {
+  async transition(taskId: string, to: TaskState["status"], intent: "normal" | "park" | "unpark" | "cancel" | "retry" | "rework",
+    extra: { readonly stopConfirmation?: CancellationStopConfirmation } = {}) {
     const task = taskOf(this.state, taskId);
     return this.engine.transitionTask({ runId: this.state.snapshot.runId, taskId, expectedVersion: this.state.snapshot.version,
       from: task.status, to, intent, generationFrom: task.generation, generationTo: task.generation,
-      idempotencyKey: this.key(`${intent}-${taskId}`), occurredAt: later });
+      idempotencyKey: this.key(`${intent}-${taskId}`), occurredAt: later, ...extra });
   }
 
-  async move(taskId: string, to: TaskState["status"], intent: "normal" | "park" | "unpark" | "cancel"): Promise<WorkflowAdvanceResult> {
-    this.state = unwrap(await this.transition(taskId, to, intent));
+  async move(taskId: string, to: TaskState["status"], intent: "normal" | "park" | "unpark" | "cancel",
+    extra: { readonly stopConfirmation?: CancellationStopConfirmation } = {}): Promise<WorkflowAdvanceResult> {
+    this.state = unwrap(await this.transition(taskId, to, intent, extra));
     return this.state;
   }
 
@@ -110,6 +113,19 @@ export class Driver {
       expectedVersion: this.state.snapshot.version, attempt: taskOf(this.state, taskId).attempt, handle,
       idempotencyKey: this.key(`bind-${taskId}`), occurredAt: time }));
     return handle;
+  }
+
+  /** Record a verified `blocked` result for the bound execution (task moves to blocked, execution stays bound). */
+  async block(taskId: string, handle: AgentExecutionHandle): Promise<WorkflowAdvanceResult> {
+    const result: AgentResult = {
+      requestId: handle.requestId, attemptId: handle.attemptId, runId: handle.runId, taskId, executionId: handle.executionId,
+      status: "blocked", verification: { status: "verified", evidence: "signed-result", correlation: handle.correlation },
+      artifactProposals: [], retryable: true, startedAt: time, completedAt: later,
+      blockage: { code: "external_dependency", message: "waiting", since: time, retryable: true }
+    };
+    this.state = unwrap(await this.engine.recordAgentResult({ runId: this.state.snapshot.runId, taskId,
+      expectedVersion: this.state.snapshot.version, result, idempotencyKey: this.key(`blocked-${taskId}`), occurredAt: later }));
+    return this.state;
   }
 
   /** Bind the running task's execution and record a verified successful result for it. */

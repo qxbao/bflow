@@ -26,7 +26,7 @@ import {
   TaskStatusSchema
 } from "./execution.js";
 import { QualityGateResultSchema } from "./quality.js";
-import { TASK_TRANSITION_INTENTS, validateRunTransition, validateTaskTransition } from "./transitions.js";
+import { TASK_TRANSITION_INTENTS, validateParkStopConfirmation, validateRunTransition, validateTaskTransition } from "./transitions.js";
 
 export const CURRENT_DOMAIN_EVENT_SCHEMA_VERSION = 1 as const;
 
@@ -115,7 +115,9 @@ export const TaskStatusChangedEventSchema = z
         generationFrom: z.number().int().nonnegative(),
         generationTo: z.number().int().nonnegative(),
         blockage: BlockageSchema.optional(),
-        reason: z.string().min(1).optional()
+        reason: z.string().min(1).optional(),
+        /** B2b: durable park-scoped stop evidence, replayed against the bound execution. */
+        stopConfirmation: CancellationStopConfirmationSchema.optional()
       })
       .strict()
   })
@@ -347,6 +349,8 @@ export const DomainEventSchema = z
       if (!validation.valid) {
         context.addIssue({ code: z.ZodIssueCode.custom, message: validation.reason ?? "invalid task transition" });
       }
+      const stop = validateParkStopConfirmation(event.payload.intent, event.payload.stopConfirmation);
+      if (!stop.valid) context.addIssue({ code: z.ZodIssueCode.custom, message: stop.reason ?? "invalid stop confirmation" });
     }
     if (event.type === "command.completed" && ((event.payload.operation === "verifyAgentBinding") !== (event.schemaVersion === 2)))
       context.addIssue({ code: z.ZodIssueCode.custom, message: "Authenticated binding command receipts require event schema 2" });

@@ -1,4 +1,4 @@
-import type { RunStatus, TaskStatus } from "./execution.js";
+import type { CancellationStopConfirmation, RunStatus, TaskStatus } from "./execution.js";
 
 export type TaskTransitionIntent = "normal" | "retry" | "rework" | "cancel" | "park" | "unpark";
 
@@ -84,4 +84,21 @@ export function validateRunTransition(from: RunStatus, to: RunStatus): TaskTrans
   return normalRunTransitions[from].includes(to)
     ? { valid: true }
     : { valid: false, reason: `${from} cannot transition to ${to}` };
+}
+
+/**
+ * B2b (R-B2-14): a park transition may carry the confirmed stop of the task's bound execution. It reuses the
+ * cancellation stop-confirmation shape but must name the stopped execution and report it `cancelled` (stopped).
+ * It creates no cancellation record; Core matches `executionId` to the exact bound execution.
+ */
+export function validateParkStopConfirmation(
+  intent: TaskTransitionIntent,
+  confirmation: CancellationStopConfirmation | undefined
+): TaskTransitionValidation {
+  if (confirmation === undefined) return { valid: true };
+  if (intent !== "park") return { valid: false, reason: "only a park transition may carry a stop confirmation" };
+  if (confirmation.executionId === undefined || confirmation.terminalStatus !== "cancelled") {
+    return { valid: false, reason: "a park stop confirmation must name the stopped execution with terminalStatus cancelled" };
+  }
+  return { valid: true };
 }

@@ -47,6 +47,34 @@ describe.skipIf(process.platform === "win32")("authoritative Core checkpoint res
     await expect(new CoreSession({ ...f.ports, engine }, state, async () => undefined).restore()).rejects.toThrow();
     expect(reads).not.toHaveBeenCalled();
   }, 90000);
+  it("restores a parked task from a codec-3 checkpoint and refuses codec 4 (B2b)", async () => {
+    const { f, state } = await prepared();
+    const before = unwrap(await f.ports.engine.getSnapshot("run-1"))!;
+    const target = before.tasks.find(task => ["running", "waiting", "blocked", "ready", "pending"].includes(task.status))!;
+    const at = new Date().toISOString();
+    const parked = unwrap(await f.ports.engine.transitionTask({ runId: "run-1", taskId: target.taskId, expectedVersion: before.version,
+      from: target.status, to: "parked", intent: "park", generationFrom: target.generation, generationTo: target.generation,
+      idempotencyKey: "park-for-checkpoint", occurredAt: at,
+      ...(target.agentExecution ? { stopConfirmation: { schemaVersion: 1, cancellationId: "park-stop", executionId: target.agentExecution.executionId,
+        stoppedAt: at, terminalStatus: "cancelled" } } : {}) }));
+    unwrap(await f.ports.runStore.appendEvents({ runId: "run-1", expectedVersion: before.version, expectedLastSequence: before.lastEventSequence,
+      events: parked.emittedEvents, idempotencyKey: "park-for-checkpoint-events" }));
+    const checkpoint = unwrap(await f.ports.engine.createCheckpoint({ runId: "run-1", expectedVersion: parked.snapshot.version,
+      checkpointId: "parked-checkpoint", createdAt: at }));
+    expect(checkpoint.codec.version).toBe(3);
+    unwrap(await f.ports.runStore.saveCheckpoint(checkpoint, parked.snapshot.version));
+    const engine = new DeterministicWorkflowEngine(), recover = vi.spyOn(engine, "recover");
+    await new CoreSession({ ...f.ports, engine }, state, async () => undefined).restore();
+    expect(recover.mock.calls[0]![0].checkpoint?.codec.version).toBe(3);
+    expect(unwrap(await engine.getSnapshot("run-1"))!.tasks.find(task => task.taskId === target.taskId)?.status).toBe("parked");
+
+    const future = structuredClone(checkpoint) as any; future.codec.version = 4;
+    vi.spyOn(f.ports.runStore, "loadLatestCheckpoint").mockResolvedValue({ ok: true, value: future });
+    const reads = vi.spyOn(f.ports.runStore, "readEvents");
+    await expect(new CoreSession({ ...f.ports, engine: new DeterministicWorkflowEngine() }, state, async () => undefined).restore()).rejects.toThrow();
+    expect(reads).not.toHaveBeenCalled();
+  }, 90000);
+
   it("retains complete event recovery when the store has no checkpoint", async () => {
     const { f, state } = await prepared(), engine = new DeterministicWorkflowEngine();
     vi.spyOn(f.ports.runStore, "loadLatestCheckpoint").mockResolvedValue({ ok: true, value: null });

@@ -215,6 +215,12 @@ function taskDefinition(aggregate: WorkflowAggregate, taskId: string) {
   return aggregate.definition.tasks.find((task) => task.id === taskId);
 }
 
+/** A park-scoped stop confirmation (contract-validated: named execution, `cancelled`) for exactly the bound execution. */
+function parkStopMatches(task: TaskState, confirmation: CancellationStopConfirmation | undefined): boolean {
+  return confirmation !== undefined && task.agentExecution !== undefined &&
+    confirmation.executionId === task.agentExecution.executionId && confirmation.terminalStatus === "cancelled";
+}
+
 /** A task-scoped cancellation confirmed the stop of exactly the task's bound execution (cancel and park share it). */
 function hasConfirmedTaskStop(aggregate: WorkflowAggregate, task: TaskState): boolean {
   return [...aggregate.cancellations.values()].some((record) => record.request.taskId === task.taskId &&
@@ -485,9 +491,15 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         if (data.intent === "park" && aggregate.snapshot.status === "cancelling") {
           return conflict("A cancelling workflow cannot park tasks");
         }
-        // R-B2-14: parking a bound execution reuses the cancellation confirmed-stop rule for that exact execution.
+        // R-B2-14: parking a bound execution needs a confirmed stop of that exact execution: either the cancellation
+        // record rule shared with cancel, or the park-scoped confirmation carried by this command (no cancellation record).
+        if (data.stopConfirmation !== undefined && (current.agentExecution === undefined ||
+            !["running", "waiting", "blocked"].includes(current.status))) {
+          return validation("Park stop confirmation does not match the bound execution");
+        }
         if (data.intent === "park" && current.agentExecution !== undefined &&
-            ["running", "waiting", "blocked"].includes(current.status) && !hasConfirmedTaskStop(aggregate, current)) {
+            ["running", "waiting", "blocked"].includes(current.status) && !hasConfirmedTaskStop(aggregate, current) &&
+            !parkStopMatches(current, data.stopConfirmation)) {
           return validation("Parking a bound execution requires confirmed stop");
         }
         if (data.to === "succeeded" &&
@@ -497,7 +509,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
           return validation(`Task ${data.taskId} requires a verified successful result and required quality gates`);
         }
         const transitioned = this.#transitionTask(aggregate, emitted, data.taskId, data.to, data.intent,
-          data.occurredAt, data.idempotencyKey, data.reason, data.generationTo);
+          data.occurredAt, data.idempotencyKey, data.reason, data.generationTo, undefined, data.stopConfirmation);
         if (!transitioned.ok) return transitioned;
         const recomputed = this.#recomputeRunStatus(aggregate, emitted, data.occurredAt, data.idempotencyKey);
         return recomputed.ok ? success([]) : recomputed;
@@ -1439,8 +1451,13 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     if (event.payload.intent === "park" && before!.status === "cancelling") {
       throw new Error("A cancelling workflow parked a task");
     }
+    if (event.payload.stopConfirmation !== undefined && (task.agentExecution === undefined ||
+        !["running", "waiting", "blocked"].includes(task.status))) {
+      throw new Error("Park stop confirmation does not match the bound execution");
+    }
     if (event.payload.to === "parked" && task.agentExecution !== undefined &&
         ["running", "waiting", "blocked"].includes(task.status) &&
+        !parkStopMatches(task, event.payload.stopConfirmation) &&
         !aggregate.pendingCommandEvents.some((prior) =>
           prior.type === "cancellation.stop_confirmed" && prior.payload.terminalStatus === "cancelled" &&
             prior.payload.executionId === task.agentExecution?.executionId) &&
@@ -1781,7 +1798,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
     commandKey: string,
     reason?: string,
     generationTo?: number,
-    blockage?: TaskState["blockage"]
+    blockage?: TaskState["blockage"],
+    stopConfirmation?: CancellationStopConfirmation
   ): OperationResult<void> {
     const task = taskState(aggregate, taskId);
     if (task === undefined) return validation(`Unknown task: ${taskId}`);
@@ -1799,7 +1817,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         generationFrom: task.generation,
         generationTo: nextGeneration,
         ...(blockage === undefined ? {} : { blockage }),
-        ...(reason === undefined ? {} : { reason })
+        ...(reason === undefined ? {} : { reason }),
+        ...(stopConfirmation === undefined ? {} : { stopConfirmation })
       }
     });
   }
