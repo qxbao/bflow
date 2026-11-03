@@ -147,7 +147,7 @@ export type PaneBinding = z.infer<typeof PaneBindingSchema>;
 export const SessionManifestStatusSchema = z.enum(["initializing", "up", "degraded", "stopping", "down"]);
 export type SessionManifestStatus = z.infer<typeof SessionManifestStatusSchema>;
 
-export const SessionManifestSchema = z
+export const SessionManifestV2Schema = z
   .object({
     schemaVersion: z.literal(2),
     sessionId: IdentifierSchema,
@@ -228,7 +228,100 @@ export const SessionManifestSchema = z
       });
     }
   });
-export type SessionManifest = z.infer<typeof SessionManifestSchema>;
+export type SessionManifestV2 = z.infer<typeof SessionManifestV2Schema>;
+
+/** Director-mode progress pane. Not a PaneBinding: there is no `progress` agent role. */
+export const ProgressPaneSchema = z
+  .object({
+    tabId: IdentifierSchema,
+    paneId: IdentifierSchema,
+    terminalId: IdentifierSchema.optional(),
+    command: z.array(z.string().min(1).max(4096)).min(1).max(16),
+    phase: z.enum(["created", "launch_intent", "launch_unknown", "running", "failed"]),
+    restarts: z.array(IsoDateTimeSchema).max(20),
+    launchedAt: IsoDateTimeSchema.optional()
+  })
+  .strict();
+export type ProgressPane = z.infer<typeof ProgressPaneSchema>;
+
+/**
+ * Director-mode manifest (ADR 0009, slice B2). `conversationSessionId` is the interaction session id of the human
+ * gateway (Web, `bflow approve`, `#n` aliases). Nested PaneBinding stays v2 on purpose (reused by outbound, receipts, leases).
+ */
+export const SessionManifestV3Schema = z
+  .object({
+    schemaVersion: z.literal(3),
+    sessionId: IdentifierSchema,
+    projectName: z.string().min(1),
+    workspaceRoot: z.string().min(1),
+    herdrWorkspaceId: IdentifierSchema,
+    herdrTabId: IdentifierSchema,
+    status: SessionManifestStatusSchema,
+    conversationSessionId: IdentifierSchema,
+    activeRunIds: z.array(IdentifierSchema),
+    roleProfiles: RoleProfileCatalogSchema.optional(),
+    panes: z.array(PaneBindingSchema),
+    progressPane: ProgressPaneSchema.optional(),
+    attachTarget: z
+      .object({
+        role: z.literal("progress"),
+        tabId: IdentifierSchema,
+        paneId: IdentifierSchema,
+        terminalId: IdentifierSchema.optional()
+      })
+      .strict(),
+    createdAt: IsoDateTimeSchema,
+    updatedAt: IsoDateTimeSchema,
+    stoppedAt: IsoDateTimeSchema.optional(),
+    metadata: MetadataSchema.optional()
+  })
+  .strict()
+  .superRefine((manifest, context) => {
+    for (const [index, pane] of manifest.panes.entries()) {
+      if (pane.roleProfile && !manifest.roleProfiles?.some(snapshot => sameRoleProfilePin(snapshot.pin, pane.roleProfile) && snapshot.definition.baseRole === pane.role))
+        context.addIssue({ code: "custom", message: "pane profile requires a matching pinned manifest snapshot and governance role", path: ["panes", index, "roleProfile"] });
+      if (pane.role === "conversation" || pane.role === "coordinator")
+        context.addIssue({ code: "custom", message: `director session manifest must not contain a ${pane.role} pane`, path: ["panes", index, "role"] });
+      if (pane.sessionId !== manifest.sessionId)
+        context.addIssue({ code: "custom", message: `pane sessionId ${pane.sessionId} does not match manifest sessionId ${manifest.sessionId}`, path: ["panes", index, "sessionId"] });
+    }
+    const seenPaneIds = new Set<string>();
+    if (manifest.progressPane) seenPaneIds.add(manifest.progressPane.paneId);
+    manifest.panes.forEach((pane, index) => {
+      if (seenPaneIds.has(pane.paneId))
+        context.addIssue({ code: "custom", message: `duplicate paneId in panes: ${pane.paneId}`, path: ["panes", index, "paneId"] });
+      seenPaneIds.add(pane.paneId);
+    });
+    if (manifest.progressPane) {
+      if (manifest.attachTarget.paneId !== manifest.progressPane.paneId)
+        context.addIssue({ code: "custom", message: "attachTarget.paneId must equal progress pane's paneId", path: ["attachTarget", "paneId"] });
+      if (manifest.attachTarget.tabId !== manifest.progressPane.tabId)
+        context.addIssue({ code: "custom", message: "attachTarget.tabId must equal progress pane's tabId", path: ["attachTarget", "tabId"] });
+    }
+    if (manifest.status === "up" && manifest.progressPane?.phase !== "running")
+      context.addIssue({ code: "custom", message: "session manifest in status 'up' must include a running progress pane", path: ["progressPane"] });
+  });
+export type SessionManifestV3 = z.infer<typeof SessionManifestV3Schema>;
+export type SessionManifest = SessionManifestV2 | SessionManifestV3;
+
+/** Reads `schemaVersion` first so an unknown version yields one readable error instead of merged union issues. */
+export const SessionManifestSchema = z.unknown().transform((value, context): SessionManifest => {
+  const version = typeof value === "object" && value !== null ? (value as { schemaVersion?: unknown }).schemaVersion : undefined;
+  if (version !== 2 && version !== 3) {
+    context.addIssue({ code: "custom", message: `unsupported session manifest schemaVersion: ${String(version)}`, path: ["schemaVersion"] });
+    return z.NEVER;
+  }
+  const result = version === 2 ? SessionManifestV2Schema.safeParse(value) : SessionManifestV3Schema.safeParse(value);
+  if (!result.success) {
+    for (const issue of result.error.issues) context.addIssue(issue);
+    return z.NEVER;
+  }
+  return result.data;
+});
+
+export function isDirectorSessionManifest(manifest: SessionManifest): manifest is SessionManifestV3 {
+  return manifest.schemaVersion === 3;
+}
 
 export const AgentAssignmentSchema = z
   .object({
@@ -375,7 +468,7 @@ export const DelegationRequestSchema = z
     correlationId: IdentifierSchema,
     sessionId: IdentifierSchema,
     runId: IdentifierSchema.optional(),
-    requestedBy: z.enum(["conversation", "coordinator"]),
+    requestedBy: z.enum(["conversation", "coordinator", "director"]),
     targetRole: AgentRoleSchema,
     roleProfile: RoleProfilePinSchema.optional(),
     title: z.string().min(1),
@@ -394,6 +487,12 @@ export const DelegationRequestSchema = z
   .superRefine((request, context) => {
     if (request.roleProfile && (request.requestedBy !== "coordinator" || ["conversation", "coordinator"].includes(request.targetRole)))
       context.addIssue({ code: "custom", message: "only Coordinator may select a specialist profile", path: ["roleProfile"] });
+    if (request.requestedBy === "director") {
+      if (request.targetRole !== "coordinator")
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "director can only create work for coordinator", path: ["targetRole"] });
+      if (request.runId === undefined)
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "runId is required when director starts work", path: ["runId"] });
+    }
     if (request.requestedBy === "conversation" && request.targetRole !== "coordinator") {
       context.addIssue({
         code: z.ZodIssueCode.custom,

@@ -15,7 +15,9 @@ export const DIRECTOR_LIMITS = {
   waitDefaultMs: 45000,
   waitMinMs: 1000,
   waitMaxMs: 300000,
-  heartbeatStaleMs: 120000
+  heartbeatStaleMs: 120000,
+  mailboxPage: 200,
+  mailboxMax: 5000
 } as const;
 
 const version = z.literal(DIRECTOR_SCHEMA_VERSION);
@@ -90,12 +92,30 @@ export const DirectorRuntimeEventSchema = z.object({
 }).strict();
 export type DirectorRuntimeEvent = z.infer<typeof DirectorRuntimeEventSchema>;
 
+export const DirectorMailboxItemSchema = z.object({
+  schemaVersion: version,
+  seq: z.number().int().min(1),
+  messageId: id,
+  at: time,
+  audience: z.enum(["director", "user"]),
+  runId: id.optional(),
+  taskId: id.optional(),
+  type: id,
+  kind: id.optional(),
+  fromRole: z.union([AgentRoleSchema, z.literal("runtime")]),
+  summary: issueText,
+  text: nonblank(4000).optional(),
+  code: z.string().regex(/^#[1-9]\d*$/).optional()
+}).strict();
+export type DirectorMailboxItem = z.infer<typeof DirectorMailboxItemSchema>;
+
 export const DirectorWaitResultSchema = z.object({
   cursor: z.string().min(1).max(512),
   timedOut: z.boolean(),
   messages: z.array(DirectorMessageSchema).max(DIRECTOR_LIMITS.transcriptPage),
   issues: z.array(ParkedIssueSchema).max(DIRECTOR_LIMITS.issuesMax),
-  runtimeEvents: z.array(DirectorRuntimeEventSchema).max(200)
+  runtimeEvents: z.array(DirectorRuntimeEventSchema).max(200),
+  mailbox: z.array(DirectorMailboxItemSchema).max(DIRECTOR_LIMITS.mailboxPage).optional()
 }).strict();
 export type DirectorWaitResult = z.infer<typeof DirectorWaitResultSchema>;
 

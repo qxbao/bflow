@@ -8,7 +8,7 @@ import type {
   OperationOptions,
   OperationResult,
   PaneBinding,
-  SessionManifest,
+  SessionManifestV2,
   SessionManifestStatus
 } from "@bflow/contracts";
 import {
@@ -18,7 +18,7 @@ import {
   RoleProfilePinSchema,
   sameRoleProfilePin,
   ROLE_PROFILE_FEATURE,
-  SessionManifestSchema,
+  SessionManifestV2Schema,
   canonicalReceiptJson
 } from "@bflow/contracts";
 
@@ -91,7 +91,7 @@ import {
   parseWorktreeRemovedResult
 } from "./runner.js";
 
-import { InMemorySessionManifestStore } from "./manifest-store.js";
+import { InMemorySessionManifestStore, v2OnlySessionManifestStore, type V2SessionManifestStore } from "./manifest-store.js";
 
 function ok<T>(value: T): OperationResult<T> {
   return { ok: true, value };
@@ -277,7 +277,7 @@ async function launchPromptSource(argv: readonly string[], prompt: string): Prom
 export class RolePaneManager {
   readonly #config: RolePaneManagerConfig;
   readonly #runner: HerdrCommandRunner;
-  readonly #store: SessionManifestStore;
+  readonly #store: V2SessionManifestStore;
   readonly #worktreeInspector: WorktreeInspector;
   readonly #authorizeStoppedRetainedRelease: RolePaneManagerOptions["authorizeStoppedRetainedRelease"];
   readonly #socket: HerdrSocketPort | undefined;
@@ -310,7 +310,7 @@ export class RolePaneManager {
 
     this.#config = options.config;
     this.#runner = options.runner ?? createProcessRunner();
-    this.#store = options.store ?? new InMemorySessionManifestStore();
+    this.#store = v2OnlySessionManifestStore(options.store ?? new InMemorySessionManifestStore());
     this.#worktreeInspector = options.worktreeInspector ?? createGitWorktreeInspector();
     this.#authorizeStoppedRetainedRelease = options.authorizeStoppedRetainedRelease;
     this.#socket = options.socket;
@@ -452,7 +452,7 @@ export class RolePaneManager {
         remediation: ["Resolve the interactive dialog in the named session", "bflow up", "bflow down --yes"] });
   }
 
-  async initializeTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
+  async initializeTopology(options?: OperationOptions): Promise<OperationResult<SessionManifestV2>> {
     try {
       return await this.#reconcileTopologyInternal(false, options);
     } catch (err) {
@@ -460,7 +460,7 @@ export class RolePaneManager {
     }
   }
 
-  async reconcileTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
+  async reconcileTopology(options?: OperationOptions): Promise<OperationResult<SessionManifestV2>> {
     try {
       return await this.#reconcileTopologyInternal(true, options);
     } catch (err) {
@@ -468,7 +468,7 @@ export class RolePaneManager {
     }
   }
 
-  async shutdownTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
+  async shutdownTopology(options?: OperationOptions): Promise<OperationResult<SessionManifestV2>> {
     try {
       const loadResult = await this.#store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
@@ -525,14 +525,14 @@ export class RolePaneManager {
         lastHeartbeatAt: nowIso
       }));
 
-      const updatedManifest: SessionManifest = {
+      const updatedManifest: SessionManifestV2 = {
         ...manifest,
         status: "down",
         panes: updatedPanes,
         updatedAt: nowIso
       };
 
-      const parsedManifest = SessionManifestSchema.safeParse(updatedManifest);
+      const parsedManifest = SessionManifestV2Schema.safeParse(updatedManifest);
       if (!parsedManifest.success) {
         return validationError(
           `Failed to validate shutdown session manifest: ${parsedManifest.error.message}`,
@@ -552,7 +552,7 @@ export class RolePaneManager {
   async #reconcileTopologyInternal(
     _isReconcile: boolean,
     options?: OperationOptions
-  ): Promise<OperationResult<SessionManifest>> {
+  ): Promise<OperationResult<SessionManifestV2>> {
     // Validate env-at-creation requirements before any Herdr or store side effect.
     const configuredRoles: readonly PermanentTopologyRole[] = this.#config.permanentRoles ?? PERMANENT_TOPOLOGY_ROLES;
     // Concurrent uniqueness checks cannot reserve a name. Reject configured
@@ -721,13 +721,13 @@ export class RolePaneManager {
     const splitDepths = new Map(livePanes.map(pane => [pane.paneId, 0]));
     const manifestPanes: PaneBinding[] = [];
     const startups: { readonly role: PermanentTopologyRole; readonly pending: PaneBinding }[] = [];
-    const persistProgress = async (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
+    const persistProgress = async (binding: PaneBinding): Promise<OperationResult<SessionManifestV2>> => {
       const panes = [...manifestPanes.filter(p => p.paneId !== binding.paneId), binding];
       for (const previous of savedManifest?.panes ?? []) {
         if (!panes.some(p => p.paneId === previous.paneId || p.role === previous.role && p.permanent !== false && previous.permanent !== false)) panes.push(previous);
       }
       const conversation = panes.find(p => p.role === "conversation");
-      return this.#store.save(SessionManifestSchema.parse({
+      return this.#store.save(SessionManifestV2Schema.parse({
         schemaVersion: 2, sessionId: this.#config.sessionId, projectName: this.#config.projectName,
         workspaceRoot: this.#config.workspaceRoot, herdrWorkspaceId, herdrTabId: finalConversationTabId,
         status: "initializing", conversationSessionId: this.#config.conversationSessionId ?? savedManifest?.conversationSessionId ?? `conv-${this.#config.sessionId}`,
@@ -928,7 +928,7 @@ export class RolePaneManager {
     // launches overlap; every queued role is already represented in durable state.
     // Serialize binding replacement and the corresponding snapshot write together.
     let publications: Promise<void> = Promise.resolve();
-    const publish = (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
+    const publish = (binding: PaneBinding): Promise<OperationResult<SessionManifestV2>> => {
       const write = publications.then(async () => {
         const index = manifestPanes.findIndex(pane => pane.paneId === binding.paneId);
         manifestPanes[index] = binding;
@@ -1053,7 +1053,7 @@ export class RolePaneManager {
     const allHealthy = startupPanesHealthy(manifestPanes);
     const status: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
-    const manifest: SessionManifest = {
+    const manifest: SessionManifestV2 = {
       schemaVersion: 2,
       sessionId: this.#config.sessionId,
       projectName: this.#config.projectName,
@@ -1076,7 +1076,7 @@ export class RolePaneManager {
       metadata: { ...savedManifest?.metadata, startupPending: false, panePresentationVersion: 1 }
     };
 
-    const parsedManifest = SessionManifestSchema.safeParse(manifest);
+    const parsedManifest = SessionManifestV2Schema.safeParse(manifest);
     if (!parsedManifest.success) {
       return validationError(`Failed to create valid SessionManifest: ${parsedManifest.error.message}`, parsedManifest.error.issues);
     }
@@ -1912,7 +1912,7 @@ export class RolePaneManager {
         const newStatus: SessionManifestStatus = healthyNow && hasConversation && hasCoordinator ? "up" : "degraded";
         const updatedConversation = mergedPanes.find((p) => p.role === "conversation" && p.permanent);
 
-        const updatedManifest: SessionManifest = {
+        const updatedManifest: SessionManifestV2 = {
           ...latestManifest,
           status: newStatus,
           panes: mergedPanes,
@@ -1928,7 +1928,7 @@ export class RolePaneManager {
           updatedAt: this.#clock().toISOString()
         };
 
-        const validatedManifest = SessionManifestSchema.safeParse(updatedManifest);
+        const validatedManifest = SessionManifestV2Schema.safeParse(updatedManifest);
         if (!validatedManifest.success) {
           return validationError(
             `Failed to validate updated session manifest: ${validatedManifest.error.message}`,
@@ -1953,7 +1953,7 @@ export class RolePaneManager {
     }
   }
 
-  async recoverAfterRestart(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
+  async recoverAfterRestart(options?: OperationOptions): Promise<OperationResult<SessionManifestV2>> {
     try {
       // Env-at-creation requirements are validated before any side effect.
       const socketCheck = this.#requireSocketFor(PERMANENT_TOPOLOGY_ROLES.map(role => this.#config.roleConfigs?.[role]?.launch));
@@ -2316,7 +2316,7 @@ export class RolePaneManager {
       const allHealthy = startupPanesHealthy(recoveredPanes);
       const newStatus: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
-      const recoveredManifest: SessionManifest = {
+      const recoveredManifest: SessionManifestV2 = {
         ...savedManifest,
         herdrWorkspaceId,
         herdrTabId,
@@ -2330,7 +2330,7 @@ export class RolePaneManager {
         updatedAt: this.#clock().toISOString()
       };
 
-      const parsed = SessionManifestSchema.safeParse(recoveredManifest);
+      const parsed = SessionManifestV2Schema.safeParse(recoveredManifest);
       if (!parsed.success) {
         return validationError(`Failed to validate recovered manifest: ${parsed.error.message}`, parsed.error.issues);
       }
@@ -2396,7 +2396,7 @@ export class RolePaneManager {
         const latestLoad = await this.#store.load(this.#config.sessionId, options);
         if (!latestLoad.ok) return latestLoad;
         const base = latestLoad.value ?? manifest;
-        const updatedManifest: SessionManifest = {
+        const updatedManifest: SessionManifestV2 = {
           ...base,
           attachTarget: {
             role: "conversation",
@@ -2443,10 +2443,10 @@ export class RolePaneManager {
   }
 
   async #retainRoleProfile(
-    manifest: SessionManifest,
+    manifest: SessionManifestV2,
     snapshot: ResolvedRoleProfileSnapshot | undefined,
     options?: OperationOptions
-  ): Promise<OperationResult<SessionManifest>> {
+  ): Promise<OperationResult<SessionManifestV2>> {
     if (!snapshot) return ok(manifest);
     const parsed = ResolvedRoleProfileSnapshotSchema.safeParse(snapshot);
     if (!parsed.success) return validationError("Invalid role profile snapshot");
@@ -2856,12 +2856,12 @@ export class RolePaneManager {
                     ? startResult.value
                     : p
                 );
-            const updatedManifest: SessionManifest = {
+            const updatedManifest: SessionManifestV2 = {
               ...baseReuseManifest,
               panes: updatedPanes,
               updatedAt: this.#clock().toISOString()
             };
-            const validatedManifest = SessionManifestSchema.safeParse(updatedManifest);
+            const validatedManifest = SessionManifestV2Schema.safeParse(updatedManifest);
             if (!validatedManifest.success) {
               return validationError(`Updated session manifest is invalid: ${validatedManifest.error.message}`);
             }
@@ -3014,7 +3014,7 @@ export class RolePaneManager {
         ...baseManifest.panes.filter((p) => p.paneId !== startResult.value.paneId),
         startResult.value
       ];
-      const updatedManifest: SessionManifest = {
+      const updatedManifest: SessionManifestV2 = {
         ...baseManifest,
         panes: updatedPanes,
         updatedAt: this.#clock().toISOString()
@@ -3132,7 +3132,7 @@ export class RolePaneManager {
         updatedPanes = manifest.panes.map((p) => (p.bindingId === binding.bindingId ? releasedBinding : p));
       }
 
-      const updatedManifest: SessionManifest = {
+      const updatedManifest: SessionManifestV2 = {
         ...manifest,
         panes: updatedPanes,
         updatedAt: this.#clock().toISOString()
@@ -3275,7 +3275,7 @@ export class RolePaneManager {
           p.bindingId === binding.bindingId ? validatedBinding : p
         );
 
-        const updatedManifest: SessionManifest = {
+        const updatedManifest: SessionManifestV2 = {
           ...base,
           panes: updatedPanes,
           ...(binding.role === "conversation"
@@ -3292,7 +3292,7 @@ export class RolePaneManager {
           updatedAt: this.#clock().toISOString()
         };
 
-        const validatedManifest = SessionManifestSchema.safeParse(updatedManifest);
+        const validatedManifest = SessionManifestV2Schema.safeParse(updatedManifest);
         if (!validatedManifest.success) {
           return validationError(
             `Failed to validate updated session manifest: ${validatedManifest.error.message}`,
@@ -3310,7 +3310,7 @@ export class RolePaneManager {
     }
   }
 
-  async getManifest(options?: OperationOptions): Promise<OperationResult<SessionManifest | null>> {
+  async getManifest(options?: OperationOptions): Promise<OperationResult<SessionManifestV2 | null>> {
     try {
       return await this.#store.load(this.#config.sessionId, options);
     } catch (err) {
@@ -3375,7 +3375,7 @@ export class RolePaneManager {
 
   #allocateUniqueDeveloperName(
     taskId: string,
-    manifest: SessionManifest | null,
+    manifest: SessionManifestV2 | null,
     liveAgents: readonly HerdrAgentInfo[]
   ): string {
     const raw = taskId.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");

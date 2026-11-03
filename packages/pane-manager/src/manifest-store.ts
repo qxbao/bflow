@@ -7,8 +7,10 @@ import {
   type OperationOptions,
   type OperationResult,
   type SessionManifest,
+  type SessionManifestV2,
   SessionManifestSchema,
-  canonicalReceiptJson
+  canonicalReceiptJson,
+  isDirectorSessionManifest
 } from "@bflow/contracts";
 import type { SessionManifestStore } from "./types.js";
 
@@ -400,4 +402,34 @@ export class FileSessionManifestStore implements SessionManifestStore {
       }
     });
   }
+}
+
+/** Topology manager handles only v2 (Conversation/Coordinator) manifests; Director v3 manifests are rejected, never reinterpreted. */
+export interface V2SessionManifestStore {
+  load(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifestV2 | null>>;
+  save(manifest: SessionManifestV2, options?: OperationOptions): Promise<OperationResult<SessionManifestV2>>;
+  delete(sessionId: string, options?: OperationOptions): Promise<OperationResult<boolean>>;
+}
+
+export function v2OnlySessionManifestStore(store: SessionManifestStore): V2SessionManifestStore {
+  const unsupported = (): ContractError => ({
+    code: "validation",
+    retryable: false,
+    message: "Director session manifest (schemaVersion 3) is not supported by the role pane topology manager"
+  });
+  return {
+    async load(sessionId, options) {
+      const loaded = await store.load(sessionId, options);
+      if (!loaded.ok) return loaded;
+      if (loaded.value !== null && isDirectorSessionManifest(loaded.value)) return { ok: false, error: unsupported() };
+      return { ok: true, value: loaded.value };
+    },
+    async save(manifest, options) {
+      const saved = await store.save(manifest, options);
+      if (!saved.ok) return saved;
+      if (isDirectorSessionManifest(saved.value)) return { ok: false, error: unsupported() };
+      return { ok: true, value: saved.value };
+    },
+    delete: (sessionId, options) => store.delete(sessionId, options)
+  };
 }
