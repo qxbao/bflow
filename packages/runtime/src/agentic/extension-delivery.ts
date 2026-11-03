@@ -14,7 +14,8 @@ import { NATIVE_EXTENSION_OUTPUT_BYTES } from "./extension-output.js";
 import { redactString } from "../resilience/redaction.js";
 
 const RelativeRead = z.string().min(1).max(4096).refine(path => !path.startsWith("/") && !path.includes("\\") &&
-  path.split("/").every(part => part !== ".." && part !== "." && part.length > 0), "Read scope must be relative and normalized");
+  path.replace(/\/$/, "").split("/").every(part => part !== ".." && part !== "." && part.length > 0),
+  "Read scope must be relative and normalized, with at most one trailing directory slash");
 const IntentSchema = z.object({ family: z.enum(["analysis", "qa"]), runId: IdentifierSchema, taskId: IdentifierSchema,
   attemptId: IdentifierSchema, requestKey: IdentifierSchema, message: RoleMessageSchema, allowedReadPaths: z.array(RelativeRead).max(200),
   outputKind: z.string().min(1).max(128) }).strict();

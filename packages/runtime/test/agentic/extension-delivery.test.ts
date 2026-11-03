@@ -77,6 +77,17 @@ async function fixture() {
 }
 
 describe("native extension delivery", () => {
+  it("preserves directory slash notation in the immutable read scope while rejecting ambiguous paths", async () => {
+    const f = await fixture(), bridge = f.create();
+    const request = await bridge.prepare({ ...f.intent, allowedReadPaths: ["src/", "test/"] });
+    const out = await f.journal.exclusive(async state => structuredClone(state.outbound[0]!));
+    expect(record(record(out.message.payload).intent).allowedReadPaths).toEqual(["src/", "test/"]);
+    expect(request.runId).toBe(f.intent.runId);
+    for (const path of ["/src/", "src//", "src//private", "src/../private/", "src/./private/", "src\\private", "/"])
+      await expect(bridge.prepare({ ...f.intent, allowedReadPaths: [path] })).rejects.toThrow();
+    expect(f.transport.sentRequests).toHaveLength(0);
+  });
+
   it("prepares dedicated output envelopes from the actual native handle and refuses another pane or semantic scope", async () => {
     const f = await fixture(), bridge = f.create(), request = await bridge.prepare(f.intent), handle = await bridge.dispatch(request);
     const out = await f.journal.exclusive(async state => structuredClone(state.outbound[0]!));

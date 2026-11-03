@@ -97,6 +97,15 @@ async function activeAssignment() {
 }
 
 describe("analysis host assignment permissions", () => {
+  it("reads inside a directory scope ending in a slash without admitting siblings or traversal", async () => {
+    const f = await activeAssignment(), selected = f.select([f.out], [], f.binding);
+    const scope = { ...selected, readPaths: ["src/"] };
+    expect(f.guard(scope, "mcp__bflow__repository_read", { op: "read", path: "src/health.ts" }).permitted).toBe(true);
+    expect(f.guard(scope, "mcp__bflow__repository_read", { op: "list", path: "src" }).permitted).toBe(true);
+    for (const path of ["src-private/secret.ts", "src/../private/secret.ts", "private/secret.ts", "/src/health.ts"])
+      expect(f.guard(scope, "mcp__bflow__repository_read", { op: "read", path }).permitted).toBe(false);
+  });
+
   it("retries the same durable completion notice after a lost acknowledgement and host reopen", async () => {
     const f = await nativeAnalysisFlow(false, "session-native", true); await f.host.drive("run-native");
     await f.host.decide(f.decision((await f.host.pendingApprovals())[0]!, { "D-1": "Ops" })); await f.host.drive("run-native");

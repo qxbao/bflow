@@ -65,7 +65,10 @@ export function guardExtensionTool(scope: NativeExtensionScope, tool: string, in
     const parsed = RepositoryReadInputSchema.safeParse(tool === "mcp__bflow__repository_read" ? input : { op: "read", path: args.filePath });
     if (!parsed.success || parsed.data.op === "git") return denied();
     const path = parsed.data.path;
-    if (scope.readPaths.some(root => path === root || path.startsWith(`${root}/`))) return { permitted: true };
+    if (scope.readPaths.some(scopeRoot => {
+      const root = scopeRoot.replace(/\/$/, "");
+      return path === root || path.startsWith(`${root}/`);
+    })) return { permitted: true };
   }
   return denied();
 }
