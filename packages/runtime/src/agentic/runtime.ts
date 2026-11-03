@@ -29,7 +29,7 @@ import {
   type ArtifactReference, type CancellationRequest, type GitChangeSet, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type VerificationCycle, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
-import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
+import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
   type ConflictResolverAttempt, type IngressDiagnostic, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
@@ -239,6 +239,8 @@ function specialistBlockage(payload: unknown): string | undefined {
  * Runtime refused an inbound request for a reason that retrying cannot change (stale or foreign revision, terminal run, superseded
  * approval). Hosts must not resend it, and must not report it as an uncertain delivery: its refusal is already a Conversation notice.
  */
+/** R-B2-12: shown whenever a Director session is asked to change a run created by a v2 Conversation. */
+export const DIRECTOR_LEGACY_RUN_MESSAGE = "Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work";
 export class AdmissionRejectedError extends Error {
   readonly retryable = false;
   constructor(message: string) { super(message); this.name = "AdmissionRejectedError"; }
@@ -508,9 +510,21 @@ export class AgenticWorkflowRuntime {
       const saveAndLog = async () => { await save(); this.refreshTaskLogAssignmentSnapshot(state); await logChanges(); };
       const core = new CoreSession(this.ports, state, saveAndLog, this.coreRestoreCache);
       await core.restore();
-      const outbox = new HerdrOutbox(this.ports, state, saveAndLog);
+      const outbox = new HerdrOutbox(this.ports, state, saveAndLog, { directorMailbox: this.ports.director !== undefined });
       if (recoverPhases) await this.recoverPhaseFailures(state, saveAndLog, outbox);
       return action(state, saveAndLog, core, outbox);
+    });
+  }
+  /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
+  private assertDirectorWritable(run: RunRecord): void {
+    if (this.ports.director && run.delegation.requestedBy !== "director")
+      throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+  }
+  /** Tool-layer guard (Director principal): true when the run was created by a v2 Conversation. */
+  async assertDirectorRunWritable(runId: string): Promise<void> {
+    await this.journal.exclusive(async state => {
+      const run = state.runs.find(item => item.runId === runId);
+      if (run) this.assertDirectorWritable(run);
     });
   }
   private run(state: JournalState, runId: string): RunRecord {
@@ -639,17 +653,21 @@ export class AgenticWorkflowRuntime {
       const result = await this.ports.panes?.getManifest?.();
       const sender = result?.ok ? SessionManifestSchema.parse(result.value).panes.find(pane => pane.role === "conversation") : undefined;
       return state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
-        out.message.type === "approval.decision" && out.handle !== undefined && ["accepted", "released"].includes(out.status) &&
+        out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+          out.delivery === "director_mailbox" && out.status === "delivered") &&
         !state.inbox.some(item => item.message.message_id === out.message.message_id ||
           (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
         state.runs.some(run => run.runId === out.message.run_id && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)))
-        .map(out => RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
+        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
           ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
-          : out.message));
+          : out.message) }));
     });
-    for (const message of deliveredApprovals) {
+    for (const { message, mailbox } of deliveredApprovals) {
       try {
-        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) continue;
+        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
+          if (mailbox) await this.refuseUnauthenticatedMailboxApproval(message);
+          continue;
+        }
         await withRecoveredHerdrReceipt(message, () => this.applyAuthenticatedHerdrMessage(message, false));
         replayed++;
       }
@@ -1010,8 +1028,35 @@ export class AgenticWorkflowRuntime {
     });
     // Scheduler verification may be awaiting a specialist; cancellation must reject its waiter and report without another tick.
     // A Gateway inbox callback may itself enqueue this control. Do not await that same in-flight delivery recursively.
-    if (isCancellationHandoff(message)) void this.deliverConversationInbox().catch(() => undefined);
+    if (isCancellationHandoff(message)) void this.deliverInProcessInbox().catch(() => undefined);
     return result;
+  }
+  /**
+   * R-B2-4: the Director opens a run itself. It uses the same admission rules as a Conversation delegation but involves no RoleMessage,
+   * no outbox entry for the Coordinator (the Director is the Coordinator authority) and no rejection notice: the caller sees the error.
+   */
+  async admitDirectorWork(input: unknown): Promise<{ runId: string; correlationId: string; admission: "new" | "duplicate" }> {
+    if (this.quiesced) throw new Error("Runtime is quiesced");
+    const delegation = DelegationRequestSchema.parse(input);
+    if (delegation.requestedBy !== "director" || delegation.targetRole !== "coordinator" || delegation.runId === undefined)
+      throw new Error("Director work envelope mismatch");
+    const runId = delegation.runId;
+    return this.transaction(async (state, save, _core, outbox) => {
+      const manifest = SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
+      if (manifest.schemaVersion !== 3) throw new Error("Director work requires an active Director session");
+      if (manifest.conversationSessionId !== delegation.sessionId) throw new Error("Cross-session delegation");
+      const admission = this.admitDelegation(state, delegation, []);
+      if (admission.kind === "rejected") throw new AdmissionRejectedError(admission.reason);
+      if (admission.kind === "revision")
+        throw new AdmissionRejectedError("Director requirement revisions are not supported in slice B2; cancel the run and call start_work again");
+      if (admission.kind === "duplicate") return { runId, correlationId: delegation.correlationId, admission: "duplicate" as const };
+      const run: RunRecord = { runId, delegation, status: "intake", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3 };
+      state.runs.push(run);
+      this.emit(state, outbox, run, "delegation.accepted", { delegationId: delegation.delegationId, revision: 1, sdlcStatus: "intake",
+        headline: "Director đã nhận việc" }, "accepted");
+      await save();
+      return { runId, correlationId: delegation.correlationId, admission: "new" as const };
+    });
   }
   /**
    * Decides whether a Conversation delegation opens a run, repeats one already known, revises the run's requirement, or is refused.
@@ -1166,46 +1211,94 @@ export class AgenticWorkflowRuntime {
       this.surfaceCapabilityPreflightFailures(state, outbox);
       await save();
     });
-    await this.deliverConversationInbox();
+    await this.deliverInProcessInbox();
   }
-  private conversationDelivery: Promise<void> | undefined;
+  private inProcessDelivery: Promise<void> | undefined;
   /**
-   * Applies write-ahead Conversation inbox messages outside the journal lock, because the Gateway may drain a queued
-   * user turn that enqueues back into Runtime. The Gateway deduplicates by message_id, so a failure is requeued and retried.
+   * Applies write-ahead in-process inbox messages (Conversation Gateway, Director mailbox) outside the journal lock, because
+   * delivery may drain a queued user turn that enqueues back into Runtime. Both sinks deduplicate by message_id, so a failure
+   * is requeued and retried with the same bounded backoff. A Director mailbox item never falls back to Herdr.
    */
-  private deliverConversationInbox(): Promise<void> {
-    this.conversationDelivery ??= (async () => {
+  private deliverInProcessInbox(): Promise<void> {
+    this.inProcessDelivery ??= (async () => {
       try {
         if (this.quiesced) return;
         const pending = await this.journal.exclusive(async state =>
-          state.outbound.filter(out => isConversationDelivery(out) && out.status === "sending").map(out => out.message));
-        for (const message of pending) {
-          let error: string | undefined;
-          try { await this.ports.deliverToConversation(message); } catch (failure) { error = redactString(String(failure)); }
+          state.outbound.filter(out => isInProcessDelivery(out) && out.status === "sending").map(out => ({ message: out.message, mailbox: out.delivery === "director_mailbox" })));
+        for (const { message, mailbox } of pending) {
+          let error: string | undefined, terminal = false;
+          const director = this.ports.director;
+          if (mailbox && !director) { error = "Director mailbox unavailable in this session"; terminal = true; }
+          else {
+            try { await (mailbox && director ? director.deliver(message) : this.ports.deliverToConversation(message)); }
+            catch (failure) { error = redactString(String(failure)); }
+          }
+          let delivered = false;
           await this.journal.exclusive(async (state, save) => {
             const out = state.outbound.find(item => item.message.message_id === message.message_id);
             if (out?.status !== "sending") return;
-            if (error === undefined) { out.status = "delivered"; delete out.error; delete out.deliveryAttempts; delete out.nextAttemptAt; }
+            if (error === undefined) { out.status = "delivered"; delete out.error; delete out.deliveryAttempts; delete out.nextAttemptAt; delivered = true; }
             else {
               // Bounded: after the limit the write is terminal and the host reports it (failedConversationDeliveries).
               const attempts = (out.deliveryAttempts ?? 0) + 1;
               out.deliveryAttempts = attempts; out.error = error;
-              if (attempts >= CONVERSATION_DELIVERY_MAX_ATTEMPTS) { out.status = "failed"; delete out.nextAttemptAt; }
+              if (terminal || attempts >= CONVERSATION_DELIVERY_MAX_ATTEMPTS) { out.status = "failed"; delete out.nextAttemptAt; }
               else { out.status = "queued"; out.nextAttemptAt = new Date(Date.parse(this.now()) + conversationRetryDelayMs(attempts)).toISOString(); }
             }
             await save();
           });
+          if (delivered && mailbox) await this.applyDeliveredMailboxMessage(message);
         }
-      } finally { this.conversationDelivery = undefined; }
+      } finally { this.inProcessDelivery = undefined; }
     })();
-    return this.conversationDelivery;
+    return this.inProcessDelivery;
+  }
+  /**
+   * The Director reads the mailbox; it never answers a human gate. A human decision from the trusted interaction gateway is
+   * therefore applied here, after its durable delivery and outside the journal lock, through the same path recovery uses for an
+   * already delivered approval. Runtime notices carry no semantics on arrival. Any other Conversation→Coordinator type has no
+   * Director-session meaning and is surfaced, never silently dropped (R-B2-5).
+   */
+  private async applyDeliveredMailboxMessage(message: RoleMessage): Promise<void> {
+    if (message.sender.role === "runtime") return;
+    if (message.sender.role === "conversation" && message.type === "approval.decision") {
+      try {
+        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
+          await this.refuseUnauthenticatedMailboxApproval(message);
+          return;
+        }
+        await withRecoveredHerdrReceipt(message, () => this.applyAuthenticatedHerdrMessage(message, false));
+      } catch (error) {
+        await this.reportInboundFailure(message, String(error));
+      }
+      return;
+    }
+    // A cancellation control is consumed by drainCancellationControls before it can reach the mailbox.
+    if (isCancellationHandoff(message)) return;
+    await this.reportInboundFailure(message, message.sender.role === "conversation"
+      ? "Unsupported Conversation→Coordinator message in Director session"
+      : `Unsupported ${message.sender.role}→Coordinator message in Director session`);
+  }
+  /**
+   * A definitive authorizeHuman refusal of a delivered mailbox approval: surface it once, then journal the exact envelope as
+   * rejected so recovery never re-checks it. A new human decision travels as a new envelope.
+   */
+  private async refuseUnauthenticatedMailboxApproval(message: RoleMessage): Promise<void> {
+    const reason = "Human approval is not authenticated";
+    await this.reportInboundFailure(message, reason);
+    await this.transaction(async (state, save) => {
+      if (state.inbox.some(item => item.message.message_id === message.message_id ||
+          (message.idempotency_key !== undefined && item.message.idempotency_key === message.idempotency_key))) return;
+      state.inbox.push({ message, status: "rejected", reason });
+      await save();
+    });
   }
   /**
    * Read-only: Conversation inbox writes that exhausted their bounded retries. The host writes a notice receipt directly for each
    * (Conversation cannot be reached through the failing inbox) and dedupes by message_id.
    */
   async failedConversationDeliveries(): Promise<{ message: RoleMessage; error: string; attempts: number }[]> {
-    return this.journal.exclusive(async state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out))
+    return this.journal.exclusive(async state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out) && out.delivery === undefined)
       .map(out => ({ message: out.message, error: out.error ?? "Conversation delivery failed", attempts: out.deliveryAttempts ?? 0 })));
   }
   private readonly gateWaiters = new Map<string, { runId: string; accept(result: QualityGateResult): void; reject(error: Error): void }>();
@@ -1488,7 +1581,9 @@ export class AgenticWorkflowRuntime {
   /** Facts the host watchdog needs about one run. Derived from durable state only; activity ignores Conversation-bound notices. */
   private runFacts(state: JournalState, run: RunRecord): RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] } {
     const now = Date.parse(this.now());
-    const handoffs = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation");
+    // A Director mailbox write is not a role handoff: a queued or delivered wake owes no correlated result (R-B2-5).
+    const handoffs = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
+      out.delivery !== "director_mailbox");
     const messages = [...state.outbound.map(out => out.message), ...state.inbox.map(item => item.message)]
       .filter(message => message.run_id === run.runId && message.recipient.role !== "conversation");
     const times = [
@@ -1543,7 +1638,7 @@ export class AgenticWorkflowRuntime {
   private recordProposalRejection(state: JournalState, outbox: HerdrOutbox, run: RunRecord, input: WorkflowRejection): boolean {
     if (run.cancelled || run.supersededBy || TERMINAL_RUN_STATUSES.includes(run.status) || run.definition || run.coreCreated ||
         run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId &&
-          !isConversationDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)) ||
+          !isInProcessDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)) ||
         Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         run.approval && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;
     const rejection: WorkflowRejection = {
@@ -2165,6 +2260,7 @@ export class AgenticWorkflowRuntime {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
+      this.assertDirectorWritable(run);
       if (options.webCommand) {
         const command = WebCommandSchema.parse(options.webCommand);
         if (options.automatic || options.conversationUserMessageId || command.kind !== "resume" || command.runId !== runId || command.actionId !== actionId ||
@@ -2178,7 +2274,7 @@ export class AgenticWorkflowRuntime {
         throw new Error("Expired writer lease requires authenticated explicit owner resume through Conversation or Web UI; do not retry resume_run from Coordinator — call report_progress to inform the user and end your turn");
       const resumeUnmeasured = !options.automatic && !leaseFailure && run.status === "implementing" &&
         action?.kind === "coordinator_continuation" && action.state === "pending" && this.unmeasuredPhaseRequests(state, run).length > 0;
-      if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
+      if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isInProcessDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before resume");
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
       if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
@@ -2251,16 +2347,19 @@ export class AgenticWorkflowRuntime {
       } else if (failedCapabilityDispatches.length !== failureIds.length && failedCapabilityDispatches.length > 0) {
         throw new Error("A recorded capability handoff is missing or no longer safely unsent");
       }
+      // A Coordinator resume in a Director session is a mailbox write: there is no Coordinator pane or capability to prove.
       const resumeBindings = failedCapabilityDispatches.length
         ? await Promise.all(failedCapabilityDispatches.map(async item => ({ item, binding: unwrap(await this.ports.panes.getRoleBinding(item.selector)) })))
-        : [{ item: undefined, binding: unwrap(await this.ports.panes.getRoleBinding(action.requiredRole ?? "coordinator")) }];
-      if (resumeBindings.some(item => !item.binding) || !this.ports.preflightRoleCapabilities)
+        : this.ports.director && run.delegation.requestedBy === "director" && action.requiredRole === undefined ? []
+          : [{ item: undefined, binding: unwrap(await this.ports.panes.getRoleBinding(action.requiredRole ?? "coordinator")) }];
+      if (resumeBindings.length && (resumeBindings.some(item => !item.binding) || !this.ports.preflightRoleCapabilities))
         throw new Error("The current session has no verified role capability preflight");
       const resumeRequirements = action.requiredCapabilities ?? ["repository.read"];
       for (const entry of resumeBindings) {
         const binding = entry.binding;
         if (!binding) throw new RoleCapabilityPreflightError("The required role pane is not bound in this session");
         const requirements = entry.item?.capabilities ?? resumeRequirements;
+        if (!this.ports.preflightRoleCapabilities) throw new Error("The current session has no verified role capability preflight");
         await this.ports.preflightRoleCapabilities(binding, requirements);
         if (requirements.some(capability => !this.ports.roleCapabilities[binding.role]?.includes(capability)))
           throw new RoleCapabilityPreflightError(`${binding.role} required capability is unavailable: ${requirements.join(", ")}`);
@@ -2359,6 +2458,8 @@ export class AgenticWorkflowRuntime {
     const candidates = await this.transaction(async (state, save, _core, outbox) => {
       const now = Date.parse(this.now());
       const recoverable = state.runs.filter(run => run.status === "escalated" && !run.cancelled && !run.supersededBy &&
+        // A Director session never resumes a run created by a v2 Conversation; it is read-only there (R-B2-12).
+        (!this.ports.director || run.delegation.requestedBy === "director") &&
         run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending" &&
         ["auto_resume", "capability_repair"].includes(run.pendingAction.recovery ?? "manual"));
       let changed = false;
@@ -2387,7 +2488,7 @@ export class AgenticWorkflowRuntime {
         if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
             run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;
         if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === run.runId &&
-            ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item))) return false;
+            ["sending", "unknown_delivery"].includes(item.status) && !isInProcessDelivery(item))) return false;
         return action.recovery !== "auto_resume" || now >= autoResumeDueAt(action);
       }).map(run => ({ runId: run.runId, actionId: run.pendingAction!.actionId,
         verificationRetry: run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true && run.pendingAction!.recovery === "auto_resume" }));
@@ -2399,11 +2500,16 @@ export class AgenticWorkflowRuntime {
           // Same transition as the Coordinator's retry_verification tool; Runtime then re-runs the verification itself.
           await this.retryVerification(candidate.runId, { automatic: true, actionId: candidate.actionId }); resumed++; continue;
         }
-        if (!coordinatorReadable) continue;
-        const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
-        if (!pane) continue;
-        const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
-        if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
+        if (this.ports.director) {
+          // A wake written while the Director is absent only spends the bounded budget; it waits until someone can read it.
+          if (!await this.ports.director.present()) continue;
+        } else {
+          if (!coordinatorReadable) continue;
+          const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
+          if (!pane) continue;
+          const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
+          if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
+        }
         await this.resumeBlockedRun(candidate.runId, candidate.actionId, { automatic: true }); resumed++;
       } catch (error) {
         // Unknown delivery, cancellation/approval, stale role binding and capability proof failures remain durable waits.
@@ -2763,7 +2869,7 @@ export class AgenticWorkflowRuntime {
     const blocked = changed.filter(key => key !== REPOSITORY_SNAPSHOT_COMPONENT);
     if (blocked.length) throw new Error(`Only a repository change can be re-resolved; these accepted inputs also changed: ${blocked.map(key => `inputs.${key}`).join(", ")}. Restore them, or replan through a requirement revision`);
     if (!changed.length) { await assertRunExecutionPlan(run, read); return { rebound: false }; }
-    if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId && !isConversationDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
+    if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId && !isInProcessDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
       throw new Error("Unknown delivery must be reconciled before re-resolving the run");
     const previousRevision = run.baseRevision, head = textField((await this.ports.policies.git.inspect()).head);
     const started = run.tasks.some(task => task.worktrees.length > 0);
@@ -2799,7 +2905,7 @@ export class AgenticWorkflowRuntime {
       const run = this.run(state, runId); this.live(run);
       if (run.status !== "awaiting_approval" || run.approvalKind !== "design" || !run.approval || run.decision || run.coreCreated)
         throw new Error("Only a design proposal still awaiting its approval can be withdrawn; an accepted plan uses reresolve_execution_plan");
-      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && !isConversationDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
+      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && !isInProcessDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
         throw new Error("Unknown delivery must be reconciled before withdrawing the proposal");
       const approvalId = run.approval.approvalId, text = redactString(textField(reason)).slice(0, 300);
       run.supersededApprovals = [...(run.supersededApprovals ?? []), { approvalId, withdrawn: true }];
@@ -2823,6 +2929,7 @@ export class AgenticWorkflowRuntime {
     const userMessageId = textField(conversationUserMessageId);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId);
+      this.assertDirectorWritable(run);
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
@@ -2877,7 +2984,7 @@ export class AgenticWorkflowRuntime {
   async requestSpecialist(runId: string, requestedRole: string, objective: string, requiredCapabilities: string[], profileInput?: RoleProfilePin): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
-      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out)))
+      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isInProcessDelivery(out)))
         throw new Error("Unknown delivery must be reconciled before requesting another specialist assignment");
       if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
       const governanceRole = requestedRole;
@@ -5166,7 +5273,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         await save(); return jobs;
     });
-    await this.deliverConversationInbox();
+    await this.deliverInProcessInbox();
     for (const job of jobs) {
       // No Runtime lock is held: QA/Reviewer may reply through Herdr while verification awaits them.
       try {
@@ -5277,7 +5384,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (this.quiesced) throw new Error("Runtime is quiesced");
       const run = this.run(state, runId);
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId &&
-          ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
+          ["sending", "unknown_delivery"].includes(item.status) && !isInProcessDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before verification retry");
       if (run.cancelled || run.status !== "escalated" || !run.error?.startsWith(VERIFICATION_RETRY_PREFIX))
         throw new Error("No verification awaiting retry for this run");

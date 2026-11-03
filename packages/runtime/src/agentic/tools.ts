@@ -38,6 +38,9 @@ export const COORDINATOR_TOOLS = [
   { name: "withdraw_workflow_proposal", description: "Withdraw a design proposal still awaiting human approval so you can run repository_setup and call propose_workflow again; the new proposal gets a new approval card and the user is told which card replaced which. Parameters: runId, reason." }
 ] as const;
 
+/** R-B2-12: the only tools a Director session may call on a run created by a v2 Conversation. */
+export const DIRECTOR_LEGACY_RUN_TOOLS: readonly string[] = ["inspect", "cancel", "reconcile_cancellation", "reconcile_delivery", "tick", "tick_status", "read_role_profiles"];
+
 /** Host injects the authenticated role; an agent may not choose its own principal in tool arguments. */
 export class CoordinatorTools {
   constructor(private readonly runtime: AgenticWorkflowRuntime) {}
@@ -57,10 +60,14 @@ export class CoordinatorTools {
   }
   /** Host lifecycle only. Never wait for this from the Coordinator's own message handler. */
   async drain(): Promise<void> { await this.pendingTick; }
-  async invoke(name: string, input: unknown, principal: { role: AgentRole }): Promise<JsonValue> {
+  async invoke(name: string, input: unknown, principal: { role: AgentRole; principal?: "director" }): Promise<JsonValue> {
     const args = record(JsonValueSchema.parse(input));
     if (principal.role !== "coordinator" && !(principal.role === "developer" && name === "authorize_implementation"))
       throw new Error("Only Coordinator may invoke orchestration tools");
+    if (principal.principal === "director" && !DIRECTOR_LEGACY_RUN_TOOLS.includes(name)) {
+      const runId = args.runId ?? args.run_id;
+      if (typeof runId === "string" && runId.trim() !== "") await this.runtime.assertDirectorRunWritable(runId);
+    }
     switch (name) {
       case "read_role_profiles": return this.runtime.readRoleProfiles();
       case "inspect": {

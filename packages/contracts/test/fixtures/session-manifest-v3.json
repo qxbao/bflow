@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 3,
+  "sessionId": "bf-fixture-director",
+  "projectName": "sample-project",
+  "workspaceRoot": "/workspace/sample-project",
+  "herdrWorkspaceId": "w1",
+  "herdrTabId": "w1:t1",
+  "status": "up",
+  "conversationSessionId": "interaction-bf-fixture-director",
+  "activeRunIds": [],
+  "panes": [
+    {
+      "schemaVersion": 2,
+      "bindingId": "binding-developer-w1:p3",
+      "sessionId": "bf-fixture-director",
+      "role": "developer",
+      "paneGroup": "developer_worktree",
+      "agentId": "developer-1",
+      "workspaceId": "w1",
+      "tabId": "w1:t2",
+      "paneId": "w1:p3",
+      "provider": "claude",
+      "agentKind": "claude",
+      "cwd": "/workspace/sample-project",
+      "isolationMode": "dedicated_pane",
+      "readOnlyWorkspace": false,
+      "transportState": "idle",
+      "boundAt": "2026-11-03T10:00:00.000Z"
+    }
+  ],
+  "progressPane": {
+    "tabId": "w1:t1",
+    "paneId": "w1:p1",
+    "terminalId": "term_fixture",
+    "command": ["bflow", "progress", "--follow"],
+    "phase": "running",
+    "restarts": [],
+    "launchedAt": "2026-11-03T10:00:00.000Z"
+  },
+  "attachTarget": { "role": "progress", "tabId": "w1:t1", "paneId": "w1:p1", "terminalId": "term_fixture" },
+  "createdAt": "2026-11-03T10:00:00.000Z",
+  "updatedAt": "2026-11-03T10:00:00.000Z"
+}

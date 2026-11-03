@@ -8,18 +8,25 @@ import type {
   OperationOptions,
   OperationResult,
   PaneBinding,
+  ProgressPane,
   SessionManifest,
+  SessionManifestV2,
+  SessionManifestV3,
   SessionManifestStatus
 } from "@bflow/contracts";
 import {
   DeveloperContinuationAllocationSchema,
   PaneBindingSchema,
+  ProgressPaneSchema,
   ResolvedRoleProfileSnapshotSchema,
   RoleProfilePinSchema,
   sameRoleProfilePin,
   ROLE_PROFILE_FEATURE,
   SessionManifestSchema,
-  canonicalReceiptJson
+  SessionManifestV2Schema,
+  SessionManifestV3Schema,
+  canonicalReceiptJson,
+  isDirectorSessionManifest
 } from "@bflow/contracts";
 
 import type {
@@ -60,6 +67,7 @@ import { constants } from "node:fs";
 import { isAbsolute } from "node:path";
 import {
   AGENT_NAME_PATTERN,
+  DIRECTOR_PERMANENT_TOPOLOGY_ROLES,
   PERMANENT_TOPOLOGY_ROLES,
   ROLE_TOPOLOGY_SPECS,
   getRoleTopologySpec,
@@ -91,7 +99,24 @@ import {
   parseWorktreeRemovedResult
 } from "./runner.js";
 
-import { InMemorySessionManifestStore } from "./manifest-store.js";
+import {
+  InMemorySessionManifestStore,
+  V2_SESSION_IN_DIRECTOR_LAYOUT_MESSAGE,
+  layoutSessionManifestStore,
+  v2OnlySessionManifestStore,
+  v3OnlySessionManifestStore,
+  type V2SessionManifestStore,
+  type V3SessionManifestStore
+} from "./manifest-store.js";
+import {
+  PROGRESS_PANE_LABEL,
+  PROGRESS_TAB_LABEL,
+  closeProgressPane,
+  ensureProgressPane,
+  launchProgressPane,
+  replaceProgressPane,
+  type ProgressPaneDeps
+} from "./progress-pane.js";
 
 function ok<T>(value: T): OperationResult<T> {
   return { ok: true, value };
@@ -210,6 +235,14 @@ function launchEnvOf(launch: AgentLaunchProfile | undefined): Readonly<Record<st
 /** Validation message when an env-bearing pane creation is attempted without a configured socket port. */
 const SOCKET_REQUIRED_MESSAGE = "A Herdr socket port is required to create panes with launch env";
 
+/** Director layout refuses to adopt a running v2 (Conversation/Coordinator) session. */
+const V2_SESSION_RUNNING_MESSAGE =
+  "Phiên v2 (có pane Conversation/Coordinator) đang chạy. Chạy `bflow down` rồi `bflow up` để nâng cấp lên phiên Director.";
+
+function progressAttachTarget(progress: ProgressPane): SessionManifestV3["attachTarget"] {
+  return { role: "progress", tabId: progress.tabId, paneId: progress.paneId, ...(progress.terminalId !== undefined ? { terminalId: progress.terminalId } : {}) };
+}
+
 /** True only for a regular, non-symlink file no larger than the prompt limit that contains `text`. */
 async function regularFileContains(path: string, text: string, expectedJson = false, prefix = false): Promise<string | false> {
   let file;
@@ -277,7 +310,13 @@ async function launchPromptSource(argv: readonly string[], prompt: string): Prom
 export class RolePaneManager {
   readonly #config: RolePaneManagerConfig;
   readonly #runner: HerdrCommandRunner;
+  /** Manifests of this manager's layout only (v2 for `legacy_v2`, v3 for `director`). */
   readonly #store: SessionManifestStore;
+  /** Conversation-specific operations (restart recovery, Conversation focus) exist only for v2 sessions. */
+  readonly #v2Store: V2SessionManifestStore;
+  readonly #v3Store: V3SessionManifestStore;
+  readonly #rawStore: SessionManifestStore;
+  readonly #layout: "legacy_v2" | "director";
   readonly #worktreeInspector: WorktreeInspector;
   readonly #authorizeStoppedRetainedRelease: RolePaneManagerOptions["authorizeStoppedRetainedRelease"];
   readonly #socket: HerdrSocketPort | undefined;
@@ -308,9 +347,25 @@ export class RolePaneManager {
       throw new TypeError("RolePaneManagerConfig.workspaceRoot is required");
     }
 
+    const layout = options.config.layout ?? "legacy_v2";
+    if (layout !== "legacy_v2" && layout !== "director") {
+      throw new TypeError("RolePaneManagerConfig.layout must be 'legacy_v2' or 'director'");
+    }
+    if (layout === "director") {
+      const command = options.config.progressCommand;
+      if (command === undefined) throw new TypeError("RolePaneManagerConfig.progressCommand is required for the director layout");
+      if (!ProgressPaneSchema.shape.command.safeParse(command).success) {
+        throw new TypeError("RolePaneManagerConfig.progressCommand must be 1-16 non-empty arguments of at most 4096 characters");
+      }
+    }
+
     this.#config = options.config;
+    this.#layout = layout;
     this.#runner = options.runner ?? createProcessRunner();
-    this.#store = options.store ?? new InMemorySessionManifestStore();
+    this.#rawStore = options.store ?? new InMemorySessionManifestStore();
+    this.#store = layoutSessionManifestStore(this.#rawStore, layout);
+    this.#v2Store = v2OnlySessionManifestStore(this.#rawStore);
+    this.#v3Store = v3OnlySessionManifestStore(this.#rawStore);
     this.#worktreeInspector = options.worktreeInspector ?? createGitWorktreeInspector();
     this.#authorizeStoppedRetainedRelease = options.authorizeStoppedRetainedRelease;
     this.#socket = options.socket;
@@ -452,6 +507,153 @@ export class RolePaneManager {
         remediation: ["Resolve the interactive dialog in the named session", "bflow up", "bflow down --yes"] });
   }
 
+  /** Herdr CLI adapter for the progress pane: stdout on success; otherwise rejects with the mapped error `code`. */
+  #herdrText(options?: OperationOptions): (args: string[]) => Promise<string> {
+    return async args => {
+      const outcome = await this.#runHerdr(args, options);
+      if (outcome.exitCode === 0 && !outcome.failure) return outcome.stdout;
+      const failure = mapCommandFailure(outcome);
+      throw Object.assign(new Error(failure?.message ?? `Herdr ${args.slice(0, 2).join(" ")} failed`), {
+        code: failure?.code ?? "transport_unavailable"
+      });
+    };
+  }
+
+  #progressDeps(workspaceId: string, persist: ProgressPaneDeps["persist"], options?: OperationOptions): ProgressPaneDeps {
+    return { herdr: this.#herdrText(options), clock: this.#clock, workspaceRoot: this.#config.workspaceRoot, workspaceId, persist };
+  }
+
+  async #focusProgressTab(workspaceId: string, tabId: string, options?: OperationOptions): Promise<OperationResult<void>> {
+    const wsFocusOutcome = await this.#runHerdr(["workspace", "focus", workspaceId], options);
+    if (wsFocusOutcome.exitCode !== 0 || wsFocusOutcome.failure) {
+      return toCommandError(wsFocusOutcome, `Failed to focus workspace '${workspaceId}'`);
+    }
+    parseWorkspaceInfoResult(wsFocusOutcome);
+    const tabFocusOutcome = await this.#runHerdr(["tab", "focus", tabId], options);
+    if (tabFocusOutcome.exitCode !== 0 || tabFocusOutcome.failure) {
+      return toCommandError(tabFocusOutcome, `Failed to focus tab '${tabId}'`);
+    }
+    parseTabInfoResult(tabFocusOutcome);
+    return ok(undefined);
+  }
+
+  /**
+   * Selects the Director progress tab: a stored, still-live progress pane; otherwise the root pane of a newly created
+   * workspace, an idle pane of an existing `progress` tab, or a new `progress` tab. The tab and pane are named `progress`.
+   */
+  async #prepareProgressTab(
+    workspaceId: string,
+    liveTabs: readonly HerdrTabInfo[],
+    livePanes: readonly HerdrPaneInfo[],
+    saved: SessionManifestV3 | null,
+    createdTabId: string | null,
+    createdRootPaneId: string | null,
+    options?: OperationOptions
+  ): Promise<OperationResult<{ progress: ProgressPane; liveTabs: readonly HerdrTabInfo[]; livePanes: readonly HerdrPaneInfo[] }>> {
+    const command = [...this.#config.progressCommand ?? []];
+    const stored = saved?.progressPane;
+    const storedPane = stored === undefined ? undefined : livePanes.find(pane =>
+      pane.paneId === stored.paneId && pane.tabId === stored.tabId && pane.terminalId === stored.terminalId);
+    if (stored !== undefined && storedPane !== undefined) {
+      const progress: ProgressPane = saved?.status === "down"
+        ? { tabId: stored.tabId, paneId: stored.paneId, terminalId: storedPane.terminalId, command, phase: "created", restarts: [] }
+        : { ...stored };
+      return ok({ progress, liveTabs, livePanes });
+    }
+    let tabs = liveTabs;
+    let panes = livePanes;
+    let root: HerdrPaneInfo | undefined = createdRootPaneId === null ? undefined
+      : panes.find(pane => pane.paneId === createdRootPaneId && pane.tabId === createdTabId);
+    if (root === undefined) {
+      const existingTab = tabs.find(tab => tab.label === PROGRESS_TAB_LABEL);
+      root = existingTab === undefined ? undefined : panes.find(pane => pane.tabId === existingTab.tabId && pane.agent === null);
+    }
+    if (root === undefined) {
+      const created = await this.#createTab(workspaceId, PROGRESS_TAB_LABEL, undefined, "Failed to create progress tab", options);
+      if (!created.ok) return created;
+      tabs = [...tabs, created.value.tab];
+      panes = [...panes, created.value.rootPane];
+      root = created.value.rootPane;
+    }
+    const tab = tabs.find(item => item.tabId === root.tabId);
+    if (tab?.label !== PROGRESS_TAB_LABEL) {
+      const renamed = await this.#runHerdr(["tab", "rename", root.tabId, PROGRESS_TAB_LABEL], options);
+      if (renamed.exitCode !== 0 || renamed.failure) return toCommandError(renamed, "Could not name the progress tab");
+      parseTabInfoResult(renamed);
+    }
+    const named = await this.#runHerdr(["pane", "rename", root.paneId, PROGRESS_PANE_LABEL], options);
+    if (named.exitCode !== 0 || named.failure) return toCommandError(named, `Could not label progress pane '${root.paneId}'`);
+    parsePaneInfoResult(named);
+    return ok({
+      progress: { tabId: root.tabId, paneId: root.paneId, terminalId: root.terminalId, command, phase: "created", restarts: [] },
+      liveTabs: tabs,
+      livePanes: panes
+    });
+  }
+
+  /** Writes the progress pane into the latest v3 manifest and recomputes `up`/`degraded` from its phase. */
+  async #saveProgressPane(pane: ProgressPane, options?: OperationOptions): Promise<OperationResult<SessionManifestV3>> {
+    const latest = await this.#v3Store.load(this.#config.sessionId, options);
+    if (!latest.ok) return latest;
+    if (!latest.value) return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
+    const manifest = latest.value;
+    let status = manifest.status;
+    if (status === "up" || status === "degraded") {
+      // Only the progress pane's own recovery lifts a degradation; other causes stay for topology health to clear.
+      if (pane.phase !== "running") status = "degraded";
+      else if (manifest.progressPane?.phase !== "running" && startupPanesHealthy(manifest.panes)) status = "up";
+    }
+    const parsed = SessionManifestV3Schema.safeParse({
+      ...manifest, status, herdrTabId: pane.tabId, progressPane: pane, attachTarget: progressAttachTarget(pane),
+      updatedAt: this.#clock().toISOString()
+    });
+    if (!parsed.success) return validationError(`Failed to validate progress pane manifest: ${parsed.error.message}`, parsed.error.issues);
+    return this.#v3Store.save(parsed.data, options);
+  }
+
+  /**
+   * Director layout: reconciles the progress pane (restarts an exited viewer at most five times in ten minutes, recreates
+   * a missing pane, never replays an uncertain launch). Sessions that are not `up`/`degraded` are left untouched.
+   */
+  async ensureProgressPane(options?: OperationOptions): Promise<OperationResult<ProgressPane>> {
+    if (this.#layout !== "director") return validationError("The progress pane exists only in the director layout");
+    return this.#serializeAllocation(async (): Promise<OperationResult<ProgressPane>> => {
+      try {
+        const loaded = await this.#v3Store.load(this.#config.sessionId, options);
+        if (!loaded.ok) return loaded;
+        const manifest = loaded.value;
+        if (!manifest) return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
+        if (!manifest.progressPane) return notFoundError("Progress pane is not recorded in the session manifest");
+        if (manifest.status !== "up" && manifest.status !== "degraded") return ok(manifest.progressPane);
+        const deps = this.#progressDeps(manifest.herdrWorkspaceId, async pane => {
+          const saved = await this.#saveProgressPane(pane, options);
+          if (!saved.ok) throw new Error(`Failed to persist progress pane: ${saved.error.message}`);
+        }, options);
+        return ok(await ensureProgressPane(deps, manifest.progressPane));
+      } catch (err) {
+        return toProtocolError(err, "Failed to ensure progress pane");
+      }
+    });
+  }
+
+  /** Director layout attach target: focuses the workspace and the progress tab (the pane runs no agent). */
+  async focusProgressPane(options?: OperationOptions): Promise<OperationResult<{ tabId: string; paneId: string; terminalId?: string }>> {
+    try {
+      const loaded = await this.#rawStore.load(this.#config.sessionId, options);
+      if (!loaded.ok) return loaded;
+      const manifest = loaded.value;
+      if (!manifest) return notFoundError(`Session manifest not found for session '${this.#config.sessionId}'`);
+      if (!isDirectorSessionManifest(manifest)) return validationError(V2_SESSION_IN_DIRECTOR_LAYOUT_MESSAGE);
+      const progress = manifest.progressPane;
+      if (!progress) return notFoundError("Progress pane is not recorded in the session manifest");
+      const focused = await this.#focusProgressTab(manifest.herdrWorkspaceId, progress.tabId, options);
+      if (!focused.ok) return focused;
+      return ok({ tabId: progress.tabId, paneId: progress.paneId, ...(progress.terminalId !== undefined ? { terminalId: progress.terminalId } : {}) });
+    } catch (err) {
+      return toProtocolError(err, "Failed to focus progress pane");
+    }
+  }
+
   async initializeTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     try {
       return await this.#reconcileTopologyInternal(false, options);
@@ -470,7 +672,9 @@ export class RolePaneManager {
 
   async shutdownTopology(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
     try {
-      const loadResult = await this.#store.load(this.#config.sessionId, options);
+      // The Director layout can still stop a running v2 session: `bflow down` is the upgrade path to a Director session.
+      const store = this.#layout === "director" ? this.#rawStore : this.#store;
+      const loadResult = await store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
       const manifest = loadResult.value;
       if (!manifest) {
@@ -517,6 +721,10 @@ export class RolePaneManager {
         }
         parseOkResponse(outcome);
       }
+      // The Director progress pane is closed last and only when its ownership is proven; a foreign pane is preserved.
+      if (isDirectorSessionManifest(manifest) && manifest.progressPane) {
+        await closeProgressPane({ herdr: this.#herdrText(options), workspaceId: manifest.herdrWorkspaceId }, manifest.progressPane);
+      }
 
       const nowIso = this.#clock().toISOString();
       const updatedPanes: PaneBinding[] = manifest.panes.map((p) => ({
@@ -540,7 +748,7 @@ export class RolePaneManager {
         );
       }
 
-      const saveResult = await this.#store.save(parsedManifest.data, options);
+      const saveResult = await store.save(parsedManifest.data, options);
       if (!saveResult.ok) return saveResult;
 
       return ok(saveResult.value);
@@ -553,8 +761,13 @@ export class RolePaneManager {
     _isReconcile: boolean,
     options?: OperationOptions
   ): Promise<OperationResult<SessionManifest>> {
+    const director = this.#layout === "director";
     // Validate env-at-creation requirements before any Herdr or store side effect.
-    const configuredRoles: readonly PermanentTopologyRole[] = this.#config.permanentRoles ?? PERMANENT_TOPOLOGY_ROLES;
+    const configuredRoles: readonly PermanentTopologyRole[] =
+      this.#config.permanentRoles ?? (director ? DIRECTOR_PERMANENT_TOPOLOGY_ROLES : PERMANENT_TOPOLOGY_ROLES);
+    if (director && configuredRoles.some(role => role === "chat" || role === "coordinator")) {
+      return validationError("Director layout cannot start conversation/coordinator panes");
+    }
     // Concurrent uniqueness checks cannot reserve a name. Reject configured
     // collisions before topology side effects rather than racing two starts.
     const configuredNames = new Set<string>();
@@ -575,9 +788,20 @@ export class RolePaneManager {
         .map(role => this.#config.roleConfigs?.[role]?.launch)
         .find(launch => launchEnvOf(launch) !== undefined);
 
-    const loadResult = await this.#store.load(this.#config.sessionId, options);
+    // The Director layout reads any stored version: a running v2 session must be brought down first, and a stopped
+    // one is replaced by a fresh v3 manifest that keeps its interaction session id (Web, human receipts).
+    const loadResult = director ? await this.#rawStore.load(this.#config.sessionId, options) : await this.#store.load(this.#config.sessionId, options);
     if (!loadResult.ok) return loadResult;
-    const savedManifest = loadResult.value;
+    let savedManifest: SessionManifest | null = loadResult.value;
+    let inheritedConversationSessionId: string | undefined;
+    if (director && savedManifest !== null && !isDirectorSessionManifest(savedManifest)) {
+      if (savedManifest.status !== "down") return conflictError(V2_SESSION_RUNNING_MESSAGE);
+      inheritedConversationSessionId = savedManifest.conversationSessionId;
+      savedManifest = null;
+    }
+    const savedDirector = savedManifest !== null && isDirectorSessionManifest(savedManifest) ? savedManifest : null;
+    const conversationSessionId = this.#config.conversationSessionId ?? savedManifest?.conversationSessionId ??
+      inheritedConversationSessionId ?? `conv-${this.#config.sessionId}`;
 
     // Step 1: Workspace
     const wsListOutcome = await this.#runHerdr(["workspace", "list"], options);
@@ -599,8 +823,9 @@ export class RolePaneManager {
     if (matchedWorkspace) {
       herdrWorkspaceId = matchedWorkspace.workspaceId;
     } else {
-      // The initial root pane is created with the Conversation launch env when Conversation has one.
-      const chatLaunch = this.#config.roleConfigs?.chat?.launch;
+      // The initial root pane is created with the Conversation launch env when Conversation has one. In the Director
+      // layout it becomes the progress pane, which needs no launch env.
+      const chatLaunch = director ? undefined : this.#config.roleConfigs?.chat?.launch;
       const chatEnv = launchEnvOf(chatLaunch);
       const created = await this.#herdrCreate<HerdrWorkspaceCreated>(
         {
@@ -644,43 +869,54 @@ export class RolePaneManager {
     const coordLabel = this.#config.tabLabels?.coordination ?? "coordination";
     const verifLabel = this.#config.tabLabels?.verification ?? "verification";
 
-    // 2.1 Ensure Conversation Tab
-    let convTab = liveTabs.find(
-      (t) =>
-        t.tabId === initialConversationTabId ||
-        t.label === convLabel ||
-        (savedManifest !== null && t.tabId === savedManifest.herdrTabId)
-    );
-    if (!convTab && liveTabs.length > 0) {
-      const firstTab = liveTabs[0];
-      if (
-        firstTab !== undefined &&
-        firstTab.label !== coordLabel &&
-        firstTab.label !== "coordination" &&
-        firstTab.label !== verifLabel &&
-        firstTab.label !== "verification"
-      ) {
-        convTab = firstTab;
+    // 2.1 Ensure the primary tab: Conversation (legacy_v2) or the non-LLM progress tab (director).
+    let finalConversationTabId: string;
+    let progress: ProgressPane | null = null;
+    if (director) {
+      const prepared = await this.#prepareProgressTab(herdrWorkspaceId, liveTabs, livePanes, savedDirector,
+        initialConversationTabId, initialConversationRootPaneId, options);
+      if (!prepared.ok) return prepared;
+      progress = prepared.value.progress;
+      liveTabs = prepared.value.liveTabs;
+      livePanes = prepared.value.livePanes;
+      finalConversationTabId = progress.tabId;
+    } else {
+      let convTab = liveTabs.find(
+        (t) =>
+          t.tabId === initialConversationTabId ||
+          t.label === convLabel ||
+          (savedManifest !== null && t.tabId === savedManifest.herdrTabId)
+      );
+      if (!convTab && liveTabs.length > 0) {
+        const firstTab = liveTabs[0];
+        if (
+          firstTab !== undefined &&
+          firstTab.label !== coordLabel &&
+          firstTab.label !== "coordination" &&
+          firstTab.label !== verifLabel &&
+          firstTab.label !== "verification"
+        ) {
+          convTab = firstTab;
+        }
+      }
+      if (!convTab) {
+        const convLaunch = launchForTab("conversation");
+        const createdConv = await this.#createTab(herdrWorkspaceId, convLabel, convLaunch, "Failed to create conversation tab", options);
+        if (!createdConv.ok) return createdConv;
+        convTab = createdConv.value.tab;
+        liveTabs = [...liveTabs, convTab];
+        livePanes = [...livePanes, createdConv.value.rootPane];
+        if (convLaunch !== undefined && launchEnvOf(convLaunch) !== undefined) envPaneLaunch.set(createdConv.value.rootPane.paneId, convLaunch.launchId);
+      }
+      finalConversationTabId = convTab.tabId;
+      if (convTab.label !== convLabel) {
+        const renamed = await this.#runHerdr(["tab", "rename", convTab.tabId, convLabel], options);
+        if (renamed.exitCode !== 0 || renamed.failure) return toCommandError(renamed, "Could not name the Conversation tab");
+        parseTabInfoResult(renamed);
       }
     }
-    if (!convTab) {
-      const convLaunch = launchForTab("conversation");
-      const createdConv = await this.#createTab(herdrWorkspaceId, convLabel, convLaunch, "Failed to create conversation tab", options);
-      if (!createdConv.ok) return createdConv;
-      convTab = createdConv.value.tab;
-      liveTabs = [...liveTabs, convTab];
-      livePanes = [...livePanes, createdConv.value.rootPane];
-      if (convLaunch !== undefined && launchEnvOf(convLaunch) !== undefined) envPaneLaunch.set(createdConv.value.rootPane.paneId, convLaunch.launchId);
-    }
-    const finalConversationTabId = convTab.tabId;
-    if (convTab.label !== convLabel) {
-      const renamed = await this.#runHerdr(["tab", "rename", convTab.tabId, convLabel], options);
-      if (renamed.exitCode !== 0 || renamed.failure) return toCommandError(renamed, "Could not name the Conversation tab");
-      parseTabInfoResult(renamed);
-    }
 
-    const configuredPermanentRoles: readonly PermanentTopologyRole[] =
-      this.#config.permanentRoles ?? PERMANENT_TOPOLOGY_ROLES;
+    const configuredPermanentRoles: readonly PermanentTopologyRole[] = configuredRoles;
 
     const hasCoordRoles = configuredPermanentRoles.some((r) => ROLE_TOPOLOGY_SPECS[r].tabKey === "coordination");
     const hasVerifRoles = configuredPermanentRoles.some((r) => ROLE_TOPOLOGY_SPECS[r].tabKey === "verification");
@@ -721,23 +957,54 @@ export class RolePaneManager {
     const splitDepths = new Map(livePanes.map(pane => [pane.paneId, 0]));
     const manifestPanes: PaneBinding[] = [];
     const startups: { readonly role: PermanentTopologyRole; readonly pending: PaneBinding }[] = [];
-    const persistProgress = async (binding: PaneBinding): Promise<OperationResult<SessionManifest>> => {
-      const panes = [...manifestPanes.filter(p => p.paneId !== binding.paneId), binding];
+    const persistProgress = async (binding?: PaneBinding): Promise<OperationResult<SessionManifest>> => {
+      const panes = binding ? [...manifestPanes.filter(p => p.paneId !== binding.paneId), binding] : [...manifestPanes];
       for (const previous of savedManifest?.panes ?? []) {
         if (!panes.some(p => p.paneId === previous.paneId || p.role === previous.role && p.permanent !== false && previous.permanent !== false)) panes.push(previous);
       }
-      const conversation = panes.find(p => p.role === "conversation");
-      return this.#store.save(SessionManifestSchema.parse({
-        schemaVersion: 2, sessionId: this.#config.sessionId, projectName: this.#config.projectName,
-        workspaceRoot: this.#config.workspaceRoot, herdrWorkspaceId, herdrTabId: finalConversationTabId,
-        status: "initializing", conversationSessionId: this.#config.conversationSessionId ?? savedManifest?.conversationSessionId ?? `conv-${this.#config.sessionId}`,
+      const common = {
+        sessionId: this.#config.sessionId, projectName: this.#config.projectName,
+        workspaceRoot: this.#config.workspaceRoot, herdrWorkspaceId,
+        status: "initializing", conversationSessionId,
         activeRunIds: savedManifest?.activeRunIds ?? [], panes,
         ...(savedManifest?.roleProfiles ? { roleProfiles: savedManifest.roleProfiles } : {}),
-        attachTarget: { role: "conversation", paneId: conversation?.paneId ?? binding.paneId },
         createdAt: savedManifest?.createdAt ?? this.#clock().toISOString(), updatedAt: this.#clock().toISOString(),
         metadata: { ...savedManifest?.metadata, startupPending: true }
+      };
+      if (progress !== null) {
+        return this.#store.save(SessionManifestV3Schema.parse({
+          ...common, schemaVersion: 3, herdrTabId: progress.tabId, progressPane: progress, attachTarget: progressAttachTarget(progress)
+        }), options);
+      }
+      const conversation = panes.find(p => p.role === "conversation");
+      return this.#store.save(SessionManifestV2Schema.parse({
+        ...common, schemaVersion: 2, herdrTabId: finalConversationTabId,
+        attachTarget: { role: "conversation", paneId: conversation?.paneId ?? binding?.paneId }
       }), options);
     };
+
+    // The progress pane is launched before any specialist so the user can follow startup. A stored, still-live
+    // progress pane is reconciled instead (never replaying an uncertain launch).
+    if (progress !== null) {
+      const saved = await persistProgress();
+      if (!saved.ok) return saved;
+      const deps = this.#progressDeps(herdrWorkspaceId, async pane => {
+        progress = pane;
+        const written = await persistProgress();
+        if (!written.ok) throw new Error(`Failed to persist progress pane: ${written.error.message}`);
+      }, options);
+      const reused = savedDirector?.progressPane !== undefined && savedDirector.status !== "down" &&
+        savedDirector.progressPane.paneId === progress.paneId && savedDirector.progressPane.tabId === progress.tabId;
+      const configured = this.#config.progressCommand ?? [];
+      const sameCommand = progress.command.length === configured.length && progress.command.every((part, index) => part === configured[index]);
+      // `bflow up` recovers a failed pane, or one running an older command, by an owned replacement under the restart budget.
+      progress = !reused
+        ? await launchProgressPane(deps, { workspaceId: herdrWorkspaceId, tabId: progress.tabId, paneId: progress.paneId,
+          terminalId: progress.terminalId, command: progress.command, restarts: progress.restarts })
+        : progress.phase === "failed" || !sameCommand
+          ? await replaceProgressPane(deps, progress, configured)
+          : await ensureProgressPane(deps, progress);
+    }
 
     for (const role of configuredPermanentRoles) {
       const spec = ROLE_TOPOLOGY_SPECS[role];
@@ -1023,6 +1290,34 @@ export class RolePaneManager {
     for (const tabId of new Set(manifestPanes.filter(p => p.permanent).map(p => p.tabId))) {
       await balanceOwnedTab(args => this.#runHerdr(args, options), herdrWorkspaceId, tabId, manifestPanes.filter(p => p.tabId === tabId).map(p => p.paneId));
     }
+    if (progress !== null) {
+      // Step 3 (director): focus the progress tab. The pane runs no agent, so there is no agent focus.
+      const focused = await this.#focusProgressTab(herdrWorkspaceId, progress.tabId, options);
+      if (!focused.ok) return focused;
+      const directorManifest: SessionManifestV3 = {
+        schemaVersion: 3,
+        sessionId: this.#config.sessionId,
+        projectName: this.#config.projectName,
+        workspaceRoot: this.#config.workspaceRoot,
+        herdrWorkspaceId,
+        herdrTabId: progress.tabId,
+        status: startupPanesHealthy(manifestPanes) && progress.phase === "running" ? "up" : "degraded",
+        conversationSessionId,
+        activeRunIds: savedManifest?.activeRunIds ?? [],
+        panes: manifestPanes,
+        ...(savedManifest?.roleProfiles ? { roleProfiles: savedManifest.roleProfiles } : {}),
+        progressPane: progress,
+        attachTarget: progressAttachTarget(progress),
+        createdAt: savedManifest?.createdAt ?? this.#clock().toISOString(),
+        updatedAt: this.#clock().toISOString(),
+        metadata: { ...savedManifest?.metadata, startupPending: false, panePresentationVersion: 1 }
+      };
+      const parsedDirector = SessionManifestV3Schema.safeParse(directorManifest);
+      if (!parsedDirector.success) {
+        return validationError(`Failed to create valid SessionManifest: ${parsedDirector.error.message}`, parsedDirector.error.issues);
+      }
+      return this.#store.save(parsedDirector.data, options);
+    }
     // Step 3: Focus Conversation Pane
     const chatBinding = manifestPanes.find((p) => p.role === "conversation");
     if (!chatBinding) {
@@ -1053,7 +1348,7 @@ export class RolePaneManager {
     const allHealthy = startupPanesHealthy(manifestPanes);
     const status: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
-    const manifest: SessionManifest = {
+    const manifest: SessionManifestV2 = {
       schemaVersion: 2,
       sessionId: this.#config.sessionId,
       projectName: this.#config.projectName,
@@ -1061,8 +1356,7 @@ export class RolePaneManager {
       herdrWorkspaceId,
       herdrTabId: finalConversationTabId,
       status,
-      conversationSessionId:
-        this.#config.conversationSessionId ?? savedManifest?.conversationSessionId ?? `conv-${this.#config.sessionId}`,
+      conversationSessionId,
       activeRunIds: savedManifest?.activeRunIds ?? [],
       panes: manifestPanes,
       ...(savedManifest?.roleProfiles ? { roleProfiles: savedManifest.roleProfiles } : {}),
@@ -1076,7 +1370,7 @@ export class RolePaneManager {
       metadata: { ...savedManifest?.metadata, startupPending: false, panePresentationVersion: 1 }
     };
 
-    const parsedManifest = SessionManifestSchema.safeParse(manifest);
+    const parsedManifest = SessionManifestV2Schema.safeParse(manifest);
     if (!parsedManifest.success) {
       return validationError(`Failed to create valid SessionManifest: ${parsedManifest.error.message}`, parsedManifest.error.issues);
     }
@@ -1725,6 +2019,11 @@ export class RolePaneManager {
 
   async inspectTopologyHealth(options?: OperationOptions): Promise<OperationResult<TopologyHealthSummary>> {
     try {
+      if (this.#layout === "director") {
+        // The progress pane carries no role binding. A failed reconciliation is not a role anomaly: the stored
+        // progress phase below still decides `degraded`, and the host watchdog reports the failure itself.
+        await this.ensureProgressPane(options);
+      }
       const loadResult = await this.#store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
       const manifest = loadResult.value;
@@ -1909,10 +2208,25 @@ export class RolePaneManager {
           ...mergedPanes.filter(isRuntimeOwnedPane).map((p) => p.bindingId)
         ]);
         const healthyNow = anomalies.every((anomaly) => runtimeOwned.has(anomaly.bindingId));
+        if (isDirectorSessionManifest(latestManifest)) {
+          const directorStatus: SessionManifestStatus = healthyNow && latestManifest.progressPane?.phase === "running" ? "up" : "degraded";
+          const validatedDirector = SessionManifestV3Schema.safeParse({
+            ...latestManifest, status: directorStatus, panes: mergedPanes, updatedAt: this.#clock().toISOString()
+          });
+          if (!validatedDirector.success) {
+            return validationError(
+              `Failed to validate updated session manifest: ${validatedDirector.error.message}`,
+              validatedDirector.error.issues
+            );
+          }
+          const savedDirector = await this.#store.save(validatedDirector.data, options);
+          if (!savedDirector.ok) return savedDirector;
+          return ok(healthyNow);
+        }
         const newStatus: SessionManifestStatus = healthyNow && hasConversation && hasCoordinator ? "up" : "degraded";
         const updatedConversation = mergedPanes.find((p) => p.role === "conversation" && p.permanent);
 
-        const updatedManifest: SessionManifest = {
+        const updatedManifest: SessionManifestV2 = {
           ...latestManifest,
           status: newStatus,
           panes: mergedPanes,
@@ -1928,7 +2242,7 @@ export class RolePaneManager {
           updatedAt: this.#clock().toISOString()
         };
 
-        const validatedManifest = SessionManifestSchema.safeParse(updatedManifest);
+        const validatedManifest = SessionManifestV2Schema.safeParse(updatedManifest);
         if (!validatedManifest.success) {
           return validationError(
             `Failed to validate updated session manifest: ${validatedManifest.error.message}`,
@@ -1953,14 +2267,14 @@ export class RolePaneManager {
     }
   }
 
-  async recoverAfterRestart(options?: OperationOptions): Promise<OperationResult<SessionManifest>> {
+  async recoverAfterRestart(options?: OperationOptions): Promise<OperationResult<SessionManifestV2>> {
     try {
       // Env-at-creation requirements are validated before any side effect.
       const socketCheck = this.#requireSocketFor(PERMANENT_TOPOLOGY_ROLES.map(role => this.#config.roleConfigs?.[role]?.launch));
       if (!socketCheck.ok) return socketCheck;
       const envPaneLaunch = new Map<string, string>();
 
-      const loadResult = await this.#store.load(this.#config.sessionId, options);
+      const loadResult = await this.#v2Store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
       const savedManifest = loadResult.value;
       if (!savedManifest) {
@@ -2316,7 +2630,7 @@ export class RolePaneManager {
       const allHealthy = startupPanesHealthy(recoveredPanes);
       const newStatus: SessionManifestStatus = (allHealthy && chatBinding && coordinatorBinding) ? "up" : "degraded";
 
-      const recoveredManifest: SessionManifest = {
+      const recoveredManifest: SessionManifestV2 = {
         ...savedManifest,
         herdrWorkspaceId,
         herdrTabId,
@@ -2330,12 +2644,12 @@ export class RolePaneManager {
         updatedAt: this.#clock().toISOString()
       };
 
-      const parsed = SessionManifestSchema.safeParse(recoveredManifest);
+      const parsed = SessionManifestV2Schema.safeParse(recoveredManifest);
       if (!parsed.success) {
         return validationError(`Failed to validate recovered manifest: ${parsed.error.message}`, parsed.error.issues);
       }
 
-      const saveResult = await this.#store.save(parsed.data, options);
+      const saveResult = await this.#v2Store.save(parsed.data, options);
       if (!saveResult.ok) return saveResult;
 
       return ok(saveResult.value);
@@ -2346,7 +2660,7 @@ export class RolePaneManager {
 
   async focusConversationPane(options?: OperationOptions): Promise<OperationResult<PaneBinding>> {
     try {
-      const loadResult = await this.#store.load(this.#config.sessionId, options);
+      const loadResult = await this.#v2Store.load(this.#config.sessionId, options);
       if (!loadResult.ok) return loadResult;
       const manifest = loadResult.value;
       if (!manifest) {
@@ -2393,10 +2707,10 @@ export class RolePaneManager {
       parseAgentInfoResult(agentFocusOutcome, "agent_info");
 
       const saveResult = await this.#serializeAllocation(async () => {
-        const latestLoad = await this.#store.load(this.#config.sessionId, options);
+        const latestLoad = await this.#v2Store.load(this.#config.sessionId, options);
         if (!latestLoad.ok) return latestLoad;
         const base = latestLoad.value ?? manifest;
-        const updatedManifest: SessionManifest = {
+        const updatedManifest: SessionManifestV2 = {
           ...base,
           attachTarget: {
             role: "conversation",
@@ -2405,7 +2719,7 @@ export class RolePaneManager {
           },
           updatedAt: this.#clock().toISOString()
         };
-        return this.#store.save(updatedManifest, options);
+        return this.#v2Store.save(updatedManifest, options);
       });
       if (!saveResult.ok) return saveResult;
 
@@ -3275,7 +3589,11 @@ export class RolePaneManager {
           p.bindingId === binding.bindingId ? validatedBinding : p
         );
 
-        const updatedManifest: SessionManifest = {
+        const updatedManifest: SessionManifest = isDirectorSessionManifest(base) ? {
+          ...base,
+          panes: updatedPanes,
+          updatedAt: this.#clock().toISOString()
+        } : {
           ...base,
           panes: updatedPanes,
           ...(binding.role === "conversation"

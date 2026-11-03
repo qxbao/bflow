@@ -108,7 +108,20 @@ export interface AgenticPolicies {
   assertReadyToImplement(strategy: unknown): void;
   assertEvidenceComplete(strategy: unknown): void;
 }
+/**
+ * Director-mode mailbox (ADR 0009, R-B2-2/R-B2-5). Its presence on the ports is the session mode: the host passes it only
+ * for an activated v3 manifest. Every outbound addressed to the logical `coordinator` (without a parent assignment) is
+ * written here instead of Herdr. A mailbox write is a delivery, never task-success evidence.
+ */
+export interface DirectorRuntimePort {
+  /** Idempotent per message_id; durable before resolve. Never Herdr. */
+  deliver(message: RoleMessage): Promise<void>;
+  /** Director presence is not `absent`; gates automatic resume, which only spends budget when someone can read the wake. */
+  present(): Promise<boolean>;
+}
 export interface AgenticRuntimePorts {
+  /** Director session mode; absent in v2 (Conversation/Coordinator pane) sessions. */
+  director?: DirectorRuntimePort;
   roleProfiles?: readonly ResolvedRoleProfileSnapshot[];
   roleProfileDefaults?: Readonly<Partial<Record<AgentRole, RoleProfilePin>>>;
   preflightRoleProfile?(snapshot: ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): Promise<void>;
