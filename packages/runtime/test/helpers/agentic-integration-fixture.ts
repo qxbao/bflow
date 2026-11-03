@@ -6,21 +6,21 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
 import { expect, it } from "vitest";
-import { AgentResultSchema, ApprovalDecisionSchema, RoleMessageSchema, VerificationResultSchema, type PaneBinding, type Specification, type QualityGate, type QualityGateDefinition, type QualityGateContext } from "@bflow/contracts";
+import { AgentResultSchema, ApprovalDecisionSchema, DelegationRequestSchema, RoleMessageSchema, SessionManifestV3Schema, VerificationResultSchema, type PaneBinding, type RoleMessage, type Specification, type QualityGate, type QualityGateDefinition, type QualityGateContext } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
 import { createSignedBindingReceipt } from "../../src/agentic/receipt-host.js";
 import { AgenticWorkflowRuntime } from "../../src/agentic/runtime.js";
-import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "../../src/agentic/ports.js";
+import { loadAgenticPolicies, type AgenticRuntimePorts, type DirectorRuntimePort, type PanePolicy } from "../../src/agentic/ports.js";
 import { createAgenticConversationHost } from "../../src/agentic/conversation.js";
 import { HostDevelopment } from "../../src/agentic/host-development.js";
 import { DEFAULT_HOST_CHECKS, HostVerification } from "../../src/agentic/host-verification.js";
 import { parseBehavioralCommands, type BehavioralCommand, type RunnerProfile } from "../../src/agentic/behavioral-runner.js";
 import { TestRunnerSource } from "../../src/agentic/task-commands.js";
 import { HostReceiptJournal } from "../../src/agentic/host-receipts.js";
-import { digest } from "../../src/agentic/journal.js";
+import { AgenticJournal, digest } from "../../src/agentic/journal.js";
 import type { RunRecord } from "../../src/agentic/journal.js";
 import { reworkVerificationBinding } from "../../src/agentic/rework-causality.js";
 import { FakeAgentTransport } from "./fake-transport.js";
@@ -39,7 +39,17 @@ export class Panes implements PanePolicy {
     session: { source: "test", kind: "id", value: `session-${role}` },
     transportState: "idle", boundAt: new Date().toISOString()
   }));
-  async getManifest() { return { ok: true as const, value: { schemaVersion: 2 as const, sessionId: "session-1", projectName: "Test", workspaceRoot: "/tmp", herdrWorkspaceId: "workspace-1", herdrTabId: "tab-1", status: "up" as const,
+  /** Director layout (manifest v3): no Conversation/Coordinator pane, a running non-LLM progress pane is the attach target. */
+  director = false;
+  async getManifest() {
+    if (this.director) {
+      const at = new Date().toISOString();
+      return { ok: true as const, value: SessionManifestV3Schema.parse({ schemaVersion: 3, sessionId: "session-1", projectName: "Test", workspaceRoot: "/tmp",
+        herdrWorkspaceId: "workspace-1", herdrTabId: "tab-1", status: "up", conversationSessionId: "session-1", activeRunIds: [], panes: this.bindings,
+        progressPane: { tabId: "tab-progress", paneId: "pane-progress", command: ["bflow", "progress", "--follow"], phase: "running", restarts: [], launchedAt: at },
+        attachTarget: { role: "progress", tabId: "tab-progress", paneId: "pane-progress" }, createdAt: at, updatedAt: at }) };
+    }
+    return { ok: true as const, value: { schemaVersion: 2 as const, sessionId: "session-1", projectName: "Test", workspaceRoot: "/tmp", herdrWorkspaceId: "workspace-1", herdrTabId: "tab-1", status: "up" as const,
     conversationSessionId: "session-1", activeRunIds: [], panes: this.bindings, attachTarget: { role: "conversation" as const, paneId: "pane-conversation" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } }; }
   async getRoleBinding(selector: string) { return { ok: true as const, value: this.bindings.find(p => [p.role, p.bindingId, p.paneId, p.agentId].includes(selector)) ?? null }; }
   readonly missing = new Set<string>();
@@ -55,7 +65,22 @@ export class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-export async function fixture(options: { additionalChecks?: QualityGateDefinition[]; additionalGates?: QualityGate[]; dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial" } = {}) {
+/** In-memory Director mailbox port: records every delivery call; `fail` makes the next calls throw, `presence` drives resume gating. */
+export class FakeDirectorPort implements DirectorRuntimePort {
+  readonly delivered: RoleMessage[] = [];
+  deliverCalls = 0;
+  presentCalls = 0;
+  fail: Error | undefined;
+  presence = true;
+  async deliver(message: RoleMessage): Promise<void> {
+    this.deliverCalls++;
+    if (this.fail) throw this.fail;
+    if (!this.delivered.some(item => item.message_id === message.message_id)) this.delivered.push(RoleMessageSchema.parse(message));
+  }
+  async present(): Promise<boolean> { this.presentCalls++; return this.presence; }
+}
+
+export async function fixture(options: { additionalChecks?: QualityGateDefinition[]; additionalGates?: QualityGate[]; dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial"; director?: boolean } = {}) {
   if (options.highRisk) options = { ...options, complex: true };
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
@@ -71,6 +96,9 @@ export async function fixture(options: { additionalChecks?: QualityGateDefinitio
   const artifacts = unwrap(await openFilesystemArtifactStore({ root: join(root, "artifacts"), storeId: "p19" }));
   cleanups.push(async () => { store.close(); artifacts.close(); await rm(root, { recursive: true, force: true }); });
   const transport = new FakeAgentTransport(); const panes = new Panes();
+  // Director session: manifest v3 without Conversation/Coordinator panes; Runtime routes Coordinator-bound outbound to this port.
+  const director = options.director ? new FakeDirectorPort() : undefined;
+  if (options.director) { panes.director = true; panes.bindings = panes.bindings.filter(pane => !["conversation", "coordinator"].includes(pane.role)); }
   if (options.behavioral) transport.customSendHandler = request => {
     const nativeProofRequired = JSON.parse(request.instruction).type === "task.assignment";
     const handle = { executionId: randomUUID(), requestId: request.requestId, attemptId: request.attemptId, runId: request.runId,
@@ -149,7 +177,7 @@ export async function fixture(options: { additionalChecks?: QualityGateDefinitio
     authenticateMessage: async () => true, authenticateResult: async () => true, authenticateEvidence: async (result: any) => options.behavioral ? verification.authenticateEvidence(result) : true,
     authenticateGateResult: async (result: any) => options.behavioral ? verification.authenticateGate(result) : true,
     authorizeHuman: async (decision: any) => options.behavioral ? receipts.authenticateHuman(decision) : decision.decidedBy === "human-1",
-    projectApprovalRequired: () => options.humanApproval === true };
+    projectApprovalRequired: () => options.humanApproval === true, ...(director ? { director } : {}) };
   const runtimeOptions = { journalDirectory: join(root, "journal"), repositoryPath: repository };
   runtime = new AgenticWorkflowRuntime(ports, runtimeOptions);
   const spec: Specification = draft(options.complex ? "api" : options.behavioral ? "bugfix" : "documentation");
@@ -186,7 +214,13 @@ export async function fixture(options: { additionalChecks?: QualityGateDefinitio
     acceptanceCriteria: spec.acceptanceCriteria, inputArtifacts: [], priority: "normal", requestedAt: time, idempotencyKey: "intake-1" };
   const envelope = (type: string, payload: unknown, extra: any = {}) => RoleMessageSchema.parse({ schema_version: 2, message_id: randomUUID(), correlation_id: "correlation-1", run_id: "run-1",
     sender: { role: "conversation", agent_id: "conversation", pane_id: "pane-conversation" }, recipient: { role: "coordinator" }, type, payload, artifact_references: [], idempotency_key: randomUUID(), ...extra });
-  if (options.intake !== false) await runtime.receiveHerdr(envelope("delegation.request", delegation, { message_id: "intake-1", idempotency_key: "intake-1" }));
+  // A Director run is admitted without a RoleMessage (R-B2-4): seed the same intake RunRecord a Director admission writes.
+  if (options.intake !== false && director) await new AgenticJournal(runtimeOptions.journalDirectory, repository).exclusive(async (state, save) => {
+    state.runs.push({ runId: "run-1", delegation: DelegationRequestSchema.parse({ ...delegation, requestedBy: "director", messageId: "director-intake-1",
+      idempotencyKey: "director:intake-1" }), status: "intake", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3 });
+    await save();
+  });
+  else if (options.intake !== false) await runtime.receiveHerdr(envelope("delegation.request", delegation, { message_id: "intake-1", idempotency_key: "intake-1" }));
   const inspect = async () => await runtime.inspect("run-1") as any;
   const dossier = async () => { const value = await inspect(); return value.tasks[0].spec; };
   async function evidence(taskId: string, phase: "red" | "green" | "refactor" | "verification" = "verification") {
@@ -263,7 +297,7 @@ export async function fixture(options: { additionalChecks?: QualityGateDefinitio
     }
     await runtime.receiveHerdr(envelope("approval.decision", approved));
   }
-  return { enableDynamicGate: () => { dynamicReady = true; }, root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox,
+  return { enableDynamicGate: () => { dynamicReady = true; }, root, repository, get runtime() { return runtime; }, ports, privateKey, publicKey, runtimeOptions, panes, transport, conversationInbox, director,
     reenterOnConversationDelivery(action: (message: RoleMessage) => Promise<unknown>) { conversationReentry = action; }, spec, def, envelope, inspect, dossier, evidence, submit, approve, verification, receipts,
     calls, integrityCalls, localReview: (context: QualityGateContext) => gates.find(gate => gate.id === "review")!.evaluate(context), setFailReview: (value: boolean) => { failReview = value; },
     setReviewerExecutor: (value: string) => { reviewerExecutorId = value; },

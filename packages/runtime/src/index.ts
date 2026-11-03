@@ -87,7 +87,7 @@ export type {
 // P19: durable adaptive Agentic SDLC orchestration through the frozen v2 contracts.
 export { AgenticWorkflowRuntime } from "./agentic/runtime.js";
 export { loadAgenticPolicies } from "./agentic/ports.js";
-export type { AgenticRuntimePorts, AgenticPolicies, AgenticCompositionOptions, PanePolicy } from "./agentic/ports.js";
+export type { AgenticRuntimePorts, AgenticPolicies, AgenticCompositionOptions, DirectorRuntimePort, PanePolicy } from "./agentic/ports.js";
 export { CoordinatorTools, COORDINATOR_TOOLS, COORDINATOR_ROLE_PROFILE } from "./agentic/tools.js";
 export { createAgenticConversationHost } from "./agentic/conversation.js";
 export type { AgenticConversationHost } from "./agentic/conversation.js";
