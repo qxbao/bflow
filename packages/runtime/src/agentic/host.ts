@@ -59,6 +59,7 @@ import { callHost } from "./host-protocol.js";
 import { effectiveFastPathMode, effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
+import { selectExtensionCoordinatorDelivery } from "./extension-coordinator.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS, type AgenticWorkflowRuntime } from "./runtime.js";
@@ -1730,12 +1731,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "start_extension") {
       if (role !== "coordinator") throw new Error("Only Coordinator starts an admitted extension");
       const runId = textField(parameters.runId), state = record(await host.runtime.inspect());
-      const original = (state.outbound as unknown[]).map(record).find(out => out.status === "accepted" && out.handle &&
-        record(out.message).run_id === runId && record(out.message).type === "delegation.request" &&
-        record(record(out.message).sender).role === "conversation" && record(record(out.handle).target).paneId === binding.paneId &&
-        digest(record(record(out.handle).target).session) === digest(binding.session));
-      if (!original || !await host.extensions.owns(runId)) throw new Error("No accepted extension delegation belongs to this Coordinator");
-      await host.runtime.validateProviderDelivery(RoleMessageSchema.parse(original.message), binding);
+      if (!await host.extensions.owns(runId)) throw new Error("No admitted extension belongs to this run");
+      const admitted = record(await host.extensions.inspect(runId));
+      const delivery = selectExtensionCoordinatorDelivery({ outbound: state.outbound as unknown[],
+        run: (state.runs as unknown[]).map(record).find(run => run.runId === runId), delegation: admitted.delegation, binding });
+      await host.runtime.validateProviderDelivery(delivery, binding);
       const kind = z.enum(["analysis", "qa"]).parse(parameters.kind);
       const packPin = z.object({ id: z.string().min(1), version: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parameters.packPin);
       const started = await host.extensions.start(kind === "analysis" ? { kind, runId, intake: AnalysisIntakeSchema.parse(parameters.intake), packPin }
