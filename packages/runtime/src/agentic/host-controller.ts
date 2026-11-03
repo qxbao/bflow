@@ -16,6 +16,7 @@ import {
   type RuntimeService, type SessionManifest
 } from "@bflow/contracts";
 import { callHost } from "./host-protocol.js";
+import { DIRECTOR_LIMITS, type JsonValue } from "@bflow/contracts";
 import { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { digest, record, syncFileHandle, textField } from "./journal.js";
 import { parseBehavioralCommands, type BehavioralCommand } from "./behavioral-runner.js";
@@ -189,6 +190,31 @@ export async function queryAgenticHostInteraction(options: { repositoryPath: str
   if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
     throw new Error("Foreign host configuration");
   return callHost(configuration.socketPath, configuration.token, method, input, 5000);
+}
+async function locateDirectorHost(options: { repositoryPath: string; sessionId: string }) {
+  const repositoryPath = await realpath(options.repositoryPath);
+  if (!/^[A-Za-z0-9._-]+$/.test(options.sessionId) || options.sessionId.includes("..")) throw new Error("Unsafe host session ID");
+  const root = findPrivateRuntimeStateDirectory(repositoryPath);
+  if (!root) throw new Error("Host unavailable");
+  const directory = resolve(root, "host", options.sessionId);
+  const configuration = await readHostConfiguration(join(directory, "host.json")).catch(() => { throw new Error("Host unavailable"); });
+  if (configuration.repositoryPath !== repositoryPath || configuration.sessionId !== options.sessionId || configuration.directory !== directory)
+    throw new Error("Foreign host configuration");
+  return configuration;
+}
+/** Owner-token Director methods on an already running host; never starts a host. */
+export async function callDirectorOwnerHost(options: { repositoryPath: string; sessionId: string },
+  method: "director_register" | "director_revoke" | "director_progress" | "director_hook_note" | "director_issues" | "director_issue" | "director_issue_status",
+  input: unknown, timeoutMs = 10_000): Promise<unknown> {
+  const configuration = await locateDirectorHost(options);
+  return callHost(configuration.socketPath, configuration.token, method, input, timeoutMs);
+}
+/** Director-token tool call; the long `director_wait` gets its maximum wait plus slack. */
+export async function callDirectorTool(options: { repositoryPath: string; sessionId: string }, token: string, name: string,
+  args: Record<string, JsonValue>): Promise<unknown> {
+  const configuration = await locateDirectorHost(options);
+  return callHost(configuration.socketPath, token, "director_call", { name, arguments: args },
+    name === "director_wait" ? DIRECTOR_LIMITS.waitMaxMs + 30_000 : 600_000);
 }
 /** Read a scoped artifact from an already existing host; never opens stores or starts a host locally. */
 export async function readHostInteractionArtifact(options: { repositoryPath: string; sessionId: string }, input: unknown) {
