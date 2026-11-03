@@ -13,9 +13,10 @@ vi.mock('three', async () => {
   } };
 });
 vi.mock('../src/features/office/scene/assets', () => ({ acquireModels: async () => ({ models: { furniture: {}, character: {} }, release: f.release }) }));
-vi.mock('../src/features/office/scene/stage', async () => {
+vi.mock('../src/features/office/scene/stage', async importOriginal => {
   const { Group } = await import('three');
-  return { BACKGROUND: '#000000', setShadowCasting: vi.fn(), Stage: class {
+  const real = await importOriginal<typeof import('../src/features/office/scene/stage')>();
+  return { ...real, BACKGROUND: '#000000', setShadowCasting: vi.fn(), Stage: class {
     group = new Group(); objects = []; lights = { key: {}, hemi: {}, accents: [] }; layout = vi.fn(); dispose = vi.fn();
   } };
 });
