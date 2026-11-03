@@ -215,3 +215,9 @@ Hai run đầu thất bại và được hủy qua UI, không dùng force:
 Lỗi chủ động đã làm trên run thành công: tải lại trang giữa verification (giữ URL/3D/việc) và tắt/mở lại Local Server (pairing mới, UI phục hồi ở 3D, thẻ bàn giao vẫn còn). Chưa làm lại lần này: đóng pane Developer (đã có bằng chứng ở các run Luna), đối chiếu DOM với manifest/telemetry ở đủ năm mốc, và truy ngược từng cue ra `handoffId` — chỉ có snapshot workforce (có snapshot với hai Developer) và telemetry cuối (`succeeded`, cohort 2/0/0/0). Vì vậy V9 chỉ đạt ở mức: hai Developer song song, luồng 3D từ tạo việc tới duyệt bàn giao, hai lỗi chủ động; chưa tuyên bố đủ các mục §8.4.
 
 Ghi chú vận hành: HOME cô lập cần `~/.zshrc` rỗng (wizard zsh nuốt ký tự đầu lệnh `claude`) và đăng nhập Claude tối thiểu (credentials/tài khoản được copy tạm, đã xóa sau run). Phát hiện sản phẩm: sau lần bấm quyết định `user_decision` ở panel bị `unknown delivery`, Runtime từ chối trả lời tiếp cho cùng approval đến khi đối chiếu; chưa điều tra sâu.
+
+### Đo lại trên máy rảnh và phân tích — 2026-11-03
+
+Số 3,27 fps ở mục trên là do máy đang tải (V9 live chạy cùng lúc). Đo lại sau khi dừng phiên, cùng source `b9f39695`, Chrome có hardware GL: chunk 171,3 KiB và asset 0,657 MiB đạt; FPS idle 7,75 đạt; không có long task sau load/moving/idle và không có frame khi tab ẩn. **Vẫn vượt ngân sách:** FPS moving cả cửa sổ 22,17 (target 30) và long task vào 3D 103 ms (tối đa 50 ms). Burst moving 29,81 fps (89% khoảng cách frame), nên renderer đã gần trần 30 fps.
+
+Không nới ngưỡng và không thay đổi mã. Lý do: (1) trần 30 fps cộng với camera ease ngắn hơn chu kỳ 750 ms của phép đo (xen kẽ idle 8 fps) khiến trung bình cả cửa sổ không thể đạt 30 mà không đổi thiết kế phép đo hoặc thời lượng ease; (2) CPU profile lúc vào 3D cho thấy thời gian dồn vào link shader của driver (`getProgramInfoLog` ~40 ms, `(program)` ~86 ms), không phải code ứng dụng có thể cắt nhỏ gọn. Hai chỉ số này giữ nguyên trạng thái "chưa đạt".
