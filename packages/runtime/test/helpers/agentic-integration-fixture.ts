@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
 import { expect, it } from "vitest";
-import { AgentResultSchema, ApprovalDecisionSchema, DelegationRequestSchema, RoleMessageSchema, SessionManifestV3Schema, VerificationResultSchema, type PaneBinding, type RoleMessage, type Specification, type QualityGate, type QualityGateDefinition, type QualityGateContext } from "@bflow/contracts";
+import { AgentResultSchema, ApprovalDecisionSchema, DelegationRequestSchema, RoleMessageSchema, SessionManifestV3Schema, VerificationResultSchema, type ApprovalDecision, type PaneBinding, type RoleMessage, type Specification, type QualityGate, type QualityGateDefinition, type QualityGateContext } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import { openSqliteRunStore } from "@bflow/persistence";
@@ -80,7 +80,9 @@ export class FakeDirectorPort implements DirectorRuntimePort {
   async present(): Promise<boolean> { this.presentCalls++; return this.presence; }
 }
 
-export async function fixture(options: { additionalChecks?: QualityGateDefinition[]; additionalGates?: QualityGate[]; dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial"; director?: boolean } = {}) {
+export async function fixture(options: { additionalChecks?: QualityGateDefinition[]; additionalGates?: QualityGate[]; dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial"; director?: boolean;
+  /** Test-only override of the specification approver; omitted, the fixture keeps its `coordinator`/`human-1` principals. */
+  authorizeApprover?: (decision: ApprovalDecision, humanRequired: boolean) => boolean | Promise<boolean> } = {}) {
   if (options.highRisk) options = { ...options, complex: true };
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
@@ -162,7 +164,7 @@ export async function fixture(options: { additionalChecks?: QualityGateDefinitio
   const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts,
     gates: options.dynamicGate ? actualGates.filter(gate => gate.id !== "regression") : actualGates,
     ...(options.dynamicGate ? { dynamicGates: () => dynamicReady ? actualGates.filter(gate => gate.id === "regression") : [] } : {}),
-    loadSpecification: id => runtime.loadSpecification(id), authorizeApprover: decision => ["coordinator", "human-1"].includes(decision.decidedBy) });
+    loadSpecification: id => runtime.loadSpecification(id), authorizeApprover: options.authorizeApprover ?? (decision => ["coordinator", "human-1"].includes(decision.decidedBy)) });
   // Conversation-bound messages are delivered through the trusted inbox, never through transport or the input box.
   const conversationInbox: RoleMessage[] = [];
   let conversationReentry: ((message: RoleMessage) => Promise<unknown>) | undefined;
