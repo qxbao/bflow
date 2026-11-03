@@ -7,7 +7,7 @@ import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { join, extname, sep } from 'node:path';
 import { WebHttpContracts, WebHttpPathParamsSchema, WebProjectInspectionResultSchema, WebProjectPreviewResultSchema,
-  WebProjectMutationStatusResultSchema, WebProjectConfigurationResultSchema, WebProjectInitializationResultSchema, WebProjectSessionResultSchema, WebRunPageResultSchema, WebRunViewResultSchema, WebDecisionPageResultSchema, WebWorkforceViewSchema, WebActivityEntrySchema, WebPageSchema, WEB_LIMITS,
+  WebProjectMutationStatusResultSchema, WebProjectConfigurationResultSchema, WebProjectInitializationResultSchema, WebProjectSessionResultSchema, WebRunPageResultSchema, WebRunViewResultSchema, WebDecisionPageResultSchema, WebWorkforceViewSchema, WebActivityEntrySchema, WebWorkforceExcerptsSchema, WebAgentTranscriptSchema, WebPageSchema, WEB_LIMITS,
   type UserInteractionClient } from '@bflow/contracts/web';
 import { WebAuthenticatedContextSchema, type WebAuthenticatedContext } from '@bflow/contracts/web-host';
 import { BrowserSessions } from './session.js';
@@ -16,6 +16,8 @@ import { Operations } from './lifecycle-operations.js';
 import { OperationResultSchema } from '@bflow/contracts';
 import { HttpError, unwrap, observeWithinDeadline } from './errors.js';
 
+const WebExcerptsResultSchema=OperationResultSchema(WebWorkforceExcerptsSchema);
+const WebTranscriptResultSchema=OperationResultSchema(WebAgentTranscriptSchema);
 const WebWorkforceResultSchema=OperationResultSchema(WebWorkforceViewSchema);
 const WebActivityPageResultSchema=OperationResultSchema(WebPageSchema(WebActivityEntrySchema));
 
@@ -121,6 +123,17 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
         if(!client.readWorkforce)throw new HttpError('operation_not_allowed');
         const read=client.readWorkforce.bind(client);
         const value=unwrap(WebWorkforceResultSchema.parse(await observeWithinDeadline(()=>read(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+      }
+      if(name==='workforceExcerpts'){
+        if(!client.readWorkforceExcerpts)throw new HttpError('operation_not_allowed');
+        const read=client.readWorkforceExcerpts.bind(client);
+        const value=unwrap(WebExcerptsResultSchema.parse(await observeWithinDeadline(()=>read(id))));if(value.projectId!==id)throw new HttpError('unavailable');respond(value);return;
+      }
+      if(name==='agentTranscript'){
+        if(!client.readAgentTranscript)throw new HttpError('operation_not_allowed');
+        const read=client.readAgentTranscript.bind(client);
+        const value=unwrap(WebTranscriptResultSchema.parse(await observeWithinDeadline(()=>read(id,params.instanceId!))));
+        if(value.projectId!==id||value.instanceId!==params.instanceId)throw new HttpError('unavailable');respond(value);return;
       }
       if(name==='activity'){
         if(!client.readRunActivity)throw new HttpError('operation_not_allowed');

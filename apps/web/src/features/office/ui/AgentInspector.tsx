@@ -3,6 +3,7 @@ import type { WebActivityEntry, WebAgentView, WebEvidenceReference, WebHandoffVi
 import { ApiClient, ApiError } from '../../../api/client';
 import { Evidence } from '../../../components/DecisionCard';
 import { useRead } from '../../data';
+import { AgentTranscript } from '../../agents';
 import { roleLabel } from '../model/labels';
 import type { Certainty, OfficeAgent } from '../model/types';
 
@@ -65,6 +66,11 @@ export function AgentInspector({ api, projectId, agent, view, handoffs, revision
       {KIND[w.kind] ?? w.kind}: {titleOf(w.runId, w.taskId)} ({DELIVERY[w.delivery] ?? w.delivery})
     </li>)}</ul>}
     {runIds.map(r => <Activity key={r} api={api} projectId={projectId} runId={r} revision={revision} />)}
+    <section aria-label="Nội dung gần đây" className="mt-3">
+      <h3 className="m-0 text-sm">Nội dung gần đây</h3>
+      <AgentTranscript key={agent.instanceId} api={api} projectId={projectId} instanceId={agent.instanceId} className="h-56" />
+      <p className="my-1 text-sm"><Link to={`${base}/agents?agent=${encodeURIComponent(agent.instanceId)}`}>Xem tất cả nhân viên →</Link></p>
+    </section>
     <section aria-label="Tài liệu kiểm chứng" className="mt-3">
       <h3 className="m-0 text-sm">Tài liệu kiểm chứng</h3>
       {evidence.length === 0 ? <p className="my-1 text-sm text-muted">Chưa có tài liệu đính kèm.</p> : evidence.map(e => <Evidence key={e.artifactId} api={api} projectId={projectId} evidence={e} />)}

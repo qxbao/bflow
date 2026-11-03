@@ -290,6 +290,7 @@ const rows: Row[] = [
     localStorage.setItem('bflow:web:operations:p:unpaired:create', '{broken');
     await mount();
     const bar = await screen.findByRole('region', { name: 'Thanh điều khiển' });
+    fireEvent.click(await within(bar).findByRole('button', { name: /Thao tác đã gửi/ }));
     await waitFor(() => expect(within(bar).getAllByRole('alert').length).toBeGreaterThan(0));
     expect(main().querySelector('[role="alert"]')).toBeNull();
   } },
@@ -297,6 +298,7 @@ const rows: Row[] = [
     localStorage.setItem('bflow:web:operations:p:unpaired:create', '{broken');
     await mount();
     const bar = await screen.findByRole('region', { name: 'Thanh điều khiển' });
+    fireEvent.click(await within(bar).findByRole('button', { name: /Thao tác đã gửi/ }));
     fireEvent.click(await within(bar).findByRole('button', { name: 'Xóa mã phục hồi bị hỏng' }));
     await waitFor(() => expect(localStorage.getItem('bflow:web:operations:p:unpaired:create')).toBeNull());
   } },
@@ -389,6 +391,22 @@ test.each(rows.map(r => [r.row, r.name, r] as const))('parity row %i: %s', async
     expect(localStorage.getItem(MODE_KEY)).toBe('visual');
   }
 }, 20000);
+
+const overviewCamera = (): void => { fireEvent.click(within(screen.getByRole('group', { name: 'Góc nhìn camera' })).getByRole('button', { name: 'Toàn cảnh' })); };
+test('Toàn cảnh closes a route panel and returns to the index', async () => {
+  await openRunViaRail();
+  expect(panelOpen()).toBe(true);
+  overviewCamera();
+  await waitFor(() => expect(panelOpen()).toBe(false));
+  expect(where).toBe('/projects/p');
+});
+test('Toàn cảnh closes an open inspector', async () => {
+  await mount();
+  await mirror(/Máy chủ/);
+  expect(await screen.findByRole('heading', { name: /Máy chủ \(phiên dự án\)/ })).toBeTruthy();
+  overviewCamera();
+  await waitFor(() => expect(panelOpen()).toBe(false));
+});
 
 // §8.3 "unknown_delivery": the scene never walks for an uncertain delivery; it asks a question and the mirror says "chưa xác định".
 test('unknown_delivery reaches the renderer as a question cue and never as a walk', async () => {

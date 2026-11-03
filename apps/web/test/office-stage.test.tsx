@@ -212,6 +212,19 @@ describe('OfficeStage control', () => {
   });
 });
 
+describe('excerpts', () => {
+  test('a map present before the renderer exists reaches it, and later maps follow', async () => {
+    const first = new Map([['a', 'one']]);
+    const view = render(<OfficeStage model={model()} onSelect={noop} createRenderer={async (...args) => { const f = await factory(...args); (f as OfficeRenderer).setExcerpts = vi.fn(); return f; }} excerpts={first} />);
+    await settle();
+    const fake = fakes[0]!;
+    expect(fake.setExcerpts).toHaveBeenCalledWith(first);
+    const second = new Map([['a', 'two']]);
+    view.rerender(<OfficeStage model={model()} onSelect={noop} createRenderer={factory} excerpts={second} />);
+    expect(fake.setExcerpts).toHaveBeenLastCalledWith(second);
+  });
+});
+
 describe('label layer writes', () => {
   test('an unchanged label position writes no style', async () => {
     const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');
@@ -236,17 +249,33 @@ describe('label layer', () => {
     const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');
     const parent = document.createElement('div');
     const layer = createLabelLayer(parent);
-    layer.update([{ id: 'zone:a', kind: 'zone', text: 'Conversation', x: 10, y: 20 }, { id: 'agent:b', kind: 'agent', text: '<img src=x onerror=alert(1)> Dev #1 · Rảnh', x: 30, y: 40 }]);
+    layer.update([{ id: 'agent:a', kind: 'agent', text: 'Dev #2 · Đang làm', x: 10, y: 20 }, { id: 'agent:b', kind: 'agent', text: '<img src=x onerror=alert(1)> Dev #1 · Rảnh', x: 30, y: 40 }]);
     const root = parent.firstElementChild!;
     expect(root.getAttribute('aria-hidden')).toBe('true');
     expect(root.className).toContain('pointer-events-none');
     expect(root.children).toHaveLength(2);
     expect(root.querySelector('img')).toBeNull();
     expect(root.children[1]!.textContent).toContain('<img');
-    layer.update([{ id: 'zone:a', kind: 'zone', text: 'Conversation', x: 11, y: 20 }]);
+    layer.update([{ id: 'agent:a', kind: 'agent', text: 'Dev #2 · Đang làm', x: 11, y: 20 }]);
     expect(root.children).toHaveLength(1);
     layer.destroy();
     expect(parent.children).toHaveLength(0);
+  });
+
+  test('bubble and Zzz labels get their kind and class, hold only inert text and no child elements', async () => {
+    const { createLabelLayer } = await import('../src/features/office/ui/labelLayer');
+    const parent = document.createElement('div');
+    const layer = createLabelLayer(parent);
+    layer.update([{ id: 'bubble:a', kind: 'bubble', text: '<img src=x onerror=alert(1)>\nxong', x: 10, y: 20 }, { id: 'sleep:b', kind: 'sleep', text: 'Zzz', x: 30, y: 40 }]);
+    const [bubble, zzz] = [...parent.querySelectorAll<HTMLElement>('[data-kind]')];
+    expect(bubble!.dataset['kind']).toBe('bubble');
+    expect(bubble!.classList.contains('office-bubble')).toBe(true);
+    expect(zzz!.dataset['kind']).toBe('sleep');
+    expect(zzz!.classList.contains('office-zzz')).toBe(true);
+    expect(parent.querySelectorAll('[data-kind] *')).toHaveLength(0);
+    expect(parent.querySelector('img')).toBeNull();
+    expect(bubble!.textContent).toContain('<img');
+    layer.destroy();
   });
 });
 

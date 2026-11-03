@@ -52,6 +52,12 @@ export async function enterVisual(page: Page, scene = true): Promise<void> {
 /** HUD rail (the shortcut column). */
 export const rail = (page: Page, name: string | RegExp) => page.getByRole('navigation', { name: 'Lối tắt' }).getByRole('button', { name });
 /** Mirror button: the stable surface. It is visually hidden while the scene is healthy, so it is reached by focus and Enter like a keyboard user, never by clicking canvas pixels. */
+/** The operations dock is collapsed by default: expand it (idempotent) before reading operation status. */
+export async function openDock(page: Page): Promise<void> {
+  const toggle = page.getByRole('button', { name: /Thao tác đã gửi/ });
+  await expect(toggle).toBeVisible({ timeout: 15000 });
+  if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click();
+}
 export async function mirror(page: Page, name: string | RegExp): Promise<void> {
   const button = page.getByLabel('Bản văn bản của văn phòng').getByRole('button', { name });
   await button.focus();

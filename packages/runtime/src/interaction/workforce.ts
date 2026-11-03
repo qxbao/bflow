@@ -25,6 +25,9 @@ const sliceSafe = (text: string, max: number): string => {
 };
 const display = (s: ReadSources, text: string, max: number) => sliceSafe((s.redactOption ?? s.redact)?.(text) ?? text, max) || "[redacted]";
 
+/** The one definition of the opaque agent id: a digest of the binding id, so the pane is not exposed. */
+export const instanceIdOf = (bindingId: string): string => "agent-" + hash(bindingId, 32);
+
 type Allocation = WebAgentView["allocation"];
 /**
  * allocationStatus values written by role-pane-manager.ts: "active" (Developer/specialist allocation) and "released"
@@ -49,12 +52,10 @@ function releasedTooLong(pane: PaneBinding, allocation: Allocation, now: number)
 const realTaskId = (out: Outbound) => out.taskId === `message-${out.message.message_id}` ? undefined : out.taskId;
 const realAttemptId = (out: Outbound) => out.attemptId === `attempt-${out.message.message_id}` ? undefined : out.attemptId;
 
-interface Listed { pane: PaneBinding; role: AgentRole; allocation: Allocation; instanceId: string }
+export interface Listed { pane: PaneBinding; role: AgentRole; allocation: Allocation; instanceId: string }
 
-/** Pure, read-only projection of the Session Manifest and journal into agents, their open work and recent handoffs. */
-export function projectWorkforce(s: ReadSources): WebWorkforceView {
-  if (!s.manifest || !s.projectId) throw new Error("Workforce projection requires a manifest and project scope");
-  const manifest = s.manifest, now = Date.parse(s.observedAt);
+/** The listing rules shared by the workforce, excerpts and transcript: contract roles only, released-too-long panes dropped. */
+export function listWorkforcePanes(manifest: { panes: PaneBinding[] }, now: number): Listed[] {
   const listed: Listed[] = [];
   for (const pane of manifest.panes) {
     const role = AgentRoleSchema.safeParse(pane.role);
@@ -62,8 +63,16 @@ export function projectWorkforce(s: ReadSources): WebWorkforceView {
     if (!role.success) continue;
     const allocation = allocationOf(pane);
     if (releasedTooLong(pane, allocation, now)) continue;
-    listed.push({ pane, role: role.data, allocation, instanceId: "agent-" + hash(pane.bindingId, 32) });
+    listed.push({ pane, role: role.data, allocation, instanceId: instanceIdOf(pane.bindingId) });
   }
+  return listed;
+}
+
+/** Pure, read-only projection of the Session Manifest and journal into agents, their open work and recent handoffs. */
+export function projectWorkforce(s: ReadSources): WebWorkforceView {
+  if (!s.manifest || !s.projectId) throw new Error("Workforce projection requires a manifest and project scope");
+  const manifest = s.manifest, now = Date.parse(s.observedAt);
+  const listed = listWorkforcePanes(manifest, now);
   const shown = listed.slice(0, MAX_AGENTS);
   let truncated = listed.length > shown.length;
 

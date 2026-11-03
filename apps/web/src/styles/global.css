@@ -10,6 +10,7 @@
   --color-accent: #6b4400;
   --color-steel: #3b536f;
   --color-brand: #ffc400;
+  --color-on-brand: #1a1a1a;
   --color-focus: #8a5a00;
   --color-surface: #fff;
   --color-input: #8c8a82;
@@ -37,6 +38,7 @@
   --color-accent: #d6e58a;
   --color-steel: #a9c2e0;
   --color-brand: #ffc400;
+  --color-on-brand: #1a1a1a;
   --color-focus: #e6f08c;
   --color-surface: #191b16;
   --color-input: #8d9279;
@@ -87,3 +89,15 @@
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* In-scene labels over the 3D floor. Animated with the individual `translate`/`opacity` properties: labelLayer owns `transform` for position. */
+.office-bubble {
+  max-width: 14rem; padding: .25rem .5rem; border: 1px solid var(--color-line); border-bottom: 7px solid transparent; border-radius: .5rem;
+  background: color-mix(in srgb, var(--color-surface) 95%, transparent); color: var(--color-ink);
+  font: 500 .6875rem/1rem var(--font-data, ui-monospace, monospace); white-space: pre-line; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+  /* The tail is part of the clip shape, cut from the transparent bottom border (painted with the background); text never reaches it, so no sliver of a 4th line shows. */
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 7px), calc(50% + 6px) calc(100% - 7px), 50% 100%, calc(50% - 6px) calc(100% - 7px), 0 calc(100% - 7px));
+}
+.office-zzz { padding: .125rem .625rem; border: 2px solid var(--color-brand); border-radius: 9999px; background: color-mix(in srgb, var(--color-surface) 96%, transparent); color: var(--color-brand); font: 800 1.5rem/1.75rem var(--font-data, ui-monospace, monospace); letter-spacing: .06em; box-shadow: 0 2px 8px rgb(0 0 0 / .5); animation: office-zzz 2.4s ease-in-out infinite; }
+@keyframes office-zzz { 0% { translate: 0 4px; opacity: .65; } 50% { translate: 0 -6px; opacity: 1; } 100% { translate: 0 -14px; opacity: .65; } }

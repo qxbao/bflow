@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { WebProjectSession, WebRunView } from '@bflow/contracts/web';
 import { phases } from '../../../components/StatusBadge';
 import type { Connection } from '../../../api/events';
@@ -30,7 +30,7 @@ export function agentCounts(model: OfficeModel | undefined): string[] {
   return (Object.keys(n) as Bucket[]).filter(k => n[k] > 0).map(k => `${n[k]} ${BUCKET_TEXT[k]}`);
 }
 
-type IconName = 'overview' | 'tasks' | 'decision' | 'chat' | 'docs' | 'settings' | 'refresh' | 'send' | 'all' | 'coordinator' | 'developer' | 'qa';
+type IconName = 'overview' | 'tasks' | 'decision' | 'chat' | 'docs' | 'settings' | 'refresh' | 'send' | 'agents' | 'all' | 'coordinator' | 'developer' | 'qa';
 const PATHS: Readonly<Record<IconName, ReactNode>> = {
   overview: <><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></>,
   tasks: <><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h4"/></>,
@@ -39,6 +39,7 @@ const PATHS: Readonly<Record<IconName, ReactNode>> = {
   docs: <><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h5M10 16h5"/></>,
   settings: <><path d="M5 7h9M18 7h1M5 17h1M10 17h9"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></>,
   refresh: <path d="M19 12a7 7 0 11-2.1-5M19 4v4h-4"/>,
+  agents: <><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.2"/><path d="M16 14.2c2.8-.4 5 1.6 5 4.8"/></>,
   send: <path d="M4 12l16-8-6 16-2-6z"/>,
   all: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>,
   coordinator: <><circle cx="12" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M12 8v4M12 12H6v4M12 12h6v4"/></>,
@@ -75,14 +76,16 @@ export interface OfficeHudProps {
   onOverview: () => void;
   /** Opens the cabinet inspector (the Tài liệu button). */
   onDocuments: () => void;
-  onNavigate: (path: '' | 'runs' | 'review' | 'chat' | 'settings') => void;
+  onNavigate: (path: '' | 'runs' | 'review' | 'chat' | 'agents' | 'settings') => void;
   onRefresh: () => void;
   onFocusZone: (zone: OfficeFocusZone) => void;
   onAgentList: () => void;
   /** Receives the draft; the page that takes it over decides what happens. The HUD never sends anything. */
   onChatDraft: (draft: string) => void;
-  /** The operations dock, rendered once at the bottom. */
+  /** The operations dock, rendered once at the bottom (collapsed behind a toggle until opened). */
   dock: ReactNode;
+  /** Drives the dock toggle: shown when something is tracked or needs attention. */
+  dockSummary: { count: number; attention: boolean };
   /** Set on the shell ancestor so the panel can stop above the dock on small screens. */
   onDockHeight?: (px: number) => void;
 }
@@ -93,6 +96,8 @@ export interface OfficeHudProps {
  */
 export function OfficeHud(p: OfficeHudProps) {
   const [draft, setDraft] = useState('');
+  const [dockOpen, setDockOpen] = useState(false);
+  const dockId = useId();
   const bottom = useRef<HTMLDivElement>(null);
   const { onDockHeight } = p;
   useEffect(() => {
@@ -122,7 +127,7 @@ export function OfficeHud(p: OfficeHudProps) {
   };
   const rail: [IconName, string, () => void, number?, string?][] = [
     ['overview', 'Tổng quan', p.onOverview, clarifications, 'Câu hỏi chờ trả lời: '], ['tasks', 'Công việc', () => p.onNavigate('runs')], ['decision', 'Quyết định', () => p.onNavigate('review'), pending, 'Đang chờ: '],
-    ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
+    ['chat', 'Trò chuyện', () => p.onNavigate('chat')], ['agents', 'Nhân viên', () => p.onNavigate('agents')], ['docs', 'Tài liệu', p.onDocuments], ['settings', 'Cài đặt', () => p.onNavigate('settings')], ['refresh', 'Tải lại dữ liệu', p.onRefresh],
   ];
   const cams: [OfficeFocusZone, IconName, string][] = [['overview', 'all', 'Toàn cảnh'], ['conversation', 'chat', 'Conversation'], ['coordinator', 'coordinator', 'Coordinator'], ['developer', 'developer', 'Developer'], ['qa', 'qa', 'QA']];
   return <>
@@ -163,10 +168,13 @@ export function OfficeHud(p: OfficeHudProps) {
       </button>)}
     </nav>
     <div ref={bottom} data-hud-bottom className={`absolute inset-x-3 bottom-0 flex flex-col gap-2 pb-3 ${p.panelOpen ? 'max-md:pb-0' : ''}`}>
-      <div data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
+      {(p.dockSummary.count > 0 || p.dockSummary.attention) && <button type="button" aria-expanded={dockOpen} aria-controls={dockId} onClick={() => setDockOpen(open => !open)} className={`pointer-events-auto self-start rounded-lg px-3 py-1.5 text-xs ${panel} ${p.dockSummary.attention ? 'border-warning text-warning' : ''}`}>Thao tác đã gửi ({p.dockSummary.count})</button>}
+      {/* Live region that exists before the state changes, so a screen reader hears the dock needing a look while it stays collapsed. */}
+      <span role="status" className="sr-only" data-testid="dock-attention">{p.dockSummary.attention ? 'Có thao tác cần xem trong Thao tác đã gửi' : ''}</span>
+      <div id={dockId} hidden={!dockOpen} data-hud-dock className="pointer-events-auto max-h-[40dvh] overflow-y-auto empty:hidden">{p.dock}</div>
       <div className={`flex flex-col items-stretch gap-2 ${p.panelOpen ? '' : 'md:flex-row md:items-end'} ${hideOnPhone}`}>
         <div role="group" aria-label="Góc nhìn camera" className={`pointer-events-auto flex flex-wrap gap-1 self-start p-1 ${panel}`}>
-          {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => p.onFocusZone(zone)}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
+          {cams.map(([zone, icon, label]) => <button type="button" key={zone} aria-label={label} title={label} className={camButton} onClick={() => { if (zone === 'overview') setDockOpen(false); p.onFocusZone(zone); }}><Icon name={icon}/><span className="max-sm:hidden">{label}</span></button>)}
           {p.overflow > 0 && <button type="button" className={`${camButton} text-accent`} aria-label={`Còn ${p.overflow} lập trình viên chưa hiện trong cảnh. Mở danh sách nhân viên`} title="Mở danh sách nhân viên" onClick={p.onAgentList}>+{p.overflow}</button>}
         </div>
         <form onSubmit={submit} className={`pointer-events-auto m-0 flex min-w-0 flex-1 items-center gap-2 py-1 pr-1 pl-3 md:mx-auto md:w-full md:max-w-xl ${panel}`}>

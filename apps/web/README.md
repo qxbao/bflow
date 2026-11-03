@@ -34,13 +34,23 @@ dock are reachable from the scene (parity table in `test/office-parity.test.tsx`
   (D-WEB-03, [ADR 0008](../../docs/adr/0008-web-workforce-projection.md)) plus run, decision and session reads. Characters are chibi figures
   coloured by role; poses come from transport observation and assignment data, with a confidence label (confirmed, inferred, unknown). Herdr `done`
   is never shown as success, and HTTP 202 or `applied` never as a finished workflow. A degraded tier (no workforce route) shows placeholders and says so.
+- **Office look.** Partition walls with doorways split the floor into zones, each with a wall sign drawn as canvas text (the sign is decoration; the DOM mirror
+  holds the truth). Decor, keyboards and extra furniture come from the generated models, under bright lighting.
+- **Zzz and message boxes.** A sleeping agent shows a `Zzz` pill; a working agent shows a message box with the last lines of its terminal
+  text. The text is an unverified terminal snapshot read through `GET /api/v1/projects/:id/workforce/excerpts`, redacted and capped at 600 characters; it is
+  not an `AgentResult` and never evidence of task success. Without that route (an older or fixture host) the box shows the staff member's status text and no terminal text.
+- **Operations dock.** Hidden by default behind a toggle that shows when something is tracked or needs attention. `Toàn cảnh` closes every open panel
+  except the re-pair view, then fits the camera.
+- **Nhân viên page.** `/projects/:id/agents` lists every staff member with their recent terminal text in Classic and 3D; the agent inspector has a
+  `Nội dung gần đây` section. Full text comes from `GET /api/v1/projects/:id/agents/:instanceId/transcript` (tail of at most 64000 characters, source
+  `terminal_snapshot`). See ADR 0008, "Amendment 2026-11-02: agent terminal transcripts", for redaction and the caveat that a pane that moved on or restarted shows whatever its terminal holds.
 - **Read-only.** `features/office/scene/**` imports no command API. The HUD navigates, opens inspectors and hands a chat draft to the chat page; it sends nothing.
   Structured actions still go through the Classic components and the existing Local Server routes.
 - **Controls.** Click or tap an object or character; drag to pan, wheel or pinch to zoom; arrows pan, `+` / `-` zoom, `0` fits the view; `Esc` closes the
   panel and returns focus to the control that opened it. The camera never moves by itself: only a user gesture, a selection or a HUD camera preset moves it.
 - **Accessibility.** The canvas is `aria-hidden`. The DOM mirror ("Bản văn bản của văn phòng") lists every agent and object as real buttons; it is
   visually hidden while the scene is healthy, reachable by Tab, shown while focused, and becomes the visible complete list when WebGL is unavailable
-  or the context is lost (the panel and drafts are untouched; there is no retry loop). Labels are DOM text. `aria-live` announces new decisions and errors
+  or the context is lost (the panel and drafts are untouched; there is no retry loop). Agent, object and message-box labels are DOM text; the zone wall signs are the one canvas-text exception (the mirror still lists every zone). `aria-live` announces new decisions and errors
   at most once per 5 s. `prefers-reduced-motion` turns off walking and instantly applies poses. `e2e/office-a11y.spec.ts` covers a keyboard-only pass,
   reduced motion and 375, 768, 1280 and 1440 px (no horizontal scroll, HUD controls not overlapping, labels clear of them).
 - **Scoped dark theme.** DESIGN.md governs Classic. The 3D mode re-values the same tokens in a `.office-3d` scope (dark, rounded) per the ADR 0008
@@ -65,7 +75,7 @@ GPU string. Numbers from one machine are not portable. The latest run is recorde
 Source implementation plus local tests: vitest (jsdom), Playwright in real Chrome against the real Local Server with deterministic fixture hosts
 (W07/W09), SwiftShader software GL, and one local hardware-GL measurement. **Fixtures and SwiftShader are not live Herdr or provider evidence.** The
 workforce data in these tests is synthetic. A scoped single-provider live Web SDLC run is documented in `docs/reliability/web-ux-stabilization.md`
-for Classic; no live run has exercised the 3D mode, and multi-provider and fault-campaign acceptance remain open. The hidden-tab frame count in the
+for Classic; no live run has exercised the 3D mode, and the excerpt and transcript routes have been exercised only against fakes and a mocked route (the fixture host has no excerpts route), never a live Herdr or provider pane. Multi-provider and fault-campaign acceptance remain open. The hidden-tab frame count in the
 measurement uses an overridden `document.hidden`, not a real background tab.
 
 ## Design and accessibility

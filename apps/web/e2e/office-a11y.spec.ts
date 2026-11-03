@@ -127,7 +127,8 @@ for (const width of [375, 768, 1280, 1440]) {
       const clashes: string[] = [];
       for (let i = 0; i < controls.length; i++) for (let j = i + 1; j < controls.length; j++) if (overlap(controls[i]!.r, controls[j]!.r)) clashes.push(`${controls[i]!.name} x ${controls[j]!.name}`);
       const outside = controls.filter(c => c.r.left < -0.5 || c.r.right > innerWidth + 0.5 || c.r.top < -0.5 || c.r.bottom > innerHeight + 0.5).map(c => c.name);
-      const labels = rects([...document.querySelectorAll('[aria-label="Cảnh văn phòng"] [data-kind]')]);
+      // Name tags only: a message box is wider than the safe-area test its anchor passes, and it is decoration over the character (aria-hidden), not a control label.
+      const labels = rects([...document.querySelectorAll('[aria-label="Cảnh văn phòng"] [data-kind="agent"]')]);
       const covered = labels.filter(l => controls.some(c => overlap(l.r, c.r))).map(l => l.name);
       const small = controls.filter(c => c.r.height < 32 || c.r.width < 32).map(c => `${c.name} ${Math.round(c.r.width)}x${Math.round(c.r.height)}`);
       return { scrollW: root.scrollWidth, bodyW: document.body.scrollWidth, innerW: innerWidth, controls: controls.length, labels: labels.length, clashes, outside, covered, small };
