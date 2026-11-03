@@ -162,3 +162,47 @@ describe("DirectorStore", () => {
     expect(Date.now() - started).toBeLessThan(200);
   });
 });
+
+describe("DirectorStore mailbox", () => {
+  const input = (messageId: string, audience: "director" | "user" = "director") => ({
+    messageId, at: "2026-11-03T00:00:00.000Z", audience, type: "task.result", fromRole: "runtime" as const, summary: `s ${messageId}`
+  });
+
+  it("dedupes by audience+messageId and keeps seq", async () => {
+    const { store, dir } = await fresh();
+    const a = await store.appendMailbox(input("m1"));
+    expect(a).toMatchObject({ duplicate: false, item: { seq: 1 } });
+    expect(await store.appendMailbox(input("m1"))).toMatchObject({ duplicate: true, item: { seq: 1 } });
+    expect(await store.appendMailbox(input("m1", "user"))).toMatchObject({ duplicate: false, item: { seq: 2 } });
+    expect((await store.appendMailbox(input("m2"))).item.seq).toBe(3);
+    expect((await store.readMailbox({ afterSeq: 0, audience: "user" })).map(i => i.messageId)).toEqual(["m1"]);
+    expect((await store.mailboxItem("m2"))?.seq).toBe(3);
+    expect(await mode(path.join(dir, "mailbox.jsonl"))).toBe(0o600);
+    expect((await store.version()).mailboxSeq).toBe(3);
+  });
+
+  it("compacts above mailboxMax with monotonic seq", async () => {
+    const { store, dir } = await fresh();
+    await store.appendMailbox(input("seed"));
+    const file = path.join(dir, "mailbox.jsonl");
+    const lines = Array.from({ length: 5000 }, (_, i) => JSON.stringify({ schemaVersion: 1, seq: i + 1, ...input(`m${i + 1}`) }));
+    await fs.writeFile(file, lines.join("\n") + "\n", { mode: 0o600 });
+    const appended = await store.appendMailbox(input("new"));
+    expect(appended.item.seq).toBe(5001);
+    const all = await store.readMailbox({ afterSeq: 0, limit: 200 });
+    expect(all[0]!.seq).toBe(2);
+    const text = (await fs.readFile(file, "utf8")).trim().split("\n");
+    expect(text).toHaveLength(5000);
+    expect(JSON.parse(text[text.length - 1]!).seq).toBe(5001);
+    expect((await store.appendMailbox(input("after"))).item.seq).toBe(5002);
+  });
+
+  it("ignores a corrupt final line and overwrites it", async () => {
+    const { store, dir } = await fresh();
+    await store.appendMailbox(input("m1"));
+    await fs.appendFile(path.join(dir, "mailbox.jsonl"), '{"schemaVersion":1,"seq":2,"mess\n');
+    expect(await store.readMailbox({ afterSeq: 0 })).toHaveLength(1);
+    expect((await store.appendMailbox(input("m2"))).item.seq).toBe(2);
+    expect(await store.readMailbox({ afterSeq: 0 })).toHaveLength(2);
+  });
+});

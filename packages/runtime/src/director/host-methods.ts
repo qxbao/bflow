@@ -23,6 +23,11 @@ export const DIRECTOR_OWNER_METHODS = {
   }).strict(),
   director_issues: z.object({ status: z.array(ParkedIssueStatusSchema).max(10).optional() }).strict(),
   director_issue: z.object({ issueId: IssueId }).strict(),
+  director_mailbox: z.object({
+    afterSeq: z.number().int().min(0).optional(),
+    audience: z.enum(["director", "user"]).optional(),
+    limit: z.number().int().min(1).max(DIRECTOR_LIMITS.mailboxPage).optional()
+  }).strict(),
   director_issue_status: z.object({ issueId: IssueId, status: z.enum(["retrying", "resolved", "dismissed"]) }).strict()
 } as const;
 

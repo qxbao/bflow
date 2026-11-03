@@ -6,11 +6,13 @@ import { z } from "zod";
 import {
   DIRECTOR_LIMITS,
   DIRECTOR_SCHEMA_VERSION,
+  DirectorMailboxItemSchema,
   DirectorMessageSchema,
   DirectorSessionSchema,
   ParkedIssueSchema,
   type AgentProviderId,
   type DirectorChannel,
+  type DirectorMailboxItem,
   type DirectorMessage,
   type DirectorPresence,
   type DirectorSession,
@@ -28,7 +30,9 @@ export interface DirectorStoreOptions {
 export interface DirectorVersion {
   readonly messageSeq: number;
   readonly issuesRevision: number;
+  readonly mailboxSeq: number;
 }
+export type MailboxAppendInput = Omit<DirectorMailboxItem, "schemaVersion" | "seq">;
 export interface IssueInput {
   readonly issueId?: string;
   readonly runId: string;
@@ -191,6 +195,54 @@ export class DirectorStore {
     return messages.filter(message => message.seq > query.afterSeq).slice(0, limit);
   }
 
+  /** Append-only mailbox. Deduped by audience+messageId; a duplicate returns the stored item without advancing seq. */
+  async appendMailbox(input: MailboxAppendInput): Promise<{ item: DirectorMailboxItem; duplicate: boolean }> {
+    return this.serial(async () => {
+      await this.ensureDirectory();
+      const { items, validLength } = await this.loadMailbox();
+      const existing = items.find(item => item.audience === input.audience && item.messageId === input.messageId);
+      if (existing) return { item: existing, duplicate: true };
+      const item = DirectorMailboxItemSchema.parse({
+        ...input,
+        schemaVersion: DIRECTOR_SCHEMA_VERSION,
+        seq: (items.length > 0 ? items[items.length - 1]!.seq : 0) + 1
+      });
+      const file = path.join(this.directory, "mailbox.jsonl");
+      if (items.length + 1 > DIRECTOR_LIMITS.mailboxMax) {
+        // Compact through an atomic rename; the newest items keep their original seq, so seq stays monotonic.
+        const kept = [...items, item].slice(-DIRECTOR_LIMITS.mailboxMax);
+        const tmp = `${file}.${randomUUID()}.tmp`;
+        await fs.writeFile(tmp, kept.map(entry => `${JSON.stringify(entry)}\n`).join(""), { mode: 0o600 });
+        await fs.rename(tmp, file);
+      } else {
+        const handle = await fs.open(file, "a", 0o600);
+        try {
+          const size = (await handle.stat()).size;
+          if (size > validLength) await handle.truncate(validLength);
+          await handle.appendFile(`${JSON.stringify(item)}\n`, "utf8");
+          await handle.sync().catch(() => undefined);
+        } finally {
+          await handle.close();
+        }
+        await fs.chmod(file, 0o600);
+      }
+      this.events.emit("change");
+      return { item, duplicate: false };
+    });
+  }
+
+  async readMailbox(query: { afterSeq: number; limit?: number; audience?: "director" | "user" }): Promise<DirectorMailboxItem[]> {
+    await this.ensureDirectory();
+    const limit = Math.min(Math.max(query.limit ?? DIRECTOR_LIMITS.mailboxPage, 0), DIRECTOR_LIMITS.mailboxPage);
+    const { items } = await this.loadMailbox();
+    return items.filter(item => item.seq > query.afterSeq && (query.audience === undefined || item.audience === query.audience)).slice(0, limit);
+  }
+
+  async mailboxItem(messageId: string): Promise<DirectorMailboxItem | undefined> {
+    await this.ensureDirectory();
+    return (await this.loadMailbox()).items.find(item => item.messageId === messageId);
+  }
+
   async upsertIssue(input: IssueInput): Promise<ParkedIssue> {
     return this.serial(async () => {
       const file = await this.readIssues();
@@ -273,7 +325,12 @@ export class DirectorStore {
     await this.ensureDirectory();
     const { messages } = await this.loadTranscript();
     const file = await this.readIssues();
-    return { messageSeq: messages.length > 0 ? messages[messages.length - 1]!.seq : 0, issuesRevision: file.revision };
+    const { items } = await this.loadMailbox();
+    return {
+      messageSeq: messages.length > 0 ? messages[messages.length - 1]!.seq : 0,
+      issuesRevision: file.revision,
+      mailboxSeq: items.length > 0 ? items[items.length - 1]!.seq : 0
+    };
   }
 
   /**
@@ -288,7 +345,7 @@ export class DirectorStore {
       const onChange = (): void => {
         void this.version().then(
           current => {
-            if (current.messageSeq !== since.messageSeq || current.issuesRevision !== since.issuesRevision) resolve(true);
+            if (current.messageSeq !== since.messageSeq || current.issuesRevision !== since.issuesRevision || current.mailboxSeq !== since.mailboxSeq) resolve(true);
           },
           () => undefined
         );
@@ -307,7 +364,7 @@ export class DirectorStore {
     });
     try {
       const current = await this.version();
-      if (current.messageSeq !== since.messageSeq || current.issuesRevision !== since.issuesRevision) return true;
+      if (current.messageSeq !== since.messageSeq || current.issuesRevision !== since.issuesRevision || current.mailboxSeq !== since.mailboxSeq) return true;
       return await woken;
     } finally {
       cleanup();
@@ -406,5 +463,35 @@ export class DirectorStore {
       offset += lineBytes;
     }
     return { messages, validLength };
+  }
+
+  private async loadMailbox(): Promise<{ items: DirectorMailboxItem[]; validLength: number }> {
+    let buffer: Buffer;
+    try {
+      buffer = await fs.readFile(path.join(this.directory, "mailbox.jsonl"));
+    } catch (error) {
+      if (isEnoent(error)) return { items: [], validLength: 0 };
+      throw error;
+    }
+    const complete = buffer.lastIndexOf(0x0a) + 1;
+    const lines = buffer.subarray(0, complete).toString("utf8").split("\n");
+    lines.pop();
+    const items: DirectorMailboxItem[] = [];
+    let validLength = complete;
+    let offset = 0;
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      try {
+        items.push(DirectorMailboxItemSchema.parse(JSON.parse(line)));
+      } catch {
+        if (index === lines.length - 1) {
+          validLength = offset;
+          break;
+        }
+        throw new Error(`Corrupt director mailbox at line ${index + 1}`);
+      }
+      offset += Buffer.byteLength(line, "utf8") + 1;
+    }
+    return { items, validLength };
   }
 }

@@ -1724,6 +1724,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     repositoryRoot: configuration.repositoryPath,
     feed: webFeed,
     inspect: () => requireWorkspace().runtime.inspect(),
+    coordinatorGuide: async () => {
+      const guide = record(JsonValueSchema.parse(await promptAssets.readBuiltinRolePrompt("coordinator")));
+      return { source: textField(guide.source), prompt: textField(guide.prompt) };
+    },
     work: {
       start: async ({ key, ...delegation }) => {
         let outcome: Awaited<ReturnType<ReturnType<typeof requireWorkspace>["conversation"]["delegateDirectorWork"]>>;
@@ -2566,6 +2570,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       case "director_hook_note": return directorEndpoint.noteHookPrompt(DIRECTOR_OWNER_METHODS.director_hook_note.parse(params));
       case "director_issues": return directorEndpoint.listIssues(DIRECTOR_OWNER_METHODS.director_issues.parse(params).status);
       case "director_issue": return directorEndpoint.inspectIssue(DIRECTOR_OWNER_METHODS.director_issue.parse(params).issueId);
+      case "director_mailbox": return directorEndpoint.readMailbox(DIRECTOR_OWNER_METHODS.director_mailbox.parse(params));
       case "director_issue_status": { const input = DIRECTOR_OWNER_METHODS.director_issue_status.parse(params); return directorEndpoint.setIssueStatus(input.issueId, input.status); }
       case "interaction_register": {
         const input = OwnerKeySchema.parse(params), principalId = `local-user-${process.getuid?.() ?? "local"}`;

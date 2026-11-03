@@ -113,7 +113,7 @@ describe("DirectorEndpoint", () => {
   it("start output cursor and an empty cursor both work for the first director_wait", async () => {
     const { endpoint } = await make();
     const start = await endpoint.register({ provider: "claude" });
-    expect(start.cursor).toMatch(/^m\d+\.i\d+\.r$/);
+    expect(start.cursor).toMatch(/^m\d+\.i\d+\.b\d+\.r$/);
     const viaStartCursor = (await endpoint.call(start.token, "director_wait", { cursor: start.cursor, timeoutMs: 1 })) as { timedOut: boolean };
     expect(viaStartCursor.timedOut).toBe(true);
     const first = (await endpoint.call(start.token, "director_wait", { cursor: "", timeoutMs: 1 })) as { cursor: string; timedOut: boolean };
@@ -160,5 +160,36 @@ describe("DirectorEndpoint", () => {
     expect(String((error as Error).message)).not.toContain(bad);
     expect(String((error as Error).message)).not.toContain("abcdefghijklmnopqrstuvwxyz0123");
     expect(calls).toEqual([]);
+  });
+});
+
+describe("DirectorEndpoint mailbox", () => {
+  const message = (over: Record<string, unknown> = {}) => ({
+    message_id: "msg-1", correlation_id: "corr-1", run_id: "run-1", sender: { role: "developer" }, recipient: { role: "coordinator" },
+    type: "task.result", payload: { kind: "result", taskId: "t1", summary: "xong sk-abcdefghijklmnopqrstuvwxyz0123456789 Bearer abcdefghijklmnopqrstuvwxyz123456" },
+    artifact_references: [], schema_version: 2, ...over
+  }) as never;
+
+  it("deliverRuntimeMessage is idempotent, summarized and redacted", async () => {
+    const { endpoint } = await make();
+    await endpoint.deliverRuntimeMessage(message());
+    await endpoint.deliverRuntimeMessage(message());
+    const items = await endpoint.readMailbox({});
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ audience: "director", fromRole: "developer", kind: "result", taskId: "t1", runId: "run-1", type: "task.result" });
+    expect(items[0]!.summary.startsWith("task.result/result từ developer: xong")).toBe(true);
+    expect(items[0]!.summary).not.toMatch(/sk-abcdefghijklmnopqrstuvwxyz0123456789/);
+    expect(JSON.stringify(items[0])).not.toContain("payload");
+  });
+
+  it("maps user/conversation senders to runtime and mirrors user notices", async () => {
+    const { endpoint } = await make();
+    await endpoint.deliverRuntimeMessage(message({ message_id: "m2", sender: { role: "conversation" }, payload: { status: "approved" } }));
+    await endpoint.mirrorUserNotice(message({ message_id: "m2" }), { text: "Thông báo", code: "#3" });
+    await endpoint.mirrorUserNotice(message({ message_id: "m2" }), { text: "Thông báo", code: "#3" });
+    expect((await endpoint.readMailbox({ audience: "director" }))[0]).toMatchObject({ fromRole: "runtime" });
+    const user = await endpoint.readMailbox({ audience: "user" });
+    expect(user).toHaveLength(1);
+    expect(user[0]).toMatchObject({ text: "Thông báo", code: "#3" });
   });
 });

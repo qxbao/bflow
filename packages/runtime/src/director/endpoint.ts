@@ -2,13 +2,18 @@ import * as path from "node:path";
 import {
   DIRECTOR_LIMITS,
   type AgentProviderId,
+  AgentRoleSchema,
+  IdentifierSchema,
+  type DirectorMailboxItem,
   type DirectorProgressSnapshot,
   type DirectorRuntimeEvent,
   type DirectorSession,
   type JsonValue,
   type ParkedIssue,
-  type ParkedIssueStatus
+  type ParkedIssueStatus,
+  type RoleMessage
 } from "@bflow/contracts";
+import { redactString } from "../resilience/redaction.js";
 import { buildDirectorProgressSnapshot } from "./snapshot.js";
 import { DirectorStore } from "./store.js";
 import { DirectorTools, type DirectorCoordinatorPort, type DirectorRuntimeEventsPort, type DirectorWorkPort } from "./tools.js";
@@ -22,6 +27,7 @@ export interface DirectorEndpointOptions {
   readonly repositoryRoot: string;
   readonly coordinator: DirectorCoordinatorPort;
   readonly work?: DirectorWorkPort;
+  readonly coordinatorGuide?: () => Promise<{ source: string; prompt: string }>;
   readonly feed: DirectorFeedPort;
   readonly inspect: () => Promise<unknown>;
   readonly maxWaitMs?: number;
@@ -86,10 +92,59 @@ export class DirectorEndpoint {
       store: this.store,
       coordinator: options.coordinator,
       ...(options.work ? { work: options.work } : {}),
+      ...(options.coordinatorGuide ? { coordinatorGuide: options.coordinatorGuide } : {}),
       runtimeEvents: feedEvents(options.feed, options.pollMs ?? 1000),
       ...(options.maxWaitMs !== undefined ? { maxWaitMs: options.maxWaitMs } : {}),
       now: this.now
     });
+  }
+
+  /** Runtime outbox delivery for the logical Coordinator (R-B2-5). Idempotent per message_id; stores a redacted summary only. */
+  async deliverRuntimeMessage(message: RoleMessage): Promise<void> {
+    await this.store.appendMailbox(this.mailboxInput(message, "director"));
+  }
+
+  /** Copy of a human-facing Conversation notice for the user audience (R-B2-6). */
+  async mirrorUserNotice(message: RoleMessage, rendered: { text: string; code?: string }): Promise<void> {
+    const text = redactString(rendered.text).slice(0, 4000);
+    const code = rendered.code !== undefined && /^#[1-9]\d*$/.test(rendered.code) ? rendered.code : undefined;
+    await this.store.appendMailbox({
+      ...this.mailboxInput(message, "user"),
+      ...(text.trim().length > 0 ? { text } : {}),
+      ...(code !== undefined ? { code } : {})
+    });
+  }
+
+  readMailbox(query: { afterSeq?: number | undefined; audience?: "director" | "user" | undefined; limit?: number | undefined }): Promise<DirectorMailboxItem[]> {
+    return this.store.readMailbox({
+      afterSeq: query.afterSeq ?? 0,
+      ...(query.audience !== undefined ? { audience: query.audience } : {}),
+      ...(query.limit !== undefined ? { limit: query.limit } : {})
+    });
+  }
+
+  private mailboxInput(message: RoleMessage, audience: "director" | "user"): Omit<DirectorMailboxItem, "schemaVersion" | "seq" | "text" | "code"> {
+    const payload = typeof message.payload === "object" && message.payload !== null && !Array.isArray(message.payload) ? message.payload : {};
+    const senderRole = message.sender.role;
+    const parsedRole = AgentRoleSchema.safeParse(senderRole);
+    const fromRole = senderRole === "runtime" || senderRole === "user" || senderRole === "conversation" || !parsedRole.success ? "runtime" : parsedRole.data;
+    const kind = typeof payload.kind === "string" && IdentifierSchema.safeParse(payload.kind).success ? payload.kind.trim() : undefined;
+    const taskIdRaw = payload.taskId;
+    const taskId = typeof taskIdRaw === "string" && IdentifierSchema.safeParse(taskIdRaw).success ? taskIdRaw.trim() : undefined;
+    const detail = ["headline", "summary", "reason", "status"].map(key => payload[key]).find((value): value is string => typeof value === "string" && value.trim().length > 0);
+    const raw = `${message.type}${kind ? `/${kind}` : ""} từ ${fromRole}${detail ? `: ${detail}` : ""}`;
+    const summary = redactString(raw).replace(/\s+/g, " ").trim().slice(0, DIRECTOR_LIMITS.issueTextMax) || message.type;
+    return {
+      messageId: message.message_id,
+      at: this.now().toISOString(),
+      audience,
+      ...(message.run_id !== undefined ? { runId: message.run_id } : {}),
+      ...(taskId !== undefined ? { taskId } : {}),
+      type: message.type,
+      ...(kind !== undefined ? { kind } : {}),
+      fromRole,
+      summary
+    };
   }
 
   static isDirectorToken(token: string): boolean {

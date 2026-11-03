@@ -204,7 +204,7 @@ async function locateDirectorHost(options: { repositoryPath: string; sessionId: 
 }
 /** Owner-token Director methods on an already running host; never starts a host. */
 export async function callDirectorOwnerHost(options: { repositoryPath: string; sessionId: string },
-  method: "director_register" | "director_revoke" | "director_progress" | "director_hook_note" | "director_issues" | "director_issue" | "director_issue_status",
+  method: "director_register" | "director_revoke" | "director_progress" | "director_hook_note" | "director_issues" | "director_issue" | "director_issue_status" | "director_mailbox",
   input: unknown, timeoutMs = 10_000): Promise<unknown> {
   const configuration = await locateDirectorHost(options);
   return callHost(configuration.socketPath, configuration.token, method, input, timeoutMs);

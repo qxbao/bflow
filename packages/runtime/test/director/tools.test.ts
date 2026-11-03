@@ -49,7 +49,7 @@ describe("DirectorTools", () => {
     expect(names).toContain("propose_workflow");
     expect(names).toContain("planning_reference");
     for (const own of DIRECTOR_OWN_TOOLS) expect(names).toContain(own.name);
-    expect(DIRECTOR_OWN_TOOLS).toHaveLength(7);
+    expect(DIRECTOR_OWN_TOOLS).toHaveLength(9);
     expect(new Set(names).size).toBe(names.length);
   });
 
@@ -64,7 +64,7 @@ describe("DirectorTools", () => {
     await user(h, "before start");
     const first = await wait(h, { cursor: "", timeoutMs: 1 });
     expect(first.timedOut).toBe(true);
-    expect(first.cursor).toMatch(/^m\d+\.i\d+\.r/);
+    expect(first.cursor).toMatch(/^m\d+\.i\d+\.b\d+\.r/);
     expect(first.cursor).not.toBe("");
     await user(h, "after");
     const second = await wait(h, { cursor: first.cursor });
@@ -105,7 +105,7 @@ describe("DirectorTools", () => {
     const first = await wait(h);
     expect(first.timedOut).toBe(false);
     expect(first.messages.map(m => m.text)).toEqual(["one", "two"]);
-    expect(first.cursor).toMatch(/^m3\.i0\.r$/);
+    expect(first.cursor).toMatch(/^m3\.i0\.b0\.r$/);
     const second = await wait(h, { cursor: first.cursor, timeoutMs: 1000 });
     expect(second).toMatchObject({ timedOut: true, messages: [], issues: [], runtimeEvents: [] });
   });
@@ -143,7 +143,7 @@ describe("DirectorTools", () => {
     const h = await harness({ runtimeEvents: port });
     const result = await wait(h);
     expect(result.runtimeEvents).toEqual([event]);
-    expect(result.cursor).toBe(`m0.i0.r${Buffer.from("rt-1").toString("base64url")}`);
+    expect(result.cursor).toBe(`m0.i0.b0.r${Buffer.from("rt-1").toString("base64url")}`);
     await wait(h, { cursor: result.cursor });
     expect(seen).toEqual(["", "rt-1"]);
   });
@@ -278,5 +278,59 @@ describe("DirectorTools", () => {
     await user(h, "between start and wait");
     const result = await wait(h, { cursor });
     expect(result.messages.map(m => m.text)).toEqual(["between start and wait"]);
+  });
+});
+
+describe("DirectorTools mailbox", () => {
+  const item = (messageId: string, audience: "director" | "user" = "director") => ({
+    messageId, at: "2026-11-03T00:00:00.000Z", audience, type: "task.result", fromRole: "runtime" as const, summary: `s ${messageId}`
+  });
+
+  it("director_wait wakes on a mailbox item and returns it", async () => {
+    const h = await harness({ maxWaitMs: 5000 });
+    const pending = h.tools.invoke("director_wait", { cursor: "", timeoutMs: 5000 }, h.token) as Promise<unknown>;
+    await new Promise(r => setTimeout(r, 100));
+    await h.store.appendMailbox(item("mb1", "user"));
+    await new Promise(r => setTimeout(r, 50));
+    await h.store.appendMailbox(item("mb2"));
+    const result = (await pending) as unknown as { timedOut: boolean; mailbox: { messageId: string }[]; cursor: string };
+    expect(result.timedOut).toBe(false);
+    expect(result.mailbox.map(m => m.messageId)).toEqual(["mb2"]);
+    expect(result.cursor).toMatch(/\.b2\.r/);
+    const next = await wait(h, { cursor: result.cursor, timeoutMs: 1000 });
+    expect(next.timedOut).toBe(true);
+  });
+
+  it("a B1 cursor works and does not replay mailbox history", async () => {
+    const h = await harness();
+    await h.store.appendMailbox(item("old"));
+    const result = (await h.tools.invoke("director_wait", { cursor: "m0.i0.r", timeoutMs: 1000 }, h.token)) as unknown as { timedOut: boolean; mailbox: unknown[]; cursor: string };
+    expect(result.timedOut).toBe(true);
+    expect(result.mailbox).toEqual([]);
+    expect(result.cursor).toMatch(/^m0\.i0\.b1\.r/);
+  });
+
+  it("read_mailbox filters by audience and pages", async () => {
+    const h = await harness();
+    await h.store.appendMailbox(item("a"));
+    await h.store.appendMailbox(item("b", "user"));
+    await h.store.appendMailbox(item("c"));
+    const names = async (args: unknown) => ((await h.tools.invoke("read_mailbox", args, h.token)) as unknown as { messageId: string }[]).map(i => i.messageId);
+    expect(await names({})).toEqual(["a", "c"]);
+    expect(await names({ audience: "user" })).toEqual(["b"]);
+    expect(await names({ afterSeq: 1, limit: 1, audience: "director" })).toEqual(["c"]);
+    await expect(h.tools.invoke("read_mailbox", { limit: 201 }, h.token)).rejects.toThrow();
+    expect(DIRECTOR_OWN_TOOLS.map(t => t.name)).toEqual(expect.arrayContaining(["read_mailbox", "read_coordinator_guide"]));
+    expect(DIRECTOR_OWN_TOOLS.find(t => t.name === "start_work")!.description).toContain("read_coordinator_guide");
+  });
+
+  it("read_coordinator_guide prefixes and truncates to 64 KiB", async () => {
+    const h = await harness();
+    const guideTools = new DirectorTools({ store: h.store, coordinator: { invoke: async () => ({}) }, coordinatorGuide: async () => ({ source: "agents/coordinator", prompt: "é".repeat(100_000) }) });
+    const out = (await guideTools.invoke("read_coordinator_guide", {}, h.token)) as unknown as { source: string; prompt: string };
+    expect(out.source).toBe("agents/coordinator");
+    expect(out.prompt.startsWith("Hướng dẫn lập kế hoạch của Coordinator (Director dùng thay).")).toBe(true);
+    expect(Buffer.byteLength(out.prompt, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    await expect(h.tools.invoke("read_coordinator_guide", {}, h.token)).rejects.toThrow("unavailable");
   });
 });

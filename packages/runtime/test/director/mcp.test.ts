@@ -28,7 +28,7 @@ describe("director MCP", () => {
     expect((await h.reply(1)).result.protocolVersion).toBe("2024-11-05");
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const names = (await h.reply(2)).result.tools.map((t: any) => t.name);
-    expect(names).toContain("director_wait"); expect(names).toContain("propose_workflow"); expect(names).not.toContain("report_progress");
+    expect(names).toContain("read_mailbox"); expect(names).toContain("read_coordinator_guide"); expect(names).toContain("director_wait"); expect(names).toContain("propose_workflow"); expect(names).not.toContain("report_progress");
     h.send({ jsonrpc: "2.0", id: 3, method: "nope" });
     expect((await h.reply(3)).error.code).toBe(-32601);
     await h.end();
