@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { DirectorRuntimeEvent, JsonValue } from "@bflow/contracts";
 import { DIRECTOR_OWN_TOOLS, DIRECTOR_TOOLS, DirectorAuthError, DirectorStore, DirectorTools } from "../../src/director/index.js";
-import type { DirectorRuntimeEventsPort } from "../../src/director/index.js";
+import type { DirectorRuntimeEventsPort, DirectorWorkPort, DirectorWorkStart } from "../../src/director/index.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -19,7 +19,7 @@ interface Harness {
   setNow(date: Date): void;
 }
 
-async function harness(options: { maxWaitMs?: number; runtimeEvents?: DirectorRuntimeEventsPort } = {}): Promise<Harness> {
+async function harness(options: { maxWaitMs?: number; runtimeEvents?: DirectorRuntimeEventsPort; work?: DirectorWorkPort } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "director-tools-"));
   dirs.push(root);
   let fixed: Date | undefined;
@@ -31,6 +31,7 @@ async function harness(options: { maxWaitMs?: number; runtimeEvents?: DirectorRu
     store,
     coordinator: { invoke: async (name, input) => { calls.push({ name, input }); return { ok: true, name } as JsonValue; } },
     ...(options.runtimeEvents ? { runtimeEvents: options.runtimeEvents } : {}),
+    ...(options.work ? { work: options.work } : {}),
     maxWaitMs: options.maxWaitMs ?? 1000,
     now
   });
@@ -46,9 +47,39 @@ describe("DirectorTools", () => {
     const names = DIRECTOR_TOOLS.map(t => t.name);
     expect(names).not.toContain("report_progress");
     expect(names).toContain("propose_workflow");
+    expect(names).toContain("planning_reference");
     for (const own of DIRECTOR_OWN_TOOLS) expect(names).toContain(own.name);
-    expect(DIRECTOR_OWN_TOOLS).toHaveLength(6);
+    expect(DIRECTOR_OWN_TOOLS).toHaveLength(7);
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("passes planning_reference to the coordinator port", async () => {
+    const h = await harness();
+    await h.tools.invoke("planning_reference", { section: "workflow" }, h.token);
+    expect(h.calls).toEqual([{ name: "planning_reference", input: { section: "workflow" } }]);
+  });
+
+  it("accepts the empty first cursor from director start and returns a non-empty cursor", async () => {
+    const h = await harness();
+    await user(h, "before start");
+    const first = await wait(h, { cursor: "", timeoutMs: 1 });
+    expect(first.timedOut).toBe(true);
+    expect(first.cursor).toMatch(/^m\d+\.i\d+\.r/);
+    expect(first.cursor).not.toBe("");
+    await user(h, "after");
+    const second = await wait(h, { cursor: first.cursor });
+    expect(second.messages.map(m => m.text)).toEqual(["after"]);
+  });
+
+  it("returns early when the caller aborts the wait", async () => {
+    const h = await harness({ maxWaitMs: 1500 });
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = h.tools.invoke("director_wait", {}, h.token, controller.signal);
+    setTimeout(() => controller.abort(), 40);
+    const result = (await pending) as unknown as WaitResult;
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it("rejects a bad token without calling the coordinator", async () => {
@@ -153,7 +184,7 @@ describe("DirectorTools", () => {
     h.setNow(new Date("2026-11-03T00:00:00.000Z"));
     expect(await h.tools.invoke("director_note_user_message", { text: "hello" }, h.token)).toEqual({ recorded: true, seq: 1 });
     h.setNow(new Date("2026-11-03T00:00:05.000Z"));
-    expect(await h.tools.invoke("director_note_user_message", { text: " hello " }, h.token)).toEqual({ recorded: false, duplicate: true });
+    expect(await h.tools.invoke("director_note_user_message", { text: " hello " }, h.token)).toEqual({ recorded: false, duplicate: true, seq: 1 });
     h.setNow(new Date("2026-11-03T00:00:11.000Z"));
     expect(await h.tools.invoke("director_note_user_message", { text: "hello" }, h.token)).toEqual({ recorded: true, seq: 2 });
   });
@@ -167,5 +198,85 @@ describe("DirectorTools", () => {
     expect(await h.tools.invoke("inspect_issue", { issueId: issue.issueId }, h.token)).toMatchObject({ issueId: issue.issueId });
     await expect(h.tools.invoke("inspect_issue", { issueId: "zzz" }, h.token)).rejects.toThrow("Unknown director issue zzz");
     expect(await h.tools.invoke("director_say", { text: "hi" }, h.token)).toMatchObject({ seq: 1 });
+  });
+
+  describe("start_work", () => {
+    const criteria = [{ description: "Endpoint trả 200", verificationMethod: "integration_test" }];
+    const args = (userMessageSeq: unknown, extra: Record<string, unknown> = {}) =>
+      ({ title: "T", objective: "O", acceptanceCriteria: criteria, sddLevel: "lightweight", userMessageSeq, ...extra });
+    const fakeWork = () => {
+      const starts: DirectorWorkStart[] = [];
+      const work: DirectorWorkPort = { start: async input => { starts.push(input); return { runId: "run-x", correlationId: "c-x", status: "queued" }; } };
+      return { starts, work };
+    };
+
+    it("refuses a Director message, an unknown seq and missing or malformed arguments", async () => {
+      const { starts, work } = fakeWork();
+      const h = await harness({ work });
+      const said = await h.store.appendMessage({ author: "director", channel: "cli", text: "hi" });
+      await expect(h.tools.invoke("start_work", args(said.seq), h.token)).rejects.toThrow(/not a user message/);
+      await expect(h.tools.invoke("start_work", args(999), h.token)).rejects.toThrow(/does not exist/);
+      await expect(h.tools.invoke("start_work", { title: "T" }, h.token)).rejects.toThrow();
+      await expect(h.tools.invoke("start_work", args(1, { acceptanceCriteria: [] }), h.token)).rejects.toThrow();
+      await expect(h.tools.invoke("start_work", args(1, { extra: 1 }), h.token)).rejects.toThrow();
+      expect(starts).toEqual([]);
+    });
+
+    it("hands off once per user message and returns the same run on replay", async () => {
+      const { starts, work } = fakeWork();
+      const h = await harness({ work });
+      const msg = await user(h, "làm tính năng X");
+      const first = await h.tools.invoke("start_work", args(msg.seq), h.token);
+      const second = await h.tools.invoke("start_work", args(msg.seq), h.token);
+      expect(first).toEqual({ runId: "run-x", correlationId: "c-x", status: "queued" });
+      expect(second).toEqual(first);
+      expect(starts).toHaveLength(1);
+      expect(starts[0]).toMatchObject({ priority: "normal", requestedAt: msg.at });
+      expect(starts[0]!.key).toBe(`director:${msg.messageId}`);
+      expect(starts[0]!.kind).toBe("feature");
+    });
+
+    it("returns the same run after the Director registers again, without a second handoff", async () => {
+      const { starts, work } = fakeWork();
+      const h = await harness({ work });
+      const msg = await user(h, "làm X");
+      const first = await h.tools.invoke("start_work", args(msg.seq, { kind: "bugfix" }), h.token);
+      expect(starts[0]).toMatchObject({ kind: "bugfix" });
+      const again = await h.store.register({ provider: "claude", repositoryRoot: "/repo" });
+      expect(again.token).not.toBe(h.token);
+      expect(await h.tools.invoke("start_work", args(msg.seq), again.token)).toEqual(first);
+      expect(starts).toHaveLength(1);
+    });
+
+    it("surfaces an admission refusal and allows a retry", async () => {
+      let refuse = true;
+      const h = await harness({ work: { start: async () => { if (refuse) throw new Error("start_work refused: Run already active"); return { runId: "r", correlationId: "c", status: "queued" }; } } });
+      const msg = await user(h, "x");
+      await expect(h.tools.invoke("start_work", args(msg.seq), h.token)).rejects.toThrow("Run already active");
+      refuse = false;
+      await expect(h.tools.invoke("start_work", args(msg.seq), h.token)).resolves.toMatchObject({ status: "queued" });
+    });
+
+    it("is unavailable without a delegation path", async () => {
+      const h = await harness();
+      const msg = await user(h, "x");
+      await expect(h.tools.invoke("start_work", args(msg.seq), h.token)).rejects.toThrow(/unavailable/);
+    });
+  });
+
+  it("returns the existing seq when a duplicate note is ignored", async () => {
+    const h = await harness();
+    const first = await h.tools.invoke("director_note_user_message", { text: "same" }, h.token) as { recorded: boolean; seq: number };
+    const dup = await h.tools.invoke("director_note_user_message", { text: "same" }, h.token);
+    expect(dup).toEqual({ recorded: false, duplicate: true, seq: first.seq });
+  });
+
+  it("startCursor does not skip a message appended before the first wait", async () => {
+    const h = await harness();
+    await user(h, "old");
+    const cursor = await h.tools.startCursor();
+    await user(h, "between start and wait");
+    const result = await wait(h, { cursor });
+    expect(result.messages.map(m => m.text)).toEqual(["between start and wait"]);
   });
 });

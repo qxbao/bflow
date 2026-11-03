@@ -2006,3 +2006,36 @@ Ingress refusals of an exactly admitted, superseded Conversation requirement rem
 Oversized policy-phase QA inspections are served as lossless UTF-8 JSON pages by `inspect_alternative_verification` (`cursor`, `offset`, optional `view: page`). Follow every `nextOffset` with the same run/task/phase and cursor, concatenate pages and parse JSON; the final page supplies `observationId`. Each continuation rechecks the assigned native verifier, active lease/request, phase and clean pinned source. Cursor state is bounded and ephemeral; a stale cursor requires a fresh inspection. The immutable captured observation and verdict/evidence validators are unchanged, and no protected provider directory is exposed.
 
 Large native Herdr deliveries use a digest-bound reference to the already persisted host intent instead of putting the full envelope into the plugin context environment. The native helper resolves only this repository/session's unknown, non-refused intent, then keeps the existing physical sender checks and signs the original complete RoleMessage. A reference is not permission to retry uncertain delivery; the producer's original reconciliation guards remain in force.
+
+## Director (thử nghiệm, lát B1)
+
+Director là vai hội thoại thử nghiệm, nằm trong `packages/runtime/src/director/`. Mục tiêu của lát B1 là cho người dùng trò chuyện với một agent duy nhất qua CLI provider đang chạy, trong khi Coordinator v2 và Conversation hiện có vẫn hoạt động song song.
+
+Các module:
+
+- `store.ts` (`DirectorStore`): quản lý phiên, transcript và hàng đợi lỗi. Token có dạng `<tokenId>.<secret>`; chỉ lưu sha256 của token, không lưu token thô.
+- `tools.ts` (`DirectorTools`): tập tool dành cho Director gồm các tool của Coordinator trừ `report_progress`, cộng với `director_wait`, `director_say`, `director_note_user_message`, `list_issues`, `inspect_issue` và `set_issue_status`. Không có tool phê duyệt hay ghi evidence.
+- `endpoint.ts` (`DirectorEndpoint`): điểm vào của Director trên host.
+- `snapshot.ts` (`buildDirectorProgressSnapshot`) và `progress.ts` (`renderDirectorProgress`): tạo và hiển thị ảnh chụp tiến độ.
+- `mcp.ts` (`runDirectorMcp`): MCP server stdio. Token là đối số `token` của mỗi tool.
+
+Host daemon tạo một `DirectorEndpoint` cho mỗi host tại `<host directory>/director`. Các phương thức:
+
+- Director token: `director_call`.
+- Owner: `director_register`, `director_revoke`, `director_progress`, `director_hook_note`, `director_issues`, `director_issue`, `director_issue_status`.
+
+Phía client có `callDirectorOwnerHost` và `callDirectorTool`. Timeout của `director_wait` là `waitMax` (300 s) cộng 30 s.
+
+Luồng sử dụng: người dùng gõ `/bflow-start` trong CLI provider. Skill chạy `bflow director start --json`, sau đó vòng `director_wait` / `director_say` tiếp tục cho đến khi phiên kết thúc. Chi tiết lệnh nằm trong [apps/cli/README.md](../../apps/cli/README.md).
+
+Giới hạn đã biết:
+
+- Director cùng tồn tại với pane Conversation và Coordinator v2; việc thay thế hoàn chỉnh thuộc lát B2.
+- Hook ghi tin nhắn chỉ ghi cho đúng phiên provider đã khởi động bằng `/bflow-start` (gắn theo `session_id` của hook, lưu trong bộ nhớ host). Phiên không có hook (ví dụ Agy) dùng `director_note_user_message`. Host khởi động lại thì chạy lại `director start`.
+- `tools/list` của MCP Director chỉ mô tả đối số `token`; các tham số còn lại nằm trong mô tả của từng tool. Hãy gọi `planning_reference` trước khi lập kế hoạch.
+- Token Director hiển thị trong transcript của provider và trong argv của lệnh shell (đường dự phòng); đây là thiết kế của B1.
+- Tin nhắn của các vai chuyên trách vẫn được gửi tới pane Coordinator.
+- Codex và Agy chưa được kiểm live (hết hạn mức); chỉ Claude Code có spike live.
+- Director không có quyền phê duyệt, không ghi evidence và không thay thế Quality Gates.
+
+Bậc bằng chứng: source và test cục bộ. Chưa có chạy live end-to-end.

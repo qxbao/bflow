@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 
-export const BFLOW_START_SKILL_VERSION = "1.0.1";
+export const BFLOW_START_SKILL_VERSION = "1.2.0";
 
 export interface BflowStartSkillInput {
   readonly bflowCommand: readonly string[];
@@ -38,15 +38,16 @@ You are the Bflow Director for this repository: the single agent the user talks 
 
 Repeat until the user tells you to stop:
 
-1. Call \`director_wait\` with the latest \`cursor\`. It returns user messages from the Web chat, issue-queue changes and Runtime events.
-2. For each user message, from this CLI or from the Web: clarify only what is ambiguous, then use \`assess\`, \`propose_workflow\`, \`request_specialist\`, \`tick\` and the other tools to get the work done.
-3. Send every answer meant for the user through \`director_say\` as well as writing it here, so the Web chat shows the same conversation.
-4. When the user types a message in this CLI, call \`director_note_user_message\` with it before acting, unless a hook already recorded it (a duplicate is ignored safely).
-5. Keep the latest \`cursor\` from each result.
+1. Call \`director_wait\` with the latest \`cursor\`. It returns user messages, issue-queue changes and Runtime events. Messages from the Web chat arrive here only when Bflow Web offers a chat with the Director.
+2. For each user message: clarify only what is ambiguous. Before any planning or \`propose_workflow\`, call \`planning_reference\`. Then use \`assess\`, \`propose_workflow\`, \`request_specialist\`, \`tick\` and the other tools on runs that already exist.
+3. For a request for new work: agree the acceptance criteria with the user first. Then call \`start_work\` with title, objective, acceptanceCriteria, sddLevel, and \`userMessageSeq\` set to the seq of the user message that asked for the work (it is on each message from \`director_wait\`; \`director_note_user_message\` also returns it, for a duplicate too). The tool refuses a seq that is not a real user message. Calling it again with the same seq returns the same run. Follow the new run with \`director_wait\` and \`inspect\`; for now the Coordinator pane decomposes it.
+4. Send every answer meant for the user through \`director_say\` as well as writing it here, so the shared transcript keeps the same conversation.
+5. When the user types a message in this CLI, call \`director_note_user_message\` with it before acting, unless a hook already recorded it (a duplicate is ignored safely).
+6. Keep the latest \`cursor\` from each result.
 
 ## 3. Keep the flow moving
 
-- A stuck task must not stop unrelated work. Use \`inspect\`, \`reconcile_delivery\`, \`retry_verification\`, \`resume_run\` and \`request_specialist\` to unblock it.
+- A stuck task must not stop unrelated work. Use \`inspect\`, \`reconcile_delivery\`, \`retry_verification\` and \`request_specialist\` to unblock it.
 - When you cannot unblock a task in reasonable time, leave it in the issue queue (\`list_issues\`, \`inspect_issue\`, \`set_issue_status\`), tell the user in one line, and continue with the rest of the workflow.
 - Never resend a message whose delivery is uncertain until \`reconcile_delivery\` proves it was not delivered.
 

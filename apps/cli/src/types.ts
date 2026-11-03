@@ -97,6 +97,10 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly check?: boolean | undefined;
   readonly remove?: boolean | undefined;
   readonly noGitnexus?: boolean | undefined;
+  /** Skips writing the Director skill, MCP and hook files. */
+  readonly noDirector?: boolean | undefined;
+  /** Keeps the Director skill files committable: no managed git exclude block. */
+  readonly commitSkills?: boolean | undefined;
   /** Accepts the GitNexus license and repository index without prompting. */
   readonly yes?: boolean | undefined;
   /** Accepts the GitNexus license and repository index only; unlike yes, never implies force. */
@@ -438,6 +442,7 @@ export interface InitCommandOutput {
   readonly rolePresets?: import("./environment-config.js").RolePresetReport | undefined;
   /** The `.bflow/` entry in `<git-common-dir>/info/exclude`. */
   readonly gitExclude?: import("./git-exclude.js").GitExcludeReport | undefined;
+  readonly director?: import("./init-director.js").InitDirectorReport | undefined;
   readonly diagnostics?: readonly string[] | undefined;
 }
 
@@ -548,7 +553,7 @@ export interface CliContext {
 export interface CliExecutionResult {
   readonly exitCode: CliExitCode;
   readonly ok: boolean;
-  readonly command?: CliCommandName | "iso" | "web" | undefined;
+  readonly command?: CliCommandName | "iso" | "web" | "director" | "progress" | "queue" | undefined;
   readonly stdout: string;
   readonly stderr: string;
   readonly data?: CliCommandData | undefined;

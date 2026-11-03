@@ -130,6 +130,12 @@ Mặc định thêm các tệp này vào `.gitignore` (nội dung chứa đườ
 
 ---
 
+### D-DIR-06 — Không có vai `director` trong cấu hình — **ĐÃ CHỐT** (chủ dự án, 2026-11-03)
+
+- `.bflow/config.yml` không có mục vai `director`. CLI nơi người chạy skill `bflow-start` chính là Director; provider được suy từ CLI đó (`bflow director start` đọc dấu hiệu môi trường, hoặc nhận `--provider` do skill truyền).
+- Chỉ Web cần chọn provider, và chọn **lúc bấm "Khởi động phiên"** (danh sách provider sẵn sàng trên máy), không lưu thành cấu hình vai. Lựa chọn gần nhất có thể nhớ như tuỳ chọn hiển thị của Web, không phải cấu hình repo.
+- Hệ quả: lát B2 gỡ `conversation`/`coordinator` khỏi cấu hình vai và preflight, không thay bằng vai mới; lát C thêm bộ chọn provider vào nút Web.
+
 ## 4. Spike bắt buộc trước khi cam kết (Phase 0)
 
 > **Đã chạy 2026-11-03**, xem [báo cáo](../../reliability/director-spikes-2026-11-03.md). Claude qua S1, S2, S3, S6, S7. Codex qua S1 và phần cấu hình của S2. Phần live của Codex và Agy bị chặn vì hết hạn mức tài khoản; chạy lại sau 2026-11-17. Không có spike nào đỏ đến mức phải đổi kiến trúc. Hai điều chỉnh đã đưa vào plan: kênh CLI chung và `director_wait` mặc định 45 s.
@@ -188,7 +194,7 @@ Thứ tự bắt buộc: Phase 0 → 1 (khóa hợp đồng) → 2 (Runtime) →
 - [ ] `bflow progress [--follow] [--json]`: lõi thuần render (theo mẫu `status_panel.py`): RUN · ĐANG LÀM (vai, task, phút) · CẦN BẠN (phê duyệt > câu hỏi > hàng đợi lỗi) · HÀNG ĐỢI LỖI · DIRECTOR (có mặt/vắng, heartbeat). Co dãn theo kích thước pane, bỏ dòng ưu tiên thấp trước.
 - [ ] `bflow queue list|show|retry|dismiss`, `bflow approve <mã>` (kênh phê duyệt ngoài LLM, D-DIR-02).
 - [ ] `bflow init`: inject skill + MCP repo scope cho 3 provider (D-DIR-05), receipt, `--check`, `--remove`, `--update`; `doctor` có check `director-skill-installed` và `director-mcp-reachable`.
-- [ ] Gỡ lệnh/tùy chọn phụ thuộc pane chat (`attach` vào Conversation, cấu hình provider cho `conversation`/`coordinator`); `config migration` đổi hai vai này thành `director`.
+- [ ] Gỡ lệnh/tùy chọn phụ thuộc pane chat (`attach` vào Conversation, cấu hình provider cho `conversation`/`coordinator`); `config migration` **gỡ** hai vai này khỏi `.bflow/config.yml` và **không** thêm vai `director` (chủ dự án chốt 2026-11-03: Director là CLI nơi người chạy skill, provider suy từ CLI đó; xem D-DIR-06).
 
 ### Phase 5 — Skill và prompt (owner: `skills/**`, `packages/skills/**`, `agents/**`)
 
@@ -201,7 +207,7 @@ Thứ tự bắt buộc: Phase 0 → 1 (khóa hợp đồng) → 2 (Runtime) →
 
 - [ ] Local-server: route chỉ đọc `director` và `issues`; lệnh có cấu trúc `issue/retry`, `issue/dismiss`, `approval/decide` (đã có) không đi qua model.
 - [ ] Local-server: route `director/messages` (gửi/đọc transcript, SSE), lệnh `session/open-director` gọi cùng logic với `bflow open`.
-- [ ] Classic: nút "Khởi động phiên" mở CLI + skill (D-DIR-04), fallback hiện lệnh; thẻ trạng thái Director (hoạt động / đang chờ / vắng, lần cuối hoạt động); chat đổi thành chat với Director trên transcript thống nhất; trang "Hàng đợi lỗi"; bỏ phụ thuộc `conversationStatus`.
+- [ ] Classic: nút "Khởi động phiên" mở CLI + skill (D-DIR-04), người chọn provider ngay lúc bấm (D-DIR-06), fallback hiện lệnh; thẻ trạng thái Director (hoạt động / đang chờ / vắng, lần cuối hoạt động); chat đổi thành chat với Director trên transcript thống nhất; trang "Hàng đợi lỗi"; bỏ phụ thuộc `conversationStatus`.
 - [ ] 3D: thay ghế `conversation`/`coordinator` bằng bàn Director (đặt ở "phòng điều hành", trạng thái lấy từ heartbeat), thêm bảng hàng đợi lỗi tương tác mở panel Classic tương ứng. Cập nhật `PLACEHOLDER_ROLES`, `seats.ts`, `labels.ts`.
 - [ ] Test kiến trúc: cảnh 3D vẫn không gọi API ghi.
 
