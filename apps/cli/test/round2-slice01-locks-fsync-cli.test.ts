@@ -521,7 +521,8 @@ describe("Round 2 Slice 1 — CLI FUSE/NTFS fsync, Stale Locks, EISDIR/Corruptio
       ? cfgText.replace(/deepwiki:\s*\n\s*enabled:\s*true/, "deepwiki:\n    enabled: false")
       : `${cfgText.trimEnd()}\n  deepwiki:\n    enabled: false\n`;
     await writeFile(cfgPath, updatedCfg);
-    execFileSync(realGit, ["-C", repo, "add", ".gitignore", ".bflow/config.yml"]);
+    // init lists .bflow/ in .git/info/exclude, so committing its configuration needs --force.
+    execFileSync(realGit, ["-C", repo, "add", "--force", ".gitignore", ".bflow/config.yml"]);
     execFileSync(realGit, ["-C", repo, "commit", "--quiet", "-m", "disable deepwiki"]);
     execFileSync(realGit, ["-C", repo, "worktree", "add", "--quiet", "-b", "bflow/dev-docs-wt", wtDir]);
 

@@ -90,6 +90,17 @@ hoàn tất công việc cũ. Không tự đổi provider hoặc bỏ gate.
 
 ---
 
+## Preset role/model tĩnh (`ROLE_MODEL_PRESETS`)
+
+`role-model-presets.ts` định nghĩa bộ `cli` + `model` khuyến nghị cho mọi governance role và `sos`, theo từng CLI;
+dữ liệu được parse bằng Zod khi load và `bflow init` dùng nó để điền sẵn `.bflow/config.yml`.
+
+- `claude`: `claude-opus-4-7` cho coordinator/planner/architect/specifier/reviewer/security/sos, `claude-sonnet-4-6` cho conversation/developer/tester/qa.
+- `codex`: `gpt-5.4` cho mọi role trừ tester/qa (`gpt-5.4-mini`).
+- `agy`: specialist để trống `model` (dùng model mặc định của Agy) vì catalog `agy models` khác nhau theo tài khoản và preflight chặn id lạ; Conversation chuyển sang Claude (`fallbackReason`) vì Agy Conversation chưa được hỗ trợ.
+
+Preset là gợi ý cấu hình tĩnh, không phải bằng chứng model khả dụng: preflight/doctor vẫn là nơi xác minh.
+
 ## Ma trận Health Check (`checkHealth`)
 
 `checkHealth` thực hiện quan sát không phá hủy, không tự đăng nhập và không sửa trạng thái môi trường.
