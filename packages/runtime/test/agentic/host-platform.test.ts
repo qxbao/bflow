@@ -1180,3 +1180,71 @@ describe("read_pinned_instructions reply", () => {
       fallbackInstructions: "", hasPlatform: true, read: async () => undefined })).rejects.toThrow("no verified pinned instruction context");
   });
 });
+
+async function retainedInstructionsFixture() {
+  const {FileSkillStore,SkillManager,bundleDigest}=await import('@bflow/skills');
+  const {files}=await import('../../../skills/test/fixtures.js');
+  const {SkillSessionStore}=await import('../../src/platform/skills-session.js');
+  const {createSkillResolver}=await import('../../src/platform/defaults.js');
+  const {RoleEnvironmentResolver}=await import('../../src/platform/environment.js');
+  const {FileLaunchJournal}=await import('../../src/platform/launch-journal.js');
+  const {PaneBindingSchema}=await import('@bflow/contracts');const {launchReceiptName}=await import('../../src/agentic/tool-reachability.js');
+  const service=fakeService();const {root,options}=await session(service);let approved=true;
+  const store=new FileSkillStore(join(root,'skills-store'));const manager=new SkillManager({store,supportedCommands:['status'],authorize:async()=>approved});
+  const bundle=files('retained-work');const definition=await manager.installBundle(bundle,{source:'repository',expectedDigest:bundleDigest(bundle)});
+  const selection={skill:{skillId:definition.skillId,version:definition.version,digest:definition.digest},required:true,approvalReceiptId:'approved-pin'};
+  const selectedPlatform={...platform,skillsStoreRoot:store.root,roles:platform.roles.map(role=>role.role==='developer'?{...role,skillSelections:[selection]}:role)};
+  const requirement={...selectedPlatform.roles.find(role=>role.role==='developer')!,cwd:join(root,'task-tree'),taskId:'run-task'};
+  await mkdir(requirement.cwd);const identity={machineId:platform.machineId,repositoryId:platform.repositoryId,workspaceRoot:root,sessionId:'s1',generation:1,stateDirectory:options.stateDirectory};
+  const environmentId=new RoleEnvironmentResolver().environmentId(identity,requirement);
+  const resolved=await new SkillSessionStore({resolver:createSkillResolver(manager)}).resolveForRole(identity,requirement,environmentId);if(!resolved.ok)throw new Error(resolved.error.message);
+  const binding=PaneBindingSchema.parse({schemaVersion:2,bindingId:'old-developer',sessionId:'s1',role:'developer',agentId:'dev-retained',paneId:'p-dev',workspaceId:'w',tabId:'t',terminalId:'term',provider:'codex',agentKind:'codex',cwd:requirement.cwd,worktreePath:requirement.cwd,isolationMode:'dedicated_pane',readOnlyWorkspace:false,permanent:false,session:{source:'herdr:codex',kind:'id',value:'native-retained'},transportState:'idle',boundAt:new Date().toISOString(),metadata:{launchId:'launch-retained',launchFingerprint:'a'.repeat(64),processScopeId:'11111111-1111-4111-8111-111111111111',taskId:'run-task',runId:'run',allocationStatus:'active'}});
+  const journal=new FileLaunchJournal(join(options.stateDirectory,'launch-journal.jsonl'));
+  await journal.append({kind:'intent',launchId:'launch-retained',role:'developer',provider:'codex',environmentId,configFingerprint:'b'.repeat(64),launchFingerprint:'a'.repeat(64),generation:1,recordedAt:new Date().toISOString()});
+  await journal.append({kind:'released',launchId:'launch-retained',recordedAt:new Date().toISOString()});
+  await mkdir(join(root,'launch-receipts'));const startupPath=join(root,'launch-receipts',launchReceiptName('developer',binding.paneId));
+  await writeFile(startupPath,JSON.stringify({role:'developer',paneId:binding.paneId,source:'hook',nativeSessionId:binding.session!.value}));
+  await writeFile(options.generationFile,JSON.stringify({generation:1}));let scopeReady=true;
+  const scopeEvents:string[]=[];const scopes={assertBindingReady:async()=>{if(!scopeReady)throw new Error('namespace proof unavailable');},assertRetainedBindingReady:async()=>{if(!scopeReady)throw new Error('namespace proof unavailable');},sealLaunch:async()=>{scopeEvents.push('seal');},stopLaunch:async()=>{scopeEvents.push('stop');}} as never;
+  const host=new HostPlatformSession({...options,platform:selectedPlatform,processScopes:scopes},manager,store);await host.prepare();
+  return {host,binding,platform:selectedPlatform,manager,store,startupPath,scopeEvents,recordPath:join(options.stateDirectory,'gen-1/skills/developer-run-task.json'),resolved:resolved.value,service,setApproved:(v:boolean)=>{approved=v;},setScopeReady:(v:boolean)=>{scopeReady=v;}};
+}
+describe('retained Developer instruction proof',()=>{
+  it('recovers only currently approved instructions after host restart without reviving a retired launch or Gateway',async()=>{
+    const f=await retainedInstructionsFixture();
+    await verifyDispatchPinnedSkills(f.host,f.platform,f.binding);
+    expect(await f.host.readPinnedInstructions('developer',undefined,0,8192,'launch-retained')).toMatchObject({launchId:'launch-retained',manifestDigest:f.resolved.manifest.digest,continuationOnly:true});
+    await expect(f.host.developerReachability('launch-retained','p-dev')).rejects.toThrow(/not active/);
+    expect(f.service.calls).not.toContain('prepareDeveloper');expect(f.service.calls).not.toContain('verifyActivated');
+    f.setApproved(false);await expect(verifyDispatchPinnedSkills(f.host,f.platform,f.binding)).rejects.toThrow(/pinned skill/);
+  });
+  it.each(['foreign-native','wrong-launch','revoked','scope-missing','required-gateway','corrupt-bundle','symlink-record','changed-selection'] as const)('fails closed for %s retained instruction proof',async mode=>{
+    const f=await retainedInstructionsFixture();
+    if(mode==='foreign-native')f.binding.session={...f.binding.session!,value:'foreign-native'};
+    if(mode==='wrong-launch')f.binding.metadata={...f.binding.metadata,launchFingerprint:'c'.repeat(64)};
+    if(mode==='revoked')f.setApproved(false);
+    if(mode==='changed-selection')f.platform.roles.find(r=>r.role==='developer')!.skillSelections[0]!.required=false;
+    if(mode==='scope-missing')f.setScopeReady(false);
+    if(mode==='required-gateway')f.platform.roles.find(r=>r.role==='developer')!.mcpServiceIds=['required-service'];
+    if(mode==='corrupt-bundle'){const path=f.resolved.rendered.references[0]!.entrypoint;await chmod(path,0o600);await writeFile(path,'tampered bundle');}
+    if(mode==='symlink-record'){const {symlink}=await import('node:fs/promises');const bytes=await readFile(f.recordPath);const elsewhere=f.recordPath+'.saved';await writeFile(elsewhere,bytes);await rm(f.recordPath);await symlink(elsewhere,f.recordPath);}
+    await expect(verifyDispatchPinnedSkills(f.host,f.platform,f.binding)).rejects.toThrow(/pinned skill/);
+  });
+});
+
+it('stops the retained namespace on allocation release without reviving its Gateway launch',async()=>{
+  const f=await retainedInstructionsFixture();await verifyDispatchPinnedSkills(f.host,f.platform,f.binding);
+  await f.host.releaseDeveloper('run-task');expect(f.scopeEvents).toEqual(['seal','stop']);
+  expect(await f.host.readPinnedInstructions('developer',undefined,0,8192,'launch-retained')).toBeUndefined();
+  expect(f.service.calls).not.toContain('release:launch-retained');
+  f.binding.metadata={...f.binding.metadata,allocationStatus:'released'};
+  await expect(verifyDispatchPinnedSkills(f.host,f.platform,f.binding)).rejects.toThrow(/pinned skill/);
+});
+it('never serves a retained pin after process proof fails or across a new preparation generation',async()=>{
+  const f=await retainedInstructionsFixture();await verifyDispatchPinnedSkills(f.host,f.platform,f.binding);
+  f.setScopeReady(false);await expect(f.host.readPinnedInstructions('developer',undefined,0,8192,'launch-retained')).rejects.toThrow();
+  f.setScopeReady(true);await verifyDispatchPinnedSkills(f.host,f.platform,f.binding);
+  await f.host.prepare();expect(await f.host.readPinnedInstructions('developer',undefined,0,8192,'launch-retained')).toBeUndefined();
+  await verifyDispatchPinnedSkills(f.host,f.platform,f.binding);
+  expect(await f.host.readPinnedInstructions('developer',undefined,0,8192,'launch-retained')).toMatchObject({continuationOnly:true});
+});

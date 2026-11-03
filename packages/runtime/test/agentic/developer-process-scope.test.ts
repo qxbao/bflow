@@ -236,3 +236,19 @@ describe("legacy Developer bindings without a process scope", () => {
     await expect(manager.assertBindingReady(claimed)).rejects.toThrow("no started, authenticated process-scope witness");
   });
 });
+describe.skipIf(process.platform !== 'linux')('retained execution binding proof',()=>{
+  it('requires the persisted exact execution and a live authenticated namespace, including the worktree',async()=>{
+    const f=await fixture("console.log('retained-ready');setInterval(()=>{},1000);");
+    const child=spawn(join(f.wrapped.env.PATH!.split(':')[0]!,'codex'),[],{cwd:f.root,env:{...process.env,...f.wrapped.env},stdio:['ignore','pipe','pipe']});
+    cleanups.push(async()=>{if(child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');});
+    const output=await Promise.race([once(child.stdout,'data'),once(child,'exit').then(()=>{throw new Error('namespace exited before startup');})]);expect(String(output[0])).toContain('retained-ready');
+    await expect(f.manager.assertRetainedBindingReady(f.binding)).rejects.toThrow();
+    await f.manager.pinDispatch(AgentRequestSchema.parse({requestId:f.handle.requestId,runId:f.handle.runId,taskId:f.handle.taskId,attemptId:f.handle.attemptId,role:'developer',target:f.handle.target,instruction:'retained test',workingDirectory:f.root,inputs:[],attempt:1,retry:{maxAttempts:1,strategy:'fixed',initialDelayMs:0,maxDelayMs:0,jitter:false},timeout:{executionTimeoutMs:1000,onTimeout:'block'},idempotency:{key:f.handle.idempotencyKey,scope:'agent-request',fingerprint:'a'.repeat(64)},createdAt:new Date().toISOString()}),f.binding);
+    await f.manager.bindExecution(f.handle,f.binding);
+    const recovered=new DeveloperProcessScopes({directory:join(f.root,'scopes')});
+    await expect(recovered.assertRetainedBindingReady(f.binding)).resolves.toBeUndefined();
+    await expect(recovered.assertRetainedBindingReady({...f.binding,cwd:join(f.root,'foreign'),worktreePath:join(f.root,'foreign')})).rejects.toThrow(/execution|binding/);
+    await expect(recovered.assertRetainedBindingReady({...f.binding,session:{...f.binding.session!,value:'foreign'}})).rejects.toThrow(/execution|binding/);
+    await recovered.stop(f.handle,f.binding);await expect(recovered.assertRetainedBindingReady(f.binding)).rejects.toThrow();
+  });
+});

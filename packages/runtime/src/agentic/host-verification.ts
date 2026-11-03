@@ -1,4 +1,4 @@
-import { reviewCandidateEvidence } from "./review-candidate-evidence.js";
+import { reviewCandidateEvidence, candidateEvidenceContext, hasCandidateGateReceipt } from "./review-candidate-evidence.js";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -1342,6 +1342,20 @@ export class HostVerification {
       throw new Error("Missing rework dossier; historical state cannot supply independent finding evidence");
     }
     return dossier;
+  }
+  /** Existing authenticated measurements at the Developer's current head; this is context, never a verdict. */
+  async candidateEvidenceForDeveloper(input:{runId:string;taskId:string;attemptId:string;sourceRevision:string}) {
+    const state=record(await this.runtime().inspect());
+    const run=(Array.isArray(state.runs)?state.runs:[]).map(record).find(r=>r.runId===input.runId);
+    const task=(Array.isArray(run?.tasks)?run!.tasks:[]).map(record).find(t=>t.taskId===input.taskId);
+    if(!task)throw new Error("Unknown candidate evidence task");
+    const dossier=record(task.spec),specification=SpecificationSchema.parse(dossier.specification),strategy=TestStrategySchema.parse(dossier.strategy);
+    const packet=await reviewCandidateEvidence({context:candidateEvidenceContext({...input,specification,strategy}),state,store:this.store(),authenticateEvidence:r=>this.authenticateEvidence(r),authenticateGate:r=>this.authenticateGate(r)});
+    const owner=(Array.isArray(state.outbound)?state.outbound:[]).map(record).find(out=>out.status==="accepted"&&record(out.message).type==="task.assignment"&&out.handle&&record(out.handle).attemptId===input.attemptId);
+    const rework=owner ? record(record(owner.message).payload).reworkContext : undefined;
+    const unchanged=rework!==undefined&&record(rework).failedRevision===input.sourceRevision;
+    let complete=false;try{this.runtime().ports.policies.assertEvidenceComplete(strategy);complete=true;}catch{}
+    return json({...record(packet),noChangeDisputeProposalAllowed:unchanged&&complete&&hasCandidateGateReceipt(packet),submissionGuidance:"Historical host observations retain their original attempts. They do not replace Reviewer/QA verdicts. A withheld untrusted handover is not missing spec/lease authority. For an unchanged candidate, a complete all-disputed proposal may use status succeeded only when Runtime re-verifies matching independent host evidence; no finding is closed by the Developer. Cite the displayed receipt ID/digest for a disputed missing-evidence claim. A new source commit is not required merely to change revision when noChangeDisputeProposalAllowed is true; use status succeeded to propose independent adjudication, never to claim acceptance. Otherwise report blocked with complete findingResolutions; the host supplies blockage metadata."});
   }
   /** Capture objective revision/diff before the model evaluates it; the returned ID pins later judgment. */
   private readonly reviews = new Map<string, { binding: PaneBinding; sourceMessageId: string; context: unknown; observation: Awaited<ReturnType<HostVerification["capture"]>> }>();

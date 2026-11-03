@@ -31,9 +31,9 @@ function derivePose(a: WebAgentView, input: OfficeInput, observed: number, pendi
   // 2. Delivery uncertain: never claim the work arrived.
   const uncertain = work.find(w => w.delivery === 'unknown_delivery');
   if (uncertain) return { verdict: v('question', 'unknown', 'Chưa xác định việc đã tới'), via: uncertain };
-  // 3. A pending human decision on a run where this agent still has non-terminal work.
+  // 3. Run-level decisions do not identify which active agent is awaiting the owner.
   const asked = work.find(w => ACTIVE_DELIVERY.has(w.delivery) && pendingRuns.has(w.runId));
-  if (asked) return { verdict: v('hand_raised', 'confirmed', 'Chờ bạn quyết định'), via: asked };
+  if (asked) return { verdict: v('hand_raised', 'inferred', 'Công việc có quyết định đang chờ'), via: asked };
   // 4/5. Accepted work needs a lease still valid at snapshot time (never the browser clock); no lease is not confirmed.
   const held = work.find(w => w.delivery === 'accepted' && w.leaseExpiresAt !== undefined && Date.parse(w.leaseExpiresAt) > observed);
   if (held) {

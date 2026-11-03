@@ -61,7 +61,7 @@ export interface GitPolicy {
     /** Verified dependency heads; with two or more, Git merges them into the task base (baseRevision is then the run base). */
     dependencyHeads?: string[];
   }): Promise<TaskWorktree>;
-  collectTask(key: string): Promise<GitChangeSet>;
+  collectTask(key: string, options?: {authorizeUnchangedDispute?:(revision:string)=>Promise<boolean>;comparisonBaseRevision?:string}): Promise<GitChangeSet>;
   beginIntegration(request: {
     runId: string; integrationId: string; baseRevision: string;
     tasks: { taskKey: string; dependsOn: string[] }[];
@@ -142,6 +142,9 @@ export interface AgenticRuntimePorts {
   deliverToConversation(message: RoleMessage): Promise<void>;
   /** Host validates remote correlation/runner identity. Herdr terminal `done` is insufficient. */
   authenticateResult(result: AgentResult, handle: AgentExecutionHandle, message: RoleMessage): Promise<boolean>;
+  /** Immutable host-store lookup, separate from authenticating a newly received native envelope. */
+  authenticateStoredGate?(result: QualityGateResult): Promise<boolean>;
+  authenticateStoredEvidence?(result: VerificationResult): Promise<boolean>;
   authenticateGateResult(result: QualityGateResult, message: RoleMessage): Promise<boolean>;
   authenticateEvidence(result: VerificationResult, message: RoleMessage): Promise<boolean>;
   projectApprovalRequired?(action: string, context: JsonValue): boolean;

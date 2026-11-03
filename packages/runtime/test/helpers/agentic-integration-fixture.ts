@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID, generateKeyPairSync } from "node:crypto";
 import { expect, it } from "vitest";
-import { AgentResultSchema, ApprovalDecisionSchema, RoleMessageSchema, VerificationResultSchema, type PaneBinding, type Specification, type QualityGate, type QualityGateContext } from "@bflow/contracts";
+import { AgentResultSchema, ApprovalDecisionSchema, RoleMessageSchema, VerificationResultSchema, type PaneBinding, type Specification, type QualityGate, type QualityGateDefinition, type QualityGateContext } from "@bflow/contracts";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { FileAgentRegistry } from "@bflow/agent-registry";
 import { openSqliteRunStore } from "@bflow/persistence";
@@ -55,7 +55,7 @@ export class Panes implements PanePolicy {
   async releaseDeveloper() { return { ok: true as const, value: undefined }; }
 }
 
-export async function fixture(options: { dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial" } = {}) {
+export async function fixture(options: { additionalChecks?: QualityGateDefinition[]; additionalGates?: QualityGate[]; dynamicGate?: boolean; parallel?: boolean; tdd?: boolean; complex?: boolean; failReview?: boolean; conflict?: boolean; intake?: boolean; remoteReview?: boolean; humanApproval?: boolean; behavioral?: BehavioralCommand; runners?: TestRunnerSource; highRisk?: boolean; readiness?: "ready" | "partial" } = {}) {
   if (options.highRisk) options = { ...options, complex: true };
   const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-p19-")));
   const repository = join(root, "repo"); await mkdir(repository); git(repository, "init", "-b", "main");
@@ -118,7 +118,8 @@ export async function fixture(options: { dynamicGate?: boolean; parallel?: boole
   const receipts = new HostReceiptJournal(join(root, "host-receipts"), repository, "session-1");
   const verification = new HostVerification(() => runtime, () => artifacts, receipts, options.runners ?? (options.behavioral ? [options.behavioral] : []), undefined, undefined, [], { suites: [] }, DEFAULT_HOST_CHECKS);
   if (options.behavioral) checks.splice(0, checks.length, ...DEFAULT_HOST_CHECKS, ...(options.highRisk ? [] : verification.behavioralChecks()));
-  const actualGates = options.behavioral ? [
+  checks.push(...(options.additionalChecks ?? []));
+  const baseGates = options.behavioral ? [
     ...DEFAULT_HOST_CHECKS.filter(check => (check.configuration as any).kind === "review").map(check => ({ id: check.id,
       evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(check.id).evaluate(...args) })),
     verification.deterministicGate(), { id: "host-test-integrity", evaluate: async (context: QualityGateContext) => {
@@ -128,6 +129,7 @@ export async function fixture(options: { dynamicGate?: boolean; parallel?: boole
     } }))
   ] : options.remoteReview ? gates.map(gate => gate.id === "review" ? { id: gate.id,
     evaluate: (...args: Parameters<QualityGate["evaluate"]>) => runtime.herdrQualityGate(gate.id).evaluate(...args) } : gate) : gates;
+  const actualGates = [...baseGates, ...(options.additionalGates ?? [])];
   let dynamicReady = false;
   const policies = await loadAgenticPolicies({ repositoryPath: repository, artifactStore: artifacts,
     gates: options.dynamicGate ? actualGates.filter(gate => gate.id !== "regression") : actualGates,

@@ -95,7 +95,8 @@ export async function syncFileHandle(handle: Pick<FileHandle, "sync">): Promise<
 export class HostDevelopment {
   private readonly runners: TestRunnerSource;
   constructor(private readonly runtime: () => AgenticWorkflowRuntime, runners: TestRunnerSource | readonly BehavioralCommand[],
-    private readonly rtk?: RtkOutputIntegration) {
+    private readonly rtk?: RtkOutputIntegration,
+    private readonly candidateEvidence?: (context:{runId:string;taskId:string;attemptId:string;sourceRevision:string})=>Promise<JsonValue>) {
     this.runners = runners instanceof TestRunnerSource ? runners : new TestRunnerSource(parseBehavioralCommands(runners));
   }
   /** The same resolver as Verification: owner commands and automatic profiles, bound to this task's identities and ownership. */
@@ -378,7 +379,7 @@ export class HostDevelopment {
     const rawResumeContext = await this.runtime().taskHandover(binding, { runId: context.runId, taskId: context.taskId });
     const isAgy = context.binding.agentKind === "agy" || context.binding.provider === "agy";
     const resumeContext = isAgy ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
-    return this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
+    const reply = await this.runtime().withDeveloperWorkspace(context.binding, context.runId, context.taskId, async task => {
       const fullEvidence = task.spec.strategy.metadata?.tddEvidence ?? [];
       const fullReply = { resumeContext, runId: context.runId, taskId: context.taskId, head: (await this.git(context.cwd, ["rev-parse", "HEAD"])).trim(),
         branch: (await this.git(context.cwd, ["branch", "--show-current"])).trim(), worktreePath: context.cwd,
@@ -406,6 +407,12 @@ export class HostDevelopment {
       }
       return json(fullReply);
     });
+    const head=record(reply).head;
+    if(!this.candidateEvidence || typeof head!=="string")return reply;
+    // Receipt lookup runs outside the workspace transaction; it grants no mutation or acceptance authority.
+    const packet=await this.candidateEvidence({runId:context.runId,taskId:context.taskId,attemptId:context.attemptId,sourceRevision:head});
+    const combined=json({...record(reply),candidateBehavioralEvidence:packet});
+    return isAgy && exceedsAgyInlineReply(combined) ? reply : combined;
   }
   /** Useful Developer feedback, deliberately not authenticated QA evidence. */
   async check(binding: PaneBinding, input: unknown) {

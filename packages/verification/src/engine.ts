@@ -32,7 +32,9 @@ const IntegrationSchema = z.object({ headCommitHash: z.string().regex(/^[a-f0-9]
   });
 const OptionsSchema = z.object({
   integration: IntegrationSchema.optional(),
-  repair: RepairSchema.optional()
+  repair: RepairSchema.optional(),
+  /** Trusted controller callback; JSON callers cannot manufacture this authority. */
+  authorizeUnchangedDispute: z.function().args(z.string()).returns(z.promise(z.boolean())).optional()
 }).strict();
 const ReceiptSchema = z.object({
   gate: QualityGateResultSchema, observation: ObservationSchema,
@@ -245,6 +247,7 @@ export class VerificationEngine {
     const startedAt = this.now();
     const previous = cycle.history.at(-1);
     let iteration = 1;
+    let unchangedDisputeAuthorized = false;
     if (previous) {
       const receipt = ArtifactReferenceSchema.parse(cycle.metadata?.verificationReceipt);
       const persisted = JSON.parse((await this.read(receipt)).toString("utf8")) as unknown;
@@ -256,15 +259,19 @@ export class VerificationEngine {
           previous.status !== "failed" || cycle.status !== "rework_required") throw new Error("Invalid cycle history");
       if (!options.repair || options.repair.taskId !== plan.taskId || options.repair.changeSetId !== change.changeSetId)
         throw new Error("Rework needs a correlated repair record");
-      if (cycle.history.some(result => change.attemptId === result.attemptId ||
-          change.changeSetId === result.changeSet?.changeSetId || change.headCommitHash === result.changeSet?.headCommitHash))
+      if (cycle.history.some(result => change.attemptId === result.attemptId || change.changeSetId === result.changeSet?.changeSetId))
         throw new Error("Rework needs a new attempt and Git change not used anywhere in this cycle");
+      if (cycle.history.some(result => change.headCommitHash === result.changeSet?.headCommitHash)) {
+        unchangedDisputeAuthorized = plan.scope === "task" && await options.authorizeUnchangedDispute?.(change.headCommitHash) === true;
+        if (!unchangedDisputeAuthorized) throw new Error("Rework needs a new attempt and Git change not used anywhere in this cycle");
+      }
       iteration = cycle.currentIteration + 1;
     } else if (cycle.currentIteration !== 1 || cycle.status !== "in_progress") throw new Error("Invalid initial cycle");
     if (iteration > cycle.maxIterations) throw new Error("Verification iteration limit reached");
     const key = `${cycle.cycleId}:${iteration}:${change.attemptId}`;
     // Durable intent precedes any runner side effect, including rework provenance.
-    const intent = await this.store(plan, `${key}:intent`, { plan, cycleId: cycle.cycleId, iteration, change, options, startedAt }, "log");
+    const { authorizeUnchangedDispute: _authority, ...persistedOptions } = options;
+    const intent = await this.store(plan, `${key}:intent`, { plan, cycleId: cycle.cycleId, iteration, change, options: persistedOptions, ...(unchangedDisputeAuthorized ? {unchangedDisputeAuthorized:true} : {}), startedAt }, "log");
     const findings: QualityFinding[] = [];
     const receipts: CheckReceipt[] = [];
     const failedChecks: { checkId: string; code: string; message: string; diagnostics?: JsonValue }[] = [];
