@@ -273,16 +273,85 @@ describe("parked tasks (R-B2-14)", () => {
     expect(statusOf(single.state, "a")).toBe("cancelled");
   });
 
-  it("does not cancel parked tasks under fail-fast and does not count them as failures", async () => {
-    const workflow = definition(["a", "c"], [], { maxConcurrency: 1, failurePolicy: "fail-fast" });
+  it("fail-fast with a real failure cancels parked tasks and their dependents and fails the run", async () => {
+    // a -> b (succeeded), c independent; a parked while ready, then c fails for real.
+    const workflow = definition(["c", "a", "b"], [{ taskId: "b", dependsOnTaskId: "a", condition: "succeeded" }],
+      { maxConcurrency: 1, failurePolicy: "fail-fast" });
     const driver = await start(workflow, "run-fail-fast");
-    await driver.move("a", "ready", "normal");
+    await driver.advance();
     await driver.move("a", "parked", "park");
+    await driver.fail("c");
+    expect(statusOf(driver.state, "c")).toBe("failed");
+    // The failure leaves cancellable work for the next advance; the run is not held blocked.
+    expect(driver.state.snapshot.status).toBe("running");
+    const advanced = await driver.advance();
+    expect(statusOf(driver.state, "a")).toBe("cancelled");
+    expect(statusOf(driver.state, "b")).toBe("cancelled");
+    expect(advanced.emittedEvents.some((event) => event.type === "task.status_changed" && event.taskId === "a" &&
+      event.payload.from === "parked" && event.payload.to === "cancelled" && event.payload.intent === "cancel" &&
+      event.payload.reason === "fail-fast policy")).toBe(true);
+    expect(driver.state.snapshot.status).toBe("failed");
+    // Complete history replays the parked -> cancelled fail-fast transition.
+    const history = await collect(driver);
+    const replayed = unwrap(await new DeterministicWorkflowEngine({ definitions: [workflow] }).recover({ runId: driver.state.snapshot.runId,
+      events: history, expectedVersion: driver.state.snapshot.version }));
+    expect(replayed.snapshot).toEqual(driver.state.snapshot);
+
+    // Without a pending dependent the parked task alone still keeps the run moving to failed, not blocked.
+    const lone = await start(definition(["c", "a"], [], { maxConcurrency: 1, failurePolicy: "fail-fast" }), "run-fail-fast-lone");
+    await lone.advance();
+    await lone.move("a", "parked", "park");
+    await lone.fail("c");
+    expect(lone.state.snapshot.status).toBe("running");
+    await lone.advance();
+    expect(statusOf(lone.state, "a")).toBe("cancelled");
+    expect(lone.state.snapshot.status).toBe("failed");
+  });
+
+  it("continue-independent with a real failure keeps parked work and its dependents, and unpark can still finish the run", async () => {
+    const workflow = definition(["c", "a", "b"], [{ taskId: "b", dependsOnTaskId: "a", condition: "succeeded" }],
+      { maxConcurrency: 1, failurePolicy: "continue-independent" });
+    const driver = await start(workflow, "run-continue");
     await driver.advance();
-    await driver.succeed("c");
+    await driver.move("a", "parked", "park");
+    await driver.fail("c");
     await driver.advance();
-    expect(statusOf(driver.state, "a")).toBe("parked");
+    expect([statusOf(driver.state, "c"), statusOf(driver.state, "a"), statusOf(driver.state, "b")]).toEqual(["failed", "parked", "pending"]);
     expect(driver.state.snapshot.status).toBe("blocked");
+    await driver.move("a", "ready", "unpark");
+    await driver.advance();
+    expect(taskOf(driver.state, "a")).toMatchObject({ status: "running", attempt: 1 });
+    await driver.succeed("a");
+    await driver.advance();
+    expect(statusOf(driver.state, "b")).toBe("running");
+    await driver.succeed("b");
+    // The policy's normal outcome with one independent failure.
+    expect(driver.state.snapshot.status).toBe("failed");
+    expect([statusOf(driver.state, "a"), statusOf(driver.state, "b")]).toEqual(["succeeded", "succeeded"]);
+  });
+
+  it("refuses to park in a cancelling run, live and on replay", async () => {
+    const workflow = definition(["a"]);
+    const engine = new DeterministicWorkflowEngine({ definitions: [workflow] });
+    const runId = "run-cancelling-park";
+    const created = unwrap(await engine.createRun({ runId, definition: workflow, idempotencyKey: `${runId}/create`, createdAt: time }));
+    // Live run-wide cancellation moves every task out of a parkable state, so the cancelling run with a pending task
+    // is built from durable history: the run alone entered cancelling.
+    const cancelling = craftCommand(runId, created.snapshot, "to-cancelling", "requestCancellation",
+      [{ type: "run.status_changed", payload: { from: "queued", to: "cancelling", reason: "test" } }]);
+    const history = [...created.emittedEvents, ...cancelling];
+    const recovered = unwrap(await engine.recover({ runId, events: history, expectedVersion: cancelling.at(-1)!.aggregateVersion }));
+    expect(recovered.snapshot.status).toBe("cancelling");
+    expect(statusOf(recovered, "a")).toBe("pending");
+    const live = await new Driver(engine, recovered, "live").transition("a", "parked", "park");
+    expect(live).toMatchObject({ ok: false, error: { code: "conflict", message: "A cancelling workflow cannot park tasks" } });
+
+    const afterCancelling = { ...created.snapshot, lastEventSequence: cancelling.at(-1)!.sequence, version: cancelling.at(-1)!.aggregateVersion };
+    const parkEvents = craftCommand(runId, afterCancelling, "forged-park", "transitionTask", [{ type: "task.status_changed", taskId: "a",
+      payload: { from: "pending", to: "parked", intent: "park", attempt: 0, generationFrom: 0, generationTo: 0 } }]);
+    const replay = await new DeterministicWorkflowEngine({ definitions: [workflow] }).recover({ runId, events: [...history, ...parkEvents],
+      expectedVersion: parkEvents.at(-1)!.aggregateVersion });
+    expect(replay).toMatchObject({ ok: false, error: { code: "corruption", message: "A cancelling workflow parked a task" } });
   });
 
   it("checkpoints parked state with aggregate codec 3, rejects it under codec 2 and recovers it", async () => {

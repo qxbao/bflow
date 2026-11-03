@@ -50,13 +50,18 @@ describe.skipIf(process.platform === "win32")("authoritative Core checkpoint res
   it("restores a parked task from a codec-3 checkpoint and refuses codec 4 (B2b)", async () => {
     const { f, state } = await prepared();
     const before = unwrap(await f.ports.engine.getSnapshot("run-1"))!;
-    const target = before.tasks.find(task => ["running", "waiting", "blocked", "ready", "pending"].includes(task.status))!;
+    // Pin a bound running task so the park-scoped stop-confirmation path is always exercised.
+    const target = before.tasks.find(task => task.status === "running" && task.agentExecution !== undefined);
+    expect(target?.agentExecution).toBeDefined();
+    if (!target?.agentExecution) return;
     const at = new Date().toISOString();
     const parked = unwrap(await f.ports.engine.transitionTask({ runId: "run-1", taskId: target.taskId, expectedVersion: before.version,
       from: target.status, to: "parked", intent: "park", generationFrom: target.generation, generationTo: target.generation,
       idempotencyKey: "park-for-checkpoint", occurredAt: at,
-      ...(target.agentExecution ? { stopConfirmation: { schemaVersion: 1, cancellationId: "park-stop", executionId: target.agentExecution.executionId,
-        stoppedAt: at, terminalStatus: "cancelled" } } : {}) }));
+      stopConfirmation: { schemaVersion: 1, cancellationId: "park-stop", executionId: target.agentExecution.executionId,
+        stoppedAt: at, terminalStatus: "cancelled" } }));
+    expect(parked.emittedEvents.find(event => event.type === "task.status_changed")).toMatchObject({ payload: { from: "running", to: "parked",
+      stopConfirmation: { executionId: target.agentExecution.executionId } } });
     unwrap(await f.ports.runStore.appendEvents({ runId: "run-1", expectedVersion: before.version, expectedLastSequence: before.lastEventSequence,
       events: parked.emittedEvents, idempotencyKey: "park-for-checkpoint-events" }));
     const checkpoint = unwrap(await f.ports.engine.createCheckpoint({ runId: "run-1", expectedVersion: parked.snapshot.version,
@@ -71,7 +76,8 @@ describe.skipIf(process.platform === "win32")("authoritative Core checkpoint res
     const future = structuredClone(checkpoint) as any; future.codec.version = 4;
     vi.spyOn(f.ports.runStore, "loadLatestCheckpoint").mockResolvedValue({ ok: true, value: future });
     const reads = vi.spyOn(f.ports.runStore, "readEvents");
-    await expect(new CoreSession({ ...f.ports, engine: new DeterministicWorkflowEngine() }, state, async () => undefined).restore()).rejects.toThrow();
+    await expect(new CoreSession({ ...f.ports, engine: new DeterministicWorkflowEngine() }, state, async () => undefined).restore())
+      .rejects.toThrow("Core recovery requires a complete aggregate checkpoint");
     expect(reads).not.toHaveBeenCalled();
   }, 90000);
 

@@ -211,7 +211,9 @@ describe("Workflow Recovery", { timeout: 30000 }, () => {
       vi.spyOn(harness.runStore, "loadLatestCheckpoint").mockResolvedValue({ ok: true, value: future as never });
       const refused = await recoverWorkflowRun(runId, { engine: new DeterministicWorkflowEngine({ definitions: [definition] }),
         runStore: harness.runStore, transport: harness.transport });
-      expect(refused.ok).toBe(false);
+      // The runtime gate itself refuses it (its own message), not the envelope schema.
+      expect(refused).toMatchObject({ ok: false, error: { code: "validation",
+        message: "Recovery requires complete event history or a complete aggregate checkpoint (got codec bflow.workflow-aggregate+json v4)" } });
       vi.restoreAllMocks();
     } finally {
       await harness.cleanup();

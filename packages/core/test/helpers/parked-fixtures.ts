@@ -128,6 +128,20 @@ export class Driver {
     return this.state;
   }
 
+  /** Bind the running task's execution and record a verified, non-retryable failed result for it. */
+  async fail(taskId: string): Promise<WorkflowAdvanceResult> {
+    const handle = await this.bind(taskId);
+    const result: AgentResult = {
+      requestId: handle.requestId, attemptId: handle.attemptId, runId: handle.runId, taskId, executionId: handle.executionId,
+      status: "failed", verification: { status: "verified", evidence: "signed-result", correlation: handle.correlation },
+      artifactProposals: [], retryable: false, startedAt: time, completedAt: later,
+      error: { code: "agent_error", message: "failed", retryable: false }
+    };
+    this.state = unwrap(await this.engine.recordAgentResult({ runId: this.state.snapshot.runId, taskId,
+      expectedVersion: this.state.snapshot.version, result, idempotencyKey: this.key(`failed-${taskId}`), occurredAt: later }));
+    return this.state;
+  }
+
   /** Bind the running task's execution and record a verified successful result for it. */
   async succeed(taskId: string): Promise<WorkflowAdvanceResult> {
     const handle = await this.bind(taskId);

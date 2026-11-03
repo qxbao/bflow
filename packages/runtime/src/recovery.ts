@@ -77,21 +77,23 @@ export async function recoverWorkflowRun(
   let cachedAllEvents: DomainEvent[] | undefined = undefined;
 
   if (checkpoint !== null) {
-    // Validate checkpoint envelope
-    const parsedCp = parseRecoveryCheckpointWithCompatibility(checkpoint);
-    if (!parsedCp.ok) return parsedCp as OperationResult<WorkflowRecoveryResult>;
-
-    // Reject non-aggregate codec for tail recovery
-    if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2, 3].includes(checkpoint.codec.version)) {
+    // Reject non-aggregate or unknown codecs for tail recovery before the envelope parse, so the supported
+    // aggregate codec set ([1, 2, 3]) is enforced here rather than only by the envelope schema.
+    const codec: { readonly name?: unknown; readonly version?: unknown } | undefined = checkpoint.codec;
+    if (codec?.name !== "bflow.workflow-aggregate+json" || typeof codec.version !== "number" || ![1, 2, 3].includes(codec.version)) {
       return {
         ok: false,
         error: {
           code: "validation",
           retryable: false,
-          message: `Recovery requires complete event history or a complete aggregate checkpoint (got codec ${checkpoint.codec.name} v${checkpoint.codec.version})`
+          message: `Recovery requires complete event history or a complete aggregate checkpoint (got codec ${String(codec?.name)} v${String(codec?.version)})`
         }
       };
     }
+
+    // Validate checkpoint envelope
+    const parsedCp = parseRecoveryCheckpointWithCompatibility(checkpoint);
+    if (!parsedCp.ok) return parsedCp as OperationResult<WorkflowRecoveryResult>;
 
     // Decode aggregate state
     const decoded = decodeWorkflowAggregateCheckpointState(checkpoint);

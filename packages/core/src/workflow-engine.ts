@@ -410,8 +410,9 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         }
 
         if (this.#hasFailFastFailure(aggregate)) {
+          // Fail-fast wins over the issue queue (Task 12 ruling): parked work is cancelled with the rest.
           for (const task of aggregate.snapshot.tasks) {
-            if (["pending", "ready", "retrying"].includes(task.status)) {
+            if (["pending", "ready", "retrying", "parked"].includes(task.status)) {
               const transitioned = this.#transitionTask(aggregate, emitted, task.taskId, "cancelled", "cancel",
                 parsed.data.occurredAt, parsed.data.idempotencyKey, "fail-fast policy");
               if (!transitioned.ok) return transitioned;
@@ -1891,7 +1892,7 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
         activeCapacity < aggregate.definition.maxConcurrency &&
         dependenciesSatisfied(aggregate.definition, aggregate.snapshot, task.taskId, context, depIndex)) ||
       (this.#hasFailFastFailure(aggregate) &&
-        tasks.some((task) => ["pending", "ready", "retrying"].includes(task.status)));
+        tasks.some((task) => ["pending", "ready", "retrying", "parked"].includes(task.status)));
     const exhaustedRework = aggregate.definition.tasks.flatMap((definition) => {
       const task = taskState(aggregate, definition.id);
       const policy = definition.rework ?? { maxReworks: 0, onExhausted: "fail" as const };
@@ -1919,6 +1920,8 @@ export class DeterministicWorkflowEngine implements WorkflowEngine {
       else if (hasWaiting) target = "waiting";
       else target = activeCapacity === 0 ? "blocked" : "running";
     } else if (exhaustedRework.includes("require_human")) target = "blocked";
+    // Fail-fast: the next advance cancels the parked work, after which the run fails.
+    else if (hasParked && this.#hasFailFastFailure(aggregate)) target = "running";
     else if (hasParked) {
       target = hasWaiting && !hasBlocked && !(hasFailure && aggregate.definition.failurePolicy === "block") ? "waiting" : "blocked";
     } else if (exhaustedRework.includes("fail")) target = "failed";
