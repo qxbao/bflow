@@ -275,6 +275,9 @@ export async function executeHostIdleCheck(deps: {
   };
   const initial = activeState();
   if (!initial) return;
+  // Director session (manifest v3, which activation already matched to the host layout): there is no Conversation pane to
+  // wake, so no idle notice is written; a stuck run reaches the Director through the watchdog stall report and the mailbox.
+  if (initial.manifest.schemaVersion === 3) return;
   const now = deps.now ?? Date.now();
   const runs = await initial.workspace.runtime.watchdogSnapshot(initial.manifest.conversationSessionId);
   const liveEpisodes = new Set(runs.filter(run => run.live).map(episodeKeyOf));
@@ -283,7 +286,7 @@ export async function executeHostIdleCheck(deps: {
   const beforeManifest = activeState();
   if (!beforeManifest) return;
   const current = SessionManifestSchema.parse(unwrap(await beforeManifest.workspace.runtime.ports.panes.getManifest()));
-  if (!activeState()) return;
+  if (!activeState() || current.schemaVersion === 3) return;
   const panes = await Promise.all(current.panes.filter(pane => pane.role !== "conversation").map(async pane => ({
     role: pane.role,
     paneId: pane.paneId,

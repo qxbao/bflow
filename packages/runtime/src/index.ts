@@ -192,3 +192,7 @@ export { digest as dataVerificationDigest, contractDigest as dataContractDigest 
 
 // Director agent facade and state (ADR 0009).
 export * from "./director/index.js";
+// Director-mode host composition pieces (ADR 0009, slice B2a): the same functions the host wires, so a fake-runner E2E can
+// compose a Director session without Herdr. They grant no authority on their own; the host decides what to wire.
+export { startDirectorWork, recordConversationNotice, type DirectorStartWorkDeps, type DirectorNoticeMirrorDeps } from "./agentic/host-director-mode.js";
+export { HostReceiptJournal } from "./agentic/host-receipts.js";

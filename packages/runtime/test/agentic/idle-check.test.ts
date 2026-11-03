@@ -139,6 +139,30 @@ describe("executeHostIdleCheck", () => {
     expect([...pings.keys()]).toEqual([`run-1@${T0}`]);
   });
 
+  it("never runs in a Director session (manifest v3) and still runs in a v2 session", async () => {
+    const { receipts, pass, state } = await fixture([run()]);
+    const at = new Date(T0).toISOString();
+    const specialists = state.manifest.panes.filter(pane => !["conversation", "coordinator"].includes(pane.role));
+    const director = SessionManifestSchema.parse({ schemaVersion: 3, sessionId: "session-1", projectName: "bflow-test", workspaceRoot: "/repo",
+      herdrWorkspaceId: "workspace", herdrTabId: "tab", conversationSessionId: "session-1", status: "up", activeRunIds: ["run-1"], panes: specialists,
+      progressPane: { tabId: "tab-progress", paneId: "pane-progress", command: ["bflow", "progress", "--follow"], phase: "running", restarts: [] },
+      attachTarget: { role: "progress", tabId: "tab-progress", paneId: "pane-progress" }, createdAt: at, updatedAt: at });
+    const v2 = state.manifest;
+    let snapshots = 0;
+    const runtime = (state.workspace as unknown as { runtime: { watchdogSnapshot: (...args: unknown[]) => Promise<unknown> } }).runtime;
+    const snapshot = runtime.watchdogSnapshot;
+    runtime.watchdogSnapshot = async (...args) => { snapshots++; return snapshot(...args); };
+    state.manifest = director;
+    await pass(IDLE);
+    await pass(IDLE + 3600 * SEC);
+    expect(snapshots).toBe(0);
+    expect(await receipts.unsurfacedConversationNotices()).toEqual([]);
+    state.manifest = v2;
+    await pass(IDLE);
+    expect(snapshots).toBe(1);
+    expect(await receipts.unsurfacedConversationNotices()).toHaveLength(1);
+  });
+
   it("does nothing once the host has started closing", async () => {
     const { receipts, pass, state } = await fixture([run()]);
     state.closing = true;
