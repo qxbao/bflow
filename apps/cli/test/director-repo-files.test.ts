@@ -187,3 +187,21 @@ describe("director repo files", () => {
     expect(await exists(".codex/config.toml")).toBe(false);
   });
 });
+
+describe("commitSkills", () => {
+  it("writes no .gitignore block when commitSkills is true", async () => {
+    const { written } = await applyDirectorRepoFiles(input({ commitSkills: true }));
+    expect(written).not.toContain(".gitignore");
+    expect(await exists(".gitignore")).toBe(false);
+    const checks = await checkDirectorRepoFiles(input({ commitSkills: true }));
+    expect(checks.map(c => c.path)).not.toContain(".gitignore");
+    expect(checks.every(c => c.status === "current")).toBe(true);
+  });
+
+  it("removes a previously managed .gitignore block when re-applied with commitSkills", async () => {
+    await applyDirectorRepoFiles(input());
+    expect(await read(".gitignore")).toContain("bflow director");
+    await applyDirectorRepoFiles(input({ commitSkills: true }));
+    expect(await exists(".gitignore")).toBe(false);
+  });
+});

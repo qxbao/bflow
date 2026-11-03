@@ -99,6 +99,8 @@ export interface InitCommandArgs extends GlobalCliFlags {
   readonly noGitnexus?: boolean | undefined;
   /** Skips writing the Director skill, MCP and hook files. */
   readonly noDirector?: boolean | undefined;
+  /** Keeps the Director skill files committable: no managed .gitignore block. */
+  readonly commitSkills?: boolean | undefined;
   /** Accepts the GitNexus license and repository index without prompting. */
   readonly yes?: boolean | undefined;
   /** Accepts the GitNexus license and repository index only; unlike yes, never implies force. */

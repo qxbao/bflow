@@ -19,7 +19,8 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-const run = (args: string[]) => runCli(["init", "--no-gitnexus", ...args, "--json"], { cwd: repo, env: { ...process.env, HOME: home, BFLOW_HOME: home } } as never);
+const ctx = () => ({ cwd: repo, setup: { isolatedRoot: home } });
+const run = (args: string[]) => runCli(["init", "--no-gitnexus", ...args, "--json"], ctx());
 const exists = (p: string) => stat(join(repo, p)).then(() => true, () => false);
 
 describe("bflow init Director files", () => {
@@ -38,17 +39,34 @@ describe("bflow init Director files", () => {
     expect(JSON.parse(res.stdout).data.director).toBeUndefined();
   });
 
+  it("--check without a receipt stays healthy with an informational notice", async () => {
+    await run(["--no-director"]);
+    const check = await runCli(["init", "--check", "--json"], ctx());
+    const data = JSON.parse(check.stdout).data;
+    expect(data.director.status).not.toBe("failed");
+    expect(data.diagnostics.join("\n")).toContain("Director chưa được cài");
+    expect(data.diagnostics.join("\n")).not.toContain("cài lại skill");
+  });
+
+  it("--commit-skills writes no .gitignore block and removes a previous one", async () => {
+    const res = await run(["--commit-skills"]);
+    expect(res.exitCode).toBe(0);
+    expect(await exists(".gitignore")).toBe(false);
+    const check = await runCli(["init", "--check", "--json"], ctx());
+    expect(JSON.parse(check.stdout).data.director.files.map((f: { path: string }) => f.path)).not.toContain(".gitignore");
+  });
+
   it("--check is unhealthy after the skill is deleted, and --remove deletes files", async () => {
     await run([]);
     await rm(join(repo, ".claude/skills/bflow-start/SKILL.md"));
-    const check = await runCli(["init", "--check", "--json"], { cwd: repo, env: { ...process.env, HOME: home, BFLOW_HOME: home } } as never);
+    const check = await runCli(["init", "--check", "--json"], ctx());
     const data = JSON.parse(check.stdout).data;
     expect(data.healthy).toBe(false);
     expect(data.director.status).toBe("missing");
     expect(data.diagnostics.join("\n")).toContain("bflow init --update");
 
     await run([]);
-    const removed = await runCli(["init", "--remove", "--json"], { cwd: repo, env: { ...process.env, HOME: home, BFLOW_HOME: home } } as never);
+    const removed = await runCli(["init", "--remove", "--json"], ctx());
     expect(JSON.parse(removed.stdout).data.director.status).toBe("removed");
     expect(await exists(".claude/skills/bflow-start/SKILL.md")).toBe(false);
     expect(await exists(".mcp.json")).toBe(false);

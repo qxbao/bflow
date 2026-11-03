@@ -1,5 +1,5 @@
-import { realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   applyDirectorRepoFiles,
   checkDirectorRepoFiles,
@@ -44,13 +44,40 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export interface DirectorFilesOptions {
+  readonly commitSkills?: boolean | undefined;
+  readonly deps?: ResolveBflowCommandDeps | undefined;
+}
+
+export const DIRECTOR_NOT_INSTALLED_NOTICE =
+  "Director chưa được cài trong kho này; chạy `bflow init --update` nếu muốn dùng /bflow-start";
+
+/** Reads the install receipt: whether it exists and whether it was written with --commit-skills (no .gitignore unit). */
+async function readDirectorReceipt(repositoryRoot: string): Promise<{ installed: boolean; commitSkills: boolean }> {
+  let text: string;
+  try {
+    text = await readFile(join(repositoryRoot, ".bflow", "director-files.json"), "utf8");
+  } catch {
+    return { installed: false, commitSkills: false };
+  }
+  try {
+    const units = (JSON.parse(text) as { units?: { path?: unknown }[] }).units;
+    const hasIgnore = Array.isArray(units) && units.some(u => u?.path === ".gitignore");
+    return { installed: true, commitSkills: Array.isArray(units) && !hasIgnore };
+  } catch {
+    return { installed: true, commitSkills: false };
+  }
+}
+
 export async function installDirectorFiles(
   repositoryRoot: string,
-  deps?: ResolveBflowCommandDeps
+  options: DirectorFilesOptions = {}
 ): Promise<{ report: InitDirectorReport; diagnostics: string[] }> {
   try {
-    const bflowCommand = await resolveBflowCommand(deps);
-    const { written } = await applyDirectorRepoFiles({ repositoryRoot, bflowCommand, providers: DIRECTOR_PROVIDERS });
+    const bflowCommand = await resolveBflowCommand(options.deps);
+    const { written } = await applyDirectorRepoFiles({
+      repositoryRoot, bflowCommand, providers: DIRECTOR_PROVIDERS, ...(options.commitSkills ? { commitSkills: true } : {})
+    });
     const report: InitDirectorReport = { status: "installed", files: written.map(path => ({ path, action: "written" })) };
     return { report, diagnostics: [] };
   } catch (error) {
@@ -63,23 +90,33 @@ export async function installDirectorFiles(
 
 export async function checkDirectorFiles(
   repositoryRoot: string,
-  deps?: ResolveBflowCommandDeps
-): Promise<{ report: InitDirectorReport; healthy: boolean; diagnostics: string[] }> {
+  options: DirectorFilesOptions = {}
+): Promise<{ report: InitDirectorReport; healthy: boolean; installed: boolean; diagnostics: string[] }> {
+  const receipt = await readDirectorReceipt(repositoryRoot);
+  const installed = receipt.installed;
+  const commitSkills = options.commitSkills ?? receipt.commitSkills;
   try {
-    const bflowCommand = await resolveBflowCommand(deps);
-    const checks = await checkDirectorRepoFiles({ repositoryRoot, bflowCommand, providers: DIRECTOR_PROVIDERS });
+    const bflowCommand = await resolveBflowCommand(options.deps);
+    const checks = await checkDirectorRepoFiles({
+      repositoryRoot, bflowCommand, providers: DIRECTOR_PROVIDERS, ...(commitSkills ? { commitSkills: true } : {})
+    });
     const files = checks.map(c => ({ path: c.path, action: c.status }));
     const status = checks.some(c => c.status === "modified") ? "modified"
       : checks.some(c => c.status === "missing") ? "missing" : "ready";
+    if (!installed) {
+      return { report: { status, files }, healthy: true, installed, diagnostics: [DIRECTOR_NOT_INSTALLED_NOTICE] };
+    }
     return {
       report: { status, files },
       healthy: status === "ready",
+      installed,
       diagnostics: status === "ready" ? [] : ["Chạy `bflow init --update` để cài lại skill Director."]
     };
   } catch (error) {
     return {
       report: { status: "failed", files: [] },
-      healthy: false,
+      healthy: !installed,
+      installed,
       diagnostics: [`Không kiểm tra được tệp Director: ${errorMessage(error)}. Chạy \`bflow init --update\` để cài lại skill Director.`]
     };
   }

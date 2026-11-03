@@ -1160,10 +1160,10 @@ export async function runDoctorDiagnostics(
       checkId: "director-skill-installed",
       group: "skills",
       component: "director",
-      status: director.healthy ? "pass" : "warning",
+      status: !director.installed ? "skipped" : director.healthy ? "pass" : "warning",
       detected_version: null,
-      reason: director.healthy ? "Director skill, MCP and hook files are installed." : `Director repository files are ${director.report.status}.`,
-      remediation: director.healthy ? "" : "Run 'bflow init --update' to install the Director skill.",
+      reason: !director.installed ? "Director is not installed in this repository (optional)." : director.healthy ? "Director skill, MCP and hook files are installed." : `Director repository files are ${director.report.status}.`,
+      remediation: director.healthy ? "" : "Run 'bflow init --update' to reinstall the Director skill.",
       ...(director.healthy ? {} : { repair_command: "bflow init --update" })
     });
   } catch (error) {

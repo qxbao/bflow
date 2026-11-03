@@ -8,6 +8,8 @@ export interface DirectorRepoFilesInput {
   readonly repositoryRoot: string;
   readonly bflowCommand: readonly string[];
   readonly providers: readonly DirectorProvider[];
+  /** When true the skill files are meant to be committed: no managed .gitignore block. */
+  readonly commitSkills?: boolean;
 }
 export type DirectorRepoFileStatus = "missing" | "current" | "modified";
 export interface DirectorRepoFileCheck {
@@ -317,7 +319,7 @@ function jsonSpec(path: string, defs: readonly JsonUnitDef[]): FileSpec {
   };
 }
 
-function buildSpecs(providers: readonly DirectorProvider[], bflowCommand: readonly string[]): FileSpec[] {
+function buildSpecs(providers: readonly DirectorProvider[], bflowCommand: readonly string[], commitSkills = false): FileSpec[] {
   const selected = canonicalProviders(providers);
   const specs: FileSpec[] = [];
   const skill = renderBflowStartSkill({ bflowCommand });
@@ -345,7 +347,7 @@ function buildSpecs(providers: readonly DirectorProvider[], bflowCommand: readon
     specs.push(jsonSpec(".codex/hooks.json", [hookDef(bflowCommand, "codex")]));
   }
   const ignored = [...directorRepoFilePaths(selected), RECEIPT_PATH].sort();
-  specs.push(blockSpec(GITIGNORE_PATH, "gitignore-block", ignored.join("\n")));
+  if (!commitSkills) specs.push(blockSpec(GITIGNORE_PATH, "gitignore-block", ignored.join("\n")));
   return specs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
@@ -389,7 +391,7 @@ async function writeText(root: string, rel: string, text: string, mode?: number)
 
 export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<{ written: string[] }> {
   const { repositoryRoot: root } = input;
-  const specs = buildSpecs(input.providers, input.bflowCommand);
+  const specs = buildSpecs(input.providers, input.bflowCommand, input.commitSkills === true);
 
   // Plan phase: check every path and compute every new text before the first write.
   await assertNoSymlink(root, RECEIPT_PATH);
@@ -460,7 +462,7 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
 }
 
 export async function checkDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<DirectorRepoFileCheck[]> {
-  const specs = buildSpecs(input.providers, input.bflowCommand);
+  const specs = buildSpecs(input.providers, input.bflowCommand, input.commitSkills === true);
   const results: DirectorRepoFileCheck[] = [];
   for (const spec of specs) {
     const text = await readIfExists(input.repositoryRoot, spec.path);

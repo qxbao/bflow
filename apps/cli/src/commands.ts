@@ -507,7 +507,7 @@ async function executeCommandWithProgress(
 
     const directorInstall = parsed.noDirector
       ? undefined
-      : await installDirectorFiles(repository.root);
+      : await installDirectorFiles(repository.root, { commitSkills: parsed.commitSkills === true });
     const output: InitCommandOutput = {
       ...initRes.value,
       mode: "init",
