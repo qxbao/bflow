@@ -189,6 +189,13 @@ describe("Director mailbox routing", () => {
     expect(after.status).not.toBe("awaiting_approval");
     expect(after.decision).toMatchObject({ approvalId: decision.approvalId, decision: "approved" });
     expect(f.director!.delivered.map(item => item.message_id)).toContain(message.message_id);
+    // Recovery after a successful live apply never applies the same approval again.
+    const authorize = vi.spyOn(f.ports, "authorizeHuman");
+    const decided = (await f.inspect()).decision;
+    await f.runtime.recoverMissingCoordinatorWakeups(); await f.runtime.flushOutbound(); await f.runtime.recoverMissingCoordinatorWakeups();
+    expect(authorize).not.toHaveBeenCalled();
+    expect((await f.inspect()).decision).toEqual(decided);
+    expect((await f.runtime.inspect() as any).inbox.filter((item: any) => item.message.message_id === message.message_id)).toHaveLength(1);
     expect(f.transport.sentRequests.slice(sentBefore).some(sent => sent.role === "coordinator")).toBe(false);
   }, 60000);
 
@@ -208,7 +215,14 @@ describe("Director mailbox routing", () => {
     expect(after.status).toBe("awaiting_approval");
     expect(after.decision).toBeUndefined();
     expect(after.ingressDiagnostics).toEqual([expect.objectContaining({ messageId: message.message_id, reason: expect.stringContaining("Human approval is not authenticated") })]);
-    expect((await f.runtime.inspect() as any).inbox.some((item: any) => item.message.message_id === message.message_id)).toBe(false);
+    // The definitive refusal is journaled as rejected, so recovery never re-checks the same envelope.
+    expect((await f.runtime.inspect() as any).inbox.filter((item: any) => item.message.message_id === message.message_id))
+      .toEqual([expect.objectContaining({ status: "rejected", reason: "Human approval is not authenticated" })]);
+    const authorize = vi.spyOn(f.ports, "authorizeHuman");
+    await f.runtime.recoverMissingCoordinatorWakeups(); await f.runtime.recoverMissingCoordinatorWakeups();
+    expect(authorize).not.toHaveBeenCalled();
+    expect((await f.inspect()).ingressDiagnostics).toHaveLength(1);
+    expect((await f.inspect()).status).toBe("awaiting_approval");
   }, 60000);
 
   it("recovers a delivered but unapplied mailbox approval after restart", async () => {
@@ -292,6 +306,17 @@ describe("Director mailbox routing", () => {
     }
     expect(f.transport.sentRequests).toEqual([]);
   });
+
+  it("names the actual sender role for an unsupported non-Conversation mailbox message", async () => {
+    const f = await light();
+    const failures = vi.spyOn(f.runtime, "reportInboundFailure").mockResolvedValue(undefined);
+    const message = RoleMessageSchema.parse({ schema_version: 2, message_id: "from-planner", correlation_id: "correlation", run_id: "run-1",
+      sender: { role: "planner" }, recipient: { role: "coordinator" }, type: "task.status", payload: { status: "completed" },
+      artifact_references: [], occurred_at: T0, idempotency_key: "from-planner" });
+    await f.enqueue(message);
+    await f.runtime.flushOutbound();
+    expect(failures).toHaveBeenCalledWith(expect.objectContaining({ message_id: "from-planner" }), "Unsupported planner→Coordinator message in Director session");
+  });
 });
 
 describe("Director-mode liveness and resume", () => {
@@ -329,6 +354,20 @@ describe("Director-mode liveness and resume", () => {
     expect(f.director.delivered.map(item => item.message_id)).toEqual([wake.message.message_id]);
     expect((await f.record()).status).toBe("planning");
     expect(f.panes.bindingReads).not.toContain("coordinator");
+  });
+
+  it("refuses an explicit or idle resume of a legacy v2 run in a Director session and leaves the journal unchanged", async () => {
+    const f = await light([run("run-1", "escalated", "conversation", { pendingAction: autoResume("run-1") })]);
+    f.advance(31_000);
+    const before = await readFile(join(f.journalDirectory, "state.json"));
+    const refusal = "Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work";
+    await expect(f.runtime.resumeBlockedRun("run-1", autoResume("run-1").actionId)).rejects.toThrow(refusal);
+    await expect(f.runtime.resumeBlockedRun("run-1", autoResume("run-1").actionId, { conversationUserMessageId: "user-turn-1" })).rejects.toThrow(refusal);
+    await expect(f.runtime.resumeIdleRun("run-1", "user-turn-2")).rejects.toThrow(refusal);
+    expect((await readFile(join(f.journalDirectory, "state.json"))).equals(before)).toBe(true);
+    expect((await f.record()).status).toBe("escalated");
+    expect((await f.state()).outbound).toEqual([]);
+    expect(f.director.deliverCalls).toBe(0);
   });
 
   it("never auto-resumes a legacy v2 run in a Director session", async () => {

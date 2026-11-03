@@ -513,6 +513,11 @@ export class AgenticWorkflowRuntime {
       return action(state, saveAndLog, core, outbox);
     });
   }
+  /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
+  private assertDirectorWritable(run: RunRecord): void {
+    if (this.ports.director && run.delegation.requestedBy !== "director")
+      throw new AdmissionRejectedError("Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work");
+  }
   private run(state: JournalState, runId: string): RunRecord {
     const run = state.runs.find(item => item.runId === runId);
     if (!run) throw new Error(`Unknown delegation run ${runId}`);
@@ -644,13 +649,16 @@ export class AgenticWorkflowRuntime {
         !state.inbox.some(item => item.message.message_id === out.message.message_id ||
           (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
         state.runs.some(run => run.runId === out.message.run_id && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)))
-        .map(out => RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
+        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
           ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
-          : out.message));
+          : out.message) }));
     });
-    for (const message of deliveredApprovals) {
+    for (const { message, mailbox } of deliveredApprovals) {
       try {
-        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) continue;
+        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
+          if (mailbox) await this.refuseUnauthenticatedMailboxApproval(message);
+          continue;
+        }
         await withRecoveredHerdrReceipt(message, () => this.applyAuthenticatedHerdrMessage(message, false));
         replayed++;
       }
@@ -1220,7 +1228,7 @@ export class AgenticWorkflowRuntime {
     if (message.sender.role === "conversation" && message.type === "approval.decision") {
       try {
         if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
-          await this.reportInboundFailure(message, "Human approval is not authenticated");
+          await this.refuseUnauthenticatedMailboxApproval(message);
           return;
         }
         await withRecoveredHerdrReceipt(message, () => this.applyAuthenticatedHerdrMessage(message, false));
@@ -1231,7 +1239,23 @@ export class AgenticWorkflowRuntime {
     }
     // A cancellation control is consumed by drainCancellationControls before it can reach the mailbox.
     if (isCancellationHandoff(message)) return;
-    await this.reportInboundFailure(message, "Unsupported Conversation→Coordinator message in Director session");
+    await this.reportInboundFailure(message, message.sender.role === "conversation"
+      ? "Unsupported Conversation→Coordinator message in Director session"
+      : `Unsupported ${message.sender.role}→Coordinator message in Director session`);
+  }
+  /**
+   * A definitive authorizeHuman refusal of a delivered mailbox approval: surface it once, then journal the exact envelope as
+   * rejected so recovery never re-checks it. A new human decision travels as a new envelope.
+   */
+  private async refuseUnauthenticatedMailboxApproval(message: RoleMessage): Promise<void> {
+    const reason = "Human approval is not authenticated";
+    await this.reportInboundFailure(message, reason);
+    await this.transaction(async (state, save) => {
+      if (state.inbox.some(item => item.message.message_id === message.message_id ||
+          (message.idempotency_key !== undefined && item.message.idempotency_key === message.idempotency_key))) return;
+      state.inbox.push({ message, status: "rejected", reason });
+      await save();
+    });
   }
   /**
    * Read-only: Conversation inbox writes that exhausted their bounded retries. The host writes a notice receipt directly for each
@@ -2200,6 +2224,7 @@ export class AgenticWorkflowRuntime {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
+      this.assertDirectorWritable(run);
       if (options.webCommand) {
         const command = WebCommandSchema.parse(options.webCommand);
         if (options.automatic || options.conversationUserMessageId || command.kind !== "resume" || command.runId !== runId || command.actionId !== actionId ||
@@ -2289,7 +2314,7 @@ export class AgenticWorkflowRuntime {
       // A Coordinator resume in a Director session is a mailbox write: there is no Coordinator pane or capability to prove.
       const resumeBindings = failedCapabilityDispatches.length
         ? await Promise.all(failedCapabilityDispatches.map(async item => ({ item, binding: unwrap(await this.ports.panes.getRoleBinding(item.selector)) })))
-        : this.ports.director && action.requiredRole === undefined ? []
+        : this.ports.director && run.delegation.requestedBy === "director" && action.requiredRole === undefined ? []
           : [{ item: undefined, binding: unwrap(await this.ports.panes.getRoleBinding(action.requiredRole ?? "coordinator")) }];
       if (resumeBindings.length && (resumeBindings.some(item => !item.binding) || !this.ports.preflightRoleCapabilities))
         throw new Error("The current session has no verified role capability preflight");
@@ -2868,6 +2893,7 @@ export class AgenticWorkflowRuntime {
     const userMessageId = textField(conversationUserMessageId);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId);
+      this.assertDirectorWritable(run);
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
       if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
