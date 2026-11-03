@@ -31,9 +31,9 @@ describe("bflow-start director skill", () => {
   });
 
   it("embeds the skill version", () => {
-    expect(BFLOW_START_SKILL_VERSION).toBe("1.2.0");
+    expect(BFLOW_START_SKILL_VERSION).toBe("1.3.0");
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("1.2.0");
+    expect(text).toContain("1.3.0");
     expect(text).toContain("BFLOW_DIRECTOR_TOKEN=<token> '/usr/bin/node' director call <tool> --json");
     expect(text).not.toContain("--token");
   });
@@ -52,5 +52,30 @@ describe("bflow-start director skill", () => {
     expect(text).not.toContain("cannot create a new run");
     expect(text).toContain("start_work");
     expect(text).toContain("userMessageSeq");
+  });
+
+  it("describes the v3 work loop with mailbox audiences and both approval paths", () => {
+    const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
+    expect(text).toContain("read_coordinator_guide");
+    expect(text).toContain("read_mailbox");
+    expect(text).toContain("audience");
+    expect(text).toContain("director_say");
+    expect(text).toContain("request_specialist");
+    expect(text).toContain("retry_verification");
+    expect(text).toContain("! bflow approve '#n'");
+    expect(text).toContain("approve button in Bflow Web");
+  });
+
+  it("never tells the Director to run bflow approve itself", () => {
+    const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
+    expect(text).not.toMatch(/Run `[^`]*bflow approve/);
+    expect(text).toContain("Do not run that command yourself");
+    expect(text).not.toContain("<code>");
+  });
+
+  it("keeps file paths out of backticks", () => {
+    const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
+    const spans = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1]!);
+    expect(spans.filter(span => /[\\/]|\.(md|ts|js|json|yml|yaml)$/.test(span.replace(/^! /, "")))).toEqual([]);
   });
 });

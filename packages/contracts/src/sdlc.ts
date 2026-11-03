@@ -16,7 +16,9 @@ export const SdlcWorkStatusSchema = z.enum([
   "completed",
   "escalated",
   "failed",
-  "cancelled"
+  "cancelled",
+  // B2b (R-B2-15): every unfinished task is parked or behind a parked task; reopened only by unpark.
+  "completed_with_parked"
 ]);
 export type SdlcWorkStatus = z.infer<typeof SdlcWorkStatusSchema>;
 

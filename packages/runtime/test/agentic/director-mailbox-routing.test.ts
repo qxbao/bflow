@@ -414,6 +414,24 @@ describe("private journal v8", () => {
     expect(() => parseAgenticJournalState(withDirectorRun, repository)).toThrow("Director journal fields require private journal v8");
     expect(parseAgenticJournalState({ ...structuredClone(withDelivery), version: 8 }, repository).outbound.at(-1)!.delivery).toBe("director_mailbox");
     expect(parseAgenticJournalState({ ...structuredClone(withDirectorRun), version: 8 }, repository).runs[0]!.delegation.requestedBy).toBe("director");
+    // B2b (R-B2-15): `completed_with_parked` only exists in a v8 journal.
+    const withParkedRun = structuredClone(raw);
+    withParkedRun.runs[0].status = "completed_with_parked";
+    expect(() => parseAgenticJournalState(withParkedRun, repository)).toThrow("Director journal fields require private journal v8");
+    expect(parseAgenticJournalState({ ...structuredClone(withParkedRun), version: 8 }, repository).runs[0]!.status).toBe("completed_with_parked");
+  });
+
+  it("raises the journal to v8 when a run is saved as completed_with_parked", async () => {
+    const raw = JSON.parse(await readFile(fixturePath, "utf8"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "bflow-journal-parked-")));
+    roots.push(root);
+    await mkdir(join(root, "journal"), { recursive: true });
+    await writeFile(join(root, "journal", "state.json"), JSON.stringify(raw));
+    const journal = new AgenticJournal(join(root, "journal"), repository);
+    await journal.exclusive(async (state, save) => { state.runs[0]!.status = "completed_with_parked"; await save(); });
+    const saved = JSON.parse(await readFile(join(root, "journal", "state.json"), "utf8"));
+    expect(saved.version).toBe(8);
+    expect(saved.runs[0].status).toBe("completed_with_parked");
   });
 
   it("refuses a Director mailbox tag on a non-Coordinator, parented or dispatched outbound", () => {

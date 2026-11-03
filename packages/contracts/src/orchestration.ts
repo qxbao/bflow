@@ -23,7 +23,7 @@ import {
   TaskStatusSchema
 } from "./execution.js";
 import { QualityGateResultSchema } from "./quality.js";
-import { validateTaskTransition } from "./transitions.js";
+import { TASK_TRANSITION_INTENTS, validateParkStopConfirmation, validateTaskTransition } from "./transitions.js";
 import { WorkflowDefinitionSchema, WorkflowRunSnapshotSchema } from "./workflow.js";
 
 export const CreateRunCommandSchema = z
@@ -53,10 +53,12 @@ export const TaskTransitionCommandSchema = z
     expectedVersion: z.number().int().nonnegative(),
     from: TaskStatusSchema,
     to: TaskStatusSchema,
-    intent: z.enum(["normal", "retry", "rework", "cancel"]),
+    intent: z.enum(TASK_TRANSITION_INTENTS),
     generationFrom: z.number().int().nonnegative(),
     generationTo: z.number().int().nonnegative(),
     reason: z.string().min(1).optional(),
+    /** B2b: park-scoped confirmed stop of the bound execution (no cancellation record, never `cancelling`). */
+    stopConfirmation: CancellationStopConfirmationSchema.optional(),
     idempotencyKey: IdempotencyKeySchema,
     occurredAt: IsoDateTimeSchema
   })
@@ -71,6 +73,8 @@ export const TaskTransitionCommandSchema = z
     if (!validation.valid) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: validation.reason ?? "invalid task transition" });
     }
+    const stop = validateParkStopConfirmation(command.intent, command.stopConfirmation);
+    if (!stop.valid) context.addIssue({ code: z.ZodIssueCode.custom, message: stop.reason ?? "invalid stop confirmation", path: ["stopConfirmation"] });
   });
 
 export const BindAgentExecutionCommandSchema = z

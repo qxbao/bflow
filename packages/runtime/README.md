@@ -2007,35 +2007,33 @@ Oversized policy-phase QA inspections are served as lossless UTF-8 JSON pages by
 
 Large native Herdr deliveries use a digest-bound reference to the already persisted host intent instead of putting the full envelope into the plugin context environment. The native helper resolves only this repository/session's unknown, non-refused intent, then keeps the existing physical sender checks and signs the original complete RoleMessage. A reference is not permission to retry uncertain delivery; the producer's original reconciliation guards remain in force.
 
-## Director (thử nghiệm, lát B1)
+## Director (thử nghiệm, lát B2a)
 
-Director là vai hội thoại thử nghiệm, nằm trong `packages/runtime/src/director/`. Mục tiêu của lát B1 là cho người dùng trò chuyện với một agent duy nhất qua CLI provider đang chạy, trong khi Coordinator v2 và Conversation hiện có vẫn hoạt động song song.
+Director là agent hội thoại duy nhất mà người dùng trò chuyện, nằm trong `packages/runtime/src/director/`. Trong lát B2a, phiên Director (manifest v3) thay thế Conversation và Coordinator v2 trong bố cục mới: Director tự lập kế hoạch, giao việc cho vai chuyên trách qua Herdr và theo dõi run. Các thành phần của B1 vẫn có: `store.ts` (`DirectorStore`, token `<tokenId>.<secret>`, chỉ lưu sha256), `tools.ts` (`DirectorTools`), `endpoint.ts` (`DirectorEndpoint`), `snapshot.ts` và `progress.ts`, `mcp.ts` (`runDirectorMcp`).
 
-Các module:
+Thành phần của B2a:
 
-- `store.ts` (`DirectorStore`): quản lý phiên, transcript và hàng đợi lỗi. Token có dạng `<tokenId>.<secret>`; chỉ lưu sha256 của token, không lưu token thô.
-- `tools.ts` (`DirectorTools`): tập tool dành cho Director gồm các tool của Coordinator trừ `report_progress`, cộng với `director_wait`, `director_say`, `director_note_user_message`, `list_issues`, `inspect_issue` và `set_issue_status`. Không có tool phê duyệt hay ghi evidence.
-- `endpoint.ts` (`DirectorEndpoint`): điểm vào của Director trên host.
-- `snapshot.ts` (`buildDirectorProgressSnapshot`) và `progress.ts` (`renderDirectorProgress`): tạo và hiển thị ảnh chụp tiến độ.
-- `mcp.ts` (`runDirectorMcp`): MCP server stdio. Token là đối số `token` của mỗi tool.
+- **Manifest v3** (`SessionManifestV3Schema`, `schemaVersion: 3`): giữ `conversationSessionId` làm id phiên tương tác (cổng người: Web, `bflow approve`, alias `#n`), thêm `progressPane` và `attachTarget` trỏ tới tab `progress`. v3 cấm pane có vai `conversation` hoặc `coordinator`. `PaneBinding` lồng bên trong vẫn là v2; đây là quyết định R-B2-3 cần reviewer tích hợp duyệt.
+- **Tab `progress`**: Pane Manager tạo tab từ root pane của workspace và chạy `bflow progress --follow`. Watchdog của host chạy mỗi 15 giây và gọi `ensureProgressPane` ở mỗi lượt. Nếu tiến trình thoát, pane được chạy lại tối đa 5 lần trong 10 phút; quá giới hạn thì pane ở `phase: "failed"` và manifest `degraded`, phiên không sập.
+- **Hộp thư Director**: tin gửi tới `coordinator` không có `parentAssignmentId` được xếp hàng với `delivery: "director_mailbox"` và giao trong tiến trình qua `ports.director.deliver`. Không đi qua Herdr, không lease, không `unknown_delivery`. Mỗi mục (`DirectorMailboxItemSchema`) có `audience` (`director` hoặc `user`), `seq`, `runId`, `taskId`, `text` và `code` (`#n`). Tin `approval.decision` từ cổng người được áp dụng ngay sau khi giao.
+- **Thông báo cho người**: gateway Conversation trong tiến trình vẫn giữ thẻ, alias `#n`, receipt và projection cho Web (tất định, không LLM). Trong phiên Director, host còn ghi bản sao vào hộp thư với `audience: "user"`, đối chiếu được qua `messageId` gốc.
+- **Khởi tạo run**: `admitDirectorWork` dùng đúng `admitDelegation` (new, duplicate hoặc rejected). Yêu cầu có `requestedBy: "director"`, `targetRole: "coordinator"`, `runId` bắt buộc và không có `roleProfile`. Không có RoleMessage và không có outbox tới coordinator. Khoá idempotent là `director:<messageId của tin người>` như B1, nên gọi lại không tạo run thứ hai.
+- **Principal**: mọi tool Director ghi activity log với `principal: "director"`. Run có `delegation.requestedBy !== "director"` là run cũ, chỉ đọc (xem giới hạn bên dưới).
+- **Watchdog**: trong phiên v3, host bỏ qua kiểm tra idle (không có pane Conversation để đánh thức). Run bị treo được báo qua stall report của watchdog và hộp thư.
+- **Phê duyệt bằng CLI**: `bflow approve '#n'` gọi method của chủ `human_decision_cli`. Host tra alias ra thẻ đang chờ, dựng `ApprovalDecision` khớp đúng request và ghi receipt người với provenance `cli_owner` (trường `tty` chỉ để audit). Director không có tool phê duyệt, và token Director bị từ chối ở method này.
+- **Journal v8**: các trường `delivery`, `requestedBy: "director"` và `delegationHistory` chỉ hợp lệ từ version 8. Parser từ chối chúng khi `version < 8`.
+- **Cấu hình**: Runtime bỏ qua vai `conversation` và `coordinator` còn sót trong cấu hình và cảnh báo; `bflow config-migrate` gỡ chúng (xem [apps/cli/README.md](../../apps/cli/README.md)).
 
-Host daemon tạo một `DirectorEndpoint` cho mỗi host tại `<host directory>/director`. Các phương thức:
+Giới hạn đã biết sau B2:
 
-- Director token: `director_call`.
-- Owner: `director_register`, `director_revoke`, `director_progress`, `director_hook_note`, `director_issues`, `director_issue`, `director_issue_status`.
-
-Phía client có `callDirectorOwnerHost` và `callDirectorTool`. Timeout của `director_wait` là `waitMax` (300 s) cộng 30 s.
-
-Luồng sử dụng: người dùng gõ `/bflow-start` trong CLI provider. Skill chạy `bflow director start --json`, sau đó vòng `director_wait` / `director_say` tiếp tục cho đến khi phiên kết thúc. Chi tiết lệnh nằm trong [apps/cli/README.md](../../apps/cli/README.md).
-
-Giới hạn đã biết:
-
-- Director cùng tồn tại với pane Conversation và Coordinator v2; việc thay thế hoàn chỉnh thuộc lát B2.
+- Phiên v2 đang chạy phải `bflow down` trước khi `bflow up`. Run tạo trong phiên v2 (kể cả run do `start_work` của B1 tạo) chỉ đọc được trong phiên Director. Director chỉ dùng được `inspect`, `cancel`, `reconcile_cancellation` và `reconcile_delivery` trên các run đó (R-B2-12). Host giữ đường mã v2 cho test cũ và đọc dữ liệu cũ; CLI không bao giờ tạo hay khởi động lại phiên v2.
+- Chat Web trong phiên Director báo `chat_adapter_unavailable`. Các thao tác có cấu trúc (phê duyệt, resume, cancel) vẫn dùng được. Web `create_request`, `revise_request` và `answer_clarification` bị từ chối kèm hướng dẫn tiếng Việt.
+- `bflow approve '#n'` chạy trong shell cùng UID với Director. Host không phân biệt được người gõ lệnh với model chạy lệnh. Đây là rủi ro đã chấp nhận ở D-DIR-02; trường `tty` chỉ để audit.
+- Khi Director vắng mặt, Runtime vẫn chạy phần tất định (dispatch, gate, verification). Bước cần phán đoán (phân rã, xử lý wake) chờ trong hộp thư.
 - Hook ghi tin nhắn chỉ ghi cho đúng phiên provider đã khởi động bằng `/bflow-start` (gắn theo `session_id` của hook, lưu trong bộ nhớ host). Phiên không có hook (ví dụ Agy) dùng `director_note_user_message`. Host khởi động lại thì chạy lại `director start`.
 - `tools/list` của MCP Director chỉ mô tả đối số `token`; các tham số còn lại nằm trong mô tả của từng tool. Hãy gọi `planning_reference` trước khi lập kế hoạch.
-- Token Director hiển thị trong transcript của provider và trong argv của lệnh shell (đường dự phòng); đây là thiết kế của B1.
-- Tin nhắn của các vai chuyên trách vẫn được gửi tới pane Coordinator.
+- Token Director hiển thị trong transcript của provider và trong argv của lệnh shell (đường dự phòng).
 - Codex và Agy chưa được kiểm live (hết hạn mức); chỉ Claude Code có spike live.
 - Director không có quyền phê duyệt, không ghi evidence và không thay thế Quality Gates.
 
-Bậc bằng chứng: source và test cục bộ. Chưa có chạy live end-to-end.
+Bậc bằng chứng: nguồn + test cục bộ (fake runner). Chưa có live Herdr hay provider cho chế độ Director; chưa có chạy live end-to-end.

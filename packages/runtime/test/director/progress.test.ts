@@ -51,6 +51,12 @@ describe("renderDirectorProgress", () => {
     expect(out[2]).toContain("thực hiện");
   });
 
+  it("labels a run that completed with parked tasks (R-B2-15)", () => {
+    const out = renderDirectorProgress(snap({ runs: [run([task("a", "succeeded"), task("b", "parked")], "completed_with_parked")] }),
+      { width: 120, height: 20, now });
+    expect(out[2]).toContain("Xong một phần — còn mục treo");
+  });
+
   it("formats elapsed time", () => {
     const out = renderDirectorProgress(
       snap({

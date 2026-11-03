@@ -30,7 +30,8 @@ const SDLC_LABEL: Record<string, string> = {
   completed: "hoàn tất",
   escalated: "cần người",
   failed: "thất bại",
-  cancelled: "đã hủy"
+  cancelled: "đã hủy",
+  completed_with_parked: "Xong một phần — còn mục treo"
 };
 
 const ACTIVE_TASK_LABEL: Record<string, string> = {

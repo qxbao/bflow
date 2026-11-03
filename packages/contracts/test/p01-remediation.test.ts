@@ -5,8 +5,10 @@ import {
   ReworkPolicySchema,
   WorkflowAggregateCheckpointStateSchema,
   WorkflowDefinitionSchema,
+  SdlcWorkStatusSchema,
   decodeWorkflowAggregateCheckpointState,
   fingerprintWorkflowCommand,
+  requiresParkedTaskCodec,
   parseRecoveryCheckpointWithCompatibility
 } from "../src/index.js";
 import { now, workflow } from "./fixtures.js";
@@ -65,6 +67,25 @@ describe("P01 remediation contracts", () => {
     expect(decodeWorkflowAggregateCheckpointState(RecoveryCheckpointSchema.parse({
       ...checkpoint, codec: { name: "bflow.workflow-run-snapshot+json", version: 1 }
     }))).toMatchObject({ ok: false, error: { code: "validation" } });
+  });
+
+  it("requires aggregate codec 3 for parked tasks and accepts codec 3 (R-B2-14)", () => {
+    const parkedSnapshot = { ...snapshot, status: "blocked", tasks: snapshot.tasks.map((task, index) =>
+      index === 0 ? { ...task, status: "parked", version: 1 } : task) };
+    const parked = { ...checkpoint, state: { ...aggregate, snapshot: parkedSnapshot } };
+    expect(requiresParkedTaskCodec(WorkflowAggregateCheckpointStateSchema.parse(parked.state))).toBe(true);
+    expect(requiresParkedTaskCodec(WorkflowAggregateCheckpointStateSchema.parse(aggregate))).toBe(false);
+    for (const version of [1, 2]) {
+      expect(decodeWorkflowAggregateCheckpointState(RecoveryCheckpointSchema.parse({ ...parked,
+        codec: { name: "bflow.workflow-aggregate+json", version } })))
+        .toEqual({ ok: false, error: { code: "validation", retryable: false, message: "Parked tasks require aggregate codec 3" } });
+    }
+    expect(decodeWorkflowAggregateCheckpointState(RecoveryCheckpointSchema.parse({ ...parked,
+      codec: { name: "bflow.workflow-aggregate+json", version: 3 } }))).toMatchObject({ ok: true });
+    expect(decodeWorkflowAggregateCheckpointState(RecoveryCheckpointSchema.parse({ ...checkpoint,
+      codec: { name: "bflow.workflow-aggregate+json", version: 3 } }))).toMatchObject({ ok: true });
+    expect(RecoveryCheckpointSchema.safeParse({ ...checkpoint, codec: { name: "bflow.workflow-aggregate+json", version: 4 } }).success).toBe(false);
+    expect(SdlcWorkStatusSchema.parse("completed_with_parked")).toBe("completed_with_parked");
   });
 
   it("stores distinct per-execution stop confirmations for run-wide cancellation", () => {
