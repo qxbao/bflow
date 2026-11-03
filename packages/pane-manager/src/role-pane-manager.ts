@@ -17,6 +17,7 @@ import type {
 import {
   DeveloperContinuationAllocationSchema,
   PaneBindingSchema,
+  ProgressPaneSchema,
   ResolvedRoleProfileSnapshotSchema,
   RoleProfilePinSchema,
   sameRoleProfilePin,
@@ -113,6 +114,7 @@ import {
   closeProgressPane,
   ensureProgressPane,
   launchProgressPane,
+  replaceProgressPane,
   type ProgressPaneDeps
 } from "./progress-pane.js";
 
@@ -351,8 +353,9 @@ export class RolePaneManager {
     }
     if (layout === "director") {
       const command = options.config.progressCommand;
-      if (!Array.isArray(command) || command.length === 0 || command.some(part => typeof part !== "string" || part.length === 0)) {
-        throw new TypeError("RolePaneManagerConfig.progressCommand is required for the director layout");
+      if (command === undefined) throw new TypeError("RolePaneManagerConfig.progressCommand is required for the director layout");
+      if (!ProgressPaneSchema.shape.command.safeParse(command).success) {
+        throw new TypeError("RolePaneManagerConfig.progressCommand must be 1-16 non-empty arguments of at most 4096 characters");
       }
     }
 
@@ -554,7 +557,7 @@ export class RolePaneManager {
     if (stored !== undefined && storedPane !== undefined) {
       const progress: ProgressPane = saved?.status === "down"
         ? { tabId: stored.tabId, paneId: stored.paneId, terminalId: storedPane.terminalId, command, phase: "created", restarts: [] }
-        : { ...stored, command };
+        : { ...stored };
       return ok({ progress, liveTabs, livePanes });
     }
     let tabs = liveTabs;
@@ -992,9 +995,15 @@ export class RolePaneManager {
       }, options);
       const reused = savedDirector?.progressPane !== undefined && savedDirector.status !== "down" &&
         savedDirector.progressPane.paneId === progress.paneId && savedDirector.progressPane.tabId === progress.tabId;
-      progress = reused ? await ensureProgressPane(deps, progress) : await launchProgressPane(deps, {
-        workspaceId: herdrWorkspaceId, tabId: progress.tabId, paneId: progress.paneId, terminalId: progress.terminalId ?? "",
-        command: progress.command, restarts: progress.restarts });
+      const configured = this.#config.progressCommand ?? [];
+      const sameCommand = progress.command.length === configured.length && progress.command.every((part, index) => part === configured[index]);
+      // `bflow up` recovers a failed pane, or one running an older command, by an owned replacement under the restart budget.
+      progress = !reused
+        ? await launchProgressPane(deps, { workspaceId: herdrWorkspaceId, tabId: progress.tabId, paneId: progress.paneId,
+          terminalId: progress.terminalId, command: progress.command, restarts: progress.restarts })
+        : progress.phase === "failed" || !sameCommand
+          ? await replaceProgressPane(deps, progress, configured)
+          : await ensureProgressPane(deps, progress);
     }
 
     for (const role of configuredPermanentRoles) {

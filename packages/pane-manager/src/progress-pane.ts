@@ -29,7 +29,8 @@ export const PROGRESS_PANE_LABEL = "progress";
 export const PROGRESS_RESTART_LIMIT = 5;
 export const PROGRESS_RESTART_WINDOW_MS = 10 * 60 * 1000;
 
-type Observation = "missing" | "replaced" | "foreign" | "viewer" | "shell" | "occupied" | "starting";
+/** `unobservable`: Herdr could not report the pane (unsupported command, timeout, malformed reply). Never a launch permit. */
+type Observation = "missing" | "replaced" | "foreign" | "viewer" | "shell" | "occupied" | "starting" | "unobservable";
 
 const PROCESS_POLL_MS = 100;
 const PROCESS_MAX_POLLS = 25;
@@ -96,12 +97,18 @@ async function observe(deps: ObserveDeps, current: ProgressPane): Promise<Observ
   return isShellReadyForAgent(pane, info).ready ? "shell" : "occupied";
 }
 
+/** Observation that never throws: any Herdr failure other than a missing target is reported as `unobservable`. */
+async function inspect(deps: ObserveDeps, current: ProgressPane): Promise<Observation> {
+  try { return await observe(deps, current); }
+  catch { return "unobservable"; }
+}
+
 async function waitFor(deps: ObserveDeps, current: ProgressPane, target: "shell" | "viewer"): Promise<Observation> {
   let latest: Observation = "starting";
   const deadline = Date.now() + PROCESS_DEADLINE_MS;
   for (let attempt = 0; attempt < PROCESS_MAX_POLLS && Date.now() < deadline; attempt++) {
-    latest = await observe(deps, current);
-    if (latest === "missing" || latest === "replaced" || latest === "foreign" || latest === "viewer") return latest;
+    latest = await inspect(deps, current);
+    if (latest === "missing" || latest === "replaced" || latest === "foreign" || latest === "viewer" || latest === "unobservable") return latest;
     if (target === "shell" && latest === "shell") return latest;
     if (attempt + 1 < PROCESS_MAX_POLLS) await delay(Math.max(0, Math.min(PROCESS_POLL_MS, deadline - Date.now())));
   }
@@ -110,11 +117,12 @@ async function waitFor(deps: ObserveDeps, current: ProgressPane, target: "shell"
 
 /**
  * Launches the progress command in an owned shell pane. The launch intent is persisted before `pane run`; an error,
- * a non-empty acknowledgement or an unconfirmed process yields `launch_unknown`, which is never replayed.
+ * a non-empty acknowledgement or an unconfirmed process yields `launch_unknown`, which is never replayed. Herdr
+ * observation failures never escape: before the intent the pane becomes `failed`, after it `launch_unknown`.
  */
 export async function launchProgressPane(
   deps: ProgressPaneDeps,
-  input: { workspaceId: string; tabId: string; paneId: string; terminalId: string; command: readonly string[]; restarts?: readonly string[] }
+  input: { workspaceId: string; tabId: string; paneId: string; terminalId?: string | undefined; command: readonly string[]; restarts?: readonly string[] }
 ): Promise<ProgressPane> {
   const base: ProgressPane = {
     tabId: input.tabId, paneId: input.paneId, ...(input.terminalId ? { terminalId: input.terminalId } : {}), command: [...input.command],
@@ -123,7 +131,7 @@ export async function launchProgressPane(
   const scoped: ObserveDeps = { herdr: deps.herdr, workspaceId: input.workspaceId };
   const ready = await waitFor(scoped, base, "shell");
   if (ready === "viewer") return persist(deps, { ...base, phase: "running", launchedAt: deps.clock().toISOString() });
-  if (ready === "foreign" || ready === "occupied") return persist(deps, { ...base, phase: "failed" });
+  if (ready === "foreign" || ready === "occupied" || ready === "unobservable") return persist(deps, { ...base, phase: "failed" });
   // Nothing was run: a later ensure launches once the shell is observed ready.
   if (ready !== "shell") return persist(deps, base);
   const intent = await persist(deps, { ...base, phase: "launch_intent" });
@@ -139,19 +147,46 @@ export async function launchProgressPane(
     : persist(deps, { ...intent, phase: "launch_unknown" });
 }
 
-async function recreate(deps: ProgressPaneDeps, current: ProgressPane, now: Date): Promise<ProgressPane> {
+async function recreate(deps: ProgressPaneDeps, current: ProgressPane, now: Date, command: readonly string[] = current.command): Promise<ProgressPane> {
   if (!progressRestartAllowed(current.restarts, now)) return persist(deps, { ...current, phase: "failed" });
-  const created = parseTabCreatedResult(outcomeOf(await deps.herdr(["tab", "create", "--workspace", deps.workspaceId, "--cwd",
-    deps.workspaceRoot, "--label", PROGRESS_TAB_LABEL, "--no-focus"])));
-  const root = created.rootPane;
-  if (created.tab.workspaceId !== deps.workspaceId || root.tabId !== created.tab.tabId || root.workspaceId !== deps.workspaceId)
-    throw new Error("Herdr created a progress tab with mismatched identity");
+  let root: HerdrPaneInfo;
+  try {
+    const created = parseTabCreatedResult(outcomeOf(await deps.herdr(["tab", "create", "--workspace", deps.workspaceId, "--cwd",
+      deps.workspaceRoot, "--label", PROGRESS_TAB_LABEL, "--no-focus"])));
+    root = created.rootPane;
+    if (created.tab.workspaceId !== deps.workspaceId || root.tabId !== created.tab.tabId || root.workspaceId !== deps.workspaceId)
+      return persist(deps, { ...current, phase: "failed" });
+  } catch {
+    // An unacknowledged tab creation is not retried here; the next ensure or `bflow up` decides again.
+    return persist(deps, { ...current, phase: "failed" });
+  }
   // The new pane is owned before it is renamed or launched, so a lost acknowledgement never orphans an unknown pane.
-  const fresh = await persist(deps, { tabId: created.tab.tabId, paneId: root.paneId, terminalId: root.terminalId,
-    command: current.command, phase: "created", restarts: [...recentRestarts(current.restarts, now), now.toISOString()] });
-  parsePaneInfoResult(outcomeOf(await deps.herdr(["pane", "rename", root.paneId, PROGRESS_PANE_LABEL])));
+  const fresh = await persist(deps, { tabId: root.tabId, paneId: root.paneId, terminalId: root.terminalId,
+    command: [...command], phase: "created", restarts: [...recentRestarts(current.restarts, now), now.toISOString()] });
+  try { parsePaneInfoResult(outcomeOf(await deps.herdr(["pane", "rename", root.paneId, PROGRESS_PANE_LABEL]))); }
+  catch { /* The label is cosmetic; ownership is the recorded terminal identity. */ }
   return launchProgressPane(deps, { workspaceId: deps.workspaceId, tabId: fresh.tabId, paneId: fresh.paneId,
     terminalId: root.terminalId, command: fresh.command, restarts: fresh.restarts });
+}
+
+/**
+ * `bflow up` recovery for a `failed` pane or one launched with a different command: when the pane is still owned (same
+ * workspace, tab and terminal, running the old command or an idle shell) a fresh progress tab is created and launched
+ * under the restart budget, then the old pane is closed. A foreign, occupied or unobservable pane is left untouched and
+ * the progress pane stays `failed`. Uncertain launches are never replaced here; they need a confirmed idle shell.
+ */
+export async function replaceProgressPane(deps: ProgressPaneDeps, current: ProgressPane, command: readonly string[]): Promise<ProgressPane> {
+  if (current.phase === "launch_intent" || current.phase === "launch_unknown") return ensureProgressPane(deps, current);
+  const now = deps.clock();
+  const observed = await inspect(deps, current);
+  if (observed === "missing" || observed === "replaced") return recreate(deps, current, now, command);
+  if (observed !== "viewer" && observed !== "shell") return current.phase === "failed" ? current : persist(deps, { ...current, phase: "failed" });
+  const replacement = await recreate(deps, current, now, command);
+  if (replacement.paneId !== current.paneId) {
+    try { await deps.herdr(["pane", "close", current.paneId]); }
+    catch { /* The replacement is recorded; a pane that refused to close stays an orphan shell, never reused. */ }
+  }
+  return replacement;
 }
 
 /**
@@ -160,8 +195,13 @@ async function recreate(deps: ProgressPaneDeps, current: ProgressPane, now: Date
  */
 export async function ensureProgressPane(deps: ProgressPaneDeps, current: ProgressPane): Promise<ProgressPane> {
   const now = deps.clock();
-  const observed = await observe(deps, current);
+  const observed = await inspect(deps, current);
   if (observed === "missing" || observed === "replaced") return recreate(deps, current, now);
+  if (observed === "unobservable") {
+    // An unobservable pane is never treated as running and never relaunched: the session degrades instead.
+    const phase = current.phase === "launch_intent" || current.phase === "launch_unknown" ? "launch_unknown" : "failed";
+    return current.phase === phase ? current : persist(deps, { ...current, phase });
+  }
   if (observed === "viewer") {
     return current.phase === "running" ? current
       : persist(deps, { ...current, phase: "running", launchedAt: current.launchedAt ?? now.toISOString() });
@@ -176,12 +216,12 @@ export async function ensureProgressPane(deps: ProgressPaneDeps, current: Progre
   // The pane is an idle owned shell.
   if (current.phase === "created") {
     return launchProgressPane(deps, { workspaceId: deps.workspaceId, tabId: current.tabId, paneId: current.paneId,
-      terminalId: current.terminalId ?? "", command: current.command, restarts: current.restarts });
+      terminalId: current.terminalId, command: current.command, restarts: current.restarts });
   }
   if (current.phase === "running") {
     if (!progressRestartAllowed(current.restarts, now)) return persist(deps, { ...current, phase: "failed" });
     return launchProgressPane(deps, { workspaceId: deps.workspaceId, tabId: current.tabId, paneId: current.paneId,
-      terminalId: current.terminalId ?? "", command: current.command,
+      terminalId: current.terminalId, command: current.command,
       restarts: [...recentRestarts(current.restarts, now), now.toISOString()] });
   }
   return current.phase === "failed" ? current : persist(deps, { ...current, phase: "failed" });
@@ -192,7 +232,7 @@ export async function ensureProgressPane(deps: ProgressPaneDeps, current: Progre
  * idle shell). A missing/replaced pane is already gone; a foreign or occupied pane is preserved.
  */
 export async function closeProgressPane(deps: ObserveDeps, current: ProgressPane): Promise<"closed" | "absent" | "preserved"> {
-  const observed = await observe(deps, current);
+  const observed = await inspect(deps, current);
   if (observed === "missing" || observed === "replaced") return "absent";
   if (observed !== "viewer" && observed !== "shell") return "preserved";
   try {

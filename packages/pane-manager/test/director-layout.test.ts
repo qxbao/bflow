@@ -4,7 +4,7 @@ import { SessionManifestSchema, SessionManifestV3Schema, type SessionManifest, t
 import { RolePaneManager } from "../src/role-pane-manager.js";
 import { InMemorySessionManifestStore } from "../src/manifest-store.js";
 import type { PermanentTopologyRole, RolePaneManagerConfig } from "../src/types.js";
-import { DirectorHerdrFake } from "./support/director-herdr-fake.js";
+import { DirectorHerdrFake, fail } from "./support/director-herdr-fake.js";
 
 const ROOT = "/workspace/sample-project";
 const SESSION = "bf-fixture-session";
@@ -201,5 +201,123 @@ describe("RolePaneManager director layout", () => {
     const stopped = await manager.shutdownTopology();
     expect(stopped.ok && stopped.value.status).toBe("down");
     expect(stopped.ok && stopped.value.schemaVersion).toBe(2);
+  });
+
+  describe("fix round 1", () => {
+    // Herdr cannot report the progress pane (e.g. an unsupported `pane process-info`); specialist panes stay observable.
+    let progressFake: DirectorHerdrFake | undefined;
+    const unsupported = (args: readonly string[]) => args[0] === "pane" && args[1] === "process-info" &&
+      progressFake?.panes.get(args[args.indexOf("--pane") + 1]!)?.label === "progress" ? fail("unknown_command", "unsupported") : undefined;
+
+    it("degrades instead of failing when process-info is unavailable before the launch", async () => {
+      const { fake, manager, store } = setup();
+      progressFake = fake;
+      fake.intercept = unsupported;
+      const result = await manager.initializeTopology();
+      expect(result.ok).toBe(true);
+      const manifest = await storedV3(store);
+      expect(manifest.status).toBe("degraded");
+      expect(manifest.progressPane?.phase).toBe("failed");
+      expect(fake.count("pane", "run")).toBe(0);
+      expect((await manager.inspectTopologyHealth()).ok).toBe(true);
+      expect((await storedV3(store)).status).toBe("degraded");
+      expect(fake.count("pane", "run")).toBe(0);
+    });
+
+    it("records launch_unknown when process-info fails after pane run, and never reruns it", async () => {
+      const { fake, manager, store } = setup();
+      progressFake = fake;
+      fake.intercept = args => args[0] === "pane" && args[1] === "process-info" && fake.count("pane", "run") > 0 ? unsupported(args) : undefined;
+      expect((await manager.initializeTopology()).ok).toBe(true);
+      expect((await storedV3(store)).progressPane?.phase).toBe("launch_unknown");
+      expect((await storedV3(store)).status).toBe("degraded");
+      expect((await manager.inspectTopologyHealth()).ok).toBe(true);
+      expect((await storedV3(store)).status).toBe("degraded");
+      expect((await storedV3(store)).progressPane?.phase).toBe("launch_unknown");
+      expect(fake.count("pane", "run")).toBe(1);
+    });
+
+    it("degrades a running pane that becomes unobservable instead of reporting up", async () => {
+      const { fake, manager, store } = setup();
+      expect((await manager.initializeTopology()).ok).toBe(true);
+      progressFake = fake;
+      fake.intercept = unsupported;
+      expect((await manager.inspectTopologyHealth()).ok).toBe(true);
+      const manifest = await storedV3(store);
+      expect(manifest.progressPane?.phase).toBe("failed");
+      expect(manifest.status).toBe("degraded");
+    });
+
+    it("bflow up replaces an owned failed progress pane", async () => {
+      const { fake, manager, store } = setup();
+      expect((await manager.initializeTopology()).ok).toBe(true);
+      const old = (await storedV3(store)).progressPane!;
+      progressFake = fake;
+      fake.intercept = unsupported;
+      await manager.ensureProgressPane();
+      expect((await storedV3(store)).progressPane?.phase).toBe("failed");
+      fake.intercept = undefined;
+      expect((await manager.reconcileTopology()).ok).toBe(true);
+      const manifest = await storedV3(store);
+      expect(manifest.status).toBe("up");
+      expect(manifest.progressPane?.phase).toBe("running");
+      expect(manifest.progressPane?.paneId).not.toBe(old.paneId);
+      expect(manifest.progressPane?.restarts).toHaveLength(1);
+      expect(manifest.attachTarget.paneId).toBe(manifest.progressPane?.paneId);
+      expect(fake.calls).toContainEqual(["pane", "close", old.paneId]);
+    });
+
+    it("bflow up recovers a budget-exhausted pane once the restart window has passed", async () => {
+      const { fake, manager, store, advance } = setup();
+      expect((await manager.initializeTopology()).ok).toBe(true);
+      const paneId = (await storedV3(store)).progressPane!.paneId;
+      for (let restart = 0; restart < 6; restart++) { fake.exitForeground(paneId); advance(1000); await manager.ensureProgressPane(); }
+      expect((await storedV3(store)).progressPane?.phase).toBe("failed");
+      // Still within the window: the budget refuses the replacement and the old pane is left alone.
+      expect((await manager.reconcileTopology()).ok).toBe(true);
+      expect((await storedV3(store)).progressPane).toMatchObject({ phase: "failed", paneId });
+      expect(fake.count("pane", "close")).toBe(0);
+      advance(11 * 60_000);
+      expect((await manager.reconcileTopology()).ok).toBe(true);
+      expect((await storedV3(store)).progressPane?.phase).toBe("running");
+      expect((await storedV3(store)).status).toBe("up");
+    });
+
+    it("bflow up replaces a progress pane running an older command", async () => {
+      const store = new InMemorySessionManifestStore();
+      const first = setup({}, store);
+      expect((await first.manager.initializeTopology()).ok).toBe(true);
+      const old = (await storedV3(store)).progressPane!;
+      const upgraded = ["/usr/bin/node", "/opt/bflow-2/apps/cli/dist/bin.js", "progress", "--follow"];
+      const manager = new RolePaneManager({ runner: first.fake, store, config: { sessionId: SESSION, projectName: "sample-project",
+        workspaceRoot: ROOT, defaultAgentKind: "codex", layout: "director", progressCommand: upgraded, permanentRoles: ["planner"] } });
+      expect((await manager.reconcileTopology()).ok).toBe(true);
+      const manifest = await storedV3(store);
+      expect(manifest.progressPane).toMatchObject({ phase: "running", command: upgraded });
+      expect(manifest.progressPane?.paneId).not.toBe(old.paneId);
+      expect(first.fake.calls).toContainEqual(["pane", "close", old.paneId]);
+      expect(first.fake.panes.get(manifest.progressPane!.paneId)?.foreground?.argv).toEqual(upgraded);
+    });
+
+    it("bflow up leaves a foreign occupant alone and stays failed", async () => {
+      const { fake, manager, store } = setup();
+      expect((await manager.initializeTopology()).ok).toBe(true);
+      const old = (await storedV3(store)).progressPane!;
+      fake.occupy(old.paneId, ["vim", "notes.txt"]);
+      await manager.ensureProgressPane();
+      expect((await manager.reconcileTopology()).ok).toBe(true);
+      const manifest = await storedV3(store);
+      expect(manifest.progressPane).toMatchObject({ phase: "failed", paneId: old.paneId });
+      expect(manifest.status).toBe("degraded");
+      expect(fake.count("pane", "close")).toBe(0);
+      expect(fake.count("tab", "create", "--workspace", manifest.herdrWorkspaceId, "--cwd", ROOT, "--label", "progress")).toBe(0);
+    });
+
+    it("rejects an invalid progress command before any Herdr call", () => {
+      const fake = new DirectorHerdrFake();
+      expect(() => new RolePaneManager({ runner: fake, config: { sessionId: SESSION, projectName: "p", workspaceRoot: ROOT, layout: "director",
+        progressCommand: ["node", ""] } })).toThrow("RolePaneManagerConfig.progressCommand must be");
+      expect(fake.calls).toHaveLength(0);
+    });
   });
 });

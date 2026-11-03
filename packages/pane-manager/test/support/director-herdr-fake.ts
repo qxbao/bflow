@@ -19,7 +19,7 @@ interface FakePane {
 interface FakeAgent { name: string; kind: string; paneId: string }
 
 const ok = (result: Record<string, unknown>): CommandOutcome => ({ exitCode: 0, stdout: JSON.stringify({ id: "1", result }), stderr: "" });
-const fail = (code: string, message: string): CommandOutcome => ({ exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code, message } }) });
+export const fail = (code: string, message: string): CommandOutcome => ({ exitCode: 1, stdout: "", stderr: JSON.stringify({ id: "1", error: { code, message } }) });
 const flag = (args: readonly string[], name: string): string | undefined => {
   const index = args.indexOf(name);
   return index === -1 ? undefined : args[index + 1];
@@ -45,6 +45,8 @@ export class DirectorHerdrFake implements HerdrCommandRunner {
   paneRunOutcome?: CommandOutcome;
   /** When false, `pane run` is acknowledged but no process appears (unconfirmed launch). */
   launchStarts = true;
+  /** Returns a replacement outcome for a command (e.g. an unsupported `pane process-info`), or undefined to run normally. */
+  intercept?: (args: readonly string[]) => CommandOutcome | undefined;
 
   private next(prefix: string): string { return `${prefix}-${++this.counter}`; }
 
@@ -95,6 +97,8 @@ export class DirectorHerdrFake implements HerdrCommandRunner {
   async run(invocation: CommandInvocation): Promise<CommandOutcome> {
     const args = [...invocation.args];
     this.calls.push(args);
+    const intercepted = this.intercept?.(args);
+    if (intercepted) return intercepted;
     const [domain, action, ...rest] = args;
     if (domain === "workspace") {
       if (action === "list") {
