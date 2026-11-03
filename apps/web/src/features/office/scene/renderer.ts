@@ -34,11 +34,13 @@ export interface OfficeRenderer {
   destroy(): void;
 }
 
-/** Text the DOM draws over the canvas. `agent` is the name tag, `bubble` the message box over a working character, `sleep` the Zzz over a sleeping one; all anchored bottom-centre. */
+/** Text the DOM draws over the canvas. `agent` is the name tag, `bubble` the message box over a working character, `sleep` the rising z letters over a sleeping one's head; all anchored bottom-centre. */
 export interface ProjectedLabel { id: string; kind: 'agent' | 'bubble' | 'sleep'; text: string; x: number; y: number }
 
 const DRAG_THRESHOLD = 4;
 const BUBBLE_W = 224, BUBBLE_H = 72;
+/** World height the sleep z letters start from: just over a seated character's head (the name tag hangs at 2.15). */
+const SLEEP_Y = 1.3;
 const EXPOSURE_OPEN = 1, EXPOSURE_CLOSED = 0.6;
 const MOVING_MS = 1000 / 30;
 const IDLE_MS = 1000 / 8;
@@ -251,7 +253,8 @@ function build(gl: WebGLRenderer, lease: ModelLease, host: HTMLElement, rawSelec
       if (placer.tag(tagX, tagY, tag.text.length * 6.8 + 12, 18, far)) slot(n++, tag.id, 'agent', tag.text);
       const extra = poseLabel(a.pose);
       if (extra === 'bubble') { boxTag[boxCount] = tag; boxX[boxCount] = tagX; boxY[boxCount] = tagY - 22; boxText[boxCount] = excerpts.get(a.instanceId) ?? a.statusText; boxCount++; }
-      else if (extra === 'sleep') { pt.y = tagY - 22; slot(n++, tag.sleepId, 'sleep', 'Zzz'); }
+      // The z letters rise from just over the (slumped) head, below the name tag, so they read as belonging to the sleeper.
+      else if (extra === 'sleep' && project(view.point.x, SLEEP_Y, view.point.z, v.w, v.h)) slot(n++, tag.sleepId, 'sleep', 'Zzz');
     }
     // Message boxes go above their name tag; far out, one that would overlap any tag or an earlier box is hidden.
     for (let i = 0; i < boxCount; i++) {

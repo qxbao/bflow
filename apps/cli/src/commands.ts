@@ -49,7 +49,11 @@ import {
 } from "./types.js";
 import { executeHighLevelCommand, isHighLevelCommand } from "./high-level-commands.js";
 import { executeSetupCommand } from "./setup-integration.js";
-import { defaultEnvironmentConfig, ENVIRONMENT_CONFIG_PATH, readEnvironmentConfig } from "./environment-config.js";
+import { defaultEnvironmentConfig, ENVIRONMENT_CONFIG_PATH, readEnvironmentConfig, summarizeRolePresets, type EnvironmentProvider } from "./environment-config.js";
+import { ensureGitExclude, inspectGitExclude, removeGitExclude, type GitExcludeReport } from "./git-exclude.js";
+import { lstat } from "node:fs/promises";
+import { findExecutable, type PlatformProfile } from "@bflow/machine-setup";
+import { roleModelPreset } from "@bflow/agent-providers";
 import { identifyRepository } from "./repository.js";
 import {
   checkRepositoryGitNexus,
@@ -210,6 +214,55 @@ export async function promptConfirmOverwrite(configPath: string): Promise<boolea
  * Asks before the first GitNexus index of a repository; non-interactive runs need --yes or
  * --accept-gitnexus-license. Unlike --yes, --accept-gitnexus-license does not force config overwrite.
  */
+const INIT_PROVIDERS: readonly EnvironmentProvider[] = ["claude", "codex", "agy"];
+
+/** Installed provider CLIs, in preset preference order; PATH presence only, not login or model readiness. */
+export async function detectInstalledProviders(platform: PlatformProfile): Promise<EnvironmentProvider[]> {
+  const found = await Promise.all(INIT_PROVIDERS.map(async provider =>
+    await findExecutable(provider, platform.pathEntries, process.platform).catch(() => null) ? provider : undefined));
+  return found.filter((provider): provider is EnvironmentProvider => provider !== undefined);
+}
+
+/** Asks for the preset CLI only for a new configuration on an interactive terminal; otherwise the flag or the codex default applies. */
+async function selectInitProvider(
+  args: InitCommandArgs,
+  targetDir: string,
+  context: CliContext | undefined,
+  progress: CliProgress | undefined
+): Promise<EnvironmentProvider | undefined> {
+  if (args.provider || args.update) return args.provider;
+  const repository = await identifyRepository(targetDir).catch(() => undefined);
+  if (!repository) return undefined;
+  const exists = await lstat(resolve(repository.root, ENVIRONMENT_CONFIG_PATH)).then(() => true, () => false);
+  if (exists && !args.force) return undefined;
+  const select = context?.selectInitProvider;
+  if (!select && (args.json || !process.stdin.isTTY || !process.stderr.isTTY)) return undefined;
+  const installed = await detectInstalledProviders(resolveSetupPlatform(context));
+  const suggested = installed[0] ?? "codex";
+  const ask = async (): Promise<EnvironmentProvider | undefined> => {
+    if (select) return select({ installed, suggested });
+    const choices = INIT_PROVIDERS.map((provider, index) =>
+      `  ${index + 1}. ${provider}${installed.includes(provider) ? " (đã cài)" : ""} — ${roleModelPreset(provider).description}`);
+    const terminal = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      const answer = (await terminal.question(
+        `Chọn CLI chủ đạo để điền sẵn provider/model cho từng role:\n${choices.join("\n")}\nLựa chọn [${suggested}]: `)).trim().toLowerCase();
+      if (!answer) return suggested;
+      const byIndex = INIT_PROVIDERS[Number(answer) - 1];
+      return byIndex ?? INIT_PROVIDERS.find(provider => provider === answer) ?? suggested;
+    } finally { terminal.close(); }
+  };
+  return progress ? progress.confirmation(ask) : ask();
+}
+
+async function gitExcludeStep(action: () => Promise<GitExcludeReport>): Promise<{ report?: GitExcludeReport; diagnostics: string[] }> {
+  try {
+    return { report: await action(), diagnostics: [] };
+  } catch (error) {
+    return { diagnostics: [`Git exclude for .bflow/ was not updated: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+}
+
 async function approveGitNexusIndexing(
   args: InitCommandArgs,
   repositoryRoot: string,
@@ -374,6 +427,7 @@ async function executeCommandWithProgress(
               status: "skipped" as const,
               diagnostics: ["GitNexus is disabled in .bflow/config.yml (tools.gitnexus.enabled: false)."]
             };
+        const exclude = await gitExcludeStep(() => inspectGitExclude(repository.root));
         const directorCheck = await checkDirectorFiles(repository.root);
         const healthy = configValid && (!gitnexusEnabled || gitnexus.status === "ready") && directorCheck.healthy;
         const diagnostics = [
@@ -381,7 +435,9 @@ async function executeCommandWithProgress(
           ...(!configValid
             ? [`Repository configuration is missing or invalid (${configDiagnostics.join("; ") || configPath}); run 'bflow init' in '${repository.root}'.`]
             : []),
-          ...gitnexus.diagnostics
+          ...gitnexus.diagnostics,
+          ...exclude.diagnostics,
+          ...(exclude.report?.status === "absent" ? [`.bflow/ is not listed in ${exclude.report.path}; run 'bflow init' to add it.`] : [])
         ];
         const config = envConfig ?? defaultEnvironmentConfig(repository, parsed.projectName, context?.clock?.(), parsed.provider);
         const output: InitCommandOutput = {
@@ -392,6 +448,8 @@ async function executeCommandWithProgress(
           healthy,
           configValid,
           gitnexus,
+          ...(envConfig ? { rolePresets: summarizeRolePresets(envConfig, undefined, false) } : {}),
+          ...(exclude.report ? { gitExclude: exclude.report } : {}),
           director: directorCheck.report,
           diagnostics
         };
@@ -421,6 +479,7 @@ async function executeCommandWithProgress(
         const configPath = resolve(workspaceRoot, parsed.configPath ?? ENVIRONMENT_CONFIG_PATH);
         const platform = resolveSetupPlatform(context);
         const gitnexus = await removeRepositoryGitNexus({ workspaceRoot, platform });
+        const exclude = repository ? await gitExcludeStep(() => removeGitExclude(repository.root)) : { diagnostics: [] };
         const directorRemoval = await removeDirectorFiles(workspaceRoot);
         const loaded = repository ? await loadRepositoryConfig(configPath) : undefined;
         const config = loaded?.ok ? loaded.value : undefined;
@@ -431,8 +490,9 @@ async function executeCommandWithProgress(
           mode: "remove",
           healthy: true,
           gitnexus,
+          ...(exclude.report ? { gitExclude: exclude.report } : {}),
           director: directorRemoval.report,
-          diagnostics: [...gitnexus.diagnostics, ...directorRemoval.diagnostics]
+          diagnostics: [...gitnexus.diagnostics, ...exclude.diagnostics, ...directorRemoval.diagnostics]
         };
         return makeResult(CLI_EXIT_CODES.SUCCESS, true, "init", output, undefined, isJson, io, presentation);
       } catch (error) {
@@ -443,12 +503,13 @@ async function executeCommandWithProgress(
     if (showProgress) {
       emitProgress("Chuẩn bị kho mã nguồn", "Kiểm tra thông tin Git và cấu hình Bflow");
     }
+    const provider = await selectInitProvider(parsed, targetDir, context, showProgress ? progress : undefined);
     const initRes = await initRepositoryConfig({
       cwd,
       ...(parsed.dir !== undefined ? { dir: parsed.dir } : {}),
       ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
       ...(parsed.projectName !== undefined ? { projectName: parsed.projectName } : {}),
-      ...(parsed.provider !== undefined ? { provider: parsed.provider } : {}),
+      ...(provider !== undefined ? { provider } : {}),
       force: parsed.force,
       ...(parsed.update !== undefined ? { update: parsed.update } : {}),
       ...(context?.clock !== undefined ? { clock: context.clock } : {}),
@@ -460,6 +521,7 @@ async function executeCommandWithProgress(
     }
 
     const repository = await identifyRepository(targetDir);
+    const exclude = await gitExcludeStep(() => ensureGitExclude(repository.root));
     const platform = resolveSetupPlatform(context);
     let gitnexusEnabled = !parsed.noGitnexus;
     if (gitnexusEnabled) {
@@ -514,8 +576,9 @@ async function executeCommandWithProgress(
       healthy: !gitnexusEnabled || gitnexus.status === "ready",
       configValid: true,
       gitnexus,
+      ...(exclude.report ? { gitExclude: exclude.report } : {}),
       ...(directorInstall ? { director: directorInstall.report } : {}),
-      diagnostics: [...gitnexus.diagnostics, ...(directorInstall?.diagnostics ?? [])]
+      diagnostics: [...gitnexus.diagnostics, ...exclude.diagnostics, ...(directorInstall?.diagnostics ?? [])]
     };
 
     if (showProgress) {

@@ -10,7 +10,7 @@ export type Clip = 'sleep' | 'idle' | 'type' | 'type_fast' | 'walk' | 'carry' | 
 export const CLIPS: readonly Clip[] = ['sleep', 'idle', 'type', 'type_fast', 'walk', 'carry', 'raise_hand', 'blocked', 'ghost'];
 /** A seated character sits this far (world units) north of its desk, facing the camera side; the offset fades out while it walks. */
 export const SEAT_OFFSET_Z = -0.62;
-/** Heading of a seated character: facing +z, so its face is visible over the low laptop. */
+/** Heading of a seated character: facing +z, so its face is visible over the low laptop or monitor. */
 export const SEATED_HEADING = 0;
 
 /** One clip per pose. A pose with no distinct clip (question, preparing) stands still and shows its desk bubble instead. */

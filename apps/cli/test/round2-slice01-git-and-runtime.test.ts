@@ -293,7 +293,8 @@ describe("Round 2 Slice 1 — Git Dubious Ownership / NTFS FileMode & Authoritat
 
     const initRes = await runCli(["init", "--no-gitnexus"], { cwd: repoDir });
     expect(initRes.ok).toBe(true);
-    execFileSync(realGit, ["-C", repoDir, "add", "-A"]);
+    // init lists .bflow/ in .git/info/exclude, so committing its configuration needs --force.
+    execFileSync(realGit, ["-C", repoDir, "add", "--force", ".bflow/config.yml", ".bflow/.gitignore"]);
     execFileSync(realGit, ["-C", repoDir, "commit", "--quiet", "-m", "chore: bflow init"]);
     execFileSync(realGit, ["-C", repoDir, "worktree", "add", "--quiet", "-b", "task/w1", worktreeDir]);
 

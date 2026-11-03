@@ -304,9 +304,10 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
         "profile-name": "lead-profile"
       });
       const conversation = parsedAfter.environment.roles.find((r: any) => r.role === "conversation");
+      // The agy preset routes the unsupported Conversation role to Claude; --update keeps the saved model.
       expect(conversation).toMatchObject({
         role: "conversation",
-        cli: "agy",
+        cli: "claude",
         model: "gemini-3-flash-low"
       });
     });

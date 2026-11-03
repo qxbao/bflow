@@ -438,6 +438,10 @@ export interface InitCommandOutput {
   readonly healthy?: boolean | undefined;
   readonly configValid?: boolean | undefined;
   readonly gitnexus?: import("./gateway-repositories.js").RepositoryGitNexusReport | undefined;
+  /** Per-role provider/model written (applied) or kept by this init. */
+  readonly rolePresets?: import("./environment-config.js").RolePresetReport | undefined;
+  /** The `.bflow/` entry in `<git-common-dir>/info/exclude`. */
+  readonly gitExclude?: import("./git-exclude.js").GitExcludeReport | undefined;
   readonly director?: import("./init-director.js").InitDirectorReport | undefined;
   readonly diagnostics?: readonly string[] | undefined;
 }
@@ -533,6 +537,9 @@ export interface CliContext {
   readonly io?: CliIo | undefined;
   readonly clock?: (() => Date) | undefined;
   readonly confirmOverwrite?: ((configPath: string) => Promise<boolean> | boolean) | undefined;
+  /** Chooses the `bflow init` role/model preset CLI for a new configuration; undefined keeps the codex default. */
+  readonly selectInitProvider?: ((options: { readonly installed: readonly ("claude" | "codex" | "agy")[];
+    readonly suggested: "claude" | "codex" | "agy" }) => Promise<"claude" | "codex" | "agy" | undefined>) | undefined;
   readonly operationOptions?: OperationOptions | undefined;
   readonly highLevel?: HighLevelFacadeServices | undefined;
   /** Engine facades for high-level commands; defaults compose the reviewed packages. */
