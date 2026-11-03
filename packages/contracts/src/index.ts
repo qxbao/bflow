@@ -34,3 +34,5 @@ export * from "./role-profile.js";
 
 export * from "./web.js";
 export * from "./web-host.js";
+
+export * from "./director.js";
