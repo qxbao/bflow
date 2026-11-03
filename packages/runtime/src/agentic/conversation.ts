@@ -54,9 +54,17 @@ export async function createAgenticConversationHost(options: {
   noticeAliases?: () => Promise<{ approvalShortIds: Record<string, string>; runShortIds: Record<string, string> }>;
 }): Promise<AgenticConversationHost> {
   const manifest = SessionManifestSchema.parse(options.manifest);
+  // Director session (manifest v3): the human gateway runs in-process without any Conversation or Coordinator pane.
+  const director = manifest.schemaVersion === 3;
   const conversation = manifest.panes.find(pane => pane.role === "conversation");
   const coordinator = manifest.panes.find(pane => pane.role === "coordinator");
-  if (!conversation || !coordinator) throw new Error("Conversation and Coordinator panes are required");
+  if (!director && (!conversation || !coordinator)) throw new Error("Conversation and Coordinator panes are required");
+  /** Envelope endpoints built by this gateway; a Director session carries roles only, never agent or pane ids. */
+  const conversationEndpoint = director ? { role: "conversation" as const }
+    : { role: "conversation" as const, agent_id: conversation!.agentId, pane_id: conversation!.paneId };
+  const coordinatorEndpoint = director ? { role: "coordinator" as const }
+    : { role: "coordinator" as const, agent_id: coordinator!.agentId, pane_id: coordinator!.paneId };
+  const DIRECTOR_WEB_REFUSAL = "Phiên Director: hãy gửi yêu cầu cho Director trong CLI (chạy /bflow-start).";
   // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
   const module: any = await import("@bflow/conversation");
   const runtime = options.runtime;
@@ -137,9 +145,7 @@ export async function createAgenticConversationHost(options: {
     const correlationId = textField(record(run.delegation).correlationId);
     return { ok: true, value: RoleMessageSchema.parse({ schema_version: 2, message_id: messageId,
       correlation_id: correlationId, run_id: decision.runId,
-      sender: { role: "conversation", agent_id: conversation!.agentId, pane_id: conversation!.paneId },
-      recipient: { role: "coordinator", agent_id: coordinator!.agentId, pane_id: coordinator!.paneId },
-      type: "approval.decision", payload: json(decision), artifact_references: decision.feedbackArtifacts,
+      sender: conversationEndpoint, recipient: coordinatorEndpoint, type: "approval.decision", payload: json(decision), artifact_references: decision.feedbackArtifacts,
       occurred_at: decision.decidedAt, idempotency_key: decision.idempotencyKey }) };
   };
   const enqueueDecision = async (input: unknown): Promise<OperationResult<void>> => {
@@ -153,8 +159,7 @@ export async function createAgenticConversationHost(options: {
       const request = DelegationRequestSchema.parse(input);
       const runId = request.runId ?? `run-${request.correlationId}`;
       return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: request.messageId, correlation_id: request.correlationId,
-        run_id: runId, sender: { role: "conversation", agent_id: conversation!.agentId, pane_id: conversation!.paneId },
-        recipient: { role: "coordinator", agent_id: coordinator!.agentId, pane_id: coordinator!.paneId }, type: "delegation.request",
+        run_id: runId, sender: conversationEndpoint, recipient: coordinatorEndpoint, type: "delegation.request",
         payload: json({ ...request, runId }), artifact_references: request.inputArtifacts,
         occurred_at: request.requestedAt, idempotency_key: request.idempotencyKey }));
     }
@@ -178,13 +183,14 @@ export async function createAgenticConversationHost(options: {
     }
   }
   const bridge = new DurableBridge({ transport: runtime.ports.transport, sessionId: manifest.conversationSessionId,
-    conversationAgentId: conversation.agentId, conversationPaneId: conversation.paneId,
-    coordinatorTarget: { transport: "herdr", agentId: coordinator.agentId, paneId: coordinator.paneId,
-      workspaceId: coordinator.workspaceId, tabId: coordinator.tabId } });
+    // Director: placeholders only. Every envelope this bridge sends is overridden above, and its transport targets are never used.
+    conversationAgentId: conversation?.agentId ?? "director-gateway", conversationPaneId: conversation?.paneId ?? "director-gateway",
+    coordinatorTarget: { transport: "herdr", agentId: coordinator?.agentId ?? "director-gateway", paneId: coordinator?.paneId ?? "director-gateway",
+      workspaceId: coordinator?.workspaceId ?? manifest.herdrWorkspaceId, tabId: coordinator?.tabId ?? manifest.herdrTabId } });
   const contextStore = new module.FileConversationContextStore(options.contextDirectory);
   let structured: StructuredConversationCallbacks | undefined;
   const gateway = new module.ConversationGateway({ sessionId: manifest.conversationSessionId, herdrSessionId: manifest.sessionId,
-    conversationAgentId: conversation.agentId, paneId: conversation.paneId, bridge,
+    conversationAgentId: conversation?.agentId ?? "director-gateway", paneId: conversation?.paneId ?? "director-gateway", bridge,
     contextStore, now: () => structured?.now() ?? new Date().toISOString(),
     authorizeStructuredInteraction: async (command: WebCommand, principal: WebPrincipal) => structured ? structured.authorize(command, principal) : false,
     onStructuredApproval: async (decision: unknown, command: WebCommand, principal: WebPrincipal) => {
@@ -334,6 +340,11 @@ export async function createAgenticConversationHost(options: {
     configureStructuredInteraction(callbacks) { structured = callbacks; },
     handleStructuredInteraction(command, principal) {
       return exclusive(async () => {
+        if (director) {
+          // Requests come from the Director's own CLI session, never from the Web form (R-B2-7). Refused before any bridge call.
+          const kind = (command as { kind?: unknown } | null)?.kind;
+          if (kind === "create_request" || kind === "revise_request" || kind === "answer_clarification") return validationError(DIRECTOR_WEB_REFUSAL);
+        }
         await reconcileApprovals();
         return gateway.handleStructuredInteraction(WebCommandSchema.parse(command), WebPrincipalSchema.parse(principal));
       });
@@ -341,6 +352,7 @@ export async function createAgenticConversationHost(options: {
     readStructuredInteraction: commandId => exclusive(async () => gateway.readStructuredInteraction(commandId)),
     reconcileApprovals: () => exclusive(reconcileApprovals),
     handleUserTurn(input) {
+      if (director) return Promise.reject(new Error("Director session has no Conversation pane"));
       return exclusive(async () => {
         await reconcileApprovals().catch(() => undefined);
         return withWarnings(await gateway.handleUserTurn(input));
@@ -455,6 +467,7 @@ export async function createAgenticConversationHost(options: {
     setBusy: busy => exclusive(() => gateway.setAgentBusyState(busy)),
     flush: () => exclusive(() => gateway.flushPendingInboundQueue()),
     delegateDirectorWork(input) {
+      if (director) return Promise.reject(new Error("Use admitDirectorWork in a Director session"));
       return exclusive(async () => {
         const hash = digest(input.key).replace(/[^A-Za-z0-9]/g, "").slice(0, 24);
         const correlationId = `director-${hash}`, runId = `run-${correlationId}`;
