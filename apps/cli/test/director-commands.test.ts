@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { parseDirectorArgs, runDirectorCommand, detectProvider, type DirectorCommandDeps } from "../src/director-commands.js";
+import { parseDirectorArgs, runDirectorCommand, runDirectorHookSafely, detectProvider, type DirectorCommandDeps } from "../src/director-commands.js";
 
 function make(over: Partial<DirectorCommandDeps> & { stdinText?: string } = {}) {
   const out: string[] = []; const err: string[] = [];
@@ -107,5 +107,24 @@ describe("director mcp", () => {
     const { deps, out } = make();
     expect(await runDirectorCommand(parse(["mcp"]), deps)).toBe(0);
     expect(deps.runMcp).toHaveBeenCalled(); expect(out).toEqual([]);
+  });
+});
+
+describe("director hook termination", () => {
+  it("resolves within the deadline on a never-closing stdin and pauses it", async () => {
+    const stdin = new PassThrough();
+    const { deps, out, ownerCall } = make({ stdin, hookStdinDeadlineMs: 50 });
+    const started = Date.now();
+    expect(await runDirectorCommand(parse(["hook", "claude"]), deps)).toBe(0);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(stdin.destroyed || stdin.isPaused()).toBe(true);
+    expect(ownerCall).not.toHaveBeenCalled(); expect(out).toEqual([]);
+  });
+  it("exits 0 with empty stdout when dependency loading fails", async () => {
+    const write = vi.spyOn(process.stdout, "write");
+    const before = write.mock.calls.length;
+    expect(await runDirectorHookSafely("claude", async () => { throw new Error("cannot load"); }, {})).toBe(0);
+    expect(write.mock.calls.length).toBe(before);
+    write.mockRestore();
   });
 });

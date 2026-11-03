@@ -55,6 +55,18 @@ export async function main(
   };
 
   // Director subcommands own raw stdout (MCP protocol lines, one JSON object, or nothing for hooks).
+  if (args[0] === "director" && args[1] === "hook" && args.length === 3 && (args[2] === "claude" || args[2] === "codex")) {
+    try {
+      const m = await import("./director-commands.js");
+      await m.runDirectorHookSafely(args[2], () => m.defaultDirectorDeps(context?.cwd ?? process.cwd()));
+    } catch (error) {
+      if (process.env.BFLOW_DEBUG) { try { process.stderr.write(`director hook: ${error instanceof Error ? error.message : String(error)}\n`); } catch {} }
+    }
+    // A hook must never linger on an open stdin pipe.
+    if (context === undefined) process.exit(0);
+    process.exitCode = 0;
+    return { ok: true, command: "director", exitCode: 0, stdout: "", stderr: "" };
+  }
   if (args[0] === "director" || (args[0] === "help" && args[1] === "director")) {
     const { parseDirectorArgs, runDirectorCommand, defaultDirectorDeps, DIRECTOR_HELP } = await import("./director-commands.js");
     const parsed = parseDirectorArgs(args[0] === "help" ? [] : args.slice(1));

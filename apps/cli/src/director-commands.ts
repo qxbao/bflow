@@ -71,6 +71,7 @@ export interface DirectorCommandDeps {
   readonly stdin: NodeJS.ReadableStream;
   readonly stdout: { write(chunk: string): unknown };
   readonly stderr: { write(chunk: string): unknown };
+  readonly hookStdinDeadlineMs?: number | undefined;
 }
 
 export async function defaultDirectorDeps(cwd: string): Promise<DirectorCommandDeps> {
@@ -115,7 +116,15 @@ function startFix(message: string): string {
 async function readLimited(stream: NodeJS.ReadableStream, maxBytes: number, deadlineMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []; let size = 0; let done = false;
-    const finish = (fn: () => void) => { if (done) return; done = true; clearTimeout(timer); stream.removeListener("data", onData); stream.removeListener("end", onEnd); stream.removeListener("error", onError); fn(); };
+    const finish = (fn: () => void) => {
+      if (done) return; done = true; clearTimeout(timer);
+      stream.removeListener("data", onData); stream.removeListener("end", onEnd);
+      // Keep an error listener so a late stream error cannot become an uncaught exception.
+      stream.removeListener("error", onError); stream.on("error", () => {});
+      try { stream.pause(); } catch {}
+      try { (stream as { destroy?: () => void }).destroy?.(); } catch {}
+      fn();
+    };
     const onData = (chunk: Buffer | string) => {
       const b = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
       size += b.length;
@@ -125,6 +134,7 @@ async function readLimited(stream: NodeJS.ReadableStream, maxBytes: number, dead
     const onEnd = () => finish(() => resolve(Buffer.concat(chunks).toString("utf8")));
     const onError = (e: Error) => finish(() => reject(e));
     const timer = setTimeout(() => finish(() => reject(new Error("stdin timeout"))), deadlineMs);
+    timer.unref?.();
     stream.on("data", onData); stream.on("end", onEnd); stream.on("error", onError);
   });
 }
@@ -198,7 +208,7 @@ async function runMcp(deps: DirectorCommandDeps): Promise<number> {
 async function runHook(provider: "claude" | "codex", deps: DirectorCommandDeps): Promise<number> {
   try {
     if (deps.env.HERDR_PANE_ID) return 0;
-    const raw = await readLimited(deps.stdin, MAX_HOOK_STDIN_BYTES, HOOK_STDIN_DEADLINE_MS);
+    const raw = await readLimited(deps.stdin, MAX_HOOK_STDIN_BYTES, deps.hookStdinDeadlineMs ?? HOOK_STDIN_DEADLINE_MS);
     const payload: unknown = JSON.parse(raw);
     const prompt = isRecord(payload) ? payload.prompt : undefined;
     if (typeof prompt !== "string" || prompt.trim() === "") return 0;
@@ -208,4 +218,14 @@ async function runHook(provider: "claude" | "codex", deps: DirectorCommandDeps):
     if (deps.env.BFLOW_DEBUG) { try { deps.stderr.write(`director hook: ${scrub(error instanceof Error ? error.message : String(error))}\n`); } catch {} }
   }
   return 0;
+}
+
+/** Hook entry point: any failure, including loading dependencies, yields exit 0 with nothing on stdout. */
+export async function runDirectorHookSafely(provider: "claude" | "codex", makeDeps: () => Promise<DirectorCommandDeps>, env: Readonly<Record<string, string | undefined>> = process.env): Promise<number> {
+  try {
+    return await runHook(provider, await makeDeps());
+  } catch (error) {
+    if (env.BFLOW_DEBUG) { try { process.stderr.write(`director hook: ${scrub(error instanceof Error ? error.message : String(error))}\n`); } catch {} }
+    return 0;
+  }
 }
