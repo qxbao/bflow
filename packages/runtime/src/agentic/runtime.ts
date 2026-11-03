@@ -751,13 +751,29 @@ export class AgenticWorkflowRuntime {
    * role or report a blocker) as a bounded `auto_resume` action. A pending human gate is never bypassed: the run then only
    * records the reason. Returns whether the run was escalated.
    */
-  private escalateInvalidMessages(run: RunRecord, sourceMessageId: string, reason: string, createdAt = this.now()): boolean {
+  private escalateInvalidMessages(run: RunRecord, sourceMessageId: string, reason: string, createdAt = this.now(), assignment?: Outbound): boolean {
     if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return false;
     const previousStatus = run.status, inherited = inheritedAutoResume(run);
+    const assignmentTaskId = assignment && taskLogBusinessTaskId(assignment);
+    const implementationAttemptId = assignment?.message.type === "task.assignment" ? assignment.attemptId :
+      objectField(assignment?.message.payload, "implementationAttemptId") ?? objectField(assignment?.message.payload, "attemptId");
     run.error = reason.slice(0, 2000); run.status = "escalated";
     run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-      reason: run.error, sourceMessageId, createdAt, state: "pending", previousStatus, ...inherited, recovery: "auto_resume" };
+      reason: run.error, sourceMessageId, createdAt, state: "pending", previousStatus, ...inherited, recovery: "auto_resume",
+      ...(assignment && assignmentTaskId && typeof implementationAttemptId === "string" && ["task.assignment", "verification.requested"].includes(assignment.message.type) ? { invalidAssignment: {
+        messageId: assignment.message.message_id, taskId: assignmentTaskId, attemptId: assignment.attemptId, implementationAttemptId } } : {}) };
     return true;
+  }
+  /** Refused ingress never guesses an assignment from a role alone or a stale/ambiguous pane history. */
+  private invalidMessageAssignment(state: JournalState, run: RunRecord, message: RoleMessage): Outbound | undefined {
+    if (!message.causation_id && !message.sender.pane_id && !message.sender.agent_id) return undefined;
+    const sources = state.outbound.filter(out => !out.parentAssignmentId && out.handle &&
+      out.message.run_id === run.runId && out.message.correlation_id === message.correlation_id &&
+      out.message.recipient.role === message.sender.role && ["accepted", "released"].includes(out.status) &&
+      (message.causation_id === undefined || out.message.message_id === message.causation_id) &&
+      (message.sender.pane_id === undefined || out.handle.target.paneId === message.sender.pane_id) &&
+      (message.sender.agent_id === undefined || out.handle.target.agentId === message.sender.agent_id));
+    return sources.length === 1 ? sources[0] : undefined;
   }
   /**
    * Returns a refused message's validation error to the agent that sent it, through Herdr, so it can fix and resend. A Developer
@@ -828,7 +844,7 @@ export class AgenticWorkflowRuntime {
           await save(); return;
         }
         this.escalateInvalidMessages(run, data.message_id, `${data.type} from ${data.sender.role} was invalid ${attempt} times for ${sourceId}: ${error}`,
-          data.occurred_at ?? this.now());
+          data.occurred_at ?? this.now(), this.invalidMessageAssignment(state, run, data));
         this.surfaceFailure(state, outbox, run, data.message_id, "inbound_failed",
           `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text, INBOUND_FAILURE_OPTIONS);
         await save(); return;
@@ -889,7 +905,7 @@ export class AgenticWorkflowRuntime {
       const attempt = this.countInvalidMessage(run, binding.role, source.message.message_id);
       if (attempt < INVALID_ROLE_MESSAGE_LIMIT) { await save(); return { attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, escalated: false }; }
       const reason = `Rejected invalid ${binding.role} RoleMessage before transport ${attempt} times for ${source.message.message_id}: ${describeValidationError(reasonInput)}`.slice(0, 2000);
-      const escalated = this.escalateInvalidMessages(run, messageId, reason);
+      const escalated = this.escalateInvalidMessages(run, messageId, reason, this.now(), source);
       const automatic = escalated && (run.pendingAction?.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
       this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId,
         sdlcStatus: run.status, owner: "coordinator", ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }),
@@ -1847,23 +1863,30 @@ export class AgenticWorkflowRuntime {
         ...(args.resumeAttempts !== undefined ? { resumeAttempts: args.resumeAttempts } : {}),
         ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) };
       delete task.parkSettlement;
-      const after = await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId,
-        expectedVersion: snapshot.version, from: current.status, to: "parked", intent: "park", generationFrom: current.generation, generationTo: current.generation,
-        reason: task.parked!.reason, occurredAt: task.parked!.at, idempotencyKey: `park:${run.runId}:${task.taskId}:${episode}`,
-        ...(bound?.parkStop?.proof ? { stopConfirmation: { schemaVersion: 1, cancellationId: `park-${digest([run.runId, task.taskId, episode])}`,
-          executionId: bound.handle!.executionId, stoppedAt: bound.parkStop.proof.observedAt, terminalStatus: "cancelled" } } : {}) }));
+      // This settlement is part of the park event's write-ahead snapshot, before CoreSession.persist saves pendingCore.
+      // A crash before append must not leave a replayable verification outcome next to a committed park intent.
       state.pendingVerifications = state.pendingVerifications.filter(item => !pendingVerification.includes(item));
       if (pendingVerification.length) {
         task.parkedVerifications = [...(task.parkedVerifications ?? []), ...pendingVerification.map(item => ({
           episode, settledAt: task.parked!.at, job: item.job, outcome: item.outcome, attempts: item.attempts!,
           ...(item.lastError !== undefined ? { lastError: item.lastError } : {}) }))].slice(-20);
-        task.verificationPending = false; run.status = "implementing"; delete run.pendingAction; delete run.error;
+        task.verificationPending = false;
       }
-      if (run.status === "escalated" && run.pendingAction && related.some(out =>
-          [run.pendingAction!.sourceMessageId, ...(run.pendingAction!.relatedMessageIds ?? [])].includes(out.message.message_id))) {
-        run.status = run.pendingAction.previousStatus ?? "implementing";
-        delete run.pendingAction; delete run.error;
+      const action = run.pendingAction;
+      const ownsAction = action && (action.verificationTaskId === task.taskId || action.invalidAssignment?.taskId === task.taskId ||
+        related.some(out => out.message.message_id === action.sourceMessageId) ||
+        ["verification-retry", "workflow-blocked"].some(prefix => action.sourceMessageId === `${prefix}-${digest([run.runId, task.taskId, action.reason])}`));
+      if (ownsAction) {
+        if (run.status === "escalated") run.status = action.previousStatus ?? "implementing";
+        delete run.pendingAction;
+        if (run.error?.slice(0, 2000) === action.reason) delete run.error;
       }
+      if (pendingVerification.length && run.status === "verifying" && !run.pendingAction) run.status = "implementing";
+      const after = await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId,
+        expectedVersion: snapshot.version, from: current.status, to: "parked", intent: "park", generationFrom: current.generation, generationTo: current.generation,
+        reason: task.parked!.reason, occurredAt: task.parked!.at, idempotencyKey: `park:${run.runId}:${task.taskId}:${episode}`,
+        ...(bound?.parkStop?.proof ? { stopConfirmation: { schemaVersion: 1, cancellationId: `park-${digest([run.runId, task.taskId, episode])}`,
+          executionId: bound.handle!.executionId, stoppedAt: bound.parkStop.proof.observedAt, terminalStatus: "cancelled" } } : {}) }));
       this.completeWithParked(state, outbox, run, after);
       await core.checkpoint(run.runId);
       await save();
@@ -2109,7 +2132,8 @@ export class AgenticWorkflowRuntime {
           throw new AdmissionRejectedError(reason);
         }
         if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
-          if (agentSender) this.escalateInvalidMessages(run, message.message_id, `${reason} (${attempt} refused messages for ${sourceId})`);
+          if (agentSender) this.escalateInvalidMessages(run, message.message_id, `${reason} (${attempt} refused messages for ${sourceId})`,
+            this.now(), this.invalidMessageAssignment(state, run, message));
           else {
             const previousStatus = run.status;
             run.error = reason; run.status = "escalated";
@@ -5592,7 +5616,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const sourceMessageId = `verification-retry-${digest([run.runId, taskId, reason])}`;
       // Automatic, bounded: Runtime re-runs retry_verification itself after backoff, sharing the inherited budget.
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-        reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
+        reason: reason.slice(0, 2000), sourceMessageId, verificationTaskId: taskId, createdAt: this.now(), state: "pending", previousStatus,
         ...inheritedAutoResume(run), recovery: "auto_resume" };
     }
     const action = run.pendingAction!;
@@ -5623,7 +5647,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const sourceMessageId = `workflow-blocked-${digest([run.runId, taskId, reason])}`;
     if (!(run.pendingAction?.state === "pending" && run.pendingAction.kind === "resume_coordinator" && run.pendingAction.sourceMessageId === sourceMessageId)) {
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-        reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
+        reason: reason.slice(0, 2000), sourceMessageId, verificationTaskId: taskId, createdAt: this.now(), state: "pending", previousStatus,
         ...inheritedManualResume(run), recovery: "manual" };
     }
     const action = run.pendingAction!;

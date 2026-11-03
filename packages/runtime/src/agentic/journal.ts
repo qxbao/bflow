@@ -110,6 +110,10 @@ export interface RunRecord {
     actionId: string; kind: "coordinator_continuation" | "resume_coordinator" | "reconcile_delivery"; owner: "coordinator";
     reason: string; sourceMessageId: string; createdAt: string; state: "pending" | "queued"; previousStatus?: SdlcWorkStatus; resumeAttempts?: number;
     relatedMessageIds?: string[];
+    /** Exact authenticated assignment responsible for refused messages; sourceMessageId remains the refused envelope. */
+    invalidAssignment?: { messageId: string; taskId: string; attemptId: string; implementationAttemptId: string };
+    /** Task owning a verification pause; never authorizes clearing another task's approval or action. */
+    verificationTaskId?: string;
     /**
      * `auto_resume`: Runtime resumes this blocker itself with backoff, sharing the bounded `resumeAttempts` budget; once spent it
      * becomes `manual`. `capability_repair` resumes only after a positive capability proof. Absent/`manual`: waits for a human.
@@ -414,7 +418,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       throw new Error("Invalid follow-up supersession");
     if (run.pendingAction !== undefined) {
       const action = record(run.pendingAction);
-      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "lastResumedAt", "manualResumeAttempts", "requiredRole", "requiredCapabilities"]);
+      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "lastResumedAt", "manualResumeAttempts", "requiredRole", "requiredCapabilities", "invalidAssignment", "verificationTaskId"]);
       if (Object.keys(action).some(key => !allowed.has(key))) throw new Error("Invalid durable workflow next action fields");
       textField(action.actionId); textField(action.reason); textField(action.sourceMessageId); textField(action.createdAt);
       if (String(action.reason).length > 2000 || !Number.isFinite(Date.parse(String(action.createdAt))) ||
@@ -435,6 +439,10 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
         throw new Error("Invalid durable workflow resume time");
       if (action.manualResumeAttempts !== undefined && (!Number.isInteger(action.manualResumeAttempts) || Number(action.manualResumeAttempts) < 0 ||
           Number(action.manualResumeAttempts) > 3)) throw new Error("Invalid durable workflow user resume limit");
+      if (action.invalidAssignment !== undefined) action.invalidAssignment = z.object({
+        messageId: z.string().min(1), taskId: z.string().min(1), attemptId: z.string().min(1), implementationAttemptId: z.string().min(1)
+      }).strict().parse(action.invalidAssignment);
+      if (action.verificationTaskId !== undefined) textField(action.verificationTaskId);
       if (action.requiredRole !== undefined) AgentRoleSchema.parse(action.requiredRole);
       if (action.requiredCapabilities !== undefined) strings(action.requiredCapabilities);
     }

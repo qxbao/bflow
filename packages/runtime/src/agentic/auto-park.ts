@@ -44,7 +44,7 @@ export function exhaustedTaskVerification(item: JournalState["pendingVerificatio
     jobField(jobField(item.job, "plan"), "scope") === "task" &&
     [cycle.data, sourceCycle.data, result.data, change.data].every(value => value.runId === run.runId && value.taskId === task.taskId) &&
     cycle.data.cycleId === task.cycle.cycleId && sourceCycle.data.cycleId === task.cycle.cycleId &&
-    digest(sourceCycle.data) === digest(task.cycle) && cycle.data.specId === task.spec.specification.specId &&
+    (digest(sourceCycle.data) === digest(task.cycle) || digest(cycle.data) === digest(task.cycle)) && cycle.data.specId === task.spec.specification.specId &&
     sourceCycle.data.specId === task.spec.specification.specId &&
     result.data.attemptId === attemptId && change.data.attemptId === attemptId && task.changeSet.attemptId === attemptId &&
     change.data.changeSetId === task.changeSet.changeSetId && result.data.changeSet?.changeSetId === task.changeSet.changeSetId;
@@ -109,11 +109,13 @@ function select(state: AutoParkState, policy: AutoParkPolicy, now: number, prepa
       else if (pending.some(item => item.stuck && (item.attempts ?? 0) >= VERIFICATION_ATTEMPT_LIMIT)) kind = "verification_exhausted";
       else {
         const action = run.pendingAction;
-        const source = action && related.find(out => out.message.message_id === action.sourceMessageId);
+        const identity = action?.invalidAssignment;
+        const source = action && related.find(out => out.message.message_id === (identity?.messageId ?? action.sourceMessageId) &&
+          (!identity || identity.taskId === task.taskId && identity.attemptId === out.attemptId && identity.implementationAttemptId === current.attemptId));
         if (run.status === "escalated" && action?.state === "pending" && source &&
             ["task.assignment", "verification.requested"].includes(source.message.type) && taskLogBusinessTaskId(source) === task.taskId &&
             (action.recovery === "manual" || action.recovery === "auto_resume" && (action.resumeAttempts ?? 0) >= policy.maxAutoResumesBeforePark))
-          kind = STRUCTURAL_DELIVERY_BLOCKERS.test(action.reason) ? "transport_failure" : action.reason.includes("refused messages") ? "other" : "transport_failure";
+          kind = identity ? "other" : STRUCTURAL_DELIVERY_BLOCKERS.test(action.reason) ? "transport_failure" : action.reason.includes("refused messages") ? "other" : "transport_failure";
       }
       if (!kind) continue;
       const episode = Math.max(0, ...(task.parkHistory ?? []).map(item => item.episode)) + 1;
