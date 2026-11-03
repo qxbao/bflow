@@ -7,12 +7,15 @@ import { loadRepositoryConfig } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { fsyncTolerant } from "./fs-resilience.js";
 import { identifyRepository } from "./repository.js";
+import { migrateDirectorRoles } from "./director-roles-migration.js";
 
 export interface ConfigMigrationOutput {
   readonly sourcePath: string;
   readonly configPath: string;
   readonly backupPath?: string;
   readonly migrated: boolean;
+  /** Present when conversation/coordinator entries were removed from the configuration (Director replaces them). */
+  readonly removedRoles?: readonly string[];
 }
 
 async function pathEntryExists(path: string): Promise<boolean> {
@@ -30,9 +33,8 @@ function validateConfig(value: unknown, path: string, repository: Awaited<Return
     const env = config.environment;
     if (env.repositoryId !== repository.id || env.workspaceRoot !== repository.root || env.sessionName !== repository.sessionName)
       throw new Error(`Invalid legacy configuration at ${path}: repository identity does not match this Git checkout.`);
-    if (new Set(env.roles.map(role => role.role)).size !== env.roles.length ||
-      !["conversation", "coordinator"].every(role => env.roles.some(item => item.role === role && (item.required ?? true))))
-      throw new Error(`Invalid legacy configuration at ${path}: unique roles and required conversation/coordinator roles are mandatory.`);
+    if (new Set(env.roles.map(role => role.role)).size !== env.roles.length)
+      throw new Error(`Invalid legacy configuration at ${path}: unique roles are mandatory.`);
     return parsed.data;
   }
   const required = ["schemaVersion", "projectName", "runtimeId", "createdAt", "storage", "defaultWorkflow"];
@@ -40,7 +42,16 @@ function validateConfig(value: unknown, path: string, repository: Awaited<Return
   return object;
 }
 
+/** Format migration first (legacy file name), then removal of the retired Conversation/Coordinator roles. */
 export async function migrateRepositoryConfig(cwd: string): Promise<ConfigMigrationOutput> {
+  const formatted = await migrateConfigFormat(cwd);
+  const roles = await migrateDirectorRoles(resolve(formatted.configPath, "..", ".."));
+  return roles.migrated
+    ? { ...formatted, migrated: true, removedRoles: roles.removedRoles, ...(formatted.backupPath ? {} : { backupPath: roles.backupPath! }) }
+    : formatted;
+}
+
+async function migrateConfigFormat(cwd: string): Promise<ConfigMigrationOutput> {
   const repository = await identifyRepository(cwd);
   const root = repository.root;
   const target = resolve(root, ".bflow/config.yml");

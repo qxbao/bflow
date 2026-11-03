@@ -16,9 +16,9 @@ Lệnh / Commands:
   progress        Director: xem tiến độ (bflow progress [--follow] [--json])
   queue           Director: hàng đợi lỗi (bflow queue list|show|retry|dismiss)
   web             Mở web localhost: bflow web [--port N] [--no-open]
-  up              Khởi động/đồng bộ môi trường làm việc của kho mã
+  up              Dựng hạ tầng Bflow (daemon, Herdr, vai chuyên trách, tab tiến trình)
   down            Tạo checkpoint và dừng môi trường làm việc của kho mã
-  attach          Kết nối vào khung trò chuyện (Conversation pane) của kho mã
+  attach          Mở tab tiến trình của phiên Bflow
   doctor          Chẩn đoán môi trường, công cụ phụ thuộc và phiên làm việc
   recover         Khôi phục khóa vòng đời cũ mà không xóa trạng thái dự án
   run             Bắt đầu một lượt chạy quy trình mới từ yêu cầu đầu vào
@@ -546,9 +546,9 @@ Examples:
 
 const HELP_MAP: Record<CliCommandName, string> = {
   docs: DOCS_HELP,
-  up: "Cách dùng: bflow up [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow up [--timeout <milliseconds>] [--json])\nKhởi động hoặc đồng bộ phiên làm việc chạy nền của kho mã này và chờ các vai trò bắt buộc sẵn sàng.",
+  up: "Cách dùng: bflow up [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow up [--timeout <milliseconds>] [--json])\nDựng hạ tầng Bflow (daemon, Herdr, vai chuyên trách, tab tiến trình). Không tạo phiên làm việc: mở CLI và chạy /bflow-start.",
   down: "Cách dùng: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json])\nTạo checkpoint cho công việc đang chạy và dừng an toàn chỉ phiên làm việc của kho mã này. --yes xác nhận dừng khi có công việc chưa an toàn. --force bao gồm xác nhận và dừng trực tiếp phiên làm việc thuộc sở hữu khi việc dọn dẹp pane bị kẹt. Cả hai chế độ đều yêu cầu rào chắn tắt Runtime và các checkpoint hợp lệ; trạng thái dự án và các worktree được giữ nguyên.",
-  attach: "Cách dùng: bflow attach [--json] [--debug] (Usage: bflow attach [--json])\nChuyển tiêu điểm vào khung Trò chuyện (Conversation) và kết nối vào phiên làm việc hiện có của kho mã. Hãy chạy bflow up trước.",
+  attach: "Cách dùng: bflow attach [--json] [--debug] (Usage: bflow attach [--json])\nMở tab tiến trình của phiên Bflow.",
   recover: "Cách dùng: bflow recover --yes [--json] [--debug] (Usage: bflow recover --yes [--json])\nHãy dừng các lệnh Bflow cũ trước. Chỉ chuyển đổi khóa vòng đời cũ đang trống; giữ nguyên trạng thái dự án, các tác nhân và worktree. Sau đó chạy bflow up hoặc bflow down --yes.",
   doctor: "Cách dùng: bflow doctor [--deep] [--json] [--debug] (Usage: bflow doctor [--deep] [--json])\nKiểm tra cấu hình, công cụ phụ thuộc, mức sẵn sàng của nhà cung cấp và phiên tác nhân của kho mã này. Chẩn đoán mặc định không gọi thực thi mô hình. --deep kiểm tra thêm từng nhà cung cấp/hồ sơ/mô hình riêng biệt đã cấu hình; tùy chọn này có thể tiêu tốn hạn mức sử dụng mô hình.",
   init: INIT_HELP,

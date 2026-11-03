@@ -84,11 +84,14 @@ describe("buildHostPlatformOptions", () => {
 
   it("produces valid options for a mixed configuration and keeps each role's provider", async () => {
     const input = configure(environment => {
-      environment.roles = environment.roles.map(role => ({ ...role, cli: role.role === "conversation" ? "claude" : role.role === "coordinator" ? "codex" : "agy" }));
+      environment.roles = environment.roles.map(role => ({ ...role, cli: role.role === "architect" ? "claude" : role.role === "planner" ? "codex" : "agy" }));
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
     const providers = Object.fromEntries(options.roles.map(role => [role.role, role.provider]));
-    expect(providers).toMatchObject({ conversation: "claude", coordinator: "codex", planner: "agy" });
+    expect(providers).toMatchObject({ architect: "claude", planner: "codex", reviewer: "agy" });
+    expect(providers).not.toHaveProperty("conversation");
+    expect(providers).not.toHaveProperty("coordinator");
+    expect(options.layout).toBe("director");
   });
 
   it("uses a role profile override before the selected provider default", async () => {
@@ -98,15 +101,15 @@ describe("buildHostPlatformOptions", () => {
         claude: { "profile-name": "personal" },
         agy: { "profile-name": "work" }
       } });
-      environment.roles = environment.roles.map(role => role.role === "coordinator"
-        ? Object.assign({ ...role, model: "gpt-model", effort: "high" as const }, { "profile-name": "lead" })
+      environment.roles = environment.roles.map(role => role.role === "planner"
+        ? Object.assign({ ...role, cli: "codex", model: "gpt-model", effort: "high" as const }, { "profile-name": "lead" })
         : role);
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
-    expect(options.roles.find(role => role.role === "coordinator")).toMatchObject({
+    expect(options.roles.find(role => role.role === "planner")).toMatchObject({
       provider: "codex", profileName: "lead", model: "gpt-model", effort: "high"
     });
-    expect(options.roles.find(role => role.role === "conversation")).toMatchObject({ provider: "codex", profileName: "work" });
+    expect(options.roles.find(role => role.role === "architect")).toMatchObject({ provider: "codex", profileName: "work" });
   });
 
   it("binds selected profiles to the trusted isolator root while omitting it without a selection", async () => {
@@ -134,13 +137,13 @@ describe("buildHostPlatformOptions", () => {
         claude: { "profile-name": "personal" },
         agy: { "profile-name": "agy-work" }
       } });
-      environment.roles = environment.roles.map(role => role.role === "coordinator"
+      environment.roles = environment.roles.map(role => role.role === "planner"
         ? Object.assign({ ...role, cli: "codex", model: "coord-model", effort: "xhigh" as const }, { "profile-name": "lead" })
         : { ...role, cli: "claude" });
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
-    expect(options.roles.find(role => role.role === "coordinator")).toMatchObject({ provider: "codex", profileName: "lead" });
-    expect(options.roles.find(role => role.role === "conversation")).toMatchObject({ provider: "claude", profileName: "personal" });
+    expect(options.roles.find(role => role.role === "planner")).toMatchObject({ provider: "codex", profileName: "lead" });
+    expect(options.roles.find(role => role.role === "architect")).toMatchObject({ provider: "claude", profileName: "personal" });
     expect(options.roles.find(role => role.role === "developer")).toMatchObject({
       provider: "codex", profileName: "lead", model: "coord-model", effort: "xhigh", required: false
     });
@@ -153,14 +156,14 @@ describe("buildHostPlatformOptions", () => {
 
   it("resolves role skills to exact pins and rejects a missing pin by name", async () => {
     const pinned = configure(environment => {
-      environment.roles = environment.roles.map(role => role.role === "coordinator" ? { ...role, skills: ["inspect-repository"] } : role);
+      environment.roles = environment.roles.map(role => role.role === "planner" ? { ...role, skills: ["inspect-repository"] } : role);
     });
     const options = await buildHostPlatformOptions(pinned, { context, fileExists: absent });
-    const coordinator = options.roles.find(role => role.role === "coordinator")!;
+    const coordinator = options.roles.find(role => role.role === "planner")!;
     expect(coordinator.skillSelections).toEqual([{ skill: expect.objectContaining({ skillId: "inspect-repository", version: expect.any(String), digest: expect.stringMatching(/^[a-f0-9]{64}$/) }), required: true }]);
 
     const missing = configure(environment => {
-      environment.roles = environment.roles.map(role => role.role === "coordinator" ? { ...role, skills: ["no-such-skill"] } : role);
+      environment.roles = environment.roles.map(role => role.role === "planner" ? { ...role, skills: ["no-such-skill"] } : role);
     });
     await expect(buildHostPlatformOptions(missing, { context, fileExists: absent })).rejects.toThrow("no-such-skill");
   });
@@ -385,8 +388,8 @@ describe("buildHostPlatformOptions", () => {
     });
   });
 
-  it("adds a Developer template using the Coordinator's provider when none is configured", async () => {
-    const input = configure(environment => { environment.roles = environment.roles.filter(role => role.role !== "developer").map(role => ({ ...role, cli: role.role === "coordinator" ? "agy" : "claude" })); });
+  it("adds a Developer template using the first specialist role's provider when none is configured", async () => {
+    const input = configure(environment => { environment.roles = environment.roles.filter(role => role.role !== "developer").map(role => ({ ...role, cli: role.role === "planner" ? "agy" : "claude" })); });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
     const developer = options.roles.find(role => role.role === "developer");
     expect(developer).toMatchObject({ provider: "agy", required: false });
@@ -396,18 +399,18 @@ describe("buildHostPlatformOptions", () => {
   it("carries role model and effort settings and inherits them for an implicit Developer template", async () => {
     const input = configure(environment => {
       environment.roles = environment.roles.filter(role => role.role !== "developer");
-      environment.roles = environment.roles.map(role => role.role === "coordinator"
+      environment.roles = environment.roles.map(role => role.role === "planner"
         ? { ...role, model: "codex-main", effort: "xhigh" as const }
         : role);
     });
     const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
-    expect(options.roles.find(role => role.role === "coordinator")).toMatchObject({ model: "codex-main", effort: "xhigh" });
+    expect(options.roles.find(role => role.role === "planner")).toMatchObject({ model: "codex-main", effort: "xhigh" });
     expect(options.roles.find(role => role.role === "developer")).toMatchObject({ provider: "codex", model: "codex-main", effort: "xhigh", required: false });
   });
 
   it("uses an explicitly configured Developer model and effort instead of the Coordinator defaults", async () => {
     const input = configure(environment => {
-      environment.roles = environment.roles.map(role => role.role === "coordinator"
+      environment.roles = environment.roles.map(role => role.role === "planner"
         ? { ...role, model: "coordinator-model", effort: "high" as const }
           : role);
       environment.roles = environment.roles.map(role => role.role === "developer"
@@ -419,9 +422,19 @@ describe("buildHostPlatformOptions", () => {
     expect(options.roles.find(role => role.role === "developer")).toMatchObject({ provider: "claude", model: "developer-model", effort: "xhigh", required: false });
   });
 
-  it("requires a coordinator role", async () => {
-    const input = configure(environment => { environment.roles = environment.roles.filter(role => role.role !== "coordinator"); });
-    await expect(buildHostPlatformOptions(input, { context, fileExists: absent })).rejects.toThrow();
+  it("does not require a coordinator role and never emits conversation/coordinator roles", async () => {
+    const input = configure(environment => { environment.roles = environment.roles.filter(role => role.role !== "coordinator" && role.role !== "conversation"); });
+    const options = await buildHostPlatformOptions(input, { context, fileExists: absent });
+    expect(options.layout).toBe("director");
+    expect(options.roles.map(role => role.role)).not.toContain("coordinator");
+    expect(options.roles.map(role => role.role)).not.toContain("conversation");
+  });
+
+  it("requires at least one specialist role to derive the Developer template", async () => {
+    const input = configure(environment => { environment.roles = environment.roles.filter(role => role.role === "developer" || role.role === "sos"); });
+    await expect(buildHostPlatformOptions(input, { context, fileExists: absent })).resolves.toBeDefined();
+    const none = configure(environment => { environment.roles = environment.roles.filter(role => role.role === "sos"); });
+    await expect(buildHostPlatformOptions(none, { context, fileExists: absent })).rejects.toThrow("at least one specialist role");
   });
 });
 
@@ -471,10 +484,7 @@ describe("DeepWiki role grants", () => {
       expect(roles[role]?.mcpServiceIds, role).toEqual(["deepwiki"]);
       expect(roles[role]?.toolIds, role).toEqual(["deepwiki"]);
     }
-    for (const role of ["conversation", "coordinator"]) {
-      expect(roles[role]?.mcpServiceIds, role).toEqual([]);
-      expect(roles[role]?.toolIds, role).toEqual([]);
-    }
+    for (const role of ["conversation", "coordinator"]) expect(roles[role], role).toBeUndefined();
     expect(options.toolGrants?.filter(grant => grant.toolId === "deepwiki").every(grant =>
       grant.serviceId === "deepwiki" && grant.operations.join(",") === "ask_wiki_question,read_wiki_contents,read_wiki_structure")).toBe(true);
     expect(AgenticHostPlatformOptionsSchema.parse(options)).toEqual(options);

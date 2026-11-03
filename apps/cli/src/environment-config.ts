@@ -6,6 +6,7 @@ import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema, RoleProfilePinSchema } from "@bflow/contracts";
 import { migrateLegacyContext7Config } from "./deepwiki-migration.js";
+import { migrateDirectorRoles } from "./director-roles-migration.js";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, parseRepositoryConfig, resolveReadableConfigPath } from "./config.js";
 import { parseConfigYaml, renderEnvironmentConfigYaml } from "./config-format.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
@@ -196,7 +197,13 @@ export const EnvironmentConfigSchema = z
 
 export interface EnvironmentConfig extends BflowRepositoryConfig {
   readonly environment: z.infer<typeof EnvironmentConfigEnvironmentSchema>;
+  /** Read-time warnings (for example a legacy conversation/coordinator entry that was ignored); never persisted. */
+  readonly diagnostics?: readonly string[] | undefined;
 }
+/** Roles of the retired v2 layout; the Director (the user's own CLI) replaces them and they never get a pane. */
+export const LEGACY_DIRECTOR_REPLACED_ROLES = ["conversation", "coordinator"] as const;
+export const LEGACY_ROLES_IGNORED_WARNING = "Đã bỏ qua vai conversation/coordinator (Director thay thế). Chạy `bflow config-migrate` để gỡ khỏi cấu hình.";
+export const isLegacyDirectorRole = (role: string): boolean => (LEGACY_DIRECTOR_REPLACED_ROLES as readonly string[]).includes(role);
 export const ENVIRONMENT_CONFIG_PATH = ".bflow/config.yml";
 
 export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: string, now = new Date(), provider: EnvironmentProvider = "codex"): EnvironmentConfig {
@@ -208,7 +215,7 @@ export function defaultEnvironmentConfig(repository: RepositoryIdentity, name?: 
       workspaceRoot: repository.root,
       sessionName: repository.sessionName,
       herdrBinary: "herdr",
-      roles: ["conversation", "coordinator", "planner", "architect", "specifier", "developer", "reviewer", "qa", "sos"].map((role) => ({
+      roles: ["planner", "architect", "specifier", "developer", "reviewer", "qa", "sos"].map((role) => ({
         role: EnvironmentRoleNameSchema.parse(role),
         cli: provider,
         required: role !== "developer" && role !== "sos"
@@ -425,11 +432,12 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity, cont
     if (typeof env["herdrBinary"] !== "string" || !env["herdrBinary"].trim()) throw new Error("Invalid Herdr executable");
     const rawRoles = env["roles"];
     if (!Array.isArray(rawRoles) || !rawRoles.length) throw new Error("Missing role configuration");
-    const roles = rawRoles.map((value: unknown, index: number) => {
+    const parsedRoles = rawRoles.map((value: unknown, index: number) => {
       return EnvironmentRoleConfigSchema.parse(value, { path: ["environment", "roles", index] });
     });
-    if (new Set(roles.map((r) => r.role)).size !== roles.length || !["conversation", "coordinator"].every((r) => roles.some((role) => role.role === r && (role.required ?? true))))
-      throw new Error("Unique roles and required conversation/coordinator roles are mandatory");
+    const roles = parsedRoles.filter(role => !isLegacyDirectorRole(role.role));
+    const diagnostics = roles.length !== parsedRoles.length ? [LEGACY_ROLES_IGNORED_WARNING] : [];
+    if (new Set(parsedRoles.map((r) => r.role)).size !== parsedRoles.length) throw new Error("Unique roles are mandatory");
     const sdd = record(env["sdd"]);
     const tdd = record(env["tdd"]);
     const verification = record(env["verification"]);
@@ -448,7 +456,7 @@ export async function readEnvironmentConfig(repository: RepositoryIdentity, cont
       ...env,
       roles
     }, { path: ["environment"] });
-    return { ...base.value, environment: parsedEnv };
+    return { ...base.value, environment: parsedEnv, ...(diagnostics.length ? { diagnostics } : {}) };
   } catch (error) {
     if (!(error instanceof z.ZodError)) throw error;
     const issue = error.issues[0]!;
@@ -497,7 +505,10 @@ export async function initializeEnvironmentConfig(options: {
   if (options.update) {
     let mergedConfig = config;
     let reportProvider: EnvironmentProvider | undefined = presetProvider;
+    let removedRoles: readonly string[] = [];
     if (configExists) {
+      // The retired conversation/coordinator roles are removed first, with a backup (Director replaces them).
+      removedRoles = (await migrateDirectorRoles(repository.root)).removedRoles;
       // 0. A configuration from an earlier release is migrated first: a timestamped backup, then context7 becomes deepwiki.
       await migrateLegacyContext7Config(repository.root);
       // 1. Lưu tạm các giá trị config hiện tại trong bộ nhớ (validate trước khi xoá).
@@ -514,8 +525,10 @@ export async function initializeEnvironmentConfig(options: {
           sessionName: repository.sessionName
         }
       });
-      // Roles new to this release follow the CLI the saved Coordinator already uses unless --provider picks another preset.
-      const savedCoordinator = EnvironmentProviderSchema.safeParse(savedConfig.environment.roles.find(role => role.role === "coordinator")?.cli);
+      // Roles new to this release follow the CLI the first saved specialist role already uses unless --provider picks another preset.
+      // The retired conversation/coordinator entries are dropped here (the file is rewritten without them).
+      savedConfig.environment.roles = savedConfig.environment.roles.filter(role => !isLegacyDirectorRole(role.role));
+      const savedCoordinator = EnvironmentProviderSchema.safeParse(savedConfig.environment.roles[0]?.cli);
       const savedProvider = savedCoordinator.success ? savedCoordinator.data : undefined;
       const baseProvider = options.provider ?? savedProvider ?? presetProvider;
       const base = baseProvider === presetProvider ? config
@@ -532,6 +545,7 @@ export async function initializeEnvironmentConfig(options: {
     const file = await open(configPath, "wx", 0o600);
     try { await file.writeFile(renderEnvironmentConfigYaml(mergedConfig)); } finally { await file.close(); }
     return { configPath, config: mergedConfig, overwritten: configExists, updated: true,
+      ...(removedRoles.length ? { removedRoles } : {}),
       rolePresets: summarizeRolePresets(mergedConfig, reportProvider, reportProvider !== undefined) };
   }
   if (options.force) {

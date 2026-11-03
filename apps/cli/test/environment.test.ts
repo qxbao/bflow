@@ -14,7 +14,7 @@ import type { LifecycleHost } from "../src/agentic-host.js";
 
 const now = "2026-10-16T00:00:00.000Z";
 const linuxIt = it.skipIf(process.platform !== "linux");
-const roles = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"] as const;
+const roles = ["planner", "architect", "specifier", "reviewer", "qa"] as const;
 const activeRun: WorkflowRunSnapshot = { runId: "active-run", workflowId: "workflow", workflowVersion: "1", status: "running", tasks: [], createdAt: now, updatedAt: now, version: 2, lastEventSequence: 2 };
 function checkpoint(command: CreateCheckpointCommand): RecoveryCheckpoint {
   return { checkpointSchemaVersion: 1, codec: { name: "bflow.workflow-aggregate+json", version: 1 }, checkpointId: command.checkpointId,
@@ -54,17 +54,20 @@ class FakeProcesses implements EnvironmentProcessRunner {
 }
 function mockManager(repository: Awaited<ReturnType<typeof identifyRepository>>) {
   let current: SessionManifest | null = null;
-  const create = () => SessionManifestSchema.parse({ schemaVersion: 2, sessionId: repository.sessionName, projectName: "repo", workspaceRoot: repository.root,
+  // Director layout (manifest v3): specialist panes plus the progress tab; there are no Conversation/Coordinator panes.
+  const create = () => SessionManifestSchema.parse({ schemaVersion: 3, sessionId: repository.sessionName, projectName: "repo", workspaceRoot: repository.root,
     herdrWorkspaceId: "w1", herdrTabId: "w1:t1", status: "up", conversationSessionId: "conversation-1", activeRunIds: [], metadata: { panePresentationVersion: 1 },
     panes: roles.map((role, i) => ({ schemaVersion: 2, bindingId: `binding-${i}`, sessionId: repository.sessionName, role, agentId: `agent-${i}`,
-      workspaceId: "w1", tabId: "w1:t1", paneId: `w1:p${i}`, provider: "openai", agentKind: "codex", cwd: repository.root,
-      isolationMode: "dedicated_pane", readOnlyWorkspace: role === "conversation", transportState: "idle", boundAt: now })),
-    attachTarget: { role: "conversation", paneId: "w1:p0" }, createdAt: now, updatedAt: now });
+      workspaceId: "w1", tabId: "w1:t1", paneId: `w1:p${i + 1}`, provider: "openai", agentKind: "codex", cwd: repository.root,
+      isolationMode: "dedicated_pane", readOnlyWorkspace: false, transportState: "idle", boundAt: now })),
+    progressPane: { tabId: "w1:t0", paneId: "w1:p0", command: ["/usr/bin/node", "/x/bin.js", "progress", "--follow"], phase: "running", restarts: [] },
+    attachTarget: { role: "progress", tabId: "w1:t0", paneId: "w1:p0" }, createdAt: now, updatedAt: now });
   const manager: SessionLifecycleManager = {
     init: vi.fn(async (manifest) => ({ ok: true, value: manifest })),
     up: vi.fn(async () => { current = create(); return { ok: true, value: current }; }),
     down: vi.fn(async () => { current = { ...current!, status: "down" }; return { ok: true, value: current }; }),
     attach: vi.fn(async () => ({ ok: true, value: current!.panes[0]! })),
+    attachProgress: vi.fn(async () => ({ ok: true, value: { tabId: "w1:t0", paneId: "w1:p0" } })),
     getManifest: vi.fn(async () => ({ ok: true, value: current })),
     doctorSession: vi.fn(async () => ({ schemaVersion: 2, workspaceRoot: repository.root, sessionId: repository.sessionName, healthy: true,
       checks: [{ checkId: "panes", name: "panes", status: "passed", message: "test fixture" }], checkedAt: now }))
@@ -194,8 +197,8 @@ describe("P12 repository environment lifecycle", () => {
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     config.environment.roles = config.environment.roles.map(role => ({
       ...role,
-      required: role.role === "conversation" || role.role === "coordinator",
-      ...(role.role === "conversation" || role.role === "coordinator" ? { "profile-name": "work" } : {})
+      required: role.role === "architect" || role.role === "specifier",
+      ...(role.role === "architect" || role.role === "specifier" ? { "profile-name": "work" } : {})
     }));
     await writeFile(path, renderEnvironmentConfigYaml(config));
     runner.authenticated = false;
@@ -214,8 +217,8 @@ describe("P12 repository environment lifecycle", () => {
     const config = EnvironmentConfigSchema.parse(parseConfigYaml(await readFile(path, "utf8")));
     config.environment.roles = config.environment.roles.map(role => ({
       ...role,
-      required: role.role === "conversation" || role.role === "coordinator" || role.role === "planner",
-      ...(role.role === "conversation" || role.role === "coordinator" ? { "profile-name": "work" } : {})
+      required: role.role === "architect" || role.role === "specifier" || role.role === "planner",
+      ...(role.role === "architect" || role.role === "specifier" ? { "profile-name": "work" } : {})
     }));
     await writeFile(path, renderEnvironmentConfigYaml(config));
     runner.authenticated = false;
@@ -235,7 +238,7 @@ describe("P12 repository environment lifecycle", () => {
     config.environment.allowProviderFallback = true;
     config.environment.defaults = { claude: { "profile-name": "fallback-profile" } };
     config.environment.roles = config.environment.roles.map(role =>
-      role.role === "conversation" || role.role === "coordinator"
+      role.role === "architect" || role.role === "specifier"
         ? { ...role, required: true, fallbackCli: "claude" }
         : { ...role, required: false });
     await writeFile(path, renderEnvironmentConfigYaml(config));
@@ -256,7 +259,7 @@ describe("P12 repository environment lifecycle", () => {
     config.environment.allowProviderFallback = true;
     config.environment.defaults = { claude: { "profile-name": "fallback-profile" } };
     config.environment.roles = config.environment.roles.map(role =>
-      role.role === "conversation" || role.role === "coordinator"
+      role.role === "architect" || role.role === "specifier"
         ? { ...role, required: true, fallbackCli: "claude" }
         : { ...role, required: false });
     await writeFile(path, renderEnvironmentConfigYaml(config));
@@ -758,9 +761,10 @@ describe("P12 repository environment lifecycle", () => {
     await expect(lifecycle.attach()).rejects.toThrow("Run bflow up");
     expect(runner.requests.filter((r) => r.executable === "herdr")).toHaveLength(0);
   });
-  linuxIt("focuses Conversation through the manager before opening the matching named TUI", async () => {
+  linuxIt("focuses the progress tab through the manager before opening the matching named TUI", async () => {
     await lifecycle.up(); await lifecycle.attach();
-    expect(fixture.manager.attach).toHaveBeenCalledWith(repository.sessionName, expect.any(Object));
+    expect(fixture.manager.attachProgress).toHaveBeenCalledWith(repository.sessionName, expect.any(Object));
+    expect(fixture.manager.attach).not.toHaveBeenCalled();
     const attach = runner.requests.find((r) => r.mode === "interactive")!;
     expect(attach.args).toEqual(["session", "attach", repository.sessionName]);
     expect(attach.env?.["HERDR_SESSION"]).toBe(repository.sessionName);
@@ -774,15 +778,15 @@ describe("P12 repository environment lifecycle", () => {
     expect(chunks).toEqual([]);
     process.exitCode = 0;
   });
-  linuxIt("rejects a manager attach target belonging to another role", async () => {
-    await lifecycle.up(); vi.mocked(fixture.manager.attach).mockResolvedValue({ ok: true, value: fixture.get().panes[1]! });
-    await expect(lifecycle.attach()).rejects.toThrow("incorrect Conversation");
+  linuxIt("rejects a manager attach target belonging to another pane", async () => {
+    await lifecycle.up(); vi.mocked(fixture.manager.attachProgress!).mockResolvedValue({ ok: true, value: { tabId: "w1:t0", paneId: fixture.get().panes[1]!.paneId } });
+    await expect(lifecycle.attach()).rejects.toThrow("incorrect progress attach target");
     expect(runner.requests.some((r) => r.mode === "interactive")).toBe(false);
   });
   linuxIt("reports blocked startup and re-observes without duplicate agents", async () => {
     const manifest = fixture.create(); manifest.panes[1]!.transportState = "blocked";
     vi.mocked(fixture.manager.up).mockImplementation(async () => { fixture.set(manifest); return { ok: true, value: manifest }; });
-    await expect(lifecycle.up()).rejects.toThrow("coordinator' is blocked");
+    await expect(lifecycle.up()).rejects.toThrow("architect' is blocked");
     await expect(lifecycle.up()).rejects.toThrow("blocked"); expect(fixture.manager.up).toHaveBeenCalledTimes(2);
     const saved = JSON.parse(await readFile(join(dir, ".bflow/state/session.json"), "utf8")); expect(saved.status).toBe("down");
   });
@@ -1093,7 +1097,7 @@ describe("P12 repository environment lifecycle", () => {
   });
   linuxIt("reports live server, panes and agent state", async () => {
     await lifecycle.up(); const status = await lifecycle.status();
-    expect(status.server).toBe("running"); expect(status.liveObservation).toBe(true); expect(status.manifest?.panes).toHaveLength(7);
+    expect(status.server).toBe("running"); expect(status.liveObservation).toBe(true); expect(status.manifest?.panes).toHaveLength(5);
   });
   linuxIt("cancels an in-flight up and resumes the same saved topology without deleting state", async () => {
     const abort = new AbortController(), sentinel = join(dir, "notes.txt"); await writeFile(sentinel, "uncommitted work");

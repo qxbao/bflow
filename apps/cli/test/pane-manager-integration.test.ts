@@ -64,15 +64,15 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     let settled = false;
     const pending = lifecycle().up().finally(() => { settled = true; });
     try {
-      await expect.poll(() => starts(runner).length, { timeout: 15_000 }).toBe(7);
+      await expect.poll(() => starts(runner).length, { timeout: 15_000 }).toBe(5);
       await expect.poll(() => checked.length).toBe(3);
-      expect(firstCheckStartCount).toBeLessThan(7);
+      expect(firstCheckStartCount).toBeLessThan(5);
       expect(settled).toBe(false);
       expect(host.activate).not.toHaveBeenCalled();
     } finally { release(); }
     const manifest = await pending;
-    expect(manifest.panes).toHaveLength(7);
-    expect(checked).toHaveLength(7);
+    expect(manifest.panes).toHaveLength(5);
+    expect(checked).toHaveLength(5);
   });
 
   linuxIt.each(["quiesce", "close"] as const)("waits for remote startup drain before %s after a disconnected check", async transition => {
@@ -103,11 +103,11 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(host.verifyRoleStartup).not.toHaveBeenCalled();
   });
 
-  linuxIt("starts all seven P13 roles with trusted host arguments and persists returned IDs", async () => {
+  linuxIt("starts all five specialist P13 roles with trusted host arguments and persists returned IDs", async () => {
     const environment = lifecycle();
     const manifest = await environment.up();
-    expect(starts(runner)).toHaveLength(7); expect(manifest.panes.map((p) => p.role).sort()).toEqual(["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"].sort());
-    expect(manifest.status).toBe("up"); expect(new Set(manifest.panes.map((p) => p.tabId)).size).toBe(3);
+    expect(starts(runner)).toHaveLength(5); expect(manifest.panes.map((p) => p.role).sort()).toEqual(["planner", "architect", "specifier", "reviewer", "qa"].sort());
+    expect(manifest.status).toBe("up"); expect(new Set(manifest.panes.map((p) => p.tabId)).size).toBe(2);
     const saved = SessionManifestSchema.parse(JSON.parse(await readFile(join(dir, `.bflow/state/panes/${input.repository.sessionName}.manifest.json`), "utf8")));
     expect(saved.panes.map((p) => p.paneId)).toEqual(manifest.panes.map((p) => p.paneId));
     expect(saved.metadata?.["repositoryId"]).toBe(input.repository.id);
@@ -120,7 +120,7 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     await writeFile(join(dir, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
     expect((await lifecycle().up(299_999)).status).toBe("up");
     const calls = starts(runner);
-    expect(calls).toHaveLength(7);
+    expect(calls).toHaveLength(5);
     for (const call of calls) {
       const timeout = Number(call.args[call.args.indexOf("--timeout") + 1]);
       expect(Number.isInteger(timeout)).toBe(true);
@@ -132,10 +132,10 @@ describe("P12 composition with real P13 RolePaneManager", () => {
   linuxIt("reopens composition across CLI invocations without starting duplicate agents", async () => {
     await lifecycle().up();
     await lifecycle().up();
-    expect(starts(runner)).toHaveLength(7);
+    expect(starts(runner)).toHaveLength(5);
     expect(runner.calls.filter((r) => r.args[0] === "workspace" && r.args[1] === "create")).toHaveLength(1);
   });
-  linuxIt("refreshes live health and focuses Conversation through P13 before the TUI", async () => {
+  linuxIt("refreshes live health and focuses the progress tab through P13 before the TUI", async () => {
     const environment = lifecycle(); await environment.up();
     const first = await environment.status(); expect(first.liveObservation).toBe(true);
     const panes = runner.session(input.repository.sessionName).panes;
@@ -143,8 +143,8 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     const blocked = await environment.status(); expect(blocked.manifest?.status).toBe("degraded");
     expect(blocked.manifest?.panes.find((p) => p.role === "reviewer")?.transportState).toBe("blocked");
     await environment.attach();
-    const last = runner.calls.findLast((r) => r.args[0] === "agent" && r.args[1] === "focus")!;
-    expect(last.args[2]).toBe(blocked.manifest?.attachTarget.paneId);
+    expect(blocked.manifest?.schemaVersion).toBe(3);
+    expect(blocked.manifest?.attachTarget.role).toBe("progress");
     expect(runner.calls.findLast((r) => r.mode === "interactive")?.args).toEqual(["session", "attach", input.repository.sessionName]);
     expect((await environment.doctor()).healthy).toBe(false);
   });
@@ -155,22 +155,22 @@ describe("P12 composition with real P13 RolePaneManager", () => {
     expect(observed.manifest?.panes.find((p) => p.role === "qa")?.transportState).toBe("disconnected");
   });
   linuxIt("preserves an interactive startup dialog and resumes its exact agent without duplicate dispatch", async () => {
-    runner.blockedAgent = "coordinator";
+    runner.blockedAgent = "architect";
     await expect(lifecycle().up()).rejects.toThrow(/waiting for your choice/s);
     const session = runner.session(input.repository.sessionName);
     expect(session.running).toBe(true);
     expect(host.quiesce).not.toHaveBeenCalled();
-    const pane = session.panes.find(pane => pane.name === "coordinator")!;
+    const pane = session.panes.find(pane => pane.name === "architect")!;
     expect(pane.agent_status).toBe("blocked");
     expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
     await expect(lifecycle().up()).rejects.toThrow(/waiting for your choice/s);
-    expect(starts(runner).filter(call => call.args[2] === "coordinator")).toHaveLength(1);
+    expect(starts(runner).filter(call => call.args[2] === "architect")).toHaveLength(1);
     runner.blockedAgent = undefined;
     pane.agent_status = "idle";
     const manifest = await lifecycle().up();
     expect(manifest.status).toBe("up");
-    expect(manifest.panes.find(binding => binding.role === "coordinator")?.paneId).toBe(pane.pane_id);
-    expect(starts(runner)).toHaveLength(7);
+    expect(manifest.panes.find(binding => binding.role === "architect")?.paneId).toBe(pane.pane_id);
+    expect(starts(runner)).toHaveLength(5);
   });
   linuxIt("rejects a foreign durable manifest without dispatching P13 commands", async () => {
     await lifecycle().up();
@@ -353,13 +353,13 @@ describe("P30 platform readiness in up", () => {
     const host = hostWith(await roleLaunchesFor(input));
     const result = await openPaneManagerEnvironment(input, runner, async () => host, undefined, socketFor).manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
-    expect(starts()).toHaveLength(7);
+    expect(starts()).toHaveLength(5);
     expect(starts().every(call => kindOf(call) === "codex")).toBe(true);
     // Live finding: Herdr agent start never forwards invocation env, so the launch env must be set at pane creation.
     expect(starts().every(call => !JSON.stringify(call.env ?? {}).includes("must-not-leak") && !call.args.join(" ").includes("must-not-leak"))).toBe(true);
     expect(runner.calls.some(call => call.args.join(" ").includes("must-not-leak"))).toBe(false);
     const started = runner.session(input.repository.sessionName).panes.filter(pane => pane.agent !== null);
-    expect(started).toHaveLength(7);
+    expect(started).toHaveLength(5);
     expect(started.every(pane => pane.env?.["BFLOW_TEST_SECRET"] === "must-not-leak")).toBe(true);
     expect(host.prepare).toHaveBeenCalledTimes(1);
   });
@@ -369,20 +369,20 @@ describe("P30 platform readiness in up", () => {
     const host = hostWith(await roleLaunchesFor(input));
     const environment = () => new EnvironmentLifecycle(dir, { runner, openIntegration: async composition =>
       openPaneManagerEnvironment(composition, runner, async () => host, undefined, socketFor) });
-    runner.blockedAgent = "coordinator";
+    runner.blockedAgent = "architect";
     await expect(environment().up()).rejects.toThrow("waiting for your choice");
-    const pane = runner.session(input.repository.sessionName).panes.find(pane => pane.name === "coordinator")!;
+    const pane = runner.session(input.repository.sessionName).panes.find(pane => pane.name === "architect")!;
     const id = pane.pane_id;
     expect(pane.env?.BFLOW_TEST_SECRET).toBe("must-not-leak");
     await expect(environment().up()).rejects.toThrow("waiting for your choice");
-    expect(starts().filter(call => call.args[2] === "coordinator")).toHaveLength(1);
+    expect(starts().filter(call => call.args[2] === "architect")).toHaveLength(1);
     runner.blockedAgent = undefined;
     pane.agent_status = "idle";
     const manifest = await environment().up();
     expect(manifest.status).toBe("up");
-    expect(manifest.panes.find(binding => binding.role === "coordinator")).toMatchObject({ paneId: id,
-      metadata: { launchId: "launch-coordinator" } });
-    expect(starts()).toHaveLength(7);
+    expect(manifest.panes.find(binding => binding.role === "architect")).toMatchObject({ paneId: id,
+      metadata: { launchId: "launch-architect" } });
+    expect(starts()).toHaveLength(5);
   });
 
   linuxIt("checks only current prepared launches while reconciling a saved prior generation", async () => {
@@ -408,42 +408,42 @@ describe("P30 platform readiness in up", () => {
     const result = await openPaneManagerEnvironment(input, runner, async () => host, undefined, socketFor)
       .manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
-    expect(checked).toHaveLength(7);
+    expect(checked).toHaveLength(5);
     expect(checked.every(id => id.startsWith("new-"))).toBe(true);
     if (result.ok) expect(result.value.panes.every(pane => pane.metadata?.["launchId"] === `new-${pane.role}`)).toBe(true);
   });
 
   linuxIt("fails up with the readiness report before any agent start when a required role is blocked", async () => {
-    const input = withProviders(role => role === "coordinator" ? "codex" : "claude");
+    const input = withProviders(role => role === "architect" ? "codex" : "claude");
     serverRunning(input);
     const roleLaunch = await roleLaunchesFor(input);
     const platform: HostPrepareResponse["platform"] = { ready: false, generation: 1, checkedAt: new Date().toISOString(), roles: [
-      { role: "coordinator", provider: "codex", required: true, status: "blocked", message: "Codex is not authenticated",
+      { role: "architect", provider: "codex", required: true, status: "blocked", message: "Codex is not authenticated",
         checks: [{ check: "authentication", status: "failed", code: "codex_auth_missing", message: "Codex login is missing", remediation: "Run codex login" }] },
-      { role: "conversation", provider: "claude", required: true, status: "ready", checks: [] }
+      { role: "planner", provider: "claude", required: true, status: "ready", checks: [] }
     ] };
     const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(roleLaunch, platform)).manager.up(input.repository.sessionName);
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.message).toContain("coordinator [codex]: blocked");
+    expect(result.error.message).toContain("architect [codex]: blocked");
     expect(result.error.message).toContain("codex_auth_missing");
     expect(result.error.message).toContain("Codex login is missing");
-    expect(result.error.message).not.toContain("conversation [claude]");
+    expect(result.error.message).not.toContain("planner [claude]");
     expect(result.error.message).not.toContain("must-not-leak");
     expect(starts()).toHaveLength(0);
   });
 
   linuxIt("starts a mixed Claude, Codex and Agy configuration with each role's own provider", async () => {
-    const input = withProviders(role => role === "conversation" ? "claude" : role === "coordinator" ? "codex" : "agy");
+    const input = withProviders(role => role === "planner" ? "claude" : role === "architect" ? "codex" : "agy");
     serverRunning(input);
     const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(await roleLaunchesFor(input)), undefined, socketFor).manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
     const kinds = starts().map(kindOf).sort();
-    expect(kinds).toEqual(["agy", "agy", "agy", "agy", "agy", "claude", "codex"]);
+    expect(kinds).toEqual(["agy", "agy", "agy", "claude", "codex"]);
   });
 
   linuxIt("keeps a configured Developer model as a dynamic template without creating a permanent pane", async () => {
-    const input = withProviders(role => role === "coordinator" ? "codex" : "claude");
+    const input = withProviders(role => role === "architect" ? "codex" : "claude");
     const developer = { role: "developer" as const, cli: "codex" as const, required: false, model: "developer-codex", effort: "high" as const };
     input.config.environment.roles = input.config.environment.roles.map(role => role.role === "developer" ? developer : role);
     serverRunning(input);
@@ -455,9 +455,9 @@ describe("P30 platform readiness in up", () => {
       return host;
     }, undefined, socketFor).manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
-    expect(starts()).toHaveLength(7);
+    expect(starts()).toHaveLength(5);
     const manifest = result.ok ? result.value : undefined;
-    expect(manifest?.panes).toHaveLength(7);
+    expect(manifest?.panes).toHaveLength(5);
     expect(manifest?.panes.some(pane => pane.role === "developer")).toBe(false);
   });
 
@@ -469,14 +469,14 @@ describe("P30 platform readiness in up", () => {
     const launchArguments = vi.fn(async (kind: string, role: string) => ["--legacy-test", `${kind}:${role}`]);
     const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(legacy), launchArguments).manager.up(input.repository.sessionName);
     expect(result.ok ? "ok" : result.error.message).toBe("ok");
-    expect(launchArguments).toHaveBeenCalledTimes(7);
+    expect(launchArguments).toHaveBeenCalledTimes(5);
     expect(starts().every(call => call.args.includes("--legacy-test"))).toBe(true);
   });
 
   linuxIt("refuses a prepared launch whose provider differs from the configured role provider", async () => {
     const input = withProviders(() => "codex");
     const roleLaunch = await roleLaunchesFor(input);
-    roleLaunch["coordinator"] = await launchFor("coordinator", "claude");
+    roleLaunch["architect"] = await launchFor("architect", "claude");
     serverRunning(input);
     const result = await openPaneManagerEnvironment(input, runner, async () => hostWith(roleLaunch)).manager.up(input.repository.sessionName);
     expect(result.ok).toBe(false);

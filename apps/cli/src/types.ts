@@ -443,6 +443,8 @@ export interface InitCommandOutput {
   /** The `.bflow/` entry in `<git-common-dir>/info/exclude`. */
   readonly gitExclude?: import("./git-exclude.js").GitExcludeReport | undefined;
   readonly director?: import("./init-director.js").InitDirectorReport | undefined;
+  /** conversation/coordinator entries removed from the configuration by this `init --update` (Director replaces them). */
+  readonly removedRoles?: readonly string[] | undefined;
   readonly diagnostics?: readonly string[] | undefined;
 }
 

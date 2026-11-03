@@ -24,9 +24,10 @@ describe("bflow init role/model presets", () => {
     const result = await runCli(["init", "--provider", "claude", "--no-gitnexus", "--json"], { cwd: dir });
     expect(result.ok).toBe(true);
     const saved = await byRole(dir);
-    expect(saved["coordinator"]).toMatchObject({ cli: "claude", model: "claude-opus-4-7", required: true });
+    expect(saved["planner"]).toMatchObject({ cli: "claude", required: true });
+    expect(saved["coordinator"]).toBeUndefined();
     expect(saved["developer"]).toEqual({ role: "developer", cli: "claude", model: "claude-sonnet-4-6", required: false });
-    expect(saved["conversation"]).toMatchObject({ cli: "claude", model: "claude-sonnet-4-6" });
+    expect(saved["conversation"]).toBeUndefined();
     const data = JSON.parse(result.stdout).data;
     expect(data.rolePresets).toMatchObject({ provider: "claude", applied: true });
     expect(data.rolePresets.roles.find((row: { role: string }) => row.role === "architect")).toMatchObject({ cli: "claude", model: "claude-opus-4-7" });
@@ -42,17 +43,16 @@ describe("bflow init role/model presets", () => {
     expect(parseCliArgs(["init", "--preset", "gemini"]).ok).toBe(false);
   });
 
-  it("routes the agy Conversation role to Claude and omits effort/model for Agy specialists", async () => {
+  it("omits effort/model for Agy specialists and has no Conversation role to route", async () => {
     const result = await runCli(["init", "--preset", "agy", "--no-gitnexus"], { cwd: dir });
     expect(result.ok).toBe(true);
     const saved = await byRole(dir);
-    expect(saved["conversation"]).toMatchObject({ cli: "claude", model: "claude-sonnet-4-6" });
-    for (const role of ["coordinator", "architect", "reviewer", "qa", "developer"]) {
+    expect(saved["conversation"]).toBeUndefined();
+    for (const role of ["planner", "architect", "reviewer", "qa", "developer"]) {
       expect(saved[role]?.cli).toBe("agy");
       expect(saved[role]?.model).toBeUndefined();
       expect(saved[role]?.effort).toBeUndefined();
     }
-    expect(result.stdout).toContain("Agy does not support the Conversation role");
   });
 
   it("uses the interactive selection, offered with the installed CLIs, for a new configuration", async () => {
@@ -82,8 +82,7 @@ describe("bflow init role/model presets", () => {
     const saved = await byRole(dir);
     expect(saved["qa"]).toMatchObject({ cli: "agy" });
     expect(saved["qa"]?.model).toBeUndefined();
-    // Conversation stays on Claude under the agy preset, so its saved model is kept.
-    expect(saved["conversation"]).toMatchObject({ cli: "claude", model: "claude-sonnet-4-6" });
+    expect(saved["conversation"]).toBeUndefined();
     expect(JSON.parse(switched.stdout).data.rolePresets).toMatchObject({ provider: "agy", applied: true });
   });
 });

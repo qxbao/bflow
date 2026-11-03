@@ -248,13 +248,13 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
       rawBefore.environment.sdd = { minimumLevel: "full", approvalRequired: false };
       rawBefore.environment.verification = { maxIterations: 5, onExhausted: "require_human" };
       rawBefore.environment.tools = { rtk: { enabled: false, required: false } };
-      rawBefore.environment.roles = rawBefore.environment.roles.map((r: any) =>
-        r.role === "coordinator"
-          ? { ...r, model: "gemini-3.1-pro-high", "profile-name": "lead-profile" }
-          : r.role === "conversation"
-            ? { ...r, model: "gemini-3-flash-low" }
-            : r
-      );
+      // A configuration from the v2 layout still lists conversation/coordinator; --update removes them.
+      rawBefore.environment.roles = [
+        { role: "conversation", cli: "claude", model: "gemini-3-flash-low", required: true },
+        { role: "coordinator", cli: "agy", model: "gemini-3.1-pro-high", required: true },
+        ...rawBefore.environment.roles.map((r: any) =>
+          r.role === "planner" ? { ...r, model: "gemini-3.1-pro-high", "profile-name": "lead-profile" } : r)
+      ];
       await writeFile(configPath, "# stripped old comment\n" + stringifyConfigYaml(rawBefore), "utf8");
 
       const updateRes = await runCli(["init", "--update", "--json"], { cwd: tempDir });
@@ -296,20 +296,17 @@ describe("CLI Command Execution - runCli & executeCommand", () => {
         agy: {}
       });
       // Preserved custom role models and profile-name
-      const coordinator = parsedAfter.environment.roles.find((r: any) => r.role === "coordinator");
-      expect(coordinator).toMatchObject({
-        role: "coordinator",
+      const planner = parsedAfter.environment.roles.find((r: any) => r.role === "planner");
+      expect(planner).toMatchObject({
+        role: "planner",
         cli: "agy",
         model: "gemini-3.1-pro-high",
         "profile-name": "lead-profile"
       });
-      const conversation = parsedAfter.environment.roles.find((r: any) => r.role === "conversation");
-      // The agy preset routes the unsupported Conversation role to Claude; --update keeps the saved model.
-      expect(conversation).toMatchObject({
-        role: "conversation",
-        cli: "claude",
-        model: "gemini-3-flash-low"
-      });
+      // Director replaces the retired roles: they are removed from the rewritten file and reported.
+      expect(parsedAfter.environment.roles.map((r: any) => r.role)).not.toContain("conversation");
+      expect(parsedAfter.environment.roles.map((r: any) => r.role)).not.toContain("coordinator");
+      expect(envelope.data.removedRoles).toEqual(["conversation", "coordinator"]);
     });
 
     it("creates configuration in custom subproject directory with custom name", async () => {

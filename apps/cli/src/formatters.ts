@@ -39,6 +39,7 @@ import {
   yellow
 } from "./presentation.js";
 import type { EnvironmentStatus } from "./environment.js";
+import { DIRECTOR_INFRASTRUCTURE_READY_MESSAGE, DIRECTOR_ROLES_REMOVED_MESSAGE } from "./director-messages.js";
 import { formatCodexHookSetupOutput } from "./codex-hook-setup.js";
 import { renderPreview } from "@bflow/machine-setup";
 import { boundReadinessReport, summarizeReadinessReport } from "./readiness-output.js";
@@ -588,8 +589,12 @@ function directorSummaryLine(director: NonNullable<InitCommandOutput["director"]
 
 function formatInitOutput(output: InitCommandOutput, useColor = false, debug = false): string {
   const text = formatInitOutputBase(output, useColor, debug);
-  if (!output.director) return text;
-  const line = directorSummaryLine(output.director);
+  const extra = [
+    ...((output.removedRoles?.length ?? 0) > 0 ? [DIRECTOR_ROLES_REMOVED_MESSAGE] : []),
+    ...(output.director ? [directorSummaryLine(output.director)] : [])
+  ];
+  if (extra.length === 0) return text;
+  const line = extra.join("\n");
   const marker = "\n\n";
   const at = text.lastIndexOf(marker);
   return at < 0 ? `${text}\n${line}` : `${text.slice(0, at)}\n${line}${text.slice(at)}`;
@@ -773,6 +778,9 @@ export function formatEnvironmentStatus(status: EnvironmentStatus, useColor = fa
     if (status.sessionName) lines.push(`Phiên:         ${sanitizeIdentifier(status.sessionName)}`);
   }
 
+  const statusProgressLine = status.manifest ? progressTabLine(status.manifest) : undefined;
+  if (statusProgressLine) lines.push(statusProgressLine);
+
   const roles: any[] = Array.isArray((status as any).roles)
     ? (status as any).roles
     : status.manifest?.panes ?? [];
@@ -825,11 +833,21 @@ export function formatEnvironmentStatus(status: EnvironmentStatus, useColor = fa
   ) {
     lines.push(`${nextLabel} Chạy 'bflow up' để khởi động môi trường.`);
   } else if (isFullyUp) {
-    lines.push(`${nextLabel} Chạy 'bflow attach' để làm việc với Conversation.`);
+    lines.push(status.manifest?.schemaVersion === 3
+      ? `${nextLabel} Mở CLI (Claude Code/Codex/Agy) trong kho này và chạy /bflow-start; 'bflow attach' mở tab tiến trình.`
+      : `${nextLabel} Chạy 'bflow attach' để làm việc với Conversation.`);
   } else {
     lines.push(`${nextLabel} Chạy 'bflow doctor' để chẩn đoán môi trường hiện tại.`);
   }
   return lines.join("\n");
+}
+
+/** Director (manifest v3) sessions have a progress tab instead of a Conversation pane. */
+function progressTabLine(manifest: { readonly schemaVersion?: number; readonly progressPane?: { readonly paneId: string; readonly phase: string } | undefined }): string | undefined {
+  if (manifest.schemaVersion !== 3) return undefined;
+  const pane = manifest.progressPane;
+  if (!pane) return "Tab tiến trình: chưa có — chạy `bflow up` để mở lại";
+  return `Tab tiến trình: pane ${sanitizeIdentifier(pane.paneId)} (${sanitizeIdentifier(pane.phase)})${pane.phase === "running" ? "" : " — chạy `bflow up` để mở lại"}`;
 }
 
 export function formatUpOutput(manifest: SessionManifest, useColor = false, debug = false): string {
@@ -850,12 +868,14 @@ export function formatUpOutput(manifest: SessionManifest, useColor = false, debu
       readyPanes.length === panes.length && panes.length > 0 ? ` ${greenTick(useColor)}` : ""
     }`
   );
+  const upProgressLine = progressTabLine(manifest);
+  if (upProgressLine) lines.push(upProgressLine);
 
   if (debug) {
     if (manifest.workspaceRoot) lines.push(`Thư mục gốc:     ${sanitizeIdentifier(manifest.workspaceRoot)}`);
     if (manifest.herdrWorkspaceId) lines.push(`Herdr Workspace: ${sanitizeIdentifier(manifest.herdrWorkspaceId)}`);
     if (manifest.herdrTabId) lines.push(`Herdr Tab:       ${sanitizeIdentifier(manifest.herdrTabId)}`);
-    if (manifest.attachTarget?.paneId) {
+    if (manifest.schemaVersion !== 3 && manifest.attachTarget?.paneId) {
       lines.push(
         `Khung chat:      pane ${sanitizeIdentifier(manifest.attachTarget.paneId)} (${sanitizeIdentifier(manifest.attachTarget.role)})`
       );
@@ -885,8 +905,9 @@ export function formatUpOutput(manifest: SessionManifest, useColor = false, debu
   }
 
   lines.push("");
-  lines.push(
-    `${useColor ? cyan(bold("👉 Tiếp theo:"), true) : "👉 Tiếp theo:"} Chạy 'bflow attach' để mở khung chat Conversation.`
+  lines.push(manifest.schemaVersion === 3
+    ? DIRECTOR_INFRASTRUCTURE_READY_MESSAGE
+    : `${useColor ? cyan(bold("👉 Tiếp theo:"), true) : "👉 Tiếp theo:"} Chạy 'bflow attach' để mở khung chat Conversation.`
   );
   return lines.join("\n");
 }
@@ -978,13 +999,14 @@ function formatAttachOutput(data: CliCommandData, useColor = false, debug = fals
   const role = sanitizeIdentifier(
     (data as any)?.role ?? (data as any)?.attachTarget?.role ?? "conversation"
   );
+  const progressTab = role === "progress";
 
   if (attached) {
-    const title = "[HOÀN TẤT] Đã rời khung chat Conversation.";
+    const title = progressTab ? "[HOÀN TẤT] Đã rời tab tiến trình Bflow." : "[HOÀN TẤT] Đã rời khung chat Conversation.";
     lines.push(`${useColor ? green(bold(title), true) : title} ${greenTick(useColor)}`);
   } else {
     lines.push(
-      `ℹ Khung chat Conversation sẵn sàng tại pane ${paneId}${sessionId ? ` (phiên ${sessionId})` : ""}.`
+      `ℹ ${progressTab ? "Tab tiến trình Bflow" : "Khung chat Conversation"} sẵn sàng tại pane ${paneId}${sessionId ? ` (phiên ${sessionId})` : ""}.`
     );
   }
 
@@ -1360,6 +1382,7 @@ export function formatCommandSuccess(
         `${useColor ? green(bold(header), true) : header} ${greenTick(useColor)}`,
         `  Từ:   ${sanitizeIdentifier(data.sourcePath)}`,
         `  Sang: ${targetPath}`,
+        ...((data.removedRoles?.length ?? 0) > 0 ? [`  ${DIRECTOR_ROLES_REMOVED_MESSAGE}`] : []),
         ...(debug && data.backupPath ? [`  Sao lưu: ${sanitizeIdentifier(data.backupPath)}`] : [])
       ].join("\n");
     }
