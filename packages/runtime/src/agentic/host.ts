@@ -53,6 +53,8 @@ import { effectiveFastPathMode, effectiveRegressionScope, readHostConfiguration,
 import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS } from "./tools.js";
+import { DirectorEndpoint } from "../director/endpoint.js";
+import { DIRECTOR_OWNER_METHODS, isDirectorCoordinatorTool, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS, type AgenticWorkflowRuntime } from "./runtime.js";
 import { guardNativeShell, NATIVE_READ_GUIDANCE, NATIVE_SHELL_TOOLS } from "./read-only-commands.js";
@@ -1661,6 +1663,70 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return json({ invocationId: expectedInvocationId, acknowledged: true, meaning: "Exact result evidence was acknowledged into this role's current task context; this is not semantic use or task acceptance." });
     });
   };
+  /** Coordinator orchestration guards that need no pane binding; shared by Coordinator role_call and the Director endpoint. */
+  const invokeCoordinatorTool = async (name: string, parameters: Record<string, unknown>, role: AgentRole = "coordinator") => {
+    const host = requireWorkspace();
+    if (quiesced && !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    if (name === "propose_workflow") {
+      if (configuration.policy?.verification.maxIterations !== undefined) {
+        if (parameters.maxIterations !== undefined && parameters.maxIterations !== configuration.policy.verification.maxIterations) throw new Error("Verification limit is fixed by the project owner policy");
+        parameters.maxIterations = configuration.policy.verification.maxIterations;
+      }
+      // Lazily retries an unsupported detection, so dependencies installed since the host started are picked up without a restart.
+      await testRunners.refresh();
+      const spec = record(normalizeSpecificationOptionals(parameters.specification)), configuredMethods = verification.configuredMethods();
+      const normalizedDefinition = parameters.definition !== undefined ? normalizeWorkflowDefinitionOptionals(parameters.definition) : undefined;
+      const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
+      const currentRun = runId !== undefined ? await host.runtime.inspect(runId).then(record).catch(() => undefined) : undefined;
+      const delegatedSddLevel = currentRun && typeof record(currentRun.delegation).sddLevel === "string" ? String(record(currentRun.delegation).sddLevel) : undefined;
+      try {
+        // Schema and conditional-TDD assessment errors name the exact fields and stay with the Coordinator, which can correct them.
+        let strategy: unknown;
+        guardWorkflowProposal({ phase: "specification", specification: spec, configuredMethods, check: () => {
+          SpecificationSchema.parse(spec);
+          if (delegatedSddLevel === "full" && spec.level !== "full") {
+            throw new Error("Planning weakens the delegated full SDD specification level; keep specification.level='full' and the full SDD assessment");
+          }
+          if (normalizedDefinition !== undefined) WorkflowDefinitionSchema.parse(normalizedDefinition);
+          strategy = host.runtime.ports.policies.strategy.resolve(spec);
+        } });
+        guardWorkflowProposal({ phase: "policy", specification: spec, configuredMethods, check: () => {
+          if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
+        } });
+        guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
+          verification.assertSupported(spec, strategy, normalizedDefinition) });
+      } catch (error) {
+        // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
+        // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.
+        if (error instanceof WorkflowProposalRejected && runId !== undefined) {
+          try { await host.runtime.recordWorkflowRejected(runId, error.rejection); }
+          catch (reportError) { process.stderr.write(`Bflow could not report workflow rejection: ${redactString(String(reportError))}\n`); }
+        }
+        throw error;
+      }
+    }
+    return host.tools.invoke(name, parameters, { role });
+  };
+  const directorEndpoint = new DirectorEndpoint({
+    directory: join(configuration.directory, "director"),
+    repositoryRoot: configuration.repositoryPath,
+    feed: webFeed,
+    inspect: () => requireWorkspace().runtime.inspect(),
+    coordinator: {
+      invoke: async (name, input) => {
+        if (!isDirectorCoordinatorTool(name)) throw new Error("Tool is unavailable to the Director");
+        const parameters = record(JsonValueSchema.parse(input ?? {}));
+        try {
+          const value = await invokeCoordinatorTool(name, parameters);
+          await activityLog.record({ kind: "tool", role: "coordinator", action: `director:${name}:completed` });
+          return JsonValueSchema.parse(value);
+        } catch (error) {
+          await activityLog.record({ kind: "error", role: "coordinator", action: `director:${name}:failed`, outcome: error instanceof Error ? error.name : "HostToolError" });
+          throw error;
+        }
+      }
+    }
+  });
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
@@ -2069,45 +2135,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         () => runnerBindings.run(binding, () => verification.alternativeEvidence(binding, parameters)));
       return nativeDeliver(envelope(RoleMessageSchema.parse(completed.assignment), "verification.result", completed.result, completed.result.evidenceArtifacts), `alternative:${textField(parameters.observationId)}`);
     }
-    if (name === "propose_workflow") {
-      if (configuration.policy?.verification.maxIterations !== undefined) {
-        if (parameters.maxIterations !== undefined && parameters.maxIterations !== configuration.policy.verification.maxIterations) throw new Error("Verification limit is fixed by the project owner policy");
-        parameters.maxIterations = configuration.policy.verification.maxIterations;
-      }
-      // Lazily retries an unsupported detection, so dependencies installed since the host started are picked up without a restart.
-      await testRunners.refresh();
-      const spec = record(normalizeSpecificationOptionals(parameters.specification)), configuredMethods = verification.configuredMethods();
-      const normalizedDefinition = parameters.definition !== undefined ? normalizeWorkflowDefinitionOptionals(parameters.definition) : undefined;
-      const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
-      const currentRun = runId !== undefined ? await host.runtime.inspect(runId).then(record).catch(() => undefined) : undefined;
-      const delegatedSddLevel = currentRun && typeof record(currentRun.delegation).sddLevel === "string" ? String(record(currentRun.delegation).sddLevel) : undefined;
-      try {
-        // Schema and conditional-TDD assessment errors name the exact fields and stay with the Coordinator, which can correct them.
-        let strategy: unknown;
-        guardWorkflowProposal({ phase: "specification", specification: spec, configuredMethods, check: () => {
-          SpecificationSchema.parse(spec);
-          if (delegatedSddLevel === "full" && spec.level !== "full") {
-            throw new Error("Planning weakens the delegated full SDD specification level; keep specification.level='full' and the full SDD assessment");
-          }
-          if (normalizedDefinition !== undefined) WorkflowDefinitionSchema.parse(normalizedDefinition);
-          strategy = host.runtime.ports.policies.strategy.resolve(spec);
-        } });
-        guardWorkflowProposal({ phase: "policy", specification: spec, configuredMethods, check: () => {
-          if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
-        } });
-        guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
-          verification.assertSupported(spec, strategy, normalizedDefinition) });
-      } catch (error) {
-        // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
-        // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.
-        if (error instanceof WorkflowProposalRejected && runId !== undefined) {
-          try { await host.runtime.recordWorkflowRejected(runId, error.rejection); }
-          catch (reportError) { process.stderr.write(`Bflow could not report workflow rejection: ${redactString(String(reportError))}\n`); }
-        }
-        throw error;
-      }
-    }
-    return host.tools.invoke(name, parameters, { role });
+    return invokeCoordinatorTool(name, parameters, role);
   };
   /** Best effort: a failure to report is logged, never thrown, so it cannot mask the original error. */
   /** Returns whether Runtime recorded the failure in its run; false means the caller must write a notice receipt itself. */
@@ -2167,6 +2195,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           throw new Error("Interaction credential/proof scope mismatch");
         const work = userQueue.catch(() => undefined).then(() => webCommands.execute(input.command, input.principal));
         userQueue = work; return work;
+      }
+      if (isDirectorCredential(token, configuration.token)) {
+        const call = parseDirectorCredentialCall(method, params);
+        try { return await directorEndpoint.call(token, call.name, call.arguments ?? {}); }
+        catch (error) { if (error instanceof Error && error.message.includes(token)) throw new Error("Director authentication failed"); throw error; }
       }
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
       if (method === "provider_tools_list") {
@@ -2502,6 +2535,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error("Role cannot call host lifecycle methods");
     }
     switch (method) {
+      case "director_register": return directorEndpoint.register(DIRECTOR_OWNER_METHODS.director_register.parse(params));
+      case "director_revoke": DIRECTOR_OWNER_METHODS.director_revoke.parse(params); await directorEndpoint.revoke(); return { revoked: true };
+      case "director_progress": DIRECTOR_OWNER_METHODS.director_progress.parse(params); return directorEndpoint.progress();
+      case "director_hook_note": return directorEndpoint.noteHookPrompt(DIRECTOR_OWNER_METHODS.director_hook_note.parse(params));
+      case "director_issues": return directorEndpoint.listIssues(DIRECTOR_OWNER_METHODS.director_issues.parse(params).status);
+      case "director_issue": return directorEndpoint.inspectIssue(DIRECTOR_OWNER_METHODS.director_issue.parse(params).issueId);
+      case "director_issue_status": { const input = DIRECTOR_OWNER_METHODS.director_issue_status.parse(params); return directorEndpoint.setIssueStatus(input.issueId, input.status); }
       case "interaction_register": {
         const input = OwnerKeySchema.parse(params), principalId = `local-user-${process.getuid?.() ?? "local"}`;
         if (input.principalId !== principalId) throw new Error("Owner registration must use host-local principal");
