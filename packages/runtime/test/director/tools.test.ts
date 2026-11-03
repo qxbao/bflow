@@ -19,7 +19,7 @@ interface Harness {
   setNow(date: Date): void;
 }
 
-async function harness(options: { maxWaitMs?: number; runtimeEvents?: DirectorRuntimeEventsPort; work?: DirectorWorkPort } = {}): Promise<Harness> {
+async function harness(options: { maxWaitMs?: number; runtimeEvents?: DirectorRuntimeEventsPort; work?: DirectorWorkPort; invoke?: (name: string, input: unknown) => Promise<JsonValue> } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "director-tools-"));
   dirs.push(root);
   let fixed: Date | undefined;
@@ -29,7 +29,7 @@ async function harness(options: { maxWaitMs?: number; runtimeEvents?: DirectorRu
   const calls: { name: string; input: unknown }[] = [];
   const tools = new DirectorTools({
     store,
-    coordinator: { invoke: async (name, input) => { calls.push({ name, input }); return { ok: true, name } as JsonValue; } },
+    coordinator: { invoke: async (name, input) => { calls.push({ name, input }); return options.invoke ? options.invoke(name, input) : { ok: true, name } as JsonValue; } },
     ...(options.runtimeEvents ? { runtimeEvents: options.runtimeEvents } : {}),
     ...(options.work ? { work: options.work } : {}),
     maxWaitMs: options.maxWaitMs ?? 1000,
@@ -49,7 +49,7 @@ describe("DirectorTools", () => {
     expect(names).toContain("propose_workflow");
     expect(names).toContain("planning_reference");
     for (const own of DIRECTOR_OWN_TOOLS) expect(names).toContain(own.name);
-    expect(DIRECTOR_OWN_TOOLS).toHaveLength(9);
+    expect(DIRECTOR_OWN_TOOLS).toHaveLength(11);
     expect(new Set(names).size).toBe(names.length);
   });
 
@@ -198,6 +198,55 @@ describe("DirectorTools", () => {
     expect(await h.tools.invoke("inspect_issue", { issueId: issue.issueId }, h.token)).toMatchObject({ issueId: issue.issueId });
     await expect(h.tools.invoke("inspect_issue", { issueId: "zzz" }, h.token)).rejects.toThrow("Unknown director issue zzz");
     expect(await h.tools.invoke("director_say", { text: "hi" }, h.token)).toMatchObject({ seq: 1 });
+  });
+
+  it("parks via Runtime and upserts one issue per park episode", async () => {
+    const h = await harness({ invoke: async () => ({ parked: true, runStatus: "completed_with_parked", episode: 2 }) });
+    const args = { runId: "run-1", taskId: "implement", reason: "Chờ sửa nhà cung cấp" };
+    await h.tools.invoke("park_task", args, h.token);
+    await h.tools.invoke("park_task", args, h.token);
+    expect(h.calls[0]).toEqual({ name: "park_task", input: args });
+    expect(await h.store.listIssues()).toMatchObject([{ issueId: "park:run-1:implement:2", taskKey: "implement", kind: "other", status: "open" }]);
+  });
+
+  it("does not create an issue for an unconfirmed stop or a rejected legacy run", async () => {
+    let refused = false;
+    const h = await harness({ invoke: async () => {
+      if (refused) throw new Error("Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work");
+      return { parked: false, runStatus: "implementing", reason: "Chưa xác nhận dừng" };
+    } });
+    const args = { runId: "run-1", taskId: "implement", reason: "Treo" };
+    expect(await h.tools.invoke("park_task", args, h.token)).toMatchObject({ parked: false });
+    refused = true;
+    await expect(h.tools.invoke("park_task", args, h.token)).rejects.toThrow("Run v2 chỉ đọc");
+    expect(await h.store.listIssues()).toEqual([]);
+  });
+
+  it("unparks before setting retrying; dismissal changes the issue only", async () => {
+    const h = await harness({ invoke: async (_name, input) => {
+      const issue = await h.store.listIssues();
+      expect(issue[0]!.status).toBe("open");
+      expect(input).toEqual({ runId: "run-1", taskId: "implement" });
+      return { unparked: true, runStatus: "implementing" };
+    } });
+    const issue = await h.store.upsertIssue({ runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    expect(await h.tools.invoke("set_issue_status", { issueId: issue.issueId, status: "retrying" }, h.token)).toMatchObject({ status: "retrying" });
+    expect(h.calls).toEqual([{ name: "unpark_task", input: { runId: "run-1", taskId: "implement" } }]);
+    await h.tools.invoke("set_issue_status", { issueId: issue.issueId, status: "dismissed" }, h.token);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("passes unpark_task through to Runtime", async () => {
+    const h = await harness({ invoke: async () => ({ unparked: true, runStatus: "implementing" }) });
+    expect(await h.tools.invoke("unpark_task", { runId: "run-1", taskId: "implement" }, h.token)).toMatchObject({ unparked: true });
+    expect(h.calls).toEqual([{ name: "unpark_task", input: { runId: "run-1", taskId: "implement" } }]);
+  });
+
+  it.each([false, true])("keeps the issue open if Runtime refuses retry (throws=%s)", async throws => {
+    const h = await harness({ invoke: async () => { if (throws) throw new Error("Phụ thuộc chưa xong"); return { unparked: false, runStatus: "completed_with_parked" }; } });
+    const issue = await h.store.upsertIssue({ runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    await expect(h.tools.invoke("set_issue_status", { issueId: issue.issueId, status: "retrying" }, h.token)).rejects.toThrow();
+    expect((await h.store.listIssues())[0]!.status).toBe("open");
   });
 
   describe("start_work", () => {

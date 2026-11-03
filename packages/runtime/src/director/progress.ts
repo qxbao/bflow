@@ -87,8 +87,11 @@ export function renderDirectorProgress(snapshot: DirectorProgressSnapshot, optio
 
   for (const run of parsed.runs) {
     const done = run.tasks.filter(task => task.status === "succeeded").length;
+    const statusLabel = run.sdlcStatus === "completed_with_parked"
+      ? `Xong một phần — còn ${run.tasks.filter(task => task.status === "parked").length} mục treo`
+      : SDLC_LABEL[run.sdlcStatus] ?? run.sdlcStatus;
     lines.push({
-      text: `▸ ${run.title} [${bar(done, run.tasks.length)}] ${done}/${run.tasks.length} · ${SDLC_LABEL[run.sdlcStatus] ?? run.sdlcStatus}`,
+      text: `▸ ${run.title} [${bar(done, run.tasks.length)}] ${done}/${run.tasks.length} · ${statusLabel}`,
       priority: 1
     });
     for (const task of run.tasks) {
@@ -102,11 +105,14 @@ export function renderDirectorProgress(snapshot: DirectorProgressSnapshot, optio
     }
   }
 
-  if (pendingIssues.length > 0) {
-    lines.push({ text: `HÀNG ĐỢI LỖI (${pendingIssues.length})`, priority: 1 });
+  const parkedTasks = parsed.runs.flatMap(run => run.tasks.filter(task => task.status === "parked")
+    .filter(task => !pendingIssues.some(issue => issue.runId === run.runId && issue.taskKey === task.taskKey)));
+  if (pendingIssues.length > 0 || parkedTasks.length > 0) {
+    lines.push({ text: `HÀNG ĐỢI LỖI (${pendingIssues.length + parkedTasks.length})`, priority: 1 });
     for (const issue of pendingIssues) {
       lines.push({ text: `  #${issue.issueId.slice(0, 8)} ${issue.summary}`, priority: 3 });
     }
+    for (const task of parkedTasks) lines.push({ text: `  · ${task.title} · đang treo`, priority: 3 });
   }
 
   let kept = lines;

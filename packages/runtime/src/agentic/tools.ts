@@ -115,6 +115,16 @@ export class CoordinatorTools {
       case "authorize_implementation": return this.runtime.authorizeImplementation(textField(args.runId ?? args.run_id), textField(args.taskId ?? args.task_id));
       case "accept_conflict_resolution": return this.runtime.acceptConflictResolution(textField(args.runId ?? args.run_id), textField(args.taskKey ?? args.task_key), textField(args.resolutionCommitHash ?? args.resolution_commit_hash));
       case "cancel": return this.runtime.cancel(textField(args.runId ?? args.run_id), textField(args.reason));
+      case "park_task": {
+        if (principal.principal !== "director") throw new Error("Chỉ Director được treo task qua tool này");
+        return JsonValueSchema.parse(await this.runtime.parkTask({ runId: textField(args.runId ?? args.run_id),
+          taskId: textField(args.taskId ?? args.task_id), reason: textField(args.reason), kind: "other", source: "director" }));
+      }
+      case "unpark_task": {
+        if (principal.principal !== "director") throw new Error("Chỉ Director được mở lại task qua tool này");
+        return JsonValueSchema.parse(await this.runtime.unparkTask({ runId: textField(args.runId ?? args.run_id),
+          taskId: textField(args.taskId ?? args.task_id), source: "director" }));
+      }
       case "reconcile_cancellation": return JsonValueSchema.parse(await this.runtime.reconcileCancellation(textField(args.runId ?? args.run_id)));
       case "repository_setup": {
         const { runId, run_id: runIdAlias, ...setup } = args;

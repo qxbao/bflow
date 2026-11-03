@@ -25,7 +25,7 @@ import {
   CancellationRequestSchema, DelegationRequestSchema, GitChangeSetSchema,
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
-  WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
+  WorkflowDefinitionSchema, IdentifierSchema, ParkedIssueKindSchema, type ParkedIssueKind, type SdlcWorkStatus, type WorkflowRunSnapshot, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
   type ArtifactReference, type CancellationRequest, type GitChangeSet, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type VerificationCycle, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
@@ -91,7 +91,7 @@ const TEST_INTEGRITY_APPROVE_OPTION = "Approve test-integrity exception";
 const TEST_INTEGRITY_REJECT_OPTION = "Reject test-integrity exception";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
-const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
+const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "completed_with_parked", "failed", "cancelled", "escalated"];
 /** An escalated run can still resume, so it is not here: its human decisions stay answerable. */
 const ENDED_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled"];
 const REPOSITORY_SETUP_LOG_LIMIT = 200;
@@ -363,13 +363,17 @@ export class AgenticWorkflowRuntime {
         runtimeId: `p19-${digest(this.journal.repository).slice(0, 16)}`, configuration: {}, recoveryMode: true, initializedAt: this.now()
       })));
       SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
-      await this.transaction(async (state, save, core) => {
+      await this.transaction(async (state, save, core, outbox) => {
         // These flags describe coroutines owned by the previous process, not durable verification outcomes.
         // Keep a persisted outcome for finishVerification; otherwise the next tick resumes the frozen plan.
         let changed = false;
         for (const run of state.runs) {
           try {
-            if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) {
+            if (run.coreCreated && run.tasks.some(task => task.parked) &&
+                this.completeWithParked(state, outbox, run, await core.snapshot(run.runId))) {
+              changed = true; continue;
+            }
+            if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) {
               if (run.pendingAction) { delete run.pendingAction; changed = true; }
               continue;
             }
@@ -453,7 +457,7 @@ export class AgenticWorkflowRuntime {
         for (const run of state.runs) {
           const before = oldRuns.get(run.runId);
           if (before === undefined) await this.activityLog.record({ kind: "admission", role: "runtime", action: "run_admitted", runId: run.runId, outcome: run.status });
-          else if (before !== run.status) await this.activityLog.record({ kind: run.status === "cancelled" ? "cancellation" : run.status === "awaiting_approval" ? "approval" : ["completed", "failed", "escalated"].includes(run.status) ? "result" : "progress",
+          else if (before !== run.status) await this.activityLog.record({ kind: run.status === "cancelled" ? "cancellation" : run.status === "awaiting_approval" ? "approval" : ["completed", "completed_with_parked", "failed", "escalated"].includes(run.status) ? "result" : "progress",
             role: "runtime", action: "run_status_changed", runId: run.runId, outcome: `${before} -> ${run.status}` });
           const beforeRun = previous.runs.find(item => item.runId === run.runId);
           if (run.error && beforeRun?.error !== run.error)
@@ -534,12 +538,12 @@ export class AgenticWorkflowRuntime {
   }
   private live(run: RunRecord): void {
     if (resumablyPaused(run)) throw new Error(`Run ${run.runId} is paused awaiting resume of action ${run.pendingAction!.actionId}; retry this same call after the run resumes`);
-    if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) throw new Error(`Run is ${run.status}`);
+    if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) throw new Error(`Run is ${run.status}`);
   }
   /** Non-terminal guard for Coordinator user-communication tools that must remain usable while a run is escalated or paused. */
   private assertCoordinatorCommunicable(run: RunRecord): void {
     if (run.supersededBy) throw new Error(`Run ${run.runId} continued as follow-up run ${run.supersededBy}`);
-    if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}`);
+    if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}`);
   }
   /** Exact non-throwing mirror of HerdrOutbox.noticeParent preconditions so expired/released writer leases never throw uncaught. */
   private canEnqueueTaskNotice(state: JournalState, parent: Outbound | undefined, allowExpired = false): boolean {
@@ -553,10 +557,10 @@ export class AgenticWorkflowRuntime {
         !allowExpired && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) return false;
     const run = state.runs.find(item => item.runId === parent.message.run_id);
     const task = run?.tasks.find(item => item.taskId === parent.taskId);
-    return !!run && !run.cancelled && !["completed", "failed", "cancelled", "escalated"].includes(run.status) && !!task && !task.writerReleased && !task.result;
+    return !!run && !run.cancelled && !["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status) && !!task && !task.writerReleased && !task.result;
   }
   private escalateExpiredWriterNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, sourceMessageId: string, reason: string): void {
-    if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) return;
+    if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) return;
     const previousStatus = run.status;
     run.status = "escalated";
     run.error = reason;
@@ -701,7 +705,7 @@ export class AgenticWorkflowRuntime {
         const message = RoleMessageSchema.parse(item.message);
         if (!message.run_id) continue;
         const run = state.runs.find(candidate => candidate.runId === message.run_id);
-        if (!run || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) ||
+        if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
             message.correlation_id !== run.delegation.correlationId) continue;
         const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
         if (state.outbound.some(out => out.message.message_id === wakeId)) continue;
@@ -938,7 +942,7 @@ export class AgenticWorkflowRuntime {
     const allFailures = state.outbound.filter(item => item.status === "failed" && item.error?.includes(RoleCapabilityPreflightError.name));
     for (const failure of allFailures.filter(item => isConversationContextWake(item.message))) {
       const run = state.runs.find(item => item.runId === failure.message.run_id);
-      if (run && !run.cancelled && !["completed", "failed", "cancelled"].includes(run.status))
+      if (run && !run.cancelled && !["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status))
         this.surfaceFailure(state, outbox, run, failure.message.message_id, "undeliverable", "Informational Conversation context", redactString(failure.error ?? "Capability unavailable"));
     }
     const failures = allFailures.filter(item => !isConversationContextWake(item.message));
@@ -947,7 +951,7 @@ export class AgenticWorkflowRuntime {
     for (const runFailures of byRun.values()) {
       const out = runFailures[0]!;
       const run = state.runs.find(item => item.runId === out.message.run_id);
-      if (!run || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) continue;
+      if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) continue;
       const existing = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
       if (existing?.state === "pending" && runFailures.every(failure => [existing.sourceMessageId, ...(existing.relatedMessageIds ?? [])].includes(failure.message.message_id))) continue;
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
@@ -1016,7 +1020,7 @@ export class AgenticWorkflowRuntime {
       if (isCancellationHandoff(message)) await this.cancellationTarget(state, message);
       if (message.type === "approval.decision") {
         const run = state.runs.find(item => item.runId === message.run_id);
-        if (run && (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)))
+        if (run && (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)))
           throw new AdmissionRejectedError(`Run is ${run.status}; approval is no longer actionable`);
         const approvalId = ApprovalDecisionSchema.parse(message.payload).approvalId;
         const reason = run && (supersededReason(run, approvalId) ?? prototypeDecisionRefusal(run.prototype, approvalId));
@@ -1531,7 +1535,7 @@ export class AgenticWorkflowRuntime {
     const report = await readWorkflowTelemetry(this.ports.runStore, runId, { source: "agentic", asOf,
       supersededApprovalIds: context.supersededApprovalIds, reviewTimings: context.reviewTimings });
     report.hostWorkStatus = context.status ?? null;
-    if (report.coverage.events === 0 && context.status && ["completed", "failed", "cancelled", "escalated"].includes(context.status)) {
+    if (report.coverage.events === 0 && context.status && ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(context.status)) {
       report.outcome = context.status; report.outcomeSource = "host_journal";
     }
     return report;
@@ -1633,6 +1637,152 @@ export class AgenticWorkflowRuntime {
       try { return [this.runFacts(state, run)]; }
       catch { return []; }
     }));
+  }
+  /** R-B2-15: Core stays blocked; only parked tasks and their pending descendants remain. No integration or cleanup follows. */
+  private completeWithParked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, snapshot: WorkflowRunSnapshot): boolean {
+    if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status) || snapshot.status !== "blocked" ||
+        run.pendingAction?.state === "pending" || run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId ||
+        Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending") ||
+        run.tasks.some(task => task.verificationPending) || run.workflowVerificationPending) return false;
+    const parkedTaskIds = snapshot.tasks.filter(task => task.status === "parked").map(task => task.taskId);
+    if (!parkedTaskIds.length) return false;
+    const behindParked = (taskId: string, seen = new Set<string>()): boolean => {
+      if (parkedTaskIds.includes(taskId)) return true;
+      if (seen.has(taskId)) return false;
+      seen.add(taskId);
+      return run.definition!.dependencies.some(edge => edge.taskId === taskId && behindParked(edge.dependsOnTaskId, seen));
+    };
+    if (!snapshot.tasks.every(task => task.status === "succeeded" || task.status === "parked" || task.status === "pending" && behindParked(task.taskId))) return false;
+    run.status = "completed_with_parked";
+    delete run.error;
+    this.emit(state, outbox, run, "conversation.progress", { kind: "run_completed_with_parked", sdlcStatus: run.status,
+      parkedTaskIds, headline: `Xong một phần: còn ${parkedTaskIds.length} mục trong hàng đợi lỗi` },
+    `completed-with-parked:${digest(run.tasks.flatMap(task => task.parked ? [[task.taskId, task.parked.episode]] : []))}`);
+    return true;
+  }
+
+  async parkTask(input: { runId: string; taskId: string; reason: string; kind: ParkedIssueKind; source: "director" | "auto"; episodeKey?: string }): Promise<{ parked: boolean; runStatus: SdlcWorkStatus; reason?: string; episode?: number }> {
+    const args = z.object({ runId: IdentifierSchema, taskId: IdentifierSchema, reason: z.string().trim().min(1).max(2000),
+      kind: ParkedIssueKindSchema, source: z.enum(["director", "auto"]), episodeKey: z.string().min(1).optional() }).strict().parse(input);
+    await this.initialize();
+    return this.transaction(async (state, save, core, outbox) => {
+      const run = this.run(state, args.runId);
+      this.assertDirectorWritable(run);
+      if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể treo task`);
+      if (args.taskId === FINAL_TASK) throw new Error("Không thể treo kiểm chứng toàn workflow");
+      const task = run.tasks.find(item => item.taskId === args.taskId);
+      if (!task || !run.coreCreated) throw new Error("Không tìm thấy task Core để treo");
+      const snapshot = await core.snapshot(run.runId), current = snapshot.tasks.find(item => item.taskId === task.taskId)!;
+      if (current.status === "parked" && task.parked) return { parked: true, runStatus: run.status, episode: task.parked.episode };
+      if (!["pending", "ready", "blocked", "waiting", "running"].includes(current.status)) throw new Error(`Không thể treo task ở trạng thái ${current.status}`);
+      const related = state.outbound.filter(out => out.message.run_id === run.runId &&
+        (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
+      const queued = related.filter(out => out.status === "queued");
+      if (run.nativeDeliveries?.length || related.some(out => ["sending", "unknown_delivery"].includes(out.status)))
+        throw new Error("Có delivery đang gửi hoặc giao chưa rõ; cần đối soát trước khi treo task");
+      if (run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId &&
+          (run.approval.target.type !== "task" || run.approval.target.taskId === task.taskId) ||
+          Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending" && entry.taskId === task.taskId))
+        throw new Error("Task đang chờ phê duyệt hoặc quyết định của người dùng");
+      if (task.verificationPending || state.pendingVerifications.some(item => pendingRunId(item) === run.runId && pendingTaskId(item) === task.taskId))
+        throw new Error("Task còn kiểm chứng đang chạy; cần chờ kiểm chứng kết thúc");
+      const executions = related.filter(out => !out.parentAssignmentId && out.handle &&
+        (out.status === "accepted" || out.handle.executionId === current.agentExecution?.executionId));
+      for (const out of executions) {
+        const originalError = out.error;
+        await this.requestStop(state, core, outbox, save, run, out, "Task parked", "park");
+        if (originalError === undefined) delete out.error; else out.error = originalError;
+        if (!out.parkStop) return { parked: false, runStatus: run.status, reason: "Chưa gửi được yêu cầu dừng; giữ nguyên writer và lease" };
+        if (!out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
+          out.parkStop.observations++;
+          await save();
+          // Observe a copy: an unconfirmed park does not overwrite the original assignment's diagnostic/error.
+          const observed = await this.stopObserved({ ...out });
+          // Journal validation reconstructs nested proof records on save; always update the currently owned record.
+          if (observed.proof) out.parkStop.proof = observed.proof;
+          await save();
+        }
+        if (!out.parkStop.proof) return { parked: false, runStatus: run.status, reason: "Chưa xác nhận dừng đúng execution; giữ nguyên writer và lease" };
+      }
+      const bound = current.agentExecution && executions.find(out => out.handle!.executionId === current.agentExecution!.executionId);
+      if (current.agentExecution && !bound?.parkStop?.proof) return { parked: false, runStatus: run.status, reason: "Thiếu chứng từ dừng execution đang gắn với Core" };
+      const heldFailovers = (task.failovers ?? []).filter(entry => !["dispatched", "cancelled"].includes(entry.phase));
+      if (heldFailovers.some(entry => !entry.stopProof && !executions.some(out =>
+          out.handle!.executionId === entry.sourceHandle.executionId && out.parkStop?.proof)))
+        return { parked: false, runStatus: run.status, reason: "Failover còn execution cũ chưa xác nhận dừng; giữ nguyên task" };
+      for (const out of executions) {
+        if (out.message.recipient.role === "developer" && !task.writerReleased) {
+          await this.releaseCancelledAllocation(`${run.runId}-${task.taskId}`, out.handle!.target.worktreePath);
+          task.writerReleased = true;
+          await save();
+        }
+        await outbox.release(out);
+        await this.releaseChildNotices(state, outbox, out);
+      }
+      for (const out of queued) {
+        if (out.lease && !out.parentAssignmentId) {
+          await outbox.release(out);
+          delete out.lease; delete out.leaseRelease;
+        }
+        out.status = "cancelled"; out.error = "Task parked";
+      }
+      // Parking ends this attempt's continuation, just like cancellation. `retired` would start another provider allocation.
+      // Keep policy, spent budget, source identity and failure reason; a later unpark must not inherit an active hold.
+      for (const entry of heldFailovers) {
+        entry.stopProof ??= executions.find(out => out.handle!.executionId === entry.sourceHandle.executionId)?.parkStop?.proof;
+        entry.phase = "cancelled";
+      }
+      const episode = Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1;
+      task.parked = { at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source, episode,
+        ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) };
+      const after = await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId,
+        expectedVersion: snapshot.version, from: current.status, to: "parked", intent: "park", generationFrom: current.generation, generationTo: current.generation,
+        reason: task.parked!.reason, occurredAt: task.parked!.at, idempotencyKey: `park:${run.runId}:${task.taskId}:${episode}`,
+        ...(bound?.parkStop?.proof ? { stopConfirmation: { schemaVersion: 1, cancellationId: `park-${digest([run.runId, task.taskId, episode])}`,
+          executionId: bound.handle!.executionId, stoppedAt: bound.parkStop.proof.observedAt, terminalStatus: "cancelled" } } : {}) }));
+      if (run.status === "escalated" && run.pendingAction && related.some(out =>
+          [run.pendingAction!.sourceMessageId, ...(run.pendingAction!.relatedMessageIds ?? [])].includes(out.message.message_id))) {
+        run.status = run.pendingAction.previousStatus ?? "implementing";
+        delete run.pendingAction; delete run.error;
+      }
+      this.completeWithParked(state, outbox, run, after);
+      await core.checkpoint(run.runId);
+      await save();
+      return { parked: true, runStatus: run.status, episode };
+    }, false);
+  }
+
+  async unparkTask(input: { runId: string; taskId: string; source: "director" | "user" }): Promise<{ unparked: boolean; runStatus: SdlcWorkStatus }> {
+    const args = z.object({ runId: IdentifierSchema, taskId: IdentifierSchema, source: z.enum(["director", "user"]) }).strict().parse(input);
+    await this.initialize();
+    const result = await this.transaction(async (state, save, core) => {
+      const run = this.run(state, args.runId);
+      this.assertDirectorWritable(run);
+      if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể mở lại task`);
+      const task = run.tasks.find(item => item.taskId === args.taskId);
+      if (!task?.parked || !run.coreCreated) throw new Error("Task chưa được treo");
+      const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId)!;
+      if (current.status !== "parked") throw new Error("Task Core chưa ở trạng thái parked");
+      const episode = task.parked.episode;
+      task.parkHistory = [...(task.parkHistory ?? []), task.parked].slice(-20);
+      delete task.parked; delete task.result;
+      task.writerReleased = false; task.verificationPending = false;
+      // The next candidate builds a fresh plan/cycle after its new implementer is known; old evidence cannot authorize it.
+      delete task.cycle; delete task.verificationPlan;
+      if (run.status === "completed_with_parked") run.status = "implementing";
+      delete run.error;
+      // Persist reset metadata with the Core event's write-ahead batch, so a restart cannot pair ready with stale parked/result data.
+      await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId, expectedVersion: snapshot.version,
+        from: "parked", to: "ready", intent: "unpark", generationFrom: current.generation, generationTo: current.generation,
+        occurredAt: this.now(), idempotencyKey: `unpark:${run.runId}:${task.taskId}:${episode}` }));
+      await core.checkpoint(run.runId);
+      await save();
+      return { unparked: true, runStatus: run.status };
+    }, false);
+    void this.tick().catch(() => undefined);
+    return result;
   }
   /** Cache a typed refusal while the Coordinator can still correct its proposal in the same turn. */
   private recordProposalRejection(state: JournalState, outbox: HerdrOutbox, run: RunRecord, input: WorkflowRejection): boolean {
@@ -1864,7 +2014,7 @@ export class AgenticWorkflowRuntime {
         // Dialogue-only traffic has no DelegationRequest and must never create a workflow. An answer for a live run must still reach
         // the Coordinator, which yielded its turn after asking: nothing else prompts that pane.
         const dialogueRun = isConversationContext(message) ? state.runs.find(item => item.runId === message.run_id) : undefined;
-        if (dialogueRun && !dialogueRun.cancelled && !ENDED_RUN_STATUSES.includes(dialogueRun.status) && message.correlation_id === dialogueRun.delegation.correlationId) {
+        if (dialogueRun && !dialogueRun.cancelled && !ENDED_RUN_STATUSES.includes(dialogueRun.status) && dialogueRun.status !== "completed_with_parked" && message.correlation_id === dialogueRun.delegation.correlationId) {
           this.wakeCoordinator(state, outbox, dialogueRun, message);
           inbox.status = "applied"; await save(); return json({ accepted: true, informational: true });
         }
@@ -1908,7 +2058,7 @@ export class AgenticWorkflowRuntime {
         const run = this.run(state, message.run_id!);
         if (message.correlation_id !== run.delegation.correlationId) throw new Error("Wrong run correlation");
         if (isConversationContext(message)) {
-          if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; informational context cannot reopen it`);
+          if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; informational context cannot reopen it`);
           this.wakeCoordinator(state, outbox, run, message);
           inbox.status = "applied"; await save(); return json({ accepted: true, informational: true });
         }
@@ -2147,7 +2297,7 @@ export class AgenticWorkflowRuntime {
     return this.transaction(async (state, save, _core, outbox) => {
       await this.refuseFencedDiagnostic(state, save, parsed);
       const run = state.runs.find(item => item.runId === parsed.run_id);
-      if (!run || parsed.correlation_id !== run.delegation.correlationId || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) return;
+      if (!run || parsed.correlation_id !== run.delegation.correlationId || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) return;
       const existing = state.inbox.find(item => item.message.message_id === parsed.message_id || (parsed.idempotency_key !== undefined && item.message.idempotency_key === parsed.idempotency_key));
       if (existing && digest(existing.message) !== digest(parsed)) throw new Error("Conflicting Coordinator outcome idempotency key");
       if (existing?.status === "applied") return;
@@ -2277,7 +2427,7 @@ export class AgenticWorkflowRuntime {
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isInProcessDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before resume");
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
-      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
       const priorResume = run.resumeReceipts?.find(item => item.actionId === actionId);
       // An automatic wake is not the user's explicit operational request. Keep its immutable delivery,
       // but allow a separately identified manual continuation even while that wake is queued/accepted.
@@ -2830,7 +2980,8 @@ export class AgenticWorkflowRuntime {
       const started = (item: RunRecord) => item.tasks.some(task => task.worktrees.length > 0) ||
         state.outbound.some(out => out.message.run_id === item.runId && out.message.type === "task.assignment" && out.status !== "queued" && out.status !== "cancelled");
       if (started(run)) throw new Error("Repository setup applies before implementation starts; this run already has Developer work");
-      const busy = state.runs.find(other => other.runId !== runId && !other.cancelled && !ENDED_RUN_STATUSES.includes(other.status) && started(other));
+      const busy = state.runs.find(other => other.runId !== runId && !other.cancelled && !ENDED_RUN_STATUSES.includes(other.status) &&
+        other.status !== "completed_with_parked" && started(other));
       if (busy) throw new Error(`Repository setup would move the base under active run ${busy.runId}; wait for it to finish or cancel it first`);
       const logged = { id: `setup-${digest([runId, input, this.now(), run.repositorySetupLog?.length ?? 0])}`, operation: input.operation,
         input: redactString(JSON.stringify(input)).slice(0, 1000), startedAt: this.now(), status: "started" as const };
@@ -2931,7 +3082,7 @@ export class AgenticWorkflowRuntime {
       const run = this.run(state, runId);
       this.assertDirectorWritable(run);
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
-      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status) || run.status === "completed_with_parked") throw new Error(`Run is ${run.status}; it cannot be resumed`);
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
         throw new Error("This run is waiting for your answer on its open card; answer that card instead of resuming");
       const waiting = state.outbound.filter(out => out.message.run_id === runId && out.status === "queued" && out.message.recipient.role === "coordinator");
@@ -4431,7 +4582,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             digest(target.session) === digest(binding.session);
         });
         const associatedRunIds = new Set(associated.map(item => item.message.run_id!));
-        const liveRun = state.runs.some(run => associatedRunIds.has(run.runId) && !["completed", "failed", "cancelled"].includes(run.status));
+        const liveRun = state.runs.some(run => associatedRunIds.has(run.runId) && !["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status));
         const unresolved = associated.some(item => ["sending", "unknown_delivery"].includes(item.status)) ||
           associated.some(item => {
             const run = state.runs.find(candidate => candidate.runId === item.message.run_id);
@@ -4675,7 +4826,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
         record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
         record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
-      if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) {
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) {
         // Retain the receipt while preserving a newer terminal decision.
       } else if (!repairable || failures >= run.maxIterations || task.result !== undefined) {
         const previousStatus = run.status;
@@ -5135,7 +5286,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           if (run.nativeDeliveries?.length) continue;
           // Legacy delivery blockers can predate nativeDeliveries. Reconciliation and cancellation still run outside this work loop.
           if (run.pendingAction?.state === "pending" && run.pendingAction.recovery === "reconcile_delivery") continue;
-          if (run.cancelled || ["completed", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
+          if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
           // One run's failure is recorded on that run; the other runs and the outbox flush below still proceed.
           try {
             if (!run.coreCreated) await core.create(run);
@@ -5206,7 +5357,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               if (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== current.attemptId) throw new Error("Git task submission mismatch");
               task.changeSet = change;
               const plan = this.verificationPlan(state, run, task, undefined, outbox);
-              task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, task.taskId])}`));
+              task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan,
+                `cycle-${digest([run.runId, task.taskId, ...(task.parkHistory?.length ? ["unpark", task.parkHistory.at(-1)!.episode] : [])])}`));
               const latestReworkDossier = task.reworkResolutions?.find(item => item.attemptId === current.attemptId);
               if (hasReworkAssignment(state.outbound, run.runId, task.taskId, current.attemptId!) && !latestReworkDossier) {
                 this.escalateForRetry(state, outbox, run, task.taskId, `${VERIFICATION_RETRY_PREFIX} Missing validated rework resolution dossier for ${current.attemptId}; independent finding evidence remains required`);
@@ -5221,7 +5373,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               await save();
             }
             const snapshot = await core.snapshot(run.runId);
-            if (snapshot.status === "blocked") {
+            if (snapshot.status === "blocked" && !this.completeWithParked(state, outbox, run, snapshot)) {
               const blockedTask = snapshot.tasks.find(task => ["failed", "blocked", "cancelled"].includes(task.status));
               run.status = "escalated";
               run.error = blockedTask
@@ -5285,7 +5437,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       } catch (error) {
         await this.transaction(async (state, save, _core, outbox) => {
           const run = this.run(state, job.runId);
-          if (!run.cancelled && !["failed", "completed", "cancelled", "escalated"].includes(run.status))
+          if (!run.cancelled && !["failed", "completed", "completed_with_parked", "cancelled", "escalated"].includes(run.status))
             this.escalateForRetry(state, outbox, run, job.taskId, `${VERIFICATION_RETRY_PREFIX} ${redactString(String(error))}`);
           else if (resumablyPaused(run)) { // No outcome exists: release the flag so the frozen plan reruns after resume.
             if (job.taskId === FINAL_TASK) run.workflowVerificationPending = false;
@@ -5367,7 +5519,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         const runId = pendingRunId(entry), taskId = pendingTaskId(entry) ?? "unknown-task";
         const run = state.runs.find(candidate => candidate.runId === runId);
         // Same liveness rule as finishVerification: an escalated run still resumes its verification outcomes.
-        if (run && !run.cancelled && !["completed", "failed", "cancelled"].includes(run.status)) {
+        if (run && !run.cancelled && !["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) {
           entry.stuck = true;
           this.escalateForRetry(state, outbox, run, taskId, `${VERIFICATION_RETRY_PREFIX} ${reason} (failed ${entry.attempts} times)`);
         } else state.pendingVerifications = state.pendingVerifications.filter(candidate => candidate !== entry); // no live run to resume
@@ -5493,7 +5645,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         return;
       }
-      if (run.cancelled || ["failed", "completed", "cancelled"].includes(run.status) ||
+      if (run.cancelled || ["failed", "completed", "completed_with_parked", "cancelled"].includes(run.status) ||
           run.status === "escalated" && !run.error?.startsWith(VERIFICATION_RETRY_PREFIX)) {
         clearPending(); await save(); return; // late evidence cannot revive a terminal decision
       }
@@ -5611,7 +5763,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
       this.emit(state, outbox, run, "verification.result", result, result.verificationId, "conversation", result.evidenceArtifacts);
       if (run.status === "escalated") this.progress(state, outbox, run, run.error!);
-      clearPending(); await save(); await core.checkpoint(run.runId);
+      clearPending();
+      if (run.tasks.some(task => task.parked)) this.completeWithParked(state, outbox, run, await core.snapshot(run.runId));
+      await save(); await core.checkpoint(run.runId);
     });
   }
   private async integrate(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord): Promise<void> {
@@ -5998,8 +6152,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    * interrupt is not confirmation of stop, so the lease, worktree and Core cancelling state wait for stopObserved.
    */
   private async requestStop(state: JournalState, core: CoreSession, outbox: HerdrOutbox, save: () => Promise<void>, run: RunRecord, out: Outbound,
-    reason: string): Promise<void> {
-    if (!out.handle || out.cancelRequested || out.reviewReplacement) return;
+    reason: string, purpose: "cancel" | "park" = "cancel"): Promise<void> {
+    if (!out.handle || (purpose === "park" ? out.parkStop !== undefined : out.cancelRequested) || out.reviewReplacement) return;
     let scopeError: string | undefined;
     if (out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope) {
       try {
@@ -6010,7 +6164,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           if (proof.source !== "linux_pid_namespace" || digest(proof.handle) !== digest(out.handle) ||
               (Date.parse(proof.observedAt) < Date.parse(out.handle.acceptedAt) || Date.parse(proof.observedAt) > Date.parse(this.now()))) throw new Error("Foreign namespace stop proof");
           // The scope's sealed admission/stop intent is durable before its pidfd signal. No current lease is required to stop owned work.
-          state.version = 6; out.cancelRequested = true; out.cancellationStopProof = proof; out.error = "Namespace stop confirmed; allocation cleanup pending";
+          if (purpose === "park") out.parkStop = { requestedAt: this.now(), observations: 0, proof };
+          else { if (state.version < 6) state.version = 6; out.cancelRequested = true; out.cancellationStopProof = proof; }
+          out.error = "Namespace stop confirmed; allocation cleanup pending";
           await save(); return;
         }
       } catch (error) {
@@ -6059,7 +6215,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
       }
     }
-    out.cancelRequested = true; await save();
+    if (purpose === "park") out.parkStop = { requestedAt: this.now(), observations: 0 };
+    else out.cancelRequested = true;
+    await save();
     const version = run.coreCreated ? (await core.snapshot(run.runId)).version : 0;
     const request = CancellationRequestSchema.parse({ schemaVersion: 1, cancellationId: `cancel-${digest(out.message.message_id)}`,
       runId: run.runId, taskId: out.taskId, requestedBy: "runtime", requestedAt: this.now(), expectedVersion: version,
@@ -6554,7 +6712,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (candidates.length !== 1) throw new Error("No unique unresolved native operation with this ID");
       const run = candidates[0]!;
       if (run.delegation.sessionId !== authority.sessionId) throw new Error("Cross-session diagnostic fence");
-      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) ||
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
           run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
           Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) throw new Error("A pending human gate must be resolved before diagnostic fencing");
       const intent = run.nativeDeliveries!.find(entry => entry.operationId === authority.operationId)!;
@@ -6637,7 +6795,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         await this.recoverPolicyPhaseRetirements(state, save, outbox);
         return json({ alreadyRetired: true, operationId: authority.operationId, disposition: request.phaseRetirement.disposition });
       }
-      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) || !["accepted", "released"].includes(request.status) || request.phaseFailure ||
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) || !["accepted", "released"].includes(request.status) || request.phaseFailure ||
           run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) ||
           run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
         throw new Error("Pending governance or uncertain delivery prevents phase retirement");

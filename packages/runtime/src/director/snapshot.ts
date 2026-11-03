@@ -37,6 +37,7 @@ const cut = (value: string, max: number): string => (value.length > max ? value.
  * run.userDecisions[*].status === "pending" (questions).
  */
 function taskStatus(task: Record<string, unknown>): ReturnType<typeof TaskStatusSchema.safeParse> {
+  if (task.parked !== undefined) return TaskStatusSchema.safeParse("parked");
   if (task.status !== undefined) return TaskStatusSchema.safeParse(task.status);
   const result = text(rec(task.result).status);
   const cycle = text(rec(task.cycle).status);

@@ -4,6 +4,7 @@ import {
   DirectorWaitResultSchema,
   JsonValueSchema,
   ParkedIssueStatusSchema,
+  IdentifierSchema,
   AcceptanceCriterionSchema,
   DelegationRequestSchema,
   SddPolicyLevelSchema,
@@ -60,6 +61,8 @@ export const DIRECTOR_OWN_TOOLS: readonly { name: string; description: string }[
   { name: "list_issues", description: "List the issue queue. Arguments: status (optional array of open|retrying|resolved|dismissed; default open and retrying)." },
   { name: "inspect_issue", description: "Read one queued issue with its evidence references. Arguments: issueId." },
   { name: "set_issue_status", description: "Mark a queued issue retrying, resolved or dismissed after you acted on it. Arguments: issueId, status." },
+  { name: "park_task", description: "Treo một task thuộc run Director sau khi Runtime xác nhận dừng execution, giữ worktree và đưa vào hàng đợi lỗi. Arguments: runId, taskId, reason." },
+  { name: "unpark_task", description: "Mở lại task đã treo và lên lịch thử mới qua Runtime. Arguments: runId, taskId." },
   { name: "read_mailbox", description: "Read the Director mailbox page by page. Arguments: afterSeq (optional, default 0), audience (optional director|user, default director), limit (optional, at most 200). Items are summaries; use inspect tools for detail." },
   { name: "read_coordinator_guide", description: "Read the Coordinator planning guide that the Director follows when decomposing work. Arguments: none." },
   { name: "start_work", description: "Create a new run through the same delegation path Conversation uses. In a Director session you decompose the work yourself: after start_work call planning_reference and read_coordinator_guide, then assess, propose_workflow and request_specialist; specialist results arrive in director_wait mailbox items. Clarify acceptance criteria with the user first. Arguments: title, objective, acceptanceCriteria (array of {description, verificationMethod: unit_test|integration_test|e2e_test|typecheck|lint|static_analysis|manual_review}, at least one), sddLevel (lightweight|full), kind (optional feature|bugfix|refactor|spike, default feature), priority (optional low|normal|high|critical, default normal), userMessageSeq (seq of the user message that asked for this work; it must be a real user message in the transcript). Calling again for the same user message, even from a new Director session, returns the same runId and creates no second run. Returns {runId, correlationId, status: queued}." }
@@ -95,6 +98,8 @@ const GuideArgs = z.object({}).strict();
 const COORDINATOR_GUIDE_PREFIX = "Hướng dẫn lập kế hoạch của Coordinator (Director dùng thay). Bỏ qua các phần nói về pane, Herdr và Conversation.";
 const COORDINATOR_GUIDE_MAX_BYTES = 64 * 1024;
 const SetStatusArgs = z.object({ issueId: z.string().min(1), status: z.enum(["retrying", "resolved", "dismissed"]) }).strict();
+const UnparkArgs = z.object({ runId: IdentifierSchema, taskId: IdentifierSchema }).strict();
+const ParkArgs = UnparkArgs.extend({ reason: z.string().trim().min(1).max(2000) }).strict();
 
 const VerificationMethodSchema = AcceptanceCriterionSchema.innerType().shape.verificationMethod;
 const PrioritySchema = DelegationRequestSchema.innerType().shape.priority;
@@ -161,7 +166,23 @@ export class DirectorTools {
       }
       case "set_issue_status": {
         const args = SetStatusArgs.parse(input);
-        return json(await this.store.setIssueStatus(args.issueId, args.status));
+        return json(await this.setIssueStatus(args.issueId, args.status));
+      }
+      case "park_task": {
+        const args = ParkArgs.parse(input);
+        const result = json(await this.coordinator.invoke("park_task", args));
+        const parked = z.object({ parked: z.boolean(), episode: z.number().int().positive().optional() }).passthrough().parse(result);
+        if (parked.parked) {
+          if (parked.episode === undefined) throw new Error("Runtime thiếu số lần treo task; chưa thể ghi issue");
+          await this.store.upsertIssue({ issueId: `park:${args.runId}:${args.taskId}:${parked.episode}`,
+            runId: args.runId, taskKey: args.taskId, kind: "other", summary: args.reason,
+            suggestedAction: "Mở lại task bằng unpark_task hoặc thử lại từ hàng đợi lỗi" });
+        }
+        return result;
+      }
+      case "unpark_task": {
+        const args = UnparkArgs.parse(input);
+        return json(await this.coordinator.invoke("unpark_task", args));
       }
       case "read_mailbox": {
         const args = MailboxArgs.parse(input ?? {});
@@ -180,6 +201,24 @@ export class DirectorTools {
         if (COORDINATOR_NAMES.has(name)) return json(await this.coordinator.invoke(name, input));
         throw new Error(`Unknown Director tool: ${name}`);
     }
+  }
+
+  /** Used by both authenticated Director tools and the admitted CLI queue command. Dismissal grants no Runtime authority. */
+  async setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed"): Promise<ParkedIssue> {
+    const args = SetStatusArgs.parse({ issueId, status });
+    const issue = (await this.store.listIssues()).find(item => item.issueId === args.issueId);
+    if (!issue) throw new Error(`Unknown director issue ${args.issueId}`);
+    if (args.status === "retrying" && issue.taskKey !== undefined) {
+      try {
+        const result = z.object({ unparked: z.boolean() }).passthrough().parse(
+          await this.coordinator.invoke("unpark_task", { runId: issue.runId, taskId: issue.taskKey }));
+        if (!result.unparked) throw new Error("Runtime chưa mở lại được task");
+      } catch (error) {
+        await this.store.setIssueStatus(issue.issueId, "open");
+        throw error;
+      }
+    }
+    return this.store.setIssueStatus(issue.issueId, args.status);
   }
 
   private async readCoordinatorGuide(): Promise<JsonValue> {

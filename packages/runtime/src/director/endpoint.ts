@@ -199,7 +199,7 @@ export class DirectorEndpoint {
   }
 
   setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed"): Promise<ParkedIssue> {
-    return this.store.setIssueStatus(issueId, status);
+    return this.tools.setIssueStatus(issueId, status);
   }
 
   async progress(): Promise<DirectorProgressSnapshot> {

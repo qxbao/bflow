@@ -6,7 +6,7 @@ import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { RoleProfileCatalogSchema, RoleProfilePinSchema, ExecutorLineageSchema, sameRoleProfilePin, type RoleProfilePin, type ResolvedRoleProfileSnapshot, type ExecutorLineage } from "@bflow/contracts";
+import { RoleProfileCatalogSchema, RoleProfilePinSchema, ExecutorLineageSchema, ParkedIssueKindSchema, sameRoleProfilePin, type RoleProfilePin, type ResolvedRoleProfileSnapshot, type ExecutorLineage } from "@bflow/contracts";
 import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema, PaneBindingSchema,
@@ -49,7 +49,15 @@ export function strings(value: unknown): string[] {
 export interface SpecRecord {
   specification: Specification; request: ApprovalRequest; decision?: ApprovalDecision; strategy: TestStrategy;
 }
+const TaskParkSchema = z.object({
+  at: IsoDateTimeSchema, reason: z.string().trim().min(1).max(2000), kind: ParkedIssueKindSchema,
+  source: z.enum(["director", "auto"]), episode: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  episodeKey: z.string().min(1).optional()
+}).strict();
+export type TaskPark = z.infer<typeof TaskParkSchema>;
 export interface TaskRecord {
+  parked?: TaskPark;
+  parkHistory?: TaskPark[];
   failovers?: TaskFailover[];
   taskId: string; spec: SpecRecord; worktrees: TaskWorktree[]; outboundIds: string[];
   changeSet?: GitChangeSet; cycle?: VerificationCycle; result?: AgentResult;
@@ -241,6 +249,8 @@ function parseUserDecisions(value: unknown, runId: string): void {
   }
 }
 export interface Outbound {
+  /** Private v8 park-scoped stop intent/proof. Does not cancel the run or create a task-success receipt. */
+  parkStop?: { requestedAt: string; observations: number; proof?: CancellationStopProof | undefined };
   roleProfile?: RoleProfilePin;
   profileAllocationTaskId?: string;
   profileAllocationReleased?: boolean;
@@ -310,9 +320,9 @@ export function isInProcessDelivery(out: Outbound): boolean {
 }
 /** Fields only a Director-mode host writes; their presence requires private journal v8 (R-B2-5, B2b `completed_with_parked`). */
 export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
-  return state.outbound.some(out => out.delivery !== undefined) ||
+  return state.outbound.some(out => out.delivery !== undefined || out.parkStop !== undefined) ||
     state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
-      run.status === "completed_with_parked");
+      run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined));
 }
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
@@ -448,6 +458,13 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
+      if (task.parked !== undefined || task.parkHistory !== undefined) {
+        if (state.version < 8) throw new Error("Task parking requires private journal v8");
+        if (task.parked !== undefined) task.parked = TaskParkSchema.parse(task.parked);
+        if (task.parkHistory !== undefined) task.parkHistory = z.array(TaskParkSchema).max(20).parse(task.parkHistory);
+        const episodes = [...(task.parkHistory ?? []), ...(task.parked ? [task.parked] : [])].map(entry => entry.episode);
+        if (episodes.some((episode, i) => i > 0 && episode <= episodes[i - 1]!)) throw new Error("Invalid task park episode history");
+      }
       if (task.failovers !== undefined) {
         z.array(TaskFailoverSchema).max(17).parse(task.failovers);
         if (new Set(task.failovers.map(entry => entry.switchId)).size !== task.failovers.length || task.failovers.some(entry =>
@@ -507,6 +524,13 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     }
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (out.parkStop !== undefined) {
+      out.parkStop = z.object({ requestedAt: IsoDateTimeSchema, observations: z.number().int().min(0).max(5),
+        proof: CancellationStopProofSchema.optional() }).strict().parse(out.parkStop);
+      if (state.version < 8 || !out.handle || out.parentAssignmentId ||
+          out.parkStop.proof && (digest(out.parkStop.proof.handle) !== digest(out.handle) ||
+            Date.parse(out.parkStop.proof.observedAt) < Date.parse(out.handle.acceptedAt))) throw new Error("Invalid park stop proof");
+    }
     const profileRun = state.runs.find(run => run.runId === out.message.run_id);
     const expectedPin = out.message.type === "task.assignment" ? profileRun?.definition?.tasks.find(task => task.id === out.taskId)?.roleProfile ??
       (profileRun?.conflictResolution?.attempts.some(attempt => attempt.messageId === out.message.message_id) ? profileRun.conflictResolution.roleProfile : undefined) :

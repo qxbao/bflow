@@ -77,7 +77,7 @@ export class HerdrOutbox {
         Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Task notice parent lease is expired or mismatched");
     const run = this.state.runs.find(item => item.runId === parent.message.run_id);
     const task = run?.tasks.find(item => item.taskId === parent.taskId);
-    if (!run || run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status) || !task || task.writerReleased || task.result ||
+    if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status) || !task || task.writerReleased || task.result ||
         out.message.run_id !== parent.message.run_id || out.taskId !== parent.taskId || out.attemptId !== parent.attemptId)
       throw new Error("Task notice parent execution is stopped or terminal");
     return parent;
@@ -277,7 +277,7 @@ export class HerdrOutbox {
       // A retried write-ahead release replays its idempotency receipt (ok). For a proven-stopped execution only the Registry's
       // own inactive-lease conflict is settled; a fence/version mismatch means another holder and stays visible regardless of TTL.
       const ttlExpired = Date.parse(out.lease.expiresAt) <= Date.parse(this.now());
-      const inactive = !released.ok && released.error.code === "conflict" && (out.cancellationStopProof
+      const inactive = !released.ok && released.error.code === "conflict" && ((out.cancellationStopProof || out.parkStop?.proof)
         ? released.error.message === "Lease expired or already released" : ttlExpired);
       if (!released.ok && !inactive) unwrap(released);
       // Inactive before its TTL means the grant was already released, not expired.
@@ -338,6 +338,11 @@ export class HerdrOutbox {
     }
     if (out.phaseRetirement || out.reviewReplacement) return; // Physical tombstone: neither resend, renew nor manufacture an expired-lease release.
     if (out.leaseRelease) { await this.release(out); return; }
+    if (failoverRun?.status === "completed_with_parked" && out.status === "queued" && !isInProcessDelivery(out)) {
+      if (out.lease) await this.release(out);
+      out.status = "cancelled"; out.error = "Run còn task treo; mở lại task trước khi giao việc mới";
+      await this.save(); return;
+    }
     // An in-process inbox write-ahead (Conversation or Director mailbox) stays "sending": Runtime applies it after this locked pass.
     if (out.status === "sending" && !isInProcessDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
     if (out.status === "accepted" && out.handle) {
@@ -362,7 +367,7 @@ export class HerdrOutbox {
           await this.release(out);
           return;
         }
-        if (run && !run.cancelled && !["completed", "failed", "escalated"].includes(run.status) &&
+        if (run && !run.cancelled && !["completed", "completed_with_parked", "failed", "escalated"].includes(run.status) &&
             (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
           try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); }
         }
@@ -447,7 +452,7 @@ export class HerdrOutbox {
       await this.save(); return;
     }
     if (out.error === "Unknown native delivery must be reconciled before another work dispatch") delete out.error;
-    if (run && (run.cancelled || ["completed", "failed", "escalated"].includes(run.status)) &&
+    if (run && (run.cancelled || ["completed", "completed_with_parked", "failed", "escalated"].includes(run.status)) &&
         (out.message.type === "task.assignment" || out.message.type === "delegation.request" && out.message.sender.role === "coordinator")) {
       if (out.lease) await this.release(out);
       out.status = "cancelled"; await this.save(); return;
