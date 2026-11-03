@@ -217,6 +217,23 @@ describe("SQLite RunStore", () => {
     value(await store.saveCheckpoint(aggregate, 0));
     expect(value(await store.loadLatestCheckpoint("run-1"))).toEqual(aggregate);
   });
+  it("saves and reloads a codec-3 aggregate checkpoint with a parked task and refuses codec 4 (B2b)", async () => {
+    await create(); const aggregate = checkpoint(); aggregate.codec = { name: "bflow.workflow-aggregate+json", version: 3 };
+    const parked = { ...seed().snapshot, tasks: seed().snapshot.tasks.map((task, index) => index === 0 ? { ...task, status: "parked" as const } : task) };
+    aggregate.state = { schemaVersion: 1, snapshot: parked, approvals: [], gateRequests: [], gateOutcomes: [],
+      successfulAttempts: [], cancellations: [], retrySchedules: [], attemptBaselines: [], commands: [] };
+    value(await store.saveCheckpoint(aggregate, 0)); store.close(); store = value(openSqliteRunStore({ filename })); stores.push(store);
+    const loaded = value(await store.loadLatestCheckpoint("run-1"));
+    expect(loaded).toEqual(aggregate);
+    expect((loaded?.state as { snapshot: { tasks: { status: string }[] } }).snapshot.tasks[0]!.status).toBe("parked");
+    const future = { ...aggregate, checkpointId: "cp-4", codec: { name: "bflow.workflow-aggregate+json", version: 4 } };
+    expect(await store.saveCheckpoint(future as never, 0))
+      .toMatchObject({ ok: false, error: { code: "unsupported_version", receivedVersion: 4, supportedVersions: [1, 2, 3] } });
+    // A parked task under codec 2 is refused by the shared decoder.
+    const downgraded = { ...aggregate, checkpointId: "cp-2", codec: { name: "bflow.workflow-aggregate+json" as const, version: 2 as const } };
+    expect(await store.saveCheckpoint(downgraded, 0)).toMatchObject({ ok: false, error: { message: "Parked tasks require aggregate codec 3" } });
+  });
+
   it("retains approval, gate, retry and original command outcome data in aggregate checkpoints", async () => {
     await create(); const aggregate = checkpoint(); aggregate.codec = { name: "bflow.workflow-aggregate+json", version: 1 };
     aggregate.state = { schemaVersion: 1, snapshot: seed().snapshot,

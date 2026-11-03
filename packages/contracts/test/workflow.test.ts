@@ -112,6 +112,41 @@ describe("legal transitions", () => {
     expect(validateTaskTransition("running", "waiting", "normal", 1).valid).toBe(false);
   });
 
+  it("enters and leaves parked only through park, unpark and cancel intents (R-B2-14)", () => {
+    for (const from of ["pending", "ready", "blocked", "waiting", "running"] as const) {
+      expect(validateTaskTransition(from, "parked", "park")).toEqual({ valid: true });
+      expect(validateTaskTransition(from, "parked", "normal").valid).toBe(false);
+    }
+    for (const from of ["retrying", "cancelling", "succeeded", "failed", "cancelled"] as const) {
+      expect(validateTaskTransition(from, "parked", "park").valid).toBe(false);
+    }
+    expect(validateTaskTransition("ready", "running", "park").valid).toBe(false);
+    expect(validateTaskTransition("parked", "ready", "unpark")).toEqual({ valid: true });
+    expect(validateTaskTransition("parked", "running", "unpark").valid).toBe(false);
+    expect(validateTaskTransition("blocked", "ready", "unpark").valid).toBe(false);
+    expect(validateTaskTransition("parked", "cancelled", "cancel")).toEqual({ valid: true });
+    expect(validateTaskTransition("parked", "cancelling", "cancel").valid).toBe(false);
+    for (const to of ["ready", "running", "cancelled", "succeeded", "failed"] as const) {
+      expect(validateTaskTransition("parked", to, "normal").valid).toBe(false);
+    }
+    expect(validateTaskTransition("ready", "parked", "park", 1).valid).toBe(false);
+    expect(TaskTransitionCommandSchema.safeParse({ runId: "run-1", taskId: "build", expectedVersion: 4, from: "ready", to: "parked",
+      intent: "park", generationFrom: 0, generationTo: 0, idempotencyKey: "park-1", occurredAt: now }).success).toBe(true);
+    expect(TaskTransitionCommandSchema.safeParse({ runId: "run-1", taskId: "build", expectedVersion: 4, from: "ready", to: "parked",
+      intent: "normal", generationFrom: 0, generationTo: 0, idempotencyKey: "park-2", occurredAt: now }).success).toBe(false);
+  });
+
+  it("accepts a park-scoped stop confirmation only on park, naming the stopped execution", () => {
+    const park = { runId: "run-1", taskId: "build", expectedVersion: 4, from: "running", to: "parked", intent: "park",
+      generationFrom: 0, generationTo: 0, idempotencyKey: "park-3", occurredAt: now };
+    const stop = { schemaVersion: 1, cancellationId: "stop-1", executionId: "execution-1", stoppedAt: now, terminalStatus: "cancelled" };
+    expect(TaskTransitionCommandSchema.safeParse({ ...park, stopConfirmation: stop }).success).toBe(true);
+    const { executionId: _executionId, ...anonymous } = stop;
+    expect(TaskTransitionCommandSchema.safeParse({ ...park, stopConfirmation: anonymous }).success).toBe(false);
+    expect(TaskTransitionCommandSchema.safeParse({ ...park, stopConfirmation: { ...stop, terminalStatus: "succeeded" } }).success).toBe(false);
+    expect(TaskTransitionCommandSchema.safeParse({ ...park, from: "parked", to: "cancelled", intent: "cancel", stopConfirmation: stop }).success).toBe(false);
+  });
+
   it("models completion winning a cancellation race", () => {
     expect(validateTaskTransition("cancelling", "succeeded", "normal").valid).toBe(true);
     expect(validateRunTransition("cancelling", "succeeded").valid).toBe(true);

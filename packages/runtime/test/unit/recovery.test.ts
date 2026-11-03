@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { eventTailCursor, recoverWorkflowRun } from "../../src/recovery.js";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import {
@@ -160,6 +160,61 @@ describe("Workflow Recovery", { timeout: 30000 }, () => {
 
       const planTask = recoveredSnapshot.tasks.find((t) => t.taskId === "plan");
       expect(planTask?.status).toBe("running");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("recovers a parked task from a codec-3 aggregate checkpoint and refuses codec 4 (B2b)", async () => {
+    const harness = await createTestHarness();
+    try {
+      const definition = createSampleWorkflowDefinition();
+      const runId = "run-recover-parked-1";
+      const at = new Date().toISOString();
+      await harness.engine.validateDefinition(definition);
+      const created = await harness.engine.createRun({ runId, definition, idempotencyKey: "c", createdAt: at });
+      if (!created.ok) throw new Error("createRun failed");
+      const stored = await harness.runStore.create({ snapshot: { ...created.value.snapshot, version: 0, lastEventSequence: 0 }, definition }, "s");
+      if (!stored.ok) throw new Error(stored.error.message);
+      let previous = created.value;
+      const append = async (next: typeof previous, key: string) => {
+        const appended = await harness.runStore.appendEvents({ runId, expectedVersion: previous.snapshot.version,
+          expectedLastSequence: previous.snapshot.lastEventSequence, events: next.emittedEvents, idempotencyKey: key });
+        if (!appended.ok) throw new Error(appended.error.message);
+        previous = next;
+      };
+      const appendCreate = await harness.runStore.appendEvents({ runId, expectedVersion: 0, expectedLastSequence: 0, events: created.value.emittedEvents, idempotencyKey: "e" });
+      if (!appendCreate.ok) throw new Error(appendCreate.error.message);
+      const advanced = await harness.engine.advance({ runId, expectedVersion: previous.snapshot.version, idempotencyKey: "adv-1", occurredAt: at });
+      if (!advanced.ok) throw new Error("advance failed");
+      await append(advanced.value, "adv-events-1");
+      const plan = advanced.value.snapshot.tasks.find((task) => task.taskId === "plan")!;
+      expect(plan.status).toBe("running");
+      const parked = await harness.engine.transitionTask({ runId, taskId: "plan", expectedVersion: previous.snapshot.version, from: "running", to: "parked",
+        intent: "park", generationFrom: plan.generation, generationTo: plan.generation, idempotencyKey: "park-plan", occurredAt: at });
+      if (!parked.ok) throw new Error(parked.error.message);
+      await append(parked.value, "park-events-1");
+      const checkpoint = await harness.engine.createCheckpoint({ runId, expectedVersion: parked.value.snapshot.version, checkpointId: "cp-parked", createdAt: at });
+      if (!checkpoint.ok) throw new Error(checkpoint.error.message);
+      expect(checkpoint.value.codec.version).toBe(3);
+      const saved = await harness.runStore.saveCheckpoint(checkpoint.value, parked.value.snapshot.version);
+      expect(saved.ok ? null : saved.error).toBeNull();
+
+      const recovered = await recoverWorkflowRun(runId, { engine: new DeterministicWorkflowEngine({ definitions: [definition] }),
+        runStore: harness.runStore, transport: harness.transport });
+      expect(recovered.ok ? null : recovered.error).toBeNull();
+      if (!recovered.ok) return;
+      expect(recovered.value.snapshot.tasks.find((task) => task.taskId === "plan")?.status).toBe("parked");
+
+      // Codec 4 is still refused before any recovery is attempted.
+      const future = { ...checkpoint.value, codec: { name: "bflow.workflow-aggregate+json", version: 4 } };
+      vi.spyOn(harness.runStore, "loadLatestCheckpoint").mockResolvedValue({ ok: true, value: future as never });
+      const refused = await recoverWorkflowRun(runId, { engine: new DeterministicWorkflowEngine({ definitions: [definition] }),
+        runStore: harness.runStore, transport: harness.transport });
+      // The runtime gate itself refuses it (its own message), not the envelope schema.
+      expect(refused).toMatchObject({ ok: false, error: { code: "validation",
+        message: "Recovery requires complete event history or a complete aggregate checkpoint (got codec bflow.workflow-aggregate+json v4)" } });
+      vi.restoreAllMocks();
     } finally {
       await harness.cleanup();
     }

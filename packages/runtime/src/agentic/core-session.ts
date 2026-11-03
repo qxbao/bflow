@@ -64,12 +64,15 @@ export class CoreSession {
     // Invalidate before recovery: a failed decode, failed append, changed port or divergent engine cannot retain reuse authority.
     this.restored.delete(run.runId);
     const rawCheckpoint = unwrap(await this.ports.runStore.loadLatestCheckpoint(run.runId));
+    // The supported aggregate codec set ([1, 2, 3]) is enforced here, before the envelope parse.
+    const rawCodec: { readonly name?: unknown; readonly version?: unknown } | undefined = rawCheckpoint?.codec;
+    if (rawCheckpoint !== null && (rawCodec?.name !== "bflow.workflow-aggregate+json" || typeof rawCodec.version !== "number" ||
+        ![1, 2, 3].includes(rawCodec.version)))
+      throw new Error("Core recovery requires a complete aggregate checkpoint");
     const checkpoint = rawCheckpoint === null ? undefined : unwrap(parseRecoveryCheckpointWithCompatibility(rawCheckpoint));
     if (checkpoint) {
       if (checkpoint.runId !== run.runId || checkpoint.version > stored.snapshot.version || checkpoint.eventSequence > stored.snapshot.lastEventSequence)
         throw new Error("Checkpoint does not belong to the authoritative run history");
-      if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version))
-        throw new Error("Core recovery requires a complete aggregate checkpoint");
       // The decoder preserves approvals, fencing, cancellation/retry and command outcomes; a query projection is never a substitute.
       unwrap(decodeWorkflowAggregateCheckpointState(checkpoint));
     }
