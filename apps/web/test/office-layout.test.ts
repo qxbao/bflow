@@ -23,8 +23,8 @@ describe('partitions', () => {
     expect(walls.size).toBe(PARTITION_CELLS.length);
     for (const gx of [1, 2, 3, 5, 12, 14, 22, 24, 27]) expect(walls.has(`${gx},8`), `${gx},8`).toBe(true);
     for (const gy of [1, 4, 6, 7]) for (const gx of [8, 18]) expect(walls.has(`${gx},${gy}`), `${gx},${gy}`).toBe(true);
-    for (const gy of [9, 11, 13, 18]) expect(walls.has(`18,${gy}`)).toBe(true);
-    expect(DOORWAY_CELLS.map(key).sort()).toEqual(['13,8', '18,12', '18,5', '23,8', '4,8', '8,5'].sort());
+    for (const gy of [9, 12, 13, 18]) expect(walls.has(`18,${gy}`)).toBe(true);
+    expect(DOORWAY_CELLS.map(key).sort()).toEqual(['13,8', '18,11', '18,5', '23,8', '4,8', '8,5'].sort());
     for (const d of DOORWAY_CELLS) expect(walls.has(key(d)), `doorway ${key(d)} is open`).toBe(false);
     for (const c of PARTITION_CELLS) { expect(c.gx).toBeGreaterThanOrEqual(0); expect(c.gx).toBeLessThan(GRID_W); expect(c.gy).toBeLessThan(GRID_H); }
   });
@@ -54,7 +54,7 @@ describe('decor', () => {
       ...ALL_SEATS.map((s, i) => ({ name: s, r: deskRect(seatCells[i] as Cell) })),
       ...Object.entries(OBJECT_CELLS).map(([id, c]) => ({ name: id, r: cellRect(c) })),
       ...[...PLANT_CELLS, ...TABLE_CELLS].map(c => ({ name: `fixed ${key(c)}`, r: cellRect(c) })),
-      ...PARTITION_CELLS.map(c => ({ name: `wall ${key(c)}`, r: cellRect(c) })),
+      ...PARTITION_CELLS.map(c => ({ name: `wall ${key(c)}`, r: { ...cellRect(c), z1: c.gy + 0.6 } })),
       ...DOORWAY_CELLS.flatMap(d => [d, ...approach(d)].map(c => ({ name: `doorway ${key(d)}`, r: cellRect(c) }))),
     ];
     floorItems.forEach((d, i) => {
@@ -64,7 +64,7 @@ describe('decor', () => {
     });
   });
   test('wall pieces keep to their wall, off objects, other wall pieces and tall furniture', () => {
-    const north = DECOR.filter(d => d.wall === 'north'), tall = north.filter(d => d.mount !== 'wall');
+    const north = DECOR.filter(d => d.wall === 'north' && d.cell.gy === 0), tall = north.filter(d => d.mount !== 'wall');
     const span = (d: (typeof DECOR)[number]) => { const f = decorFootprint(d); return [f.x0, f.x1] as const; };
     north.forEach((d, i) => {
       const [a0, a1] = span(d);
@@ -73,8 +73,14 @@ describe('decor', () => {
     });
     expect(tall.length).toBeGreaterThan(0);
     const west = DECOR.filter(d => d.wall === 'west'), east = DECOR.filter(d => d.wall === 'east');
-    for (const d of west) { expect(decorPlacement(d).x).toBeCloseTo(0.07); expect(d.cell.gy === OBJECT_CELLS.door.gy || d.cell.gy === OBJECT_CELLS.mailbox.gy).toBe(false); }
-    for (const d of east) expect(decorPlacement(d).x).toBeCloseTo(GRID_W - 0.07);
+    const back = (d: (typeof DECOR)[number]): number => 0.07 + (d.mount === 'wall' ? 0 : (DECOR_SIZE[d.node]?.d ?? 0) / 2);
+    for (const d of west) { expect(decorPlacement(d).x).toBeCloseTo(back(d)); expect(d.cell.gy === OBJECT_CELLS.door.gy || d.cell.gy === OBJECT_CELLS.mailbox.gy).toBe(false); }
+    for (const d of east) expect(decorPlacement(d).x).toBeCloseTo(GRID_W - back(d));
+    // Pieces against a partition stand on its south face (the panel is 0.2 thick at the cap).
+    for (const d of DECOR.filter(q => q.wall === 'north' && q.cell.gy > 0)) {
+      expect(PARTITION_CELLS.some(c => c.gx === d.cell.gx && c.gy === d.cell.gy), `${d.node} ${key(d.cell)} is on a partition`).toBe(true);
+      expect(decorFootprint(d).z0).toBeCloseTo(d.cell.gy + 0.6);
+    }
   });
   test('floor decor blocks its cells; wall, ceiling, rug and table pieces do not', () => {
     const blocked = new Set(DECOR_CELLS.map(key));
