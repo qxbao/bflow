@@ -750,3 +750,39 @@ author, refuses unrelated staged changes and executable clean filters, and uses
 the existing Git engine's no-hook/fsmonitor/signing execution policy. It does not
 commit application edits or push. Commit configuration before workflow admission;
 changing HEAD later correctly invalidates the pinned execution plan.
+
+## Director (thử nghiệm, lát B1)
+
+Director cho phép người dùng trò chuyện với một agent qua CLI provider đang chạy (Claude Code, Codex hoặc Agy), không cần cấu hình vai `director` trong `.bflow/config.yml`. Provider chính là CLI đang chạy skill.
+
+Lệnh mới:
+
+- `bflow director start [--provider claude|codex|agy] --json`: bắt đầu phiên Director và trả về thông tin phiên dạng JSON.
+- `bflow director call <tool> [<argsJson>]`: gọi một tool Director. Token được đọc từ biến môi trường `BFLOW_DIRECTOR_TOKEN`.
+- `bflow director mcp`: chạy MCP server stdio của Director.
+- `bflow director hook <claude|codex>`: chỉ ghi nhận sự kiện từ hook của provider. Lệnh luôn thoát với mã 0 và bỏ qua khi có `HERDR_PANE_ID`.
+- `bflow progress [--follow] [--json]`: hiển thị tiến độ workflow; `--follow` theo dõi liên tục.
+- `bflow queue list|show|retry|dismiss`: xem, thử lại hoặc bỏ qua các mục trong hàng đợi lỗi.
+
+Luồng sử dụng:
+
+1. Người dùng gõ `/bflow-start` trong CLI provider.
+2. Skill chạy `bflow director start --json`.
+3. Skill lặp vòng `director_wait` (chờ tin nhắn mới, thay đổi issue hoặc sự kiện Runtime) và `director_say` (trả lời người dùng), truyền lại cursor mỗi lần.
+
+`bflow init` ghi skill `bflow-start`, cấu hình MCP và hook cho Claude Code, Codex và Agy:
+
+- `--no-director`: bỏ qua phần Director.
+- `--commit-skills`: không ghi khối Director vào `.gitignore` (mặc định các tệp Director bị gitignore), để nhóm commit skill/MCP/hook vào repo; nếu khối đã có thì được gỡ.
+- `--check`: chỉ báo không khỏe khi đã có receipt `.bflow/director-files.json`.
+- `--remove`: gỡ các tệp do bflow tạo, giữ nguyên tệp người dùng đã sửa.
+
+Doctor có thêm check `director-skill-installed`.
+
+Giới hạn đã biết:
+
+- Director cùng tồn tại với pane Conversation và Coordinator v2; việc thay thế hoàn chỉnh thuộc lát B2.
+- Tin nhắn của các vai chuyên trách vẫn được gửi tới pane Coordinator.
+- Codex và Agy chưa được kiểm live (hết hạn mức); chỉ Claude Code có spike live.
+
+Bậc bằng chứng: source và test cục bộ. Chưa chạy live end-to-end.
