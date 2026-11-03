@@ -42,14 +42,23 @@ export type ProviderFailureObservation = z.infer<typeof ProviderFailureObservati
 
 export const ProviderFailureBindingSchema = z.object({ provider: AgentProviderIdSchema, executionId: IdentifierSchema,
   observedAt: IsoDateTimeSchema }).strict();
+const CodexErrorInfoSchema = z.union([
+  z.string().max(100).transform(code => ["usage_limit_exceeded", "rate_limit_exceeded", "unauthorized", "sandbox_error", "internal_server_error", "server_overloaded", "flex_unavailable"].includes(code) ? code : "unknown"),
+  z.record(z.object({ http_status_code: z.number().int().min(100).max(599).nullable().optional() })).transform(info => {
+    const keys = Object.keys(info);
+    return keys.length === 1 && ["http_connection_failed", "response_stream_connection_failed", "response_stream_disconnected", "response_too_many_failed_attempts"].includes(keys[0]!) ? info : "unknown";
+  })
+]);
+
 /** Native event projection: prose and error details are deliberately discarded at ingress. */
 export const ProviderNativeFailureEventSchema = z.union([
   z.object({ hook_event_name: z.literal("StopFailure"), error: z.string().max(100).transform(code =>
     ["rate_limit", "overloaded", "authentication_failed", "oauth_org_not_allowed", "account_on_hold", "billing_error", "invalid_request", "model_not_found", "server_error", "max_output_tokens", "cloud_credential_error"].includes(code) ? code : "unknown") }),
   z.object({ type: z.literal("event_msg"), payload: z.object({ type: z.literal("error"),
-    codex_error_info: z.union([z.string().max(100).transform(code => ["usage_limit_exceeded", "rate_limit_exceeded", "unauthorized", "sandbox_error", "internal_server_error", "server_overloaded", "flex_unavailable"].includes(code) ? code : "unknown"),
-      z.record(z.object({ http_status_code: z.number().int().min(100).max(599).nullable().optional() })).transform(info => {
-        const keys = Object.keys(info);
-        return keys.length === 1 && ["http_connection_failed", "response_stream_connection_failed", "response_stream_disconnected", "response_too_many_failed_attempts"].includes(keys[0]!) ? info : "unknown";
-      })]) }) })
+    codex_error_info: CodexErrorInfoSchema }) }),
+  // D-EXT-CODEX-TERMINAL: additive observed native ingress; canonical output and failure authority stay unchanged.
+  z.object({ type: z.literal("event_msg"), payload: z.object({ type: z.literal("task_complete"), turn_id: IdentifierSchema,
+    error: z.object({ codex_error_info: CodexErrorInfoSchema }) }) })
+    .transform(event => ({ type: "event_msg" as const, payload: { type: "error" as const,
+      codex_error_info: event.payload.error.codex_error_info } }))
 ]);
