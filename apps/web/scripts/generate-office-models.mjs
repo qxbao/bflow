@@ -58,9 +58,16 @@ function orient(polys) {
     return { v: [...p.v].reverse(), n: p.n ? [...p.n].reverse() : undefined };
   });
 }
-/** Chamfered box: 6 faces, 12 edge strips and 8 corner triangles. `r` is the bevel width. */
+/** Chamfered box: 6 faces, 12 edge strips and 8 corner triangles. `r` is the bevel width; 0 gives a plain six-face box (for small, many pieces). */
 function box(w, h, d, r = 0.02) {
   const hx = w / 2, hy = h / 2, hz = d / 2;
+  if (r <= 0) {
+    const V = (sx, sy, sz) => [sx * hx, sy * hy, sz * hz];
+    return orient([[0, 1, 2], [1, 2, 0], [2, 0, 1]].flatMap(([a, b2, c2]) => [-1, 1].map(s => {
+      const q = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => { const p = []; p[a] = s; p[b2] = u; p[c2] = v; return V(p[0], p[1], p[2]); });
+      return { v: q };
+    })));
+  }
   r = Math.min(r, hx, hy, hz);
   const corner = (sx, sy, sz) => ({
     X: [sx * hx, sy * (hy - r), sz * (hz - r)], Y: [sx * (hx - r), sy * hy, sz * (hz - r)], Z: [sx * (hx - r), sy * (hy - r), sz * hz],
@@ -212,6 +219,9 @@ const mats = g => {
   g.material('eye', P.ink, { rough: 0.4 });
   g.material('paper', P.paper);
   g.material('tag', P.tag, { rough: 0.5 });
+  g.material('shirt', '#f7f5ef', { rough: 0.6 });
+  g.material('tie', '#a3192b', { rough: 0.45 });
+  g.material('lapel', '#1b2436', { rough: 0.5 });
 };
 
 // ---------- character.glb ----------
@@ -238,13 +248,26 @@ function character() {
       children: [
         ...side('l'), ...side('r'),
         {
-          // Blocky hoodie: body, front pocket, hood ridge behind the neck, and a small name-tag plate (no text in the model).
-          name: 'torso', t: [0, 0.05, 0], parts: [
-            limb(0.32, 0.27, 0.22, 0.135, 'outfit', 0.06), { g: place(box(0.2, 0.07, 0.03, 0.012), { t: [0, 0.06, 0.115] }), m: 'accent' },
-            { g: place(box(0.22, 0.09, 0.08, 0.03), { t: [0, 0.29, -0.09] }), m: 'outfit' },
-            { g: place(box(0.095, 0.05, 0.016, 0.006), { t: [0.075, 0.2, 0.113] }), m: 'tag' },
-          ],
+          // Blocky body in the role colour. Two dress-up children: `hoodie` (front pocket, hood ridge, name-tag plate; no text in the model) is shown by
+          // default, `suit` (lapels over a shirt, a tie, collar and pocket square) replaces it for a suited role; the scene picks one per character.
+          name: 'torso', t: [0, 0.05, 0], parts: [limb(0.32, 0.27, 0.22, 0.135, 'outfit', 0.06)],
           children: [
+            { name: 'hoodie', parts: [
+              { g: place(box(0.2, 0.07, 0.03, 0.012), { t: [0, 0.06, 0.115] }), m: 'accent' },
+              { g: place(box(0.22, 0.09, 0.08, 0.03), { t: [0, 0.29, -0.09] }), m: 'outfit' },
+              { g: place(box(0.095, 0.05, 0.016, 0.006), { t: [0.075, 0.2, 0.113] }), m: 'tag' },
+            ] },
+            { name: 'suit', parts: [
+              { g: place(box(0.11, 0.17, 0.012, 0.004), { t: [0, 0.19, 0.112] }), m: 'shirt' },
+              ...[-1, 1].map(x => ({ g: place(box(0.03, 0.035, 0.012, 0.004), { t: [x * 0.03, 0.262, 0.116], r: [0, 0, x * -35] }), m: 'shirt' })),
+              ...[-1, 1].map(x => ({ g: place(box(0.06, 0.19, 0.014, 0.005), { t: [x * 0.052, 0.17, 0.118], r: [0, 0, x * -20] }), m: 'lapel' })),
+              { g: place(box(0.038, 0.032, 0.016, 0.006), { t: [0, 0.246, 0.124] }), m: 'tie' },
+              { g: place(box(0.042, 0.13, 0.012, 0.004), { t: [0, 0.165, 0.123] }), m: 'tie' },
+              { g: place(box(0.03, 0.03, 0.012, 0.004), { t: [0, 0.1, 0.123], r: [0, 0, 45] }), m: 'tie' },
+              ...[0.055, 0.095].map(y => ({ g: place(ball(0.011, 0.011, 0.007, 8, 6), { t: [0, y, 0.114] }), m: 'lapel' })),
+              { g: place(box(0.05, 0.022, 0.01, 0.003), { t: [0.1, 0.205, 0.116] }), m: 'shirt' },
+              { g: place(box(0.24, 0.06, 0.08, 0.025), { t: [0, 0.272, -0.075] }), m: 'outfit' },
+            ] },
             arm('l'), arm('r'),
             { name: 'paper', t: [0, 0.07, 0.19], r: [-12, 0, 0], parts: [{ g: box(0.22, 0.28, 0.014, 0.004), m: 'paper' }] },
             {
@@ -317,9 +340,15 @@ function furniture() {
   M('ink', P.ink, { rough: 0.5 }); M('cushion', '#3f8f8c', { rough: 0.9 }); M('mint', '#7cc4a6', { emissive: '#244d3d' }); M('coral', '#ee8f86', { emissive: '#5a2b27' }); M('sky', '#8ec1ea', { emissive: '#27455d' });
   M('lemon', '#f2d479', { emissive: '#5c4d1c' }); M('lav', '#b4a7e0');
   M('boardFace', '#22324a', { rough: 0.35, emissive: '#3a5f95' }); M('line', '#7b8da8', { emissive: '#3b4b66' }); M('lamp', '#fff1c9', { emissive: '#d8b36a' });
-  M('cushionLight', '#5fb0ab', { rough: 0.9 }); M('greenLight', '#7ac96b'); M('key', '#e9e9ee', { rough: 0.6 }); M('panel', '#f4f0e6', { rough: 0.9 }); M('panelCap', '#fbf9f3', { rough: 0.8 });
+  M('cushionLight', '#5fb0ab', { rough: 0.9 }); M('chairSeat', '#3b4048', { rough: 0.7 }); M('chairMesh', '#5a6270', { rough: 0.85 }); M('greenLight', '#7ac96b'); M('key', '#e9e9ee', { rough: 0.6 }); M('panel', '#f4f0e6', { rough: 0.9 }); M('panelCap', '#fbf9f3', { rough: 0.8 });
   M('rug', '#e0a458', { rough: 1 }); M('rugInner', '#f3dcae', { rough: 1 }); M('paper', P.paper); M('skyPane', '#9fd4f5', { rough: 0.2, emissive: '#5c9fcf' }); M('waterBlue', '#9fd3f0', { rough: 0.2, emissive: '#2c5d7d' });
   M('bookRed', '#d9534f'); M('bookBlue', '#3d6fb5'); M('bookGreen', '#4aa66a'); M('bookYellow', '#f0c43c');
+  // Conversation office (the chairman's room): walnut, brass, leather, marble and a deep red rug.
+  M('walnut', '#6e4529', { rough: 0.55 }); M('walnutDark', '#432a1a', { rough: 0.6 }); M('gold', '#d6aa4c', { rough: 0.3, metal: 0.65, emissive: '#3a2a08' });
+  M('leather', '#4f2a1f', { rough: 0.45 }); M('leatherDark', '#2f1813', { rough: 0.5 }); M('cognac', '#9a5530', { rough: 0.5 }); M('cognacLight', '#b4703f', { rough: 0.55 });
+  M('marble', '#f1ede6', { rough: 0.22 }); M('marbleVein', '#c8c1b4', { rough: 0.3 }); M('china', '#f8f6f1', { rough: 0.25 }); M('leatherGreen', '#2f5a45', { rough: 0.5 });
+  M('lampGreen', '#2f7a52', { rough: 0.35, emissive: '#1d4d33' }); M('ocean', '#2f5f8f', { rough: 0.4 }); M('rugLux', '#7d2a33', { rough: 1 }); M('rugGold', '#c99a4e', { rough: 1 }); M('rugCream', '#ecdfc4', { rough: 1 }); M('bronze', '#8a6a3a', { rough: 0.4, metal: 0.5 });
+  M('bookNavy', '#2a3d66'); M('bookBurgundy', '#7a2333'); M('bookForest', '#2e5a3e'); M('bookTan', '#b08a5a'); M('bookBlack', '#2a2522');
   const b = (w, h, d, t, m, r) => ({ g: place(box(w, h, d, r ?? 0.02), { t }), m });
   const c = (rt, rb, h, t, m, seg = 10) => ({ g: place(cyl(rt, rb, h, seg), { t }), m });
   const bl = (rx, ry, rz, t, m, ws = 8, hs = 6) => ({ g: place(ball(rx, ry, rz, ws, hs), { t }), m });
@@ -342,11 +371,16 @@ function furniture() {
   add({ name: 'spot', parts: [b(0.12, 0.12, 0.14, [0, 0, 0], 'dark', 0.02), { g: place(cyl(0.08, 0.08, 0.16, 10), { t: [0, 0, 0.12], r: [90, 0, 0] }), m: 'metalDark' }, { g: place(cyl(0.06, 0.06, 0.02, 10), { t: [0, 0, 0.21], r: [90, 0, 0] }), m: 'lamp' }] });
   add({ name: 'trim_bar', parts: [b(1, 0.012, 0.03, [0, 0.006, 0], 'amberSoft', 0.003)] });
 
-  // Desk for a 1.7 high character: top at 0.73, a low laptop (its back, a glowing dot, faces the camera) so the face stays visible.
-  add({ name: 'desk', parts: [
+  // Desk for a 1.7 high character: top at 0.73. `desk` carries a low laptop (its back, a glowing dot, faces the camera) so the face stays visible;
+  // `desk_pc` (Developer zone) carries a desktop PC instead: a monitor kept low enough (top 1.2) that the camera still sees the seated face over it,
+  // and a tower on the floor under the open side of the desk.
+  const deskFrame = [
     b(1.5, 0.05, 0.74, [0, 0.705, 0], 'wood', 0.015), b(1.5, 0.014, 0.02, [0, 0.665, 0.36], 'amberSoft', 0.004),
     b(0.05, 0.68, 0.68, [-0.69, 0.34, 0], 'woodDark', 0.012), b(0.05, 0.68, 0.68, [0.69, 0.34, 0], 'woodDark', 0.012), b(1.34, 0.4, 0.03, [0, 0.45, 0.3], 'woodDark', 0.01),
     b(0.4, 0.46, 0.62, [0.46, 0.43, 0], 'woodDark', 0.015), b(0.34, 0.1, 0.02, [0.46, 0.56, 0.315], 'metalDark', 0.006), b(0.34, 0.1, 0.02, [0.46, 0.3, 0.315], 'metalDark', 0.006),
+  ];
+  add({ name: 'desk', parts: [
+    ...deskFrame,
     // laptop: base, and a lid tilted back towards the seated character (the -z side)
     b(0.5, 0.025, 0.34, [0, 0.743, 0.02], 'metalDark', 0.01),
     { g: place(box(0.5, 0.3, 0.02, 0.008), { t: [0, 0.9, 0.16], r: [-14, 0, 0] }), m: 'metalDark' },
@@ -355,17 +389,65 @@ function furniture() {
     b(0.14, 0.012, 0.1, [0.3, 0.737, -0.06], 'metal', 0.004), c(0.05, 0.05, 0.1, [-0.5, 0.78, 0.0], 'lemon'),
     ...keyboard(-0.02, 0.73, -0.27, 0.36),
   ] });
+  add({ name: 'desk_pc', parts: [
+    ...deskFrame,
+    // monitor: foot, neck and a slightly tilted panel whose screen faces the seated character (-z); its back, with a glowing dot, faces the camera
+    b(0.26, 0.012, 0.18, [0, 0.736, 0.2], 'metalDark', 0.005), b(0.05, 0.2, 0.03, [0, 0.83, 0.24], 'metalDark', 0.008),
+    { g: place(box(0.66, 0.38, 0.035, 0.01), { t: [0, 1.0, 0.205], r: [-6, 0, 0] }), m: 'dark' },
+    { g: place(box(0.61, 0.33, 0.01, 0.003), { t: [0, 1.0, 0.184], r: [-6, 0, 0] }), m: 'screen' },
+    { g: place(box(0.06, 0.06, 0.008, 0.002), { t: [0, 1.04, 0.227], r: [-6, 0, 0] }), m: 'lamp' },
+    // tower under the open (left) side of the desk: front with power LED towards the chair, a blue light strip on the camera side
+    b(0.2, 0.46, 0.46, [-0.43, 0.23, -0.02], 'dark', 0.015), b(0.03, 0.03, 0.01, [-0.43, 0.4, -0.255], 'ledGreen', 0.004), b(0.12, 0.012, 0.01, [-0.43, 0.32, -0.255], 'metal', 0.003),
+    b(0.012, 0.36, 0.012, [-0.43, 0.23, 0.215], 'sky', 0.003),
+    b(0.14, 0.012, 0.1, [0.42, 0.737, -0.02], 'metal', 0.004), c(0.05, 0.05, 0.1, [-0.56, 0.78, 0.05], 'lemon'),
+    ...keyboard(-0.02, 0.73, -0.2, 0.36),
+  ] });
   // Chair (seat on the -z side of the desk): low seat, tall back, swivel base.
   add({ name: 'chair', parts: [
     b(0.5, 0.07, 0.5, [0, 0.31, -0.62], 'cushion', 0.025), b(0.46, 0.5, 0.06, [0, 0.62, -0.88], 'cushion', 0.025), c(0.03, 0.03, 0.2, [0, 0.19, -0.62], 'metalDark', 6),
     b(0.46, 0.035, 0.04, [0, 0.04, -0.62], 'metalDark', 0.008), b(0.04, 0.035, 0.46, [0, 0.04, -0.62], 'metalDark', 0.008),
   ] });
-  // Reception desk (Conversation).
+  // Executive desk (Conversation, node `counter`): 2.3 x 1.0 walnut with brass trim, a green leather inlay, drawer pedestals and a raised front panel.
+  // The seat is on the -z side, so the low laptop, the banker's lamp and the name plate leave the face visible from the camera.
+  const TOP = 0.76;
   add({ name: 'counter', parts: [
-    b(2.0, 0.06, 0.9, [0, 0.72, 0], 'wood', 0.015), b(2.0, 0.68, 0.05, [0, 0.34, 0.42], 'woodDark', 0.012), b(0.05, 0.68, 0.8, [-0.97, 0.34, 0], 'woodDark', 0.012), b(0.05, 0.68, 0.8, [0.97, 0.34, 0], 'woodDark', 0.012),
-    b(1.8, 0.035, 0.03, [0, 0.55, 0.45], 'amber', 0.006), b(0.5, 0.025, 0.34, [-0.45, 0.763, 0.05], 'metalDark', 0.01),
-    { g: place(box(0.5, 0.3, 0.02, 0.008), { t: [-0.45, 0.92, 0.2], r: [-14, 0, 0] }), m: 'metalDark' }, { g: place(box(0.45, 0.25, 0.01, 0.004), { t: [-0.45, 0.92, 0.188], r: [-14, 0, 0] }), m: 'screen' },
-    b(0.4, 0.24, 0.03, [0.6, 0.86, 0.3], 'lemon', 0.01), ...keyboard(-0.45, 0.75, -0.3, 0.34), c(0.06, 0.05, 0.12, [0.2, 0.81, 0.1], 'white'), c(0.055, 0.055, 0.14, [0.8, 0.82, 0], 'metal'),
+    b(2.3, 0.06, 1.0, [0, TOP - 0.03, 0], 'walnut', 0.02), b(2.3, 0.02, 0.012, [0, TOP - 0.045, 0.505], 'gold', 0.004), b(1.7, 0.008, 0.6, [0, TOP + 0.004, -0.1], 'leatherGreen', 0.002),
+    b(2.24, 0.04, 0.96, [0, 0.02, 0], 'walnutDark', 0.01), b(2.26, 0.014, 0.014, [0, 0.045, 0.48], 'gold', 0.004),
+    ...[-1, 1].flatMap(s => [
+      b(0.55, 0.66, 0.92, [s * 0.85, 0.37, 0], 'walnutDark', 0.015),
+      ...[0.17, 0.39, 0.6].flatMap(y => [b(0.48, 0.19, 0.02, [s * 0.85, y, 0.465], 'walnut', 0.01), b(0.14, 0.022, 0.022, [s * 0.85, y + 0.03, 0.485], 'gold', 0.008)]),
+    ]),
+    b(1.16, 0.56, 0.04, [0, 0.42, 0.44], 'walnutDark', 0.012), b(1.0, 0.4, 0.02, [0, 0.42, 0.465], 'walnut', 0.008), b(1.04, 0.012, 0.012, [0, 0.64, 0.47], 'gold', 0.003), b(1.04, 0.012, 0.012, [0, 0.2, 0.47], 'gold', 0.003),
+    { g: place(cyl(0.06, 0.06, 0.012, 14), { t: [0, 0.42, 0.478], r: [90, 0, 0] }), m: 'gold' },
+    // laptop: base, and a lid tilted back towards the seated character (the -z side)
+    b(0.5, 0.025, 0.34, [-0.1, TOP + 0.013, 0.02], 'metalDark', 0.01),
+    { g: place(box(0.5, 0.3, 0.02, 0.008), { t: [-0.1, TOP + 0.17, 0.18], r: [-14, 0, 0] }), m: 'metalDark' }, { g: place(box(0.45, 0.25, 0.01, 0.004), { t: [-0.1, TOP + 0.17, 0.168], r: [-14, 0, 0] }), m: 'screen' },
+    ...keyboard(-0.1, TOP, -0.3, 0.34),
+    // banker's lamp
+    c(0.08, 0.09, 0.03, [0.78, TOP + 0.015, 0.15], 'gold', 12), c(0.012, 0.012, 0.3, [0.78, TOP + 0.17, 0.15], 'gold', 6), b(0.32, 0.075, 0.14, [0.78, TOP + 0.33, 0.15], 'lampGreen', 0.035), b(0.27, 0.01, 0.1, [0.78, TOP + 0.29, 0.15], 'lamp', 0.003),
+    // name plate on the front edge, papers, pen cup, tea cup and a small desk globe
+    { g: place(box(0.36, 0.08, 0.04, 0.008), { t: [0.38, TOP + 0.04, 0.4], r: [-20, 0, 0] }), m: 'walnutDark' }, { g: place(box(0.32, 0.05, 0.01, 0.003), { t: [0.38, TOP + 0.042, 0.42], r: [-20, 0, 0] }), m: 'gold' },
+    b(0.3, 0.012, 0.4, [0.42, TOP + 0.006, -0.18], 'paper', 0.003), b(0.28, 0.01, 0.38, [0.45, TOP + 0.017, -0.16], 'white', 0.003),
+    c(0.035, 0.035, 0.1, [-0.7, TOP + 0.05, -0.2], 'gold', 10), c(0.006, 0.006, 0.14, [-0.71, TOP + 0.1, -0.2], 'ink', 4), c(0.006, 0.006, 0.13, [-0.69, TOP + 0.09, -0.21], 'red', 4),
+    c(0.06, 0.06, 0.008, [0.75, TOP + 0.004, -0.25], 'china', 12), c(0.04, 0.032, 0.06, [0.75, TOP + 0.038, -0.25], 'china', 12),
+    c(0.06, 0.07, 0.03, [-0.85, TOP + 0.015, 0.25], 'gold', 10), c(0.012, 0.012, 0.1, [-0.85, TOP + 0.08, 0.25], 'gold', 6), bl(0.1, 0.1, 0.1, [-0.85, TOP + 0.21, 0.25], 'ocean', 12, 8),
+    bl(0.04, 0.03, 0.035, [-0.8, TOP + 0.25, 0.32], 'greenDark', 8, 6), bl(0.035, 0.035, 0.03, [-0.9, TOP + 0.18, 0.31], 'greenDark', 8, 6), c(0.11, 0.11, 0.012, [-0.85, TOP + 0.21, 0.25], 'gold', 14),
+  ] });
+  // Executive chair for the counter seat (origin at the desk centre like `chair`): tall tufted leather back, brass crown, armrests and a five-star base.
+  // The back stands 0.44 further back than the plain chair so the large head clears it.
+  const ZC = -0.62, BACK_R = [-7, 0, 0], BACK_C = [0, 1.02, ZC - 0.44], qBack = euler(BACK_R);
+  const onBack = (w, h, d, l, m, r = 0.02) => { const o = rotate(qBack, l); return { g: place(box(w, h, d, r), { t: [BACK_C[0] + o[0], BACK_C[1] + o[1], BACK_C[2] + o[2]], r: BACK_R }), m }; };
+  add({ name: 'exec_chair', parts: [
+    onBack(0.7, 1.36, 0.16, [0, 0, 0], 'leather', 0.07), onBack(0.76, 0.05, 0.19, [0, 0.69, 0], 'gold', 0.012),
+    ...[-1, 1].map(s => onBack(0.03, 1.3, 0.17, [s * 0.355, 0, 0], 'leatherDark', 0.01)),
+    ...[-0.38, -0.12, 0.14, 0.4].flatMap((y, row) => [-0.22, 0, 0.22].map(x => onBack(0.028, 0.028, 0.014, [x + (row % 2 ? 0.11 : 0) * (x > 0 ? -1 : x < 0 ? 1 : 0), y, 0.083], 'leatherDark', 0))),
+    b(0.68, 0.13, 0.68, [0, 0.28, ZC - 0.1], 'leather', 0.05), { g: place(cyl(0.065, 0.065, 0.68, 10), { t: [0, 0.28, ZC + 0.24], r: [0, 0, 90] }), m: 'leather' },
+    ...[-1, 1].flatMap(s => [b(0.05, 0.24, 0.05, [s * 0.43, 0.45, ZC - 0.05], 'gold', 0.01), b(0.1, 0.06, 0.5, [s * 0.43, 0.6, ZC - 0.1], 'leatherDark', 0.025)]),
+    c(0.035, 0.035, 0.16, [0, 0.135, ZC - 0.1], 'gold', 8),
+    ...[0, 1, 2, 3, 4].flatMap(k => {
+      const a = k * 72 + 18, rad = (a * Math.PI) / 180, cx = Math.cos(rad), cz = Math.sin(rad);
+      return [{ g: place(box(0.34, 0.035, 0.05, 0.01), { t: [0.17 * cx, 0.055, ZC - 0.1 + 0.17 * cz], r: [0, -a, 0] }), m: 'gold' }, bl(0.03, 0.03, 0.03, [0.33 * cx, 0.03, ZC - 0.1 + 0.33 * cz], 'ink', 8, 6)];
+    }),
   ] });
   // Task Board: the hero wall screen, 8.4 wide, with a kanban of cards and a console below so nothing floats.
   const cards = [];
@@ -378,10 +460,25 @@ function furniture() {
     b(8.4, 2.55, 0.12, [0, 2.05, 0.04], 'dark', 0.05), b(8.15, 2.3, 0.03, [0, 2.05, 0.11], 'boardFace', 0.02), b(8.5, 0.05, 0.14, [0, 0.76, 0.05], 'amber', 0.01), b(8.5, 0.05, 0.14, [0, 3.34, 0.05], 'amber', 0.01),
     b(7.6, 0.62, 0.45, [0, 0.31, 0.22], 'woodDark', 0.04), b(7.6, 0.04, 0.46, [0, 0.64, 0.22], 'wood', 0.01), b(7.0, 0.03, 0.03, [0, 0.4, 0.46], 'amber', 0.006), ...cards,
   ] });
-  // Standing meeting table for the Task Board zone.
+  // Long meeting table of the Task Board zone (5.0 x 1.3, seated height, top at 0.74) on three trestle legs, with notebooks, cups and a speaker puck.
+  // `meeting_chair` stands around it: its sitter faces +z, the back is on the -z side.
+  const MT = 0.74;
   add({ name: 'table', parts: [
-    b(2.8, 0.07, 1.3, [0, 0.98, 0], 'wood', 0.03), b(0.4, 0.95, 0.4, [-0.8, 0.48, 0], 'woodDark', 0.04), b(0.4, 0.95, 0.4, [0.8, 0.48, 0], 'woodDark', 0.04), b(2.9, 0.03, 0.03, [0, 0.95, 0.66], 'amberSoft', 0.006),
-    b(0.5, 0.025, 0.36, [-0.6, 1.02, 0.1], 'white', 0.008), b(0.4, 0.025, 0.3, [0.2, 1.02, -0.1], 'lemon', 0.008), c(0.07, 0.06, 0.12, [0.7, 1.07, 0.2], 'white'), c(0.15, 0.15, 0.015, [0.0, 1.02, 0.25], 'metalDark', 12),
+    b(5.0, 0.06, 1.3, [0, MT - 0.03, 0], 'wood', 0.025), b(4.9, 0.03, 1.2, [0, MT - 0.075, 0], 'woodDark', 0.01), b(5.04, 0.014, 0.02, [0, MT - 0.05, 0.66], 'amberSoft', 0.004), b(5.04, 0.014, 0.02, [0, MT - 0.05, -0.66], 'amberSoft', 0.004),
+    ...[-1.9, 0, 1.9].flatMap(x => [b(0.16, MT - 0.09, 0.16, [x, (MT - 0.09) / 2, 0], 'woodDark', 0.02), b(0.22, 0.03, 0.9, [x, 0.015, 0], 'metalDark', 0.008)]),
+    c(0.13, 0.15, 0.03, [0, MT + 0.015, 0], 'dark', 14), c(0.05, 0.05, 0.006, [0, MT + 0.033, 0], 'ledGreen', 10),
+    ...[-2, -1, 0, 1, 2].flatMap(k => [-1, 1].flatMap(s => [
+      b(0.26, 0.012, 0.34, [k * 1.0 + s * 0.05, MT + 0.006, s * 0.36], (k + s) % 2 ? 'paper' : 'white', 0.003),
+      c(0.04, 0.034, 0.08, [k * 1.0 + 0.24, MT + 0.04, s * 0.3], ['china', 'lemon', 'sky', 'coral'][(k + 2 + (s > 0 ? 1 : 0)) % 4], 10),
+    ])),
+  ] });
+  add({ name: 'meeting_chair', parts: [
+    b(0.5, 0.07, 0.48, [0, 0.43, 0.04], 'chairSeat', 0.025), b(0.48, 0.52, 0.06, [0, 0.76, -0.22], 'chairSeat', 0.03), b(0.4, 0.4, 0.02, [0, 0.77, -0.188], 'chairMesh', 0.01),
+    c(0.03, 0.03, 0.34, [0, 0.23, 0.02], 'metalDark', 6),
+    ...[0, 1, 2, 3, 4].flatMap(k => {
+      const a = k * 72 + 18, rad = (a * Math.PI) / 180, cx = Math.cos(rad), cz = Math.sin(rad);
+      return [{ g: place(box(0.26, 0.03, 0.045, 0.008), { t: [0.13 * cx, 0.045, 0.02 + 0.13 * cz], r: [0, -a, 0] }), m: 'metalDark' }, bl(0.025, 0.025, 0.025, [0.25 * cx, 0.025, 0.02 + 0.25 * cz], 'ink', 6, 4)];
+    }),
   ] });
   add({ name: 'server', parts: [
     b(0.8, 1.75, 0.7, [0, 0.875, 0], 'metalDark', 0.03), b(0.7, 1.6, 0.03, [0, 0.9, 0.34], 'dark', 0.01),
@@ -470,6 +567,94 @@ function furniture() {
   add({ name: 'wall_art', parts: [
     b(0.9, 0.7, 0.03, [0, 1.75, 0.015], 'woodDark', 0.01), b(0.8, 0.6, 0.012, [0, 1.75, 0.03], 'paper', 0.003),
     b(0.3, 0.4, 0.012, [-0.22, 1.75, 0.04], 'coral', 0.003), b(0.26, 0.26, 0.012, [0.1, 1.9, 0.04], 'sky', 0.003), b(0.26, 0.2, 0.012, [0.1, 1.6, 0.04], 'lemon', 0.003), b(0.14, 0.4, 0.012, [0.3, 1.75, 0.04], 'mint', 0.003),
+  ] });
+
+  // ---------- the Conversation office (chairman's room) ----------
+  // Wall-to-wall walnut bookcase, 2.9 x 2.6 x 0.45: three bays, closed cupboards below, four rows of books with brass bands, vases, stacks and orbs.
+  // `seed` varies the rows, so the two cases flanking the statue are not copies.
+  const BOOK_MATS = ['bookNavy', 'bookBurgundy', 'bookForest', 'bookTan', 'bookBlack'];
+  const bookcase = seed => {
+    const W = 2.9, parts = [
+      b(W, 2.42, 0.03, [0, 1.33, -0.21], 'walnutDark', 0.008), b(W + 0.04, 0.14, 0.47, [0, 0.07, 0], 'walnutDark', 0.015), b(W + 0.06, 0.012, 0.012, [0, 0.142, 0.236], 'gold', 0.003),
+      b(W + 0.12, 0.09, 0.5, [0, 2.585, 0.01], 'walnut', 0.02), b(W + 0.06, 0.03, 0.47, [0, 2.525, 0], 'walnutDark', 0.008), b(W + 0.08, 0.016, 0.016, [0, 2.52, 0.24], 'gold', 0.004),
+      ...[-1.425, -0.475, 0.475, 1.425].flatMap(x => [b(0.05, 2.38, 0.45, [x, 1.33, 0], 'walnut', 0.01), b(0.012, 2.3, 0.012, [x, 1.33, 0.228], 'gold', 0.003)]),
+      ...[0.16, 0.62, 1.08, 1.54, 2.0].map(y => b(W - 0.1, 0.04, 0.43, [0, y, 0], 'walnut', 0.008)),
+    ];
+    [-0.95, 0, 0.95].forEach((bx, bi) => {
+      parts.push(b(0.86, 0.4, 0.025, [bx, 0.39, 0.205], 'walnut', 0.01), b(0.7, 0.28, 0.01, [bx, 0.39, 0.222], 'walnutDark', 0.004), bl(0.018, 0.018, 0.018, [bx + (bi === 1 ? 0 : -bx * 0.36), 0.42, 0.235], 'gold', 8, 6));
+      [0.64, 1.1, 1.56, 2.02].forEach((y, r) => {
+        const kind = (seed + r * 2 + bi) % 4, end = kind === 0 ? bx + 0.43 : bx + 0.05 - ((r + seed) % 2) * 0.12;
+        let x = bx - 0.43;
+        for (let i = 0; ; i++) {
+          const w = 0.045 + ((i * 7 + r * 3 + seed * 5 + bi) % 4) * 0.012, h = 0.27 + ((i * 5 + r + seed * 3 + bi * 2) % 4) * 0.028;
+          if (x + w > end) break;
+          x += w / 2;
+          parts.push(b(w, h, 0.3, [x, y + h / 2, 0], BOOK_MATS[(i * 3 + r + seed + bi) % 5], 0));
+          if ((i + r + bi) % 3 === 0) parts.push(b(w * 0.8, 0.014, 0.008, [x, y + h * 0.78, 0.153], 'gold', 0));
+          x += w / 2 + 0.003;
+        }
+        const dx = (x + bx + 0.43) / 2;
+        if (kind === 1) parts.push(c(0.05, 0.07, 0.2, [dx, y + 0.1, 0], 'china', 12), c(0.035, 0.05, 0.05, [dx, y + 0.225, 0], 'china', 12), c(0.04, 0.04, 0.012, [dx, y + 0.256, 0], 'gold', 12));
+        if (kind === 2) {
+          for (let k = 0; k < 3; k++) parts.push(b(0.26 - k * 0.02, 0.045, 0.22, [dx, y + 0.0225 + k * 0.045, 0], BOOK_MATS[(k + seed + r) % 5], 0.005));
+          parts.push(bl(0.04, 0.05, 0.04, [dx, y + 0.185, 0], 'gold', 8, 6));
+        }
+        if (kind === 3) parts.push(c(0.05, 0.06, 0.03, [dx, y + 0.015, 0], 'gold', 10), bl(0.09, 0.09, 0.09, [dx, y + 0.12, 0], 'ocean', 12, 8), c(0.1, 0.1, 0.01, [dx, y + 0.12, 0], 'gold', 14));
+      });
+    });
+    return parts;
+  };
+  add({ name: 'bookcase_lux_w', parts: bookcase(0) });
+  add({ name: 'bookcase_lux_e', parts: bookcase(1) });
+  // Statue console (1.0 x 0.5, stands flush against the wall; the wall is at z -0.25): walnut table on brass legs, a marble plinth with a gilded bust,
+  // and a brass-framed painting on the wall above it (below the room sign).
+  add({ name: 'statue', parts: [
+    b(1.0, 0.05, 0.48, [0, 0.86, 0], 'walnut', 0.015), b(1.0, 0.02, 0.012, [0, 0.845, 0.243], 'gold', 0.004), b(0.94, 0.1, 0.44, [0, 0.79, 0], 'walnutDark', 0.01),
+    ...[-0.44, 0.44].flatMap(x => [-0.19, 0.19].map(z => c(0.025, 0.016, 0.74, [x, 0.37, z], 'gold', 8))), b(0.9, 0.03, 0.4, [0, 0.18, 0], 'walnutDark', 0.008),
+    b(0.4, 0.03, 0.34, [0, 0.9, 0], 'marbleVein', 0.008), b(0.34, 0.3, 0.28, [0, 1.065, 0], 'marble', 0.01), b(0.38, 0.03, 0.32, [0, 1.23, 0], 'marbleVein', 0.008),
+    // gilded bust: socle, broad shoulders and chest, neck, head with a nose and a laurel band
+    c(0.07, 0.1, 0.08, [0, 1.285, 0], 'gold', 12), bl(0.24, 0.15, 0.13, [0, 1.42, 0], 'gold', 16, 10), b(0.3, 0.12, 0.16, [0, 1.36, 0], 'gold', 0.05),
+    c(0.055, 0.06, 0.1, [0, 1.6, 0], 'gold', 10), bl(0.105, 0.13, 0.115, [0, 1.75, 0.005], 'gold', 14, 10), bl(0.02, 0.03, 0.03, [0, 1.74, 0.12], 'gold', 6, 4),
+    c(0.112, 0.112, 0.025, [0, 1.81, 0], 'bronze', 16), bl(0.1, 0.05, 0.1, [0, 1.85, -0.01], 'gold', 12, 6),
+    b(0.9, 0.56, 0.035, [0, 2.36, -0.23], 'gold', 0.01), b(0.78, 0.44, 0.012, [0, 2.36, -0.208], 'bookNavy', 0.003), b(0.78, 0.14, 0.014, [0, 2.21, -0.205], 'bookForest', 0.003),
+    { g: place(cyl(0.07, 0.07, 0.014, 14), { t: [0.18, 2.46, -0.204], r: [90, 0, 0] }), m: 'gold' }, b(0.5, 0.05, 0.014, [-0.1, 2.3, -0.203], 'bookTan', 0.003),
+  ] });
+  // Long chesterfield sofa, 2.4 x 0.95: cognac leather, rolled arms and back, tufted buttons, three seat cushions, cushions and brass feet.
+  add({ name: 'sofa_lux', parts: [
+    b(2.4, 0.22, 0.95, [0, 0.2, 0], 'cognac', 0.04), ...[-1.1, 1.1].flatMap(x => [-0.38, 0.38].map(z => c(0.035, 0.025, 0.09, [x, 0.045, z], 'gold', 8))),
+    b(2.2, 0.5, 0.22, [0, 0.58, -0.36], 'cognac', 0.06), { g: place(cyl(0.11, 0.11, 2.2, 12), { t: [0, 0.83, -0.36], r: [0, 0, 90] }), m: 'cognac' },
+    ...[0.5, 0.68].flatMap((y, row) => Array.from({ length: 10 - row }, (_, i) => b(0.026, 0.026, 0.012, [-0.86 + i * 0.19 + row * 0.095, y, -0.246], 'leatherDark', 0))),
+    ...[-1, 1].flatMap(s => [b(0.2, 0.42, 0.95, [s * 1.1, 0.48, 0], 'cognac', 0.04), { g: place(cyl(0.12, 0.12, 0.95, 12), { t: [s * 1.1, 0.7, 0], r: [90, 0, 0] }), m: 'cognac' }, b(0.02, 0.34, 0.01, [s * 1.1, 0.46, 0.477], 'gold', 0.003)]),
+    ...[-0.67, 0, 0.67].map(x => b(0.66, 0.14, 0.68, [x, 0.38, 0.08], 'cognacLight', 0.05)),
+    ...[-1, 1].map(s => ({ g: place(box(0.36, 0.32, 0.1, 0.05), { t: [s * 0.74, 0.62, -0.18], r: [-12, 0, s * 6] }), m: 'rugLux' })),
+  ] });
+  // Tea table, 1.0 x 0.6: marble top on a brass frame, a walnut shelf, and a tea set (tray, teapot, two cups) with a small flower vase.
+  add({ name: 'tea_table', parts: [
+    b(1.0, 0.04, 0.6, [0, 0.42, 0], 'marble', 0.012), b(0.6, 0.003, 0.02, [0.12, 0.4415, 0.06], 'marbleVein', 0.001), b(0.3, 0.003, 0.015, [-0.25, 0.4415, -0.12], 'marbleVein', 0.001),
+    b(1.02, 0.02, 0.62, [0, 0.39, 0], 'gold', 0.006),
+    ...[-0.46, 0.46].flatMap(x => [-0.26, 0.26].map(z => c(0.02, 0.02, 0.38, [x, 0.19, z], 'gold', 8))), b(0.9, 0.025, 0.5, [0, 0.1, 0], 'walnutDark', 0.008),
+    b(0.5, 0.02, 0.32, [0.02, 0.45, 0], 'gold', 0.006),
+    bl(0.08, 0.065, 0.08, [-0.08, 0.525, 0], 'china', 12, 8), bl(0.02, 0.02, 0.02, [-0.08, 0.6, 0], 'gold', 8, 6),
+    { g: place(cyl(0.012, 0.02, 0.1, 6), { t: [0.01, 0.55, 0], r: [0, 0, -55] }), m: 'china' }, b(0.02, 0.07, 0.03, [-0.17, 0.53, 0], 'china', 0.008),
+    ...[-0.08, 0.08].flatMap(z => [c(0.045, 0.045, 0.006, [0.14, 0.463, z], 'china', 12), c(0.032, 0.026, 0.045, [0.14, 0.488, z], 'china', 12)]),
+    c(0.03, 0.035, 0.1, [-0.38, 0.49, 0.16], 'china', 10), bl(0.045, 0.04, 0.045, [-0.39, 0.57, 0.16], 'coral', 8, 6), bl(0.035, 0.03, 0.035, [-0.35, 0.575, 0.18], 'lemon', 8, 6), bl(0.03, 0.025, 0.03, [-0.4, 0.56, 0.13], 'greenLight', 8, 6),
+  ] });
+  // Deep red rug with a brass-coloured border and a cream medallion, 3.4 x 2.6.
+  add({ name: 'rug_lux', parts: [
+    b(3.4, 0.02, 2.6, [0, 0.01, 0], 'rugLux', 0.005), b(3.2, 0.023, 2.4, [0, 0.0115, 0], 'rugGold', 0.004), b(3.06, 0.026, 2.26, [0, 0.013, 0], 'rugLux', 0.004),
+    b(1.7, 0.029, 1.1, [0, 0.0145, 0], 'rugCream', 0.004), { g: place(box(0.62, 0.032, 0.62, 0.004), { t: [0, 0.016, 0], r: [0, 45, 0] }), m: 'rugLux' },
+    ...[-1, 1].flatMap(x => [-1, 1].map(z => b(0.28, 0.029, 0.28, [x * 1.3, 0.0145, z * 0.9], 'rugCream', 0.004))),
+  ] });
+  // Floor globe on a walnut stand with a brass horizon ring.
+  add({ name: 'globe', parts: [
+    c(0.18, 0.2, 0.05, [0, 0.025, 0], 'walnutDark', 12), c(0.03, 0.045, 0.5, [0, 0.3, 0], 'walnut', 8), c(0.06, 0.04, 0.06, [0, 0.57, 0], 'gold', 10),
+    bl(0.22, 0.22, 0.22, [0, 0.82, 0], 'ocean', 14, 10), ...[[0.1, 0.9, 0.16, 0.09], [-0.12, 0.78, 0.15, 0.08], [0.16, 0.74, -0.08, 0.07], [-0.05, 0.95, -0.15, 0.08]].map(([x, y, z, r]) => bl(r, r * 0.8, r, [x, y, z], 'greenDark', 8, 6)),
+    c(0.255, 0.255, 0.025, [0, 0.82, 0], 'gold', 18), { g: place(cyl(0.008, 0.008, 0.56, 4), { t: [0, 0.82, 0], r: [0, 0, 23] }), m: 'gold' },
+  ] });
+  // Brass-framed landscape for a wall.
+  add({ name: 'painting', parts: [
+    b(1.0, 0.75, 0.04, [0, 1.75, 0.02], 'gold', 0.01), b(0.86, 0.6, 0.012, [0, 1.75, 0.045], 'bookNavy', 0.003), b(0.86, 0.2, 0.014, [0, 1.55, 0.047], 'bookForest', 0.003),
+    b(0.5, 0.08, 0.016, [0.12, 1.66, 0.048], 'bookTan', 0.003), { g: place(cyl(0.07, 0.07, 0.014, 14), { t: [-0.2, 1.9, 0.048], r: [90, 0, 0] }), m: 'gold' },
   ] });
   return g.glb(nodes);
 }
