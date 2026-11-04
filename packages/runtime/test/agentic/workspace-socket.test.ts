@@ -56,6 +56,8 @@ else console.log(JSON.stringify({running:true,session:process.env.HERDR_SESSION,
       developerLaunches: { allocate: async () => ({ provider: "codex", argv: [], env: { BFLOW_TEST_TOKEN: "synthetic-secret" },
         launchId: "launch-developer", launchFingerprint: "a".repeat(64) }), release: async () => {},
         reachability: async () => { throw new Error("pane creation was refused before activation"); } } });
+    expect(Reflect.get(workspace, "extensions"), "persistent workspace must compose the existing extension runtimes").toBeDefined();
+    expect(await Reflect.get(workspace, "extensions").inspect()).toMatchObject({ runs: [] });
     const result = await workspace.runtime.ports.panes.allocateDeveloper({ taskId: "task", runId: "run", worktreePath: taskTree,
       branchName: "main", agentName: "dev-test" });
     expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining("probe_refused") } });

@@ -30,7 +30,7 @@ export async function fixture(taskType = "bugfix", reporter: "node_tap" | "vites
   await writeFile(join(cwd, "test/behavior.test.cjs"), reporter === "vitest_json" ? vitestSource : testSource); const redRevision = commit("failing acceptance test");
   const sourceDependencies = fileURLToPath(new URL("../../../../node_modules", import.meta.url));
   const dependencies = join(root, "node_modules");
-  if (reporter === "vitest_json") await copyIsolatedNodeDependencies(sourceDependencies, dependencies);
+  if (reporter === "vitest_json") await copyIsolatedNodeDependencies(sourceDependencies, dependencies, ["vitest"]);
   const stagedVitest = join(dependencies, relative(sourceDependencies, vitestCli));
   const command = parseBehavioralCommands([{ id: "node-unit", command: "owner:test-unit", executable: process.execPath, args: reporter === "vitest_json" ? [stagedVitest, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", "test/behavior.test.cjs"] : ["--test", "--test-reporter=tap", "test/behavior.test.cjs"], ...(reporter === "vitest_json" ? { reporter, dependencyRoots: [dependencies] } : {}), method: "unit_test", levels: ["unit", "regression"], testNames: [testName], testPaths: ["test/behavior.test.cjs"],
     // A nested Vitest needs more than 3 s to start under full-suite load; deadline handling is covered with timeoutMs: 1 below.

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DeterministicWorkflowEngine } from "@bflow/core";
 import { openSqliteRunStore } from "@bflow/persistence";
 import { openFilesystemArtifactStore } from "@bflow/artifact-store";
-import type { ArtifactStore, RunStore, WorkflowEngine } from "@bflow/contracts";
+import { ApprovalDecisionSchema, type ApprovalDecision, type ArtifactStore, type RunStore, type WorkflowEngine } from "@bflow/contracts";
 import {
   AnalysisPackRejected, AnalysisWorkflowRejected, AnalysisWorkflowRuntime, buildAnalysisPack, planAnalysisWorkflow, resolveAnalysisPack,
   verifyAnalysisDocument, type AnalysisAssignment, type AnalysisDocument, type AnalysisIntakeInput, type AnalysisRolePort, type AnalysisReconciliation
@@ -122,10 +122,11 @@ async function stores() {
   const artifactStore = unwrap(await openFilesystemArtifactStore({ root: join(state, "artifacts"), storeId: "analysis" })) as ArtifactStore;
   return { runStore, artifactStore };
 }
-async function open(roles: AnalysisRolePort, humans = ["user:anh"], engine: WorkflowEngine = new DeterministicWorkflowEngine()) {
+async function open(roles: AnalysisRolePort, humans = ["user:anh"], engine: WorkflowEngine = new DeterministicWorkflowEngine(),
+  authorize?: (decision: ApprovalDecision) => boolean | Promise<boolean>) {
   const { runStore, artifactStore } = await stores();
   return AnalysisWorkflowRuntime.open({ engine, runStore, artifactStore, roles, repositoryRoot: repo,
-    journalPath: join(state, "analysis-journal.json"), authorizeHuman: decision => humans.includes(decision.decidedBy), now });
+    journalPath: join(state, "analysis-journal.json"), authorizeHuman: authorize ?? (decision => humans.includes(decision.decidedBy)), now });
 }
 async function tree(dir: string): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
@@ -193,6 +194,51 @@ describe("analysis-only pack and DAG policy", () => {
 });
 
 describe("analysis-only workflow on a fixture repository", () => {
+  it("applies the original authenticated business/document decisions without regenerating their fields", async () => {
+    const roles = new FixtureRoles(), engine = new DeterministicWorkflowEngine(), seen: ApprovalDecision[] = [];
+    const runtime = await open(roles, ["user:anh"], engine, decision => {
+      seen.push(structuredClone(decision)); return decision.decidedBy === "user:anh" && decision.idempotencyKey.startsWith("human-exact-");
+    });
+    await runtime.start({ runId: "ba-exact", intake: intake(), pack: PACK, packPin: PIN });
+    const waiting = await runtime.drive("ba-exact"), snapshot = unwrap(await engine.getSnapshot("ba-exact"))!;
+    const apply = Reflect.get(runtime, "applyHumanDecision"); expect(apply).toBeTypeOf("function");
+    const business = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: waiting.approvals.elicitation!.approvalId,
+      runId: "ba-exact", sessionId: "session-1", target: { type: "task", taskId: "elicitation" }, revision: 1,
+      generation: snapshot.tasks.find(task => task.taskId === "elicitation")!.generation, decision: "approved", decidedBy: "user:anh",
+      decidedAt: now(), reason: "Actual owner answers", feedbackArtifacts: [], idempotencyKey: "human-exact-business",
+      metadata: { approvalScope: "business_decisions", answers: { "D-1": "Above 5,000,000 VND", "D-2": "30 days after delivery" }, originalTag: "retain" } });
+    const documentWaiting = await apply.call(runtime, business);
+    expect(seen[0]).toEqual(business);
+    expect(runtime.status("ba-exact").decisions["D-1"]!.decidedAt).toBe(business.decidedAt);
+    const document = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: documentWaiting.approvals.document.approvalId,
+      runId: "ba-exact", sessionId: "session-1", target: { type: "task", taskId: "review" }, revision: documentWaiting.documents.at(-1).version,
+      generation: unwrap(await engine.getSnapshot("ba-exact"))!.tasks.find(task => task.taskId === "review")!.generation,
+      decision: "approved", decidedBy: "user:anh", decidedAt: now(), reason: "Exact reviewed document", feedbackArtifacts: [],
+      idempotencyKey: "human-exact-document", metadata: { approvalScope: "analysis_document", documentDigest: docDigest(runtime, "ba-exact"), originalTag: "retain" } });
+    expect((await apply.call(runtime, document)).status).toBe("published");
+    expect(seen[1]).toEqual(document);
+    expect(runtime.status("ba-exact").approvals.document!.decision).toEqual(document);
+    expect((await apply.call(runtime, document)).status).toBe("published");
+  });
+
+  it("refuses a mismatched document digest/session/revision without changing the pending approval", async () => {
+    const engine = new DeterministicWorkflowEngine(), runtime = await open(new FixtureRoles(), ["user:anh"], engine);
+    await runtime.start({ runId: "ba-exact-denials", intake: intake(), pack: PACK, packPin: PIN }); await runtime.drive("ba-exact-denials");
+    const waiting = await runtime.decideBusinessQuestions("ba-exact-denials", { decision: "approved", decidedBy: "user:anh",
+      answers: { "D-1": "Above 5,000,000 VND", "D-2": "30 days after delivery" } });
+    const apply = Reflect.get(runtime, "applyHumanDecision"); expect(apply).toBeTypeOf("function");
+    const original = ApprovalDecisionSchema.parse({ schemaVersion: 2, approvalId: waiting.approvals.document!.approvalId,
+      runId: "ba-exact-denials", sessionId: "session-1", target: { type: "task", taskId: "review" }, revision: waiting.documents.at(-1)!.version,
+      generation: unwrap(await engine.getSnapshot("ba-exact-denials"))!.tasks.find(task => task.taskId === "review")!.generation,
+      decision: "approved", decidedBy: "user:anh", decidedAt: now(), feedbackArtifacts: [], idempotencyKey: "human-wrong-document",
+      metadata: { approvalScope: "analysis_document", documentDigest: docDigest(runtime, "ba-exact-denials") } });
+    for (const bad of [{ ...original, metadata: { ...original.metadata, documentDigest: "f".repeat(64) } },
+      { ...original, sessionId: "another-session" }, { ...original, revision: original.revision + 1 }])
+      await expect(apply.call(runtime, ApprovalDecisionSchema.parse(bad))).rejects.toThrow();
+    expect(runtime.status("ba-exact-denials").status).toBe("awaiting_document_approval");
+    expect(runtime.status("ba-exact-denials").approvals.document!.decision).toBeUndefined();
+  });
+
   it("runs survey → decisions → specification (bounded repair) → independent review → document approval → handoff", async () => {
     const before = await tree(repo);
     const roles = new FixtureRoles({

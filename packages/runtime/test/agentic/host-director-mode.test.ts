@@ -177,7 +177,7 @@ describe("start_work in a Director session", () => {
       correlationId: result.correlationId, metadata: { origin: "director" } });
     expect(result.runId).toBe(`run-${result.correlationId}`);
     expect(result.status).toBe("queued");
-    expect(log).toHaveBeenCalledWith({ kind: "tool", action: "director:start_work:completed" });
+    expect(log).toHaveBeenCalledWith({ kind: "tool", action: "director:start_work:completed", outcome: "implementation" });
     // Deterministic: the same key yields the identical delegation.
     await startDirectorWork({ manifest: v3Manifest, build, admitDirectorWork, log }, work);
     expect(DelegationRequestSchema.parse((admitDirectorWork.mock.calls[1] as unknown[])[0])).toEqual(request);

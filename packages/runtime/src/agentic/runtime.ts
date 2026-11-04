@@ -443,8 +443,24 @@ export class AgenticWorkflowRuntime {
       ? [{ status: item.status, taskId: taskLogBusinessTaskId(item), attemptId: item.attemptId, message: { run_id: item.message.run_id }, handle: item.handle }]
       : []);
   }
+  private readonly nativeCancellationEffects = new WeakMap<JournalState, Map<string, string>>();
+  /** Read-only authority view for pane guards; does not restore Core or clone unrelated runs/inbox. */
+  async outboundForPane(paneId: string): Promise<Outbound[]> {
+    return this.journal.project(state => state.outbound.filter(out => (out.request?.target.paneId ?? out.handle?.target.paneId) === paneId));
+  }
+  /** Includes queued Conversation handoffs, so restart cannot reclassify an admitted implementation intake. */
+  async hasDelegation(runId: string): Promise<boolean> {
+    return this.journal.project(state => state.runs.some(run => run.runId === runId) || state.outbound.some(out => {
+      if (out.message.type !== "delegation.request" || isCancellationHandoff(out.message)) return false;
+      const request = DelegationRequestSchema.safeParse(out.message.payload);
+      return request.success && request.data.runId === runId;
+    }));
+  }
   private async transaction<T>(action: (state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox) => Promise<T>, recoverPhases = true): Promise<T> {
-    return this.journal.exclusive(async (state, save) => {
+    const nativeCancellations = new Map<string, string>();
+    let result: T;
+    try { result = await this.journal.exclusive(async (state, save) => {
+      this.nativeCancellationEffects.set(state, nativeCancellations);
       this.refreshTaskLogAssignmentSnapshot(state);
       let previous = structuredClone(state);
       const logChanges = async () => {
@@ -523,7 +539,12 @@ export class AgenticWorkflowRuntime {
       const outbox = new HerdrOutbox(this.ports, state, saveAndLog, { directorMailbox: this.ports.director !== undefined });
       if (recoverPhases) await this.recoverPhaseFailures(state, saveAndLog, outbox);
       return action(state, saveAndLog, core, outbox);
-    });
+    }); }
+    finally {
+      // cancelRun/requestCoreCancellation persisted intent first. Herdr callbacks may safely re-enter Runtime here.
+      for (const [runId, reason] of nativeCancellations) await this.ports.cancelWorkflowExtension!(runId, reason);
+    }
+    return result;
   }
   /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
   private assertDirectorWritable(run: RunRecord): void {
@@ -643,6 +664,7 @@ export class AgenticWorkflowRuntime {
     const received = await this.transaction(async state => state.inbox.filter(item => item.status === "received" &&
         (isCancellationHandoff(item.message) || state.outbound.some(out => out.reviewReplacement && out.message.message_id === item.message.causation_id) || !state.runs.some(run => run.runId === item.message.run_id && (run.cancelled ||
           TERMINAL_RUN_STATUSES.includes(run.status) && !this.acceptsPausedNativeReply(state, run, item.message) &&
+          !this.acceptsPausedUserDecision(run, item.message) &&
           !(run.status === "escalated" && isConversationContext(item.message))))))
       .map(item => RoleMessageSchema.parse(item.message)));
     let replayed = 0;
@@ -667,7 +689,8 @@ export class AgenticWorkflowRuntime {
           out.delivery === "director_mailbox" && out.status === "delivered") &&
         !state.inbox.some(item => item.message.message_id === out.message.message_id ||
           (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
-        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled && !TERMINAL_RUN_STATUSES.includes(run.status)))
+        state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
+          (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
         .map(out => ({ mailbox: out.delivery === "director_mailbox", message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
           ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
           : out.message) }));
@@ -1655,10 +1678,16 @@ export class AgenticWorkflowRuntime {
    * then calls the report methods below one at a time.
    */
   async watchdogSnapshot(sessionId: string): Promise<(RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[]> {
-    return this.transaction(async state => state.runs.filter(run => run.delegation.sessionId === sessionId).flatMap(run => {
-      try { return [this.runFacts(state, run)]; }
-      catch { return []; }
-    }));
+    return this.transaction(async state => {
+      const facts: (RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] })[] = [];
+      for (const run of state.runs.filter(item => item.delegation.sessionId === sessionId)) {
+        try {
+          if (await this.ports.workflowExtensionStarted?.(run.runId)) continue;
+          facts.push(this.runFacts(state, run));
+        } catch { /* Unreadable state is not evidence of a stall. */ }
+      }
+      return facts;
+    });
   }
   /** R-B2-15: Core stays blocked; only parked tasks and their pending descendants remain. No integration or cleanup follows. */
   private completeWithParked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, snapshot: WorkflowRunSnapshot): boolean {
@@ -2428,6 +2457,15 @@ export class AgenticWorkflowRuntime {
       headline: `Workflow blocked: ${reason}`, sdlcStatus: run.status }, `specialist-blocked:${message.message_id}`, "conversation");
   }
 
+  private acceptsPausedUserDecision(run: RunRecord, message: RoleMessage): boolean {
+    if (!resumablyPaused(run) || run.supersededBy || message.type !== "approval.decision" ||
+        message.sender.role !== "conversation") return false;
+    const decision = ApprovalDecisionSchema.safeParse(message.payload);
+    if (!decision.success) return false;
+    const entry = run.userDecisions?.[decision.data.approvalId];
+    return entry?.role === "coordinator" && entry.status === "pending";
+  }
+
   private acceptsPausedNativeReply(state: JournalState, run: RunRecord, message: RoleMessage): boolean {
     return resumablyPaused(run) && !run.cancelled && message.recipient.role === "coordinator" &&
       ["spec.draft", "task.status", "verification.escalation"].includes(message.type) &&
@@ -2991,6 +3029,7 @@ export class AgenticWorkflowRuntime {
   /** An authenticated Stop is operational evidence only. It never applies ingress, retries delivery or changes business state. */
   async coordinatorTurnStopped(input: unknown, bindingInput: unknown): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    const extensionStarted = message.run_id ? await this.ports.workflowExtensionStarted?.(message.run_id) : false;
     await this.transaction(async (state, save, _core, outbox) => {
       const delivery = this.providerDelivery(state, message, binding);
       if (binding.role !== "coordinator" || message.type !== "delegation.request" || message.sender.role !== "conversation")
@@ -3009,7 +3048,7 @@ export class AgenticWorkflowRuntime {
           artifact_references: [], occurred_at: this.now(), idempotency_key: messageId }));
         await save(); return;
       }
-      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
+      if (run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || extensionStarted || this.hasSemanticNextAction(state, run)) return;
       if (!state.inbox.some(item => item.message.message_id === message.message_id && item.status === "applied"))
         run.error = "The delivered delegation has no durable ingress in Runtime; authorized intake is retained. Reconcile the delivery or resume the same run.";
       this.recordCoordinatorNoNextAction(state, outbox, run, message, delivery);
@@ -3444,6 +3483,7 @@ export class AgenticWorkflowRuntime {
 
   async proposeWorkflow(runId: string, specificationInput: unknown, definitionInput: unknown, maxIterations = 3): Promise<JsonValue> {
     if (this.quiesced) throw new Error("Runtime is quiesced");
+    if (await this.ports.workflowExtensionOwns?.(runId)) throw new Error("Extension workflow must use its pinned SDK family, never the Developer DAG");
     const draft = SpecificationSchema.parse(normalizeSpecificationOptionals(specificationInput));
     const originalProposal = WorkflowDefinitionSchema.parse(normalizeWorkflowDefinitionOptionals(definitionInput));
     const taskRequiredCapabilities = (task: TaskDefinition): string[] => {
@@ -6248,6 +6288,11 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       await save(); return json(integration);
     });
   }
+  /** Startup barrier: the durable parent intent fences native work even if the process died before post-commit I/O. */
+  async reconcileWorkflowExtensionCancellations(): Promise<void> {
+    const intents = await this.journal.project(state => state.runs.filter(run => run.cancelled).map(run => ({ runId: run.runId, reason: run.error ?? "Run cancelled" })));
+    for (const intent of intents) if (await this.ports.workflowExtensionStarted?.(intent.runId)) await this.cancel(intent.runId, intent.reason);
+  }
   async cancel(runId: string, reason: string): Promise<JsonValue> {
     return this.transaction(async (state, save, core, outbox) => {
       await this.cancelRun(state, save, core, outbox, this.run(state, runId), reason);
@@ -6288,6 +6333,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   }
   private async cancelRun(state: JournalState, save: () => Promise<void>, core: CoreSession, outbox: HerdrOutbox,
     run: RunRecord, reason: string): Promise<void> {
+    if (await this.ports.workflowExtensionStarted?.(run.runId)) {
+      if (!this.ports.cancelWorkflowExtension) throw new Error("Native extension cancellation authority unavailable");
+      const extension = this.ports.inspectWorkflowExtension ? record(await this.ports.inspectWorkflowExtension(run.runId)) : undefined;
+      // A completed document/report is retained; cancellation cannot rewrite its terminal outcome.
+      if (extension && ["published", "reported", "failed"].includes(String(extension.extensionStatus))) return;
+    }
     // Completed and failed runs remain authoritative terminal outcomes; cancellation is a safe no-op.
     if (!run.cancelled && ["completed", "failed"].includes(run.status)) return;
     if (!run.cancelled) { run.cancelled = true; run.status = "cancelled"; run.error = textField(reason); await save(); }
@@ -6299,7 +6350,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         !state.inbox.some(item => item.message.run_id === run.runId && item.status === "received" && isCancellationHandoff(item.message))) { await save(); return; }
     this.progress(state, outbox, run, "Run cancelled; stop confirmation and worktree reconciliation are in progress");
     await save();
-    await this.requestCoreCancellation(run, core);
+    await this.requestCoreCancellation(state, run, core);
     for (const out of state.outbound.filter(item => item.message.run_id === run.runId && isStoppableExecution(item) && !item.phaseRetirement)) {
       if (out.status === "queued") { out.status = "cancelled"; continue; }
       if (out.status === "sending") out.status = "unknown_delivery";
@@ -6310,7 +6361,14 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     await save();
   }
   /** Repair the write-ahead cancellation-intent/Core crash gap without sending another transport interrupt. */
-  private async requestCoreCancellation(run: RunRecord, core: CoreSession): Promise<void> {
+  private async requestCoreCancellation(state: JournalState, run: RunRecord, core: CoreSession): Promise<void> {
+    if (await this.ports.workflowExtensionStarted?.(run.runId)) {
+      if (!this.ports.cancelWorkflowExtension) throw new Error("Native extension cancellation authority unavailable");
+      const effects = this.nativeCancellationEffects.get(state);
+      if (!effects) throw new Error("Native cancellation requires a Runtime transaction");
+      effects.set(run.runId, run.error ?? "Run cancelled");
+      return;
+    }
     if (run.coreCreated) {
       const snapshot = await core.snapshot(run.runId);
       if (!["succeeded", "failed", "cancelled", "cancelling"].includes(snapshot.status)) {
@@ -6460,7 +6518,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const run = this.run(state, runId);
       if (!run.cancelled) throw new Error("Only an already cancelled run can be reconciled");
       await this.closeCancelledRunDecisions(state, save, outbox, run);
-      await this.requestCoreCancellation(run, core);
+      await this.requestCoreCancellation(state, run, core);
       if (run.integrationKey) await this.ports.policies.git.cancelIntegration(run.integrationKey);
       for (const task of run.tasks) for (const tree of task.worktrees) await this.ports.policies.git.cancelTask(tree.key);
       return (await this.reconcileCancellations(state, save, core, outbox, runId))!;
@@ -6626,6 +6684,10 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     run: RunRecord, executions: Outbound[], explicit = false, allocationBlockers: string[] = []): Promise<CancellationReconciliationReport> {
     await this.cleanupProfileSpecialists(state, save, run.runId);
     const unresolved: string[] = [...allocationBlockers, ...(run.nativeDeliveries ?? []).map(item => `Native delivery ${item.operationId} is uncertain (${item.message.message_id}); no mutation was resent`)];
+    if (await this.ports.workflowExtensionStarted?.(run.runId)) {
+      const extension = this.ports.inspectWorkflowExtension ? record(await this.ports.inspectWorkflowExtension(run.runId)) : undefined;
+      if (extension?.extensionStatus !== "cancelled") unresolved.push("Native extension stop/Core cancellation is unresolved; execution authority is retained");
+    }
     for (const retired of state.outbound.filter(item => item.message.run_id === run.runId && item.phaseRetirement))
       unresolved.push(`Retired verifier phase ${retired.message.message_id}: measurement/remote outcome remains unclaimed; late results are fenced`);
     for (const replaced of state.outbound.filter(item => item.message.run_id === run.runId && item.reviewReplacement))
@@ -6797,12 +6859,13 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    */
   async coordinatorStopWithoutResponse(input: unknown, bindingInput: unknown, reason?: string): Promise<void> {
     const message = RoleMessageSchema.parse(input), binding = PaneBindingSchema.parse(bindingInput);
+    const extensionStarted = message.run_id ? await this.ports.workflowExtensionStarted?.(message.run_id) : false;
     await this.transaction(async (state, save, _core, outbox) => {
       const delivery = this.providerDelivery(state, message, binding);
       if (binding.role !== "coordinator" || message.recipient.role !== "coordinator") throw new Error("Coordinator Stop requires a Coordinator delivery");
       if (isConversationContextWake(message)) return; // An informational turn owes no business next action.
       const run = state.runs.find(item => item.runId === message.run_id);
-      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || this.hasSemanticNextAction(state, run)) return;
+      if (!run || run.cancelled || TERMINAL_RUN_STATUSES.includes(run.status) || extensionStarted || this.hasSemanticNextAction(state, run)) return;
       if (reason) run.error = redactString(reason).slice(0, 2000);
       this.recordCoordinatorNoNextAction(state, outbox, run, message, delivery);
       await save();

@@ -127,6 +127,11 @@ export interface DirectorRuntimePort {
 export interface AgenticRuntimePorts {
   /** Director session mode; absent in v2 (Conversation/Coordinator pane) sessions. */
   director?: DirectorRuntimePort;
+  /** Host-private routing; extension SDKs retain their own Core DAG and approval ownership. */
+  workflowExtensionOwns?(runId: string): Promise<boolean>;
+  workflowExtensionStarted?(runId: string): Promise<boolean>;
+  cancelWorkflowExtension?(runId: string, reason: string): Promise<JsonValue>;
+  inspectWorkflowExtension?(runId: string): Promise<JsonValue>;
   roleProfiles?: readonly ResolvedRoleProfileSnapshot[];
   roleProfileDefaults?: Readonly<Partial<Record<AgentRole, RoleProfilePin>>>;
   preflightRoleProfile?(snapshot: ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): Promise<void>;

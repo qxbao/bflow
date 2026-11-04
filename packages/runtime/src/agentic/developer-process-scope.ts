@@ -141,7 +141,8 @@ export class DeveloperProcessScopes {
     // Give this launch private startup files; provider HOME/auth and its original PATH stay intact.
     const shellRoot = join(root, "shell"); await mkdir(shellRoot, { mode: 0o700 });
     const launchPath = join(root, "bin") + delimiter + originalPath;
-    await writeFilePrivate(join(shellRoot, ".zshenv"), `export PATH=${quote(launchPath)}\n`, 0o500);
+    // Debian/Ubuntu's system zshrc honors this knob. Completion discovery is unrelated to a governed CLI launch.
+    await writeFilePrivate(join(shellRoot, ".zshenv"), `skip_global_compinit=1\nexport PATH=${quote(launchPath)}\n`, 0o500);
     return HostLaunchMaterialSchema.parse({ ...material, env: { ...material.env, PATH: launchPath, ZDOTDIR: shellRoot, BFLOW_PROCESS_SCOPE_ID: scopeId } });
   }
   /** Bindings launched under a scope carry its id; legacy/unsupervised panes have none and keep pre-scope semantics. */

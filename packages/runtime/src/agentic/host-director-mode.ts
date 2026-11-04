@@ -5,6 +5,10 @@ import {
 import { isDirectorCoordinatorTool } from "../director/host-methods.js";
 import { redactString } from "../resilience/redaction.js";
 import { digest, record } from "./journal.js";
+import { z } from "zod";
+import type { WorkflowExtensionHost, WorkflowFamily } from "./extension-host.js";
+import { AnalysisIntakeSchema } from "../analysis/model.js";
+import { QaIntakeSchema } from "../qa/model.js";
 import { notificationBody, renderConversationNotice, type NoticeLike } from "./conversation-notice-render.js";
 import type { DirectorWorkStart } from "../director/tools.js";
 
@@ -82,7 +86,7 @@ export function buildDirectorWorkDelegation(build: DelegationBuilder, input: Dir
       acceptanceCriteria: input.acceptanceCriteria, isRequirementChange: false } });
   if (!built.ok) return built;
   const parsed = DelegationRequestSchema.safeParse({ ...built.value, requestedBy: "director", targetRole: "coordinator", sessionId, runId,
-    metadata: { ...built.value.metadata, origin: "director" } });
+    metadata: { ...built.value.metadata, origin: "director", ...(input.nativeFamily ? { nativeFamily: input.nativeFamily } : {}) } });
   if (!parsed.success) return { ok: false, error: { code: "validation", retryable: false, message: parsed.error.message } };
   return { ok: true, value: parsed.data };
 }
@@ -90,6 +94,7 @@ export function buildDirectorWorkDelegation(build: DelegationBuilder, input: Dir
 export interface DirectorStartWorkDeps {
   manifest: () => SessionManifest;
   build: DelegationBuilder;
+  admitExtension?: (delegation: DelegationRequest) => Promise<WorkflowFamily>;
   admitDirectorWork: (delegation: DelegationRequest) => Promise<{ runId: string; correlationId: string; admission: "new" | "duplicate" }>;
   log: (entry: { kind: "tool" | "error"; action: string; outcome?: string }) => Promise<void>;
 }
@@ -97,6 +102,7 @@ export interface DirectorStartWorkDeps {
 /** `start_work` in a Director session: admitted by Runtime directly, never through the Conversation bridge. */
 export async function startDirectorWork(deps: DirectorStartWorkDeps, input: DirectorWorkStart): Promise<{ runId: string; correlationId: string; status: "queued" }> {
   let admitted: Awaited<ReturnType<DirectorStartWorkDeps["admitDirectorWork"]>>;
+  let family: WorkflowFamily = "implementation";
   try {
     const manifest = SessionManifestSchema.parse(deps.manifest());
     if (manifest.schemaVersion !== 3) throw new Error("Director work requires an active Director session");
@@ -105,6 +111,7 @@ export async function startDirectorWork(deps: DirectorStartWorkDeps, input: Dire
       await deps.log({ kind: "error", action: "director:start_work:failed", outcome: built.error.code });
       throw new Error(`start_work refused: ${redactString(built.error.message)}`);
     }
+    family = await deps.admitExtension?.(built.value) ?? "implementation";
     admitted = await deps.admitDirectorWork(built.value);
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("start_work refused: ")) throw error;
@@ -115,13 +122,15 @@ export async function startDirectorWork(deps: DirectorStartWorkDeps, input: Dire
     await deps.log({ kind: "error", action: "director:start_work:failed", outcome: error instanceof Error ? error.name : "HostToolError" });
     throw error;
   }
-  await deps.log({ kind: "tool", action: "director:start_work:completed" });
+  await deps.log({ kind: "tool", action: "director:start_work:completed", outcome: family });
   return { runId: admitted.runId, correlationId: admitted.correlationId, status: "queued" };
 }
 
 export interface DirectorNoticeMirrorDeps {
   /** Writes (or finds) the durable notice receipt; the receipt carries the #n alias. */
   appendNotice: (message: RoleMessage) => Promise<{ created: boolean; notice: (NoticeLike & { shortId?: string | undefined }) | undefined }>;
+  /** Required native/Director delivery: retain the original envelope for retry when the mirror fails. */
+  requireMirror?: boolean;
   /** Present only in a Director session. */
   mirror?: ((message: RoleMessage, rendered: { text: string; code?: string }) => Promise<void>) | undefined;
   log: (entry: { kind: "error"; action: string; outcome: string }) => Promise<void>;
@@ -129,7 +138,7 @@ export interface DirectorNoticeMirrorDeps {
 
 /**
  * Host `onConversationNotice`: the receipt is always written (and its failure propagates as before); in a Director session the
- * rendered notice is copied into the Director mailbox for the user audience. A mirror failure is logged and never fails delivery.
+ * rendered notice is copied into the Director mailbox for the user audience. Required mirrors propagate failure so the same envelope can retry.
  */
 export async function recordConversationNotice(deps: DirectorNoticeMirrorDeps, message: RoleMessage): Promise<void> {
   const { notice } = await deps.appendNotice(message);
@@ -139,6 +148,7 @@ export async function recordConversationNotice(deps: DirectorNoticeMirrorDeps, m
     await deps.mirror(message, { text, ...(notice.shortId !== undefined ? { code: notice.shortId } : {}) });
   } catch (error) {
     await deps.log({ kind: "error", action: "director_notice_mirror_failed", outcome: redactString(String(error)).slice(0, 240) }).catch(() => undefined);
+    if (deps.requireMirror) throw error;
   }
 }
 
@@ -175,7 +185,7 @@ export interface DirectorCoordinatorPortDeps {
 export function directorCoordinatorPort(deps: DirectorCoordinatorPortDeps): { invoke(name: string, input: unknown): Promise<JsonValue> } {
   return {
     invoke: async (name, input) => {
-      if (!isDirectorCoordinatorTool(name)) throw new Error("Tool is unavailable to the Director");
+      if (!["start_extension", "resume_run"].includes(name) && !isDirectorCoordinatorTool(name)) throw new Error("Tool is unavailable to the Director");
       const parameters = record(JsonValueSchema.parse(input ?? {}));
       try {
         const result = name === "planning_reference" ? await deps.planningReference(parameters) : await deps.invoke(name, parameters, DIRECTOR_TOOL_PRINCIPAL);
@@ -187,4 +197,48 @@ export function directorCoordinatorPort(deps: DirectorCoordinatorPortDeps): { in
       }
     }
   };
+}
+
+
+/** Strict host-only entry: callers reach this helper only through the authenticated Director endpoint. */
+export const DirectorExtensionStartSchema = z.object({ runId: z.string().min(1), kind: z.enum(["analysis", "qa"]),
+  intake: z.record(JsonValueSchema), packPin: z.object({ id: z.string().min(1), version: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict() }).strict();
+interface DirectorExtensionAdmissionDeps {
+  manifest(): SessionManifest;
+  extensions: Pick<WorkflowExtensionHost, "owns" | "inspect">;
+  readRun(runId: string): Promise<unknown>;
+}
+async function assertDirectorExtensionAdmission(deps: DirectorExtensionAdmissionDeps, principal: { role: string; principal?: string }, runId: string) {
+  if (principal.principal !== "director" || principal.role !== "coordinator") throw new Error("Only the authenticated Director principal controls a native extension");
+  const manifest = SessionManifestSchema.parse(deps.manifest());
+  if (manifest.schemaVersion !== 3) throw new Error("Director extension requires an active Director session");
+  if (!await deps.extensions.owns(runId)) throw new Error("No admitted extension route belongs to this run");
+  const view = record(await deps.extensions.inspect(runId)), delegation = DelegationRequestSchema.parse(view.delegation);
+  if (delegation.sessionId !== manifest.conversationSessionId || delegation.requestedBy !== "director" || delegation.metadata?.origin !== "director")
+    throw new Error("Native extension delegation does not belong to this Director session");
+  const parent = record(await deps.readRun(runId));
+  if (parent.cancelled === true || parent.supersededBy || ["completed", "completed_with_parked", "failed", "cancelled"].includes(String(parent.status)))
+    throw new Error("Native extension Runtime admission is terminal or superseded");
+  if (digest(DelegationRequestSchema.parse(parent.delegation)) !== digest(delegation))
+    throw new Error("Native extension differs from its admitted Runtime delegation");
+  return view;
+}
+export async function startDirectorExtension(deps: DirectorExtensionAdmissionDeps & {
+  extensions: Pick<WorkflowExtensionHost, "owns" | "inspect" | "start">;
+  wake(runId: string): void;
+}, principal: { role: string; principal?: string }, input: unknown): Promise<JsonValue> {
+  const args = DirectorExtensionStartSchema.parse(input);
+  await assertDirectorExtensionAdmission(deps, principal, args.runId);
+  const started = await deps.extensions.start(args.kind === "analysis" ? { ...args, kind: "analysis", intake: AnalysisIntakeSchema.parse(args.intake) }
+    : { ...args, kind: "qa", intake: QaIntakeSchema.parse(args.intake) });
+  deps.wake(args.runId); return started;
+}
+export async function resumeDirectorExtension(deps: DirectorExtensionAdmissionDeps & {
+  wakeStarted(runId: string): Promise<boolean>;
+}, principal: { role: string; principal?: string }, input: unknown): Promise<JsonValue> {
+  const args = z.object({ runId: z.string().min(1), actionId: z.string().min(1).optional() }).strict().parse(input);
+  const view = await assertDirectorExtensionAdmission(deps, principal, args.runId);
+  if (view.cancelled === true || view.status === "completed") throw new Error("Native extension is terminal");
+  if (!await deps.wakeStarted(args.runId)) throw new Error("Native extension has not started; use start_extension with its frozen intake and pin");
+  return { queued: true, runId: args.runId };
 }
