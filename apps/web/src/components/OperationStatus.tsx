@@ -3,7 +3,7 @@ import { WebApiErrorCodeSchema, type WebApiError } from '@bflow/contracts/web';
 import { ApiError } from '../api/client';
 import type { Observation } from '../api/commands';
 export const outcomeLabels={approved:'Duyệt',rejected:'Từ chối',changes_requested:'Yêu cầu sửa'} as const;
-export const operationLabels={create_request:'Tạo yêu cầu',revise_request:'Chỉnh yêu cầu',answer_clarification:'Trả lời làm rõ',answer_decision:'Quyết định gói',resume:'Tiếp tục công việc',cancel:'Hủy công việc',session_start:'Khởi động phiên',session_stop:'Dừng phiên'};
+export const operationLabels={create_request:'Tạo yêu cầu',revise_request:'Chỉnh yêu cầu',answer_clarification:'Trả lời làm rõ',answer_decision:'Quyết định gói',resume:'Tiếp tục công việc',cancel:'Hủy công việc',session_start:'Khởi động phiên',session_stop:'Dừng phiên',issue_retry:'Thử lại sự cố',issue_dismiss:'Bỏ qua sự cố',director_launch:'Mở Director'};
 const labels={accepted:'Đã tiếp nhận, đang chờ xử lý.',running:'Đang áp dụng thao tác.',applied:'Đã áp dụng thao tác. Trạng thái công việc được đọc riêng.',failed:'Thao tác không được áp dụng.',reconciliation_required:'Chưa xác định kết quả. Cần đối chiếu; không gửi lại.'};
 const failureGuidance:Record<WebApiError['code'],{reason:string;remedy:string}>={
   invalid_request:{reason:'Thông tin gửi chưa hợp lệ. Kiểm tra nội dung yêu cầu, câu trả lời và các trường bắt buộc.',remedy:'Sau khi sửa thông tin, chọn “Bắt đầu thao tác mới” rồi gửi lại yêu cầu đã chỉnh.'},

@@ -68,6 +68,14 @@ it.each(["wrong_action", "stale", "terminal", "disabled", "foreign_session"])("r
   expect(await f.service.execute(command, f.proof(command))).toMatchObject({ ok: false });
   expect(f.count()).toBe(0);
 });
+it.each(["issue_retry", "issue_dismiss"] as const)("fails closed for %s before any receipt until Director issue admission exists", async kind => {
+  const f = await setup();
+  const command = WebCommandSchema.parse({ apiVersion: 1, projectId: "project-1", commandId: f.command.commandId,
+    kind, runId: "run-1", issueId: "issue-1", expectedUpdatedAt: new Date(now).toISOString() });
+  expect(await f.service.execute(command, f.proof(command))).toMatchObject({ ok: false, error: { details: { reason: "operation_not_allowed" } } });
+  expect(f.count()).toBe(0);
+  expect(await f.store.read("local-user-1", command.commandId)).toBeUndefined();
+});
 it("lost response recovers by observation after restart without another admission", async () => {
   const f = await setup(); f.loseAck();
   expect(await f.service.execute(f.command, f.proof())).toMatchObject({ ok: true, value: { state: "reconciliation_required" } });

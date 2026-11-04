@@ -49,7 +49,8 @@ export const DirectorMessageSchema = z.object({
   messageId: id,
   author: z.enum(["user", "director"]),
   channel: DirectorChannelSchema,
-  text: nonblank(DIRECTOR_LIMITS.messageBytes).refine(value => Buffer.byteLength(value, "utf8") <= DIRECTOR_LIMITS.messageBytes,
+  // D-CD-01: portable UTF-8 count (browser-safe; lone surrogates count as U+FFFD, 3 bytes).
+  text: nonblank(DIRECTOR_LIMITS.messageBytes).refine(value => new TextEncoder().encode(value).byteLength <= DIRECTOR_LIMITS.messageBytes,
     `must be at most ${DIRECTOR_LIMITS.messageBytes} UTF-8 bytes`),
   at: time,
   runId: id.optional()

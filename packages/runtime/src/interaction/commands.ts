@@ -116,6 +116,9 @@ export class HostStructuredCommands {
   async validate(command: WebCommand): Promise<void> {
     if (!this.ports.ready()) throw new Refusal("unavailable");
     if (command.kind === "create_request") return;
+    // D-CD-01 issue commands are not run actions; fail closed before any receipt until
+    // the Director issue admission path owns them.
+    if (command.kind === "issue_retry" || command.kind === "issue_dismiss") throw new Refusal("operation_not_allowed");
     let view: WebRunView | undefined;
     if ("runId" in command && command.runId) {
       view = WebRunViewSchema.parse(await this.ports.run(command.runId));

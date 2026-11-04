@@ -53,6 +53,9 @@ export const WebInteractionReceiptSchema = z.object({ version: z.literal(2), rep
       value.sessionId !== principal.hostSessionId || operation.owner !== "host_interaction" || operation.operationKind !== command.kind ||
       fingerprint !== principal.commandDigest || fingerprint !== webCommandFingerprint(command))
     ctx.addIssue({ code: "custom", path: ["payload"], message: "web receipt identity/fingerprint mismatch" });
+  // D-CD-01: an applied issue command can only report the issue it named.
+  if ((command.kind === "issue_retry" || command.kind === "issue_dismiss") && operation.result?.kind === "issue" && operation.result.issueId !== command.issueId)
+    ctx.addIssue({ code: "custom", path: ["payload", "operation", "result"], message: "web receipt issue identity mismatch" });
 });
 export type WebInteractionReceipt = z.infer<typeof WebInteractionReceiptSchema>;
 
@@ -60,7 +63,8 @@ export type WebInteractionReceipt = z.infer<typeof WebInteractionReceiptSchema>;
 export const WebOperationIndexRecordSchema = z.object({ schemaVersion: z.literal(1), projectId: id, principalId: id, commandId: uuid,
   owner: z.enum(["host_interaction", "local_lifecycle"]), operationKind: WebOperationKindSchema, fingerprint: digest,
   hostSessionId: id.optional(), receiptId: uuid, createdAt: IsoDateTimeSchema }).strict().superRefine((value, ctx) => {
-  const lifecycle = value.operationKind === "session_start" || value.operationKind === "session_stop";
+  // D-CD-01: director_launch is a local lifecycle operation, like session start/stop.
+  const lifecycle = value.operationKind === "session_start" || value.operationKind === "session_stop" || value.operationKind === "director_launch";
   if (lifecycle !== (value.owner === "local_lifecycle") || (value.owner === "host_interaction") !== (value.hostSessionId !== undefined) || value.receiptId !== value.commandId)
     ctx.addIssue({ code: "custom", message: "index owner/session/receipt identity mismatch" });
 });

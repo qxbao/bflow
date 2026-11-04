@@ -9,6 +9,18 @@ import { RunStatusSchema, TaskStatusSchema } from "./execution.js";
 import { AcceptanceCriterionSchema, SdlcWorkStatusSchema } from "./sdlc.js";
 import { ConversationSessionStatusSchema } from "./conversation-status.js";
 import { OperationResultSchema, type OperationResult } from "./errors.js";
+import { AgentProviderIdSchema } from "./platform.js";
+import { DirectorMessageSchema, DirectorProgressSnapshotSchema, ParkedIssueSchema, ParkedIssueStatusSchema } from "./director.js";
+// D-CD-01: browser-safe Director read shapes; Web imports them only through this subpath.
+export {
+  DIRECTOR_LIMITS, DIRECTOR_SCHEMA_VERSION, DirectorChannelSchema, DirectorMessageSchema, DirectorPresenceSchema,
+  DirectorProgressRunSchema, DirectorProgressSnapshotSchema, DirectorProgressTaskSchema, ParkedIssueKindSchema,
+  ParkedIssueSchema, ParkedIssueStatusSchema
+} from "./director.js";
+export type {
+  DirectorChannel, DirectorMessage, DirectorPresence, DirectorProgressRun, DirectorProgressSnapshot, DirectorProgressTask,
+  ParkedIssue, ParkedIssueKind, ParkedIssueStatus
+} from "./director.js";
 
 export const WEB_API_VERSION = 1 as const;
 export const WEB_LIMITS = { bodyBytes: 262144, chatBytes: 16384, previewBytes: 1048576,
@@ -26,6 +38,9 @@ export const WebCursorSchema = token;
 export const WebEventCursorSchema = z.string().regex(/^[A-Za-z0-9_-]{1,200}:(0|[1-9][0-9]{0,19})$/);
 export const WebRequestKindSchema = z.enum(["feature", "bugfix", "refactor", "spike"]);
 export const WebCommandKindSchema = z.enum(["create_request", "revise_request", "answer_clarification", "answer_decision", "resume", "cancel"]);
+// D-CD-01: issue commands are WebCommand members but deliberately not WebAction kinds,
+// so existing run snapshots/action lists never advertise them to older clients.
+export const WebIssueCommandKindSchema = z.enum(["issue_retry", "issue_dismiss"]);
 export const WebDraftCriterionSchema = z.object({ description: nonblank(2000),
   verificationMethod: AcceptanceCriterionSchema.innerType().shape.verificationMethod }).strict();
 const requirements = { objective: text, acceptanceCriteria: z.array(WebDraftCriterionSchema).min(1).max(100),
@@ -42,7 +57,9 @@ export const WebCommandSchema = z.discriminatedUnion("kind", [
   z.object({ ...command, kind: z.literal("answer_decision"), runId: id, decisionId: id, expectedVersion: WebApprovalVersionSchema,
     outcome: z.enum(["approved", "rejected", "changes_requested"]), reason: text.optional(), selectedOption: nonblank(200).optional() }).strict(),
   z.object({ ...command, kind: z.literal("resume"), runId: id, actionId: id, expectedVersion: WebRevisionVersionSchema }).strict(),
-  z.object({ ...command, kind: z.literal("cancel"), runId: id, expectedVersion: WebRevisionVersionSchema, reason: text }).strict()
+  z.object({ ...command, kind: z.literal("cancel"), runId: id, expectedVersion: WebRevisionVersionSchema, reason: text }).strict(),
+  z.object({ ...command, kind: z.literal("issue_retry"), runId: id, issueId: id, expectedUpdatedAt: time }).strict(),
+  z.object({ ...command, kind: z.literal("issue_dismiss"), runId: id, issueId: id, expectedUpdatedAt: time }).strict()
 ]).superRefine((input, ctx) => {
   if (input.kind === "answer_clarification" && (input.runId === undefined) === (input.intakeId === undefined))
     ctx.addIssue({ code: "custom", path: ["intakeId"], message: "exactly one runId or intakeId is required" });
@@ -108,21 +125,38 @@ export const WebApiErrorSchema = z.object({ apiVersion: version, code: WebApiErr
 export const WebOperationResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("interaction"), runId: id, currentRunId: id, continuedAsRunId: id.optional() }).strict(),
   z.object({ kind: z.literal("intake"), intakeId: id }).strict(),
-  z.object({ kind: z.literal("lifecycle"), session: WebProjectSessionSchema }).strict()
+  z.object({ kind: z.literal("lifecycle"), session: WebProjectSessionSchema }).strict(),
+  z.object({ kind: z.literal("issue"), issueId: id, status: ParkedIssueStatusSchema }).strict(),
+  z.object({ kind: z.literal("director_launch"), provider: AgentProviderIdSchema, mode: z.enum(["terminal_opened", "manual_command"]),
+    manualCommand: nonblank(4096), launchedAt: time }).strict()
 ]);
-export const WebOperationKindSchema = z.enum([...WebCommandKindSchema.options, "session_start", "session_stop"]);
+export const WebOperationKindSchema = z.enum([...WebCommandKindSchema.options, ...WebIssueCommandKindSchema.options,
+  "session_start", "session_stop", "director_launch"]);
+type WebOperationKind = z.infer<typeof WebOperationKindSchema>;
+// D-CD-01 per-kind ownership/result rules; the pre-existing kinds keep their original rules.
+const localLifecycleKinds: readonly WebOperationKind[] = ["session_start", "session_stop", "director_launch"];
+function allowedResultKinds(kind: WebOperationKind): readonly string[] {
+  if (kind === "session_start" || kind === "session_stop") return ["lifecycle"];
+  if (kind === "director_launch") return ["director_launch"];
+  if (kind === "issue_retry" || kind === "issue_dismiss") return ["issue"];
+  if (kind === "create_request" || kind === "revise_request" || kind === "answer_clarification") return ["interaction", "intake"];
+  return ["interaction"];
+}
 export const WebOperationSchema = z.object({ apiVersion: version, operationId: uuid, projectId: id,
   owner: z.enum(["host_interaction", "local_lifecycle"]), operationKind: WebOperationKindSchema,
   state: z.enum(["accepted", "running", "applied", "failed", "reconciliation_required"]),
   result: WebOperationResultSchema.optional(), error: WebApiErrorSchema.optional(), updatedAt: time }).strict().superRefine((value, ctx) => {
-  const lifecycle = value.operationKind === "session_start" || value.operationKind === "session_stop";
+  const lifecycle = localLifecycleKinds.includes(value.operationKind);
   if (lifecycle !== (value.owner === "local_lifecycle")) ctx.addIssue({ code: "custom", path: ["owner"], message: "operation owner/kind mismatch" });
+  if (value.result && !allowedResultKinds(value.operationKind).includes(value.result.kind))
+    ctx.addIssue({ code: "custom", path: ["result"], message: "result kind does not match operation kind" });
   if (value.state === "applied" && !value.result) ctx.addIssue({ code: "custom", path: ["result"], message: "applied requires result" });
   if (value.state === "failed" && !value.error) ctx.addIssue({ code: "custom", path: ["error"], message: "failed requires error" });
   if (value.state !== "applied" && value.result) ctx.addIssue({ code: "custom", path: ["result"], message: "non-applied operation cannot have result" });
   if ((value.state === "applied" || value.state === "accepted" || value.state === "running") && value.error)
     ctx.addIssue({ code: "custom", path: ["error"], message: "error only for failed or uncertain operation" });
-  if (value.result && lifecycle !== (value.result.kind === "lifecycle")) ctx.addIssue({ code: "custom", path: ["result"], message: "result owner mismatch" });
+  const session = value.operationKind === "session_start" || value.operationKind === "session_stop";
+  if (value.result && session !== (value.result.kind === "lifecycle")) ctx.addIssue({ code: "custom", path: ["result"], message: "result owner mismatch" });
   if (value.result?.kind === "intake" && !["create_request", "revise_request", "answer_clarification"].includes(value.operationKind))
     ctx.addIssue({ code: "custom", path: ["result"], message: "only intake commands return intake result" });
   if (value.error?.operationId && value.error.operationId !== value.operationId) ctx.addIssue({ code: "custom", path: ["error"], message: "error operation identity mismatch" });
@@ -290,6 +324,31 @@ export interface UserInteractionClient {
   readWorkforceExcerpts?(projectId: string): Promise<OperationResult<WebWorkforceExcerpts>>;
   readAgentTranscript?(projectId: string, instanceId: string): Promise<OperationResult<WebAgentTranscript>>;
 }
+// D-CD-01 Director Web read/launch DTOs. No DirectorSession, token, directorId or repository path crosses to the browser.
+export const WebDirectorViewSchema = z.object({ apiVersion: version, projectId: id,
+  layout: z.enum(["director", "legacy_v2", "not_started"]), sessionId: id.optional(), snapshot: DirectorProgressSnapshotSchema,
+  waitingSince: time.optional(), transcriptSeq: z.number().int().min(0), cliCaptureMayBeIncomplete: z.boolean(), observedAt: time }).strict();
+/** Message `channel` records the origin; Director replies stay `cli` because Director runs in a CLI. */
+export const WebDirectorTranscriptPageSchema = WebPageSchema(DirectorMessageSchema);
+export const WebIssueQueueViewSchema = WebPageSchema(ParkedIssueSchema);
+/** Installed is not ready: `available` requires the server's own readiness checks. */
+export const WebDirectorLaunchOptionSchema = z.object({ provider: AgentProviderIdSchema,
+  state: z.enum(["available", "unavailable", "unverified"]), reason: nonblank(2000).optional(), manualCommand: nonblank(4096) }).strict();
+export const WebDirectorLaunchOptionsSchema = z.object({ apiVersion: version, projectId: id,
+  terminal: z.object({ available: z.boolean(), reason: nonblank(2000).optional() }).strict(),
+  providers: z.array(WebDirectorLaunchOptionSchema).max(3)
+    .refine(items => new Set(items.map(item => item.provider)).size === items.length, "providers must be unique"),
+  observedAt: time }).strict();
+/** The server derives argv/cwd/env; the browser only selects a provider. */
+export const WebDirectorLaunchRequestSchema = z.object({ apiVersion: version, operationId: uuid, provider: AgentProviderIdSchema,
+  replaceActive: z.boolean().default(false) }).strict();
+export type WebDirectorView = z.infer<typeof WebDirectorViewSchema>;
+export type WebDirectorTranscriptPage = z.infer<typeof WebDirectorTranscriptPageSchema>;
+export type WebIssueQueueView = z.infer<typeof WebIssueQueueViewSchema>;
+export type WebDirectorLaunchOption = z.infer<typeof WebDirectorLaunchOptionSchema>;
+export type WebDirectorLaunchOptions = z.infer<typeof WebDirectorLaunchOptionsSchema>;
+export type WebDirectorLaunchRequest = z.infer<typeof WebDirectorLaunchRequestSchema>;
+export type WebIssueCommand = Extract<WebCommand, { kind: z.infer<typeof WebIssueCommandKindSchema> }>;
 export const WebProjectInspectionResultSchema = OperationResultSchema(WebProjectInspectionSchema);
 export const WebProjectSessionResultSchema = OperationResultSchema(WebProjectSessionSchema);
 export const WebProjectPreviewResultSchema = OperationResultSchema(WebProjectPreviewSchema);
@@ -338,7 +397,14 @@ export const WebHttpContracts = {
   workforce: { method: "GET", path: "/api/v1/projects/:id/workforce", body: noBody, query: noQuery, response: WebWorkforceViewSchema, statuses: [200] },
   activity: { method: "GET", path: "/api/v1/projects/:id/runs/:runId/activity", body: noBody, query: WebActivityQuerySchema, response: WebPageSchema(WebActivityEntrySchema), statuses: [200] },
   workforceExcerpts: { method: "GET", path: "/api/v1/projects/:id/workforce/excerpts", body: noBody, query: noQuery, response: WebWorkforceExcerptsSchema, statuses: [200] },
-  agentTranscript: { method: "GET", path: "/api/v1/projects/:id/agents/:instanceId/transcript", body: noBody, query: noQuery, response: WebAgentTranscriptSchema, statuses: [200] }
+  agentTranscript: { method: "GET", path: "/api/v1/projects/:id/agents/:instanceId/transcript", body: noBody, query: noQuery, response: WebAgentTranscriptSchema, statuses: [200] },
+  // D-CD-01 Director routes. Issue actions use `command`; SSE event types are unchanged.
+  director: { method: "GET", path: "/api/v1/projects/:id/director", body: noBody, query: noQuery, response: WebDirectorViewSchema, statuses: [200] },
+  directorMessages: { method: "GET", path: "/api/v1/projects/:id/director/messages", body: noBody, query: WebMessagesQuerySchema, response: WebDirectorTranscriptPageSchema, statuses: [200] },
+  sendDirectorMessage: { method: "POST", path: "/api/v1/projects/:id/director/messages", body: WebChatSendSchema, query: noQuery, response: DirectorMessageSchema, statuses: [202] },
+  directorIssues: { method: "GET", path: "/api/v1/projects/:id/director/issues", body: noBody, query: WebMessagesQuerySchema, response: WebIssueQueueViewSchema, statuses: [200] },
+  directorLaunchOptions: { method: "GET", path: "/api/v1/projects/:id/director/launch-options", body: noBody, query: noQuery, response: WebDirectorLaunchOptionsSchema, statuses: [200] },
+  launchDirector: { method: "POST", path: "/api/v1/projects/:id/director/launch", body: WebDirectorLaunchRequestSchema, query: noQuery, response: WebOperationSchema, statuses: [202] }
 } as const;
 export const WebHttpPathParamsSchema = z.object({ id, runId: id.optional(), operationId: uuid.optional(),
   artifactId: ArtifactIdSchema.optional(), noticeId: id.optional(), sessionId: id.optional(), instanceId: id.optional() }).strict();

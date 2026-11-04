@@ -91,8 +91,9 @@ describe("D-WEB-03 workforce projection contract", () => {
   });
   it("keeps the browser closure of web.ts limited to pure zod modules", () => {
     // Baseline before D-WEB-03 plus agent-roles.ts, a zod-only leaf needed for AgentRoleSchema.
+    // D-CD-01 adds director.ts (portable UTF-8 count) and its zod-only platform.ts provider enum.
     const expected = ["agent-roles.ts", "agent.ts", "approval.ts", "artifact.ts", "common.ts", "conversation-status.ts",
-      "errors.ts", "execution.ts", "quality.ts", "sdlc.ts", "web.ts"];
+      "director.ts", "errors.ts", "execution.ts", "platform.ts", "quality.ts", "sdlc.ts", "web.ts"];
     const visited = new Set<string>();
     const visit = (path: string) => {
       if (visited.has(path)) return;
