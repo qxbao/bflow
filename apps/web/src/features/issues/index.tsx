@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import type { ParkedIssue, ParkedIssueKind, ParkedIssueStatus, WebRunView } from '@bflow/contracts/web';
+import type { ParkedIssue, ParkedIssueKind, ParkedIssueStatus } from '@bflow/contracts/web';
 import { ApiError, explain } from '../../api/client';
 import { ActionConfirmation } from '../../components/ActionConfirmation';
 import { LoadingState } from '../../components/LoadingState';
@@ -30,7 +30,9 @@ export const artifactIdOf=(uri:string)=>uri.replace(/^artifact:\/\//,'').split('
 export interface IssueQueue{
   projectId:string;
   /** `unavailable`: layout or backend has no Director issue port; never rendered as an empty queue. */
-  availability:'ready'|'unavailable'|'loading';
+  availability:'ready'|'unavailable'|'loading'|'unknown';
+  /** runId -> its current run, for the active issues on this page; missing = not read (unknown), never assumed current. */
+  currentRuns:Record<string,string>;
   items:ParkedIssue[];all:ParkedIssue[];
   filter:IssueFilter;setFilter(filter:IssueFilter):void;
   loading:boolean;error:unknown;
@@ -47,10 +49,17 @@ export function useIssueQueue():IssueQueue{
   const cursor=trail.at(-1),usable=d.layout==='director'||d.layout==='not_started';
   const read=useRead(`issues:${d.projectId}:${cursor??''}:${usable}`,()=>usable?d.api.directorIssues(d.projectId,cursor):Promise.resolve(undefined),d.readEpoch);
   const missingPort=read.error instanceof ApiError&&unsupportedCodes.has(read.error.code);
-  const availability:IssueQueue['availability']=d.layout==='legacy_v2'||d.layout==='unsupported'||missingPort?'unavailable':read.data===undefined&&read.error===undefined?'loading':'ready';
+  // `unknown` (Director view not readable, no confirmed layout) is neither loading forever nor unavailable: it offers a re-read.
+  const availability:IssueQueue['availability']=d.layout==='legacy_v2'||d.layout==='unsupported'||missingPort?'unavailable':d.layout==='unknown'?(d.loading?'loading':'unknown'):read.data===undefined&&read.error===undefined?'loading':'ready';
   const all=read.data?.items??[];
+  const activeRuns=[...new Set(all.filter(issue=>issue.status==='open'||issue.status==='retrying').map(issue=>issue.runId))].sort();
+  const runs=useRead(`issue-runs:${d.projectId}:${activeRuns.join(',')}`,async()=>{
+    const out:Record<string,string>={};
+    await Promise.all(activeRuns.map(async runId=>{try{out[runId]=(await d.api.run(d.projectId,runId)).currentRunId;}catch{/* unknown stays unknown */}}));
+    return out;
+  },d.readEpoch);
   const next=read.data?.nextCursor;
-  return {projectId:d.projectId,availability,all,items:all.filter(issue=>matches(filter,issue)),filter,setFilter,loading:read.loading,error:missingPort?undefined:read.error,
+  return {projectId:d.projectId,availability,currentRuns:runs.data??{},all,items:all.filter(issue=>matches(filter,issue)),filter,setFilter,loading:read.loading,error:missingPort?undefined:read.error,
     fresh:!read.loading&&read.error===undefined&&read.data!==undefined,page:trail.length+1,hasNext:Boolean(next),hasPrevious:trail.length>0,
     next:()=>{if(next)setTrail(old=>[...old,next]);},previous:()=>setTrail(old=>old.slice(0,-1)),refresh:d.reload};
 }
@@ -60,13 +69,13 @@ const settledState=(op?:{state:string})=>Boolean(op&&['applied','failed'].includ
  * Retry/dismiss for one issue. Gates: a fresh read, the issue's own status, a still-current episode (checked again against the run at click
  * time), and no unsettled earlier command. An unsettled or uncertain command is observed only, never re-sent.
  */
-export function IssueActions({issue,run,fresh,refresh}:{issue:ParkedIssue;run?:WebRunView|undefined;fresh:boolean;refresh:()=>void}){
+export function IssueActions({issue,currentRunId,fresh,refresh}:{issue:ParkedIssue;currentRunId?:string|undefined;fresh:boolean;refresh:()=>void}){
   const d=useDirector(),retry=useCommands(`issue_retry:${issue.issueId}`),dismiss=useCommands(`issue_dismiss:${issue.issueId}`);
   const [confirm,setConfirm]=useState(false),[error,setError]=useState(''),[checking,setChecking]=useState(false),uid=useId();
   const stamp0=useRef(issue.updatedAt);
   useEffect(()=>{if(stamp0.current!==issue.updatedAt){stamp0.current=issue.updatedAt;setError('');setConfirm(false);}},[issue.updatedAt]);
   const unsettled=[retry,dismiss].some(cmd=>Boolean(cmd.tracked&&!settledState(cmd.operation)));
-  const historical=run!==undefined&&run.currentRunId!==issue.runId;
+  const historical=currentRunId!==undefined&&currentRunId!==issue.runId;
   const base=!fresh||historical||checking||retry.busy||dismiss.busy||!retry.online||unsettled||d.layout==='legacy_v2';
   const canRetry=!base&&issue.status==='open',canDismiss=!base&&(issue.status==='open'||issue.status==='retrying');
   async function send(kind:'issue_retry'|'issue_dismiss'){
@@ -75,13 +84,12 @@ export function IssueActions({issue,run,fresh,refresh}:{issue:ParkedIssue;run?:W
     try{
       // The episode may have moved on since the page was read; the runtime also re-checks the exact updatedAt.
       const current=await d.api.run(d.projectId,issue.runId);
-      if(current.currentRunId!==issue.runId){refresh();setError('Công việc đã được tiếp nối ở phiên bản khác nên sự cố này không còn thao tác được. Đã đọc lại hàng đợi.');return;}
+      if(current.currentRunId!==issue.runId){setError('Công việc đã được tiếp nối ở phiên bản khác nên sự cố này không còn thao tác được. Đã đọc lại hàng đợi.');return;}
       if(settledState(target.operation))await target.startNew();
       await target.submit({kind,runId:issue.runId,issueId:issue.issueId,expectedUpdatedAt:issue.updatedAt});
       setConfirm(false);
     }catch(e){
-      if(e instanceof ApiError&&(e.code==='stale_version'||e.code==='operation_not_allowed'))refresh();
-      setError(e instanceof Error&&!('code' in e)?e.message:e instanceof ApiError&&e.code==='stale_version'?'Sự cố đã thay đổi. Đã đọc lại hàng đợi; kiểm tra rồi thử lại nếu vẫn cần.':explain(e));
+      setError(e instanceof ApiError?e.code==='stale_version'?'Sự cố đã thay đổi. Đã đọc lại hàng đợi; kiểm tra rồi thử lại nếu vẫn cần.':explain(e):'Chưa gửi được thao tác. Đọc lại hàng đợi rồi thử lại.');
     }finally{setChecking(false);refresh();}
   }
   const open=issue.status==='open'||issue.status==='retrying';
@@ -119,18 +127,18 @@ export function IssueQueuePanel({compact=false}:{compact?:boolean}){
   const q=useIssueQueue(),Heading=compact?'h3':'h2';
   const base=`/projects/${encodeURIComponent(q.projectId)}/issues`;
   const filterId=useId();
-  const refreshed=useCallback(()=>q.refresh(),[q]);
   return <section data-component="IssueQueue" aria-label="Hàng đợi sự cố" className="min-w-0">
     <Heading className="m-0 text-base">Hàng đợi sự cố</Heading>
     {q.availability==='unavailable'&&<p role="status" className="my-2 text-sm text-muted">Hàng đợi sự cố chưa khả dụng với cấu hình hoặc phiên bản này. Đây không có nghĩa là không có sự cố.</p>}
+    {q.availability==='unknown'&&<div role="status" className="my-2 text-sm"><p className="my-1">Chưa xác định được trạng thái hàng đợi. Lần đọc phiên Director gần nhất không thành công; đây không có nghĩa là không có sự cố.</p><button type="button" onClick={q.refresh}>Đọc lại</button></div>}
     {q.availability==='loading'&&<LoadingState loading initial label="Đang đọc hàng đợi sự cố…"/>}
     {q.availability==='ready'&&<>
-      <div className="my-2 flex flex-wrap items-end gap-3"><div><label htmlFor={filterId} className="block text-xs">Lọc theo trạng thái</label><select id={filterId} value={q.filter} onChange={e=>q.setFilter(e.target.value as IssueFilter)}>{(Object.keys(filterLabels) as IssueFilter[]).map(key=><option key={key} value={key}>{filterLabels[key]}</option>)}</select></div><button type="button" onClick={refreshed}>Đọc lại hàng đợi</button></div>
+      <div className="my-2 flex flex-wrap items-end gap-3"><div><label htmlFor={filterId} className="block text-xs">Lọc theo trạng thái</label><select id={filterId} value={q.filter} onChange={e=>q.setFilter(e.target.value as IssueFilter)}>{(Object.keys(filterLabels) as IssueFilter[]).map(key=><option key={key} value={key}>{filterLabels[key]}</option>)}</select></div><button type="button" onClick={q.refresh}>Đọc lại hàng đợi</button></div>
       {Boolean(q.error)&&<p role="alert" className="my-2 border-l-3 border-warning pl-3 text-sm">Chưa đọc được hàng đợi sự cố mới nhất; dữ liệu bên dưới có thể đã cũ. Đây không có nghĩa là hết sự cố.</p>}
       {q.items.length===0?<p className="my-2 text-sm text-muted">{q.all.length===0&&q.page===1?'Chưa có sự cố nào được ghi nhận.':'Không có sự cố phù hợp bộ lọc trong trang này.'}</p>
         :<ul className="m-0 list-none border-t border-line p-0">{q.items.map(issue=><li key={issue.issueId} className="border-b border-line py-2.5"><IssueSummary issue={issue}/>
           <p className="my-1 text-sm"><Link to={`${base}/${encodeURIComponent(issue.issueId)}`}>Xem chi tiết sự cố →</Link></p>
-          <IssueActions issue={issue} fresh={q.fresh} refresh={q.refresh}/></li>)}</ul>}
+          <IssueActions issue={issue} currentRunId={q.currentRuns[issue.runId]} fresh={q.fresh} refresh={q.refresh}/></li>)}</ul>}
       {(q.hasNext||q.hasPrevious)&&<nav aria-label="Phân trang hàng đợi sự cố" className="my-2 flex flex-wrap items-center gap-2"><button type="button" disabled={!q.hasPrevious||q.loading} onClick={q.previous}>Trang trước</button><span className="font-data text-xs text-muted">Trang {q.page}</span><button type="button" disabled={!q.hasNext||q.loading} onClick={q.next}>Trang sau</button></nav>}
     </>}
   </section>;

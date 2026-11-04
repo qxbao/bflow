@@ -57,7 +57,7 @@ export function IssueDetail(){
       </section>
       <section aria-label="Tài liệu bằng chứng" className="my-3"><h2 className="m-0 text-base">Tài liệu bằng chứng</h2>
         {issue.evidence.length===0?<p className="text-sm text-muted">Chưa có tài liệu đính kèm.</p>:<ul className="m-0 list-none p-0">{issue.evidence.map(uri=><IssueEvidence key={uri} api={d.api} projectId={d.projectId} uri={uri}/>)}</ul>}</section>
-      <IssueActions issue={issue} run={runView} fresh={!read.loading&&!read.error} refresh={d.reload}/>
+      <IssueActions issue={issue} currentRunId={runView?.currentRunId} fresh={!read.loading&&!read.error} refresh={d.reload}/>
     </article>}
   </>;
 }

@@ -10,7 +10,7 @@ import { DirectorProvider } from '../src/features/director/status';
 import { IssueQueuePanel, IssuesPage } from '../src/features/issues';
 import { IssueDetail } from '../src/features/issues/detail';
 import { Runs, RunView } from '../src/features/runs';
-import { directorServer, locks, sessionRead, uuid } from './director-fixtures';
+import { directorServer, locks, sessionRead, uuid, view } from './director-fixtures';
 import { run as baseRun } from './fixtures';
 
 beforeEach(()=>{localStorage.clear();vi.stubGlobal('crypto',webcrypto);Object.defineProperty(navigator,'locks',{configurable:true,value:locks});});
@@ -103,6 +103,26 @@ it('a non-current episode cannot be acted on and sends nothing',async()=>{
   const {calls}=server({issues:[issue()],run:runView({currentRunId:'child'})});render(page());
   fireEvent.click(await screen.findByRole('button',{name:'Thử lại sự cố'}));
   expect(await screen.findByText(/tiếp nối ở phiên bản khác/)).toBeTruthy();expect(calls.commands).toHaveLength(0);
+});
+it('list rows disable actions for a non-current episode without clicking',async()=>{
+  const {calls}=server({issues:[issue()],run:runView({currentRunId:'child'})});render(page());
+  await screen.findByText('Hết lượt kiểm chứng');
+  await waitFor(()=>expect(screen.getByRole<HTMLButtonElement>('button',{name:'Thử lại sự cố'}).disabled).toBe(true));
+  expect(screen.getByRole<HTMLButtonElement>('button',{name:'Bỏ qua sự cố'}).disabled).toBe(true);expect(calls.commands).toHaveLength(0);
+});
+it('an unreadable Director view is an explicit unknown state with a re-read control, not endless loading',async()=>{
+  let fail=true;
+  directorServer({view:()=>fail?err('unavailable',503):view(),extra:path=>path.includes('/director/issues')?{apiVersion:1,items:[issue()]}:undefined});
+  render(page());
+  expect(await screen.findByText(/Chưa xác định được trạng thái hàng đợi/)).toBeTruthy();expect(screen.queryByText('Đang đọc hàng đợi sự cố…')).toBeNull();
+  fail=false;fireEvent.click(screen.getByRole('button',{name:'Đọc lại'}));
+  expect(await screen.findByText('Hết lượt kiểm chứng')).toBeTruthy();
+});
+it('a non-API error shows Vietnamese text, never the raw message',async()=>{
+  vi.stubGlobal('navigator',{onLine:true,locks:{request:async()=>{throw new Error('RAW_ENGLISH_BOOM');}}});
+  server({issues:[issue()]});render(page());
+  fireEvent.click(await screen.findByRole('button',{name:'Thử lại sự cố'}));
+  expect(await screen.findByText(/Chưa gửi được thao tác/)).toBeTruthy();expect(screen.queryByText(/RAW_ENGLISH_BOOM/)).toBeNull();
 });
 it('the detail disables actions for a historical run',async()=>{
   server({issues:[issue()],run:runView({currentRunId:'child'})});render(detail());
