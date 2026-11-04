@@ -160,6 +160,7 @@ jobs:
           pnpm exec vitest run \
             packages/runtime/test/agentic/lifecycle-fault-matrix-extended-restart.test.ts \
             packages/runtime/test/agentic/lifecycle-fault-matrix-faults.test.ts \
+            packages/runtime/test/agentic/lifecycle-fault-matrix-extended-interventions.test.ts \
             --maxWorkers=1 --minWorkers=1 --reporter=basic
 
   test-e2e:
