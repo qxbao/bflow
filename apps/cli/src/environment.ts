@@ -148,6 +148,12 @@ export function startupSessionWasCleanedUp(error: unknown): boolean {
 function fail(message: string, details?: any): never {
   throw new EnvironmentError({ code: "validation", retryable: false, message, ...(details !== undefined ? { details } : {}) });
 }
+/** Used only at explicit refusal sites before the shutdown barrier or stop intent. */
+function refuseUnchangedStop(message: string): never {
+  const error = new EnvironmentError({ code: "validation", retryable: false, message });
+  unchangedLifecycleFailures.add(error);
+  throw error;
+}
 function unwrap<T>(result: OperationResult<T>): T {
   if (!result.ok) throw new EnvironmentError(ContractErrorSchema.parse(result.error));
   return result.value;
@@ -1074,7 +1080,7 @@ export class EnvironmentLifecycle {
             configuration: "valid" as const, manifest: null, liveObservation: true, issues: [] };
         }
         if (!prior || !["server_starting", "manager_pending", "down"].includes(prior.phase))
-          fail("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
+          refuseUnchangedStop("No repository manifest. Run bflow status or bflow doctor; no session was stopped.");
         const recovery = await acquire();
         if (!recovery) fail("No role manager can reconcile the partial startup; no session was stopped.");
         try {
@@ -1222,17 +1228,17 @@ export class EnvironmentLifecycle {
         const busy = manifest.panes.some((p) => ["working", "starting", "accepted", "unknown", "disconnected", "blocked"].includes(p.transportState));
         // --yes confirms an orderly checkpointed stop; it cannot accept losing an unverified Developer attempt. Only --force can.
         const writerBlocker = force ? undefined : unverifiedWriterBlocker(unverifiedWriters(activeSnapshots));
-        if (writerBlocker) fail(writerBlocker);
+        if (writerBlocker) refuseUnchangedStop(writerBlocker);
         if ((hasUncommittedChanges || activeRuns.size || busy) && !confirmed) {
           const dirtySuffix = dirtyWorktrees.length > 0
             ? `, uncommitted changes in Developer worktree(s) (${dirtyWorktrees.join(", ")})`
             : changes.trim()
               ? ", uncommitted changes"
               : "";
-          fail(`Unsafe shutdown: ${activeRuns.size} active runs${dirtySuffix}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
+          refuseUnchangedStop(`Unsafe shutdown: ${activeRuns.size} active runs${dirtySuffix}${busy ? ", busy/unresolved agents" : ""}. Inspect state and rerun bflow down --yes to confirm. Nothing was stopped.`);
         }
-        if (activeRuns.size && !integration.checkpoint) fail("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
-        if (!integration.quiesce) fail("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
+        if (activeRuns.size && !integration.checkpoint) refuseUnchangedStop("Runtime checkpoint/quiesce API is unavailable. --yes cannot bypass recovery checkpoint requirements.");
+        if (!integration.quiesce) refuseUnchangedStop("Runtime shutdown barrier is unavailable; cannot stop intake/dispatch safely.");
         await this.writeIntent(repository, "stopping");
         this.progress("Đang thiết lập rào chắn dừng Runtime an toàn...");
         unwrap(await deadline.call((opts) => integration.quiesce!(opts)));

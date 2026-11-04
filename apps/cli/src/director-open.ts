@@ -311,7 +311,8 @@ export async function defaultDirectorOpenDeps(cwd: string): Promise<DirectorOpen
       try {
         const { EnvironmentLifecycle } = await import("./environment.js");
         const status = await new EnvironmentLifecycle(repository.root).status();
-        if (status.server !== "running") return "host_stopped";
+        if (status.server === "stopped") return "host_stopped";
+        if (status.server !== "running") return "unknown";
         const { identifyRepository } = await import("./repository.js");
         const runtime = await import("@bflow/runtime");
         const { sessionName } = await identifyRepository(repository.root);

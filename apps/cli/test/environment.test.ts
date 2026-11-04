@@ -120,6 +120,36 @@ describe("P12 repository environment lifecycle", () => {
     expect(runner.running.has(repository.sessionName)).toBe(true);
     expect(fixture.manager.down).not.toHaveBeenCalled();
   });
+  it("settles a Web stop refused before touching an unowned live session as failed", async () => {
+    runner.running.add(repository.sessionName);
+    const project = { apiVersion: 1 as const, projectId: interactionProjectId(repository.root), canonicalPath: repository.root,
+      displayName: "repo", registrationState: "registered" as const };
+    const services = createWebWorkspaceServices({ resolveProject: async () => project, createLifecycle: () => lifecycle });
+    const operationId = crypto.randomUUID();
+    expect(await services.stopSession(project.projectId, operationId)).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect(await services.reconcileSessionOperation({ apiVersion: 1, projectId: project.projectId, operationId,
+      owner: "local_lifecycle", operationKind: "session_stop", state: "running", updatedAt: now })).toMatchObject({ ok: true, value: { state: "failed" } });
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+  });
+  it("settles the Web refusal of an unverified writer without stopping or checkpointing its execution", async () => {
+    const manifest = fixture.create();fixture.set(manifest);
+    await mkdir(join(dir, '.bflow/state'), { recursive: true });
+    await writeFile(join(dir, '.bflow/state/session.json'), JSON.stringify(manifest));
+    runner.running.add(repository.sessionName);
+    const writer: WorkflowRunSnapshot = { ...activeRun, tasks: [{ taskId: "task-multiply", status: "running", attempt: 1, generation: 0, attemptId: "attempt-1", version: 3,
+      agentExecution: { executionId: "exec-1", requestId: "request-1", attemptId: "attempt-1", runId: "active-run", taskId: "task-multiply", idempotencyKey: "assign-1",
+        target: { transport: "herdr", agentId: "dev-1", paneId: "w2:p2" }, correlation: { token: "request-1", provenance: "orchestrator", verified: false }, acceptedAt: now } }] } as WorkflowRunSnapshot;
+    const quiesce=vi.fn(async()=>({ok:true as const,value:undefined}));
+    const life=new EnvironmentLifecycle(dir,{runner,integration:{manager:fixture.manager,runtime:mockRuntime([writer]),quiesce}});
+    const project={apiVersion:1 as const,projectId:interactionProjectId(repository.root),canonicalPath:repository.root,displayName:'repo',registrationState:'registered' as const};
+    const services=createWebWorkspaceServices({resolveProject:async()=>project,createLifecycle:()=>life});
+    const operationId=crypto.randomUUID();
+    expect(await services.stopSession(project.projectId,operationId)).toMatchObject({ok:false,error:{code:'validation'}});
+    expect(await services.reconcileSessionOperation({apiVersion:1,projectId:project.projectId,operationId,owner:'local_lifecycle',operationKind:'session_stop',state:'running',updatedAt:now})).toMatchObject({ok:true,value:{state:'failed'}});
+    expect(quiesce).not.toHaveBeenCalled();expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+  });
   it("preserves unmanifested active Runtime work on an already stopped server", async () => {
     const shutdownHost = vi.fn(async () => {});
     const life = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]),

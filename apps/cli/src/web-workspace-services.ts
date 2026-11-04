@@ -253,7 +253,7 @@ export function createWebWorkspaceServices(options: WebWorkspaceOptions): WebWor
         const saved=await readReceipt(root,operation.projectId,operation.operationId);
         if(saved && saved.operationKind!==operation.operationKind)throw new Error('Lifecycle receipt kind mismatch');
         const activeInProcess=saved?.state==='running' && inFlight.has(path);
-        if(saved?.state==='reconciliation_required' && !inFlight.has(path)){
+        if(saved && (saved.state==='reconciliation_required'||saved.state==='running') && !inFlight.has(path)){
           const stopped=await subsequentStop(root,saved,repository.sessionName);
           if(stopped){
             const retired=WebOperationSchema.parse({...saved,state:'failed',

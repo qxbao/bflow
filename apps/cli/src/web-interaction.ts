@@ -194,7 +194,8 @@ export function createWebInteractionServices(context: InteractionComposition, de
     try{
       const {EnvironmentLifecycle}=await import('./environment.js');
       const status=await new EnvironmentLifecycle(project.canonicalPath).status();
-      if(status.server!=='running')return 'host_stopped';
+      if(status.server==='stopped')return 'host_stopped';
+      if(status.server!=='running')return 'unknown';
       const view=await (await openDirector({repositoryPath:project.canonicalPath,sessionId:hostSessionId})).readDirector(project.projectId);
       return view.ok?view.value.snapshot.director.presence:'unknown';
     }catch{return 'unknown';}

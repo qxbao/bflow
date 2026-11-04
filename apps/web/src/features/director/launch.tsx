@@ -67,7 +67,7 @@ export function DirectorLaunch({label='Mở phiên Director'}:{label?:string}){
   },[waitingForDirector,result]);
   // A window opened by this launch may still be starting Director while presence reads absent: another launch must be an
   // explicit replacement, never a silent second Director.
-  const needsReplace=(d.layout!=='not_started'&&d.presence!=='absent')||waitingForDirector;
+  const needsReplace=d.presence!=='absent'||waitingForDirector;
   const chosen=options?.providers.find(option=>option.provider===provider);
   const toggle=useRef<HTMLButtonElement>(null),outcome=useRef<HTMLDivElement>(null);
   const close=()=>{setOpen(false);requestAnimationFrame(()=>toggle.current?.focus());};

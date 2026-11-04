@@ -10,6 +10,7 @@ import type { LocalWorkspaceServices, WebProject } from '@bflow/contracts/web';
 import { createWebInteractionServices } from '../src/web-interaction.js';
 import { createWebWorkspaceServices } from '../src/web-workspace-services.js';
 import { initializeEnvironmentConfig } from '../src/environment-config.js';
+import { EnvironmentLifecycle } from '../src/environment.js';
 
 const dirs: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(dirs.splice(0).map(d => rm(d, { recursive: true, force: true }))); });
@@ -67,6 +68,17 @@ it('exposes a configured stopped Director project before a host or browser layou
     director: { readPresence: async () => 'unknown' }
   });
   expect(await unknown.director.readView(project.projectId, browser())).toMatchObject({ ok: false });
+});
+
+it('a failed real lifecycle status probe remains unknown rather than a stopped Director projection', async () => {
+  const { project } = await repository();
+  await initializeEnvironmentConfig({ cwd: project.canonicalPath });
+  vi.spyOn(EnvironmentLifecycle.prototype, 'status').mockResolvedValue({ workspaceRoot: project.canonicalPath, sessionName: 'host-1',
+    server: 'unknown', configuration: 'valid', manifest: null, liveObservation: false, issues: ['Herdr status probe failed'] });
+  const services = createWebInteractionServices({ principalId: 'ledger', resolveProject: async () => project }, {
+    sessionId: async () => 'host-1', openDirector: (async () => { throw new Error('Host unresponsive'); }) as never
+  });
+  expect(await services.director.readView(project.projectId, browser())).toMatchObject({ ok: false });
 });
 
 it('reads the Director view through the owner query and pages messages/sends with the registered Web credential only', async () => {
