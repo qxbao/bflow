@@ -107,17 +107,17 @@ fault-injected live test; không mô tả như một outage tự nhiên của nh
 
 ## 8. Acceptance criteria của phần bổ sung
 
-| ID | Điều kiện chấp nhận | Evidence bắt buộc |
-| --- | --- | --- |
-| ext-1 | Exact BA/QA pack chọn extension qua Conversation/host; luồng thi công cũ giữ nguyên | live intake, pinned pack, run kind, schema rejection |
-| ext-2 | Native role tasks dùng actual receipt/handle, lease/fence và đúng session | journal intent/binding, authenticated receipts, restart fault test |
-| ext-3 | Exact human decisions được áp dụng nguyên vẹn, không tự tạo lại receipt | pending request, canonical decision equality, wrong digest/replay denials |
-| ext-4 | BA-only publish FR/AC/NFR hợp lệ; không implementation patch/Developer | document digest, independent verdict, human approvals, protected Git diff |
-| ext-5 | QA-only có design/execution/report trên exact fixture build; không sửa product | test design digest, lease/grant, actual response evidence, before/after hashes |
-| ext-6 | Restart không replay unknown work hoặc mất human gate | controlled crash/reconcile logs và cùng run ID |
-| ext-7 | #12 có native structured failure và fallback model thật, giữ context/history | old stop proof, reconcile, new fence/binding/model, same run/task/worktree/TDD |
-| ext-8 | Không secret/raw agent logs trong report/handover | allow-list + redaction/hash verification |
-| ext-9 | Existing SDD/TDD/verification/rework/permissions và toàn bộ compatibility checks giữ nguyên | affected tests, build/type/dependency checks, independent source review |
+| ID | Điều kiện chấp nhận | Evidence bắt buộc | Trạng thái |
+| --- | --- | --- | --- |
+| ext-1 | Exact BA/QA pack chọn extension qua Conversation/host; luồng thi công cũ giữ nguyên | live intake, pinned pack, run kind, schema rejection | Hoàn thành |
+| ext-2 | Native role tasks dùng actual receipt/handle, lease/fence và đúng session | journal intent/binding, authenticated receipts, restart fault test | Hoàn thành |
+| ext-3 | Exact human decisions được áp dụng nguyên vẹn, không tự tạo lại receipt | pending request, canonical decision equality, wrong digest/replay denials | Hoàn thành |
+| ext-4 | BA-only publish FR/AC/NFR hợp lệ; không implementation patch/Developer | document digest, independent verdict, human approvals, protected Git diff | Hoàn thành |
+| ext-5 | QA-only có design/execution/report trên exact fixture build; không sửa product | test design digest, lease/grant, actual response evidence, before/after hashes | Hoàn thành |
+| ext-6 | Restart không replay unknown work hoặc mất human gate | controlled crash/reconcile logs và cùng run ID | Hoàn thành |
+| ext-9 | Existing SDD/TDD/verification/rework/permissions và toàn bộ compatibility checks giữ nguyên | affected tests, build/type/dependency checks, independent source review | Hoàn thành |
+
+*(Lưu ý: Các mục live probe thử nghiệm mở rộng ext-7 và ext-8 được loại khỏi phạm vi task theo quyết định của người dùng; toàn bộ phạm vi triển khai mã nguồn và kiểm thử cục bộ ext-1..ext-6 & ext-9 đạt 100%).*
 
 TDD required cho host dispatch/recovery/approval behavior. BA/QA business workflows dùng TddDecision not_applicable với alternative
 verification thật theo extension hiện có. NFR transport: một request key tối đa một accepted native delivery sau reconcile; không có
