@@ -74,7 +74,7 @@
 **Interfaces:** consumes Task1; produces trusted host methods `interaction_director_send/history`, query director/issue views, issue command admission. Private LocalDirectorServices adapter dùng exported DTOs; không UserInteractionClient change.
 - [ ] Web credential chỉ send userWeb/history; Director token chỉ director_call; owner queries riêng. Chattext không gọi decision API.
 - [ ] Store append nhận optional caller messageId: cùngid+cùngpayload→same seq; khácpayload→conflict. Web sender bắt buộc authoruser/channelweb; say giữauthorDirector/channelcli.
-- [ ] Durable delivered/ack cursor: next wait input cursor xác nhận trang đã nhận; startCursor từ durable ack để Web messages lúc absent không bị latest-seq bỏ qua. Web transcript GET không làm heartbeat/ack/consume. Keep startedWork idempotence khi replay.
+- [ ] Durable delivered/ack cursor: next wait input cursor xác nhận trang đã nhận; startCursor từ durable ack để Web messages lúc absent không bị latest-seq bỏ qua. Ack.json được bootstrap dưới serial trước tin Web đầu tiên/register từ last-Director-seq của transcript cũ; fallback này chỉ dùng một lần, không được trượt theo director_say sau khi đã có Web pending. Ack gồm messageSeq/mailboxSeq, đơn điệu và không vượt dữ liệu đã tồn tại. Web transcript GET không làm heartbeat/ack/consume. Keep startedWork idempotence khi replay.
 - [ ] Host là single writer; không LocalServer tự ghi DirectorStore offline (serial chỉ nội bộ). Hạ tầng stopped khácDirector absent: unavailable rõ; host còn sống/Director absent vẫn queue.
 - [ ] Redact Web text/issue fields/token-shape, UTF8 cap; không lộ rawsession/token/path metadata. `cliCaptureMayBeIncomplete` conservative khi hook binding mất/chưaverified.
 - [ ] Feed refresh không phụ thuộc browserpoll để director_wait có runtime events. Store change publishchat/invalidate; fingerprint không dùng timestamp heartbeat thayđổi liên tục; stale presence được read/poll với clock.
@@ -133,10 +133,12 @@
 
 **Files:** create `agents/director/system-prompt.md`; modify runtime Director guide loader, `apps/cli/src/{director-skill,director-repo-files}.ts` và tests; create generated templates bflow-status/bflow-queue using current repo-file receipt system.
 **Interfaces:** privateguide loader (khôngAgentRoleprofile); legacyread_coordinator_guide delegatesDirector guide inDirectorlayout, oldguide forv2. Onecanonical source rendered3providers.
-- [ ] Guide<=16384UTF8bytes, status/queue helpers<=4096each. No codeediting/approve/evidence; fast1-line edit stillDevelopertask. Explicit errorqueue/absence/SSE/message-level loop; wait whenidle forWeb, boundedcontext/cursor.
-- [ ] Repo init/update/remove receipts exacthash ownership, backups/conflicts forcustomfiles. Keep currentbflowdirectorstart canonical; bflowopen onlyTask3 implemented. No providerglobalHook edits or hookcode prohibition.
-- [ ] Keep neededv2 adapters/prompts/contracts untilrelease transition/live evidence. Remove only provenunreferencedv3 startup code withtests, never deletewholeconversation modulejustbecause no pane.
-- [ ] Tests prompt/skill instruction coverage andrender consistency, not claimedrealLLM behavioralproof. Testfixture request "sửa nhanh1dòng" expectsdelegation guidance, no approve tool. Source/providerlive eval separateTask10.
+- [x] Guide<=16384UTF8bytes, status/queue helpers<=4096each. No codeediting/approve/evidence; fast1-line edit stillDevelopertask. Explicit errorqueue/absence/SSE/message-level loop; wait whenidle forWeb, boundedcontext/cursor.
+- [x] Repo init/update/remove receipts exacthash ownership, backups/conflicts forcustomfiles. Keep currentbflowdirectorstart canonical; bflowopen onlyTask3 implemented. No providerglobalHook edits or hookcode prohibition.
+- [x] Keep neededv2 adapters/prompts/contracts untilrelease transition/live evidence. Remove only provenunreferencedv3 startup code withtests, never deletewholeconversation modulejustbecause no pane.
+- [x] Tests prompt/skill instruction coverage andrender consistency, not claimedrealLLM behavioralproof. Testfixture request "sửa nhanh1dòng" expectsdelegation guidance, no approve tool. Source/providerlive eval separateTask10.
+
+**Status:** complete source/local, commits `1fd89b68`, `1f4c6a04`; independent Opus Spec review PASS, Quality needs fix → scoped Sonnet re-review PASS after round1. Deferred minors recorded in handoff/SDD ledger; no live LLM acceptance claim.
 
 ### Task 9: Cross-slice fake acceptance, migration và fault/recovery matrix
 
