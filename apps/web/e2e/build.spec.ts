@@ -65,7 +65,9 @@ test('pairs with actual HTTP, registers a real Git root, reloads deep links and 
   await page.getByLabel('Khởi tạo không dùng GitNexus (tắt công cụ này trong cấu hình)').check();
   await page.getByRole('button',{name:'Khởi tạo / sửa GitNexus',exact:true}).click();
   await expect(page.getByText('Đã hoàn tất',{exact:true})).toBeVisible({timeout:30000});
-  await page.getByRole('textbox',{name:'Model (conversation)',exact:true}).fill('haiku');
+  // Fresh Director repositories configure specialist roles; the default provider is Codex.
+  const plannerModel='gpt-5.4-mini';
+  await page.getByRole('textbox',{name:'Model (planner)',exact:true}).fill(plannerModel);
   await page.getByRole('button',{name:'Lưu cấu hình',exact:true}).click();
   await expect(page.getByText('Đã lưu cấu hình. Các thay đổi áp dụng khi khởi động lại phiên.')).toBeVisible();
   await page.getByLabel(/Commit cấu hình đã xem vào Git/).check();
@@ -79,7 +81,7 @@ test('pairs with actual HTTP, registers a real Git root, reloads deep links and 
   await expect(page.locator('#settings-configuration').getByRole('alert')).toContainText('missing required');
   await page.getByRole('button',{name:'Bỏ thay đổi',exact:true}).click();
   await page.getByRole('button',{name:'Form cấu hình',exact:true}).click();
-  await expect(page.getByRole('textbox',{name:'Model (conversation)',exact:true})).toHaveValue('haiku');
+  await expect(page.getByRole('textbox',{name:'Model (planner)',exact:true})).toHaveValue(plannerModel);
   await page.getByRole('button',{name:'Hủy đăng ký dự án',exact:true}).click();
   await page.getByRole('button',{name:'Xác nhận hủy đăng ký',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Chưa có dự án',exact:true})).toBeVisible();

@@ -50,8 +50,17 @@ test('structured create, clarify, stale review, changes, resume/cancel and lost 
   await page.getByRole('button',{name:'Bắt đầu thao tác mới: Quyết định gói',exact:true}).click();
   await page.getByRole('button',{name:'Xem xét gói'}).click();await page.getByLabel(/Lý do \(bắt buộc/).fill('Bổ sung tiêu chí hiệu năng');await page.getByRole('button',{name:'Yêu cầu sửa',exact:true}).click();
   await expect.poll(async()=>(await host('inspect')).currentRunId).toBe('follow-up');
-  await expect(page.getByRole('link',{name:'Mở công việc hiện hành →'}).first()).toBeVisible();
-  await page.getByRole('link',{name:'Mở công việc hiện hành →'}).last().click();await expect(page).toHaveURL(/runs\/follow-up$/);
+  // A current run follows its continuation automatically; the receipt retains its own link.
+  await expect(page).toHaveURL(/runs\/follow-up$/);
+  const continuation=page.getByRole('link',{name:'Mở công việc tiếp nối →',exact:true});
+  await expect(continuation).toBeVisible();await expect(continuation).toHaveAttribute('href',`${base}/runs/follow-up`);
+  await continuation.click();await expect(page).toHaveURL(/runs\/follow-up$/);
+  // Opening the parent as history keeps the explicit current-work link available.
+  await page.getByRole('link',{name:'← Tiếp nối từ công việc trước',exact:true}).click();
+  await expect(page).toHaveURL(/runs\/run$/);
+  const currentWork=page.getByRole('link',{name:'Mở công việc hiện hành →',exact:true});
+  await expect(currentWork).toBeVisible();await expect(currentWork).toHaveAttribute('href',`${base}/runs/follow-up`);
+  await currentWork.click();await expect(page).toHaveURL(/runs\/follow-up$/);
   expect((await host('inspect')).effects.filter((kind:string)=>kind==='answer_decision')).toHaveLength(2);
   await page.getByRole('link',{name:'Tổng quan',exact:true}).click();await page.getByRole('button',{name:'Dừng phiên',exact:true}).click();await page.getByRole('button',{name:'Gửi yêu cầu dừng phiên'}).click();await expect.poll(async()=>(await host('inspect')).ready).toBe(false);
   await page.getByRole('button',{name:'Khởi động phiên',exact:true}).click();await expect.poll(async()=>(await host('inspect')).ready).toBe(true);expect((await host('inspect')).lifecycleCalls).toEqual(['stop','start']);
