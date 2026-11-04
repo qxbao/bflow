@@ -5,3 +5,4 @@ export * from "./snapshot.js";
 export * from "./endpoint.js";
 export * from "./mcp.js";
 export * from "./guide.js";
+export * from "./web.js";

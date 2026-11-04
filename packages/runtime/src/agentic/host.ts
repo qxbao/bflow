@@ -58,6 +58,7 @@ import { createDirectorGuideSource } from "../director/guide.js";
 import { assertManifestLayout, directorCoordinatorPort, directorDefaultAgentKind, ensureDirectorProgressPane, hostRolesFor, recordConversationNotice,
   startDirectorWork, type DelegationBuilder } from "./host-director-mode.js";
 import { DirectorAuthError } from "../director/store.js";
+import { DirectorWebBridge, isDirectorWebMethod } from "../director/web.js";
 import { DIRECTOR_OWNER_METHODS, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
 import { handleHumanDecisionCli } from "./human-decision-cli.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
@@ -582,10 +583,24 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return projectionFingerprint(views);
   };
   let webFeedQueue: Promise<unknown> = Promise.resolve();
+  /**
+   * Observes projections and publishes on change. Runs from a host timer as well as from `interaction_events`, so
+   * director_wait receives Runtime events without any browser polling (F3). Serialized with event reads.
+   */
+  const refreshWebFeed = () => {
+    const work = webFeedQueue.catch(() => undefined).then(() => observeWebFeed());
+    webFeedQueue = work; return work;
+  };
   const readWebEvents = (params: unknown) => {
     const work = webFeedQueue.catch(() => undefined).then(async () => {
       const input = z.object({ projectId: z.string(), query: WebEventsQuerySchema }).strict().parse(params);
       if (input.projectId !== webProjectId) throw new Error("Interaction project scope mismatch");
+      await observeWebFeed();
+      return webFeed.read(input.query.cursor);
+    });
+    webFeedQueue = work; return work;
+  };
+  const observeWebFeed = async () => {
       // Generic invalidation covers every projection, including runs outside the first page.
       // It is explicitly not a claim that a domain event occurred or a command succeeded.
       // Publish only on an observed change: every client polls this once a second and reloads its
@@ -605,9 +620,6 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         for (const id of fresh) webFeedNotices.add(id);
         for (let offset = 0; offset < fresh.length; offset += 100) webFeed.publish("notice", fresh.slice(offset, offset + 100));
       }
-      return webFeed.read(input.query.cursor);
-    });
-    webFeedQueue = work; return work;
   };
   const webAuthority = new WebInteractionAuthority(webProjectId, configuration.sessionId);
   const webStore = new WebOperationStore({ directory: join(configuration.directory, "web-interactions"),
@@ -620,6 +632,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const sharedExcerpts = sharedFor<string, unknown>(2000, value => record(value).ok === true);
   const readPane = (paneId: string, lines: number) => herdr(["pane", "read", paneId, "--source", "recent", "--lines", String(lines), "--format", "text"]);
   const readWebQuery = async (params: unknown) => {
+    // Director view/issue queue: the host's single store owner answers (no file reads in the generic projection).
+    const director = await directorWeb.query(params);
+    if (director !== undefined) return director;
     if (record(params).kind === "workforce_excerpts")
       return sharedExcerpts(String(record(params).projectId), () => readWebQueryUncached(params));
     return readWebQueryUncached(params);
@@ -647,8 +662,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (!result.ok) throw new Error("Conversation projection unavailable");
       return result.value;
     },
-    admit: (command, principal, acceptedAt) => webContext.run({ command, principal, acceptedAt },
-      () => requireWorkspace().conversation.handleStructuredInteraction(command, principal)),
+    admit: (command, principal, acceptedAt) => {
+      if (command.kind === "issue_retry" || command.kind === "issue_dismiss") throw new Error("Issue commands are not Conversation interactions");
+      return webContext.run({ command, principal, acceptedAt }, () => requireWorkspace().conversation.handleStructuredInteraction(command, principal));
+    },
     reconcile: async command => {
       if (!workspace || !manifest) return undefined;
       const cached = await workspace.conversation.readStructuredInteraction(command.commandId);
@@ -661,6 +678,13 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       // A lost Gateway result can be recovered from Runtime's exact original
       // admission/outbox. This branch observes; it never resends a command.
       return observeStructuredAdmission(command, state.outbound as unknown[], readWebRun);
+    },
+    // D-CD-01 issue retry/dismiss: admitted by the Director issue queue, never by Conversation (whose generic branch treats
+    // an unknown command as resume). Validation, effect and reconciliation all run in the host's single store owner.
+    issues: {
+      validate: command => directorWeb.validateIssueCommand(command),
+      admit: command => directorWeb.admitIssueCommand(command),
+      reconcile: command => directorWeb.reconcileIssueCommand(command)
     } });
   const toolUsage = new FileToolUsageLedger(join(configuration.directory, "tool-usage.json"));
   await toolUsage.recoverInterrupted();
@@ -1783,6 +1807,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     repositoryRoot: configuration.repositoryPath,
     feed: webFeed,
     inspect: () => requireWorkspace().runtime.inspect(),
+    // Park-episode checks for issue retries (read-only Runtime run document).
+    inspectRun: runId => requireWorkspace().runtime.inspect(runId),
     // read_coordinator_guide: the Director guide in the Director layout, the unchanged Coordinator guide for v2 sessions.
     coordinatorGuide: createDirectorGuideSource({
       directorLayout,
@@ -1818,6 +1844,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     // Director-token calls only: every Coordinator tool runs under the Director principal (R-B2-12 legacy-run guard).
     coordinator: directorCoordinatorPort({ invoke: invokeCoordinatorTool, planningReference: readPlanningReference,
       log: async entry => { await activityLog.record({ ...entry, role: "coordinator" }); } })
+  });
+  // Slice C Web bridge: Web credential send/history, owner view/issue reads, issue command admission and feed refresh.
+  const directorWeb = new DirectorWebBridge({
+    endpoint: directorEndpoint,
+    projectId: webProjectId,
+    layout: () => directorLayout ? "director" : "legacy_v2",
+    ready: interactionReady,
+    sessionId: () => manifest?.conversationSessionId,
+    inspect: () => requireWorkspace().runtime.inspect(),
+    runSession: async runId => {
+      if (!workspace) return undefined;
+      const run = record(await workspace.runtime.inspect(runId).catch(() => undefined));
+      const sessionId = record(run.delegation).sessionId;
+      return typeof sessionId === "string" ? sessionId : undefined;
+    },
+    feed: { publish: (type, resourceIds) => webFeed.publish(type, resourceIds) }
   });
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
@@ -2274,6 +2316,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           if (input.projectId !== webProjectId) throw new Error("Interaction project scope mismatch");
           return webCommands.readOperation(web.principalId, input.operationId);
         }
+        // Director Web methods: append a user/web message or page the transcript. Never director tools, owner methods or approvals.
+        if (isDirectorWebMethod(method)) return directorWeb.callWeb(method, params);
         if (method !== "interaction_execute") throw new Error("User interaction credentials cannot call owner or role methods");
         const input = InteractionExecuteSchema.parse(params);
         if (input.principal.principalId !== web.principalId || input.principal.issuerId !== web.issuerId || input.principal.keyId !== web.keyId)
@@ -3123,8 +3167,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     idleCheckTask = task;
   }, IDLE_CHECK_INTERVAL_MS);
   idleCheckTimer.unref();
+  // F3: the projection feed is observed by the host itself, so director_wait gets Runtime events with no browser open.
+  // Every 2 s without a browser (each observation reads the projections); a polling browser still observes once a second.
+  const webFeedTimer = setInterval(() => { void refreshWebFeed().catch(() => undefined); }, 2000);
+  webFeedTimer.unref();
+  // Only a Director host publishes Director refresh signals (a v2 host never touches the Director store through it).
+  if (directorLayout) directorWeb.start();
   const close = async () => {
     closing = true; schedulerTimerAlive = false; clearInterval(timer); clearInterval(pump); clearInterval(gatewayTimer); clearInterval(inboxTimer); clearInterval(watchdogTimer); clearInterval(idleCheckTimer);
+    clearInterval(webFeedTimer); directorWeb.stop();
     await drainRoleStartup(true);
     await activation?.catch(() => undefined);
     await nativeSessionWrites;

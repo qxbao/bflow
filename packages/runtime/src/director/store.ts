@@ -22,6 +22,14 @@ import {
 } from "@bflow/contracts";
 
 export class DirectorAuthError extends Error {}
+/** The same caller messageId was already stored with a different payload; the stored message is never overwritten. */
+export class DirectorMessageConflictError extends Error {
+  constructor(readonly messageId: string) { super("Director message ID already holds a different message"); this.name = "DirectorMessageConflictError"; }
+}
+/** A cursor/ack refers to transcript or mailbox data that does not exist yet. */
+export class DirectorCursorError extends Error {
+  constructor() { super("Invalid director cursor"); this.name = "DirectorCursorError"; }
+}
 
 export interface DirectorStoreOptions {
   readonly directory: string;
@@ -31,6 +39,19 @@ export interface DirectorVersion {
   readonly messageSeq: number;
   readonly issuesRevision: number;
   readonly mailboxSeq: number;
+}
+/** Durable delivery acknowledgement: the transcript/mailbox position the Director has provably received. */
+export interface DirectorAck {
+  readonly messageSeq: number;
+  readonly mailboxSeq: number;
+}
+export interface DirectorMessageInput {
+  /** Caller-supplied stable ID (Web send); omitted for host-generated messages. */
+  readonly messageId?: string;
+  readonly author: "user" | "director";
+  readonly channel: DirectorChannel;
+  readonly text: string;
+  readonly runId?: string;
 }
 export type MailboxAppendInput = Omit<DirectorMailboxItem, "schemaVersion" | "seq">;
 export interface IssueInput {
@@ -48,11 +69,15 @@ export interface IssueInput {
 const TokenFileSchema = z.object({ tokenId: z.string().min(1), secretSha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict();
 const IssuesFileSchema = z.object({ revision: z.number().int().min(0), issues: z.array(ParkedIssueSchema) }).strict();
 type IssuesFile = z.infer<typeof IssuesFileSchema>;
+const AckFileSchema = z.object({ schemaVersion: z.literal(1), messageSeq: z.number().int().min(0), mailboxSeq: z.number().int().min(0),
+  at: z.string().datetime() }).strict();
 const StartedWorkFileSchema = z.object({ works: z.record(z.object({ runId: z.string().min(1), correlationId: z.string().min(1) }).strict()) }).strict();
 export interface StartedWork { readonly runId: string; readonly correlationId: string }
 
 const sha256 = (value: string): Buffer => createHash("sha256").update(value, "utf8").digest();
 const isEnoent = (error: unknown): boolean => (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+/** Issue ID that `upsertIssue({ key })` derives for a key. */
+export const directorIssueIdForKey = (key: string): string => `park-${sha256(key).toString("hex")}`;
 
 /** File-backed Director state: session/token, shared transcript, issue queue. */
 export class DirectorStore {
@@ -159,14 +184,27 @@ export class DirectorStore {
     return raw === undefined ? { works: {} } : StartedWorkFileSchema.parse(raw);
   }
 
-  async appendMessage(input: { author: "user" | "director"; channel: DirectorChannel; text: string; runId?: string }): Promise<DirectorMessage> {
+  /**
+   * Appends one message. A caller messageId makes the write idempotent: the same ID with the same author, channel, text and
+   * runId returns the stored message (same seq); the same ID with a different payload throws DirectorMessageConflictError.
+   * The first Web message bootstraps the durable ack in the same serial step, so the legacy anchor cannot include it.
+   */
+  async appendMessage(input: DirectorMessageInput): Promise<DirectorMessage> {
     return this.serial(async () => {
       await this.ensureDirectory();
       const { messages, validLength } = await this.loadTranscript();
+      if (input.messageId !== undefined) {
+        const existing = messages.find(message => message.messageId === input.messageId);
+        if (existing) {
+          if (existing.author === input.author && existing.channel === input.channel && existing.text === input.text && existing.runId === input.runId) return existing;
+          throw new DirectorMessageConflictError(input.messageId);
+        }
+      }
+      if (input.channel === "web") await this.bootstrapAckLocked(messages);
       const message = DirectorMessageSchema.parse({
         schemaVersion: DIRECTOR_SCHEMA_VERSION,
         seq: (messages.length > 0 ? messages[messages.length - 1]!.seq : 0) + 1,
-        messageId: randomUUID(),
+        messageId: input.messageId ?? randomUUID(),
         author: input.author,
         channel: input.channel,
         text: input.text,
@@ -187,6 +225,77 @@ export class DirectorStore {
       this.events.emit("change");
       return message;
     });
+  }
+
+  /** Every stored message (unpaged). Read-only: never acknowledges delivery. */
+  async allMessages(): Promise<DirectorMessage[]> {
+    await this.ensureDirectory();
+    return (await this.loadTranscript()).messages;
+  }
+
+  /** Durable ack, or undefined before the first Web message/registration bootstrapped it. Read-only. */
+  async readAck(): Promise<DirectorAck | undefined> {
+    const raw = await this.readJson("ack.json");
+    if (raw === undefined) return undefined;
+    const file = AckFileSchema.parse(raw);
+    return { messageSeq: file.messageSeq, mailboxSeq: file.mailboxSeq };
+  }
+
+  /**
+   * Creates ack.json once from the legacy anchor (last Director message seq; mailbox 0) and returns the ack. An existing ack is
+   * returned unchanged, so later director_say messages never slide it past pending user messages. The mailbox has no delivery
+   * proof before the first acknowledged wait, so it starts at 0: bounded replay of old items instead of losing pending ones.
+   */
+  async bootstrapAck(): Promise<DirectorAck> {
+    return this.serial(async () => {
+      await this.ensureDirectory();
+      return this.bootstrapAckLocked((await this.loadTranscript()).messages);
+    });
+  }
+
+  /**
+   * Records what an authenticated director_wait cursor proves was received. Monotonic per field; a position beyond the
+   * stored transcript/mailbox throws DirectorCursorError and writes nothing. Only director_wait may call this.
+   */
+  async recordAck(input: { messageSeq: number; mailboxSeq?: number }): Promise<DirectorAck> {
+    return this.serial(async () => {
+      await this.ensureDirectory();
+      const { messages } = await this.loadTranscript();
+      const { items } = await this.loadMailbox();
+      const messageSeq = messages.length > 0 ? messages[messages.length - 1]!.seq : 0;
+      const mailboxSeq = items.length > 0 ? items[items.length - 1]!.seq : 0;
+      if (!Number.isSafeInteger(input.messageSeq) || input.messageSeq < 0 || input.messageSeq > messageSeq) throw new DirectorCursorError();
+      if (input.mailboxSeq !== undefined && (!Number.isSafeInteger(input.mailboxSeq) || input.mailboxSeq < 0 || input.mailboxSeq > mailboxSeq)) throw new DirectorCursorError();
+      const current = await this.bootstrapAckLocked(messages);
+      const next = {
+        messageSeq: Math.max(current.messageSeq, input.messageSeq),
+        mailboxSeq: Math.max(current.mailboxSeq, input.mailboxSeq ?? 0)
+      };
+      if (next.messageSeq !== current.messageSeq || next.mailboxSeq !== current.mailboxSeq) {
+        await this.writeJson("ack.json", { schemaVersion: 1, ...next, at: this.iso() });
+      }
+      return next;
+    });
+  }
+
+  /** Must run inside serial(). */
+  private async bootstrapAckLocked(messages: readonly DirectorMessage[]): Promise<DirectorAck> {
+    const existing = await this.readAck();
+    if (existing) return existing;
+    const lastDirector = [...messages].reverse().find(message => message.author === "director");
+    const ack = { messageSeq: lastDirector?.seq ?? 0, mailboxSeq: 0 };
+    await this.writeJson("ack.json", { schemaVersion: 1, ...ack, at: this.iso() });
+    return ack;
+  }
+
+  /** In-process change notification (transcript, issues, mailbox, revoke). Returns the unsubscribe function. */
+  subscribe(listener: () => void): () => void {
+    this.events.on("change", listener);
+    this.events.on("revoked", listener);
+    return () => {
+      this.events.off("change", listener);
+      this.events.off("revoked", listener);
+    };
   }
 
   async readMessages(query: { afterSeq: number; limit?: number }): Promise<DirectorMessage[]> {
@@ -248,7 +357,7 @@ export class DirectorStore {
     return this.serial(async () => {
       const file = await this.readIssues();
       const at = this.iso();
-      const issueId = input.key === undefined ? input.issueId : `park-${sha256(input.key).toString("hex")}`;
+      const issueId = input.key === undefined ? input.issueId : directorIssueIdForKey(input.key);
       const existing = issueId !== undefined ? file.issues.find(issue => issue.issueId === issueId) : undefined;
       let saved: ParkedIssue;
       let issues: ParkedIssue[];

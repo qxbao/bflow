@@ -61,9 +61,11 @@ describe("DirectorTools", () => {
 
   it("accepts the empty first cursor from director start and returns a non-empty cursor", async () => {
     const h = await harness();
+    // R-ACK (intentional change): a message stored while no Director had received it is delivered, not skipped.
     await user(h, "before start");
     const first = await wait(h, { cursor: "", timeoutMs: 1 });
-    expect(first.timedOut).toBe(true);
+    expect(first.timedOut).toBe(false);
+    expect(first.messages.map(m => m.text)).toEqual(["before start"]);
     expect(first.cursor).toMatch(/^m\d+\.i\d+\.b\d+\.r/);
     expect(first.cursor).not.toBe("");
     await user(h, "after");
@@ -236,6 +238,15 @@ describe("DirectorTools", () => {
     expect(h.calls).toHaveLength(1);
   });
 
+  it("a repeated retry neither unparks again nor resets the issue (F2)", async () => {
+    const h = await harness({ invoke: async () => ({ unparked: true, runStatus: "implementing" }) });
+    const issue = await h.store.upsertIssue({ runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    const first = await h.tools.invoke("set_issue_status", { issueId: issue.issueId, status: "retrying" }, h.token);
+    expect(await h.tools.invoke("set_issue_status", { issueId: issue.issueId, status: "retrying" }, h.token)).toEqual(first);
+    expect(h.calls.filter(call => call.name === "unpark_task")).toHaveLength(1);
+    expect((await h.store.listIssues())[0]!.status).toBe("retrying");
+  });
+
   it("passes unpark_task through to Runtime", async () => {
     const h = await harness({ invoke: async () => ({ unparked: true, runStatus: "implementing" }) });
     expect(await h.tools.invoke("unpark_task", { runId: "run-1", taskId: "implement" }, h.token)).toMatchObject({ unparked: true });
@@ -322,11 +333,12 @@ describe("DirectorTools", () => {
 
   it("startCursor does not skip a message appended before the first wait", async () => {
     const h = await harness();
+    // R-ACK (intentional change): "old" was never received by a Director, so the ack-based start cursor includes it.
     await user(h, "old");
     const cursor = await h.tools.startCursor();
     await user(h, "between start and wait");
     const result = await wait(h, { cursor });
-    expect(result.messages.map(m => m.text)).toEqual(["between start and wait"]);
+    expect(result.messages.map(m => m.text)).toEqual(["old", "between start and wait"]);
   });
 });
 

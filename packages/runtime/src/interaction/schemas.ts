@@ -37,4 +37,7 @@ export const InteractionQuerySchema = z.discriminatedUnion("kind", [
   z
     .object({ kind: z.literal("activity"), projectId: IdentifierSchema, runId: IdentifierSchema, cursor: WebCursorSchema.optional() })
     .strict(),
+  // Director Web reads (slice C), served by the host's DirectorWebBridge, never by the generic projection.
+  z.object({ kind: z.literal("director"), projectId: IdentifierSchema }).strict(),
+  z.object({ kind: z.literal("director_issues"), projectId: IdentifierSchema, cursor: WebCursorSchema.optional() }).strict(),
 ]);

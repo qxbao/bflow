@@ -16,7 +16,7 @@ import {
   type ParkedIssue
 } from "@bflow/contracts";
 import { COORDINATOR_TOOLS } from "../agentic/tools.js";
-import type { DirectorStore } from "./store.js";
+import { directorIssueIdForKey, type DirectorStore } from "./store.js";
 
 export interface DirectorCoordinatorPort {
   invoke(name: string, input: unknown): Promise<JsonValue>;
@@ -42,6 +42,34 @@ export interface DirectorRuntimeEventsPort {
   /** Returns at most `limit` events after `cursor` ("" = from now). Waits at most timeoutMs when none are available; resolves early on abort. */
   wait(cursor: string, timeoutMs: number, signal: AbortSignal, limit: number): Promise<{ cursor: string; events: DirectorRuntimeEvent[] }>;
 }
+/** One park episode of a task as Runtime recorded it (journal TaskPark). */
+export interface DirectorParkEpisode {
+  readonly episode: number;
+  readonly source: "director" | "auto";
+  readonly episodeKey?: string;
+}
+/** Read-only observation of a task's current park and park history. */
+export interface DirectorTaskParkObservation {
+  readonly current?: DirectorParkEpisode;
+  readonly history: readonly DirectorParkEpisode[];
+}
+/** Returns undefined when the run or task is unknown to Runtime. Never mutates. */
+export type DirectorTaskParkPort = (runId: string, taskId: string) => Promise<DirectorTaskParkObservation | undefined>;
+/** Issue IDs a park episode can have: `park_task` uses the explicit ID, auto-park and its replay use the hashed key. */
+export function parkEpisodeIssueIds(runId: string, taskId: string, park: DirectorParkEpisode): string[] {
+  return [`park:${runId}:${taskId}:${park.episode}`, directorIssueIdForKey(`park:${park.episodeKey ?? `${runId}:${taskId}:${park.episode}`}`)];
+}
+export type DirectorIssueRefusalReason = "not_found" | "forbidden" | "stale_version" | "operation_not_allowed";
+/** Refused before any Runtime effect. */
+export class DirectorIssueRefusal extends Error {
+  constructor(readonly reason: DirectorIssueRefusalReason, message: string) { super(message); this.name = "DirectorIssueRefusal"; }
+}
+export type DirectorIssueGuard = (issue: ParkedIssue) => void;
+export interface DirectorIssueObservation {
+  issue(issueId: string): Promise<ParkedIssue | undefined>;
+  readonly park: DirectorTaskParkPort | undefined;
+}
+
 export interface DirectorToolsOptions {
   readonly store: DirectorStore;
   readonly coordinator: DirectorCoordinatorPort;
@@ -51,6 +79,8 @@ export interface DirectorToolsOptions {
   readonly coordinatorGuide?: () => Promise<{ source: string; prompt: string; framing?: "director" | "coordinator_v2" }>;
   /** Provider-specific upper bound; clamped to [DIRECTOR_LIMITS.waitMinMs, DIRECTOR_LIMITS.waitMaxMs]. Default DIRECTOR_LIMITS.waitDefaultMs. */
   readonly maxWaitMs?: number;
+  /** Runtime park observation; without it retry falls back to a plain unpark call. */
+  readonly taskPark?: DirectorTaskParkPort;
   readonly now?: () => Date;
 }
 
@@ -130,6 +160,9 @@ export class DirectorTools {
   private readonly inFlight = new Map<string, Promise<JsonValue>>();
   private readonly maxWaitMs: number;
   private readonly now: () => Date;
+  private readonly taskPark: DirectorTaskParkPort | undefined;
+  /** Issue status changes (Director tool, owner CLI, Web command) run one at a time per host. */
+  private issueChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: DirectorToolsOptions) {
     this.store = options.store;
@@ -139,6 +172,7 @@ export class DirectorTools {
     this.coordinatorGuide = options.coordinatorGuide;
     this.maxWaitMs = Math.min(Math.max(options.maxWaitMs ?? DIRECTOR_LIMITS.waitDefaultMs, DIRECTOR_LIMITS.waitMinMs), DIRECTOR_LIMITS.waitMaxMs);
     this.now = options.now ?? (() => new Date());
+    this.taskPark = options.taskPark;
   }
 
   async invoke(name: string, input: unknown, token: string, signal?: AbortSignal): Promise<JsonValue> {
@@ -176,7 +210,7 @@ export class DirectorTools {
           if (parked.episode === undefined) throw new Error("Runtime thiếu số lần treo task; chưa thể ghi issue");
           await this.store.upsertIssue({ issueId: `park:${args.runId}:${args.taskId}:${parked.episode}`,
             runId: args.runId, taskKey: args.taskId, kind: "other", summary: args.reason,
-            suggestedAction: "Mở lại task bằng unpark_task hoặc thử lại từ hàng đợi lỗi" });
+            suggestedAction: "Thử lại từ hàng đợi lỗi (set_issue_status retrying); Runtime tự mở lại task" });
         }
         return result;
       }
@@ -203,22 +237,70 @@ export class DirectorTools {
     }
   }
 
-  /** Used by both authenticated Director tools and the admitted CLI queue command. Dismissal grants no Runtime authority. */
-  async setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed"): Promise<ParkedIssue> {
+  /**
+   * Used by authenticated Director tools, the admitted CLI queue command and Web issue commands. Dismissal grants no Runtime
+   * authority. Idempotent: a repeated status is returned unchanged, and a retry never unparks twice nor resets the issue to
+   * open. With a park observation port the issue must belong to the task's current park episode before unpark; an episode
+   * that Runtime already reopened only gets its status recorded (observed, not resent). `guard` runs before any effect.
+   */
+  async setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard): Promise<ParkedIssue> {
     const args = SetStatusArgs.parse({ issueId, status });
-    const issue = (await this.store.listIssues()).find(item => item.issueId === args.issueId);
-    if (!issue) throw new Error(`Unknown director issue ${args.issueId}`);
-    if (args.status === "retrying" && issue.taskKey !== undefined) {
-      try {
-        const result = z.object({ unparked: z.boolean() }).passthrough().parse(
-          await this.coordinator.invoke("unpark_task", { runId: issue.runId, taskId: issue.taskKey }));
-        if (!result.unparked) throw new Error("Runtime chưa mở lại được task");
-      } catch (error) {
-        await this.store.setIssueStatus(issue.issueId, "open");
-        throw error;
+    return this.issueSerial(async () => {
+      const issue = (await this.store.listIssues()).find(item => item.issueId === args.issueId);
+      if (!issue) throw new DirectorIssueRefusal("not_found", `Unknown director issue ${args.issueId}`);
+      guard?.(issue);
+      if (issue.status === args.status) return issue;
+      if (args.status === "retrying" && issue.taskKey !== undefined) {
+        const observed = this.taskPark ? await this.taskPark(issue.runId, issue.taskKey) : undefined;
+        const matches = (park: DirectorParkEpisode) => parkEpisodeIssueIds(issue.runId, issue.taskKey!, park).includes(issue.issueId);
+        let unpark = observed === undefined;
+        if (observed !== undefined) {
+          if (observed.current !== undefined) {
+            if (!matches(observed.current)) throw new DirectorIssueRefusal("stale_version", "Issue không thuộc lần treo hiện tại của task; không mở lại");
+            unpark = true;
+          } else if (!observed.history.some(matches)) {
+            throw new DirectorIssueRefusal("stale_version", "Task không còn treo ở lần ghi trong issue; không mở lại");
+          }
+        }
+        if (unpark) {
+          const result = z.object({ unparked: z.boolean() }).passthrough().parse(
+            await this.coordinator.invoke("unpark_task", { runId: issue.runId, taskId: issue.taskKey }));
+          if (!result.unparked) throw new Error("Runtime chưa mở lại được task");
+        }
       }
-    }
-    return this.store.setIssueStatus(issue.issueId, args.status);
+      return this.store.setIssueStatus(issue.issueId, args.status);
+    });
+  }
+
+  /** Read-only check of a status change against current issue and park state, under the same serial step as changes. */
+  async checkIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard): Promise<ParkedIssue> {
+    const args = SetStatusArgs.parse({ issueId, status });
+    return this.issueSerial(async () => {
+      const issue = (await this.store.listIssues()).find(item => item.issueId === args.issueId);
+      if (!issue) throw new DirectorIssueRefusal("not_found", `Unknown director issue ${args.issueId}`);
+      guard?.(issue);
+      if (args.status === "retrying" && issue.status !== "retrying" && issue.taskKey !== undefined && this.taskPark) {
+        const observed = await this.taskPark(issue.runId, issue.taskKey);
+        const matches = (park: DirectorParkEpisode) => parkEpisodeIssueIds(issue.runId, issue.taskKey!, park).includes(issue.issueId);
+        if (!observed || (observed.current !== undefined ? !matches(observed.current) : !observed.history.some(matches)))
+          throw new DirectorIssueRefusal("stale_version", "Issue không thuộc lần treo hiện tại của task");
+      }
+      return issue;
+    });
+  }
+
+  /** Runs `work` in the issue serial step: an observation made inside it cannot interleave with a status change. */
+  observeIssues<T>(work: (observe: DirectorIssueObservation) => Promise<T>): Promise<T> {
+    return this.issueSerial(() => work({
+      issue: async issueId => (await this.store.listIssues()).find(item => item.issueId === issueId),
+      park: this.taskPark
+    }));
+  }
+
+  private issueSerial<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.issueChain.then(task, task);
+    this.issueChain = run.catch(() => undefined);
+    return run;
   }
 
   private async readCoordinatorGuide(): Promise<JsonValue> {
@@ -264,10 +346,13 @@ export class DirectorTools {
     return run;
   }
 
-  /** Cursor meaning "from now": the first director_wait after start sees only what happens afterwards. */
+  /**
+   * First cursor of a Director session: starts at the durable ack (bootstrapped once from the legacy anchor), so user and
+   * mailbox messages that arrived while no Director was present are delivered. `i0` returns the open issues on the first wait.
+   */
   async startCursor(): Promise<string> {
-    const version = await this.store.version();
-    return `m${version.messageSeq}.i${version.issuesRevision}.b${version.mailboxSeq}.r`;
+    const ack = await this.store.bootstrapAck();
+    return `m${ack.messageSeq}.i0.b${ack.mailboxSeq}.r`;
   }
 
   /** Records a user message typed in the CLI (channel cli) unless the same text was recorded within 10 s. Caller authenticates. */
@@ -294,20 +379,25 @@ export class DirectorTools {
   }
 
   private async wait(args: z.infer<typeof WaitArgs>, token: string, signal?: AbortSignal): Promise<JsonValue> {
+    // An empty cursor (the first wait after `director start`) is the ack-based start cursor; an omitted cursor reads everything.
+    const cursor = args.cursor === "" ? await this.startCursor() : args.cursor;
     const start = await this.store.version();
-    // An empty cursor (the first wait after `director start`) means "from now"; an omitted cursor reads the whole transcript.
-    let seq = args.cursor === "" ? start.messageSeq : 0;
+    let seq = 0;
     let revision = start.issuesRevision;
-    // Omitted cursor reads the whole mailbox; "" is "from now"; a B1 cursor (no .b) does not replay history.
-    let mailboxSeq = args.cursor === undefined ? 0 : start.mailboxSeq;
+    // Omitted cursor reads the whole mailbox; a B1 cursor (no .b) does not replay history.
+    let mailboxSeq = cursor === undefined ? 0 : start.mailboxSeq;
     let runtimeCursor = "";
-    if (args.cursor !== undefined && args.cursor !== "") {
-      const match = CURSOR.exec(args.cursor);
+    if (cursor !== undefined) {
+      const match = CURSOR.exec(cursor);
       if (!match) throw new Error("Invalid director cursor");
       seq = Number(match[1]);
       revision = Number(match[2]);
       if (match[3] !== undefined) mailboxSeq = Number(match[3]);
       runtimeCursor = Buffer.from(match[4]!, "base64url").toString("utf8");
+      // R-ACK: a cursor the Director passes back proves it received the result that carried it. Recorded before waiting;
+      // a position beyond stored data is refused (DirectorCursorError) and nothing is acknowledged.
+      if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(revision) || (match[3] !== undefined && !Number.isSafeInteger(mailboxSeq))) throw new Error("Invalid director cursor");
+      await this.store.recordAck({ messageSeq: seq, ...(match[3] !== undefined ? { mailboxSeq } : {}) });
     }
     const requested = args.timeoutMs ?? this.maxWaitMs;
     const timeoutMs = Math.min(Math.max(requested, DIRECTOR_LIMITS.waitMinMs), this.maxWaitMs);

@@ -360,6 +360,9 @@ export async function hostInteractionQuery(
         message: "Project scope mismatch.",
       },
     };
+  // Director reads are served only by the host's DirectorWebBridge (single store owner), never from files here.
+  if (query.kind === "director" || query.kind === "director_issues")
+    return { ok: false as const, error: { code: "validation" as const, retryable: false as const, message: "Director views are served by the host bridge." } };
   const observedAt = new Date().toISOString();
   const root = resolve(configuration.directory, "../..");
   const rawManifest = await readSnapshot(

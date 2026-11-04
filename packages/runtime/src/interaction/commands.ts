@@ -59,7 +59,7 @@ export async function observeStructuredDecision(command: Extract<WebCommand, { k
  * can remain unknown: observing local admission does not resend remote work. */
 export async function observeStructuredAdmission(command: WebCommand, outbound: readonly unknown[], readRun: (runId: string) => Promise<unknown>)
   : Promise<OperationResult<WebOperationResult> | undefined> {
-  if (command.kind === "answer_decision") return undefined;
+  if (command.kind === "answer_decision" || isIssueCommand(command)) return undefined;
   let runId: string | undefined;
   for (const raw of outbound) {
     const parsed = RoleMessageSchema.safeParse(record(raw).message);
@@ -101,6 +101,20 @@ function failure(reason: Reason, operationId?: string): OperationResult<never> {
       : { code: "validation", retryable: false, message: "Interaction is not allowed for this scope or state.", details: { reason } };
   return { ok: false, error };
 }
+type IssueCommand = Extract<WebCommand, { kind: "issue_retry" | "issue_dismiss" }>;
+/** D-CD-01 issue commands are admitted by the Director issue queue, never by Conversation. */
+export function isIssueCommand(command: WebCommand): command is IssueCommand {
+  return command.kind === "issue_retry" || command.kind === "issue_dismiss";
+}
+/** Director issue admission (host DirectorWebBridge). Absent → issue commands are refused before any receipt. */
+export interface IssueCommandPort {
+  /** Read-only; returns the refusal reason or undefined when the command may proceed. */
+  validate(command: IssueCommand): Promise<Exclude<Reason, "invalid_request" | "operation_conflict"> | undefined>;
+  /** The effect; throws when the outcome is unknown (receipt stays reconciliation_required). */
+  admit(command: IssueCommand): Promise<unknown>;
+  /** Observation only; never re-applies the effect. */
+  reconcile(command: IssueCommand): Promise<unknown | undefined>;
+}
 export interface StructuredCommandPorts {
   authority: WebInteractionAuthority; store: WebOperationStore;
   ready(): boolean; conversationSessionId(): string;
@@ -108,6 +122,7 @@ export interface StructuredCommandPorts {
   admit(command: WebCommand, principal: WebPrincipal, acceptedAt: string): Promise<unknown>;
   /** Observation only; never dispatch an unresolved command. */
   reconcile(command: WebCommand, principal: WebPrincipal): Promise<unknown | undefined>;
+  issues?: IssueCommandPort;
 }
 /** Host calls this under the same serialized user boundary as native intake.
  * Conversation owns admission; this adapter never creates a delegation itself. */
@@ -116,9 +131,14 @@ export class HostStructuredCommands {
   async validate(command: WebCommand): Promise<void> {
     if (!this.ports.ready()) throw new Refusal("unavailable");
     if (command.kind === "create_request") return;
-    // D-CD-01 issue commands are not run actions; fail closed before any receipt until
-    // the Director issue admission path owns them.
-    if (command.kind === "issue_retry" || command.kind === "issue_dismiss") throw new Refusal("operation_not_allowed");
+    // D-CD-01 issue commands are not run actions: only the Director issue port validates them (run/issue identity,
+    // expectedUpdatedAt, current park episode). Without that port they fail closed before any receipt.
+    if (isIssueCommand(command)) {
+      if (!this.ports.issues) throw new Refusal("operation_not_allowed");
+      const reason = await this.ports.issues.validate(command);
+      if (reason !== undefined) throw new Refusal(reason);
+      return;
+    }
     let view: WebRunView | undefined;
     if ("runId" in command && command.runId) {
       view = WebRunViewSchema.parse(await this.ports.run(command.runId));
@@ -162,7 +182,10 @@ export class HostStructuredCommands {
       if (!await this.ports.store.begin(principal.principalId, command.commandId)) return this.readOperation(principal.principalId, command.commandId);
       try {
         await this.validate(command);
-        const result = AdmissionResult.parse(await this.ports.admit(command, principal, accepted.updatedAt));
+        // Issue commands never reach Conversation's admission (whose generic branch would treat an unknown kind as resume).
+        const result = AdmissionResult.parse(isIssueCommand(command)
+          ? await this.ports.issues!.admit(command)
+          : await this.ports.admit(command, principal, accepted.updatedAt));
         if (result.ok && command.kind === "answer_decision") {
           // Admission queues a human decision; final effect/lineage awaits normal
           // Runtime/Herdr processing. Never predict a follow-up child from a click.
@@ -182,7 +205,8 @@ export class HostStructuredCommands {
     const value = result.ok ? { ...operation, state: "applied", result: result.value } : uncertain
       ? { ...operation, state: "reconciliation_required" }
       : { ...operation, state: "failed", error: { apiVersion: 1, code: result.error.code === "conflict" ? "stale_version" : "operation_not_allowed",
-        message: "Conversation refused this exact interaction.", retryable: false, operationId: operation.operationId, correlationId: operation.operationId } };
+        message: operation.operationKind === "issue_retry" || operation.operationKind === "issue_dismiss"
+          ? "Director issue queue refused this exact command." : "Conversation refused this exact interaction.", retryable: false, operationId: operation.operationId, correlationId: operation.operationId } };
     await this.ports.store.settle(principal.principalId, operation.operationId, WebOperationSchema.parse(value));
   }
   async readOperation(principalId: string, commandId: string): Promise<OperationResult<WebOperation>> {
@@ -190,7 +214,10 @@ export class HostStructuredCommands {
     if (!current) return { ok: false, error: { code: "not_found", retryable: false, message: "Interaction operation not found." } };
     if (["applied", "failed"].includes(current.state)) return { ok: true, value: current };
     const intent = (await this.ports.store.records()).find(record => record.id === commandId && record.payload.principal.principalId === principalId)!;
-    const raw = await this.ports.reconcile(intent.payload.command, intent.payload.principal);
+    const command = intent.payload.command;
+    const raw = isIssueCommand(command)
+      ? (this.ports.issues ? await this.ports.issues.reconcile(command) : undefined)
+      : await this.ports.reconcile(command, intent.payload.principal);
     if (raw !== undefined) {
       // A result in Conversation proves the admission happened. An accepted-only
       // intent after restart may lack a dispatch marker; seal that gap only from

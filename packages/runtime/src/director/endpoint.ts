@@ -16,8 +16,10 @@ import {
 } from "@bflow/contracts";
 import { redactString } from "../resilience/redaction.js";
 import { buildDirectorProgressSnapshot } from "./snapshot.js";
-import { DirectorStore } from "./store.js";
-import { DirectorTools, type DirectorCoordinatorPort, type DirectorRuntimeEventsPort, type DirectorWorkPort } from "./tools.js";
+import { DirectorStore, type DirectorMessageInput, type DirectorVersion } from "./store.js";
+import { DirectorTools, type DirectorCoordinatorPort, type DirectorIssueGuard, type DirectorIssueObservation, type DirectorParkEpisode, type DirectorRuntimeEventsPort,
+  type DirectorTaskParkObservation, type DirectorTaskParkPort, type DirectorWorkPort } from "./tools.js";
+import type { DirectorMessage } from "@bflow/contracts";
 
 export interface DirectorFeedPort {
   /** Same contract as ProjectionFeed.read (packages/runtime/src/interaction/events.ts): non-blocking page after cursor. */
@@ -31,6 +33,8 @@ export interface DirectorEndpointOptions {
   readonly coordinatorGuide?: () => Promise<{ source: string; prompt: string; framing?: "director" | "coordinator_v2" }>;
   readonly feed: DirectorFeedPort;
   readonly inspect: () => Promise<unknown>;
+  /** Read-only Runtime run document (journal RunRecord shape); enables park-episode checks for issue retries. */
+  readonly inspectRun?: (runId: string) => Promise<unknown>;
   readonly maxWaitMs?: number;
   readonly pollMs?: number;
   readonly now?: () => Date;
@@ -44,6 +48,35 @@ const TOKEN_SHAPE = /^[A-Za-z0-9_-]{8,128}\.[A-Za-z0-9_-]{16,256}$/;
 function summarize(item: { type: string; resourceIds: readonly string[] }): string {
   const ids = item.resourceIds.slice(0, 5).join(", ");
   return `${item.type}: ${ids}`.slice(0, DIRECTOR_LIMITS.issueTextMax);
+}
+
+/**
+ * Feed items the host publishes for Director store changes (`chat`, and `invalidate` scoped to `director`). They are Web refresh
+ * signals for the Director's own transcript/presence/issues and must not wake director_wait as Runtime events: a director_say
+ * or a presence flip would otherwise wake the Director with its own change (self-wake loop).
+ */
+export function isDirectorRefreshItem(item: { type: string; resourceIds: readonly string[] }): boolean {
+  return item.type === "chat" || (item.type === "invalidate" && item.resourceIds.length > 0 && item.resourceIds.every(id => id === DIRECTOR_FEED_RESOURCE));
+}
+export const DIRECTOR_FEED_RESOURCE = "director";
+
+function parkEpisode(value: unknown): DirectorParkEpisode | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const entry = value as Record<string, unknown>;
+  const valid = typeof entry.episode === "number" && Number.isSafeInteger(entry.episode) && entry.episode > 0;
+  if (!valid || (entry.source !== "director" && entry.source !== "auto")) return undefined;
+  return { episode: entry.episode as number, source: entry.source, ...(typeof entry.episodeKey === "string" && entry.episodeKey.length > 0 ? { episodeKey: entry.episodeKey } : {}) };
+}
+/** Park observation from a Runtime run document; malformed entries are ignored (never treated as a match). */
+export function observeTaskPark(run: unknown, runId: string, taskId: string): DirectorTaskParkObservation | undefined {
+  if (typeof run !== "object" || run === null || Array.isArray(run)) return undefined;
+  const record = run as Record<string, unknown>;
+  if (record.runId !== runId || !Array.isArray(record.tasks)) return undefined;
+  const task = record.tasks.find(item => typeof item === "object" && item !== null && (item as Record<string, unknown>).taskId === taskId) as Record<string, unknown> | undefined;
+  if (!task) return undefined;
+  const current = parkEpisode(task.parked);
+  const history = Array.isArray(task.parkHistory) ? task.parkHistory.map(parkEpisode).filter((item): item is DirectorParkEpisode => item !== undefined) : [];
+  return { ...(current ? { current } : {}), history };
 }
 
 /** Runtime events port over a ProjectionFeed-like feed. Polls; never blocks beyond timeoutMs and always clears its timer. */
@@ -60,8 +93,11 @@ function feedEvents(feed: DirectorFeedPort, pollMs: number): DirectorRuntimeEven
         if (signal.aborted) return { cursor, events: [] };
         const items = feed.read(cursor).items.slice(0, Math.max(0, limit));
         if (items.length > 0) {
-          const events: DirectorRuntimeEvent[] = items.map(item => ({ type: `projection.${item.type}`, summary: summarize(item) }));
-          return { cursor: items[items.length - 1]!.cursor, events };
+          cursor = items[items.length - 1]!.cursor;
+          const events: DirectorRuntimeEvent[] = items.filter(item => !isDirectorRefreshItem(item))
+            .map(item => ({ type: `projection.${item.type}`, summary: summarize(item) }));
+          if (events.length > 0) return { cursor, events };
+          continue;
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) return { cursor, events: [] };
@@ -84,11 +120,14 @@ export class DirectorEndpoint {
   /** In-memory only: a restarted host forgets the binding and the Director must run `director start` again. */
   private candidate: { provider: AgentProviderId; sessionId: string; at: number } | undefined;
   private bound: { provider: AgentProviderId; sessionId: string } | undefined;
+  private readonly taskPark: DirectorTaskParkPort | undefined;
 
   constructor(options: DirectorEndpointOptions) {
     this.options = options;
     this.now = options.now ?? (() => new Date());
     this.store = new DirectorStore({ directory: path.resolve(options.directory), now: this.now });
+    const inspectRun = options.inspectRun;
+    this.taskPark = inspectRun ? async (runId, taskId) => observeTaskPark(await inspectRun(runId), runId, taskId) : undefined;
     this.tools = new DirectorTools({
       store: this.store,
       coordinator: options.coordinator,
@@ -96,6 +135,7 @@ export class DirectorEndpoint {
       ...(options.coordinatorGuide ? { coordinatorGuide: options.coordinatorGuide } : {}),
       runtimeEvents: feedEvents(options.feed, options.pollMs ?? 1000),
       ...(options.maxWaitMs !== undefined ? { maxWaitMs: options.maxWaitMs } : {}),
+      ...(this.taskPark ? { taskPark: this.taskPark } : {}),
       now: this.now
     });
   }
@@ -200,8 +240,59 @@ export class DirectorEndpoint {
     return issue;
   }
 
-  setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed"): Promise<ParkedIssue> {
-    return this.tools.setIssueStatus(issueId, status);
+  setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard): Promise<ParkedIssue> {
+    return this.tools.setIssueStatus(issueId, status, guard);
+  }
+
+  /** Read-only validation of a status change (same serial step and park-episode rule as setIssueStatus). */
+  checkIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard): Promise<ParkedIssue> {
+    return this.tools.checkIssueStatus(issueId, status, guard);
+  }
+
+  /** Observation inside the issue serial step (reconciliation of an uncertain issue command). */
+  observeIssues<T>(work: (observe: DirectorIssueObservation) => Promise<T>): Promise<T> {
+    return this.tools.observeIssues(work);
+  }
+
+  /**
+   * The only Web write: a user message on the web channel with the browser's stable messageId. Idempotent per messageId
+   * (DirectorMessageConflictError on a different payload). The host is the single writer; callers check readiness first.
+   */
+  appendWebMessage(input: { messageId: string; text: string; runId?: string | undefined }): Promise<DirectorMessage> {
+    const message: DirectorMessageInput = { messageId: input.messageId, author: "user", channel: "web", text: input.text,
+      ...(input.runId !== undefined ? { runId: input.runId } : {}) };
+    return this.store.appendMessage(message);
+  }
+
+  /** Whole transcript, read-only (never acknowledges delivery, never heartbeats). */
+  transcript(): Promise<DirectorMessage[]> { return this.store.allMessages(); }
+
+  version(): Promise<DirectorVersion> { return this.store.version(); }
+
+  /** Presence with waitingSince, computed with the endpoint clock at read time; no session/token/path leaves this method. */
+  async presenceDetail(): Promise<{ presence: DirectorPresence; provider?: AgentProviderId; heartbeatAt?: string; waitingSince?: string; registered: boolean }> {
+    const { presence, session } = await this.store.presence();
+    return {
+      presence,
+      registered: session !== null,
+      ...(session ? { provider: session.provider, heartbeatAt: session.heartbeatAt } : {}),
+      ...(session && presence === "waiting" && session.waitingSince !== null ? { waitingSince: session.waitingSince } : {})
+    };
+  }
+
+  /**
+   * Conservative: true unless this host process verified the Director's provider session through the start hook. The binding
+   * is in-memory only, so a host restart (or a start without hook) reports possibly-missing CLI messages.
+   */
+  cliCaptureMayBeIncomplete(): boolean { return this.bound === undefined; }
+
+  /** In-process store change notification for the host feed publisher. */
+  subscribe(listener: () => void): () => void { return this.store.subscribe(listener); }
+
+  /** Progress snapshot over an explicit Runtime state (the Web view passes an empty state while the host is not ready). */
+  async progressFrom(state: unknown): Promise<DirectorProgressSnapshot> {
+    const { presence, session } = await this.store.presence();
+    return buildDirectorProgressSnapshot({ state, presence, session, issues: await this.store.listIssues({ status: ["open", "retrying"] }), now: this.now() });
   }
 
   async progress(): Promise<DirectorProgressSnapshot> {
