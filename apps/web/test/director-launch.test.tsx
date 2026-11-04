@@ -8,8 +8,10 @@ import { DirectorProvider } from '../src/features/director/status';
 import { DirectorLaunch } from '../src/features/director/launch';
 import { directorServer, locks, sessionRead, view, at } from './director-fixtures';
 
-beforeEach(()=>{localStorage.clear();vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('navigator',{onLine:true,locks,clipboard:{writeText:vi.fn(async()=>{})}});});
-afterEach(()=>{cleanup();vi.unstubAllGlobals();});
+// Only Date is faked (timers stay real): "now" is 10 s after the synthetic launch, inside the wait-for-Director window.
+const launchedNow=Date.parse(at)+10_000;
+beforeEach(()=>{vi.useFakeTimers({toFake:['Date'],now:launchedNow});localStorage.clear();vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('navigator',{onLine:true,locks,clipboard:{writeText:vi.fn(async()=>{})}});});
+afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.useRealTimers();});
 const manual="cd '/work/books' && claude '/bflow-start'";
 const options={apiVersion:1,projectId:'p',terminal:{available:true},observedAt:at,providers:[
   {provider:'claude',state:'available',manualCommand:manual},
@@ -132,4 +134,28 @@ it('presence without a heartbeat is not treated as arrival',async()=>{
   await screen.findByText(/Đã mở cửa sổ terminal/);
   setPresence('waiting','');rendered.rerender(open(1));
   expect(await screen.findByText(/chưa xác nhận đây là phiên mới/)).toBeTruthy();expect(screen.queryByText(/Director đã có mặt/)).toBeNull();
+});
+it('while waiting for the Director a launch just opened, another launch requires an explicit replacement',async()=>{
+  const {calls}=launchServer();render(open());
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
+  expect(await screen.findByText(/hãy đợi trạng thái/)).toBeTruthy();
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  const submit=screen.getByRole<HTMLButtonElement>('button',{name:'Mở terminal Director'});expect(submit.disabled).toBe(true);
+  expect(screen.getByLabelText(/Mở phiên thay thế\. Cửa sổ terminal Director mở lúc/)).toBeTruthy();
+  fireEvent.click(submit);expect(calls.launches).toHaveLength(1);
+  fireEvent.click(screen.getByLabelText(/Mở phiên thay thế/));expect(submit.disabled).toBe(false);
+  fireEvent.click(submit);await waitFor(()=>expect(calls.launches).toHaveLength(2));expect(calls.launches[1].replaceActive).toBe(true);
+});
+it('after the wait window an applied launch without a registered Director stops saying "please wait"',async()=>{
+  launchServer();const rendered=render(open());
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
+  expect(await screen.findByText(/hãy đợi trạng thái/)).toBeTruthy();
+  vi.setSystemTime(Date.parse(at)+3*60*1000+1000);rendered.rerender(open(1));
+  expect(await screen.findByText(/Không thấy Director đăng ký sau khi mở cửa sổ; kiểm tra cửa sổ terminal hoặc mở lại\./)).toBeTruthy();
+  expect(screen.queryByText(/hãy đợi trạng thái/)).toBeNull();
+  // Past the window the replacement prompt is no longer forced while Director is confirmed absent.
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  expect(screen.queryByLabelText(/Mở phiên thay thế/)).toBeNull();
 });

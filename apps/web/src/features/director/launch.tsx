@@ -58,7 +58,16 @@ export function DirectorLaunch(){
   const unconfirmedPresent=Boolean(result&&present&&!arrived);
   const waitingForDirector=Boolean(result?.mode==='terminal_opened'&&!arrived&&Date.now()-Date.parse(result.launchedAt)<PRESENCE_WAIT_MS);
   useEffect(()=>{if(!waitingForDirector)return;const poll=setInterval(d.reload,PRESENCE_POLL_MS);return()=>clearInterval(poll);},[waitingForDirector,d.reload]);
-  const needsReplace=d.presence!=='absent';
+  // Re-render once the wait window ends so the "please wait" text is replaced even without another presence change.
+  const [,setExpired]=useState(0);
+  useEffect(()=>{
+    if(!waitingForDirector||!result)return;
+    const timer=setTimeout(()=>setExpired(n=>n+1),Math.max(0,Date.parse(result.launchedAt)+PRESENCE_WAIT_MS-Date.now())+1);
+    return()=>clearTimeout(timer);
+  },[waitingForDirector,result]);
+  // A window opened by this launch may still be starting Director while presence reads absent: another launch must be an
+  // explicit replacement, never a silent second Director.
+  const needsReplace=d.presence!=='absent'||waitingForDirector;
   const chosen=options?.providers.find(option=>option.provider===provider);
   const toggle=useRef<HTMLButtonElement>(null),outcome=useRef<HTMLDivElement>(null);
   const close=()=>{setOpen(false);requestAnimationFrame(()=>toggle.current?.focus());};
@@ -101,7 +110,7 @@ export function DirectorLaunch(){
           </div>)}
         </div>
         {!options.providers.some(option=>option.state!=='unavailable')&&<p className="text-sm text-warning">Chưa có nhà cung cấp nào dùng được cho Director trên máy này.</p>}
-        {needsReplace&&<label className="mt-2 flex items-start gap-2 text-sm"><input type="checkbox" checked={replace} onChange={event=>setReplace(event.target.checked)}/><span>Mở phiên thay thế. Director có thể đang chạy ({d.presence==='unknown'?'chưa đọc được trạng thái':'đang có mặt'}); phiên hiện có không bị dừng.</span></label>}
+        {needsReplace&&<label className="mt-2 flex items-start gap-2 text-sm"><input type="checkbox" checked={replace} onChange={event=>setReplace(event.target.checked)}/><span>{d.presence==='absent'&&waitingForDirector&&result?`Mở phiên thay thế. Cửa sổ terminal Director mở lúc ${time(result.launchedAt)} có thể đang khởi động Director; cửa sổ đó không bị đóng.`:`Mở phiên thay thế. Director có thể đang chạy (${d.presence==='unknown'?'chưa đọc được trạng thái':'đang có mặt'}); phiên hiện có không bị dừng.`}</span></label>}
         {chosen&&<details className="mt-2"><summary className="text-sm">Lệnh tự chạy cho {providerLabels[chosen.provider]}</summary><CopyCommand command={chosen.manualCommand}/></details>}
         <div className="mt-2.5 flex flex-wrap gap-2"><button type="button" disabled={!chosen||chosen.state==='unavailable'||(needsReplace&&!replace)||!command.online||command.busy} onClick={()=>void launch()}>{command.busy?'Đang mở…':'Mở terminal Director'}</button><button type="button" onClick={close}>Đóng</button></div>
       </>}
@@ -112,7 +121,7 @@ export function DirectorLaunch(){
       <p className="my-1">Không rõ cửa sổ terminal đã mở hay chưa. Kiểm tra màn hình: nếu chưa có cửa sổ Director, mở bằng thao tác mới. Bflow không tự thử lại.</p>
       <div className="flex flex-wrap gap-2"><button type="button" onClick={command.reread}>Đọc lại kết quả mở phiên</button><button type="button" disabled={op?.state!=='reconciliation_required'} onClick={()=>void releaseUncertain()}>Tôi đã kiểm tra màn hình, mở bằng thao tác mới</button></div>
     </div>}
-    {result?.mode==='terminal_opened'&&<p role="status" className="my-2 text-sm">{arrived?'Director đã có mặt và đang nhận tin.':unconfirmedPresent?`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới vừa mở.`:`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Việc này chưa có nghĩa Director đã sẵn sàng; hãy đợi trạng thái chuyển sang “Đang hoạt động” hoặc “Đang chờ”.`}</p>}
+    {result?.mode==='terminal_opened'&&<p role="status" className="my-2 text-sm">{arrived?'Director đã có mặt và đang nhận tin.':unconfirmedPresent?`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới vừa mở.`:waitingForDirector?`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Việc này chưa có nghĩa Director đã sẵn sàng; hãy đợi trạng thái chuyển sang “Đang hoạt động” hoặc “Đang chờ”.`:`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Không thấy Director đăng ký sau khi mở cửa sổ; kiểm tra cửa sổ terminal hoặc mở lại.`}</p>}
     {result?.mode==='terminal_opened'&&!arrived&&<details className="my-1"><summary className="text-sm">Không thấy cửa sổ? Lệnh tự chạy</summary><CopyCommand command={result.manualCommand}/></details>}
     {result?.mode==='manual_command'&&<div className="my-2 text-sm"><p className="my-1">Không mở được terminal tự động. Chạy lệnh sau trong một terminal trên máy này:</p><CopyCommand command={result.manualCommand}/>{arrived?<p role="status" className="my-1">Director đã có mặt và đang nhận tin.</p>:unconfirmedPresent?<p role="status" className="my-1">Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới vừa mở.</p>:null}</div>}
     {op?.state==='failed'&&<p className="my-2 border-l-3 border-danger pl-3 text-sm">{op.error?.message??'Chưa mở được Director.'}</p>}

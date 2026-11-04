@@ -16,6 +16,7 @@ import type { OfficeDirectorInput, OfficeInput, OfficeModel, OfficeTarget } from
 import { Choreographer, directorPose } from '../src/features/office/scene/actors';
 import { OBJECT_CELLS, QUEUE_BOARD, deskPlan, seatCell, zoneTitles } from '../src/features/office/scene/world';
 import { AccessibleOffice } from '../src/features/office/ui/AccessibleOffice';
+import { directorTime } from '../src/features/director/status';
 import { OfficeHud, type OfficeHudProps } from '../src/features/office/ui/OfficeHud';
 import { OfficeStage, type CreateRenderer } from '../src/features/office/ui/OfficeStage';
 import type { OfficeRenderer } from '../src/features/office/scene/renderer';
@@ -114,6 +115,10 @@ describe('seats and world: one Director desk in the control room', () => {
     expect(QUEUE_BOARD.node).toBe('whiteboard');
     expect(zoneTitles(false).find(z => z.id === 'conversation')?.text).toBe('Conversation');
     expect(zoneTitles(true).find(z => z.id === 'conversation')?.text).toBe('Director');
+    // A confirmed Director layout has no Coordinator room sign; legacy v2 keeps it.
+    expect(zoneTitles(true).find(z => z.id === 'coordination')?.text).toBe('Director Team');
+    expect(zoneTitles(true).some(z => /coordinator/i.test(z.text))).toBe(false);
+    expect(zoneTitles(false).find(z => z.id === 'coordination')?.text).toBe('Coordinator');
   });
 
   test('logical handoffs to the coordinator or conversation end at the Director desk visually, with no new wire role', () => {
@@ -152,6 +157,13 @@ describe('AccessibleOffice parity', () => {
     expect(onSelect.mock.calls.map(c => c[0])).toEqual([{ kind: 'director' }, { kind: 'queue' }]);
     expect(within(region).getByRole('button', { name: 'Bàn Director (trò chuyện)' })).toBeTruthy();
     expect(within(region).queryByRole('button', { name: /Quầy Conversation/ })).toBeNull();
+  });
+
+  test('the Director heartbeat is shown as a formatted time like the Classic view, never a raw ISO timestamp', () => {
+    render(<AccessibleOffice model={dmodel({ heartbeatAt: t1 })} onSelect={vi.fn()} visible />);
+    const name = screen.getByRole('button', { name: /^Director:/ }).textContent ?? '';
+    expect(name).toContain(`báo hoạt động lúc ${directorTime(t1)}`);
+    expect(name).not.toContain(t1); expect(name).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
   });
 
   test('unknown queue and unknown presence are spelled out, never shown as empty or absent', () => {
@@ -218,11 +230,15 @@ describe('HUD: Director chat gate and queue shortcut', () => {
     expect(screen.getByLabelText('Trạng thái văn phòng').textContent).toContain('Director đang hoạt động');
     expect(screen.getByRole('button', { name: 'Director' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Conversation' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Director Team' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Coordinator' })).toBeNull();
+    expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).placeholder).toBe('Trò chuyện với Director…');
     rerender(<OfficeHud {...base({ director: { canSend: false, presenceLabel: 'Chưa đọc được trạng thái Director' } })} />);
     expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).disabled).toBe(true);
     rerender(<OfficeHud {...base({ model: empty })} />);
     expect((screen.getByLabelText('Trò chuyện với Bflow') as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByRole('button', { name: 'Conversation' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Coordinator' })).toBeTruthy();
   });
   test('the rail offers the queue with its open count only in a Director layout', () => {
     const onQueue = vi.fn();

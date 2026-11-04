@@ -1,9 +1,9 @@
 import { environmentProcessRunner, type EnvironmentProcessRequest, type EnvironmentProcessResult, type EnvironmentProcessRunner } from "@bflow/cli";
 
 /**
- * Copy of the E16 Herdr wire fake (tests/e2e/scenarios/e16-group-f-lifecycle.e2e.test.ts, unchanged there) for the E16-D
- * Director lifecycle variant: answers the Herdr CLI protocol the EnvironmentLifecycle/Pane Manager uses, records every call.
- * Not a live Herdr transport.
+ * The shared Herdr wire fake used by both E16 (tests/e2e/scenarios/e16-group-f-lifecycle.e2e.test.ts) and the E16-D Director
+ * lifecycle variant; it is the single source, not a copy. Answers the Herdr CLI protocol the EnvironmentLifecycle/Pane Manager uses
+ * and records every call. Not a live Herdr transport.
  */
 export interface WirePane {
   pane_id: string;

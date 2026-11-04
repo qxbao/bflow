@@ -4,7 +4,7 @@ import { useDirector } from './status';
 
 /**
  * Project-scoped Director transcript (both channels, both authors) built from the server's private cursor convention:
- * no cursor = latest page (≤100, no backward cursor), `a<last-seq>` = newer, `b<first-seq>` = older. Items are merged by seq;
+ * no cursor = latest page (≤100, no backward cursor), `a<highest contiguous seq>` = newer, `b<first-seq>` = older. Items are merged by seq;
  * a seq or message ID that changes identity, or a view whose transcriptSeq is behind what we hold, means the transcript was
  * reset/restarted and the latest page is reloaded. Reads never acknowledge anything.
  */
@@ -24,6 +24,15 @@ export function mergeTranscript(current:readonly DirectorMessage[],incoming:read
 export type TranscriptState={items:DirectorMessage[];loaded:boolean;loading:boolean;loadingOlder:boolean;hasOlder:boolean;error?:unknown;olderError?:unknown};
 const initial:TranscriptState={items:[],loaded:false,loading:false,loadingOlder:false,hasOlder:false};
 const older=(page:WebDirectorTranscriptPage)=>page.items.length>=TRANSCRIPT_PAGE&&page.items[0]!.seq>1;
+/**
+ * Highest seq held without a gap from the first held item. Store seqs are contiguous, so a later item (e.g. our own send
+ * result merged ahead of an unseen Director reply) must not move the `a<seq>` cursor past the missing seqs.
+ */
+export function contiguousSeq(items:readonly DirectorMessage[]):number{
+  let last=items[0]?.seq??0;
+  for(let i=1;i<items.length&&items[i]!.seq===last+1;i++)last=items[i]!.seq;
+  return last;
+}
 
 export function useDirectorTranscript(enabled:boolean){
   const d=useDirector(),projectId=d.projectId;
@@ -51,7 +60,7 @@ export function useDirectorTranscript(enabled:boolean){
     commit({loading:true});
     try{
       for(let pageIndex=0;pageIndex<MAX_NEWER_PAGES;pageIndex++){
-        const after=items.current.at(-1)?.seq??0;
+        const after=contiguousSeq(items.current);
         const page=await client.current.directorMessages(projectId,`a${after}`);
         if(gen!==generation.current)return;
         if(page.items.some(item=>item.seq<=after))throw new TranscriptReset('newer page went backwards');
@@ -78,7 +87,7 @@ export function useDirectorTranscript(enabled:boolean){
     if(!enabled||seq===undefined||!loaded.current)return;
     const last=items.current.at(-1)?.seq??0;
     if(seq<last){generation.current++;loaded.current=false;void run(latest);}
-    else if(seq>last)void run(newer);
+    else if(seq>contiguousSeq(items.current))void run(newer);
   },[seq,enabled]);// eslint-disable-line react-hooks/exhaustive-deps
 
   const loadOlder=useCallback(()=>run(async gen=>{

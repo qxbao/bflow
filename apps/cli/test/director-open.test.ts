@@ -349,11 +349,25 @@ describe("bflow open", () => {
   });
 
   it("refuses an active Director without --replace-active, and explains how to confirm", async () => {
-    const { d, out } = openDeps({ readPresence: async () => "waiting" });
+    const { d, out, err } = openDeps({ readPresence: async () => "waiting" });
     expect(await runOpenCommand({ provider: "claude", replaceActive: false, json: false, help: false }, d)).not.toBe(0);
-    expect(out.join("")).toMatch(/--replace-active/);
+    // Text-mode errors go to stderr (like usage errors); stdout stays empty.
+    expect(err.join("")).toMatch(/--replace-active/);
+    expect(out.join("")).toBe("");
     const ok = openDeps({ readPresence: async () => "waiting" });
     expect(await runOpenCommand({ provider: "claude", replaceActive: true, json: false, help: false }, ok.d)).toBe(0);
+  });
+
+  it("an automatically chosen unverified provider is announced with its reason on stderr", async () => {
+    const runner: ProviderCommandRunner = { async run() { return { exitCode: null, stdout: "", stderr: "", started: true, failure: "timeout" }; } };
+    const launch = deps({ env: {}, runner });
+    const expected = (await inspectDirectorLaunchOptions(project(), deps({ env: {}, runner }))).providers.find(p => p.provider === "claude")!;
+    expect(expected.state).toBe("unverified");
+    const { d, out, err } = openDeps({ launch });
+    expect(await runOpenCommand({ provider: undefined, replaceActive: false, json: false, help: false }, d)).toBe(0);
+    expect(err.join("")).toContain("Chọn claude dù chưa xác minh được");
+    expect(expected.reason).toBeTruthy(); expect(err.join("")).toContain(expected.reason!.replace(/\.$/, ""));
+    expect(out.join("")).toContain("'claude' '/bflow-start'");
   });
 
   it("reports an unavailable provider with its reason", async () => {

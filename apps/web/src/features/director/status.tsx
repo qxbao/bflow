@@ -93,7 +93,9 @@ export function useDirector():DirectorState{
 /** Optional variant for surfaces rendered outside a project (tests, pages without Director). */
 export function useOptionalDirector():DirectorState|null{return useContext(Context);}
 
-const time=(iso:string)=>new Date(iso).toLocaleTimeString('vi',{hour:'2-digit',minute:'2-digit'});
+/** Hour:minute of a Director timestamp, shared by the Classic presence line and the 3D office mirror. */
+export const directorTime=(iso:string)=>new Date(iso).toLocaleTimeString('vi',{hour:'2-digit',minute:'2-digit'});
+const time=directorTime;
 const tone:Record<DirectorPresenceState,string>={active:'border-steel text-steel',waiting:'border-steel text-steel',absent:'border-line text-muted',unknown:'border-warning text-warning'};
 const icon:Record<DirectorPresenceState,string>={active:'●',waiting:'◷',absent:'○',unknown:'?'};
 /** Text + icon (never colour alone), in a polite status region; background refreshes keep its box size. */

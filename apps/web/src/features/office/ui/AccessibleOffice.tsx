@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { directorTime } from '../../director/status';
 import { queueText, roleLabel } from '../model/labels';
 import type { Certainty, OfficeDirectorPresence, OfficeModel, OfficeObjectId, OfficeTarget } from '../model/types';
 
@@ -75,7 +76,7 @@ export function AccessibleOffice({ model, onSelect, visible, notice, extra }: { 
           <h3 className="m-0 text-base font-semibold">Director</h3>
           <ul className="my-2 list-none p-0"><li className="py-1.5">
             <button type="button" className="text-left" onClick={() => onSelect({ kind: 'director' })}>
-              <span className="font-semibold">Director:</span> {model.director.statusText}. Mức tin cậy: {CERTAINTY[model.director.certainty]}{model.director.heartbeatAt ? `, báo hoạt động lúc ${model.director.heartbeatAt}` : ''}{model.director.provider ? `, ${model.director.provider}` : ''}.
+              <span className="font-semibold">Director:</span> {model.director.statusText}. Mức tin cậy: {CERTAINTY[model.director.certainty]}{model.director.heartbeatAt ? `, báo hoạt động lúc ${directorTime(model.director.heartbeatAt)}` : ''}{model.director.provider ? `, ${model.director.provider}` : ''}.
             </button>
           </li></ul>
         </>}

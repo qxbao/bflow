@@ -329,7 +329,9 @@ export async function defaultDirectorOpenDeps(cwd: string): Promise<DirectorOpen
 export async function runOpenCommand(args: OpenArgs, deps: DirectorOpenDeps): Promise<number> {
   if (args.help) { deps.stdout.write(`${OPEN_HELP}\n`); return 0; }
   const fail = (code: string, message: string, extra: Record<string, unknown> = {}): number => {
-    deps.stdout.write(args.json ? `${JSON.stringify({ ok: false, code, message, ...extra })}\n` : `${message}\n`);
+    // JSON results stay on stdout for machine readers; text-mode errors go to stderr like the CLI usage errors.
+    if (args.json) deps.stdout.write(`${JSON.stringify({ ok: false, code, message, ...extra })}\n`);
+    else deps.stderr.write(`${message}\n`);
     return CLI_EXIT_CODES.RUNTIME_ERROR;
   };
   try {
@@ -341,6 +343,10 @@ export async function runOpenCommand(args: OpenArgs, deps: DirectorOpenDeps): Pr
       const pick = options.providers.find(p => p.state === "available") ?? options.providers.find(p => p.state === "unverified");
       if (!pick) return fail("provider_unavailable", `Không có CLI nhà cung cấp nào dùng được:\n${options.providers.map(p => `  ${p.provider}: ${p.reason ?? p.state}`).join("\n")}`);
       provider = pick.provider;
+      // An automatically chosen provider that is only `unverified` is a guess: say why before acting on it.
+      if (pick.state === "unverified") {
+        deps.stderr.write(`Chọn ${pick.provider} dù chưa xác minh được${pick.reason ? `: ${pick.reason.replace(/\.$/, "")}` : ""}. Dùng --provider để chọn rõ.\n`);
+      }
     }
     const plan = await buildDirectorLaunchPlan(project, provider, deps.launch);
     const presence = await deps.readPresence(repository);

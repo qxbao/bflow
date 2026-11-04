@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveGitExcludePath } from "./git-exclude.js";
 import {
@@ -452,6 +452,17 @@ function skillDirs(): string[] {
   return SKILL_NAMES.flatMap(name => [`.claude/skills/${name}`, `.agents/skills/${name}`]);
 }
 
+/**
+ * Creates the backup directory 0700, and tightens an existing one (`mkdir`'s mode applies only to a newly created directory).
+ * A symlink or non-directory there is refused rather than followed.
+ */
+async function ensurePrivateDir(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const info = await lstat(dir);
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Refusing to write through a symlink: ${dir}`);
+  if (process.platform !== "win32" && (info.mode & 0o777) !== 0o700) await chmod(dir, 0o700);
+}
+
 function backupPath(path: string, text: string): string {
   return `${BACKUP_DIR}/${path.replace(/\//g, "__")}.${sha256(text).slice(0, 12)}.bak`;
 }
@@ -536,8 +547,8 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
   }
   const receiptChanged = (await readIfExists(locate, RECEIPT_PATH)) !== finalReceipt;
 
+  if (backups.length > 0) await ensurePrivateDir(join(root, BACKUP_DIR));
   for (const item of backups) {
-    await mkdir(join(root, BACKUP_DIR), { recursive: true, mode: 0o700 });
     if ((await readIfExists(locate, item.path)) !== item.text) await writeText(locate, item.path, item.text, 0o600);
   }
   for (const item of pending) await writeText(locate, item.path, item.text);
