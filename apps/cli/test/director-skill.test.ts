@@ -127,6 +127,17 @@ describe("generated Director skills", () => {
     expect(status).toContain("Do not run that command yourself");
   });
 
+  it("tells the Director to retry through set_issue_status alone, never unpark_task first", () => {
+    const queue = renderBflowQueueSkill({ bflowCommand: argv });
+    const retry = queue.split("\n").find(line => line.startsWith("   - Retry:"))!;
+    expect(retry).toContain("`set_issue_status`");
+    expect(retry).toMatch(/do not call unpark_task first/);
+    expect(retry).toMatch(/If the Runtime refuses, the issue stays open/);
+    expect(queue).not.toMatch(/`unpark_task`[^\n]*then[^\n]*set_issue_status/);
+    expect(queue).not.toContain("`unpark_task`");
+    expect(retry.indexOf("set_issue_status")).toBeLessThan(retry.indexOf("unpark_task"));
+  });
+
   it("tells the Director to delegate a quick one-line edit, wait when idle and handle errors", () => {
     const text = renderBflowStartSkill({ bflowCommand: argv });
     expect(text).toMatch(/even for a one-line change: tell the user a Developer will make it and call `start_work`/);

@@ -111,7 +111,7 @@ You need the Director \`token\` from /bflow-start. If this session has none, tel
 
 2. For each issue worth acting on call \`inspect_issue\`. Tell the user in their language: what failed, how many attempts, the suggested action, and which evidence exists. Keep it to a few lines per issue.
 3. Act only on what the user asked for or what you can safely do:
-   - Retry: \`unpark_task\` for its run and task, then \`set_issue_status\` retrying. If the Runtime refuses, the issue stays open: say so.
+   - Retry: call \`set_issue_status\` with retrying. It reopens the task through the Runtime, so do not call unpark_task first. If the Runtime refuses, the issue stays open: say so.
    - Resolved: only when the Runtime shows the task finished.
    - Dismissed: records a decision only. It does not unpark the task and does not fix anything.
    - A user_decision_pending issue is a question for the user: ask it with the options and wait. Never choose for them.

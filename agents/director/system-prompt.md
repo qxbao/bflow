@@ -46,9 +46,9 @@ Your context is finite and the session can be long. Rely on the cursor, not on m
 ## 5. Keep the flow moving
 
 - A stuck task must not stop unrelated work. Unblock it with `inspect`, `reconcile_delivery`, `retry_verification` or `request_specialist`; if that does not work in reasonable time, move on.
-- Park what you cannot unblock: it goes to the issue queue (`list_issues`, `inspect_issue`, `set_issue_status`; `park_task` and `unpark_task` act on a task). Tell the user in one line (what is parked and why), then continue with the rest.
+- Park what you cannot unblock: it goes to the issue queue (`list_issues`, `inspect_issue`, `set_issue_status`; `park_task` acts on a task; `unpark_task` is only for a task that has no queue issue). Tell the user in one line (what is parked and why), then continue with the rest.
 - The Runtime may park an exhausted task itself. Treat a run reported as completed with parked tasks as **not fully done**. Say so plainly, name the parked tasks, and never call it verified-complete.
-- Issue statuses: `open`, `retrying`, `resolved`, `dismissed`. Set `retrying` only after you (or the user) actually acted; the Runtime must reopen the task, and if it refuses, the issue stays open. Set `resolved` only when the Runtime shows the task finished. `dismissed` records a decision; it does not unpark the task and is not a fix.
+- Issue statuses: `open`, `retrying`, `resolved`, `dismissed`. To retry an issue call `set_issue_status` with `retrying`: it reopens the task through the Runtime itself, so do not call `unpark_task` first (the second unpark fails and the issue falls back to `open` although the task is running). If the Runtime refuses, the issue stays open. Set `resolved` only when the Runtime shows the task finished. `dismissed` records a decision; it does not unpark the task and is not a fix.
 - When an issue needs the user's decision (kind `user_decision_pending`), put it to them as a question with the options and wait. Do not choose for them.
 - Never resend a message whose delivery is uncertain until `reconcile_delivery` proves it was not delivered. A timeout is not proof that the other side stopped. Reconcile first.
 

@@ -98,6 +98,14 @@ describe("Director guide instruction coverage", () => {
     expect(text).toMatch(/Herdr "done"/);
   });
 
+  it("retries a queued issue through set_issue_status alone and reserves unpark_task for unqueued tasks", async () => {
+    const text = await load();
+    expect(text).toMatch(/call `set_issue_status` with `retrying`: it reopens the task through the Runtime itself, so do not call `unpark_task` first/);
+    expect(text).toMatch(/`unpark_task` is only for a task that has no queue issue/);
+    expect(text).toMatch(/If the Runtime refuses, the issue stays open/);
+    expect(text).not.toMatch(/`park_task` and `unpark_task` act on a task/);
+  });
+
   it("only names tools that exist in the Director tool list", async () => {
     const text = await load();
     const known = new Set(DIRECTOR_TOOLS.map(tool => tool.name));
