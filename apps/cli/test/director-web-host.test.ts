@@ -190,7 +190,9 @@ describe.skipIf(process.platform === 'win32')('Director Web over the activated r
       issueId: 'park:run-unknown:implement:1', expectedUpdatedAt: new Date().toISOString() };
     const issued = await send(`${base}/commands`, 'POST', issueCommand, headers);
     expect(issued.status).toBe(202);
-    expect(issued.json).toMatchObject({ operationId: issueCommand.commandId, state: 'failed' });
+    // The host refuses with validation/details.reason=forbidden before any receipt effect; the generic /commands route maps a
+    // host `validation` error to the public `invalid_request` code (local-server errors.ts contractError), so that is what the browser sees.
+    expect(issued.json).toMatchObject({ operationId: issueCommand.commandId, state: 'failed', error: { code: 'invalid_request', retryable: false } });
     expect((await send(`${base}/director/issues`, 'GET', undefined, headers)).json).toMatchObject({ items: [] });
 
     // Host restart (down/up of the same session and manifest): the stream ends, the old cursor resumes into a reset (new host
@@ -200,11 +202,13 @@ describe.skipIf(process.platform === 'win32')('Director Web over the activated r
     await controller.quiesce(); await controller.shutdown();
     controller = await activateDirectorHost(repo, sessionId, herdrBinary);
     // The open stream either ends or tells the browser to reread everything; it never splices the new epoch as a continuation.
-    await expect.poll(() => stream.closed || stream.events.slice(beforeRestart).some(event => event.data.type === 'reset'), { timeout: 15_000 }).toBe(true);
-    expect(stream.events.slice(beforeRestart).findIndex(event => event.data.type === 'reset')).toBeLessThanOrEqual(0);
+    // The open stream must actually deliver a `reset`, and it must be the first frame after the restart (never a spliced continuation).
+    await expect.poll(() => stream.events.length > beforeRestart, { timeout: 15_000 }).toBe(true);
+    expect(stream.events[beforeRestart]!.data.type).toBe('reset');
     const resumed = openStream(server.origin, `${base}/events`, { Cookie: headers.Cookie, 'Last-Event-ID': lastCursor });
     cleanups.push(async () => resumed.close());
-    await expect.poll(() => resumed.events[0]?.data.type, { timeout: 15_000 }).toBe('reset');
+    await expect.poll(() => resumed.events.length, { timeout: 15_000 }).toBeGreaterThan(0);
+    expect(resumed.events[0]!.data.type).toBe('reset');
     await expect.poll(async () => (await send(`${base}/director/messages`, 'GET', undefined, headers)).status, { timeout: 15_000 }).toBe(200);
     const afterRestart = (await send(`${base}/director/messages`, 'GET', undefined, headers)).json;
     expect(afterRestart.items.map((m: any) => m.seq)).toEqual([1, 2, 3]);

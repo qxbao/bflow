@@ -158,7 +158,9 @@ describe("Scenario E18 — Director Web × Runtime × issue queue (manifest v3, 
     next.trackRun(runId, started.correlationId);
     ({ bridge, feed } = directorWebBridge(next));
     await bridge.refresh();
-    expect(next.panes.manifest()).toEqual(session.panes.manifest());
+    // The reopened durable journal is bound to the manifest's Conversation session (manifest file durability across a real
+    // host restart is covered by apps/cli/test/director-web-host.test.ts and the Linux-only E16-D lifecycle variant).
+    expect((await next.inspect(runId)).delegation.sessionId).toBe(next.panes.manifest().conversationSessionId);
     expect((await next.inspect(runId)).status).toBe(before.status);
     expect(ok(await bridge.issues(PROJECT_ID)).items).toEqual(before.issues);
     expect(ok(await bridge.history(PROJECT_ID)).items).toEqual(before.transcript);
@@ -285,9 +287,14 @@ describe("Scenario E18 — Director Web × Runtime × issue queue (manifest v3, 
   }, 120_000);
 
   it("seeded stale issue episodes: retry/dismiss commands bound to an older updatedAt or another run never change the issue", async () => {
-    const { session, authorized } = await createWebDirectorSession({ inspectRun: true });
+    const { session, authorized } = await createWebDirectorSession({ humanApproval: true, inspectRun: true });
     sessions.push(session);
     const { bridge } = directorWebBridge(session);
+    /** Host admission order (interaction/commands.ts execute): validate (pre-receipt and again pre-effect), admit only if it passes. */
+    const hostAdmit = async (command: ReturnType<typeof issueCommand>) => {
+      const reason = await bridge.validateIssueCommand(command);
+      return reason !== undefined ? { ok: false as const, reason } : bridge.admitIssueCommand(command);
+    };
     const registered = await session.endpoint.register({ provider: "claude" });
     const noted = await session.endpoint.call(registered.token, "director_note_user_message", { text: "Cập nhật ba tệp" }) as { seq: number };
     const started = await session.endpoint.call(registered.token, "start_work", { title: "Ba tệp", objective: "Ba tệp phản ánh yêu cầu",
@@ -295,7 +302,10 @@ describe("Scenario E18 — Director Web × Runtime × issue queue (manifest v3, 
     session.trackRun(started.runId, started.correlationId);
     const runId = started.runId;
     await session.endpoint.call(registered.token, "propose_workflow", { runId, ...threeTaskPlan(runId, (await session.inspect(runId)).delegation.specificationId) });
-    if ((await session.inspect(runId)).status === "awaiting_approval") await webApproval(session, runId, authorized);
+    // Human approval is required in this session: the design approval is pinned, then given through the Web decision path.
+    expect((await session.inspect(runId)).status).toBe("awaiting_approval");
+    await webApproval(session, runId, authorized);
+    expect((await session.inspect(runId)).status).toBe("implementing");
     await session.runtime.tick();
     await stallAndAutoPark(session, runId);
     const current = ok(await bridge.issues(PROJECT_ID)).items[0]!;
@@ -304,14 +314,47 @@ describe("Scenario E18 — Director Web × Runtime × issue queue (manifest v3, 
       const kind = random.pick(["issue_retry", "issue_dismiss"] as const);
       const shape = random.pick(["older", "newer", "foreign_run", "foreign_project"] as const);
       const at = Date.parse(current.updatedAt) + (shape === "newer" ? 1 + random.int(5000) : -1 - random.int(5000));
+      // foreign_project keeps the current run and updatedAt: only the project differs.
       const command = issueCommand(kind, current, shape === "foreign_run" ? { runId: `run-${random.int(9)}` } : shape === "foreign_project" ? { projectId: "project-other" }
         : { expectedUpdatedAt: new Date(at).toISOString() });
-      const refusal = await bridge.validateIssueCommand(command);
-      expect(refusal).toBe(shape === "older" || shape === "newer" ? "stale_version" : "forbidden");
+      const expected = shape === "older" || shape === "newer" ? "stale_version" : "forbidden";
+      expect(await bridge.validateIssueCommand(command)).toBe(expected);
+      // Through the host admission order every shape is refused before any effect.
+      expect(await hostAdmit(command)).toEqual({ ok: false, reason: expected });
+      // The bridge effect step alone re-checks run identity and the pinned version (not the project: see report).
       if (shape !== "foreign_project") expect((await bridge.admitIssueCommand(command)).ok).toBe(false);
       expect(ok(await bridge.issues(PROJECT_ID)).items).toEqual([current]);
     }
     expect((ok(await session.ports.engine.getSnapshot(runId)) as any).tasks.find((task: any) => task.taskId === "implement").status).toBe("parked");
+
+    // A real, existing run owned by another host session: after the host's Conversation session changes, the same run and issue
+    // (current updatedAt) are foreign to the host and refused before any effect; a Web message bound to that run too.
+    const original = session.panes.manifest.bind(session.panes);
+    session.panes.manifest = () => ({ ...original(), conversationSessionId: "session-other" });
+    try {
+      expect((await session.inspect(runId)).delegation.sessionId).toBe(HOST_CONVERSATION_SESSION);
+      for (const kind of ["issue_retry", "issue_dismiss"] as const) expect(await hostAdmit(issueCommand(kind, current))).toEqual({ ok: false, reason: "forbidden" });
+      expect(await bridge.send(webSend("việc của phiên khác", { sessionId: "session-other", runId }))).toMatchObject({ ok: false, error: { details: { reason: "forbidden" } } });
+      expect(ok(await bridge.issues(PROJECT_ID)).items).toEqual([current]);
+    } finally { session.panes.manifest = original; }
+
+    // Retrying-status rule with the CURRENT updatedAt: a retrying issue cannot be retried again (status rule, not a stale
+    // version) and stays retrying; it can still be dismissed (Runtime rule: dismiss allowed for open or retrying).
+    expect(ok(await hostAdmit(issueCommand("issue_retry", current)) as never)).toEqual({ kind: "issue", issueId: current.issueId, status: "retrying" });
+    const retrying = ok(await bridge.issues(PROJECT_ID)).items[0]!;
+    expect(retrying).toMatchObject({ issueId: current.issueId, status: "retrying" });
+    expect(Date.parse(retrying.updatedAt)).toBeGreaterThan(Date.parse(current.updatedAt));
+    const again = issueCommand("issue_retry", retrying);
+    expect(await bridge.validateIssueCommand(again)).toBe("operation_not_allowed");
+    expect(await bridge.admitIssueCommand(again)).toMatchObject({ ok: false, error: { details: { reason: "operation_not_allowed" } } });
+    expect(ok(await bridge.issues(PROJECT_ID)).items).toEqual([retrying]);
+    const dismiss = issueCommand("issue_dismiss", retrying);
+    expect(await bridge.validateIssueCommand(dismiss)).toBeUndefined();
+    expect(ok(await hostAdmit(dismiss) as never)).toEqual({ kind: "issue", issueId: current.issueId, status: "dismissed" });
+    expect(ok(await bridge.issues(PROJECT_ID)).items[0]).toMatchObject({ issueId: current.issueId, status: "dismissed" });
+    // Closed: neither command is admitted any more.
+    const closed = ok(await bridge.issues(PROJECT_ID)).items[0]!;
+    for (const kind of ["issue_retry", "issue_dismiss"] as const) expect(await bridge.validateIssueCommand(issueCommand(kind, closed))).toBe("operation_not_allowed");
   }, 120_000);
 
   it("legacy v2 layout: the Director chat, transcript and issue commands are unavailable, never silently enabled", async () => {
