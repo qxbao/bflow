@@ -86,6 +86,20 @@ export async function main(
     return { ok: exitCode === 0, command: "director", exitCode, stdout: "", stderr: "" };
   }
 
+  // `bflow open` launches the same terminal plan as the Web "start session" action; it never mints a token.
+  if (args[0] === "open" || (args[0] === "help" && args[1] === "open")) {
+    const m = await import("./director-open.js");
+    const parsed = m.parseOpenArgs(args[0] === "help" ? ["--help"] : args.slice(1));
+    if (!parsed.ok) {
+      realIo.stderr(`${parsed.message}\n${m.OPEN_HELP}`);
+      process.exitCode = CLI_EXIT_CODES.USAGE_ERROR;
+      return { ok: false, command: "open", exitCode: CLI_EXIT_CODES.USAGE_ERROR, stdout: "", stderr: parsed.message };
+    }
+    const exitCode = await m.runOpenCommand(parsed.value, await m.defaultDirectorOpenDeps(context?.cwd ?? process.cwd()));
+    process.exitCode = exitCode;
+    return { ok: exitCode === 0, command: "open", exitCode, stdout: "", stderr: "" };
+  }
+
   if (args[0] === "progress" || args[0] === "queue") {
     const m = await import("./director-progress.js");
     const cmd = args[0];

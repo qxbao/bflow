@@ -347,6 +347,77 @@ describe("Director Web bridge: issue commands", () => {
     expect(c.conversation()).toBe(0);
     expect((await f.endpoint.inspectIssue(issueId)).status).toBe("open");
   });
+
+  it("reconcile of an unparked retry never resurrects a concurrently dismissed issue", async () => {
+    const f = await setup();
+    const issue = await f.endpoint.upsertIssue({ issueId, runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    // Runtime already reopened this episode (the retry effect happened) but the local status record is still open.
+    f.runs[0]!.tasks[0] = { taskId: "implement", parkHistory: [{ episode: 1, source: "director" }] };
+    const command = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project-1", kind: "issue_retry",
+      runId: "run-1", issueId, expectedUpdatedAt: issue.updatedAt });
+    // The reconcile observation is queued first; a dismiss lands in the issue serial before reconcile's status write.
+    const reconciled = f.bridge.reconcileIssueCommand(command);
+    const dismissed = f.endpoint.setIssueStatus(issueId, "dismissed");
+    const [outcome] = await Promise.all([reconciled, dismissed]);
+    expect((await f.endpoint.inspectIssue(issueId)).status).toBe("dismissed");
+    // The concurrent dismiss wins: the retry outcome stays unproven (receipt reconciliation_required), never "retrying".
+    expect(outcome).toBeUndefined();
+    expect(unparks(f)).toBe(0);
+  });
+
+  it("reconcile of an unparked retry still records retrying when nothing changed concurrently", async () => {
+    const f = await setup();
+    const issue = await f.endpoint.upsertIssue({ issueId, runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    f.runs[0]!.tasks[0] = { taskId: "implement", parkHistory: [{ episode: 1, source: "director" }] };
+    const command = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project-1", kind: "issue_retry",
+      runId: "run-1", issueId, expectedUpdatedAt: issue.updatedAt });
+    expect(await f.bridge.reconcileIssueCommand(command)).toMatchObject({ ok: true, value: { kind: "issue", status: "retrying" } });
+    expect(unparks(f)).toBe(0);
+  });
+
+  it("reconcile of an unparked retry reports applied when retrying was recorded concurrently", async () => {
+    const f = await setup();
+    const issue = await f.endpoint.upsertIssue({ issueId, runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    f.runs[0]!.tasks[0] = { taskId: "implement", parkHistory: [{ episode: 1, source: "director" }] };
+    const command = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project-1", kind: "issue_retry",
+      runId: "run-1", issueId, expectedUpdatedAt: issue.updatedAt });
+    const reconciled = f.bridge.reconcileIssueCommand(command);
+    const recorded = f.endpoint.setIssueStatus(issueId, "retrying");
+    const [outcome] = await Promise.all([reconciled, recorded]);
+    expect(outcome).toMatchObject({ ok: true, value: { kind: "issue", status: "retrying" } });
+    expect(unparks(f)).toBe(0);
+  });
+
+  it("reconcile never unparks: a park read that becomes unobservable before the status write fails closed", async () => {
+    const f = await setup();
+    const issue = await f.endpoint.upsertIssue({ issueId, runId: "run-1", taskKey: "implement", kind: "other", summary: "Treo" });
+    f.runs[0]!.tasks[0] = { taskId: "implement", parkHistory: [{ episode: 1, source: "director" }] };
+    const command = WebCommandSchema.parse({ apiVersion: 1, commandId: randomUUID(), projectId: "project-1", kind: "issue_retry",
+      runId: "run-1", issueId, expectedUpdatedAt: issue.updatedAt });
+    const reconciled = f.bridge.reconcileIssueCommand(command);
+    // Lands in the issue serial between reconcile's observation and its status write: Runtime no longer reports the task.
+    const hidden = f.endpoint.observeIssues(async () => { f.runs[0]!.tasks = []; });
+    const [outcome] = await Promise.all([reconciled, hidden]);
+    expect(outcome).toBeUndefined();
+    expect(unparks(f)).toBe(0);
+    expect((await f.endpoint.inspectIssue(issueId)).status).toBe("open");
+  });
+
+  it("refuses an issue command whose run belongs to another host session before any receipt or effect", async () => {
+    const f = await setup();
+    const c = signedCommands(f, f.root);
+    f.runs.push({ runId: "run-2", delegation: { sessionId: "conv-other", requestedBy: "director" },
+      tasks: [{ taskId: "implement", parked: { episode: 1, source: "director" } }] });
+    const foreignIssue = "park:run-2:implement:1";
+    const issue = await f.endpoint.upsertIssue({ issueId: foreignIssue, runId: "run-2", taskKey: "implement", kind: "other", summary: "Treo" });
+    for (const kind of ["issue_retry", "issue_dismiss"] as const) {
+      const command = c.command(kind, foreignIssue, issue.updatedAt, "run-2");
+      expect(await c.service.execute(command, c.proof(command))).toMatchObject({ ok: false, error: { details: { reason: "forbidden" } } });
+      expect(await c.store.read("local-user-1", command.commandId)).toBeUndefined();
+    }
+    expect(unparks(f)).toBe(0);
+    expect((await f.endpoint.inspectIssue(foreignIssue)).status).toBe("open");
+  });
 });
 
 describe("LocalDirectorServices adapter", () => {

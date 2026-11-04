@@ -15,6 +15,7 @@ import { ProjectRegistry } from './project-registry.js';
 import { Operations } from './lifecycle-operations.js';
 import { OperationResultSchema } from '@bflow/contracts';
 import { HttpError, unwrap, observeWithinDeadline } from './errors.js';
+import { DIRECTOR_ROUTES, directorRoute, type LocalWebDirectorServices } from './director.js';
 
 const WebExcerptsResultSchema=OperationResultSchema(WebWorkforceExcerptsSchema);
 const WebTranscriptResultSchema=OperationResultSchema(WebAgentTranscriptSchema);
@@ -51,7 +52,7 @@ function serializeInteraction<T>(ctx:RouteContext,key:string,call:()=>Promise<T>
   void settled.then(()=>{if(queues!.get(key)===settled)queues!.delete(key);});
   return next;
 }
-export interface RouteContext {eventEpoch:string;sessions:BrowserSessions;registry:ProjectRegistry;operations:Operations;interaction:(id:string,context:WebAuthenticatedContext)=>Promise<UserInteractionClient>;principalId:string;assetsDirectory:string;serialize:<T>(fn:()=>Promise<T>)=>Promise<T>}
+export interface RouteContext {eventEpoch:string;sessions:BrowserSessions;registry:ProjectRegistry;operations:Operations;interaction:(id:string,context:WebAuthenticatedContext)=>Promise<UserInteractionClient>;principalId:string;assetsDirectory:string;serialize:<T>(fn:()=>Promise<T>)=>Promise<T>;director?:LocalWebDirectorServices}
 export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteContext):Promise<void>{
   const {path,query}=requestPath(req.url??'/');
   if(path==='/api'||path.startsWith('/api/')){
@@ -79,6 +80,15 @@ export async function route(req:IncomingMessage,res:ServerResponse,ctx:RouteCont
       await ctx.registry.get(id);
       if(name==='unregisterProject'){res.setTimeout(45000);await ctx.serialize(async()=>{ctx.sessions.authenticate(req);if(ctx.operations.workspace.projectMutationStatus){const value=unwrap(WebProjectMutationStatusResultSchema.parse(await ctx.operations.workspace.projectMutationStatus(id)));if(value.projectId!==id)throw new HttpError('unavailable');if(value.initializationPending)throw new HttpError('operation_conflict');}return ctx.registry.unregister(id);});respond(undefined,204);return;}
       if(name==='operation'){res.setTimeout(40000);respond(await ctx.operations.read(id,params.operationId!,()=>{ctx.sessions.authenticate(req);},authentication));return;}
+      // D-CD-01 Director routes (optional port; missing → operation_not_allowed). Old routes below are unchanged.
+      if(DIRECTOR_ROUTES.has(name)){
+        await directorRoute({name,projectId:id,input,query:parsedQuery,req,res,authentication,director:ctx.director,respond,
+          authorize:()=>{ctx.sessions.authenticate(req);},requireProject:()=>ctx.registry.require(id),critical:ctx.serialize,
+          queue:(key,fn)=>serializeInteraction(ctx,key,fn),
+          launch:(project,request,port)=>ctx.operations.directorLaunch(id,request,project.canonicalPath,()=>{ctx.sessions.authenticate(req);},
+            ()=>port.launch(id,{provider:request.provider,replaceActive:request.replaceActive},authentication))});
+        return;
+      }
       await ctx.registry.require(id);
       if(name==='configuration' || name==='saveConfiguration'){
         res.setTimeout(45000);

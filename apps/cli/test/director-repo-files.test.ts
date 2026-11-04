@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -357,6 +357,17 @@ describe("generated skills", () => {
     const second = await applyDirectorRepoFiles(input());
     expect(second).toEqual({ written: [], backedUp: [] });
     expect(await readdir(join(root, ".bflow/director-backups"))).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === "win32")("tightens an existing backup directory to 0700 before writing a backup", async () => {
+    await mkdir(join(root, ".bflow/director-backups"), { recursive: true });
+    await chmod(join(root, ".bflow/director-backups"), 0o755);
+    await mkdir(join(root, ".claude/skills/bflow-queue"), { recursive: true });
+    await writeFile(join(root, ".claude/skills/bflow-queue/SKILL.md"), "my own queue skill\n");
+    const result = await applyDirectorRepoFiles(input());
+    expect(result.backedUp).toHaveLength(1);
+    expect((await stat(join(root, ".bflow/director-backups"))).mode & 0o777).toBe(0o700);
+    expect((await stat(join(root, result.backedUp[0]!))).mode & 0o777).toBe(0o600);
   });
 
   it("backs up a hand-edited Bflow skill on update and keeps the edit retrievable", async () => {

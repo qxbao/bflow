@@ -1,16 +1,20 @@
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { z } from 'zod';
-import { IdentifierSchema, type OperationResult } from '@bflow/contracts';
+import { IdentifierSchema, SessionManifestSchema, type OperationResult } from '@bflow/contracts';
 import { WebChatMessageResultSchema, WebChatPageResultSchema, WebChatSendSchema, WebCommandSchema, WebNoticeDisplayedResultSchema,
   WebOperationResponseSchema, WebProjectSchema, WebProjectSessionResultSchema,
   type UserInteractionClient, type WebOperation, type WebProject } from '@bflow/contracts/web';
 import { canonicalWebJson, webCommandFingerprint, WebPrincipalSchema, WebAuthenticatedContextSchema,
   WebOperationIndexRecordSchema, WebIssuerRegistrationSchema, WebIssuerCredentialSchema,
   type WebAuthenticatedContext, type WebOperationIndexRecord } from '@bflow/contracts/web-host';
-import { findPrivateRuntimeStateDirectory, openUserInteractionClient, registerUserInteractionIssuer } from '@bflow/runtime';
+import { findPrivateRuntimeStateDirectory, openLocalDirectorServices, openUserInteractionClient, registerUserInteractionIssuer,
+  type LocalDirectorServices } from '@bflow/runtime';
+import type { LocalWebDirectorServices, DirectorLaunchOutcome } from '@bflow/local-server';
 import { identifyRepository } from './repository.js';
+import { DirectorLaunchError, buildDirectorLaunchPlan, inspectDirectorLaunchOptions, launchDirectorPlan,
+  type DirectorLaunchDeps, type DirectorLaunchPresence } from './director-open.js';
 
 type WebIssuerCredential = z.infer<typeof WebIssuerCredentialSchema>;
 
@@ -22,6 +26,51 @@ interface InteractionDependencies {
   register?: typeof registerUserInteractionIssuer;
   openClient?: typeof openUserInteractionClient;
   sessionId?: (project: WebProject) => Promise<string>;
+  openDirector?: typeof openLocalDirectorServices;
+  director?: DirectorWebDependencies;
+}
+/** D-CD-01 Director Web port composition (tests inject; production uses the Task 3 launcher and the running host). */
+export interface DirectorWebDependencies {
+  inspect?: typeof inspectDirectorLaunchOptions;
+  build?: typeof buildDirectorLaunchPlan;
+  launch?: typeof launchDirectorPlan;
+  deps?: DirectorLaunchDeps;
+  /** Presence from the running host; read failure must be `unknown`, a stopped host `host_stopped`. */
+  readPresence?: (project: WebProject, hostSessionId: string) => Promise<DirectorLaunchPresence>;
+  /** Bound on the presence read (default 10 s); a late read counts as `unknown`, which requires replaceActive. */
+  presenceTimeoutMs?: number;
+  /** The host's activated Conversation session (manifest), undefined when unknown; checked against a Director view. */
+  conversationSessionId?: (project: WebProject, hostSessionId: string) => Promise<string | undefined>;
+  /** Machine paths that must never reach the browser (BFLOW_HOME, provider homes). */
+  sensitivePaths?: () => string[];
+}
+const PRESENCE_TIMEOUT_MS = 10000;
+/** Reads the activated manifest's Conversation session; any failure is "unknown" (undefined), never a mismatch. */
+async function manifestConversationSessionId(project: WebProject, hostSessionId: string): Promise<string | undefined> {
+  try {
+    const raw = await readFile(join(project.canonicalPath, '.bflow/state/panes', `${hostSessionId}.manifest.json`), 'utf8');
+    if (raw.length > 4 * 1024 * 1024) return undefined;
+    const manifest = SessionManifestSchema.parse(JSON.parse(raw));
+    if (manifest.sessionId !== hostSessionId || manifest.workspaceRoot !== project.canonicalPath) return undefined;
+    return manifest.conversationSessionId;
+  } catch { return undefined; }
+}
+const TOKEN_TEXT = /\b[A-Za-z0-9_-]{8,128}\.[A-Za-z0-9_-]{32,256}\b|\b(?:sk|ghp|gho|xox[abp]|AIza)[A-Za-z0-9_-]{16,}\b/g;
+/** Default machine paths kept out of Web responses: BFLOW_HOME and provider homes (never HOME itself, which may hold the repository). */
+function defaultSensitivePaths(env: NodeJS.ProcessEnv = process.env): string[] {
+  const home = env.HOME;
+  return [env.BFLOW_HOME, env.CODEX_HOME, env.CLAUDE_CONFIG_DIR, env.GEMINI_HOME, env.XDG_STATE_HOME,
+    ...(home ? [join(home, '.bflow'), join(home, '.claude'), join(home, '.codex'), join(home, '.gemini')] : [])]
+    .filter((path): path is string => typeof path === 'string' && path.startsWith('/') && path.length > 1);
+}
+/** Redacts machine paths and token shapes; `keep` (the canonical project path) survives so manual commands stay usable. */
+export function redactDirectorWebText(text: string, sensitive: readonly string[], keep?: string): string {
+  const scrub = (part: string) => {
+    let out = part.replace(TOKEN_TEXT, '[REDACTED]');
+    for (const path of [...sensitive].sort((a, b) => b.length - a.length)) out = out.split(path).join('[REDACTED]');
+    return out;
+  };
+  return keep ? text.split(keep).map(scrub).join(keep) : scrub(text);
 }
 const unavailable = (): OperationResult<WebOperation> => ({ok:false,error:{code:'transport_unavailable',retryable:true,
   message:'Host interaction unavailable; observe the same operation ID. No command was resent.'}});
@@ -119,7 +168,107 @@ export function createWebInteractionServices(context: InteractionComposition, de
     return clientFromCredential(project,hostSessionId,registered,browser);
   };
 
+  const openDirector=dependencies.openDirector??openLocalDirectorServices;
+  const directorDeps=dependencies.director??{};
+  const sensitive=()=>(directorDeps.sensitivePaths??(()=>defaultSensitivePaths()))();
+  const directorUnavailable=<T>(message='Host của phiên chưa chạy; Director chưa đọc/gửi được.'):OperationResult<T>=>({ok:false,error:{code:'transport_unavailable',retryable:true,message,details:{reason:'unavailable'}}});
+  const directorRefused=<T>(reason:'forbidden'|'invalid_request'|'operation_not_allowed',message:string):OperationResult<T>=>({ok:false,error:{code:'validation',retryable:false,message,details:{reason}}});
+  /** Validates the authenticated browser context and resolves the registered project and its host session (never a browser path). */
+  const directorScope=async(projectId:string,input:WebAuthenticatedContext)=>{
+    const browser=WebAuthenticatedContextSchema.parse(input);
+    if(browser.principalId!==context.principalId || Date.parse(browser.expiresAt)<=Date.now())throw new Error('Invalid browser context');
+    const project=WebProjectSchema.parse(await context.resolveProject(IdentifierSchema.parse(projectId)));
+    if(project.projectId!==projectId)throw new Error('Foreign registered project');
+    return {project,hostSessionId:IdentifierSchema.parse(await session(project))};
+  };
+  /** Owner reads use no credential; message methods use the registered Web credential only (never owner/Director tokens). */
+  const directorService=async(project:WebProject,hostSessionId:string,withCredential:boolean):Promise<LocalDirectorServices>=>{
+    const host={repositoryPath:project.canonicalPath,sessionId:hostSessionId};
+    if(!withCredential)return openDirector(host);
+    const registered=await withProbeTimeout(()=>resolveCredential(project,hostSessionId),COLD_REGISTER_PROBE_MS);
+    return openDirector({...host,interaction:{credential:registered.credential}});
+  };
+  const readPresence=directorDeps.readPresence??(async(project:WebProject,hostSessionId:string):Promise<DirectorLaunchPresence>=>{
+    try{
+      const {EnvironmentLifecycle}=await import('./environment.js');
+      const status=await new EnvironmentLifecycle(project.canonicalPath).status();
+      if(status.server!=='running')return 'host_stopped';
+      const view=await (await openDirector({repositoryPath:project.canonicalPath,sessionId:hostSessionId})).readDirector(project.projectId);
+      return view.ok?view.value.snapshot.director.presence:'unknown';
+    }catch{return 'unknown';}
+  });
+  const launchDeps=async():Promise<DirectorLaunchDeps>=>directorDeps.deps??{pathEntries:(await import('./gateway-repositories.js')).resolveSetupPlatform().pathEntries};
+  const director:LocalWebDirectorServices={
+    async readView(projectId,input){
+      let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
+      try{
+        const view=await (await directorService(scope.project,scope.hostSessionId,false)).readDirector(projectId);
+        // Defence in depth: a view served by another host's Conversation session is never shown as this project's Director.
+        if(view.ok && view.value.sessionId!==undefined){
+          const expected=await (directorDeps.conversationSessionId??manifestConversationSessionId)(scope.project,scope.hostSessionId).catch(()=>undefined);
+          if(expected!==undefined && expected!==view.value.sessionId)return directorUnavailable('Director view không khớp phiên host hiện tại.');
+        }
+        return view;
+      }catch{return directorUnavailable();}
+    },
+    async issues(projectId,cursor,input){
+      let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
+      try{return await (await directorService(scope.project,scope.hostSessionId,false)).listDirectorIssues(projectId,cursor);}catch{return directorUnavailable();}
+    },
+    async messages(projectId,cursor,input){
+      let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
+      let service;try{service=await directorService(scope.project,scope.hostSessionId,true);}catch{return directorUnavailable();}
+      try{return await service.listDirectorMessages(projectId,cursor);}catch{return directorUnavailable();}
+    },
+    async send(raw,input){
+      let body;try{body=WebChatSendSchema.parse(raw);}catch{return directorRefused('invalid_request','Invalid Director message.');}
+      let scope;try{scope=await directorScope(body.projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
+      // No credential means no connection was made: the message was not written and may be sent again with the same ID.
+      let service;try{service=await directorService(scope.project,scope.hostSessionId,true);}
+      catch{return directorUnavailable('Host chưa sẵn sàng; tin chưa được gửi.');}
+      try{return await service.sendDirectorMessage(body);}
+      catch{return {ok:false,error:{code:'unknown_delivery',retryable:false,manualInterventionRequired:true,message:'Observe the transcript for this message ID before resending.',details:{reason:'reconciliation_required',messageId:body.messageId}}};}
+    },
+    async launchOptions(projectId,input){
+      let scope;try{scope=await directorScope(projectId,input);}catch{return directorRefused('forbidden','Invalid Director scope.');}
+      try{
+        const canonicalPath=await realpath(scope.project.canonicalPath),paths=sensitive();
+        const options=await (directorDeps.inspect??inspectDirectorLaunchOptions)({projectId,canonicalPath},await launchDeps());
+        return {ok:true,value:{...options,
+          terminal:options.terminal.reason===undefined?options.terminal:{...options.terminal,reason:redactDirectorWebText(options.terminal.reason,paths)},
+          providers:options.providers.map(option=>({...option,manualCommand:redactDirectorWebText(option.manualCommand,paths,canonicalPath),
+            ...(option.reason===undefined?{}:{reason:redactDirectorWebText(option.reason,paths)})}))}};
+      }catch{return directorUnavailable('Không kiểm tra được cách mở Director cho kho này.');}
+    },
+    async launch(projectId,request,input):Promise<OperationResult<DirectorLaunchOutcome>>{
+      // Everything before launchDirectorPlan is pre-effect: a failure there is a definitive refusal.
+      // The plan (argv, cwd and the user's environment) stays in this closure: it is never returned, persisted or logged.
+      const refused=(reason:string):OperationResult<DirectorLaunchOutcome>=>({ok:false,error:{code:'validation',retryable:false,message:'Director launch refused before any effect.',details:{reason}}});
+      let plan,presence:DirectorLaunchPresence,canonicalPath:string,deps:DirectorLaunchDeps;
+      try{
+        const scope=await directorScope(projectId,input);
+        canonicalPath=await realpath(scope.project.canonicalPath);deps=await launchDeps();
+        plan=await (directorDeps.build??buildDirectorLaunchPlan)({projectId,canonicalPath},request.provider,deps);
+        // Bounded so a slow presence read cannot push the spawn past the operation deadline (into the "uncertain" window).
+        let timer:ReturnType<typeof setTimeout>|undefined;
+        presence=await Promise.race([readPresence(scope.project,scope.hostSessionId).catch(():DirectorLaunchPresence=>'unknown'),
+          new Promise<DirectorLaunchPresence>(resolve=>{timer=setTimeout(()=>resolve('unknown'),directorDeps.presenceTimeoutMs??PRESENCE_TIMEOUT_MS);})])
+          .finally(()=>{if(timer)clearTimeout(timer);});
+      }catch(error){return refused(error instanceof DirectorLaunchError?error.code:'not_started');}
+      try{
+        const result=await (directorDeps.launch??launchDirectorPlan)(plan,{presence,replaceActive:request.replaceActive,deps});
+        return {ok:true,value:{kind:'director_launch',provider:request.provider,mode:result.mode,
+          manualCommand:redactDirectorWebText(result.manualCommand,sensitive(),canonicalPath),launchedAt:result.launchedAt}};
+      }catch(error){
+        if(error instanceof DirectorLaunchError && error.code!=='launch_uncertain')return refused(error.code);
+        return {ok:false,error:{code:'unknown_delivery',retryable:false,manualInterventionRequired:true,
+          message:'Director launch outcome is uncertain; it is never retried automatically.',details:{reason:'launch_uncertain'}}};
+      }
+    }
+  };
+
   return {
+    director,
     async hostSessionId(projectId:string):Promise<string>{
       const project=WebProjectSchema.parse(await context.resolveProject(IdentifierSchema.parse(projectId)));
       if(project.projectId!==projectId)throw new Error('Foreign registered project');

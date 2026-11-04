@@ -5,7 +5,7 @@ import type { Connection } from '../../../api/events';
 import { useRead } from '../../data';
 import { deriveOffice } from '../model/derive';
 import { applySeats } from '../model/seats';
-import type { OfficeModel, SeatMap } from '../model/types';
+import type { OfficeDirectorInput, OfficeModel, SeatMap } from '../model/types';
 
 /** A lease can expire without any invalidating event, so the visible workforce is re-read on this period. */
 export const WORKFORCE_POLL_MS = 15_000;
@@ -38,7 +38,7 @@ const byBoundAt = (a: { boundAt: string; instanceId: string }, b: { boundAt: str
  * The office model of visual mode. Mounted only while visual mode shows, so Classic never reads /workforce. Reads follow the page
  * revision (SSE invalidation) plus a 15 s re-read while the tab is visible. A failed re-read keeps the last model and sets `stale`.
  */
-export function useOfficeModel({ api, id, session, connection, revision }: { api: ApiClient; id: string; session: WebProjectSession | undefined; connection: Connection; revision: number }): OfficeModelState {
+export function useOfficeModel({ api, id, session, connection, revision, director }: { api: ApiClient; id: string; session: WebProjectSession | undefined; connection: Connection; revision: number; /** Shared Director projection (stable identity while unchanged); undefined keeps the legacy office. */ director?: OfficeDirectorInput | undefined }): OfficeModelState {
   const runs = useRead(`office-runs:${id}`, () => api.runs(id), revision);
   const decisions = useRead(`office-decisions:${id}`, () => api.decisions(id), revision);
   const [tick, setTick] = useState(0);
@@ -69,9 +69,9 @@ export function useOfficeModel({ api, id, session, connection, revision }: { api
   const seats = useRef<SeatMap>({ entries: [], overflow: 0 });
   const seated = useMemo(() => {
     if (!session) return undefined;
-    const derived = deriveOffice({ session, runs: runs.data?.items ?? [], decisions: decisions.data?.items ?? [], ...(sorted ? { workforce: sorted } : {}), connection, now: Date.now() });
+    const derived = deriveOffice({ session, runs: runs.data?.items ?? [], decisions: decisions.data?.items ?? [], ...(sorted ? { workforce: sorted } : {}), ...(director ? { director } : {}), connection, now: Date.now() });
     return applySeats(seats.current, derived);
-  }, [session, runs.data, decisions.data, sorted, connection]);
+  }, [session, runs.data, decisions.data, sorted, connection, director]);
   // Seats are remembered after commit, so rendering itself never mutates the ref.
   useEffect(() => { if (seated) seats.current = seated.seats; }, [seated]);
   const error = [workforce.error, runs.error, decisions.error].find(e => e !== undefined);

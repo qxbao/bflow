@@ -1,4 +1,4 @@
-import { WebHttpContracts as contracts, WebApiErrorSchema, WEB_LIMITS, type WebSessionSummary } from '@bflow/contracts/web';
+import { WebHttpContracts as contracts, WebApiErrorSchema, WEB_LIMITS, type DirectorMessage, type WebChatSend, type WebDirectorTranscriptPage, type WebSessionSummary } from '@bflow/contracts/web';
 
 type Parser<T> = { parse(input: unknown): T };
 export class ConfigurationError extends Error {}
@@ -15,6 +15,7 @@ const messages: Record<string, string> = {
   operation_conflict: 'Dự án còn thao tác chưa được xác nhận. Kiểm tra trạng thái thao tác trước khi hủy đăng ký.',
   operation_not_allowed: 'Trạng thái hiện tại chưa cho phép thao tác này. Tải lại để xem thao tác hợp lệ; nếu vẫn bị từ chối, khởi động lại Bflow Web bằng phiên bản mới.',
   unavailable: 'Chưa kết nối được dịch vụ. Kiểm tra phiên dự án rồi thử tải lại.',
+  reconciliation_required: 'Chưa xác định được kết quả. Đối chiếu lại trước; Bflow không tự gửi lại.',
 };
 export function explain(error: unknown): string { return error instanceof ConfigurationError ? error.message : error instanceof ApiError ? messages[error.code] ?? messages.unavailable! : messages.unavailable!; }
 /** Capture and erase secrets before rendering, requests, or asynchronous work. */
@@ -80,6 +81,39 @@ export class ApiClient {
   }
   readWorkforceExcerpts(id: string) { return this.request(`${projectPath(id)}/workforce/excerpts`, contracts.workforceExcerpts.response); }
   readAgentTranscript(id: string, instanceId: string) { return this.request(`${projectPath(id)}/agents/${encodeURIComponent(instanceId)}/transcript`, contracts.agentTranscript.response); }
+  /** D-CD-01 Director view. A backend without the Director port answers 422 `operation_not_allowed`. */
+  async director(id: string) {
+    const value = await this.request(`${projectPath(id)}/director`, contracts.director.response, 'GET', undefined, 30000);
+    if (value.projectId !== id) throw new ApiError('invalid_response');
+    return value;
+  }
+  /** Transcript page. Cursors are the server's private `a<seq>` (newer) / `b<seq>` (older) convention; none = latest page. */
+  async directorMessages(id: string, cursor?: string): Promise<WebDirectorTranscriptPage> {
+    const query = cursor ? `?${new URLSearchParams({cursor})}` : '';
+    const page = await this.request(`${projectPath(id)}/director/messages${query}`, contracts.directorMessages.response, 'GET', undefined, 40000);
+    // Pages are oldest→newest with unique seq and message IDs; anything else is not a verified transcript page.
+    const ids = new Set<string>();
+    page.items.forEach((item, index) => {
+      if (ids.has(item.messageId) || (index > 0 && item.seq <= page.items[index - 1]!.seq)) throw new ApiError('invalid_response');
+      ids.add(item.messageId);
+    });
+    return page;
+  }
+  async sendDirectorMessage(input: WebChatSend): Promise<DirectorMessage> {
+    const body = contracts.sendDirectorMessage.body.parse(input);
+    const message = await this.request(`${projectPath(body.projectId)}/director/messages`, contracts.sendDirectorMessage.response, 'POST', body, 40000);
+    if (message.messageId !== body.messageId || message.author !== 'user' || message.channel !== 'web') throw new ApiError('invalid_response');
+    return message;
+  }
+  async directorIssues(id: string, cursor?: string) {
+    const query = cursor ? `?${new URLSearchParams({cursor})}` : '';
+    return this.request(`${projectPath(id)}/director/issues${query}`, contracts.directorIssues.response, 'GET', undefined, 40000);
+  }
+  async directorLaunchOptions(id: string) {
+    const value = await this.request(`${projectPath(id)}/director/launch-options`, contracts.directorLaunchOptions.response, 'GET', undefined, 30000);
+    if (value.projectId !== id) throw new ApiError('invalid_response');
+    return value;
+  }
   decisions(id: string) { return this.request(`${projectPath(id)}/decisions`, contracts.decisions.response); }
   inspect(id: string) { return this.request(`${projectPath(id)}/session/inspect`, contracts.inspectSession.response, 'POST', contracts.inspectSession.body.parse({apiVersion:1}), 50000); }
   async artifact(id: string, artifactId: string): Promise<string> {

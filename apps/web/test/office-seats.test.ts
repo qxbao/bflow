@@ -113,3 +113,12 @@ describe('assignSeats', () => {
     expect(JSON.parse(JSON.stringify(next))).toEqual(next);
   });
 });
+
+describe('Director desk seat (C/D Task 7)', () => {
+  test('the director option reserves the executive desk; without it legacy seating is unchanged', () => {
+    const conv = [agent('c1', 'conversation'), agent('c2', 'conversation')];
+    expect(assignSeats({ entries: [], overflow: 0 }, conv).entries.map(e => e.seat)).toEqual(['conversation:conversation', 'conversation:conversation:2']);
+    expect(assignSeats({ entries: [], overflow: 0 }, conv, { director: true }).entries.map(e => e.seat)).toEqual(['conversation:conversation:2', 'conversation:conversation:3']);
+    expect(assignSeats({ entries: [], overflow: 0 }, devs(3), { director: true })).toEqual(assignSeats({ entries: [], overflow: 0 }, devs(3)));
+  });
+});

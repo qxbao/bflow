@@ -89,7 +89,9 @@ class SignText {
   readonly texture: CanvasTexture;
   private readonly canvas = document.createElement('canvas');
   private dead = false;
-  constructor(private readonly sign: ZoneSign, onChange: () => void) {
+  private text: string;
+  constructor(sign: ZoneSign, onChange: () => void) {
+    this.text = sign.text;
     this.canvas.width = Math.round(sign.w * 0.9 * 200); this.canvas.height = Math.round(sign.h * 0.8 * 200);
     this.texture = new CanvasTexture(this.canvas);
     this.texture.colorSpace = SRGBColorSpace;
@@ -100,7 +102,7 @@ class SignText {
     const g = this.canvas.getContext('2d');
     if (!g) return true;
     const family = '"IBM Plex Sans", system-ui, sans-serif', loaded = document.fonts?.check('700 40px "IBM Plex Sans"') ?? true;
-    const { width, height } = this.canvas, text = this.sign.text.toUpperCase();
+    const { width, height } = this.canvas, text = this.text.toUpperCase();
     g.clearRect(0, 0, width, height);
     let px = Math.round(height * 0.7);
     g.font = `700 ${px}px ${family}`;
@@ -109,6 +111,12 @@ class SignText {
     g.fillStyle = '#f3ead0'; g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText(text, width / 2, height / 2 + px * 0.04);
     return loaded;
+  }
+  /** Redraws with another title of the same sign (the board keeps its size; the text shrinks to fit). */
+  setText(text: string): boolean {
+    if (text === this.text || this.dead) return false;
+    this.text = text; this.draw(); this.texture.needsUpdate = true;
+    return true;
   }
   dispose(): void { this.dead = true; this.texture.dispose(); }
 }
@@ -132,7 +140,7 @@ export class Stage {
   private readonly pools: { zone: string; mesh: Mesh }[] = [];
   private readonly deskGlow: InstancedMesh;
   private readonly deskGlowMat: MeshBasicMaterial;
-  private readonly signs: { text: SignText; mat: MeshBasicMaterial }[] = [];
+  private readonly signs: { id: string; text: SignText; mat: MeshBasicMaterial }[] = [];
   private readonly signGeo = new PlaneGeometry(1, 1);
   private plan: DeskPlan | undefined;
 
@@ -226,7 +234,7 @@ export class Stage {
       const plane = new Mesh(this.signGeo, mat);
       plane.scale.set(g.w * 0.9, g.h * 0.8, 1); plane.position.set(g.x, g.y, g.z + 0.022); plane.renderOrder = 3;
       this.group.add(plane);
-      this.signs.push({ text, mat });
+      this.signs.push({ id: g.id, text, mat });
     }
 
     // Lights: a bright white-warm key (soft shadows on the high tier), a white sky fill, and faint warm spot pools over each room (high tier only).
@@ -302,6 +310,13 @@ export class Stage {
     const dev = this.pools.find(p => p.zone === 'developer');
     const z = zones(rows).find(q => q.id === 'developer');
     if (dev && z) { dev.mesh.scale.set((z.x1 - z.x0 + 1) * 1.1, (z.y1 - z.y0 + 1) * 1.15, 1); dev.mesh.position.set((z.x0 + z.x1 + 1) / 2, 0.02, (z.y0 + z.y1 + 1) / 2); }
+  }
+
+  /** Retitles the zone signs for a layout (`zoneTitles`). Returns true when something was redrawn. */
+  setZoneTitles(titles: readonly { id: string; text: string }[]): boolean {
+    let changed = false;
+    for (const t of titles) { const sign = this.signs.find(g => g.id === t.id); if (sign?.text.setText(t.text)) changed = true; }
+    return changed;
   }
 
   dispose(): void {

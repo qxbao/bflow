@@ -13,3 +13,16 @@ export const shortStatus = (pose: string): string => SHORT_STATUS[pose] ?? 'Chư
 export const agentTag = (label: string, pose: string): string => `${label.replace(/^Developer/, 'Dev')} · ${shortStatus(pose)}`;
 /** The extra in-scene label a pose gets: a message box while the agent works, a Zzz while it sleeps. */
 export const poseLabel = (pose: string): 'bubble' | 'sleep' | undefined => (pose === 'working' || pose === 'typing' || pose === 'preparing' ? 'bubble' : pose === 'sleeping' ? 'sleep' : undefined);
+
+/** The Director desk tag: "Director · Hoạt động". `unknown` is a failed read, spelled differently from a confirmed absence. */
+const DIRECTOR_SHORT: Readonly<Record<string, string>> = { active: 'Hoạt động', waiting: 'Đang chờ', absent: 'Vắng mặt', unknown: 'Chưa rõ' };
+export const directorTag = (presence: string): string => `Director · ${DIRECTOR_SHORT[presence] ?? 'Chưa rõ'}`;
+/** Longer Director status for the mirror and inspector. */
+export const DIRECTOR_STATUS: Readonly<Record<string, string>> = { active: 'Đang hoạt động', waiting: 'Đang chờ tin của bạn', absent: 'Chưa có mặt', unknown: 'Chưa xác định' };
+/** The queue board text: open and retrying counts, or that the queue could not be read. */
+export function queueText(queue: { availability: string; open: number; retrying: number; truncated: boolean } | undefined): string {
+  if (!queue || queue.availability !== 'ready') return 'chưa đọc được';
+  const plus = queue.truncated ? '+' : '';
+  const parts = [`${queue.open}${plus} đang mở`, ...(queue.retrying > 0 ? [`${queue.retrying}${plus} đang thử lại`] : [])];
+  return parts.join(', ');
+}

@@ -248,7 +248,8 @@ export class DirectorTools {
    * open. With a park observation port the issue must belong to the task's current park episode before unpark; an episode
    * that Runtime already reopened only gets its status recorded (observed, not resent). `guard` runs before any effect.
    */
-  async setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard): Promise<ParkedIssue> {
+  async setIssueStatus(issueId: string, status: "retrying" | "resolved" | "dismissed", guard?: DirectorIssueGuard,
+    options: { recordOnly?: boolean } = {}): Promise<ParkedIssue> {
     const args = SetStatusArgs.parse({ issueId, status });
     return this.issueSerial(async () => {
       const issue = (await this.store.listIssues()).find(item => item.issueId === args.issueId);
@@ -258,6 +259,10 @@ export class DirectorTools {
       if (args.status === "retrying" && issue.taskKey !== undefined) {
         const observed = this.taskPark ? await this.taskPark(issue.runId, issue.taskKey) : undefined;
         const matches = (park: DirectorParkEpisode) => parkEpisodeIssueIds(issue.runId, issue.taskKey!, park).includes(issue.issueId);
+        // Record-only (reconciliation): only an episode Runtime already reopened is recorded. An unobservable or still/again
+        // parked task fails closed: no status write and never an unpark.
+        if (options.recordOnly && (observed === undefined || observed.current !== undefined || !observed.history.some(matches)))
+          throw new DirectorIssueRefusal("stale_version", "Không xác nhận được task đã được mở lại; chỉ quan sát, không mở lại");
         let unpark = observed === undefined;
         if (observed !== undefined) {
           if (observed.current !== undefined) {
