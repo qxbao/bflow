@@ -150,6 +150,20 @@ describe("P12 repository environment lifecycle", () => {
     expect(quiesce).not.toHaveBeenCalled();expect(fixture.manager.down).not.toHaveBeenCalled();
     expect(runner.running.has(repository.sessionName)).toBe(true);
   });
+  it('force stop preserves durable state when a dead host cannot reopen its stale execution plan',async()=>{
+    const manifest=fixture.create();fixture.set(manifest);
+    await mkdir(join(dir,'.bflow/state'),{recursive:true});
+    await writeFile(join(dir,'.bflow/state/session.json'),JSON.stringify(manifest));
+    const journal=join(dir,'.bflow/state/keep-journal.json');await writeFile(journal,'{"dispatch":"unknown"}');
+    const drift=Object.assign(new Error('Execution plan inputs changed; read-only re-resolution is required before execution'),{code:'execution_plan_drift'});
+    const terminate=vi.fn(async()=>{});
+    const life=new EnvironmentLifecycle(dir,{runner,integration:{manager:fixture.manager,runtime:mockRuntime(),
+      quiesce:async()=>{throw drift;},shutdownHost:vi.fn(async()=>{}),terminateIncompatibleHost:terminate}});
+    await expect(life.down(true)).rejects.toThrow('Execution plan inputs changed');expect(terminate).not.toHaveBeenCalled();
+    await expect(life.down(true,3000,true)).resolves.toMatchObject({status:'down'});
+    expect(terminate).toHaveBeenCalledOnce();expect(await readFile(journal,'utf8')).toBe('{"dispatch":"unknown"}');
+    expect(fixture.manager.up).not.toHaveBeenCalled();expect(fixture.manager.down).not.toHaveBeenCalled();
+  });
   it("preserves unmanifested active Runtime work on an already stopped server", async () => {
     const shutdownHost = vi.fn(async () => {});
     const life = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]),
