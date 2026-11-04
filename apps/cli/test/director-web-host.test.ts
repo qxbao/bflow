@@ -201,10 +201,11 @@ describe.skipIf(process.platform === 'win32')('Director Web over the activated r
     const beforeRestart = stream.events.length;
     await controller.quiesce(); await controller.shutdown();
     controller = await activateDirectorHost(repo, sessionId, herdrBinary);
-    // The open stream either ends or tells the browser to reread everything; it never splices the new epoch as a continuation.
-    // The open stream must actually deliver a `reset`, and it must be the first frame after the restart (never a spliced continuation).
-    await expect.poll(() => stream.events.length > beforeRestart, { timeout: 15_000 }).toBe(true);
-    expect(stream.events[beforeRestart]!.data.type).toBe('reset');
+    // Race-free contract: if the open stream's upstream poll lands inside the host downtime, Local Server closes it (the Web client
+    // then reconnects with its last cursor, apps/web/src/api/events.ts). Otherwise its first frame after the restart must be the
+    // `reset`. Either way the new epoch is never spliced into the old stream as a continuation; the resumed stream asserts the reset below.
+    await expect.poll(() => stream.closed || stream.events.length > beforeRestart, { timeout: 15_000 }).toBe(true);
+    if (stream.events.length > beforeRestart) expect(stream.events[beforeRestart]!.data.type).toBe('reset');
     const resumed = openStream(server.origin, `${base}/events`, { Cookie: headers.Cookie, 'Last-Event-ID': lastCursor });
     cleanups.push(async () => resumed.close());
     await expect.poll(() => resumed.events.length, { timeout: 15_000 }).toBeGreaterThan(0);

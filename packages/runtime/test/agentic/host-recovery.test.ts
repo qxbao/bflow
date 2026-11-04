@@ -426,6 +426,10 @@ it('refreshes inactive source snapshots only from explicit resolved startup and 
  const source={schemaVersion:3 as const,plan:{schemaVersion:3,resolverVersion:'1',policyVersion:'1',repository:{revision:'abc'},mode:'intake'},files:[{component:'project-config',path:sourcePath,format:'json' as const}]};
  const first=await ensureAgenticHost({repositoryPath:root,sessionId:'resolved-restart',herdrBinary:binary,executionResolution:source});cleanup.push(()=>first.shutdown().catch(()=>undefined));
  expect(await first.quiesce()).toMatchObject({ok:true});await first.shutdown();
+ // shutdown() resolves once the endpoint is unlinked, while the daemon may still be exiting. Source refresh is refused while the
+ // recorded owner is alive, so wait for the owner-death barrier exactly as the sibling fixture's stop() does. The guard is unchanged.
+ const owner=JSON.parse(await readFile(join(root,'.bflow/state/host','resolved-restart','owner.json'),'utf8'));
+ await vi.waitFor(()=>expect(()=>process.kill(owner.pid,0)).toThrow(),{timeout:5000,interval:20});
  await writeFile(sourcePath,'{"model":"haiku","effort":"low"}');
  const next=await ensureAgenticHost({repositoryPath:root,sessionId:'resolved-restart',herdrBinary:binary,executionResolution:source});cleanup.push(()=>next.shutdown().catch(()=>undefined));
  expect(await next.quiesce()).toMatchObject({ok:true});await next.shutdown();
