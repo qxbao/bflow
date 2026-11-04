@@ -63,6 +63,23 @@ it('detects native profile model changes without exporting credential-bearing se
  expect(JSON.stringify(after)).not.toContain('credential-canary-private');
 });
 
+it('keeps preview fingerprints stable for native presentation counters while guarding profile authority',async()=>{
+ const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
+ config.environment.roles.find(role=>role.role==='developer')!['profile-name']='preview-owner';
+ await writeFile(join(root,'.bflow/config.yml'),renderEnvironmentConfigYaml(config));
+ vi.stubEnv('AI_ISOLATOR_HOME',join(root,'isolator'));
+ const profile=join(root,'isolator/profiles/codex--preview-owner');await mkdir(join(profile,'home/.codex'),{recursive:true});
+ await writeFile(join(profile,'profile.env'),'AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=preview-owner\n');
+ const file=join(profile,'home/.codex/config.toml'),base='model = "profile-first"\n';await writeFile(file,base);
+ const before=await loadExecutionPreview(root);
+ await writeFile(file,base+'\n[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 1\n');
+ const after=await loadExecutionPreview(root);
+ expect(after.components.profiles).toBe(before.components.profiles);
+ expect(after.fingerprint).toBe(before.fingerprint);
+ await writeFile(file,'approval_policy = "never"\n'+base);
+ expect((await loadExecutionPreview(root)).components.profiles).not.toBe(before.components.profiles);
+});
+
 it('hands the daemon unique validated watches and uses execution skill selection when optional tools have no grants',async()=>{
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
  const input={repository,config,env:process.env};

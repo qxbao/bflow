@@ -104,3 +104,53 @@ it('accepts the existing native root trust decision with a trailing slash',async
  const f=await fixture();await writeFile(f.config,f.baseline.replace(JSON.stringify(f.repo),JSON.stringify(f.repo+'/')));const read=await f.reader();const tree=await f.prepare();
  await ensureCodexWorkspaceTrust(tree.worktreePath,f.config);await expect(read()).resolves.toMatchObject({mode:'intake'});
 });
+
+it('retains accepted profile inputs when native startup appends only its generated presentation-state tables',async()=>{
+ const f=await fixture();const read=await f.reader();const before=await read.readPrivateSources!();
+ await writeFile(f.config,f.baseline+'\n[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 1\n');
+ await expect(read()).resolves.toMatchObject({mode:'intake'});
+ expect(await read.readPrivateSources!()).toEqual(before);
+ await writeFile(f.config,(await readFile(f.config,'utf8')).replace('= 1\n','= 4\n'));
+ await expect(read()).resolves.toMatchObject({mode:'intake'});
+ expect(await read.readPrivateSources!()).toEqual(before);
+});
+
+it.each([
+ '[tui]\nscreen_reader_detection_done = true\napproval_policy = "never"\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 1\n',
+ '[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = "changed"\n',
+ '[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 1\n\n[projects."/outside"]\ntrust_level = "trusted"\n'
+])('keeps unknown or malformed settings beside presentation metadata guarded',async suffix=>{
+ const f=await fixture();const read=await f.reader();await writeFile(f.config,f.baseline+'\n'+suffix);
+ await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
+});
+
+it('does not remove presentation-table-shaped bytes inside a multiline provider command',async()=>{
+ const f=await fixture();const base=f.baseline+'\n[model_providers.local.auth]\ncommand = """\n[start]\n"""\n';
+ await writeFile(f.config,base);const read=await f.reader();
+ await writeFile(f.config,base.replace('[start]','[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 1\n'));
+ await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
+});
+
+it('preserves an unchanged legacy accepted digest that already included native presentation tables',async()=>{
+ const f=await fixture();const text=f.baseline+'\n[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 4\n';
+ await writeFile(f.config,text);const expectedDigest=createHash('sha256').update(text).digest('hex');
+ const read=await createExecutionResolutionReader({schemaVersion:3,repositoryRoot:f.repo,
+  plan:{schemaVersion:3,resolverVersion:'legacy-native-test',policyVersion:'1',repository:await readExecutionRepositorySnapshot(f.repo),mode:'intake'},
+  files:[{component:'native-profile-settings-1',path:f.config,format:'bytes',expectedDigest}]});
+ await expect(read()).resolves.toMatchObject({mode:'intake'});
+ expect((await read.readPrivateSources!())['native-profile-settings-1']).toBe(expectedDigest);
+ await writeFile(f.config,'approval_policy = "never"\n'+text);
+ await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
+});
+
+it('does not normalize duplicate model keys in generated presentation tables',async()=>{
+ const f=await fixture();const read=await f.reader();
+ await writeFile(f.config,f.baseline+'\n[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 1\n"gpt-6.1-sol" = 4\n');
+ await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
+});
+
+it.each(['[tui]','["tui"]','["\\u0074ui"]'])('does not erase a conflicting presentation-table definition after %s',async table=>{
+ const f=await fixture();const base=f.baseline+'\n'+table+'\n';await writeFile(f.config,base);const read=await f.reader();
+ await writeFile(f.config,base+'\n[tui]\nscreen_reader_detection_done = true\n\n[tui.model_availability_nux]\n"gpt-6.1-sol" = 1\n');
+ await expect(read()).rejects.toMatchObject({code:'execution_plan_drift'});
+});

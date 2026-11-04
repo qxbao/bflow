@@ -4,7 +4,7 @@ import { presetAssignment, roleModelPreset } from "@bflow/agent-providers";
 import { lstatSync } from "node:fs";
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
-import { AgentRoleSchema, RepositoryToolPolicySchema, WorkflowDefinitionSchema, RoleProfilePinSchema } from "@bflow/contracts";
+import { AgentRoleSchema, RepositoryToolPolicySchema, RuntimeHttpPolicySchema, WorkflowDefinitionSchema, RoleProfilePinSchema } from "@bflow/contracts";
 import { migrateLegacyContext7Config } from "./deepwiki-migration.js";
 import { EMPTY_ROLES_AFTER_MIGRATION_MESSAGE, migrateDirectorRoles } from "./director-roles-migration.js";
 import { createDefaultRepositoryConfig, loadRepositoryConfig, parseRepositoryConfig, resolveReadableConfigPath } from "./config.js";
@@ -159,6 +159,7 @@ export const EnvironmentConfigEnvironmentSchema = z
     requiredTools: z.array(z.string().trim().min(1)).optional(),
     tools: EnvironmentToolsConfigSchema.optional(),
     toolPolicy: RepositoryToolPolicySchema.optional(),
+    runtimeHttpPolicy: RuntimeHttpPolicySchema.optional(),
     /** DeepWiki public-repository documentation through the shared Gateway. Enabled by default unless explicitly set to enabled: false. */
     deepwiki: z
       .object({

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import {
-  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
+  hasAuthenticatedBindings, AgentBindingVerificationSchema, AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   ArtifactWriteOptionsSchema, DomainEventSchema, SpecificationSchema, StoredRunSchema, VerificationResultSchema,
   WorkflowAdvanceResultSchema, type ApprovalDecision, type ArtifactReference, type ArtifactStore, type OperationResult,
   type RunStore, type TestStrategy, type WorkflowAdvanceResult, type WorkflowDefinition, type WorkflowEngine,
@@ -17,7 +17,14 @@ import { resolveAnalysisPack, type AnalysisPackPin, type AnalysisPackPolicy } fr
 import { ANALYSIS_GATES, assertAnalysisOnlyWorkflow, planAnalysisWorkflow } from "./plan.js";
 import { renderAnalysisDocument, renderVerificationSummary } from "./render.js";
 import { verifyAnalysisDocument, type AnalysisVerification } from "./verify.js";
+import { cancelExtension } from "../extension-cancellation.js";
+import type { CancellationRequest } from "@bflow/contracts";
+import { extensionDecisionRequest } from "../extension-decisions.js";
+import { analysisBusinessAnswers } from "./business-decision.js";
+import { canonicalReceiptJson } from "@bflow/contracts";
 
+import { executeExtension, extensionIntent, nativeExecutionsIndependent, type ExtensionExecution } from "../extension-execution.js";
+import type { NativeExtensionRolePort } from "../agentic/extension-delivery.js";
 /** One assignment delivered to a standard role; it carries read context only, never write/command authority. */
 export interface AnalysisAssignment {
   readonly runId: string;
@@ -45,6 +52,7 @@ export type AnalysisReconciliation =
 
 /** Role transport port. The persistent host would deliver over Runtime → Herdr; tests use deterministic fixtures. */
 export interface AnalysisRolePort {
+  readonly native?: NativeExtensionRolePort;
   dispatch(assignment: AnalysisAssignment): Promise<{ readonly agentId: string; readonly output: unknown }>;
   /** Outcome of an execution whose result was not journaled before a restart; absent means unknown. */
   reconcile?(executionId: string): Promise<AnalysisReconciliation>;
@@ -65,9 +73,10 @@ export interface AnalysisRuntimePorts {
 }
 
 export type AnalysisRunStatus = "running" | "awaiting_business_decision" | "awaiting_document_approval" | "blocked" |
-  "needs_revision" | "published" | "superseded" | "failed";
+  "needs_revision" | "published" | "superseded" | "failed" | "cancelling" | "cancelled";
 
 interface ExecutionRecord {
+  native?: ExtensionExecution;
   executionId: string; taskId: AnalysisTaskKind; attemptId: string; attempt: number; generation: number;
   state: "bound" | "recorded"; agentId?: string; outputDigest?: string; startedAt: string;
   /** Set with state "recorded": the processed outcome that Core must receive (re-submitted idempotently after a restart). */
@@ -75,6 +84,7 @@ interface ExecutionRecord {
 }
 interface DocumentRecord { version: number; digest: string; artifact: ArtifactReference; authorAgentId: string; attemptId: string; content: AnalysisDocument }
 interface RunRecord {
+  cancellation?: CancellationRequest;
   runId: string; intake: AnalysisIntake; intakeDigest: string; policy: AnalysisPackPolicy; definition: WorkflowDefinition;
   status: AnalysisRunStatus; createdAt: string; strategy: TestStrategy; coreCreated: boolean;
   executions: ExecutionRecord[]; observations: SurveyObservation[];
@@ -84,7 +94,7 @@ interface RunRecord {
   verifications: { documentDigest: string; attemptId: string; at: string; status: AnalysisVerification["status"]; artifact: ArtifactReference; result: AnalysisVerification }[];
   review?: { agentId: string; verdict: "approved" | "changes_requested"; documentDigest: string; artifact: ArtifactReference;
     findings: { id: string; severity: "blocking" | "advisory"; statementIds: string[]; note: string }[] };
-  approvals: { elicitation?: { approvalId: string; decision?: ApprovalDecision["decision"] }; document?: { approvalId: string; documentDigest: string; decision?: ApprovalDecision } };
+  approvals: { elicitation?: { approvalId: string; decision?: ApprovalDecision["decision"]; receipt?: ApprovalDecision }; document?: { approvalId: string; documentDigest: string; decision?: ApprovalDecision } };
   denials: { executionId: string; taskId: string; reason: string; at: string }[];
   /** Rejected (non-permission) outputs, kept for diagnosis of failed attempts. */
   rejections: { executionId: string; taskId: string; code: string; message: string; at: string }[];
@@ -92,7 +102,7 @@ interface RunRecord {
   blockers: string[];
   supersededBy?: string;
 }
-interface Journal { schemaVersion: 1; runs: RunRecord[] }
+interface Journal { schemaVersion: 1 | 2; delivery?: "native"; runs: RunRecord[] }
 
 export class AnalysisPermissionDenied extends Error {
   constructor(message: string) { super(message); this.name = "AnalysisPermissionDenied"; }
@@ -127,9 +137,13 @@ function relativeSafe(path: string): string {
  * deploy work, and roles receive no write/command authority: only Runtime publishes the approved handoff.
  */
 export class AnalysisWorkflowRuntime {
+  private saveTail: Promise<void> = Promise.resolve();
+  private readonly activeLocalTasks = new Set<string>();
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
-  private constructor(private readonly ports: AnalysisRuntimePorts) {}
+  private constructor(private readonly ports: AnalysisRuntimePorts) {
+    if (ports.roles.native) this.journal = { schemaVersion: 2, delivery: "native", runs: [] };
+  }
 
   static async open(ports: AnalysisRuntimePorts): Promise<AnalysisWorkflowRuntime> {
     if (!isAbsolute(ports.repositoryRoot) || !isAbsolute(ports.journalPath)) throw new Error("Analysis runtime paths must be absolute");
@@ -138,18 +152,23 @@ export class AnalysisWorkflowRuntime {
       const st = await lstat(ports.journalPath);
       if (!st.isFile()) throw new Error("Analysis journalPath must be a regular file");
       const parsed = JSON.parse(await readFile(ports.journalPath, "utf8")) as Journal;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.runs)) throw new Error("Unsupported analysis journal version");
+      if (!Array.isArray(parsed.runs) || (ports.roles.native
+        ? parsed.schemaVersion !== 2 || parsed.delivery !== "native"
+        : parsed.schemaVersion !== 1 || parsed.delivery !== undefined))
+        throw new Error("Legacy SDK and native analysis journals require separate versioned namespaces");
       runtime.journal = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    if (ports.roles.native)
+      for (const run of runtime.journal.runs) if (run.coreCreated) await runtime.restoreCore(run);
     return runtime;
   }
 
   /** Read-only public view of one run. */
   status(runId: string) {
     const run = this.run(runId);
-    return structuredClone({ runId: run.runId, status: run.status, revision: run.intake.revision, pack: run.policy.pack,
+    return structuredClone({ runId: run.runId, intakeDigest: run.intakeDigest, executionMode: this.ports.roles.native ? "native" : "local", status: run.status, revision: run.intake.revision, pack: run.policy.pack,
       tdd: { mode: run.strategy.tddDecision.mode, alternativeVerification: alternativeMethods(run.strategy) },
       blockers: run.blockers, questions: run.questions, decisions: run.decisions, denials: run.denials, rejections: run.rejections,
       documents: run.documents.map(item => ({ version: item.version, digest: item.digest, artifactId: item.artifact.artifactId })),
@@ -208,13 +227,32 @@ export class AnalysisWorkflowRuntime {
     return [`${base}/analysis.md`, `${base}/handoff.md`];
   }
 
+  /** Stop this native workflow through Core and the bridge; an interrupt acknowledgement never proves stop. */
+  async cancel(runId: string, reason: string) {
+    const run = this.run(runId);
+    if (!this.ports.roles.native) throw new Error("Native cancellation requires native execution authority");
+    await this.restoreCore(run);
+    const snapshot = await cancelExtension({ runId, reason, native: this.ports.roles.native, now: this.ports.now,
+      ...(run.cancellation ? { cancellation: run.cancellation } : {}),
+      persist: async request => { run.cancellation = request; run.status = "cancelling"; await this.save(); },
+      localStopped: (taskId, transport) => taskId === "publication" && transport === "runtime-publication" && !this.activeLocalTasks.has(`${runId}:${taskId}`),
+      unresolvedLocalWork: () => [...this.activeLocalTasks].some(key => key.startsWith(`${runId}:`)),
+      snapshot: () => this.snapshot(runId), mutate: action => this.mutate(runId, action),
+      request: request => this.ports.engine.requestCancellation(request),
+      confirm: command => this.ports.engine.confirmCancellationStop(command) });
+    if (snapshot.status === "cancelled" || snapshot.status === "cancelling") run.status = snapshot.status;
+    await this.save(); return this.status(runId);
+  }
+
   /** Runs every step that needs no human input; returns at a human gate, a blocker or completion. */
   async drive(runId: string) {
     const run = this.run(runId);
     if (run.status === "superseded") throw new Error(`Analysis run ${runId} was superseded by ${run.supersededBy}`);
     await this.restoreCore(run);
+    if (run.cancellation) return this.cancel(runId, run.cancellation.reason ?? "Run cancelled");
     for (let guard = 0; guard < 200; guard++) {
       let snapshot = await this.snapshot(runId);
+      if (run.cancellation) return this.cancel(runId, "Run cancelled");
       if (TERMINAL.has(snapshot.status)) return this.finish(run, snapshot);
       for (const task of snapshot.tasks.filter(item => item.status === "retrying"))
         snapshot = await this.mutate(runId, version => this.ports.engine.transitionTask({ runId, taskId: task.taskId, from: "retrying", to: "ready",
@@ -223,7 +261,12 @@ export class AnalysisWorkflowRuntime {
       snapshot = await this.mutate(runId, version => this.ports.engine.advance({ runId, expectedVersion: version,
         idempotencyKey: `analysis:advance:${runId}:${version}`, occurredAt: this.ports.now() }));
       const active = snapshot.tasks.find(item => item.status === "running" || item.status === "waiting");
-      if (active) { await this.execute(run, active); continue; }
+      if (active) {
+        const key = `${runId}:${active.taskId}`;
+        if (active.taskId === "publication") this.activeLocalTasks.add(key);
+        try { await this.execute(run, active); } finally { this.activeLocalTasks.delete(key); }
+        continue;
+      }
       if (run.status !== "running") { await this.save(); return this.status(runId); }
       // A permanently failed or blocked task stops the run before any human is asked to decide for a doomed workflow.
       if (snapshot.tasks.some(item => item.status === "blocked" || item.status === "failed")) {
@@ -239,6 +282,9 @@ export class AnalysisWorkflowRuntime {
 
   private async execute(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<void> {
     const kind = task.taskId as AnalysisTaskKind;
+    if (this.ports.roles.native && !(kind === "publication")) {
+      await this.executeNative(run, task); return;
+    }
     let existing = run.executions.find(item => item.attemptId === task.attemptId);
     if (!existing && task.agentExecution && task.agentExecution.attemptId === task.attemptId) {
       // Core persisted the binding but the journal write was lost: adopt Core's binding and reconcile it, never rebind.
@@ -292,7 +338,66 @@ export class AnalysisWorkflowRuntime {
     await this.complete(run, execution, outcome);
   }
 
+  private async executeNative(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<void> {
+    if (!hasAuthenticatedBindings(this.ports.engine)) throw new Error("Native extension requires authenticated Core binding support");
+    const engine = this.ports.engine, kind = task.taskId as AnalysisTaskKind;
+    let execution = run.executions.find(item => item.attemptId === task.attemptId);
+    if (execution && !execution.native) throw new Error("Legacy logical execution cannot become native evidence");
+    if (!execution) {
+      if (task.agentExecution) throw new Error("Native Core binding lost its SDK delivery intent; recovery requires reconciliation");
+      execution = { executionId: `${run.runId}.${kind}.g${task.generation}.a${task.attempt}`, taskId: kind,
+        attemptId: task.attemptId!, attempt: task.attempt, generation: task.generation, state: "bound", startedAt: this.ports.now() };
+      const assignment = this.assignment(run, kind, execution);
+      execution.native = { intent: extensionIntent("analysis", run.intake.sessionId, assignment, assignment, execution.startedAt), phase: "prepared" };
+      run.executions.push(execution); await this.save();
+    }
+    const blocker = `native_execution_unresolved:${task.attemptId}`;
+    const clearNativeBlocker = async () => {
+      if (!run.blockers.includes(blocker)) return;
+      run.blockers = run.blockers.filter(item => item !== blocker);
+      if (run.status === "blocked" && !run.blockers.length) run.status = "running";
+      await this.save();
+    };
+    try {
+      if (task.status === "waiting") { await this.evaluateGates(run, task, execution); await clearNativeBlocker(); return; }
+      if (execution.state === "recorded") { await this.recordResult(run, execution); await clearNativeBlocker(); return; }
+      const record = execution;
+      const outcome = await executeExtension({ execution: record.native!, port: this.ports.roles.native!, save: () => this.save(),
+        bind: async handle => {
+          record.executionId = handle.executionId; await this.save();
+          const current = (await this.snapshot(run.runId)).tasks.find(item => item.taskId === kind)!;
+          if (current.agentExecution) {
+            if (canonicalReceiptJson(current.agentExecution) !== canonicalReceiptJson(handle))
+              throw new Error("Recovered native Core binding differs from its accepted handle");
+            return;
+          }
+          await this.mutate(run.runId, version => engine.bindAgentExecution({ runId: run.runId, taskId: kind, attempt: task.attempt,
+            handle, expectedVersion: version, idempotencyKey: `analysis:bind:${handle.executionId}`, occurredAt: handle.acceptedAt }));
+        } });
+      record.native!.verification ??= AgentBindingVerificationSchema.parse({ receipt: outcome.receipt, evidence: outcome.receiptEvidence,
+        verifiedAt: this.ports.now() });
+      await this.save();
+      const proof = AgentBindingVerificationSchema.parse(record.native!.verification);
+      const verified = (await this.snapshot(run.runId)).tasks.find(item => item.taskId === kind)!.bindingVerification;
+      if (verified) {
+        if (canonicalReceiptJson(verified) !== canonicalReceiptJson(proof)) throw new Error("Recovered native binding proof changed");
+      } else await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
+        verification: proof, occurredAt: proof.verifiedAt, idempotencyKey: `analysis:verify-binding:${outcome.handle.executionId}` }));
+      await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
+      await clearNativeBlocker();
+    } catch (error) {
+      if (run.cancellation) { await this.save(); throw error; }
+      run.status = "blocked";
+      run.blockers = [...new Set([...run.blockers, blocker])];
+      await this.save(); throw error;
+    }
+  }
+
   private handle(run: RunRecord, execution: ExecutionRecord) {
+    if (execution.native) {
+      if (!execution.native.handle) throw new Error("Native execution has not been accepted");
+      return execution.native.handle;
+    }
     return { executionId: execution.executionId, requestId: `request-${execution.executionId}`, attemptId: execution.attemptId,
       runId: run.runId, taskId: execution.taskId, idempotencyKey: `analysis:dispatch:${execution.executionId}`,
       target: { transport: execution.taskId === "publication" ? "runtime-publication" : "analysis-role",
@@ -319,12 +424,15 @@ export class AnalysisWorkflowRuntime {
   }
 
   private async complete(run: RunRecord, execution: ExecutionRecord, outcome: { agentId: string; output: unknown }) {
+    if (run.cancellation) throw new Error("Extension run is cancelled; late output cannot continue it");
     const kind = execution.taskId;
     let failure: { code: string; message: string } | undefined;
     try {
       const forbidden = forbiddenOutputKeys(outcome.output);
       if (forbidden.length) throw new AnalysisPermissionDenied(`Role output requested forbidden authority: ${forbidden.join(", ")}`);
-      if (kind !== "publication" && outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`))
+      if (kind !== "publication" && (execution.native
+        ? outcome.agentId !== execution.native.outcome?.sender.agent_id || execution.native.outcome.sender.role !== this.roleOf(run, kind)
+        : outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`)))
         throw new AnalysisPermissionDenied(`Output came from ${outcome.agentId}, not the assigned ${this.roleOf(run, kind)} role`);
       if (kind === "survey") await this.acceptSurvey(run, RoleOutputSchemas.survey.parse(outcome.output));
       else if (kind === "elicitation") this.acceptElicitation(run, RoleOutputSchemas.elicitation.parse(outcome.output));
@@ -332,6 +440,7 @@ export class AnalysisWorkflowRuntime {
       else if (kind === "review") await this.acceptReview(run, outcome.agentId, RoleOutputSchemas.review.parse(outcome.output));
       else await this.publish(run);
     } catch (error) {
+      if (run.cancellation) throw error;
       if (error instanceof AnalysisPermissionDenied) {
         run.denials.push({ executionId: execution.executionId, taskId: kind, reason: error.message, at: this.ports.now() });
         failure = { code: "permission_denied", message: error.message };
@@ -341,6 +450,7 @@ export class AnalysisWorkflowRuntime {
     }
     if (failure && failure.code !== "permission_denied")
       run.rejections.push({ executionId: execution.executionId, taskId: kind, code: failure.code, message: failure.message, at: this.ports.now() });
+    if (run.cancellation) throw new Error("Extension run is cancelled");
     execution.state = "recorded";
     execution.agentId = outcome.agentId;
     execution.outputDigest = analysisDigest(outcome.output ?? null);
@@ -354,9 +464,9 @@ export class AnalysisWorkflowRuntime {
     const kind = execution.taskId;
     const failure = execution.failure ?? undefined;
     const at = execution.completedAt ?? this.ports.now();
-    const result = AgentResultSchema.parse({ requestId: `request-${execution.executionId}`, attemptId: execution.attemptId, runId: run.runId,
+    const result = AgentResultSchema.parse({ requestId: this.handle(run, execution).requestId, attemptId: execution.attemptId, runId: run.runId,
       taskId: kind, executionId: execution.executionId, status: failure ? "failed" : "succeeded",
-      verification: { status: "verified", evidence: `analysis ${kind} output ${execution.outputDigest}`, correlation: this.handle(run, execution).correlation },
+      verification: { status: "verified", evidence: `analysis ${kind} output ${execution.outputDigest}`, correlation: execution.native?.outcome?.receipt.correlation ?? this.handle(run, execution).correlation },
       artifactProposals: [], retryable: Boolean(failure), startedAt: execution.startedAt, completedAt: at,
       ...(failure ? { error: { code: failure.code, message: failure.message, retryable: true } } : {}) });
     const snapshot = await this.mutate(run.runId, version => this.ports.engine.recordAgentResult({ runId: run.runId, taskId: kind,
@@ -435,7 +545,9 @@ export class AnalysisWorkflowRuntime {
       const review = run.review!;
       const recheck = this.verify(run, latest.content);
       const problems: { code: string; message: string; ids: string[]; severity: string }[] = [];
-      if (review.agentId === author) problems.push({ code: "review_not_independent", message: "The reviewer authored the document", ids: [review.agentId], severity: "error" });
+      const authorExecution = run.executions.find(item => item.attemptId === latest.attemptId);
+      if (review.agentId === author || execution.native && !nativeExecutionsIndependent(authorExecution?.native, execution.native))
+        problems.push({ code: "review_not_independent", message: "The reviewer must have an independent authenticated actor, pane and native session", ids: [review.agentId], severity: "error" });
       if (review.documentDigest !== latest.digest) problems.push({ code: "review_stale", message: "Review is not pinned to the current document digest", ids: [review.documentDigest], severity: "error" });
       if (review.verdict !== "approved" || review.findings.some(item => item.severity === "blocking"))
         problems.push({ code: "review_changes_requested", message: "Independent review requested changes", ids: review.findings.map(item => item.id), severity: "error" });
@@ -483,8 +595,12 @@ export class AnalysisWorkflowRuntime {
         await this.mutate(run.runId, version => this.ports.engine.requestApproval({ expectedVersion: version, idempotencyKey: `analysis:approval:${approvalId}`,
           request: ApprovalRequestSchema.parse({ schemaVersion: 2, approvalId, runId: run.runId, sessionId: run.intake.sessionId,
             target: { type: "task", taskId: "elicitation" }, revision: run.intake.revision, generation: elicitation.generation, requestedBy: "coordinator",
-            requestedAt: this.ports.now(), reason: "Business decisions and analysis scope must be confirmed by the user", evidence: [],
+            requestedAt: this.ports.now(), reason: "Xác nhận các quyết định nghiệp vụ và phạm vi phân tích; đây không phải nghiệm thu sản phẩm", evidence: [],
             idempotencyKey: `analysis:approval:${approvalId}`, metadata: { approvalScope: "business_decisions",
+              ...(run.questions.some(question => !Object.hasOwn(run.decisions, question.id)) ? { kind: "user_decision",
+                question: ["Vui lòng trả lời các câu hỏi nghiệp vụ sau:",
+                  ...run.questions.filter(question => !Object.hasOwn(run.decisions, question.id)).map(question => `${question.id}: ${question.question}${question.blocking ? " (cần trả lời)" : " (có thể để mở)"}`),
+                  "Trả lời theo mẫu D-1: nội dung trả lời; mỗi câu hỏi một dòng. Chỉ xác nhận phạm vi không thay cho câu trả lời còn thiếu."].join("\n") } : {}),
               questions: run.questions.map(item => ({ ...item })) } }) }));
         run.approvals.elicitation = { approvalId };
       }
@@ -530,25 +646,7 @@ export class AnalysisWorkflowRuntime {
       target: { type: "task", taskId: "elicitation" }, revision: run.intake.revision, generation, decision: input.decision,
       decidedBy: input.decidedBy, decidedAt: this.ports.now(), ...(input.reason ? { reason: input.reason } : {}), feedbackArtifacts: [],
       idempotencyKey: `analysis:decision:${approvalId}`, metadata: { approvalScope: "business_decisions", answers: input.answers } });
-    await this.authorize(decision);
-    if (input.decision === "approved") {
-      const missing = run.questions.filter(item => item.blocking && !input.answers[item.id]?.trim() && !run.decisions[item.id]);
-      if (missing.length) throw new Error(`Required business decisions are missing: ${missing.map(item => item.id).join(", ")}`);
-      const unknown = Object.keys(input.answers).filter(id => !run.questions.some(item => item.id === id));
-      if (unknown.length) throw new Error(`Unknown business questions: ${unknown.join(", ")}`);
-    }
-    await this.mutate(runId, version => this.ports.engine.applyApproval({ expectedVersion: version, idempotencyKey: `analysis:decision:${approvalId}`, decision }));
-    run.approvals.elicitation!.decision = input.decision;
-    if (input.decision === "approved") {
-      for (const [id, answer] of Object.entries(input.answers))
-        if (answer.trim()) run.decisions[id] = { answer: answer.trim(), decidedBy: decision.decidedBy, decidedAt: decision.decidedAt };
-      run.status = "running";
-    } else {
-      run.status = "needs_revision";
-      run.blockers = [`business_decisions_${input.decision}`];
-    }
-    await this.save();
-    return input.decision === "approved" ? this.drive(runId) : this.status(runId);
+    return this.applyHumanDecision(decision);
   }
 
   /** Human approval of the exact analysis document digest. It approves the document only, never the product. */
@@ -565,13 +663,40 @@ export class AnalysisWorkflowRuntime {
       decision: input.decision, decidedBy: input.decidedBy, decidedAt: this.ports.now(), ...(input.reason ? { reason: input.reason } : {}),
       feedbackArtifacts: [], idempotencyKey: `analysis:decision:${pending.approvalId}`,
       metadata: { approvalScope: "analysis_document", documentDigest: pending.documentDigest, productAcceptance: "not_established" } });
+    return this.applyHumanDecision(decision);
+  }
+
+  /** Host entrypoint: authenticate and apply the exact original decision. No timestamp, key or metadata is regenerated. */
+  async applyHumanDecision(input: ApprovalDecision) {
+    const decision = ApprovalDecisionSchema.parse(input), run = this.run(decision.runId);
+    const business = run.approvals.elicitation?.approvalId === decision.approvalId;
+    const pending = business ? run.approvals.elicitation : run.approvals.document?.approvalId === decision.approvalId ? run.approvals.document : undefined;
+    if (!pending) throw new Error("No matching analysis human decision is pending");
     await this.authorize(decision);
-    await this.mutate(runId, version => this.ports.engine.applyApproval({ expectedVersion: version, idempotencyKey: `analysis:decision:${pending.approvalId}`, decision }));
-    pending.decision = decision;
-    if (input.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`document_${input.decision}`]; }
+    const previous = business ? run.approvals.elicitation?.receipt : run.approvals.document?.decision;
+    if (previous) {
+      if (canonicalReceiptJson(previous) !== canonicalReceiptJson(decision)) throw new Error("Analysis approval already has another decision");
+      return this.status(run.runId);
+    }
+    this.live(run.runId);
+    if (business ? run.status !== "awaiting_business_decision" : run.status !== "awaiting_document_approval")
+      throw new Error("Analysis decision is not at its waiting phase");
+    await this.restoreCore(run);
+    const request = await extensionDecisionRequest(this.ports.runStore, decision, business ? "business_decisions" : "analysis_document", this.ports.now());
+    const answers = business ? analysisBusinessAnswers(decision, run.questions, run.decisions) : {};
+    if (!business && (decision.metadata?.documentDigest !== run.approvals.document!.documentDigest ||
+        request.metadata?.documentDigest !== run.approvals.document!.documentDigest)) throw new Error("Approval must name the exact reviewed document digest");
+    await this.mutate(run.runId, version => this.ports.engine.applyApproval({ expectedVersion: version,
+      idempotencyKey: `analysis:decision:${pending.approvalId}`, decision }));
+    if (business) {
+      run.approvals.elicitation!.decision = decision.decision; run.approvals.elicitation!.receipt = decision;
+      if (decision.decision === "approved") for (const [id, answer] of Object.entries(answers))
+        if (answer.trim()) run.decisions[id] = { answer: answer.trim(), decidedBy: decision.decidedBy, decidedAt: decision.decidedAt };
+    } else run.approvals.document!.decision = decision;
+    if (decision.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`${business ? "business_decisions" : "document"}_${decision.decision}`]; }
     else run.status = "running";
     await this.save();
-    return input.decision === "approved" ? this.drive(runId) : this.status(runId);
+    return decision.decision === "approved" ? this.drive(run.runId) : this.status(run.runId);
   }
 
   private async authorize(decision: ApprovalDecision) {
@@ -683,11 +808,16 @@ export class AnalysisWorkflowRuntime {
     if (!within(this.ports.repositoryRoot, absolute)) throw new AnalysisPermissionDenied(`Write escapes the repository: ${path}`);
     // Check existing ancestors before mkdir: a symlinked parent would otherwise create directories outside the repository.
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     await mkdir(dirname(absolute), { recursive: true });
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     try {
       const handle = await open(absolute, "wx", 0o644);
-      try { await handle.writeFile(content, "utf8"); } finally { await handle.close(); }
+      try {
+        if (run.cancellation) throw new Error("Extension run is cancelled before publication");
+        await handle.writeFile(content, "utf8");
+      } finally { await handle.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       // Idempotent republish after a restart; a different existing file or directory is never overwritten.
@@ -714,7 +844,7 @@ export class AnalysisWorkflowRuntime {
   }
 
   private finish(run: RunRecord, snapshot: WorkflowRunSnapshot) {
-    if (run.status !== "superseded") run.status = snapshot.status === "succeeded" && run.handoff ? "published" : "failed";
+    if (run.status !== "superseded") run.status = snapshot.status === "cancelled" ? "cancelled" : snapshot.status === "succeeded" && run.handoff ? "published" : "failed";
     return this.save().then(() => this.status(run.runId));
   }
 
@@ -776,11 +906,15 @@ export class AnalysisWorkflowRuntime {
     if (!allowTerminal && (run.status === "published" || run.status === "failed")) throw new Error(`Analysis run ${runId} is ${run.status}`);
     return run;
   }
-  private async save() {
-    await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    await rename(temporary, this.ports.journalPath);
+  private save(): Promise<void> {
+    const saved = this.saveTail.then(async () => {
+      await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
+      const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      await rename(temporary, this.ports.journalPath);
+    });
+    this.saveTail = saved.catch(() => undefined);
+    return saved;
   }
 }
 

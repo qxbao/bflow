@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 3,
+  "grantId": "proposal-qa-http-read",
+  "policyDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "kind": "runtime_http",
+  "toolId": "qa-http",
+  "role": "qa",
+  "scope": {
+    "kind": "session",
+    "machineId": "fixture-machine",
+    "repositoryId": "fixture-repository",
+    "workspaceRoot": "/tmp/qa-grant-proposal-fixture",
+    "sessionId": "fixture-herdr-session"
+  },
+  "origins": ["http://127.0.0.1:8123"],
+  "operations": ["http_read"]
+}

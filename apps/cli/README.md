@@ -751,6 +751,12 @@ the existing Git engine's no-hook/fsmonitor/signing execution policy. It does no
 commit application edits or push. Commit configuration before workflow admission;
 changing HEAD later correctly invalidates the pinned execution plan.
 
+## Runtime-owned QA HTTP policy
+
+`environment.runtimeHttpPolicy` is a separate, explicit version-3 `RuntimeHttpPolicy` contract for host-owned QA HTTP. It binds `kind: runtime_http`, `toolId: qa-http`, `role: qa`, repository identity/scope, exact normalized HTTP(S) origins, and explicit `http_read`/`http_mutate` operations. Its digest is SHA-256 of canonical JSON excluding `digest` (the existing `digest` export from `@bflow/machine-setup`). CLI rejects a mismatched digest, machine, repository or workspace before issuing the session grant.
+
+The resolved `RuntimeHttpGrant` pins the actual host session and stays separate from CLI/MCP grants and provider tool permissions. Runtime intersects its authority with the human-approved QA intake/design and checks current pinned policy plus a resource fence before every target request. Missing policy grants nothing. Policy changes revoke the active snapshot and require normal re-resolution; they do not hot-reload additional authority. Side-effect-free execution preview fingerprints this policy. Initial live acceptance is restricted to anonymous loopback `http_read`; source/local tests do not establish live QA acceptance. See [the owner integration decision](../../packages/runtime/qa-host-grant-integration-decision.md).
+
 ## Director (thử nghiệm, lát B2a)
 
 Director cho phép người dùng trò chuyện với một agent qua CLI provider đang chạy (Claude Code, Codex hoặc Agy), không cần cấu hình vai `director` trong `.bflow/config.yml`. Provider chính là CLI đang chạy skill. Từ B2a, phiên Director thay thế Conversation và Coordinator v2: `bflow up` chỉ dựng hạ tầng, còn phiên làm việc bắt đầu khi người dùng chạy `/bflow-start`.

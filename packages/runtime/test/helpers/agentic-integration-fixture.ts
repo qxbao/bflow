@@ -324,7 +324,7 @@ export async function connectedPhaseFixture(reporter: "node_tap" | "vitest_json"
   const dependencies = await realpath(await mkdtemp(join(tmpdir(), "bflow-integration-deps-")));
   cleanups.push(() => rm(dependencies, { recursive: true, force: true }));
   const sourceDependencies = await realpath("node_modules"), staged = join(dependencies, "node_modules");
-  if (reporter === "vitest_json") await copyIsolatedNodeDependencies(sourceDependencies, staged);
+  if (reporter === "vitest_json") await copyIsolatedNodeDependencies(sourceDependencies, staged, ["vitest"]);
   const vitest = join(staged, relative(sourceDependencies, createRequire(import.meta.url).resolve("vitest/vitest.mjs")));
   const command = parseBehavioralCommands([{ id: "real-regression", command: "owner:double-regression", executable: process.execPath,
     args: reporter === "node_tap" ? ["--test", "--test-reporter=tap", testPath] : [vitest, "run", "--globals", "--reporter=json", "--no-cache", "--maxWorkers=1", "--minWorkers=1", testPath],

@@ -148,7 +148,11 @@ export { regressionChecks } from "./agentic/task-commands.js";
 // P30: platform readiness composition (no concrete provider adapter classes are exported).
 export * from "./platform/index.js";
 export * from "./analysis/index.js";
+export { createNativeExtensionRolePort, type NativeExtensionRolePort, type NativeExtensionIntent,
+  type NativeExtensionOutcome, type NativeExtensionReconciliation, type NativeExtensionDeliveryOptions } from "./agentic/extension-delivery.js";
+export { parseNativeExtensionOutput } from "./agentic/extension-output.js";
 export * from "./qa/index.js";
+export { createRuntimeHttpAuthority, type RuntimeHttpAction } from "./agentic/runtime-http-authority.js";
 
 // Private state placement for the host and CLI recovery composition.
 export { findPrivateRuntimeStateDirectory, resolvePrivateRuntimeStateDirectory } from "./private-state.js";
@@ -189,6 +193,9 @@ export { HumanDecisionCliValueSchema, type HumanDecisionCliValue } from "./agent
 // Opt-in, Runtime-owned data snapshot verification. No daemon/CLI configuration adapter.
 export { DataVerificationHost, specificationContent as dataSpecificationContent } from "./data/host.js";
 export { digest as dataVerificationDigest, contractDigest as dataContractDigest } from "./data/contract.js";
+export { createWorkflowExtensionHost, workflowPackFamily } from "./agentic/extension-host.js";
+export { openWorkflowExtensionRuntimes } from "./agentic/extension-composition.js";
+export { WorkflowExtensionPump } from "./agentic/extension-pump.js";
 
 // Director agent facade and state (ADR 0009).
 export * from "./director/index.js";

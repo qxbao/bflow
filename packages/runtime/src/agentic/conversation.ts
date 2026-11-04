@@ -8,6 +8,7 @@ import { digest, json, record, textField } from "./journal.js";
 import { redactString } from "../resilience/redaction.js";
 import { validateUserDecisionAnswer } from "./decision-routing.js";
 import { assertPrototypeDecision, prototypeApproval, type PrototypeRecord } from "./prototype-review.js";
+import type { WorkflowExtensionHost } from "./extension-host.js";
 import type { AgenticWorkflowRuntime } from "./runtime.js";
 
 export interface AgenticConversationHost {
@@ -53,6 +54,7 @@ export interface StructuredConversationCallbacks {
 }
 /** Compose the actual P14 Gateway with P19's durable Herdr outbox, retaining P14 dialogue/queue policies. */
 export async function createAgenticConversationHost(options: {
+  extensions?: WorkflowExtensionHost;
   runtime: AgenticWorkflowRuntime; manifest: SessionManifest; contextDirectory: string;
   onHumanDecision?: (decision: import("@bflow/contracts").ApprovalDecision) => Promise<void>;
   /** Independently authenticated host receipts only; Gateway context is never human authority. */
@@ -78,8 +80,23 @@ export async function createAgenticConversationHost(options: {
   // Untyped as before the package-specifier import: local port types do not match the package declarations yet.
   const module: any = await import("@bflow/conversation");
   const runtime = options.runtime;
+  const inspectRun = async (runId: string) => options.extensions && await options.extensions.owns(runId)
+    ? options.extensions.inspect(runId) : runtime.inspect(runId);
+  const inspectState = async () => {
+    const base = record(await runtime.inspect());
+    if (!options.extensions) return base;
+    const extensionRuns = record(await options.extensions.inspect()).runs;
+    const overrides = Array.isArray(extensionRuns) ? extensionRuns.map(record) : [];
+    const owned = new Set(overrides.map(item => item.runId));
+    return { ...base, runs: [...(Array.isArray(base.runs) ? base.runs.filter(item => !owned.has(record(item).runId)) : []), ...overrides] };
+  };
   const enqueue = async (message: RoleMessage): Promise<OperationResult<void>> => {
-    try { await runtime.queueHerdr(message); return { ok: true, value: undefined }; }
+    try {
+      if (message.type === "approval.decision" && message.run_id && options.extensions && await options.extensions.owns(message.run_id))
+        await options.extensions.decide(ApprovalDecisionSchema.parse(message.payload));
+      else await runtime.queueHerdr(message);
+      return { ok: true, value: undefined };
+    }
     catch (error) {
       // Runtime refusing a request is a decision about its content, not damaged data; the user already has its notice.
       const refused = error instanceof Error && error.name === "AdmissionRejectedError";
@@ -96,8 +113,14 @@ export async function createAgenticConversationHost(options: {
   });
   const prepareDecisionEnvelope = async (input: unknown): Promise<OperationResult<RoleMessage | undefined>> => {
     const decision = ApprovalDecisionSchema.parse(input);
+    if (options.extensions && await options.extensions.owns(decision.runId) && await options.extensions.decisionRecorded(decision))
+      return { ok: true, value: undefined };
+    if (options.extensions && await options.extensions.owns(decision.runId)) {
+      try { await options.extensions.validateDecision(decision); }
+      catch (error) { return validationError(error instanceof Error ? error.message : String(error)); }
+    }
     // Preserve the original envelope (including pane identity) if already queued or uncertain.
-    const state = record(await runtime.inspect());
+    const state = await inspectState();
     const messageId = `approval-${digest(decision)}`;
     const existing = (state.outbound as { message: unknown }[]).find(item => record(item.message).message_id === messageId);
     if (existing) {
@@ -109,7 +132,7 @@ export async function createAgenticConversationHost(options: {
     }
     let run: Record<string, unknown>;
     try {
-      run = record(await runtime.inspect(decision.runId));
+      run = record(await inspectRun(decision.runId));
     } catch (error) {
       return { ok: false, error: { code: "not_found", retryable: false, message: error instanceof Error ? error.message : String(error) } };
     }
@@ -168,6 +191,8 @@ export async function createAgenticConversationHost(options: {
     async handOffToCoordinator(input: unknown): Promise<OperationResult<void>> {
       const request = DelegationRequestSchema.parse(input);
       const runId = request.runId ?? `run-${request.correlationId}`;
+      // Cancellation is an existing-run control; Runtime validates its exact target and session.
+      if (request.metadata?.action !== "cancel") await options.extensions?.admit({ ...request, runId });
       return enqueue(RoleMessageSchema.parse({ schema_version: 2, message_id: request.messageId, correlation_id: request.correlationId,
         run_id: runId, sender: conversationEndpoint, recipient: coordinatorEndpoint, type: "delegation.request",
         payload: json({ ...request, runId }), artifact_references: request.inputArtifacts,
@@ -260,7 +285,7 @@ export async function createAgenticConversationHost(options: {
   let projectionWarnings: string[] = [];
   const reconcileRuns = async () => {
     const baseAliases = options.noticeAliases ? await options.noticeAliases().catch(() => undefined) : undefined;
-    const state = record(await runtime.inspect());
+    const state = await inspectState();
     if (!Array.isArray(state.runs)) throw new Error("Runtime returned invalid run status snapshot");
     const nextMeta = new Map<string, { status: string; cancelled: boolean; coreCreated: boolean; hasNativeDeliveries: boolean; supersededBy?: string }>();
     const entries = state.runs.map(input => {
@@ -319,6 +344,11 @@ export async function createAgenticConversationHost(options: {
   let approvalWarnings: string[] = [];
   const reconcilePendingOnly = async () => {
     const pending = await runtime.pendingApprovals({ sessionId: manifest.conversationSessionId });
+    for (const request of await options.extensions?.pendingApprovals() ?? []) {
+      if (request.sessionId !== manifest.conversationSessionId) continue;
+      const run = record(await inspectRun(request.runId));
+      pending.push({ request, correlationId: textField(record(run.delegation).correlationId) });
+    }
     const result = await gateway.reconcilePendingApprovals(pending);
     if (!result.ok) throw new Error(result.error.message);
     if (result.value.busy) return result.value;

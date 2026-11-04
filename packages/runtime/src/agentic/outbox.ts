@@ -3,12 +3,13 @@ import { assertRunExecutionPlan, ExecutionPlanDriftError } from "./execution-bin
 import { ExecutorLineageSchema, RoleProfilePinSchema, sameRoleProfilePin } from "@bflow/contracts";
 import { assertProfileBinding, assertProfileSnapshotCurrent, assertIndependentProfileExecutor, selectRoleProfile } from "./profile-admission.js";
 import {
-  AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema, AgentReconciliationResultSchema,
-  AgentRequestSchema, AgentSubmissionReceiptSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, VerificationResultSchema, WorkflowRunSnapshotSchema,
+  AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentConfigurationSchema, AgentLeaseSchema,
+  AgentRequestSchema, PaneBindingSchema, RoleMessageSchema, RenewAgentLeaseRequestSchema, ReleaseAgentLeaseRequestSchema, VerificationResultSchema, WorkflowRunSnapshotSchema,
   type AgentExecutionHandle, type OperationResult, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts } from "./ports.js";
 import { digest, isInProcessDelivery, json, record, type JournalState, type Outbound } from "./journal.js";
+import { parseSubmissionForRequest, parseReconciliationForRequest } from "./delivery-receipts.js";
 
 /** A recipient observed not ready for this long is reported to Conversation; delivery keeps retrying. */
 export const NOT_READY_FAILURE_MS = 5 * 60_000;
@@ -670,12 +671,8 @@ export class HerdrOutbox {
     catch (error) { if (error instanceof ExecutionPlanDriftError || error instanceof RoleCapabilityPreflightError) { out.status = "queued"; await this.save(); } throw error; }
     try {
       const value = unwrap(await this.ports.transport.send(out.request));
-      const receipt = AgentSubmissionReceiptSchema.parse(value);
-      if (receipt.requestId !== out.request.requestId || receipt.attemptId !== out.attemptId || receipt.runId !== out.request.runId || receipt.taskId !== out.taskId)
-        throw new Error("Transport receipt ownership mismatch");
+      const receipt = parseSubmissionForRequest(out.request, value);
       if (receipt.status === "accepted") {
-        if (digest(receipt.handle.target) !== digest(out.request.target) || receipt.handle.idempotencyKey !== out.request.idempotency.key)
-          throw new Error("Transport binding mismatch");
         out.handle = receipt.handle; out.status = "accepted"; delete out.error; delete out.deliveryAttempts; delete out.nextAttemptAt;
         await this.save();
         if (!out.parentAssignmentId) await onBound(out, receipt.handle);
@@ -722,17 +719,13 @@ export class HerdrOutbox {
       await this.save(); return;
     }
     const req = out.request;
-    const result = AgentReconciliationResultSchema.parse(unwrap(await this.ports.transport.reconcile({
+    const result = parseReconciliationForRequest(req, unwrap(await this.ports.transport.reconcile({
       requestId: req.requestId, attemptId: req.attemptId, runId: req.runId, taskId: req.taskId,
       idempotencyKey: req.idempotency.key, target: req.target, requestedAt: this.now()
     })));
     if (result.status === "bound") {
-      if (result.handle.requestId !== req.requestId || result.handle.attemptId !== req.attemptId || result.handle.runId !== req.runId ||
-          result.handle.taskId !== req.taskId || result.handle.idempotencyKey !== req.idempotency.key || digest(result.handle.target) !== digest(req.target))
-        throw new Error("Reconciled handle ownership mismatch");
       out.handle = result.handle; out.status = "accepted"; await this.save(); if (!out.parentAssignmentId) await onBound(out, result.handle);
     } else if (result.status === "not_delivered") {
-      if (result.requestId !== req.requestId) throw new Error("Reconciliation request mismatch");
       out.status = "queued"; await this.save();
     } else { out.status = "unknown_delivery"; await this.save(); }
   }

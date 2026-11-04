@@ -192,9 +192,13 @@ bàn giao Markdown sau khi người duyệt đúng digest tài liệu; phê duy�
 `AgenticWorkflowRuntime.proposeWorkflow` bắt buộc DAG chỉ gồm Developer task và kết thúc bằng workflow verification
 trên change đã tích hợp Git. Vì vậy BA-only được tách thành luồng tương thích riêng, không giả lập implementation.
 
-Chi tiết về pack, provenance, các kiểm tra, recovery, revision, phần tích hợp host/CLI còn lại và giới hạn: xem
+Chi tiết về pack, provenance, các kiểm tra, recovery, revision, tích hợp host/CLI và giới hạn: xem
 [ANALYSIS-ONLY-WORKFLOW.md](ANALYSIS-ONLY-WORKFLOW.md). Pack mẫu: [support/analysis-only-pack.json](support/analysis-only-pack.json).
-Mức bằng chứng: source cộng test local với role giả lập; chưa nối host/Herdr/Conversation/CLI.
+Host đã có nhánh pack BA riêng, giao việc native có receipt ký, tool output có cấu trúc và chuyển nguyên quyết định
+người dùng qua Conversation. Quyền mỗi assignment chỉ cho `repository_read` trong surveyPaths; native read/shell/write/network
+bị chặn kể cả trên pane từng có quyền rộng hơn. Review native yêu cầu khác agent, pane và provider session với tác giả.
+Mức bằng chứng hiện tại là source cộng test local với transport giả lập và Core/Registry/SQLite/ArtifactStore thật;
+chưa chứng nhận BA live hoặc toàn bộ recovery/lifecycle của host.
 
 ## Workflow chỉ kiểm thử (QA-only, extension)
 
@@ -206,8 +210,15 @@ dữ liệu và cleanup đều do intake khai báo. Mutation bị timeout đư�
 Kết quả được phân loại thành passed, product_failure, test_defect, environment_failure, blocked hoặc inconclusive.
 Phát hiện bug không cấp quyền sửa sản phẩm.
 
-Chi tiết và giới hạn: xem [QA-ONLY-WORKFLOW.md](QA-ONLY-WORKFLOW.md). Mức bằng chứng: source cộng test local chạy trên
-app fixture HTTP thật (process riêng) với role giả lập; browser adapter mới là port; chưa nối host/Herdr/Conversation/CLI.
+Host/Conversation/CLI đã có source wiring cho pack QA riêng, actual native handles, receipt ký và approval nguyên bản.
+HTTP do Runtime thực thi cần `environment.runtimeHttpPolicy` và `RuntimeHttpGrant` riêng theo quyết định
+[D-EXT-QA-HTTP](qa-host-grant-integration-decision.md); grant CLI/MCP không cấp quyền cho HTTP tích hợp sẵn.
+Role vẫn không có quyền mạng trực tiếp. Policy pin theo repository/session; request phải đồng thời nằm trong intake
+đã được người duyệt đúng design digest và qua current-policy/fence check.
+
+Chi tiết và giới hạn: xem [QA-ONLY-WORKFLOW.md](QA-ONLY-WORKFLOW.md). Mức bằng chứng hiện tại: source cộng test local
+với HTTP server thật, Core/Registry/SQLite/ArtifactStore thật và transport giả lập; chưa có QA live provider acceptance.
+Browser adapter native và credential-account wiring chưa được chứng nhận; thiếu prerequisite phải báo blocked.
 
 ## Composition và thực thi
 

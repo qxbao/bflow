@@ -2,19 +2,32 @@ import { resolvePrivateRuntimeStateDirectory } from "../private-state.js";
 import { mkdir, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type ApprovalDecision, type ContractError, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding
+  AgentConfigurationSchema, ApprovalDecisionSchema, PaneBindingSchema, RoleMessageSchema, SessionManifestSchema, type RuntimeHttpPolicy, type RuntimeHttpGrant, type ApprovalDecision, type ContractError, type OperationOptions, type OperationResult, type QualityGate, type RoleMessage, type PaneBinding, type WorkflowPack, type ResolvedToolGrant
 } from "@bflow/contracts";
 import { AgenticWorkflowRuntime } from "./runtime.js";
 import { loadAgenticPolicies, type AgenticRuntimePorts, type PanePolicy } from "./ports.js";
 import { createAgenticConversationHost, type AgenticConversationHost } from "./conversation.js";
 import { startHerdrReceiptIngress, authenticateNativeHerdrMessage } from "./herdr-ingress.js";
 import { CoordinatorTools } from "./tools.js";
-import { record } from "./journal.js";
+import { digest, record } from "./journal.js";
+import { createNativeExtensionRolePort, type NativeExtensionRolePort } from "./extension-delivery.js";
+import { openWorkflowExtensionRuntimes } from "./extension-composition.js";
+import type { WorkflowExtensionHost } from "./extension-host.js";
+import { AppCheckBrowserLeases } from "./app-check-lease.js";
+import { createHttpQaTool } from "../qa/tools.js";
+import { createRuntimeHttpAuthority } from "./runtime-http-authority.js";
 import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
 import { assertManifestLayout, directorProgressCommand, workspaceDefaultAgentKind, type HostLayout } from "./host-director-mode.js";
 
 export interface OpenAgenticWorkspaceOptions {
+  workflowPack?: WorkflowPack;
+  qaGrants?: readonly ResolvedToolGrant[];
+  runtimeHttpPolicy?: RuntimeHttpPolicy;
+  runtimeHttpGrants?: readonly RuntimeHttpGrant[];
+  runtimeHttpIdentity?: { machineId: string; repositoryId: string };
+  qaLeaseDirectory?: string;
+  assertExtensionDispatch?(): void;
   roleProfiles?: AgenticRuntimePorts["roleProfiles"];
   roleProfileDefaults?: AgenticRuntimePorts["roleProfileDefaults"];
   preflightRoleProfile?: AgenticRuntimePorts["preflightRoleProfile"];
@@ -260,6 +273,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
 }
 export interface AgenticWorkspaceHandle {
   runtime: AgenticWorkflowRuntime; conversation: AgenticConversationHost; tools: CoordinatorTools;
+  extensions: WorkflowExtensionHost; extensionDelivery: NativeExtensionRolePort;
   close(): Promise<void>;
 }
 /** Actual P12 session + P13 panes + P14 dialogue + P15–P18 policies + existing Core/SQLite/Registry/ArtifactStore. */
@@ -403,6 +417,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     artifactStore = unwrap(await artifactsModule.openFilesystemArtifactStore({ root: resolve(directory, "artifacts"), storeId: options.sessionId }));
     let runtime: AgenticWorkflowRuntime;
     let conversation: AgenticConversationHost | undefined;
+    let extensions: WorkflowExtensionHost | undefined;
+    const registry = new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") });
     const approvedBundles = new Map<string, ApprovalDecision>();
     for (const decision of options.recoveredHumanDecisions ?? []) {
       const parsed = ApprovalDecisionSchema.parse(decision);
@@ -424,7 +440,17 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       } });
     runtime = new AgenticWorkflowRuntime({ ...(directorSession && options.director ? { director: options.director } : {}), engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       ...(options.providerFailover ? { providerFailover: options.providerFailover } : {}),
-      registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
+      registry, transport, panes, policies,
+      workflowExtensionOwns: runId => extensions?.owns(runId) ?? Promise.resolve(false),
+      workflowExtensionStarted: async runId => extensions !== undefined && await extensions.owns(runId) && record(await extensions.inspect(runId)).coreCreated === true,
+      cancelWorkflowExtension: async (runId, reason) => {
+        if (!extensions) throw new Error("Extension host is not active");
+        return extensions.cancel(runId, reason);
+      },
+      inspectWorkflowExtension: async runId => {
+        if (!extensions) throw new Error("Extension host is not active");
+        return extensions.inspect(runId);
+      },
       ...(options.pinDeveloperDispatch ? { pinDeveloperDispatch: options.pinDeveloperDispatch } : {}),
       ...(options.bindDeveloperExecutionScope ? { bindDeveloperExecutionScope: options.bindDeveloperExecutionScope } : {}),
       ...(options.stopDeveloperExecutionScope ? { stopDeveloperExecutionScope: options.stopDeveloperExecutionScope } : {}),
@@ -460,8 +486,53 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
     await runtime.initialize();
     // An owner reopen may restore a request whose Node process never launched. Unknown remote deliveries remain untouched.
     await runtime.recoverProvenPrelaunchPolicyDeliveries();
+    const extensionDirectory = resolve(directory, "extensions", digest(options.sessionId));
+    const extensionDelivery = createNativeExtensionRolePort({ repositoryPath: repository, sessionId: options.sessionId,
+      journalDirectory: resolve(extensionDirectory, "delivery"), registry, transport, artifactStore, panes,
+      bindingReceiptKeys: options.bindingReceiptKeys ?? {},
+      authenticateMessage: async message => await authenticateNativeHerdrMessage(message) || await options.authenticateMessage(message),
+      authorize: async (intent, binding) => {
+        if (!extensions) throw new Error("Extension host is not active");
+        await extensions.authorizeNative(intent, binding);
+        const parent = record(await runtime.inspect(intent.runId));
+        if (parent.cancelled || parent.supersededBy) throw new Error("Extension parent is cancelled or superseded");
+      },
+      preflight: async binding => {
+        options.assertExtensionDispatch?.();
+        await options.readExecutionResolution?.();
+        await options.revalidateRoleSkills?.(binding);
+        await options.preflightRoleCapabilities?.(binding, options.roleCapabilities[binding.role] ?? ["repository.read"]);
+        // Match ordinary dispatch: registration comes from host capabilities after preflight, never from agent output.
+        unwrap(await registry.upsert(AgentConfigurationSchema.parse({ agentId: binding.agentId, role: binding.role,
+          transport: "herdr", enabled: true, priority: 0, maxConcurrentTasks: 1,
+          capabilities: [...(options.roleCapabilities[binding.role] ?? [])], settings: {} })));
+      }
+    });
+    const extensionRuntimes = await openWorkflowExtensionRuntimes({ repositoryPath: repository, sessionId: manifest.conversationSessionId,
+      directory: extensionDirectory, engine: runtime.ports.engine, runStore, artifactStore, native: extensionDelivery,
+      authorizeHuman: options.authorizeHuman, now: () => new Date().toISOString(), readPack: async () => options.workflowPack,
+      isLegacyImplementationRun: async runId => { try { await runtime.inspect(runId); return true; } catch { return false; } },
+      publishToConversation: async message => {
+        if (!conversation) throw new Error("Conversation is not active");
+        await conversation.receiveRuntime(message); await options.onConversationNotice?.(message);
+      }, qa: { tools: { http: createHttpQaTool() }, grants: options.qaGrants ?? [],
+        runtimeHttpGrants: options.runtimeHttpGrants ?? [],
+        ...(options.runtimeHttpIdentity ? { runtimeHttpAuthority: createRuntimeHttpAuthority({ ...options.runtimeHttpIdentity,
+          workspaceRoot: repository, sessionId: options.sessionId, ...(options.runtimeHttpPolicy ? { policy: options.runtimeHttpPolicy } : {}),
+          grants: options.runtimeHttpGrants ?? [],
+          ...(options.readExecutionResolution ? { revalidate: async () => { await options.readExecutionResolution!(); } } : {}) }) } : {}),
+        grantScopeSessionId: options.sessionId,
+        beforeTargetAction: async ({ runId }) => {
+          options.assertExtensionDispatch?.();
+          await options.readExecutionResolution?.();
+          const parent = record(await runtime.inspect(runId));
+          if (parent.cancelled || parent.supersededBy) throw new Error("Extension parent is cancelled or superseded");
+        },
+        leases: new AppCheckBrowserLeases(options.qaLeaseDirectory ?? resolve(directory, "qa-environment-leases")) }
+    });
+    extensions = extensionRuntimes.host;
     await options.beforeRecovery?.(runtime);
-    conversation = await createAgenticConversationHost({ runtime, manifest, contextDirectory: resolve(directory, "conversation"),
+    conversation = await createAgenticConversationHost({ runtime, manifest, extensions, contextDirectory: resolve(directory, "conversation"),
       ...(options.onHumanDecision ? { onHumanDecision: options.onHumanDecision } : {}),
       ...(options.recoveredHumanDecisions ? { recoveredHumanDecisions: options.recoveredHumanDecisions } : {}),
       ...(options.noticeAliases ? { noticeAliases: options.noticeAliases } : {}) });
@@ -472,10 +543,12 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
       publicKeys: options.bindingReceiptKeys ?? {}, receive: async message => {
         const result = message.recipient.role === "conversation"
           ? await routeNativeConversationMessage(runtime, conversation!, message)
-          : await runtime.receiveHerdr(message);
+          : message.run_id && ["execution.receipt", "spec.draft"].includes(message.type) && await extensions!.owns(message.run_id)
+            ? await extensions!.receive(message)
+            : await runtime.receiveHerdr(message);
         await options.onNativeDelivery?.(message); return result;
       }, ...(options.onNativeRejection ? { rejected: options.onNativeRejection } : {}),
       failed: (message, error) => runtime.reportInboundFailure(message, String(error)) }) : undefined;
-    return { runtime, conversation, tools, async close() { await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
+    return { runtime, conversation, tools, extensions, extensionDelivery, async close() { await extensions!.quiesce(); await tools.drain(); await ingress?.close(); artifactStore.close(); runStore.close(); } };
   } catch (error) { artifactStore?.close(); runStore.close(); throw error; }
 }

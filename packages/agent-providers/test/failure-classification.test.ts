@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { classifyProviderFailure } from "../src/failure-classification.js";
 const binding = { provider: "codex", executionId: "exec", observedAt: "2026-10-28T00:00:00.000Z" };
 describe("structured provider failure classification", () => {
+  it("classifies native terminal quota errors through the same bounded canonical projection", () => {
+    const result = classifyProviderFailure({ type: "event_msg", payload: { type: "task_complete", turn_id: "current-turn",
+      error: { codex_error_info: "usage_limit_exceeded", message: "private-error" } } }, binding);
+    expect(result.kind).toBe("quota_exhausted");
+    expect(JSON.stringify(result)).not.toContain("private-error");
+  });
   it.each([
     ["usage_limit_exceeded", "quota_exhausted"], ["rate_limit_exceeded", "transient_rate_limit"],
     ["unauthorized", "authentication_failure"], ["sandbox_error", "permission_failure"],

@@ -2,9 +2,9 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { ProviderFailoverPolicySchema } from "@bflow/contracts";
 import {
-  SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
+  WorkflowPackSchema, SkillDependencyApprovalSchema, AgentHealthCheckSchema, AgentProviderIdSchema, AgentRoleSchema, IdentifierSchema, IsoDateTimeSchema,
   NonEmptyArgumentSchema, SafeArgumentSchema, Sha256DigestSchema, SkillPinSchema,
-  RepositoryToolPolicySchema, ResolvedToolGrantSchema, RoleProfilePinSchema, RoleProfileCatalogSchema, ROLE_PROFILE_FEATURE,
+  RepositoryToolPolicySchema, ResolvedToolGrantSchema, RuntimeHttpPolicySchema, RuntimeHttpGrantSchema, RoleProfilePinSchema, RoleProfileCatalogSchema, ROLE_PROFILE_FEATURE,
   sameRoleProfilePin
 } from "@bflow/contracts";
 
@@ -52,6 +52,8 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   schemaVersion: z.literal(3),
   /** Session layout (ADR 0009). Absent means `legacy_v2` (Conversation/Coordinator panes); `director` has neither role. */
   layout: z.enum(["legacy_v2", "director"]).optional(),
+  /** Exact selected pack snapshot. Workflow selectors grant no provider permissions. */
+  workflowPack: WorkflowPackSchema.optional(),
   machineId: IdentifierSchema,
   repositoryId: IdentifierSchema,
   roleProfiles: RoleProfileCatalogSchema.optional(),
@@ -81,6 +83,9 @@ export const AgenticHostPlatformOptionsSchema = z.object({
   toolPolicy: RepositoryToolPolicySchema.optional(),
   /** Host-resolved grants bound to exact roles, operations and session scope. */
   toolGrants: z.array(ResolvedToolGrantSchema).optional(),
+  /** Direct host HTTP authority is separate from provider/Gateway grants. */
+  runtimeHttpPolicy: RuntimeHttpPolicySchema.optional(),
+  runtimeHttpGrants: z.array(RuntimeHttpGrantSchema).max(1).optional(),
   /** Trusted machine service resource keys; never supplied by role tool arguments. */
   exclusiveMcpResources: z.record(IdentifierSchema, IdentifierSchema).optional()
 }).strict().superRefine((options, ctx) => {

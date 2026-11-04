@@ -1,3 +1,11 @@
+import { guardExtensionTool, selectNativeExtensionScope, readNativeExtensionRepository } from "./extension-permissions.js";
+export { guardExtensionTool, selectNativeExtensionScope, readNativeExtensionRepository } from "./extension-permissions.js";
+import { readExtensionReference } from "./extension-reference.js";
+import { WorkflowExtensionPump } from "./extension-pump.js";
+import { AnalysisIntakeSchema } from "../analysis/model.js";
+import { QaIntakeSchema } from "../qa/model.js";
+import { prepareNativeExtensionOutput } from "./extension-tools.js";
+export { prepareNativeExtensionOutput } from "./extension-tools.js";
 import { nativeImplementationResult } from "./native-implementation-result.js";
 import { encodeNativePluginSelection } from "./native-intent-selection.js";
 import { HostChat } from "../interaction/chat.js";
@@ -52,6 +60,7 @@ import { callHost } from "./host-protocol.js";
 import { effectiveFastPathMode, effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
+import { selectExtensionCoordinatorDelivery } from "./extension-coordinator.js";
 import { COORDINATOR_TOOLS, DIRECTOR_LEGACY_RUN_TOOLS } from "./tools.js";
 import { DirectorEndpoint } from "../director/endpoint.js";
 import { assertManifestLayout, directorCoordinatorPort, directorDefaultAgentKind, ensureDirectorProgressPane, hostRolesFor, recordConversationNotice,
@@ -544,6 +553,13 @@ export async function readPinnedInstructionReply(input: { role: AgentRole; skill
 
 /** Long-lived composition owner. Startup is separate from activation to support provider MCP startup. */
 export async function runAgenticHost(configuration: HostConfiguration): Promise<void> {
+  if (process.platform !== "win32") {
+    const limit = process.platform === "linux" ? 107 : 103;
+    const paths = [configuration.socketPath, configuration.socketPath.replace(/\.sock$/, ".native.sock")];
+    if (paths.some(path => Buffer.byteLength(path) > limit))
+      throw new Error("Host Unix socket path is too long; reconcile the stopped host with a short owned endpoint before startup");
+  }
+  let controlReady = false;
   const readExecutionResolution = configuration.executionResolution === undefined ? undefined : await createExecutionResolutionReader(configuration.executionResolution);
   await assertPrivateExecutionSources(readExecutionResolution, configuration.executionSourceDigests);
   const binary = configuration.herdrBinary ?? "herdr";
@@ -552,6 +568,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   environment.HERDR_SESSION = configuration.sessionId;
   const herdr = async (args: string[]) => (await execute(binary, ["--session", configuration.sessionId, ...args], { cwd: configuration.repositoryPath, env: environment, timeout: 15_000, maxBuffer: 4 * 1024 * 1024 })).stdout;
   let workspace: AgenticWorkspaceHandle | undefined;
+  let extensionPump: WorkflowExtensionPump | undefined;
   let queryStore: (RunStore & {close(): void}) | undefined;
   let manifest: SessionManifest | undefined;
   // The manifest of the latest activation attempt: diagnostics (`platform_status`) report its proofs even when it was refused.
@@ -776,6 +793,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       systemPrompt += roleReplyGuidance(role);
       systemPrompt += buildRoleBriefing(role, provider);
     }
+    systemPrompt += " When a RoleMessage payload.kind is extension.assignment, this is a Runtime-owned BA/QA task: call assignment_context for its exact outputReference and messageId, obey its read-only permissions, use only scoped repository_read instead of native Read/Glob/Grep/shell tools, and submit the schema-valid object through submit_extension_output. Never use implementation/review/verification submission tools for extension output. Collect questions and undecided facts in the assigned output schema; human decisions stay with Runtime/Conversation. For a Coordinator delegation whose assignment_context includes extensionIntakes, use start_extension with its exact kind/packPin and the validated intake schema; never create Developer or no-op tasks.";
     if (provider === "agy") systemPrompt += "\n\nExact Bflow MCP tool definitions follow. Native file and shell tools are denied, including reads of MCP schema files or saved large outputs. Use these definitions directly with call_mcp_tool: ServerName=\"bflow\", ToolName=name, Arguments matching inputSchema. Do not guess parameter names. Request bounded repository_read output (limit at most 2048) to keep source observations inline.\n" + JSON.stringify(availableTools(role, provider));
     launch[role] = { systemPrompt, mcpConfigFile, hooksSettingsFile };
   }
@@ -846,6 +864,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await requireWorkspace().runtime.authorizeAgyProviderTurn(message, binding, operationName);
     return admitted;
   };
+  const nativeInbox = async () => {
+    const active = requireWorkspace();
+    return [...await active.runtime.nativeDeliveryInbox(), ...(await active.extensionDelivery.snapshot()).inbox];
+  };
   const nativeDeliver = async (message: RoleMessage, operationId = message.message_id) => {
     // Enforce native ingress requirements before reserving an intent or invoking the async plugin.
     parseNativeRoleMessage(message);
@@ -863,7 +885,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         return json({ delivered: true, messageId: previous.message.message_id });
       }
       if (workspace) {
-        const inspection = await inspectNativeDelivery(receipts, operationId, await workspace.runtime.nativeDeliveryInbox());
+        const inspection = await inspectNativeDelivery(receipts, operationId, await nativeInbox());
         if (inspection.delivery === "applied") {
           await receipts.recordNativeAcknowledgement(previous.message);
           await workspace.runtime.reconcileNativeDelivery(previous.message.message_id);
@@ -1273,7 +1295,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     await privateFile(join(pluginDirectory, "hosts", configuration.sessionId + ".json"), JSON.stringify({ issuerId, privateKeyFile: keyPath, runtimeSocket: nativeSocket, manifestFile,
       herdrSocketPath: textField(record(JSON.parse(await herdr(["status", "server", "--json"]))).socket) }));
     const hostChecks = defaultHostChecks(configuration.policy);
-    workspace = await openAgenticWorkspace({ storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
+    workspace = await openAgenticWorkspace({
+      ...(configuration.platform?.workflowPack ? { workflowPack: configuration.platform.workflowPack } : {}),
+      qaGrants: configuration.platform?.toolGrants ?? [], qaLeaseDirectory: join(configuration.directory, "app-checks"),
+      ...(configuration.platform ? { runtimeHttpIdentity: { machineId: configuration.platform.machineId, repositoryId: configuration.platform.repositoryId },
+        ...(configuration.platform.runtimeHttpPolicy ? { runtimeHttpPolicy: configuration.platform.runtimeHttpPolicy } : {}),
+        runtimeHttpGrants: configuration.platform.runtimeHttpGrants ?? [] } : {}),
+      assertExtensionDispatch: () => { if (quiesced || closing) throw new Error("Host is quiesced; native extension dispatch is disabled"); },
+      storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
       ...(configuration.layout ? { layout: configuration.layout } : {}),
       ...(directorLayout ? {
@@ -1392,6 +1421,17 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         deliveredMessageIds.add(message.message_id); },
       onHumanDecision: async decision => { const chat=webChatContext.getStore(); if(chat){await webChat.recordApproval(chat.messageId,decision);return;} if (!humanHookProvenance) throw new Error("Human approval requires physical user input hook");
         await receipts.recordHuman(ApprovalDecisionSchema.parse(decision), humanHookProvenance); }
+    });
+    extensionPump = new WorkflowExtensionPump(workspace.extensions, async (runId, error) => {
+      if (!workspace) return;
+      const view = record(await workspace.extensions.inspect(runId)), delegation = DelegationRequestSchema.parse(view.delegation);
+      const reason = redactString(String(error)).slice(0, 2000), id = `extension-blocked-${digest([runId, reason])}`;
+      const notice = RoleMessageSchema.parse({ schema_version: 2, message_id: id, correlation_id: delegation.correlationId, run_id: runId,
+        sender: { role: "runtime" }, recipient: { role: "conversation" }, type: "conversation.progress",
+        payload: { kind: "workflow_blocked", owner: "runtime", reason,
+          options: ["Xem log để xác định vướng mắc", `Sau khi xử lý, yêu cầu tiếp tục ${runId}`] },
+        artifact_references: [], occurred_at: new Date().toISOString(), idempotency_key: id });
+      await workspace.conversation.receiveRuntime(notice); await receipts.appendConversationNotice(notice);
     });
     workspace.conversation.configureStructuredInteraction({
       now: () => webContext.getStore()?.acceptedAt ?? new Date().toISOString(),
@@ -1716,6 +1756,22 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return json({ invocationId: expectedInvocationId, acknowledged: true, meaning: "Exact result evidence was acknowledged into this role's current task context; this is not semantic use or task acceptance." });
     });
   };
+  const extensionScope = async (binding: PaneBinding) => {
+    if (!workspace || binding.role === "conversation" || binding.role === "developer") return undefined;
+    const native = await workspace.extensionDelivery.snapshot();
+    if (!native.outbound.length) return undefined;
+    const ordinary = record(await workspace.runtime.inspect()).outbound;
+    return selectNativeExtensionScope(native.outbound, ordinary, binding);
+  };
+  const assertExtensionTool = async (binding: PaneBinding, tool: string, input: unknown) => {
+    const scope = await extensionScope(binding);
+    if (!scope) return;
+    const decision = guardExtensionTool(scope, tool, input);
+    if (!decision.permitted) throw new Error(decision.reason);
+    if (scope.state === "active" && !["mcp__bflow__host_status", "mcp__bflow__read_pinned_instructions", "mcp__bflow__submit_extension_output"].includes(tool))
+      await requireWorkspace().extensionDelivery.validatePrompt(scope.outbound.message, binding);
+    return scope;
+  };
   /** Coordinator orchestration guards that need no pane binding; shared by Coordinator role_call and the Director endpoint. */
   const invokeCoordinatorTool = async (name: string, parameters: Record<string, unknown>,
     principal: { role: AgentRole; principal?: "director" } = { role: "coordinator" }) => {
@@ -1828,6 +1884,41 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     const host = requireWorkspace();
     if (quiesced && !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    if (name === "start_extension") {
+      if (role !== "coordinator") throw new Error("Only Coordinator starts an admitted extension");
+      const runId = textField(parameters.runId), state = record(await host.runtime.inspect());
+      if (!await host.extensions.owns(runId)) throw new Error("No admitted extension belongs to this run");
+      const admitted = record(await host.extensions.inspect(runId));
+      const delivery = selectExtensionCoordinatorDelivery({ outbound: state.outbound as unknown[],
+        run: (state.runs as unknown[]).map(record).find(run => run.runId === runId), delegation: admitted.delegation, binding });
+      await host.runtime.validateProviderDelivery(delivery, binding);
+      const kind = z.enum(["analysis", "qa"]).parse(parameters.kind);
+      const packPin = z.object({ id: z.string().min(1), version: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parameters.packPin);
+      const started = await host.extensions.start(kind === "analysis" ? { kind, runId, intake: AnalysisIntakeSchema.parse(parameters.intake), packPin }
+        : { kind, runId, intake: QaIntakeSchema.parse(parameters.intake), packPin });
+      extensionPump?.wake(runId); return started;
+    }
+    if (name === "submit_extension_output") {
+      if (!["specifier", "architect", "reviewer", "qa", "tester"].includes(role)) throw new Error("This role has no native extension output authority");
+      const request = z.object({ messageId: z.string().min(1), output: JsonValueSchema }).strict().parse(parameters);
+      const snapshot = await host.extensionDelivery.snapshot(), out = snapshot.outbound.find(item => item.message.message_id === request.messageId);
+      if (!out?.request) throw new Error("No persisted native extension assignment matches this output");
+      const actual = AgentExecutionHandleSchema.parse(out.handle);
+      if (actual.target.agentId !== binding.agentId || actual.target.paneId !== binding.paneId ||
+          digest(actual.target.session) !== digest(binding.session) || out.message.recipient.role !== binding.role)
+        throw new Error("Native extension output belongs to another actor/session");
+      const operationId = `extension-output:${out.request.requestId}`, prior = await receipts.nativeDelivery(operationId);
+      if (prior) {
+        if (digest(record(prior.message.payload).output) !== digest(request.output)) throw new Error("Native extension already has another immutable output");
+        return nativeDeliver(prior.message, operationId);
+      }
+      await host.extensionDelivery.validatePrompt(out.message, binding);
+      const prepared = prepareNativeExtensionOutput(binding, out, request.output, issuerId);
+      const priorBinding = await receipts.nativeDelivery(prepared.bindingOperationId);
+      await nativeDeliver(priorBinding?.message ?? prepared.binding, prepared.bindingOperationId);
+      return nativeDeliver(prepared.output, prepared.outputOperationId);
+    }
+    await assertExtensionTool(binding, `mcp__bflow__${name}`, parameters);
     if (name === "invoke_tool_action") return invokeToolAction(role, binding, parameters, false);
     if (name === "reconcile_tool_action") return invokeToolAction(role, binding, parameters, true);
     if (name === "acknowledge_tool_action") return acknowledgeToolAction(role, binding, parameters);
@@ -1844,7 +1935,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     if (name === "inspect_native_delivery") {
       if (!["coordinator", "conversation"].includes(role)) throw new Error("Only Coordinator or Conversation inspects native delivery");
       const { operationId } = z.object({ operationId: z.string().min(1).max(200) }).strict().parse(parameters);
-      const delivery = await inspectNativeDelivery(receipts, operationId, await host.runtime.nativeDeliveryInbox());
+      const delivery = await inspectNativeDelivery(receipts, operationId, await nativeInbox());
       const fence = await host.runtime.nativeDiagnosticFenceStatus(operationId);
       return json({ ...delivery, ...(fence === null ? {} : { fence, blocking: false, resendAllowed: false }) });
     }
@@ -1872,6 +1963,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           }
         }
       }
+      const narrowed = await assertExtensionTool(binding, "mcp__bflow__repository_read", parameters);
+      if (narrowed) return readNativeExtensionRepository(narrowed, configuration.repositoryPath, parameters,
+        () => host.extensionDelivery.validatePrompt(narrowed.outbound.message, binding));
       return repositoryRead(readRoot, RepositoryReadInputSchema.parse(parameters));
     }
     if (name === "read_pinned_instructions") {
@@ -1902,11 +1996,20 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         const run = record(await host.runtime.inspect(runId));
         if (DelegationRequestSchema.parse(run.delegation).sessionId !== requireManifest().conversationSessionId)
           throw new Error("Resume request belongs to another Conversation session");
+        if (await host.extensions.owns(runId)) {
+          if (!extensionPump) throw new Error("Extension pump is not active");
+          if (await extensionPump.wakeStarted(runId))
+            return json({ queued: true, runId, conversationUserMessageId: resumeTurn.messageId });
+        }
         if (run.pendingAction === undefined) return host.runtime.resumeIdleRun(runId, resumeTurn.messageId);
         const action = record(run.pendingAction);
         return host.runtime.resumeBlockedRun(runId, textField(action.actionId), { conversationUserMessageId: resumeTurn.messageId });
       }
       if (role !== "coordinator") throw new Error("Only Coordinator or an authenticated Conversation resume request may resume a blocked run");
+      if (await host.extensions.owns(runId)) {
+        if (!extensionPump) throw new Error("Extension pump is not active");
+        if (await extensionPump.wakeStarted(runId)) return json({ queued: true, runId });
+      }
       if (parameters.actionId === undefined || parameters.actionId === null ||
           (typeof parameters.actionId === "string" && parameters.actionId.trim() === "")) {
         const run = record(await host.runtime.inspect(runId));
@@ -1937,6 +2040,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           }
         }
       }
+      const narrowed = await assertExtensionTool(binding, "mcp__bflow__read_project_policy", parameters);
+      if (narrowed) policyRoot = configuration.repositoryPath;
       const isAgy = providerForRole(role) === "agy";
       return json(await readProjectPolicy(policyRoot, query, isAgy ? { maxTotalBytes: 16_384 } : undefined));
     }
@@ -1944,7 +2049,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (role !== "coordinator") throw new Error("Only Coordinator reads host planning guidance");
       return readPlanningReference(parameters);
     }
-    if (name === "host_status") return json({ active: !!workspace, quiesced, taskLogPane: taskLogPane.status(), ...schedulerStatusReport({ timerAlive: schedulerTimerAlive, quiesced, workspaceOpen: !!workspace, tickInFlight: !!scheduler, lastTickAt: schedulerLastTickAt, error: schedulerError }), inboundError: inboundError ?? null, conversationDeliveryFailures: (await receipts.conversationDeliveryFailures()).slice(-5) });
+    if (name === "host_status") return json({ active: !!workspace, quiesced, taskLogPane: taskLogPane.status(), ...schedulerStatusReport({ timerAlive: schedulerTimerAlive, quiesced, workspaceOpen: !!workspace, tickInFlight: !!scheduler, lastTickAt: schedulerLastTickAt, error: schedulerError }), inboundError: inboundError ?? null, extensionScheduler: extensionPump?.snapshot() ?? null, conversationDeliveryFailures: (await receipts.conversationDeliveryFailures()).slice(-5) });
     if (name === "read_role_pane") {
       // Read-only diagnostics for Conversation so it can explain a stalled run. Pane text is untrusted data: it is never
       // task-success evidence, an approval, or an instruction, and it is redacted and size-bounded before it leaves the host.
@@ -2035,11 +2140,24 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       }
       if (message.sender.role !== role || message.sender.agent_id !== binding.agentId || message.sender.pane_id !== binding.paneId) throw new Error("Cannot impersonate another role");
       if (role === "conversation" && message.type === "delegation.request") throw new Error("Use conversation_decide for Conversation delegation");
+      if (message.run_id && await host.extensions.owns(message.run_id) && message.type === "spec.draft")
+        throw new Error("Native extension output must use submit_extension_output");
       if (["approval.decision", "execution.receipt", "implementation.submitted", "verification.result", "review.verdict"].includes(message.type)) throw new Error("Use the dedicated authenticated host tool for this message type");
       return nativeDeliver(message);
     }
     if (name === "assignment_context") {
       const query = AssignmentContextInputSchema.parse(parameters);
+      const native = (await host.extensionDelivery.snapshot()).outbound.filter(out => out.status === "accepted" && out.handle &&
+        out.handle.target.paneId === binding.paneId && out.handle.target.agentId === binding.agentId &&
+        digest(out.handle.target.session) === digest(binding.session)).at(-1);
+      if (native) {
+        await host.extensionDelivery.validatePrompt(native.message, binding);
+        const intent = record(record(native.message.payload).intent), original = RoleMessageSchema.parse(intent.message);
+        return json({ kind: "workflow_extension", messageId: native.message.message_id, runId: native.message.run_id,
+          family: intent.family, outputKind: intent.outputKind, assignment: original.payload,
+          outputReference: await readExtensionReference(intent.family), toolActions: [],
+          instructions: "Submit only the structured output using submit_extension_output with this messageId. Put business questions/undecided facts in the output schema. Runtime owns independent gates, publication, target execution and human approvals." });
+      }
       const state = record(await host.runtime.inspect());
       const outbound = assignmentsForBinding(state.outbound as unknown[], binding);
       const conflictResolution = role === "developer" ? await development.conflictResolutionContext(binding) : undefined;
@@ -2050,7 +2168,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const repositorySurvey = await assignmentSurvey.prepare(binding, outbound, assignedRuns, toolActions);
       const rawResumeContext = role === "developer" && !conflictResolution ? await host.runtime.taskHandover(binding, {}) : undefined;
       const resumeContext = rawResumeContext === undefined ? undefined : providerForRole(role) === "agy" ? deferredTaskHandover(rawResumeContext) : rawResumeContext;
-      const fullReply = { ...(resumeContext === undefined ? {} : { resumeContext }), ...(repositorySurvey === undefined ? {} : { repositorySurvey }), policyEvidence: policyEvidenceView(assignedRuns, state.outbound as Record<string, unknown>[]),
+      const extensionIntakes: unknown[] = [];
+      if (role === "coordinator") for (const run of assignedRuns) {
+        if (typeof run.runId !== "string" || !await host.extensions.owns(run.runId)) continue;
+        const extension = record(await host.extensions.inspect(run.runId));
+        extensionIntakes.push({ runId: run.runId, kind: extension.kind, packPin: extension.pack,
+          intakeReference: await readExtensionReference(extension.kind),
+          instruction: "Use start_extension for this exact family. Ground userStatements/criteria in the delegated objective and retain unknown facts. Never propose Developer/no-op implementation tasks." });
+      }
+      const fullReply = { ...(extensionIntakes.length ? { extensionIntakes } : {}), ...(resumeContext === undefined ? {} : { resumeContext }), ...(repositorySurvey === undefined ? {} : { repositorySurvey }), policyEvidence: policyEvidenceView(assignedRuns, state.outbound as Record<string, unknown>[]),
         policyEvidenceNote: "Stored Runtime phase receipts and rejected outcomes only. A failed result with accepted phase red is valid Red, never Green. Read the exact revision and artifact checksums; no lifecycle status or agent text is proof.",
         toolActions, toolActionsNote: "Host-resolved scoped tool actions for this role. Invoke only when the listed trigger applies; grants do not require every action to be used. No Gateway credential or executable identity is included.",
         ...(conflictResolution ? { kind: "conflict_resolution", conflictResolution } : {}),
@@ -2245,6 +2371,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
   };
   const dispatch = async (token: string, method: string, params: unknown, operation?: OperationOptions): Promise<unknown> => {
+    if (!controlReady) throw new Error("Host control endpoint is still initializing; retry its readiness observation");
     if (token !== configuration.token) {
       const web = webCredentials.get(token);
       if (web) {
@@ -2376,6 +2503,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         }
         const direct = guardDirectUserInteraction(role, tool);
         if (!direct.permitted) { if (!quietTool) await activityLog.record({ kind: "tool", role, action: `${tool}:denied`, ...activityContext, outcome: "policy" }); throw new Error(direct.reason); }
+        await assertExtensionTool(binding, tool, hook.tool_input ?? {});
         if (tool.startsWith("mcp__bflow__") || ["Read", "Glob", "Grep", "ToolSearch"].includes(tool)) { if (!quietTool) await activityLog.record({ kind: "tool", role, action: `${tool}:permitted`, ...activityContext }); return { permitted: true }; }
         if (NATIVE_SHELL_TOOLS.has(tool)) {
           // Claude Bash and Codex shell tools share one tokenized allowlist; the refusal names the exact command or token.
@@ -2762,6 +2890,12 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           await platformSession?.shutdown();
           quiesceCompleted = true; return null;
         }
+        try {
+          if (extensionPump) await extensionPump.quiesce(() => workspace!.extensions.quiesce());
+          else await workspace.extensions.quiesce();
+        }
+        catch (error) { quiesced = false; throw error; }
+        if (extensionPump?.snapshot().activeRunIds.length) throw new Error("Native extension work is still draining; preserve the session and reconcile before shutdown");
         await workspace.runtime.quiesce();
         if (scheduler) await Promise.race([scheduler, new Promise((_, reject) => setTimeout(() => reject(new Error("Outstanding verification has not drained; preserve the live session and retry shutdown after reconciliation")), 15_000))]);
         await watchdogTask?.catch(() => undefined);
@@ -2829,7 +2963,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const message = incoming.message;
     const binding = await principal(incoming.role, incoming.paneId);
     if (binding.session?.value !== incoming.nativeSessionId) throw new Error("Queued provider prompt native session changed");
-    const runtime = requireWorkspace().runtime;
+    const active = requireWorkspace(), runtime = active.runtime;
+    if (record(message.payload).kind === "extension.assignment" && message.run_id && await active.extensions.owns(message.run_id)) {
+      await active.extensionDelivery.validatePrompt(message, binding); return;
+    }
     await runtime.validateProviderDelivery(message, binding);
     // A Runtime-originated notice (e.g. specialist_result_ready) is already the exact outbox delivery just validated; it has no pane to re-sign.
     // Specialist assignments remain in their model turn; only authoritative receivers apply inbox state.
@@ -2986,7 +3123,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
     if(!directorLayout&&!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
-    const task = (async () => { await pumpProviderFailures(); return workspace!.runtime.tick(); })(); scheduler = task;
+    const task = (async () => { await pumpProviderFailures(); if (manifest && !activation) await extensionPump?.tick(); return workspace!.runtime.tick(); })(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
   schedulerTimerAlive = true;
@@ -3128,7 +3265,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       await rm(runner, { force: true }).catch(() => undefined);
     }
     if (useShortHook) await rm(shortHookDir, { recursive: true, force: true });
-    if (workspace) { await workspace.runtime.quiesce(); await scheduler?.catch(() => undefined); await watchdogTask?.catch(() => undefined); await idleCheckTask?.catch(() => undefined); await chatPump?.catch(() => undefined); await workspace.close(); }
+    await extensionPump?.quiesce();
+    if (workspace) { await workspace.extensions.quiesce(); await workspace.runtime.quiesce(); await scheduler?.catch(() => undefined); await watchdogTask?.catch(() => undefined); await idleCheckTask?.catch(() => undefined); await chatPump?.catch(() => undefined); await workspace.close(); }
     await preparation?.catch(() => undefined);
     await disposeDetectedDependencies();
     queryStore?.close();
@@ -3138,6 +3276,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   };
   // Abrupt process signals are crashes, never graceful-shutdown receipts.
   process.once("SIGTERM", () => { void close().then(() => process.exit(0), () => process.exit(1)); });
+  controlReady = true;
 }
 
 /** Pre-transport normalization of a role-supplied RoleMessage: the authenticated pane fills identity; the idempotency key defaults to message_id. */
@@ -3161,6 +3300,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     { name: "reconcile_tool_action", description: "Reconcile an existing unknown invocation using the identical actionId, toolId, operation and input. Never creates or resends an uncertain call." },
     { name: "acknowledge_tool_action", description: "Acknowledge that a completed tool result's exact stored evidence was delivered into this same role's current assigned task context. Uses the original schemaVersion,actionId,toolId,operation and input:{invocationId,evidence}. No upstream call; unknown, mismatched, cross-task or cross-role evidence is rejected. This proves delivery only, not semantic use or task acceptance." },
     { name: "read_tool_usage", description: "Read sanitized host-observed tool usage for the active run/task or Coordinator session. No invocation inputs, outputs, memory bodies, or success claims." });
+  if (role === "coordinator") tools.push({ name: "start_extension", description: "Start the exact pinned BA-only or QA-only workflow admitted by Conversation. Supply kind,runId,intake,packPin from the host context. Runtime owns native specialist dispatch and human gates; never create Developer/no-op tasks for these families." });
+  if (["specifier", "architect", "reviewer", "qa", "tester"].includes(role)) tools.push({ name: "submit_extension_output", description: "Submit a bounded structured output for this pane's exact native extension assignment. Parameters: messageId,output. Host authenticates the actual handle, receipt, role and scope. Output is not task acceptance." });
   if (["coordinator", "conversation"].includes(role)) tools.push({ name: "inspect_native_delivery", description: "Read-only reconciliation of the exact native operationId against private intent, ACK, observed ingress refusal and Runtime inbox. Distinct from reconcile_delivery (transport outbox). Never resends, changes criteria, approves or proves task success; missing evidence remains unknown." });
   if (role === "conversation") tools.push({ name: "resume_run", description: "Ask Runtime to resume an existing blocked run only after a real explicit user resume request. Parameters: runId, messageId? (the host binds your latest trusted user turn); Runtime preserves all approval/cancellation/delivery guards." });
   if (role === "conversation") tools.push({ name: "read_role_pane", description: "Read-only snapshot of another role's recent terminal output (redacted, untrusted) to explain a stalled or blocked run; never evidence of success or approval. Parameters: role, paneId? (required when several panes share a role), lines? (1-200, default 60)." });
@@ -3251,6 +3392,8 @@ export function availableTools(role: AgentRole, _provider: AgentProviderId = "cl
     request_specialist:{properties:{runId:string,role:string,objective:string,requiredCapabilities:array,roleProfile:roleProfilePinToolSchema},required:["runId","role","objective","requiredCapabilities"]},
     propose_prototype:{properties:{runId:string,scope:object},required:["runId","scope"]},
     submit_prototype:{properties:{runId:string,submission:object},required:["runId","submission"]},
+    start_extension:{properties:{kind:{type:"string",enum:["analysis","qa"]},runId:string,intake:object,packPin:object},required:["kind","runId","intake","packPin"]},
+    submit_extension_output:{properties:{messageId:string,output:object},required:["messageId","output"]},
     propose_workflow:{properties:{runId:string,specification:specificationToolSchema,definition:object,maxIterations:{type:"integer",minimum:1,maximum:10}},required:["runId","specification","definition"]},
     reconcile_delivery:{properties:{messageId:string},required:["messageId"]}, authorize_implementation:{properties:{runId:string,taskId:string},required:["runId","taskId"]},
     accept_conflict_resolution:{properties:{runId:string,taskKey:string,resolutionCommitHash:string},required:["runId","taskKey","resolutionCommitHash"]},

@@ -1,10 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
+import { canonicalReceiptJson } from "@bflow/contracts";
+import { cancelExtension } from "../extension-cancellation.js";
+import type { CancellationRequest } from "@bflow/contracts";
+import { extensionDecisionRequest } from "../extension-decisions.js";
 import { lstat, mkdir, open, readdir, readFile, readlink, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
-  AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
+  hasAuthenticatedBindings, AgentBindingVerificationSchema, AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema,
   ArtifactWriteOptionsSchema, DomainEventSchema, ResolvedToolGrantSchema, SpecificationSchema, StoredRunSchema, VerificationResultSchema,
-  WorkflowAdvanceResultSchema, type ApprovalDecision, type ArtifactReference, type ArtifactStore, type JsonValue, type OperationResult,
+  WorkflowAdvanceResultSchema, RuntimeHttpGrantSchema, type RuntimeHttpGrant, type ApprovalDecision, type ArtifactReference, type ArtifactStore, type JsonValue, type OperationResult,
   type ResolvedToolGrant, type RunStore, type TestStrategy, type WorkflowAdvanceResult, type WorkflowDefinition, type WorkflowEngine,
   type WorkflowRunSnapshot
 } from "@bflow/contracts";
@@ -22,6 +26,8 @@ import { QaScopeDenied, QaUnresolvedVariable, actionOf, resolveTargetUrl, substi
 import { QA_BROWSER_TOOL_ID, QA_HTTP_TOOL_ID, type QaBrowserTool, type QaHttpOutcome, type QaHttpTool } from "./tools.js";
 import { verifyQaDesign, type QaDesignVerification } from "./verify.js";
 
+import { executeExtension, extensionIntent, nativeExecutionsIndependent, type ExtensionExecution } from "../extension-execution.js";
+import type { NativeExtensionRolePort } from "../agentic/extension-delivery.js";
 /** One assignment to a standard role. Roles get context only: no write, command or network authority on the target. */
 export interface QaAssignment {
   readonly runId: string;
@@ -46,6 +52,7 @@ export type QaReconciliation =
 
 /** Role transport port. The persistent host would deliver over Runtime → Herdr; tests use deterministic fixtures. */
 export interface QaRolePort {
+  readonly native?: NativeExtensionRolePort;
   dispatch(assignment: QaAssignment): Promise<{ readonly agentId: string; readonly output: unknown }>;
   reconcile?(executionId: string): Promise<QaReconciliation>;
 }
@@ -67,13 +74,20 @@ export interface QaRuntimePorts {
   readonly tools: { readonly http?: QaHttpTool; readonly browser?: QaBrowserTool };
   /** Host-resolved session grants; each action needs a grant for the QA role, the tool and that operation. */
   readonly grants: readonly ResolvedToolGrant[];
+  /** Host transport session differs from the Conversation session in the intake. Supplied by composition, never a role. */
+  readonly grantScopeSessionId?: string;
+  /** Revalidate host policy/cancellation before every target operation, including readiness and reconciliation. */
+  beforeTargetAction?(input: { runId: string; toolId: string; action: QaAction; origin: string }): Promise<void>;
+  /** Native host HTTP has its own real grant. CLI/MCP SDK fixtures cannot become native authority. */
+  readonly runtimeHttpGrants?: readonly RuntimeHttpGrant[];
+  runtimeHttpAuthority?(input: { runId: string; toolId: string; action: QaAction; origin: string }): Promise<void>;
   /** Host-local fenced lease over the target environment, held for the whole execution transaction. */
   readonly leases: AppCheckBrowserLeases;
   readonly leaseTtlMs?: number;
   readonly accounts?: QaAccountPort;
 }
 
-export type QaRunStatus = "running" | "awaiting_design_approval" | "blocked" | "needs_revision" | "reported" | "failed";
+export type QaRunStatus = "running" | "awaiting_design_approval" | "blocked" | "needs_revision" | "reported" | "failed" | "cancelling" | "cancelled";
 export type QaCaseStatus = "passed" | "assertion_failed" | "environment_failure" | "blocked" | "inconclusive";
 export type QaBuildIdentity = { status: "identified"; value: string; source: string } | { status: "unknown"; limitation: string };
 export interface QaStepFinding { code: string; message: string; expected?: string; actual?: string }
@@ -112,6 +126,7 @@ interface ExecutionState {
   digest?: string; artifact?: ArtifactReference; completedAt?: string;
 }
 interface ExecutionRecord {
+  native?: ExtensionExecution;
   executionId: string; taskId: QaTaskKind; attemptId: string; attempt: number; generation: number;
   state: "bound" | "recorded"; agentId?: string; outputDigest?: string; startedAt: string;
   failure?: { code: string; message: string } | null; completedAt?: string;
@@ -122,6 +137,7 @@ interface AdjudicationRecord {
   verdicts: { caseId: string; classification: QaClassification; rationale: string }[]; problems?: QaFinding[];
 }
 interface RunRecord {
+  cancellation?: CancellationRequest;
   runId: string; intake: QaIntake; intakeDigest: string; definition: WorkflowDefinition; status: QaRunStatus; createdAt: string;
   strategy: TestStrategy; coreCreated: boolean; access?: { decidedBy: string; decidedAt: string };
   executions: ExecutionRecord[]; designs: DesignRecord[];
@@ -135,7 +151,7 @@ interface RunRecord {
   rejections: { executionId: string; taskId: string; code: string; message: string; at: string }[];
   blockers: string[];
 }
-interface Journal { schemaVersion: 1; runs: RunRecord[] }
+interface Journal { schemaVersion: 1 | 2; delivery?: "native"; runs: RunRecord[] }
 
 /** A whole-run precondition that is not met yet (for example a busy lease): no side effect happened, drive again later. */
 class QaBlocked extends Error { constructor(readonly code: string) { super(code); this.name = "QaBlocked"; } }
@@ -178,21 +194,30 @@ function alternativeMethods(strategy: TestStrategy): string[] {
  * workspace. Nothing in the workflow creates, requests or authorizes a product change.
  */
 export class QaWorkflowRuntime {
+  private saveTail: Promise<void> = Promise.resolve();
+  private readonly activeLocalTasks = new Set<string>();
   private journal: Journal = { schemaVersion: 1, runs: [] };
   private readonly createdInEngine = new Set<string>();
   private readonly sanitizers = new Map<string, QaSanitizer>();
-  private constructor(private readonly ports: QaRuntimePorts) {}
+  private constructor(private readonly ports: QaRuntimePorts) {
+    if (ports.roles.native) this.journal = { schemaVersion: 2, delivery: "native", runs: [] };
+  }
 
   static async open(ports: QaRuntimePorts): Promise<QaWorkflowRuntime> {
     if (!isAbsolute(ports.repositoryRoot) || !isAbsolute(ports.journalPath)) throw new Error("QA runtime paths must be absolute");
     const runtime = new QaWorkflowRuntime(ports);
     try {
       const parsed = JSON.parse(await readFile(ports.journalPath, "utf8")) as Journal;
-      if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.runs)) throw new Error("Unsupported QA journal version");
+      if (!Array.isArray(parsed.runs) || (ports.roles.native
+        ? parsed.schemaVersion !== 2 || parsed.delivery !== "native"
+        : parsed.schemaVersion !== 1 || parsed.delivery !== undefined))
+        throw new Error("Legacy SDK and native qa journals require separate versioned namespaces");
       runtime.journal = parsed;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    if (ports.roles.native)
+      for (const run of runtime.journal.runs) if (run.coreCreated) await runtime.restoreCore(run);
     return runtime;
   }
 
@@ -201,7 +226,7 @@ export class QaWorkflowRuntime {
     const run = this.run(runId);
     const exec = run.execution;
     const latest = run.designs.at(-1);
-    return structuredClone({ runId: run.runId, status: run.status, revision: run.intake.revision, blockers: run.blockers,
+    return structuredClone({ runId: run.runId, intakeDigest: run.intakeDigest, executionMode: this.ports.roles.native ? "native" : "local", status: run.status, revision: run.intake.revision, blockers: run.blockers,
       denials: run.denials, rejections: run.rejections, definition: run.definition,
       tdd: { mode: run.strategy.tddDecision.mode, alternativeVerification: alternativeMethods(run.strategy) },
       design: latest ? { version: latest.version, digest: latest.digest, artifactId: latest.artifact.artifactId } : undefined,
@@ -213,7 +238,7 @@ export class QaWorkflowRuntime {
       classifications: run.classifications ?? {}, verdict: run.report?.verdict,
       report: run.report ? { verdict: run.report.verdict, files: run.report.files, bugs: run.report.bugs, testDefects: run.report.testDefects,
         residualData: run.report.residualData, uncertainMutations: run.report.uncertainMutations, limitations: run.report.limitations,
-        artifactId: run.report.artifact.artifactId } : undefined });
+        artifactId: run.report.artifact.artifactId, artifact: run.report.artifact } : undefined });
   }
 
   /**
@@ -235,6 +260,13 @@ export class QaWorkflowRuntime {
       access = { decidedBy: decision.decidedBy, decidedAt: decision.decidedAt };
     }
     const definition = input.definition === undefined ? planQaWorkflow(intake, input.maxIterations) : assertQaOnlyWorkflow(input.definition, intake, input.maxIterations);
+    if (this.ports.roles.native && input.definition === undefined) {
+      // Herdr's tester selector aliases the QA pane. Keep adjudication on a different real actor.
+      for (const task of definition.tasks) {
+        if (task.id === "design") task.role = "qa";
+        if (task.id === "adjudication") task.role = "reviewer";
+      }
+    }
     const run: RunRecord = { runId: input.runId, intake, intakeDigest: qaDigest(intake), definition, status: "running", createdAt,
       strategy: this.resolveStrategy(input.runId, intake, createdAt), coreCreated: false, ...(access ? { access } : {}), executions: [], designs: [],
       designChecks: [], adjudications: [], denials: [], rejections: [], blockers: [] };
@@ -271,6 +303,34 @@ export class QaWorkflowRuntime {
   }
 
   /** Runs every step that needs no human input; returns at the design approval, a blocker or completion. */
+  /** Stop this native workflow through Core and the bridge; an interrupt acknowledgement never proves stop. */
+  async cancel(runId: string, reason: string) {
+    const run = this.run(runId);
+    if (!this.ports.roles.native) throw new Error("Native cancellation requires native execution authority");
+    await this.restoreCore(run);
+    const snapshot = await cancelExtension({ runId, reason, native: this.ports.roles.native, now: this.ports.now,
+      ...(run.cancellation ? { cancellation: run.cancellation } : {}),
+      persist: async request => {
+        run.cancellation = request; run.status = "cancelling"; await this.save();
+        const exec = run.execution;
+        if (exec?.lease && ![...this.activeLocalTasks].some(key => key.startsWith(`${runId}:`)) &&
+            !exec.mutations.some(item => item.state === "intent" || item.state === "uncertain")) {
+          const lease = exec.leases.find(item => item.leaseId === exec.lease!.leaseId);
+          if (lease && !lease.released) { await this.ports.leases.release(exec.lease); lease.released = true; await this.save(); }
+        }
+      },
+      localStopped: (taskId, transport) => RUNTIME_TASKS.has(taskId as QaTaskKind) && transport === "runtime-qa" &&
+        !this.activeLocalTasks.has(`${runId}:${taskId}`) && !run.execution?.mutations.some(item => item.state === "intent" || item.state === "uncertain"),
+      unresolvedLocalWork: () => [...this.activeLocalTasks].some(key => key.startsWith(`${runId}:`)) ||
+        !!run.execution?.mutations.some(item => item.state === "intent" || item.state === "uncertain") ||
+        !!run.execution?.leases.some(lease => !lease.released),
+      snapshot: () => this.snapshot(runId), mutate: action => this.mutate(runId, action),
+      request: request => this.ports.engine.requestCancellation(request),
+      confirm: command => this.ports.engine.confirmCancellationStop(command) });
+    if (snapshot.status === "cancelled" || snapshot.status === "cancelling") run.status = snapshot.status;
+    await this.save(); return this.status(runId);
+  }
+
   async drive(runId: string) {
     const run = this.live(runId);
     // A whole-run precondition (busy lease) is re-evaluated on every drive; nothing happened while it was blocked.
@@ -278,8 +338,10 @@ export class QaWorkflowRuntime {
       run.blockers = []; run.status = "running";
     }
     await this.restoreCore(run);
+    if (run.cancellation) return this.cancel(runId, run.cancellation.reason ?? "Run cancelled");
     for (let guard = 0; guard < 200; guard++) {
       let snapshot = await this.snapshot(runId);
+      if (run.cancellation) return this.cancel(runId, "Run cancelled");
       if (TERMINAL.has(snapshot.status)) return this.finish(run, snapshot);
       for (const task of snapshot.tasks.filter(item => item.status === "retrying"))
         snapshot = await this.mutate(runId, version => this.ports.engine.transitionTask({ runId, taskId: task.taskId, from: "retrying", to: "ready",
@@ -289,7 +351,10 @@ export class QaWorkflowRuntime {
         idempotencyKey: `qa:advance:${runId}:${version}`, occurredAt: this.ports.now() }));
       const active = snapshot.tasks.find(item => item.status === "running" || item.status === "waiting");
       if (active) {
-        if (await this.execute(run, active) === "blocked") return this.status(runId);
+        const key = `${runId}:${active.taskId}`;
+        if (RUNTIME_TASKS.has(active.taskId as QaTaskKind)) this.activeLocalTasks.add(key);
+        try { if (await this.execute(run, active) === "blocked") return this.status(runId); }
+        finally { this.activeLocalTasks.delete(key); }
         continue;
       }
       if (run.status !== "running") { await this.save(); return this.status(runId); }
@@ -306,6 +371,9 @@ export class QaWorkflowRuntime {
 
   private async execute(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<"blocked" | void> {
     const kind = task.taskId as QaTaskKind;
+    if (this.ports.roles.native && !(RUNTIME_TASKS.has(kind))) {
+      await this.executeNative(run, task); return;
+    }
     let existing = run.executions.find(item => item.attemptId === task.attemptId);
     if (!existing && task.agentExecution && task.agentExecution.attemptId === task.attemptId) {
       // Core persisted the binding but the journal write was lost: adopt Core's binding and reconcile it, never rebind.
@@ -353,7 +421,66 @@ export class QaWorkflowRuntime {
     }
   }
 
+  private async executeNative(run: RunRecord, task: WorkflowRunSnapshot["tasks"][number]): Promise<void> {
+    if (!hasAuthenticatedBindings(this.ports.engine)) throw new Error("Native extension requires authenticated Core binding support");
+    const engine = this.ports.engine, kind = task.taskId as QaTaskKind;
+    let execution = run.executions.find(item => item.attemptId === task.attemptId);
+    if (execution && !execution.native) throw new Error("Legacy logical execution cannot become native evidence");
+    if (!execution) {
+      if (task.agentExecution) throw new Error("Native Core binding lost its SDK delivery intent; recovery requires reconciliation");
+      execution = { executionId: `${run.runId}.${kind}.g${task.generation}.a${task.attempt}`, taskId: kind,
+        attemptId: task.attemptId!, attempt: task.attempt, generation: task.generation, state: "bound", startedAt: this.ports.now() };
+      const assignment = this.assignment(run, kind, execution);
+      execution.native = { intent: extensionIntent("qa", run.intake.sessionId, assignment, assignment, execution.startedAt), phase: "prepared" };
+      run.executions.push(execution); await this.save();
+    }
+    const blocker = `native_execution_unresolved:${task.attemptId}`;
+    const clearNativeBlocker = async () => {
+      if (!run.blockers.includes(blocker)) return;
+      run.blockers = run.blockers.filter(item => item !== blocker);
+      if (run.status === "blocked" && !run.blockers.length) run.status = "running";
+      await this.save();
+    };
+    try {
+      if (task.status === "waiting") { await this.evaluateGates(run, task, execution); await clearNativeBlocker(); return; }
+      if (execution.state === "recorded") { await this.recordResult(run, execution); await clearNativeBlocker(); return; }
+      const record = execution;
+      const outcome = await executeExtension({ execution: record.native!, port: this.ports.roles.native!, save: () => this.save(),
+        bind: async handle => {
+          record.executionId = handle.executionId; await this.save();
+          const current = (await this.snapshot(run.runId)).tasks.find(item => item.taskId === kind)!;
+          if (current.agentExecution) {
+            if (canonicalReceiptJson(current.agentExecution) !== canonicalReceiptJson(handle))
+              throw new Error("Recovered native Core binding differs from its accepted handle");
+            return;
+          }
+          await this.mutate(run.runId, version => engine.bindAgentExecution({ runId: run.runId, taskId: kind, attempt: task.attempt,
+            handle, expectedVersion: version, idempotencyKey: `qa:bind:${handle.executionId}`, occurredAt: handle.acceptedAt }));
+        } });
+      record.native!.verification ??= AgentBindingVerificationSchema.parse({ receipt: outcome.receipt, evidence: outcome.receiptEvidence,
+        verifiedAt: this.ports.now() });
+      await this.save();
+      const proof = AgentBindingVerificationSchema.parse(record.native!.verification);
+      const verified = (await this.snapshot(run.runId)).tasks.find(item => item.taskId === kind)!.bindingVerification;
+      if (verified) {
+        if (canonicalReceiptJson(verified) !== canonicalReceiptJson(proof)) throw new Error("Recovered native binding proof changed");
+      } else await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
+        verification: proof, occurredAt: proof.verifiedAt, idempotencyKey: `qa:verify-binding:${outcome.handle.executionId}` }));
+      await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
+      await clearNativeBlocker();
+    } catch (error) {
+      if (run.cancellation) { await this.save(); throw error; }
+      run.status = "blocked";
+      run.blockers = [...new Set([...run.blockers, blocker])];
+      await this.save(); throw error;
+    }
+  }
+
   private handle(run: RunRecord, execution: ExecutionRecord) {
+    if (execution.native) {
+      if (!execution.native.handle) throw new Error("Native execution has not been accepted");
+      return execution.native.handle;
+    }
     return { executionId: execution.executionId, requestId: `request-${execution.executionId}`, attemptId: execution.attemptId,
       runId: run.runId, taskId: execution.taskId, idempotencyKey: `qa:dispatch:${execution.executionId}`,
       target: { transport: RUNTIME_TASKS.has(execution.taskId) ? "runtime-qa" : "qa-role", agentId: this.roleOf(run, execution.taskId), paneId: execution.taskId },
@@ -381,12 +508,15 @@ export class QaWorkflowRuntime {
   }
 
   private async complete(run: RunRecord, execution: ExecutionRecord, outcome: { agentId: string; output: unknown }) {
+    if (run.cancellation) throw new Error("Extension run is cancelled; late output cannot continue it");
     const kind = execution.taskId;
     let failure: { code: string; message: string } | undefined;
     try {
       const forbidden = forbiddenOutputKeys(outcome.output);
       if (forbidden.length) throw new QaScopeDenied("forbidden_authority", `Role output requested forbidden authority: ${forbidden.join(", ")}`);
-      if (!RUNTIME_TASKS.has(kind) && outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`))
+      if (!RUNTIME_TASKS.has(kind) && (execution.native
+        ? outcome.agentId !== execution.native.outcome?.sender.agent_id || execution.native.outcome.sender.role !== this.roleOf(run, kind)
+        : outcome.agentId !== this.roleOf(run, kind) && !outcome.agentId.startsWith(`${this.roleOf(run, kind)}:`)))
         throw new QaScopeDenied("wrong_role", `Output came from ${outcome.agentId}, not the assigned ${this.roleOf(run, kind)} role`);
       if (kind === "design") await this.acceptDesign(run, execution, outcome.agentId, QaRoleOutputSchemas.design.parse(outcome.output).design);
       else if (kind === "design-review") await this.acceptReview(run, outcome.agentId, QaRoleOutputSchemas["design-review"].parse(outcome.output));
@@ -394,6 +524,7 @@ export class QaWorkflowRuntime {
       else if (kind === "execution") await this.runExecution(run);
       else await this.publishReport(run);
     } catch (error) {
+      if (run.cancellation) throw error;
       if (error instanceof QaScopeDenied) {
         run.denials.push({ executionId: execution.executionId, taskId: kind, reason: error.message, at: this.ports.now() });
         failure = { code: "permission_denied", message: error.message };
@@ -403,6 +534,7 @@ export class QaWorkflowRuntime {
     }
     if (failure && failure.code !== "permission_denied")
       run.rejections.push({ executionId: execution.executionId, taskId: kind, code: failure.code, message: failure.message, at: this.ports.now() });
+    if (run.cancellation) throw new Error("Extension run is cancelled");
     execution.state = "recorded";
     execution.agentId = outcome.agentId;
     execution.outputDigest = qaDigest(outcome.output ?? null);
@@ -416,9 +548,9 @@ export class QaWorkflowRuntime {
     const kind = execution.taskId;
     const failure = execution.failure ?? undefined;
     const at = execution.completedAt ?? this.ports.now();
-    const result = AgentResultSchema.parse({ requestId: `request-${execution.executionId}`, attemptId: execution.attemptId, runId: run.runId,
+    const result = AgentResultSchema.parse({ requestId: this.handle(run, execution).requestId, attemptId: execution.attemptId, runId: run.runId,
       taskId: kind, executionId: execution.executionId, status: failure ? "failed" : "succeeded",
-      verification: { status: "verified", evidence: `qa ${kind} output ${execution.outputDigest}`, correlation: this.handle(run, execution).correlation },
+      verification: { status: "verified", evidence: `qa ${kind} output ${execution.outputDigest}`, correlation: execution.native?.outcome?.receipt.correlation ?? this.handle(run, execution).correlation },
       artifactProposals: [], retryable: Boolean(failure), startedAt: execution.startedAt, completedAt: at,
       ...(failure ? { error: { code: failure.code, message: failure.message, retryable: true } } : {}) });
     const snapshot = await this.mutate(run.runId, version => this.ports.engine.recordAgentResult({ runId: run.runId, taskId: kind,
@@ -470,7 +602,9 @@ export class QaWorkflowRuntime {
     } else if (binding.gateId === QA_GATES.review) {
       const latest = run.designs.at(-1)!;
       const review = run.review!;
-      if (review.agentId === latest.authorAgentId) problems.push({ code: "review_not_independent", severity: "error", ids: [review.agentId], message: "The reviewer authored the test design" });
+      const author = run.executions.find(item => item.attemptId === latest.attemptId);
+      if (review.agentId === latest.authorAgentId || execution.native && !nativeExecutionsIndependent(author?.native, execution.native))
+        problems.push({ code: "review_not_independent", severity: "error", ids: [review.agentId], message: "The reviewer needs an independent authenticated actor, pane and native session" });
       if (review.designDigest !== latest.digest) problems.push({ code: "review_stale", severity: "error", ids: [review.designDigest], message: "Review is not pinned to the current design digest" });
       if (review.verdict !== "approved" || review.findings.some(item => item.severity === "blocking"))
         problems.push({ code: "review_changes_requested", severity: "error", ids: review.findings.map(item => item.id), message: "Independent review requested changes" });
@@ -511,7 +645,10 @@ export class QaWorkflowRuntime {
     const exec = run.execution!;
     const problems: QaFinding[] = [];
     const add = (code: QaFinding["code"], ids: string[], message: string) => problems.push({ code, severity: "error", ids, message });
-    if (adjudication.agentId === run.designs.at(-1)!.authorAgentId) add("adjudication_not_independent", [adjudication.agentId], "The test designer cannot adjudicate its own results");
+    const design = run.designs.at(-1)!, author = run.executions.find(item => item.attemptId === design.attemptId);
+    const judge = run.executions.find(item => item.attemptId === adjudication.attemptId);
+    if (adjudication.agentId === design.authorAgentId || judge?.native && !nativeExecutionsIndependent(author?.native, judge.native))
+      add("adjudication_not_independent", [adjudication.agentId], "The test designer cannot adjudicate through the same authenticated actor, pane or native session");
     if (adjudication.executionDigest !== exec.digest) add("adjudication_stale", [adjudication.executionDigest], "Adjudication is not pinned to the current execution digest");
     for (const outcome of Object.values(exec.cases)) {
       const verdicts = adjudication.verdicts.filter(item => item.caseId === outcome.caseId);
@@ -576,13 +713,31 @@ export class QaWorkflowRuntime {
       generation: snapshot.tasks.find(item => item.taskId === "design-review")!.generation, decision: input.decision, decidedBy: input.decidedBy,
       decidedAt: this.ports.now(), ...(input.reason ? { reason: input.reason } : {}), feedbackArtifacts: [], idempotencyKey: `qa:decision:${pending.approvalId}`,
       metadata: { approvalScope: "qa_test_design", designDigest: pending.designDigest, productChange: "not_authorized" } });
+    return this.applyHumanDecision(decision);
+  }
+
+  /** Apply the exact authenticated design decision supplied by Conversation/host. */
+  async applyHumanDecision(input: ApprovalDecision) {
+    const decision = ApprovalDecisionSchema.parse(input), run = this.run(decision.runId), pending = run.approval;
+    if (!pending || pending.approvalId !== decision.approvalId) throw new Error("No matching QA design approval is pending");
     await this.authorize(decision);
-    await this.mutate(runId, version => this.ports.engine.applyApproval({ expectedVersion: version, idempotencyKey: `qa:decision:${pending.approvalId}`, decision }));
+    if (pending.decision) {
+      if (canonicalReceiptJson(pending.decision) !== canonicalReceiptJson(decision)) throw new Error("QA approval already has another decision");
+      return this.status(run.runId);
+    }
+    this.live(run.runId);
+    if (run.status !== "awaiting_design_approval") throw new Error("No test design approval is pending");
+    await this.restoreCore(run);
+    const request = await extensionDecisionRequest(this.ports.runStore, decision, "qa_test_design", this.ports.now());
+    if (decision.metadata?.designDigest !== pending.designDigest || request.metadata?.designDigest !== pending.designDigest)
+      throw new Error("Approval must name the exact reviewed design digest");
+    await this.mutate(run.runId, version => this.ports.engine.applyApproval({ expectedVersion: version,
+      idempotencyKey: `qa:decision:${pending.approvalId}`, decision }));
     pending.decision = decision;
-    if (input.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`design_${input.decision}`]; }
+    if (decision.decision !== "approved") { run.status = "needs_revision"; run.blockers = [`design_${decision.decision}`]; }
     else run.status = "running";
     await this.save();
-    return input.decision === "approved" ? this.drive(runId) : this.status(runId);
+    return decision.decision === "approved" ? this.drive(run.runId) : this.status(run.runId);
   }
 
   private async authorize(decision: ApprovalDecision) {
@@ -688,11 +843,40 @@ export class QaWorkflowRuntime {
   }
 
   private grantFor(run: RunRecord, toolId: string, action: QaAction): boolean {
+    if (this.ports.roles.native) {
+      if (toolId !== QA_HTTP_TOOL_ID || !this.ports.runtimeHttpAuthority) return false;
+      return (this.ports.runtimeHttpGrants ?? []).some(raw => {
+        const parsed = RuntimeHttpGrantSchema.safeParse(raw);
+        return parsed.success && parsed.data.operations.some(operation => operation === action) && parsed.data.scope.kind === "session" &&
+          parsed.data.scope.sessionId === (this.ports.grantScopeSessionId ?? run.intake.sessionId) &&
+          parsed.data.scope.workspaceRoot === this.ports.repositoryRoot;
+      });
+    }
     return this.ports.grants.some(raw => {
       const grant = ResolvedToolGrantSchema.safeParse(raw);
       return grant.success && grant.data.role === QA_EXECUTION_ROLE && grant.data.toolId === toolId && grant.data.operations.includes(action) &&
-        grant.data.scope.kind === "session" && grant.data.scope.sessionId === run.intake.sessionId && grant.data.scope.workspaceRoot === this.ports.repositoryRoot;
+        grant.data.scope.kind === "session" && grant.data.scope.sessionId === (this.ports.grantScopeSessionId ?? run.intake.sessionId) &&
+        grant.data.scope.workspaceRoot === this.ports.repositoryRoot;
     });
+  }
+  private async targetAuthority(run: RunRecord, toolId: string, action: QaAction, origin: string): Promise<void> {
+    if (run.cancellation) throw new QaScopeDenied("cancelled", "QA run is cancelled");
+    await this.ports.beforeTargetAction?.({ runId: run.runId, toolId, action, origin });
+    if (run.cancellation) throw new QaScopeDenied("cancelled", "QA run is cancelled");
+    if (!run.intake.allowedActions.includes(action) || !this.grantFor(run, toolId, action))
+      throw new QaScopeDenied("grant_unavailable", `No current grant for ${toolId}:${action}`);
+    if (!run.intake.target.origins.includes(origin)) throw new QaScopeDenied("origin_not_approved", "Target origin exceeds the approved QA intake");
+    if (this.ports.roles.native) await this.ports.runtimeHttpAuthority!({ runId: run.runId, toolId, action, origin });
+    if (run.cancellation) throw new QaScopeDenied("cancelled", "QA run is cancelled");
+  }
+  private async recheckMutationIntent(run: RunRecord, exec: ExecutionState, mutation: QaMutationRecord, toolId: string, action: QaAction, origin: string) {
+    try {
+      await this.targetAuthority(run, toolId, action, origin);
+      await this.fence(exec);
+    } catch (error) {
+      // The write-ahead intent exists, but the tool has not been invoked. Preserve proof that nothing was delivered.
+      mutation.state = "not_delivered"; mutation.settledAt = this.ports.now(); await this.save(); throw error;
+    }
   }
   private prerequisiteGap(run: RunRecord, steps: readonly QaStep[], account?: string): string | undefined {
     for (const step of steps) {
@@ -750,6 +934,7 @@ export class QaWorkflowRuntime {
   /** One HTTP exchange through the granted tool, fence-checked; never follows redirects by itself. */
   private async request(run: RunRecord, exec: ExecutionState, url: URL, method: string, headers: Record<string, string>, body: string | undefined,
     timeoutMs: number): Promise<QaHttpOutcome> {
+    await this.targetAuthority(run, QA_HTTP_TOOL_ID, method === "GET" || method === "HEAD" ? "http_read" : "http_mutate", url.origin);
     await this.fence(exec);
     if (!run.intake.target.origins.includes(url.origin)) throw new QaScopeDenied("origin_not_approved", `Origin ${url.origin} is not approved`);
     return this.ports.tools.http!.request({ method, url: url.toString(), headers, ...(body !== undefined ? { body } : {}), timeoutMs });
@@ -887,7 +1072,7 @@ export class QaWorkflowRuntime {
       const request = `${method} ${sanitizer.text(url.toString())}`;
       const recordBase = { ...base, request, requestHeaders: sanitizer.headersOf(headers), ...(body !== undefined ? { requestBody: sanitizer.body(body) } : {}) };
       let lease: AppCheckLease;
-      try { lease = await this.fence(exec); }
+      try { await this.targetAuthority(run, QA_HTTP_TOOL_ID, action, url.origin); lease = await this.fence(exec); }
       catch (error) {
         if (error instanceof LeaseInterrupted) return { ...recordBase, outcome: "lease", findings: [{ code: error.code, message: `Environment lease ${error.code}; no further actions` }] };
         throw error;
@@ -900,6 +1085,11 @@ export class QaWorkflowRuntime {
           state: "intent", at: this.ports.now() };
         exec.mutations.push(mutation);
         await this.save();
+        try { await this.recheckMutationIntent(run, exec, mutation, QA_HTTP_TOOL_ID, action, url.origin); }
+        catch (error) {
+          if (error instanceof LeaseInterrupted) return { ...recordBase, outcome: "lease", findings: [{ code: error.code, message: "Environment lease lost before mutation delivery" }] };
+          throw error;
+        }
       }
       const response = await this.ports.tools.http!.request({ method, url: url.toString(), headers, ...(body !== undefined ? { body } : {}), timeoutMs: step.timeoutMs ?? 10_000 });
       if (mutation) {
@@ -983,7 +1173,7 @@ export class QaWorkflowRuntime {
     }
     if (resolved.url) request = `browser ${step.op} ${sanitizer.text(resolved.url)}${resolved.selector ? ` ${resolved.selector}` : ""}`;
     let lease: AppCheckLease;
-    try { lease = await this.fence(exec); }
+    try { await this.targetAuthority(run, QA_BROWSER_TOOL_ID, base.action, resolved.url ? new URL(resolved.url).origin : run.intake.target.origins[0]!); lease = await this.fence(exec); }
     catch (error) {
       if (error instanceof LeaseInterrupted) return { ...base, request, outcome: "lease", findings: [{ code: error.code, message: `Environment lease ${error.code}; no further actions` }] };
       throw error;
@@ -996,6 +1186,12 @@ export class QaWorkflowRuntime {
         state: "intent", at: this.ports.now() };
       exec.mutations.push(mutation);
       await this.save();
+      try { await this.recheckMutationIntent(run, exec, mutation, QA_BROWSER_TOOL_ID, base.action,
+        resolved.url ? new URL(resolved.url).origin : run.intake.target.origins[0]!); }
+      catch (error) {
+        if (error instanceof LeaseInterrupted) return { ...base, request, outcome: "lease", findings: [{ code: error.code, message: "Environment lease lost before browser mutation delivery" }] };
+        throw error;
+      }
     }
     const result = await this.ports.tools.browser!.perform(resolved, step.timeoutMs ?? 15_000);
     if (mutation) {
@@ -1106,11 +1302,16 @@ export class QaWorkflowRuntime {
     for (const protectedPath of run.intake.protectedPaths)
       if (within(resolve(this.ports.repositoryRoot, protectedPath), absolute)) throw new QaScopeDenied("write_out_of_scope", `Write into protected product path denied: ${path}`);
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     await mkdir(dirname(absolute), { recursive: true });
     await this.assertNoSymlink(dirname(absolute));
+    if (run.cancellation) throw new Error("Extension run is cancelled before publication");
     try {
       const handle = await open(absolute, "wx", 0o644);
-      try { await handle.writeFile(content, "utf8"); } finally { await handle.close(); }
+      try {
+        if (run.cancellation) throw new Error("Extension run is cancelled before publication");
+        await handle.writeFile(content, "utf8");
+      } finally { await handle.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const existingStat = await lstat(absolute).catch(() => undefined);
@@ -1153,7 +1354,7 @@ export class QaWorkflowRuntime {
   }
 
   private finish(run: RunRecord, snapshot: WorkflowRunSnapshot) {
-    run.status = snapshot.status === "succeeded" && run.report ? "reported" : "failed";
+    run.status = snapshot.status === "cancelled" ? "cancelled" : snapshot.status === "succeeded" && run.report ? "reported" : "failed";
     return this.save().then(() => this.status(run.runId));
   }
 
@@ -1214,10 +1415,14 @@ export class QaWorkflowRuntime {
     if (run.status === "reported" || run.status === "failed") throw new Error(`QA run ${runId} is ${run.status}`);
     return run;
   }
-  private async save() {
-    await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    await rename(temporary, this.ports.journalPath);
+  private save(): Promise<void> {
+    const saved = this.saveTail.then(async () => {
+      await mkdir(dirname(this.ports.journalPath), { recursive: true, mode: 0o700 });
+      const temporary = `${this.ports.journalPath}.${randomUUID()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(this.journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      await rename(temporary, this.ports.journalPath);
+    });
+    this.saveTail = saved.catch(() => undefined);
+    return saved;
   }
 }

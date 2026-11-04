@@ -188,26 +188,36 @@ await runtime.drive(runId);                          // dừng ở awaiting_desi
 await runtime.decideDesign(runId, { decision: "approved", designDigest, decidedBy: "user:<id>" }); // thực thi → báo cáo
 ```
 
-## Tích hợp còn lại (đề xuất, cần owner duyệt)
+## Tích hợp host và quyền HTTP
 
-1. Host MCP tool cho Coordinator: `propose_qa_workflow` gọi `start`. `QaRolePort` giao việc qua Runtime → Herdr
-   `RoleMessage`; `reconcile` dùng execution binding/receipt hiện có.
-2. Conversation route `decideDesign` và quyền truy cập target qua `request_user_decision`; `authorizeHuman` dùng cơ chế
-   xác thực human decision của host.
-3. `grants` lấy từ `platform.toolGrants` (D-TOOLS-01) với requirement `qa-http`/`qa-browser` cho role `qa`.
-   `QaBrowserTool` cần bind vào Gateway browser MCP (`chrome-devtools-mcp`) trong `BrowserResourceTransactions`. Hiện
-   chưa có adapter thật, nên mọi case browser là prerequisite gap.
-4. `QaAccountPort` lấy credential tài khoản fixture từ secret store của host. Lease directory và journal nằm trong private
-   runtime state.
-5. Lệnh CLI/`bflow up` không yêu cầu Developer/Git integration cho workflow này. Đây là thay đổi P29/P30, không phải
-   contract.
+Source host đóng băng family/pin của Conversation delegation; Coordinator gọi `start_extension` với QA intake hợp lệ.
+Runtime giao role task qua Registry/Herdr, nhận `submit_extension_output` và actual signed binding receipts. Human design
+decision được áp nguyên bằng `applyHumanDecision`, không tái tạo timestamp/idempotency key. Native review/adjudication
+phải khác authenticated actor, pane và provider session với tác giả thiết kế. Internal execution/report do Runtime thực thi.
+
+Theo [D-EXT-QA-HTTP](qa-host-grant-integration-decision.md), direct-fetch HTTP của host dùng hai contract additive:
+
+- `RuntimeHttpPolicy`: `environment.runtimeHttpPolicy`, version3, kind `runtime_http`, toolId `qa-http`, role `qa`,
+  repository identity/scope, canonical digest, exact origins và operations (`http_read`, `http_mutate`).
+- `RuntimeHttpGrant`: CLI resolve từ policy sang đúng Herdr host session, giữ policyDigest và giới hạn origins/actions.
+  Grant là upper bound lúc startup; nó không tự phê duyệt intake hay design.
+
+Native HTTP không chấp nhận grant CLI/MCP thay thế. Trong mỗi target action, Runtime kiểm giao của grant/policy với
+intake đã duyệt; đọc lại nguồn policy đã pin và kiểm lease/fence trước effect. Policy bị đổi/xóa/hỏng chặn request, không
+hot-reload để tăng quyền. Sau khi ghi mutation intent, kiểm lại authority/fence trước send; nếu mất quyền ở đoạn này,
+ghi `not_delivered`, không biến thành mutation đã gửi hoặc replay một outcome chưa rõ.
+
+SDK local vẫn giữ port/grant compatibility cũ; đó là mức bằng chứng local. Browser native cần adapter/Gateway resource
+transaction thật, và `QaAccountPort` cần secret-store wiring trước khi dùng credential; thiếu wiring báo prerequisite gap.
+Journal và lease directory nằm trong private state. Quyền truy cập target không phải fixture cần human access admission
+riêng; source host hiện chỉ có đường smoke fixture, không tự cấp quyền target khác.
 
 ## Giới hạn
 
 - Mức bằng chứng: source cộng test local (`test/qa/qa-workflow.test.ts`) với Core/RunStore/ArtifactStore thật, một app
   fixture HTTP thật chạy ở process riêng (`test/fixtures/qa-app/server.mjs`, có bug cố ý), tool HTTP thật (Node fetch) và
-  role giả lập xác định. Chưa nối host/Herdr/Conversation/CLI, chưa có live provider acceptance, chưa có browser adapter
-  thật.
+  role/transport giả lập xác định. Host/Herdr/Conversation/CLI có source wiring và native local tests; chưa có QA live
+  provider acceptance, chưa có browser adapter native thật.
 - Lease là host-local same-UID (file lock), không phải lock phân tán. Lease chỉ được gia hạn giữa các case, nên một case
   dài hơn TTL sẽ bị fence chặn giữa chừng (an toàn nhưng có thể cần TTL lớn hơn).
 - Readiness và build identity chỉ được probe một lần mỗi run. Thay đổi deploy giữa run không bị phát hiện.
@@ -217,3 +227,9 @@ await runtime.decideDesign(runId, { decision: "approved", designDigest, decidedB
   có thể lọt qua.
 - Chưa có `revise`: thiết kế bị yêu cầu sửa (`needs_revision`) cần một run mới.
 - Journal là file JSON ghi nguyên tử, một writer, chưa có lock giữa nhiều process.
+
+### Native lifecycle and read projections
+
+Native cancellation now persists its intent before Core/transport effects, cancels the actual SDK Core run and interrupts each accepted native execution at most once. An interrupt acknowledgement or Herdr `done` does not establish stop: unresolved delivery and unconfirmed stop retain their authority/lease for reconciliation. Pending human gates close on cancellation; late answers cannot restart the run. Runtime publication and QA target access recheck cancellation before effects, and local Runtime work must drain before final stop confirmation. QA retains uncertainty for unresolved mutations.
+
+The extension route journal maintains a bounded read projection for the shared Web/session reader, including after shutdown; Core/storage remain authoritative. Successful publication/report completion produces one durable Conversation update with its trusted artifact reference. A crash after notice delivery replays the same immutable message, allowing the existing receipt journal to deduplicate it. Shutdown refuses unsettled native delivery without freezing explicit reconciliation. These guarantees have source and local test evidence; provider/Herdr live acceptance remains separate.
