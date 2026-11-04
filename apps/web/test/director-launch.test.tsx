@@ -16,16 +16,16 @@ const options={apiVersion:1,projectId:'p',terminal:{available:true},observedAt:a
   {provider:'codex',state:'unavailable',reason:'Không tìm thấy codex trên PATH.',manualCommand:"cd '/work/books' && codex '/bflow-start'"},
   {provider:'agy',state:'unverified',manualCommand:"cd '/work/books' && agy '/bflow-start'"}]};
 type Op={state:string;result?:unknown;error?:unknown};
-function launchServer({presence='absent' as 'absent'|'active'|'waiting',launch=():Op|Error=>({state:'applied',result:{kind:'director_launch',provider:'claude',mode:'terminal_opened',manualCommand:manual,launchedAt:at}}),opts=():unknown=>options}={}){
+function launchServer({heartbeat=at,presence='absent' as 'absent'|'active'|'waiting',launch=():Op|Error=>({state:'applied',result:{kind:'director_launch',provider:'claude',mode:'terminal_opened',manualCommand:manual,launchedAt:at}}),opts=():unknown=>options}={}){
   const calls={options:0,launches:[] as any[],reads:[] as string[]};let current:Op|undefined;let id='';
   const op=(value:Op)=>({apiVersion:1,operationId:id,projectId:'p',owner:'local_lifecycle',operationKind:'director_launch',updatedAt:at,...value});
-  const server=directorServer({view:()=>view({presence}),extra:(path,init)=>{
+  const server=directorServer({view:()=>view({presence,heartbeatAt:heartbeat}),extra:(path,init)=>{
     if(path==='/api/v1/projects/p/director/launch-options'){calls.options++;const value=opts();return value instanceof Response?value:Response.json(value);}
     if(path==='/api/v1/projects/p/director/launch'){const body=JSON.parse(String(init.body));calls.launches.push(body);id=body.operationId;const value=launch();if(value instanceof Error)throw value;current=value;return Response.json(op(value),{status:202});}
     if(path.includes('/operations/')){calls.reads.push(path);return Response.json(op(current??{state:'reconciliation_required',error:{apiVersion:1,code:'reconciliation_required',message:'x',retryable:false,correlationId:'c'}}));}
     return undefined;
   }});
-  return {...server,calls,setPresence:(value:typeof presence)=>{presence=value;}};
+  return {...server,calls,setPresence:(value:typeof presence,beat=heartbeat)=>{presence=value;heartbeat=beat;}};
 }
 function open(revision=0){const api=new ApiClient();return <MemoryRouter><Operations api={api} id="p" refresh={()=>{}} dock="external"><DirectorProvider api={api} projectId="p" session={sessionRead()} revision={revision} resetEpoch={0}><DirectorLaunch/></DirectorProvider></Operations></MemoryRouter>;}
 const startButton=()=>screen.findByRole('button',{name:'Mở phiên Director'});
@@ -49,7 +49,10 @@ it('launches with the chosen provider, remembers only a UI preference and never 
   expect(screen.getByText(/chưa có nghĩa Director đã sẵn sàng/)).toBeTruthy();
   expect(localStorage.getItem('bflow:web:director-provider')).toBe('claude');
   expect(JSON.stringify(localStorage)).not.toContain('/work/books');
-  setPresence('active');rendered.rerender(open(1));
+  // A heartbeat not strictly after launchedAt is not the new session.
+  setPresence('active',at);rendered.rerender(open(1));
+  expect(await screen.findByText(/chưa xác nhận đây là phiên mới/)).toBeTruthy();expect(screen.queryByText(/Director đã có mặt/)).toBeNull();
+  setPresence('active','2026-11-04T00:00:05.000Z');rendered.rerender(open(2));
   expect(await screen.findByText(/Director đã có mặt/)).toBeTruthy();
 });
 it('shows the manual command with a copy confirmation',async()=>{
@@ -113,4 +116,20 @@ it('keeps unsettled launch progress in a status region and never animates it',as
   fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
   expect((await screen.findByText('Đang mở terminal Director…')).getAttribute('role')).toBe('status');
   expect(calls.launches).toHaveLength(1);expect(document.querySelector('[class*="animate-"]')).toBeNull();
+});
+it('a replacement launch never claims the already-present Director as the new session',async()=>{
+  const {calls,setPresence}=launchServer({presence:'active'});const rendered=render(open());
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  fireEvent.click(screen.getByLabelText(/Mở phiên thay thế/));fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
+  await waitFor(()=>expect(calls.launches).toHaveLength(1));
+  setPresence('active','2026-11-04T00:10:00.000Z');rendered.rerender(open(1));
+  expect(await screen.findByText(/chưa xác nhận đây là phiên mới/)).toBeTruthy();expect(screen.queryByText(/Director đã có mặt/)).toBeNull();
+});
+it('presence without a heartbeat is not treated as arrival',async()=>{
+  const {setPresence}=launchServer();const rendered=render(open());
+  fireEvent.click(await startButton());await screen.findByRole('radiogroup');
+  fireEvent.click(screen.getByRole('button',{name:'Mở terminal Director'}));
+  await screen.findByText(/Đã mở cửa sổ terminal/);
+  setPresence('waiting','');rendered.rerender(open(1));
+  expect(await screen.findByText(/chưa xác nhận đây là phiên mới/)).toBeTruthy();expect(screen.queryByText(/Director đã có mặt/)).toBeNull();
 });

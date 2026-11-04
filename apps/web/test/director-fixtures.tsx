@@ -2,10 +2,10 @@
 import { vi } from 'vitest';
 import { WebDirectorViewSchema, DirectorMessageSchema, type WebDirectorView, type DirectorMessage } from '@bflow/contracts/web';
 export const at='2026-11-04T00:00:00.000Z';
-export function view(patch:Partial<WebDirectorView>&{presence?:'active'|'waiting'|'absent'}={}):WebDirectorView{
-  const {presence='absent',...rest}=patch;
+export function view(patch:Partial<WebDirectorView>&{presence?:'active'|'waiting'|'absent';heartbeatAt?:string}={}):WebDirectorView{
+  const {presence='absent',heartbeatAt=at,...rest}=patch;
   return WebDirectorViewSchema.parse({apiVersion:1,projectId:'p',layout:'director',sessionId:'host',
-    snapshot:{schemaVersion:1,generatedAt:at,director:{presence,...(presence!=='absent'?{provider:'claude',heartbeatAt:at}:{})},runs:[],pendingApprovals:0,pendingQuestions:0,issues:[]},
+    snapshot:{schemaVersion:1,generatedAt:at,director:{presence,...(presence!=='absent'?{provider:'claude',...(heartbeatAt?{heartbeatAt}:{})}:{})},runs:[],pendingApprovals:0,pendingQuestions:0,issues:[]},
     transcriptSeq:0,cliCaptureMayBeIncomplete:false,observedAt:at,...rest});
 }
 export const uuid=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;

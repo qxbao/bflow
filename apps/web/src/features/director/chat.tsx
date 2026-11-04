@@ -6,7 +6,11 @@ import { LoadingState } from '../../components/LoadingState';
 import { DirectorPresenceStatus, useDirector, type DirectorChatBlock, type DirectorPresenceState } from './status';
 import { useDirectorTranscript, type DirectorTranscript } from './transcript';
 
-/** Refusals proven to precede any write: the message ID is released and nothing was stored. */
+/**
+ * Refusals proven to precede any write on the FIRST attempt (the ID is then released). Same set as the legacy chat composer
+ * (chat/composer.tsx). CommandStore (api/commands.ts) keeps its own set without `not_found` for command receipts; here a 404
+ * comes from Local Server project resolution, which runs before the host append (local-server director.ts `requireProject`).
+ */
 const DEFINITIVE=new Set(['invalid_request','forbidden','session_required','not_found','stale_version','operation_not_allowed','payload_too_large']);
 const REPLY_WINDOW_MS=5*60*1000,REPLY_POLL_MS=5000,RECONCILE_PAGES=60;
 const blockText:Record<DirectorChatBlock,string>={
@@ -71,34 +75,59 @@ function Bubble({item,previous,note}:{item:DirectorMessage;previous:DirectorMess
   </li>;
 }
 
-type Pending={messageId:string};
+/** `sessionId`: the host session whose Director store holds the message; the host dedups a message ID only within that store. */
+type Pending={messageId:string;sessionId:string|undefined};
+const isId=(value:unknown):value is string=>typeof value==='string'&&/^[-a-f0-9]{36}$/i.test(value);
 function readPending(key:string):Pending|undefined{
   const raw=localStorage.getItem(key);if(!raw)return;
-  const value:unknown=JSON.parse(raw);
-  if(!value||typeof value!=='object'||Object.keys(value).sort().join(',')!=='messageId,version'||(value as {version?:unknown}).version!==1||typeof (value as {messageId?:unknown}).messageId!=='string'||!/^[-a-f0-9]{36}$/i.test((value as {messageId:string}).messageId))throw Error('Invalid Director chat recovery metadata');
-  return {messageId:(value as {messageId:string}).messageId};
+  const value=JSON.parse(raw) as Record<string,unknown>|null;
+  const keys=value&&typeof value==='object'?Object.keys(value).sort().join(','):'';
+  // Version 1 (no session) predates per-session dedup: its session is unknown, so it is treated as a changed session.
+  if(value&&keys==='messageId,version'&&value.version===1&&isId(value.messageId))return {messageId:value.messageId,sessionId:undefined};
+  if(value&&keys==='messageId,sessionId,version'&&value.version===2&&isId(value.messageId)&&typeof value.sessionId==='string'&&value.sessionId.length>0&&value.sessionId.length<=200)
+    return {messageId:value.messageId,sessionId:value.sessionId};
+  throw Error('Invalid Director chat recovery metadata');
 }
 const PENDING_NOTICE='Đang có tin nhắn trước chờ đối chiếu kết quả gửi. Bấm “Đối chiếu tin nhắn” để kiểm tra; không tự gửi lại.';
 const CORRUPT_NOTICE='Dữ liệu đối chiếu cục bộ bị hỏng. Kiểm tra hội thoại rồi mở khóa khung soạn tin nếu cần; không tự gửi lại.';
+const UNCERTAIN_NOTICE='Chưa xác định được kết quả gửi. Bấm “Đối chiếu tin nhắn” để tìm tin gốc; Bflow không tự gửi lại.';
+const SESSION_CHANGED_NOTICE='Không xác định được tin nhắn trước: phiên host đã đổi nên không đối chiếu được với hội thoại cũ và không gửi lại được bằng mã cũ. Bản nháp vẫn được giữ; bạn tự quyết định bỏ qua tin này.';
 /**
- * Only the message ID survives a lost ACK (localStorage, project-scoped so it survives a host restart); the content stays in memory.
- * Recovery observes the transcript for that ID, or, in this same tab, resends the identical payload under the original ID, which the
- * host treats idempotently (same ID + payload → same seq). Nothing is ever resent automatically.
+ * Only the message ID and its host session survive a lost ACK (localStorage, project-scoped); the content stays in memory.
+ * Recovery first observes the current session's transcript for that ID. Only after a complete scan of the same session did not find
+ * it may this tab resend the identical payload under the original ID (the host dedups same ID + payload within one session store).
+ * A definitive refusal releases the ID only on the first attempt; on a resend the original may already be stored, so the ID is kept.
+ * When the host session changed, the old store cannot be observed: the user explicitly dismisses the pending item. Nothing is ever
+ * resent automatically.
  */
 function DirectorComposer({transcript,initialDraft}:{transcript:DirectorTranscript;initialDraft:string}){
   const d=useDirector(),{api,projectId}=d,key=JSON.stringify(['bflow-director-chat',projectId]);
-  const status=()=>{try{return {pending:Boolean(readPending(key)),corrupt:false};}catch{return {pending:true,corrupt:true};}};
-  const [draft,setDraft]=useState(initialDraft),[busy,setBusy]=useState(false),[uncertain,setUncertain]=useState(()=>status().pending),[canUnlock,setCanUnlock]=useState(()=>status().corrupt);
-  const [notice,setNotice]=useState(()=>{const s=status();return s.corrupt?CORRUPT_NOTICE:s.pending?PENDING_NOTICE:'';});
-  const memory=useRef<WebChatSend|undefined>(undefined),input=useRef<HTMLTextAreaElement>(null);
+  const load=():{pending:Pending|undefined;corrupt:boolean}=>{try{return {pending:readPending(key),corrupt:false};}catch{return {pending:undefined,corrupt:true};}};
+  const [draft,setDraft]=useState(initialDraft),[busy,setBusy]=useState(false);
+  const [stored,setStored]=useState(load);
+  const [scanAbsent,setScanAbsent]=useState(false),[canUnlock,setCanUnlock]=useState(()=>stored.corrupt);
+  const [notice,setNotice]=useState(()=>stored.corrupt?CORRUPT_NOTICE:stored.pending?PENDING_NOTICE:'');
+  const [focusTarget,setFocusTarget]=useState<{target:'input'|'recovery';n:number}>();
+  const memory=useRef<WebChatSend|undefined>(undefined),input=useRef<HTMLTextAreaElement>(null),recovery=useRef<HTMLButtonElement>(null);
+  useEffect(()=>{if(!focusTarget)return;(focusTarget.target==='recovery'?recovery.current:input.current)?.focus();},[focusTarget]);
+  const focus=(target:'input'|'recovery')=>setFocusTarget(old=>({target,n:(old?.n??0)+1}));
+  const pending=stored.pending,uncertain=stored.corrupt||Boolean(pending);
+  // The session the current, freshly read view names; undefined while unknown (then nothing is decided either way).
+  const currentSession=d.error===undefined&&d.view?.layout==='director'?d.view.sessionId:undefined;
+  const sessionChanged=Boolean(pending&&currentSession!==undefined&&pending.sessionId!==currentSession);
   const tooLarge=new TextEncoder().encode(draft).byteLength>WEB_LIMITS.chatBytes;
   const canSend=d.chat.canSend&&!busy&&!uncertain&&!tooLarge&&Boolean(draft.trim());
-  const settle=(message:DirectorMessage)=>{localStorage.removeItem(key);memory.current=undefined;setUncertain(false);setCanUnlock(false);setDraft('');setNotice('');transcript.append(message);};
-  async function deliver(body:WebChatSend){
+  const release=()=>{localStorage.removeItem(key);memory.current=undefined;setStored({pending:undefined,corrupt:false});setScanAbsent(false);setCanUnlock(false);};
+  const settle=(message:DirectorMessage)=>{release();setDraft('');setNotice('');transcript.append(message);focus('input');};
+  async function deliver(body:WebChatSend,first:boolean){
     try{settle(await api.sendDirectorMessage(body));}
     catch(error){
-      if(error instanceof ApiError&&DEFINITIVE.has(error.code)){localStorage.removeItem(key);memory.current=undefined;setUncertain(false);setCanUnlock(false);setNotice(explain(error));return;}
-      setNotice('Chưa xác định được kết quả gửi. Đối chiếu tin nhắn gốc hoặc gửi lại với cùng mã tin; Bflow không tự gửi lại.');
+      if(error instanceof ApiError&&DEFINITIVE.has(error.code)){
+        if(first){release();setNotice(explain(error));focus('input');return;}
+        // A resend refusal proves nothing about the original attempt, which may already be stored: keep the ID, observe again.
+        setScanAbsent(false);setNotice(`Gửi lại bị từ chối: ${explain(error)} Tin gốc có thể đã được lưu; bấm “Đối chiếu tin nhắn” để kiểm tra trước.`);focus('recovery');return;
+      }
+      setScanAbsent(false);setNotice(UNCERTAIN_NOTICE);focus('recovery');
     }
   }
   const locked=async(work:()=>Promise<void>)=>{
@@ -109,38 +138,41 @@ function DirectorComposer({transcript,initialDraft}:{transcript:DirectorTranscri
   };
   async function submit(event:FormEvent){event.preventDefault();if(!canSend||!d.chat.sessionId)return;const sessionId=d.chat.sessionId;
     await locked(async()=>{
-      if(readPending(key)){setUncertain(true);setNotice(PENDING_NOTICE);return;}
+      const current=load();if(current.pending||current.corrupt){setStored(current);setNotice(current.corrupt?CORRUPT_NOTICE:PENDING_NOTICE);return;}
       const body=WebHttpContracts.sendDirectorMessage.body.parse({apiVersion:1,messageId:crypto.randomUUID(),projectId,sessionId,content:draft});
-      localStorage.setItem(key,JSON.stringify({version:1,messageId:body.messageId}));memory.current=body;setUncertain(true);setNotice('');
-      await deliver(body);
+      localStorage.setItem(key,JSON.stringify({version:2,messageId:body.messageId,sessionId}));memory.current=body;
+      setStored({pending:{messageId:body.messageId,sessionId},corrupt:false});setScanAbsent(false);setNotice('');
+      await deliver(body,true);
     });
-    input.current?.focus();
   }
   async function resend(){await locked(async()=>{
-    const pending=readPending(key),body=memory.current;
-    if(!pending||!body||body.messageId!==pending.messageId){setNotice(PENDING_NOTICE);return;}
-    await deliver(body);
+    const current=load(),body=memory.current;
+    if(!current.pending||!body||body.messageId!==current.pending.messageId||body.sessionId!==current.pending.sessionId||current.pending.sessionId!==currentSession||!scanAbsent){setScanAbsent(false);setNotice(PENDING_NOTICE);return;}
+    await deliver(body,false);
   });}
   async function reconcile(){await locked(async()=>{
-    let pending:Pending|undefined;
-    try{pending=readPending(key);}catch{setCanUnlock(true);setNotice(CORRUPT_NOTICE);return;}
-    if(!pending){setUncertain(false);setCanUnlock(false);setNotice('');return;}
+    const current=load();setStored(current);
+    if(current.corrupt){setCanUnlock(true);setNotice(CORRUPT_NOTICE);return;}
+    const target=current.pending;
+    if(!target){setNotice('');return;}
+    if(currentSession===undefined){setNotice('Chưa đọc được phiên Director hiện tại nên chưa đối chiếu được. Thử lại sau; không gửi lại.');return;}
+    if(target.sessionId!==currentSession){setCanUnlock(true);setNotice(SESSION_CHANGED_NOTICE);return;}
     try{
       let cursor:string|undefined,complete=false;
       for(let page=0;page<RECONCILE_PAGES;page++){
         const value=await api.directorMessages(projectId,cursor);
-        const found=value.items.find(item=>item.messageId===pending!.messageId&&item.author==='user'&&item.channel==='web');
-        if(found){localStorage.removeItem(key);memory.current=undefined;setUncertain(false);setCanUnlock(false);setDraft('');setNotice('Đã tìm thấy tin nhắn gốc trong hội thoại. Không gửi lại tin này.');transcript.append(found);return;}
+        const found=value.items.find(item=>item.messageId===target.messageId&&item.author==='user'&&item.channel==='web');
+        if(found){release();setDraft('');setNotice('Đã tìm thấy tin nhắn gốc trong hội thoại. Không gửi lại tin này.');transcript.append(found);return;}
         const first=value.items[0]?.seq;
         // Latest page has no backward cursor: page older with b<first-seq>; an older page without nextCursor is the oldest.
         if(first===undefined||first<=1||(cursor?.startsWith('b')&&!value.nextCursor)){complete=true;break;}
         cursor=`b${first}`;
       }
-      if(complete){setCanUnlock(true);setNotice('Đã đối chiếu toàn bộ hội thoại hiện có nhưng không thấy tin này (có thể yêu cầu bị gián đoạn trước khi tới host). Bạn có thể gửi lại với cùng mã tin hoặc mở khóa khung soạn tin; không có gì được tự gửi.');}
-      else setNotice('Chưa tìm thấy kết quả xác thực. Tiếp tục đối chiếu tin nhắn gốc; không gửi lại.');
-    }catch{setNotice('Chưa đối chiếu được tin nhắn gốc. Kiểm tra kết nối rồi thử lại; không gửi lại.');}
+      if(complete){setScanAbsent(true);setCanUnlock(true);setNotice(`Đã đối chiếu toàn bộ hội thoại của phiên này nhưng không thấy tin (có thể yêu cầu bị gián đoạn trước khi tới host). ${memory.current?.messageId===target.messageId?'Bạn có thể gửi lại với cùng mã tin hoặc mở khóa khung soạn tin':'Bạn có thể mở khóa khung soạn tin để gửi lại thủ công'}; không có gì được tự gửi.`);}
+      else{setScanAbsent(false);setNotice('Chưa tìm thấy kết quả xác thực. Tiếp tục đối chiếu tin nhắn gốc; không gửi lại.');}
+    }catch{setScanAbsent(false);setNotice('Chưa đối chiếu được tin nhắn gốc. Kiểm tra kết nối rồi thử lại; không gửi lại.');}
   });}
-  async function unlock(){await locked(async()=>{localStorage.removeItem(key);memory.current=undefined;setUncertain(false);setCanUnlock(false);setNotice('Đã mở khóa khung soạn tin; bản nháp được giữ lại và không có tin nào được tự gửi.');});}
+  async function unlock(){await locked(async()=>{release();setNotice('Đã bỏ qua tin chưa xác định và mở khóa khung soạn tin; bản nháp được giữ lại và không có tin nào được tự gửi.');focus('input');});}
   // Enter sends; an IME still composing Vietnamese text keeps Enter for itself.
   function keyDown(event:KeyboardEvent<HTMLTextAreaElement>){if(event.key!=='Enter'||event.shiftKey||event.nativeEvent.isComposing)return;event.preventDefault();event.currentTarget.form?.requestSubmit();}
   const block=d.chat.block;
@@ -148,7 +180,7 @@ function DirectorComposer({transcript,initialDraft}:{transcript:DirectorTranscri
     {block&&<p id="director-chat-blocked" className="mt-0 mb-2 border-l-3 border-warning pl-3 text-sm">{blockText[block]}</p>}
     {!block&&d.presence==='absent'&&<p className="mt-0 mb-2 border-l-3 border-line pl-3 text-xs text-muted">Tin gửi lúc này được giữ lại cho tới khi Director mở phiên.</p>}
     {tooLarge&&<p role="alert" className="mt-0 mb-2 text-sm text-danger">Tin nhắn vượt quá giới hạn 16 KiB.</p>}
-    <p role="status" className="mt-0 mb-2 min-h-0 text-sm empty:hidden">{notice}</p>
+    <p role="status" className="mt-0 mb-2 min-h-0 text-sm empty:hidden">{sessionChanged&&!notice?SESSION_CHANGED_NOTICE:notice}</p>
     <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
       <FieldLabel htmlFor="director-draft" className="mb-0" labelClassName="font-data text-xs font-medium text-muted" label="Tin nhắn cho Director"
         help="Giao việc, hỏi tiến độ hoặc trao đổi với Director của dự án. Enter để gửi, Shift+Enter để xuống dòng."/>
@@ -160,9 +192,14 @@ function DirectorComposer({transcript,initialDraft}:{transcript:DirectorTranscri
     </div>
     <p id="director-chat-approval" className="mt-1.5 mb-0 text-xs text-muted">Tin nhắn trò chuyện không phải là phê duyệt. Duyệt hoặc từ chối chỉ thực hiện bằng thẻ quyết định trên trang công việc.</p>
     {uncertain&&<div className="mt-1.5 flex flex-wrap justify-end gap-2">
-      {canUnlock&&<button type="button" disabled={busy} onClick={()=>void unlock()}>Mở khóa khung soạn tin</button>}
-      {memory.current&&<button type="button" disabled={busy} onClick={()=>void resend()}>Gửi lại với cùng mã tin</button>}
-      <button type="button" disabled={busy} onClick={()=>void reconcile()}>Đối chiếu tin nhắn</button>
+      {sessionChanged&&!stored.corrupt?<>
+        <p className="m-0 basis-full text-right text-xs text-warning">Không xác định, phiên đã đổi.</p>
+        <button ref={recovery} type="button" disabled={busy} onClick={()=>void unlock()}>Bỏ qua tin chưa xác định</button>
+      </>:<>
+        {canUnlock&&<button type="button" disabled={busy} onClick={()=>void unlock()}>Mở khóa khung soạn tin</button>}
+        {scanAbsent&&memory.current&&memory.current.messageId===pending?.messageId&&<button type="button" disabled={busy} onClick={()=>void resend()}>Gửi lại với cùng mã tin</button>}
+        <button ref={recovery} type="button" disabled={busy} onClick={()=>void reconcile()}>Đối chiếu tin nhắn</button>
+      </>}
     </div>}
   </form>;
 }

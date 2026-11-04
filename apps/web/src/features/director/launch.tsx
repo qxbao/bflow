@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { Link } from 'react-router';
 import type { WebDirectorLaunchOptions, WebOperation } from '@bflow/contracts/web';
-import { ApiError, explain } from '../../api/client';
+import { explain } from '../../api/client';
 import { useCommands } from '../operations';
 import { DirectorPresenceStatus, useDirector } from './status';
 
@@ -47,7 +47,15 @@ export function DirectorLaunch(){
   const uncertain=Boolean(tracked&&!tracked.submitting&&(!op||op.state==='reconciliation_required'));
   const result=op?.state==='applied'&&op.result?.kind==='director_launch'?op.result as LaunchResult:undefined;
   const present=d.presence==='active'||d.presence==='waiting';
-  const arrived=Boolean(result&&present&&(!d.heartbeatAt||d.heartbeatAt>=result.launchedAt));
+  // "Arrived" needs an observed absent → active/waiting transition for this operation plus a heartbeat strictly after launchedAt.
+  // A replacement launch (Director already present) never shows that transition, so an old Director's heartbeat is never claimed.
+  const [sawAbsent,setSawAbsent]=useState<string>();
+  const commandId=tracked?.record.commandId;
+  useEffect(()=>{if(result&&commandId&&d.presence==='absent')setSawAbsent(commandId);},[result,commandId,d.presence]);
+  const heartbeat=d.heartbeatAt?Date.parse(d.heartbeatAt):Number.NaN,launched=result?Date.parse(result.launchedAt):Number.NaN;
+  const freshHeartbeat=Number.isFinite(heartbeat)&&Number.isFinite(launched)&&heartbeat>launched;
+  const arrived=Boolean(result&&present&&freshHeartbeat&&sawAbsent===commandId);
+  const unconfirmedPresent=Boolean(result&&present&&!arrived);
   const waitingForDirector=Boolean(result?.mode==='terminal_opened'&&!arrived&&Date.now()-Date.parse(result.launchedAt)<PRESENCE_WAIT_MS);
   useEffect(()=>{if(!waitingForDirector)return;const poll=setInterval(d.reload,PRESENCE_POLL_MS);return()=>clearInterval(poll);},[waitingForDirector,d.reload]);
   const needsReplace=d.presence!=='absent';
@@ -69,7 +77,9 @@ export function DirectorLaunch(){
     try{
       if(settled)await command.startNew();
       remember(chosen.provider);
-      await command.submit({kind:'director_launch',provider:chosen.provider,replaceActive:needsReplace&&replace});
+      const observed=await command.submit({kind:'director_launch',provider:chosen.provider,replaceActive:needsReplace&&replace});
+      // Director was confirmed absent when this launch was chosen: a later presence can only be the new session.
+      if(observed&&!needsReplace)setSawAbsent(observed.record.commandId);
       // The picker closes; focus moves to the outcome region instead of being lost with the removed controls.
       setOpen(false);requestAnimationFrame(()=>outcome.current?.focus());
     }catch(e){setError(e instanceof Error&&!('code' in e)?e.message:explain(e));}
@@ -102,27 +112,29 @@ export function DirectorLaunch(){
       <p className="my-1">Không rõ cửa sổ terminal đã mở hay chưa. Kiểm tra màn hình: nếu chưa có cửa sổ Director, mở bằng thao tác mới. Bflow không tự thử lại.</p>
       <div className="flex flex-wrap gap-2"><button type="button" onClick={command.reread}>Đọc lại kết quả mở phiên</button><button type="button" disabled={op?.state!=='reconciliation_required'} onClick={()=>void releaseUncertain()}>Tôi đã kiểm tra màn hình, mở bằng thao tác mới</button></div>
     </div>}
-    {result?.mode==='terminal_opened'&&<p role="status" className="my-2 text-sm">{arrived?'Director đã có mặt và đang nhận tin.':`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Việc này chưa có nghĩa Director đã sẵn sàng; hãy đợi trạng thái chuyển sang “Đang hoạt động” hoặc “Đang chờ”.`}</p>}
+    {result?.mode==='terminal_opened'&&<p role="status" className="my-2 text-sm">{arrived?'Director đã có mặt và đang nhận tin.':unconfirmedPresent?`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới vừa mở.`:`Đã mở cửa sổ terminal lúc ${time(result.launchedAt)}. Việc này chưa có nghĩa Director đã sẵn sàng; hãy đợi trạng thái chuyển sang “Đang hoạt động” hoặc “Đang chờ”.`}</p>}
     {result?.mode==='terminal_opened'&&!arrived&&<details className="my-1"><summary className="text-sm">Không thấy cửa sổ? Lệnh tự chạy</summary><CopyCommand command={result.manualCommand}/></details>}
-    {result?.mode==='manual_command'&&<div className="my-2 text-sm"><p className="my-1">Không mở được terminal tự động. Chạy lệnh sau trong một terminal trên máy này:</p><CopyCommand command={result.manualCommand}/>{arrived&&<p role="status" className="my-1">Director đã có mặt và đang nhận tin.</p>}</div>}
+    {result?.mode==='manual_command'&&<div className="my-2 text-sm"><p className="my-1">Không mở được terminal tự động. Chạy lệnh sau trong một terminal trên máy này:</p><CopyCommand command={result.manualCommand}/>{arrived?<p role="status" className="my-1">Director đã có mặt và đang nhận tin.</p>:unconfirmedPresent?<p role="status" className="my-1">Có Director đang có mặt, nhưng chưa xác nhận đây là phiên mới vừa mở.</p>:null}</div>}
     {op?.state==='failed'&&<p className="my-2 border-l-3 border-danger pl-3 text-sm">{op.error?.message??'Chưa mở được Director.'}</p>}
     </div>
     {error&&<p role="alert" className="my-2 text-sm">{error}</p>}
   </div>;
 }
 
-/** Overview block: Director presence and the launch action. Shown for a Director layout, or while the view is unreadable (unknown). */
+/**
+ * Overview block: Director presence and the launch action, only for a Director layout (confirmed by a view, or by this browser's
+ * last confirmed layout hint while the view is unreadable). Legacy or never-confirmed projects get no Director panel.
+ */
 export function DirectorSessionPanel({chatPath}:{chatPath:string}){
   const d=useDirector();
-  const unreadable=d.layout==='unknown'&&d.error!==undefined&&!(d.error instanceof ApiError&&d.error.code==='invalid_response');
-  if(!d.directorLayout&&!unreadable)return null;
+  if(!d.directorLayout)return null;
   return <section data-component="DirectorSessionPanel" aria-label="Director" className="panel my-3 min-w-0 border border-line bg-surface p-3.5 sm:p-4">
-    <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Director</h2>{d.directorLayout&&<Link className="font-data text-xs font-semibold" to={chatPath}>Trò chuyện với Director →</Link>}</div>
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h2 className="m-0 text-base">Director</h2><Link className="font-data text-xs font-semibold" to={chatPath}>Trò chuyện với Director →</Link></div>
     <DirectorPresenceStatus/>
     <div className="mt-2.5">
       {d.layout==='director'&&<DirectorLaunch/>}
       {d.layout==='not_started'&&<p className="my-1 text-sm text-muted">Host của phiên chưa sẵn sàng. Khởi động hạ tầng phiên ở trên trước, rồi mở phiên Director.</p>}
-      {!d.directorLayout&&<p className="my-1 text-sm text-muted">Nếu phiên đang dừng, hãy khởi động hạ tầng phiên trước; việc đó chưa mở Director.</p>}
+      {d.hinted&&<p className="my-1 text-sm text-muted">Chưa đọc được trạng thái Director (host có thể đang dừng). Khởi động hạ tầng phiên trước; việc đó chưa mở Director.</p>}
     </div>
   </section>;
 }

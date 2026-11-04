@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { WebDirectorView, WebProjectSession } from '@bflow/contracts/web';
 import { ApiClient, ApiError } from '../../api/client';
 import { useRead } from '../data';
@@ -16,8 +16,13 @@ export interface DirectorState {
   api:ApiClient;projectId:string;
   view:WebDirectorView|undefined;error:unknown;loading:boolean;
   layout:DirectorLayout;
-  /** The configuration is a Director layout (confirmed by the latest view received, stale or not). */
+  /**
+   * The configuration is a Director layout: confirmed by the latest view received (stale or not), or, when no view could be read
+   * (e.g. host stopped), by this browser's last confirmed layout hint. UX only: the hint never enables sending or launching.
+   */
   directorLayout:boolean;
+  /** `directorLayout` comes from the per-project UI hint, not from a view read in this mount. */
+  hinted:boolean;
   presence:DirectorPresenceState;
   waitingSince:string|undefined;heartbeatAt:string|undefined;provider:string|undefined;
   hostReady:boolean;
@@ -40,7 +45,17 @@ const presenceNotes:Record<DirectorPresenceState,string>={
 };
 const unsupportedCodes=new Set(['operation_not_allowed','not_found']);
 
-export function deriveDirectorState(input:{api:ApiClient;projectId:string;view:Read<WebDirectorView>;session:Read<WebProjectSession>;readEpoch:number;resetEpoch:number;reload:()=>void}):DirectorState{
+/** Per-project, per-browser UI hint of the last layout a view read confirmed. Never authority; storage failures are ignored. */
+export type LayoutHint='director'|'legacy_v2';
+export const layoutHintKey=(projectId:string)=>`bflow:web:director-layout:${encodeURIComponent(projectId)}`;
+export function readLayoutHint(projectId:string):LayoutHint|undefined{
+  try{const value=localStorage.getItem(layoutHintKey(projectId));return value==='director'||value==='legacy_v2'?value:undefined;}catch{return undefined;}
+}
+function writeLayoutHint(projectId:string,hint:LayoutHint){
+  try{if(localStorage.getItem(layoutHintKey(projectId))!==hint)localStorage.setItem(layoutHintKey(projectId),hint);}catch{/* hint only */}
+}
+
+export function deriveDirectorState(input:{api:ApiClient;projectId:string;view:Read<WebDirectorView>;session:Read<WebProjectSession>;readEpoch:number;resetEpoch:number;reload:()=>void;hint?:LayoutHint|undefined}):DirectorState{
   const {view,session}=input,data=view.data,error=view.error;
   const layout:DirectorLayout=data?data.layout:error!==undefined&&error instanceof ApiError&&unsupportedCodes.has(error.code)?'unsupported':'unknown';
   const fresh=Boolean(data)&&error===undefined;
@@ -50,7 +65,8 @@ export function deriveDirectorState(input:{api:ApiClient;projectId:string;view:R
   const block:DirectorChatBlock|undefined=!fresh?'unknown':layout==='legacy_v2'?'legacy':layout!=='director'||!hostReady||!sessionId?'host_not_ready'
     :session.data!.sessionId!==undefined&&session.data!.sessionId!==sessionId?'session_mismatch':undefined;
   return {api:input.api,projectId:input.projectId,view:data,error,loading:view.loading,layout,
-    directorLayout:layout==='director'||layout==='not_started',presence,
+    directorLayout:layout==='director'||layout==='not_started'||(layout==='unknown'&&input.hint==='director'),
+    hinted:layout==='unknown'&&input.hint==='director',presence,
     waitingSince:fresh&&presence==='waiting'?data!.waitingSince:undefined,
     heartbeatAt:fresh?data!.snapshot.director.heartbeatAt:undefined,provider:fresh?data!.snapshot.director.provider:undefined,
     hostReady,chat:{canSend:block===undefined,block,sessionId},readEpoch:input.readEpoch,resetEpoch:input.resetEpoch,reload:input.reload};
@@ -63,7 +79,11 @@ export function DirectorProvider({api,projectId,session,revision,resetEpoch,chil
   const reload=useCallback(()=>setLocal(value=>value+1),[]);
   const readEpoch=revision+local;
   const view=useRead(`director:${projectId}`,()=>api.director(projectId),readEpoch);
-  const value=useMemo(()=>deriveDirectorState({api,projectId,view,session,readEpoch,resetEpoch,reload}),[api,projectId,view,session,readEpoch,resetEpoch,reload]);
+  // A fresh view confirms the configured layout; `not_started` is a Director configuration whose host is not ready yet.
+  const confirmed:LayoutHint|undefined=view.data&&view.error===undefined?(view.data.layout==='legacy_v2'?'legacy_v2':'director'):undefined;
+  useEffect(()=>{if(confirmed)writeLayoutHint(projectId,confirmed);},[projectId,confirmed]);
+  const hint=confirmed??readLayoutHint(projectId);
+  const value=useMemo(()=>deriveDirectorState({api,projectId,view,session,readEpoch,resetEpoch,reload,hint}),[api,projectId,view,session,readEpoch,resetEpoch,reload,hint]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 export function useDirector():DirectorState{
