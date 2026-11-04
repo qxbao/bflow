@@ -85,6 +85,20 @@ it('a send result ahead of the held transcript fills the gap from the highest co
   expect(latestReads()).toBe(before);
   expect(screen.getAllByText('Tin 10')).toHaveLength(1);
 });
+it('an empty transcript followed by a Director reply and our send still fetches the reply (cursor from server pages only)',async()=>{
+  const {state}=directorServer();
+  render(open());await waitFor(()=>expect(input().disabled).toBe(false));
+  await waitFor(()=>expect(state.gets).toContain('/api/v1/projects/p/director/messages'));
+  const latestReads=()=>state.gets.filter(path=>path==='/api/v1/projects/p/director/messages').length,before=latestReads();
+  state.messages.push(message(1,{author:'director',channel:'cli',text:'Director chào trước'}));
+  fireEvent.change(input(),{target:{value:'Tin người dùng 2'}});fireEvent.click(sendButton());
+  await waitFor(()=>expect(state.posts).toHaveLength(1));
+  expect(await screen.findByText('Tin người dùng 2')).toBeTruthy();
+  expect(await screen.findByText('Director chào trước')).toBeTruthy();
+  expect(state.gets).toContain('/api/v1/projects/p/director/messages?cursor=a0');
+  expect(latestReads()).toBe(before);
+  expect(screen.getAllByText('Tin người dùng 2')).toHaveLength(1);
+});
 it('reloads the latest page when the transcript cursor goes backwards (store reset or restart)',async()=>{
   const {state}=directorServer({messages:[message(1),message(2),message(3,{text:'Cũ sẽ mất'})]});
   const rendered=render(open());expect(await screen.findByText('Cũ sẽ mất')).toBeTruthy();
