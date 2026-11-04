@@ -312,3 +312,31 @@ Kiểm tra: `./node_modules/.bin/tsc -b` exit 0; `git diff --check` sạch; comm
 3. Quyết định production (chưa làm): `shutdown()` hiện resolve khi socket bị gỡ, không phải khi daemon thoát. `bflow down` rồi `bflow up` ngay sau đó, khi có đổi execution source, có thể gặp cùng guard trong vài ms. Lỗi rõ ràng và retry được. Nếu muốn `shutdown()` nghĩa là "đã dừng", cần thêm owner barrier vào `shutdown()`, nhưng khi daemon không thoát trong 10s thì `bflow down` sẽ fail.
 
 Trạng thái: Task 10 **vẫn in_progress**. Không tuyên bố full test pass hay live acceptance.
+
+---
+
+## Đợt 5 (2026-11-04, Linux — CI và Web local)
+
+### CI trên `main@ffcd49ff` (run `41827831324`): xanh 9/9
+
+Lint & Build; Unit & Integration shard 1/4, 2/4, 3/4, 4/4; Runtime Lifecycle Matrices (Serial); E2E shard 1/2 và 2/2. Shard 1/4 đã đỏ trên `7e6143ed` vì race `director-web-host` (dòng 206), và xanh sau bản sửa `b0093b11`. Đây là bằng chứng CI thật cho hai race SSE và owner-stop.
+
+### Web local tại `ffcd49ff` (không thuộc CI)
+
+- Build Web (`tsc` + `vite build`): exit 0.
+- Web unit: 51/51 file, 533/533 test.
+- Playwright 35 ca: 34 pass, 1 skip, exit 0, 375.7s. Chưa kiểm tra nguyên nhân ca skip trong đợt này.
+
+### Quyết định
+
+- **`shutdown()` giữ nguyên (phương án B).** Race chỉ ảnh hưởng đường refresh source khi `bflow down` rồi `bflow up` ngay lập tức. Lỗi rõ ràng và retry được. Test đã có owner barrier. Nếu lỗi này xuất hiện thường xuyên, xem lại phương án A (barrier trong `shutdown()`) hoặc C (daemon tự `process.exit` sau `close()`).
+- **CI thêm `lifecycle-fault-matrix-extended-interventions` vào job serial.** Thay đổi nằm trên nhánh `fix/ci/lifecycle-extended-interventions` (commit `ci:`). Unit shard vẫn loại file này, nên không chạy trùng. Chưa có CI run xác nhận thay đổi này. Local đã pass 12/12 trước đó (60s).
+
+### E11 trên máy thật (user bus thật)
+
+`tests/e2e/scenarios/e11-group-a-setup.e2e.test.ts`: 6 pass, 2 skip, exit 0. Hai skip là ca cần Herdr live (bị khóa bằng cờ). So sánh trạng thái thật trước và sau: chỉ mtime của `~/.config/systemd/user` đổi, không còn unit hay symlink `qa-e11` nào sót lại. Ghi chú trước đó "E11 env-blocked" không còn đúng.
+
+### Còn lại
+
+1. CI run trên nhánh `fix/ci/lifecycle-extended-interventions` để xác nhận job serial chạy đủ 3 file.
+2. Task 10 chỉ đóng khi bước 1 xanh. Không tuyên bố live acceptance hay full acceptance cho C/D.
