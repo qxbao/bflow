@@ -10,6 +10,9 @@ import {
 import { EnvironmentConfigSchema, EnvironmentError, EnvironmentLifecycle, defaultEnvironmentConfig, identifyRepository, main, namedSessionEnvironment, parseCliArgs, parseConfigYaml,
   readEnvironmentConfig, renderEnvironmentConfigYaml, runCli, upsertEnvironmentConfig, environmentProcessRunner, formatCommandError, type EnvironmentProcessRequest, type EnvironmentProcessRunner } from "../src/index.js";
 import { PaneManagerLifecycleAdapter, openPaneManagerEnvironment } from "../src/pane-manager-integration.js";
+import { createWebWorkspaceServices } from "../src/web-workspace-services.js";
+import { interactionProjectId } from "@bflow/runtime";
+import { startupSessionWasCleanedUp } from "../src/environment.js";
 import type { LifecycleHost } from "../src/agentic-host.js";
 
 const now = "2026-10-16T00:00:00.000Z";
@@ -89,7 +92,7 @@ describe("P12 repository environment lifecycle", () => {
   let repository: Awaited<ReturnType<typeof identifyRepository>>;
   let lifecycle: EnvironmentLifecycle;
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), "bflow-p12-test-"));
+    dir = await realpath(await mkdtemp(join(tmpdir(), "bflow-p12-test-")));
     execFileSync("git", ["init", "--quiet", dir]);
     expect((await runCli(["init"], { cwd: dir })).ok).toBe(true);
     repository = await identifyRepository(dir);
@@ -98,6 +101,98 @@ describe("P12 repository environment lifecycle", () => {
   });
   afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
+  it("idempotently stops a clean repository only after correlated server and Runtime checks", async () => {
+    const runtime = mockRuntime();
+    const quiesce = vi.fn(async () => ({ ok: true as const, value: undefined }));
+    const shutdownHost = vi.fn(async () => {});
+    const life = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime, quiesce, shutdownHost } });
+    await expect(life.down(true)).resolves.toMatchObject({ server: "stopped", liveObservation: true, manifest: null });
+    await expect(life.down(true)).resolves.toMatchObject({ server: "stopped" });
+    expect(quiesce).toHaveBeenCalledTimes(2);
+    expect(runtime.findRuns).toHaveBeenCalledTimes(2);
+    expect(shutdownHost).toHaveBeenCalledTimes(2);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(runner.requests.filter(request => request.args[0] === "session" && request.args[1] === "stop")).toHaveLength(0);
+  });
+  it("refuses an unowned live session even without any repository receipt", async () => {
+    runner.running.add(repository.sessionName);
+    await expect(lifecycle.down(true)).rejects.toThrow("No repository manifest");
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+  });
+  it("preserves unmanifested active Runtime work on an already stopped server", async () => {
+    const shutdownHost = vi.fn(async () => {});
+    const life = new EnvironmentLifecycle(dir, { runner, integration: { manager: fixture.manager, runtime: mockRuntime([activeRun]),
+      quiesce: async () => ({ ok: true, value: undefined }), shutdownHost } });
+    await expect(life.down(true)).rejects.toThrow("Active workflows require their recoverable manifest and checkpoints");
+    expect(shutdownHost).not.toHaveBeenCalled();
+  });
+  it("settles a real failed start after checkpointed cleanup without trusting its message", async () => {
+    const config = await readEnvironmentConfig(repository);
+    config.environment.skills = { required: false, requiredSkills: [] };
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, skills: [] }));
+    await writeFile(join(dir, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
+    const composed = new EnvironmentLifecycle(dir, { runner, providerOverrides: { codex: { available: true } },
+      integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }),
+        activate: async () => { throw new Error("Agent name planner already in use w1:p4"); } } });
+    const project = { apiVersion: 1 as const, projectId: interactionProjectId(repository.root), canonicalPath: repository.root,
+      displayName: "repo", registrationState: "registered" as const };
+    const services = createWebWorkspaceServices({ resolveProject: async () => project, createLifecycle: () => composed });
+    const operationId = crypto.randomUUID();
+    expect(await services.startSession(project.projectId, operationId)).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect(await services.reconcileSessionOperation({ apiVersion: 1, projectId: project.projectId, operationId,
+      owner: "local_lifecycle", operationKind: "session_start", state: "running", updatedAt: now })).toMatchObject({ ok: true, value: { state: "failed" } });
+    expect(fixture.manager.down).toHaveBeenCalledOnce();
+    expect(runner.running.has(repository.sessionName)).toBe(false);
+    const failure = await composed.up().catch(error => error);
+    expect(startupSessionWasCleanedUp(failure)).toBe(true);
+  });
+  it.each(["barrier", "close"] as const)("keeps a failed start uncertain when cleanup %s fails", async stage => {
+    const config = await readEnvironmentConfig(repository);
+    config.environment.skills = { required: false, requiredSkills: [] };
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, skills: [] }));
+    await writeFile(join(dir, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
+    const composed = new EnvironmentLifecycle(dir, { runner, providerOverrides: { codex: { available: true } },
+      integration: { manager: fixture.manager, runtime: mockRuntime(),
+        quiesce: async () => { if (stage === "barrier") throw new Error("barrier unavailable"); return { ok: true, value: undefined }; },
+        close: async () => { if (stage === "close") throw new Error("close failed"); },
+        activate: async () => { throw new Error("Agent name planner already in use w1:p4"); } } });
+    const failure = await composed.up().catch(error => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(startupSessionWasCleanedUp(failure)).toBe(false);
+    expect(fixture.manager.down).toHaveBeenCalledTimes(stage === "close" ? 1 : 0);
+  });
+  it("does not claim a clean stop when Herdr observation is uncorrelated", async () => {
+    const badRunner: EnvironmentProcessRunner = { run: async request => request.args.join(" ") === "status server --json"
+      ? { exitCode: 0, stdout: JSON.stringify({ session: "foreign", running: false }), stderr: "" } : runner.run(request) };
+    const shutdownHost = vi.fn(async () => {});
+    const life = new EnvironmentLifecycle(dir, { runner: badRunner, integration: { manager: fixture.manager, runtime: mockRuntime(),
+      quiesce: async () => ({ ok: true, value: undefined }), shutdownHost } });
+    await expect(life.down(true)).rejects.toThrow("uncorrelated session status");
+    expect(shutdownHost).not.toHaveBeenCalled();
+  });
+  it("keeps unknown role delivery without a pane receipt uncertain and never replays the Web operation", async () => {
+    const config = await readEnvironmentConfig(repository);
+    config.environment.skills = { required: false, requiredSkills: [] };
+    config.environment.roles = config.environment.roles.map(role => ({ ...role, skills: [] }));
+    await writeFile(join(dir, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
+    vi.mocked(fixture.manager.up).mockResolvedValue({ ok: false, error: { code: "unknown_delivery", retryable: false,
+      manualInterventionRequired: true, message: "Startup delivery is unknown" } });
+    const composed = new EnvironmentLifecycle(dir, { runner, providerOverrides: { codex: { available: true } },
+      integration: { manager: fixture.manager, runtime: mockRuntime(), quiesce: async () => ({ ok: true, value: undefined }) } });
+    const project = { apiVersion: 1 as const, projectId: interactionProjectId(repository.root), canonicalPath: repository.root,
+      displayName: "repo", registrationState: "registered" as const };
+    const services = createWebWorkspaceServices({ resolveProject: async () => project, createLifecycle: () => composed });
+    const operationId = crypto.randomUUID();
+    expect(await services.startSession(project.projectId, operationId)).toMatchObject({ ok: false, error: { code: "transport_unavailable" } });
+    expect(await services.reconcileSessionOperation({ apiVersion: 1, projectId: project.projectId, operationId,
+      owner: "local_lifecycle", operationKind: "session_start", state: "running", updatedAt: now })).toMatchObject({ ok: true, value: { state: "reconciliation_required" } });
+    expect(await services.startSession(project.projectId, operationId)).toMatchObject({ ok: false });
+    expect(fixture.manager.up).toHaveBeenCalledOnce();
+    expect(fixture.manager.down).not.toHaveBeenCalled();
+    expect(runner.running.has(repository.sessionName)).toBe(true);
+    expect(JSON.parse(await readFile(join(dir, ".bflow/state/operation.json"), "utf8")).phase).toBe("manager_pending");
+  });
   it("rejects non-Git init without creating configuration", async () => {
     const other = await mkdtemp(join(tmpdir(), "bflow-p12-nongit-"));
     try {

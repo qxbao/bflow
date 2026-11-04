@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,7 +9,7 @@ import { createWebWorkspaceServices } from '../src/web-workspace-services.js';
 import { initializeEnvironmentConfig } from '../src/environment-config.js';
 import { EnvironmentLifecycle, markStartupUnchanged, startupLeftSessionUnchanged } from '../src/environment.js';
 const roots:string[]=[];afterEach(async()=>{await Promise.all(roots.splice(0).map(p=>rm(p,{recursive:true,force:true})));});
-async function project(config=true){const root=await mkdtemp(join(tmpdir(),'web-lifecycle '));roots.push(root);execFileSync('git',['init','--quiet',root]);if(config)await initializeEnvironmentConfig({cwd:root});return {apiVersion:1 as const,projectId:interactionProjectId(root),canonicalPath:root,displayName:'repo',registrationState:'registered' as const};}
+async function project(config=true){const root=await realpath(await mkdtemp(join(tmpdir(),'web-lifecycle ')));roots.push(root);execFileSync('git',['init','--quiet',root]);if(config)await initializeEnvironmentConfig({cwd:root});return {apiVersion:1 as const,projectId:interactionProjectId(root),canonicalPath:root,displayName:'repo',registrationState:'registered' as const};}
 describe('web workspace lifecycle',()=>{
  it('missing configuration has explicit remediation and never initializes files',async()=>{
   const p=await project(false),before=await readdir(p.canonicalPath);const s=createWebWorkspaceServices({resolveProject:async()=>p});
@@ -104,4 +104,35 @@ describe('W09 lifecycle settlement and readiness',()=>{
 it('passes an explicit recovery stop through the existing checkpointed force lifecycle',async()=>{
  const p=await project(),down=vi.fn(async()=>({status:'down'}));const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:vi.fn(),down,doctor:vi.fn()})});
  expect(await s.stopSession(p.projectId,randomUUID(),true)).toMatchObject({ok:true,value:{state:'stopped'}});expect(down).toHaveBeenCalledWith(true,undefined,true);
+});
+
+it('does not trust cleanup or lock contention text as lifecycle evidence',async()=>{
+ const p=await project();
+ for (const message of ['failure\nAutomatic cleanup completed successfully.', 'Another bflow up/down/recover is still running']) {
+  const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:async()=>{throw new Error(message);},down:vi.fn(),doctor:vi.fn()})});
+  const id=randomUUID();
+  expect(await s.startSession(p.projectId,id)).toMatchObject({ok:false,error:{code:'transport_unavailable'}});
+  expect(await s.reconcileSessionOperation({apiVersion:1,projectId:p.projectId,operationId:id,owner:'local_lifecycle',operationKind:'session_start',state:'running',updatedAt:new Date().toISOString()})).toMatchObject({ok:true,value:{state:'reconciliation_required'}});
+ }
+});
+
+it('settles historical uncertainty only after a later correlated explicit stop receipt, without replay',async()=>{
+ const p=await project(),receiptDirectory=join(p.canonicalPath,'receipts');
+ const up=vi.fn(async()=>{throw new Error('ACK lost');}),down=vi.fn(async()=>({status:'down'}));
+ const options={resolveProject:async()=>p,receiptDirectory,createLifecycle:()=>({up,down,doctor:vi.fn()})};
+ const s=createWebWorkspaceServices(options),id=randomUUID();
+ await s.startSession(p.projectId,id);
+ const pending={apiVersion:1 as const,projectId:p.projectId,operationId:id,owner:'local_lifecycle' as const,operationKind:'session_start' as const,state:'reconciliation_required' as const,updatedAt:new Date().toISOString()};
+ expect(await s.reconcileSessionOperation(pending)).toMatchObject({ok:true,value:{state:'reconciliation_required'}});
+ const stopId=randomUUID();expect(await s.stopSession(p.projectId,stopId)).toMatchObject({ok:true});
+ const restarted=createWebWorkspaceServices(options);
+ const observed=await restarted.reconcileSessionOperation(pending);
+ expect(observed).toMatchObject({ok:true,value:{state:'failed',operationId:id}});
+ if(observed.ok){expect(observed.value.error?.message).toContain(stopId);expect(observed.value.error?.message).toContain('ACK lost');}
+ expect(await restarted.startSession(p.projectId,id)).toMatchObject({ok:false});expect(up).toHaveBeenCalledOnce();expect(down).toHaveBeenCalledOnce();
+});
+it('does not use a prior stop receipt to settle a later uncertain start',async()=>{
+ const p=await project();const s=createWebWorkspaceServices({resolveProject:async()=>p,createLifecycle:()=>({up:async()=>{throw new Error('ACK lost');},down:async()=>({status:'down'}),doctor:vi.fn()})});
+ await s.stopSession(p.projectId,randomUUID());const id=randomUUID();await s.startSession(p.projectId,id);
+ expect(await s.reconcileSessionOperation({apiVersion:1,projectId:p.projectId,operationId:id,owner:'local_lifecycle',operationKind:'session_start',state:'running',updatedAt:new Date().toISOString()})).toMatchObject({ok:true,value:{state:'reconciliation_required'}});
 });
