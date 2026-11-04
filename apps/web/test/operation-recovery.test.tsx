@@ -64,3 +64,44 @@ test('uncertain operation explains the cause but never suggests a new mutation',
 test('lost operation lookup explains session expiry without exposing exception messages',()=>{
   show({record,uncertain:true,error:new ApiError('session_required')});expect(screen.getByText(/Phiên trình duyệt đã hết hạn/)).toBeTruthy();expect(document.body.textContent).not.toContain('PRIVATE');cleanup();
 });
+
+// D-CD-01 Director launch: an uncertain terminal launch is observed by its original operation ID and never relaunched.
+const launch={kind:'director_launch' as const,provider:'claude' as const,replaceActive:false};
+const launchOp=(id:string,state='reconciliation_required')=>({apiVersion:1,operationId:id,projectId:'p',owner:'local_lifecycle',operationKind:'director_launch',state,
+  ...(state==='reconciliation_required'?{error:{apiVersion:1,code:'reconciliation_required',message:'uncertain',retryable:false,operationId:id,correlationId:'c'}}:{}),updatedAt:new Date().toISOString()});
+test('director launch posts only the provider choice and an operation ID to the launch route',async()=>{
+  const posts:{path:string;body:any}[]=[];
+  vi.stubGlobal('fetch',async(path:string,init?:RequestInit)=>{const body=JSON.parse(String(init!.body));posts.push({path,body});return Response.json(launchOp(body.operationId,'accepted'),{status:202});});
+  const store=new CommandStore(new ApiClient(),'p','session');
+  const observed=await store.submit('director_launch',launch);
+  expect(observed.operation?.operationKind).toBe('director_launch');
+  expect(posts).toHaveLength(1);expect(posts[0]!.path).toBe('/api/v1/projects/p/director/launch');
+  expect(Object.keys(posts[0]!.body).sort()).toEqual(['apiVersion','operationId','provider','replaceActive']);
+  expect(posts[0]!.body).toMatchObject({apiVersion:1,provider:'claude',replaceActive:false,operationId:store.records()[0]!.commandId});
+});
+test('uncertain director launch: reload, a second tab and an identical retry only observe the original ID',async()=>{
+  let posts=0;const reads:string[]=[];
+  vi.stubGlobal('fetch',async(path:string,init?:RequestInit)=>{if(init?.method==='POST'){posts++;throw new TypeError('lost ACK');}reads.push(path);return Response.json(launchOp(path.split('/').at(-1)!));});
+  const first=new CommandStore(new ApiClient(),'p','tab-1');
+  expect((await first.submit('director_launch',launch)).uncertain).toBe(true);
+  const original=first.records()[0]!.commandId;
+  const otherTab=new CommandStore(new ApiClient(),'p','tab-2');
+  const observed=await otherTab.submit('director_launch',launch);
+  expect(observed.operation?.state).toBe('reconciliation_required');
+  await expect(otherTab.submit('director_launch',{...launch,provider:'codex'})).rejects.toThrow('đối chiếu');
+  expect(posts).toBe(1);expect(reads.every(path=>path.endsWith(`/operations/${original}`))).toBe(true);
+  // Only an explicit new intent naming this exact uncertain operation releases the slot; nothing is resent by it.
+  await expect(otherTab.newIntent('director_launch')).rejects.toThrow('Chưa xác định');
+  await otherTab.newIntent('director_launch',original);expect(otherTab.records()).toHaveLength(0);expect(posts).toBe(1);
+  expect(JSON.stringify(localStorage)).not.toContain('claude');
+});
+test('concurrent director launches in one tab reserve one operation',async()=>{
+  let posts=0;vi.stubGlobal('fetch',async(_p:string,init:RequestInit)=>{posts++;return Response.json(launchOp(JSON.parse(String(init.body)).operationId,'accepted'),{status:202});});
+  const store=new CommandStore(new ApiClient(),'p','session');const first=store.submit('director_launch',launch);
+  await expect(store.submit('director_launch',launch)).rejects.toThrow('đang');await first;expect(posts).toBe(1);
+});
+test('a backend without the Director port refuses definitively and keeps no recovery record',async()=>{
+  vi.stubGlobal('fetch',async()=>Response.json({apiVersion:1,code:'operation_not_allowed',message:'no port',retryable:false,correlationId:'c'},{status:422}));
+  const store=new CommandStore(new ApiClient(),'p','session');
+  await expect(store.submit('director_launch',launch)).rejects.toThrow('operation_not_allowed');expect(store.records()).toHaveLength(0);
+});

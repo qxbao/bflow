@@ -1,7 +1,10 @@
-import { WebHttpContracts, WebCommandSchema, type WebCommand, type WebOperation } from '@bflow/contracts/web';
+import { WebHttpContracts, WebCommandSchema, type WebCommand, type WebDirectorLaunchRequest, type WebOperation } from '@bflow/contracts/web';
 import { ApiClient, ApiError, projectPath } from './client';
 export type InteractionBody = WebCommand extends infer C ? C extends WebCommand ? Omit<C,'apiVersion'|'projectId'|'commandId'> : never : never;
-export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop';force?:boolean};
+/** `director_launch` carries only the provider choice; the server derives argv/cwd/env. */
+export type DirectorLaunchBody = {kind:'director_launch';provider:WebDirectorLaunchRequest['provider'];replaceActive:boolean};
+export type CommandBody = InteractionBody | {kind:'session_start'|'session_stop';force?:boolean} | DirectorLaunchBody;
+const RECORD_KINDS:readonly string[]=['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop','director_launch'];
 export async function execute(api:ApiClient, command:WebCommand) {
   const parsed=WebCommandSchema.parse(command);
   const value=await api.request(`${projectPath(parsed.projectId)}/commands`,WebHttpContracts.command.response,'POST',parsed,40000);
@@ -26,6 +29,14 @@ export async function executeLifecycle(api:ApiClient,project:string,id:string,ki
   return check(value,project,id,kind);
 }
 
+/** Launch effect is uncertain by nature: the same operation ID replays only as an observation (server-side), never a second window. */
+export async function executeDirectorLaunch(api:ApiClient,project:string,id:string,body:DirectorLaunchBody){
+  const route=WebHttpContracts.launchDirector;
+  const request=route.body.parse({apiVersion:1,operationId:id,provider:body.provider,replaceActive:body.replaceActive});
+  const value=await api.request(`${projectPath(project)}/director/launch`,route.response,'POST',request,50000);
+  return check(value,project,id,'director_launch');
+}
+
 export type DecisionOutcome='approved'|'rejected'|'changes_requested';
 /** `outcome` is non-sensitive display metadata for decisions; never a body, reason or authority. */
 export type RecordEntry={slot:string;scope:string;commandId:string;fingerprint:string;kind:CommandBody['kind'];outcome?:DecisionOutcome};
@@ -42,7 +53,7 @@ export class CommandStore {
     const records:RecordEntry[]=[];
     for(let i=0;i<localStorage.length;i++){
       const key=localStorage.key(i);if(!key?.startsWith(this.projectPrefix))continue;
-      try{const v=JSON.parse(localStorage.getItem(key)!);if(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))records.push({slot:v.slot,scope:v.scope,commandId:v.commandId,fingerprint:v.fingerprint,kind:v.kind,...(v.outcome?{outcome:v.outcome}:{})});else throw new Error('invalid metadata');}catch{throw new Error('Mã phục hồi bị hỏng; cần đối chiếu thao tác trước khi tạo yêu cầu mới.');}
+      try{const v=JSON.parse(localStorage.getItem(key)!);if(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && RECORD_KINDS.includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))records.push({slot:v.slot,scope:v.scope,commandId:v.commandId,fingerprint:v.fingerprint,kind:v.kind,...(v.outcome?{outcome:v.outcome}:{})});else throw new Error('invalid metadata');}catch{throw new Error('Mã phục hồi bị hỏng; cần đối chiếu thao tác trước khi tạo yêu cầu mới.');}
     }return records;
   }
   clearCorrupted():void{
@@ -51,7 +62,7 @@ export class CommandStore {
       const key=localStorage.key(i);if(!key?.startsWith(this.projectPrefix))continue;
       try{
         const v=JSON.parse(localStorage.getItem(key)!);
-        if(!(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && ['create_request','revise_request','answer_clarification','answer_decision','resume','cancel','session_start','session_stop'].includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))){
+        if(!(typeof v.slot==='string' && typeof v.scope==='string' && /^[\da-f-]{36}$/.test(v.commandId) && /^[a-f0-9]{64}$/.test(v.fingerprint) && RECORD_KINDS.includes(v.kind) && (v.outcome===undefined || (v.kind==='answer_decision' && ['approved','rejected','changes_requested'].includes(v.outcome))) && key===this.key(v))){
           toRemove.push(key);
         }
       }catch{toRemove.push(key);}
@@ -69,7 +80,8 @@ export class CommandStore {
     if(this.busy.has(slot))throw new Error('Thao tác đang được tiếp nhận.');
     this.busy.add(slot);
     const run=async()=>{
-      if(body.kind!=='session_start' && body.kind!=='session_stop')WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:crypto.randomUUID()});
+      if(body.kind==='director_launch')WebHttpContracts.launchDirector.body.parse({apiVersion:1,operationId:crypto.randomUUID(),provider:body.provider,replaceActive:body.replaceActive});
+      else if(body.kind!=='session_start' && body.kind!=='session_stop')WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:crypto.randomUUID()});
       const digest=await fingerprint(body),existing=this.records().find(r=>r.slot===slot);
       if(existing){
         // Even an identical resubmit only observes; a missing ACK is not non-delivery.
@@ -79,7 +91,7 @@ export class CommandStore {
       const record:RecordEntry={slot,scope:this.scope,commandId:crypto.randomUUID(),fingerprint:digest,kind:body.kind,...(body.kind==='answer_decision'?{outcome:body.outcome}:{})};
       this.inFlight.add(record.commandId);
       localStorage.setItem(this.key(record),JSON.stringify(record));this.changed();
-      try{const operation=body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind,body.force):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
+      try{const operation=body.kind==='director_launch'?await executeDirectorLaunch(this.api,this.projectId,record.commandId,body):body.kind==='session_start' || body.kind==='session_stop'?await executeLifecycle(this.api,this.projectId,record.commandId,body.kind,body.force):await execute(this.api,WebCommandSchema.parse({...body,apiVersion:1,projectId:this.projectId,commandId:record.commandId}));return {record,operation};}
       catch(error){
         // Registered definitive refusal has no accepted side effect. Persist no body/error text.
         if(error instanceof ApiError && ['invalid_request','forbidden','session_required','stale_version','operation_not_allowed','payload_too_large'].includes(error.code)){

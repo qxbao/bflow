@@ -19,6 +19,7 @@ import { useRead } from './features/data';
 import { Operations, OperationsDock, useOperationsDockSummary } from './features/operations';
 import type { OfficeFocusZone } from './features/office/model/types';
 import { Overview } from './features/overview';
+import { DirectorProvider } from './features/director/status';
 import { useUiMode, type UiMode } from './features/office/mode';
 import { OfficeFrame, OverviewOutlet } from './features/office/ui/OfficeFrame';
 import { ModeSwitch } from './features/office/ui/ModeSwitch';
@@ -73,6 +74,8 @@ function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{ap
   const id=project.projectId;
   const [connection,setConnection]=useState<Connection>('connecting'),[events,setEvents]=useState<WebEvent[]>([]);
   const hadDisconnect=useRef(false);
+  // An SSE reset (or a reconnect after a gap) restarts Director transcript cursors from the latest page.
+  const [resetEpoch,setResetEpoch]=useState(0);
   const session=useRead(`session:${id}`,()=>api.sessionView(id),revision);
   const sessionInactive=Boolean(session.data && !session.error && ['stopped','unavailable'].includes(session.data.state));
   const wasNotReady=useRef(false),[reconnectEpoch,setReconnectEpoch]=useState(0);
@@ -84,11 +87,11 @@ function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{ap
   },[session.data?.state]);
   useEffect(()=>{
     let timer:ReturnType<typeof setTimeout>|undefined;
-    const update=(event:WebEvent)=>{setEvents(old=>[event,...old].slice(0,25));if(timer===undefined)timer=setTimeout(()=>{timer=undefined;refresh();},150);};
+    const update=(event:WebEvent)=>{setEvents(old=>[event,...old].slice(0,25));if(event.type==='reset')setResetEpoch(value=>value+1);if(timer===undefined)timer=setTimeout(()=>{timer=undefined;refresh();},150);};
     const onConnection=(next:Connection)=>{
       setConnection(next);
       if(next==='reconnecting' || next==='offline')hadDisconnect.current=true;
-      else if(next==='connected' && hadDisconnect.current){hadDisconnect.current=false;refresh();}
+      else if(next==='connected' && hadDisconnect.current){hadDisconnect.current=false;setResetEpoch(value=>value+1);refresh();}
     };
     const close=subscribeEvents(id,update,onConnection);
     const online=()=>refresh();
@@ -99,7 +102,7 @@ function ProjectContent({api,project,projects,revision,refresh,onPair,frame}:{ap
   const mark=<div className="flex flex-wrap items-center gap-3"><span className="font-semibold text-ink">{project.displayName}</span><ConnectionBanner state={connection} inactive={sessionInactive}/></div>;
   const visual=frame.mode==='visual';
   const list=<ul className="m-0 list-none p-0">{[['runs','Công việc'],['chat','Trò chuyện'],['agents','Nhân viên'],['review','Cần bạn quyết định'],['settings','Cài đặt dự án']].map(([path,title])=><li key={path} className="border-t border-line py-2 first:border-t-0"><Link to={`/projects/${encodeURIComponent(id)}/${path}`}>{title}</Link></li>)}</ul>;
-  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':'inline'}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="agents" element={<AgentsPage api={api} id={id} revision={revision}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame>{visual && <VisualOffice api={api} project={project} projects={projects} onPair={onPair} session={session.data} connection={connection} revision={revision} refresh={refresh} list={list} frame={frame}/>}</Operations>;
+  return <Operations api={api} id={id} revision={revision} refresh={refresh} dock={visual?'external':'inline'}><DirectorProvider api={api} projectId={id} session={session} revision={revision} resetEpoch={resetEpoch}>{!visual && <div className="mb-4 flex min-h-11 flex-wrap items-center justify-between gap-3 border-b border-line pb-2.5 font-data text-sm">{mark}<div className="flex flex-wrap items-center gap-2"><ModeSwitch mode={frame.mode} onChange={frame.setMode}/><button className="min-w-28" onClick={refresh}>Tải lại dữ liệu</button></div></div>}<OfficeFrame mode={frame.mode} overview={<Overview api={api} project={project} session={session} revision={revision} refresh={refresh} events={events}/>} overviewOpen={frame.overviewOpen} panelOpen={frame.panelOpen}><Routes><Route index element={<OverviewOutlet/>}/><Route path="runs" element={<Runs api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="runs/:runId" element={<RunRoute api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="chat/:runId" element={<ChatPage api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="agents" element={<AgentsPage api={api} id={id} revision={revision}/>}/><Route path="review" element={<Review api={api} id={id} revision={revision} refresh={refresh}/>}/><Route path="settings" element={<Settings api={api} project={project} refresh={refresh}/>}/><Route path="*" element={<EmptyState title="Không tìm thấy trang"><Link to={`/projects/${encodeURIComponent(id)}`}>Về tổng quan dự án</Link></EmptyState>}/></Routes></OfficeFrame>{visual && <VisualOffice api={api} project={project} projects={projects} onPair={onPair} session={session.data} connection={connection} revision={revision} refresh={refresh} list={list} frame={frame}/>}</DirectorProvider></Operations>;
 }
 function RunRoute({api,id,revision,refresh}:{api:ApiClient;id:string;revision:number;refresh:()=>void}) { const {runId=''}=useParams();return <RunView key={runId} api={api} id={id} runId={runId} revision={revision} refresh={refresh}/>; }
 
