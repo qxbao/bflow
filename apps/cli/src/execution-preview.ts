@@ -12,7 +12,7 @@ import { readEnvironmentConfig } from './environment-config.js';
 import { resolveIsolatorStateRoot, configuredPlatformRoles, resolveRolePlatformOption, selectedProfileName, resolveRepositoryToolPolicy, resolveToolGrants, projectRecordedServiceReadiness } from './platform-options.js';
 import { SUPPORTED_CLI_COMMANDS } from './command-reference.js';
 import type { AgenticHostPlatformOptions } from '@bflow/runtime';
-import { resolvePlatformConfiguration, rolePreferenceConstraints } from './platform-resolution.js';
+import { developerLaunchTemplate, resolvePlatformConfiguration, rolePreferenceConstraints } from './platform-resolution.js';
 import { loadMachineSkillCatalog } from './skill-catalog.js';
 import { readPreviewFile } from './preview-files.js';
 import { readGatewayReadiness } from './gateway-readiness.js';
@@ -76,7 +76,7 @@ export async function loadExecutionResolution(original: EnvironmentCompositionIn
             ...(role.role === 'conversation' ? [] : (decisions.find(item => item.field === 'capabilities.required')?.effective ?? []) as string[])];
         for (const capability of capabilities) capabilityRequirements.add(capability);
         const inherited = resolution.inheritedRoles.includes(role.role);
-        const locator = `environment.roles.${inherited ? 'coordinator' : role.role}`;
+        const locator = `environment.roles.${inherited ? (developerLaunchTemplate(input.config.environment.roles)?.role ?? role.role) : role.role}`;
         const add = (field: string, value: unknown, at: string) => {
             if (!decisions.some(item => item.field === field))
                 decisions.push(resolvePlanField({ field, candidates: [{ source: source(at), value: JSON.parse(JSON.stringify(value)) }] }));

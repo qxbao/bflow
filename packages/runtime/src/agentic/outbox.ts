@@ -8,7 +8,7 @@ import {
   type AgentExecutionHandle, type OperationResult, type RoleMessage, type PaneBinding
 } from "@bflow/contracts";
 import { RoleCapabilityPreflightError, type AgenticRuntimePorts } from "./ports.js";
-import { digest, isConversationDelivery, json, record, type JournalState, type Outbound } from "./journal.js";
+import { digest, isInProcessDelivery, json, record, type JournalState, type Outbound } from "./journal.js";
 
 /** A recipient observed not ready for this long is reported to Conversation; delivery keeps retrying. */
 export const NOT_READY_FAILURE_MS = 5 * 60_000;
@@ -39,7 +39,7 @@ export function unwrap<T>(result: OperationResult<T>): T {
 }
 export class HerdrOutbox {
   constructor(private readonly ports: AgenticRuntimePorts, private readonly state: JournalState,
-    private readonly save: () => Promise<void>) {}
+    private readonly save: () => Promise<void>, private readonly options: { directorMailbox?: boolean } = {}) {}
   private now(): string { return (this.ports.clock?.() ?? new Date()).toISOString(); }
   enqueue(message: RoleMessage, selector: string = message.recipient.role, taskId = `message-${message.message_id}`,
     attemptId = `attempt-${message.message_id}`, capabilities: string[] = []): Outbound {
@@ -49,6 +49,13 @@ export class HerdrOutbox {
     if (existing) {
       if (digest(existing.message) !== digest(parsed)) throw new Error("Conflicting handoff idempotency key");
       return existing;
+    }
+    // Director session: the logical Coordinator is the Director's in-process mailbox. No pane, lease or capability exists to
+    // check, and the durable `delivery` tag keeps the routing stable across restart (R-B2-5). enqueue never sets a parent.
+    if (this.options.directorMailbox && parsed.recipient.role === "coordinator") {
+      const out: Outbound = { message: parsed, status: "queued", selector, taskId, attemptId, capabilities: [], delivery: "director_mailbox" };
+      this.state.outbound.push(out);
+      return out;
     }
     // Every coordination/investigation/verifier handoff depends on the host-owned bounded repository interface.
     // The lease resolver checks this requirement against the live role registration immediately before dispatch.
@@ -70,7 +77,7 @@ export class HerdrOutbox {
         Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) throw new Error("Task notice parent lease is expired or mismatched");
     const run = this.state.runs.find(item => item.runId === parent.message.run_id);
     const task = run?.tasks.find(item => item.taskId === parent.taskId);
-    if (!run || run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status) || !task || task.writerReleased || task.result ||
+    if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status) || !task || task.writerReleased || task.result ||
         out.message.run_id !== parent.message.run_id || out.taskId !== parent.taskId || out.attemptId !== parent.attemptId)
       throw new Error("Task notice parent execution is stopped or terminal");
     return parent;
@@ -270,7 +277,7 @@ export class HerdrOutbox {
       // A retried write-ahead release replays its idempotency receipt (ok). For a proven-stopped execution only the Registry's
       // own inactive-lease conflict is settled; a fence/version mismatch means another holder and stays visible regardless of TTL.
       const ttlExpired = Date.parse(out.lease.expiresAt) <= Date.parse(this.now());
-      const inactive = !released.ok && released.error.code === "conflict" && (out.cancellationStopProof
+      const inactive = !released.ok && released.error.code === "conflict" && ((out.cancellationStopProof || out.parkStop?.proof)
         ? released.error.message === "Lease expired or already released" : ttlExpired);
       if (!released.ok && !inactive) unwrap(released);
       // Inactive before its TTL means the grant was already released, not expired.
@@ -325,14 +332,19 @@ export class HerdrOutbox {
   private async step(out: Outbound, onBound: (out: Outbound, handle: AgentExecutionHandle) => Promise<void>): Promise<void> {
     const failoverRun = this.state.runs.find(run => run.runId === out.message.run_id);
     const held = failoverRun?.tasks.flatMap(task => task.failovers ?? []).find(entry => !["dispatched", "cancelled"].includes(entry.phase));
-    if (held && out.message.recipient.role !== "conversation" && ["queued", "accepted"].includes(out.status) &&
+    if (held && !isInProcessDelivery(out) && ["queued", "accepted"].includes(out.status) &&
         !(held.phase === "allocated" && held.destinationMessageId === out.message.message_id)) {
       out.error = "Provider continuation holds new work until reconciliation and binding settlement"; return;
     }
     if (out.phaseRetirement || out.reviewReplacement) return; // Physical tombstone: neither resend, renew nor manufacture an expired-lease release.
     if (out.leaseRelease) { await this.release(out); return; }
-    // A Conversation inbox write-ahead stays "sending": Runtime applies it after this locked pass.
-    if (out.status === "sending" && !isConversationDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
+    if (failoverRun?.status === "completed_with_parked" && out.status === "queued" && !isInProcessDelivery(out)) {
+      if (out.lease) await this.release(out);
+      out.status = "cancelled"; out.error = "Run còn task treo; mở lại task trước khi giao việc mới";
+      await this.save(); return;
+    }
+    // An in-process inbox write-ahead (Conversation or Director mailbox) stays "sending": Runtime applies it after this locked pass.
+    if (out.status === "sending" && !isInProcessDelivery(out)) { out.status = "unknown_delivery"; await this.save(); }
     if (out.status === "accepted" && out.handle) {
       const cancelledRun = this.state.runs.find(run => run.runId === out.message.run_id)?.cancelled;
       if (cancelledRun && ["task.assignment", "delegation.request", "verification.requested"].includes(out.message.type) &&
@@ -355,7 +367,7 @@ export class HerdrOutbox {
           await this.release(out);
           return;
         }
-        if (run && !run.cancelled && !["completed", "failed", "escalated"].includes(run.status) &&
+        if (run && !run.cancelled && !["completed", "completed_with_parked", "failed", "escalated"].includes(run.status) &&
             (out.leaseRenewal !== undefined || !out.lease || Date.parse(out.lease.expiresAt) - Date.parse(this.now()) <= 240_000)) {
           try { await this.renew(out); } catch (error) { out.error = String(error); await this.save(); }
         }
@@ -410,8 +422,8 @@ export class HerdrOutbox {
     }
     if (out.status !== "queued") return;
     if (out.nextAttemptAt !== undefined && Date.parse(out.nextAttemptAt) > Date.parse(this.now())) return; // backoff after a failed write/preflight
-    // Never call the Gateway here: it may drain a queued user turn that enqueues back into this locked journal.
-    if (isConversationDelivery(out)) {
+    // Never call the Gateway or Director mailbox here: delivery may re-enter Runtime and enqueue back into this locked journal.
+    if (isInProcessDelivery(out)) {
       out.status = "sending"; await this.save(); return;
     }
     const policyRun = this.state.runs.find(item => item.runId === out.message.run_id);
@@ -435,12 +447,16 @@ export class HerdrOutbox {
       }
     }
     const run = this.state.runs.find(item => item.runId === out.message.run_id);
+    if (out.message.type === "task.assignment" && run?.tasks.some(task => task.taskId === out.taskId && task.parkSettlement)) {
+      out.status = "cancelled"; out.error = "Task đang settle intent treo; chưa được giao lại";
+      await this.save(); return;
+    }
     if (run?.nativeDeliveries?.length && ["delegation.request", "task.assignment", "verification.requested"].includes(out.message.type)) {
       out.error = "Unknown native delivery must be reconciled before another work dispatch";
       await this.save(); return;
     }
     if (out.error === "Unknown native delivery must be reconciled before another work dispatch") delete out.error;
-    if (run && (run.cancelled || ["completed", "failed", "escalated"].includes(run.status)) &&
+    if (run && (run.cancelled || ["completed", "completed_with_parked", "failed", "escalated"].includes(run.status)) &&
         (out.message.type === "task.assignment" || out.message.type === "delegation.request" && out.message.sender.role === "coordinator")) {
       if (out.lease) await this.release(out);
       out.status = "cancelled"; await this.save(); return;
@@ -448,6 +464,11 @@ export class HerdrOutbox {
     const bindingValue = unwrap(await this.ports.panes.getRoleBinding(out.selector));
     if (!bindingValue) { out.error = "Recipient pane unavailable"; return; }
     const pane = PaneBindingSchema.parse(bindingValue);
+    if (pane.role === "developer" && pane.metadata?.allocationStatus === "released") {
+      out.status = "cancelled"; out.error = "Allocation Developer đã được nhả; cần cấp phát có thẩm quyền trước khi giao lại";
+      if (out.lease) await this.release(out);
+      out.status = "cancelled"; await this.save(); return;
+    }
     const profileRun = this.state.runs.find(run => run.runId === out.message.run_id);
     const payloadPin = out.message.type === "task.assignment" ? profileRun?.definition?.tasks.find(task => task.id === out.taskId)?.roleProfile ??
       (profileRun?.conflictResolution?.attempts.some(attempt => attempt.messageId === out.message.message_id) ? profileRun.conflictResolution.roleProfile : undefined)
@@ -474,7 +495,7 @@ export class HerdrOutbox {
       const blockers: string[] = [];
       if (!run || run.cancelled || run.status !== "verifying") blockers.push("run_not_verifying");
       if (run?.nativeDeliveries?.length || this.state.outbound.some(item => item.message.run_id === run?.runId &&
-          (item.status === "unknown_delivery" || item.status === "sending" && !isConversationDelivery(item)))) blockers.push("unreconciled_delivery");
+          (item.status === "unknown_delivery" || item.status === "sending" && !isInProcessDelivery(item)))) blockers.push("unreconciled_delivery");
       if (run?.approval && run.decision?.approvalId !== run.approval.approvalId || Object.values(run?.userDecisions ?? {}).some(item => item.status === "pending")) blockers.push("pending_human_gate");
       if (!original?.session || !pane.session || pane.role !== reviewSource.message.recipient.role || !["reviewer", "qa"].includes(pane.role) || !pane.readOnlyWorkspace || pane.paneId === original.paneId || digest(pane.session) === digest(original.session)) blockers.push("replacement_native_identity");
       if (out.message.type !== "verification.requested" || digest(out.message.payload) !== reviewSource.reviewReplacement!.contextDigest) blockers.push("context_changed");
@@ -515,7 +536,7 @@ export class HerdrOutbox {
         if (planRun!.cancelled || continuation.phase !== "allocated" || !continuation.stopProof || !this.ports.providerFailover ||
             planRun!.nativeDeliveries?.length || planRun!.approval && planRun!.decision?.approvalId !== planRun!.approval.approvalId ||
             Object.values(planRun!.userDecisions ?? {}).some(item => item.status === "pending") ||
-            this.state.outbound.some(item => item !== out && item.message.run_id === planRun!.runId && !isConversationDelivery(item) && ["sending", "unknown_delivery"].includes(item.status)))
+            this.state.outbound.some(item => item !== out && item.message.run_id === planRun!.runId && !isInProcessDelivery(item) && ["sending", "unknown_delivery"].includes(item.status)))
           throw new Error("Provider continuation dispatch is held by lifecycle or delivery state");
         await this.ports.providerFailover.assertMutationSafe(continuation.sourceBinding, planRun!.runId, out.taskId);
       }

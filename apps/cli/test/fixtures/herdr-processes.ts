@@ -103,8 +103,18 @@ export class HerdrProcesses implements EnvironmentProcessRunner {
     if (domain === "pane" && action === "get") {
       const pane = session.panes.find((p) => p.pane_id === target); return pane ? wire("pane_info", { pane }) : failure("Pane missing");
     }
-    if (domain === "pane" && action === "process-info") return wire("pane_process_info", { process_info: {
-      pane_id: flag("--pane"), shell_pid: 1000, foreground_process_group_id: 1000, foreground_processes: [] } });
+    if (domain === "pane" && action === "run") {
+      // Director progress viewer: `pane run <pane> '<arg>' '<arg>' ...` leaves that command in the foreground.
+      const pane = session.panes.find(p => p.pane_id === target)!;
+      Object.assign(pane, { viewer: [...String(args[3] ?? "").matchAll(/'((?:[^']|'\\'')*)'/g)].map(match => match[1]!.replace(/'\\''/g, "'")) });
+      return wire("ok", {});
+    }
+    if (domain === "pane" && action === "process-info") {
+      const pane = session.panes.find(p => p.pane_id === flag("--pane")) as (Pane & { viewer?: string[] }) | undefined;
+      return wire("pane_process_info", { process_info: {
+        pane_id: flag("--pane"), shell_pid: 1000, foreground_process_group_id: 1000,
+        foreground_processes: pane?.viewer ? [{ pid: 1000, argv: pane.viewer }] : [] } });
+    }
     if (domain === "pane" && action === "split") {
       const source = session.panes.find((p) => p.pane_id === target)!;
       return wire("pane_info", { pane: newPane(session.tabs.find((t) => t.tab_id === source.tab_id)!) });

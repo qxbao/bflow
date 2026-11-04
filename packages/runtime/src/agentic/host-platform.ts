@@ -1,3 +1,4 @@
+import { recoverRetainedDeveloperInstructions } from "./retained-developer-instructions.js";
 import { nativeChatTranscriptRoot } from "../interaction/chat-history.js";
 import { RoleCapabilityPreflightError } from "./ports.js";
 import { resolveRoleProfile } from "../platform/role-profiles.js";
@@ -302,7 +303,7 @@ interface PinnedRoleInstructions {
 
 /** Verify current pinned skill authority even for implementation-only capability requests. No readiness/model probes. */
 export async function verifyDispatchPinnedSkills(
-  session: (Pick<HostPlatformSession, 'readPinnedInstructions' | 'launchIdOf'> & Partial<Pick<HostPlatformSession, 'bindingLaunchId'>>) | undefined,
+  session: (Pick<HostPlatformSession, 'readPinnedInstructions' | 'launchIdOf'> & Partial<Pick<HostPlatformSession, 'bindingLaunchId' | 'recoverDeveloperPinnedInstructions'>>) | undefined,
   platform: Pick<AgenticHostPlatformOptions, 'roles'> | undefined,
   binding: PaneBinding
 ): Promise<void> {
@@ -314,6 +315,7 @@ export async function verifyDispatchPinnedSkills(
     const launchId = binding.roleProfile ? session.bindingLaunchId?.(binding) : binding.role === 'developer' ? metadataLaunch : session.launchIdOf(binding.role);
     if (typeof launchId !== 'string' || !launchId || typeof metadataLaunch === 'string' && metadataLaunch !== launchId)
       throw Error('Current skill launch identity is unavailable');
+    if (binding.role === 'developer') await session.recoverDeveloperPinnedInstructions?.(binding);
     // This calls SkillManager.verify, including each dependency binding's current scoped receipt and expiry.
     const pinned = await session.readPinnedInstructions(binding.role, undefined, 0, 1, launchId);
     if (!pinned || pinned.launchId !== launchId || !pinned.manifestDigest || selections.length > 0 && !pinned.instructionText.trim())
@@ -388,6 +390,7 @@ export class HostPlatformSession {
   private readonly nativeAgyHomes = new Map<string, { role: AgentRole; provider: AgentProviderId; home: string }>();
   private readonly roleInstructions = new Map<AgentRole, PinnedRoleInstructions>();
   private readonly developerInstructions = new Map<string, PinnedRoleInstructions>();
+  private readonly retainedDeveloperInstructions = new Map<string, PinnedRoleInstructions & {taskId:string;binding:PaneBinding;validForGeneration:number|undefined}>();
   private readonly developerLaunches = new Map<string, string>();
   private readonly nativeTranscriptRoots = new Map<string, string>();
   nativeTranscriptRoot(launchId: string): string | undefined { return this.nativeTranscriptRoots.get(launchId); }
@@ -479,18 +482,39 @@ export class HostPlatformSession {
   }
 
   /** Exact pinned, provider-neutral skills for the current prepared launch; callers receive no storage paths or mutable bundle handles. */
+  /** A continuation may retain verified instructions, never the retired launch/Gateway authority. */
+  async recoverDeveloperPinnedInstructions(binding: PaneBinding): Promise<void> {
+    const id = binding.metadata?.launchId;
+    if (typeof id !== "string" || this.developerInstructions.has(id) && [...this.developerLaunches.values()].includes(id)) return;
+    const prior = this.retainedDeveloperInstructions.get(id);
+    if (prior) prior.validForGeneration = undefined; // Retain only cleanup ownership until proof is re-established.
+    if (!this.skillManager || !this.report?.ready) throw new Error("Pinned skill verifier unavailable");
+    const recovered = await recoverRetainedDeveloperInstructions({binding, platform:this.options.platform, repositoryPath:this.options.repositoryPath,
+      sessionId:this.options.sessionId,stateDirectory:this.options.stateDirectory,generationFile:this.options.generationFile,generation:this.identity?.generation,
+      manager:this.skillManager,proveProcess:this.options.processScopes ? b=>this.options.processScopes!.assertRetainedBindingReady(b) : undefined});
+    this.retainedDeveloperInstructions.set(id,{...recovered,binding:structuredClone(binding),validForGeneration:this.identity?.generation});
+  }
   async readPinnedInstructions(role: AgentRole, skillId?: string, offset = 0, limit = 8 * 1024, expectedLaunchId?: string): Promise<{ launchId: string; manifestDigest: string; instructionText: string;
     references: readonly { name: string; description: string; entrypoint: string; digest: string }[];
+    continuationOnly?: true;
     skill?: { skillId: string; version: string; digest: string; offset: number; bytes: number; content: string; truncated: boolean; nextOffset?: number } } | undefined> {
-    const value = role === "developer" || expectedLaunchId !== undefined && this.profiledLaunches.has(expectedLaunchId)
+    const cached = role === "developer" && expectedLaunchId !== undefined ? this.retainedDeveloperInstructions.get(expectedLaunchId) : undefined;
+    const retained = cached?.validForGeneration === this.identity?.generation && this.identity ? cached : undefined;
+    if (retained) {
+      try { if (!this.options.processScopes) throw new Error("Retained process proof unavailable"); await this.options.processScopes.assertRetainedBindingReady(retained.binding); }
+      catch (error) { retained.validForGeneration = undefined; throw error; }
+    }
+    const current = role === "developer" || expectedLaunchId !== undefined && this.profiledLaunches.has(expectedLaunchId)
       ? expectedLaunchId === undefined ? undefined : this.developerInstructions.get(expectedLaunchId)
       : this.roleInstructions.get(role);
-    const active = role === "developer" || expectedLaunchId !== undefined && this.profiledLaunches.has(expectedLaunchId)
+    const value = current ?? retained;
+    const active = retained !== undefined || ( role === "developer" || expectedLaunchId !== undefined && this.profiledLaunches.has(expectedLaunchId)
       ? expectedLaunchId !== undefined && [...this.developerLaunches.values()].includes(expectedLaunchId)
-      : value?.launchId === this.launches.get(role)?.launchId;
+      : value?.launchId === this.launches.get(role)?.launchId);
     if (!value || !active || (expectedLaunchId !== undefined && value.launchId !== expectedLaunchId) || !this.skillManager || !this.skillStore) return undefined;
     const manifest = await this.skillManager.verify(value.manifest);
     const common = { launchId: value.launchId, manifestDigest: manifest.digest, instructionText: value.instructionText,
+      ...(retained && !current ? {continuationOnly: true as const} : {}),
       references: structuredClone(value.references) };
     if (skillId === undefined) return common;
     if (!Number.isInteger(offset) || offset < 0 || offset > 1024 * 1024 || !Number.isInteger(limit) || limit < 1 || limit > 16 * 1024)
@@ -773,7 +797,15 @@ export class HostPlatformSession {
 
   async releaseDeveloper(taskId: string): Promise<void> {
     const launchId = this.developerLaunches.get(taskId);
-    if (launchId === undefined) return;
+    if (launchId === undefined) {
+      const retained = [...this.retainedDeveloperInstructions.values()].find(value=>value.taskId===taskId);
+      if (retained) {
+        await this.options.processScopes?.sealLaunch(taskId,retained.launchId);
+        await this.options.processScopes?.stopLaunch(taskId,retained.launchId);
+        this.retainedDeveloperInstructions.delete(retained.launchId);
+      }
+      return;
+    }
     await this.options.processScopes?.sealLaunch(taskId, launchId);
     await this.options.processScopes?.stopLaunch(taskId, launchId);
     const released = await this.options.service.releaseLaunch(launchId);
@@ -801,6 +833,7 @@ export class HostPlatformSession {
     this.profileToolRequirements.clear();
     this.developerGates.clear();
     this.developerInstructions.clear();
+    this.retainedDeveloperInstructions.clear();
     this.nativeAgyHomes.clear();
     await this.persistLaunches();
   }
@@ -1230,8 +1263,14 @@ export async function createHostPlatformSession(options: CreateHostPlatformSessi
 export async function rewritePersistedPlatform(
   path: string,
   platform: AgenticHostPlatformOptions | undefined,
-  extras?: { readonly policy?: unknown; readonly impactIndex?: unknown;
-    readonly executionResolution?: unknown; readonly executionSourceDigests?: unknown }
+  extras?: {
+    readonly policy?: unknown;
+    readonly impactIndex?: unknown;
+    readonly layout?: unknown;
+    readonly progressCommand?: unknown;
+    readonly executionResolution?: unknown;
+    readonly executionSourceDigests?: unknown;
+  }
 ): Promise<void> {
   const current = z.record(z.unknown()).parse(JSON.parse(await readBoundedRegularUtf8(path)));
   await writePrivateAtomic(
@@ -1242,7 +1281,10 @@ export async function rewritePersistedPlatform(
       ...(extras && "policy" in extras ? { policy: extras.policy } : {}),
       ...(extras && "impactIndex" in extras ? { impactIndex: extras.impactIndex } : {}),
       ...(extras && "executionResolution" in extras ? { executionResolution: extras.executionResolution } : {}),
-      ...(extras && "executionSourceDigests" in extras ? { executionSourceDigests: extras.executionSourceDigests } : {})
+      ...(extras && "executionSourceDigests" in extras ? { executionSourceDigests: extras.executionSourceDigests } : {}),
+      // Undefined values are dropped by JSON.stringify, so a change back to the legacy layout removes the keys.
+      ...(extras && "layout" in extras ? { layout: extras.layout } : {}),
+      ...(extras && "progressCommand" in extras ? { progressCommand: extras.progressCommand } : {})
     })
   );
 }

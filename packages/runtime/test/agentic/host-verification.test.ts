@@ -335,7 +335,7 @@ async function candidateEvidenceFixture() {
   if(!stored.ok)throw new Error(stored.error.message);
   const result=VerificationResultSchema.parse({schemaVersion:2,verificationId:"measured-green",runId:"run",taskId:"task",attemptId:"original-attempt",cycleNumber:1,status:"passed",independentExecution:true,evaluatedCriteria:[{criterionId:"ac-1",passed:true,command:"node --test",exitCode:0,evidenceArtifactId:stored.value.artifactId,summary:"1/1 tests passed"}],qualityGateResults:[],evidenceArtifacts:[stored.value],findings:[],verifiedBy:"qa",startedAt:new Date().toISOString(),completedAt:new Date().toISOString(),metadata:{conditionalTdd:{phase:"green",decisionId:strategy.tddDecision.decisionId,specId:strategy.specId,sourceRevision:f.head,testRevision:f.base,testNames:["criterion"],observations:[{method:"unit_test",criterionId:"ac-1",evidenceArtifactId:stored.value.artifactId,command:"node --test",exitCode:0,summary:"1/1 tests passed"}]}}});
   strategy.metadata={...strategy.metadata,tddEvidence:[result]};
-  f.state.runs.push({runId:"run",tasks:[{taskId:"task",spec:{strategy},result:{attemptId:"attempt"},cycle:{history:[]}}]});
+  f.state.runs.push({runId:"run",tasks:[{taskId:"task",spec:{strategy,specification},result:{attemptId:"attempt"},cycle:{history:[]}}]});
   const context={...f.context,input:{...f.context.input as object,specId:strategy.specId}};
   f.outbound[0]!.message.payload=context;
   await f.receipts.recordEvidence(result);
@@ -376,4 +376,28 @@ it.each(["valid","stale-revision","foreign-task","wrong-spec","self-check"])("ta
   const view=await f.host.inspectReview(f.binding,{messageId:"request"}) as any;
   expect(view.candidateBehavioralEvidence.entries).toHaveLength(mode==="valid"?1:0);
   if(mode==="valid")expect(view.candidateBehavioralEvidence.entries[0]).toMatchObject({source:"host_behavioral_gate",receiptId:"measured-gate",attemptId:"previous-attempt",sourceRevision:f.head});
+});
+
+it('shows existing exact-candidate host measurements to the Developer as read-only context, retaining their original attempt',async()=>{
+ const f=await candidateEvidenceFixture();const packet=await f.host.candidateEvidenceForDeveloper({runId:'run',taskId:'task',attemptId:'attempt',sourceRevision:f.head}) as any;
+ expect(packet.status).toBe('available');expect(packet.entries[0]).toMatchObject({sourceRevision:f.head,attemptId:'original-attempt',receiptId:f.result.verificationId});
+ const wrong=await f.host.candidateEvidenceForDeveloper({runId:'run',taskId:'task',attemptId:'attempt',sourceRevision:f.base}) as any;expect(wrong.status).toBe('missing');
+});
+it.each([true,false])('admits an authenticated no-change dispute proposal but still enforces independent finding verdicts (accepted=%s)',async accepted=>{
+ const f=await reworkFixture();const {validateAndStoreReworkResolution,verifyStoredReworkDossier}=await import('../../src/agentic/rework-causality.js');
+ const context={...f.dossier.reworkContext,failedRevision:f.head};
+ const findingResolutionsInput=context.findings.map(finding=>({findingId:finding.findingId,disposition:'disputed',rootCause:'Existing independent execution contradicts the reported missing evidence',sourceLocations:['guide.md:1'],repairSummary:'No source repair is needed; request independent adjudication of the exact stored observation',disputeReason:'The authenticated candidate measurement already exists at the unchanged revision',discriminatingCheck:{kind:'host_measurement',target:'guide.md:1',beforeOutcome:'Reviewer reported evidence missing',afterOutcome:'Host candidate measurement is present',exitCode:0},evidence:{sourceRevision:f.head,reworkGeneration:context.reworkGeneration,summary:'Exact candidate host measurement exists; independent judgment is still required'}}));
+ const options={reworkContext:context,findingResolutionsInput,worktreePath:f.repository,ownedPaths:['guide.md'],submissionStatus:'succeeded' as const,submittedByAgentId:'developer',submittedAt:new Date().toISOString(),artifactStore:f.artifacts};
+ await expect(validateAndStoreReworkResolution(options)).rejects.toThrow(/no new commit/);
+ const proposal=await validateAndStoreReworkResolution({...options,authorizeVerifiedNoChangeDispute:async revision=>revision===f.head});
+ expect(proposal.verificationOutcome.status).toBe('pending_independent_verification');
+ const verify={dossierInput:proposal,reworkContext:context,worktreePath:f.repository,ownedPaths:['guide.md'],expectedStatus:'succeeded' as const,artifactStore:f.artifacts};
+ await expect(verifyStoredReworkDossier(verify)).rejects.toThrow(/no new commit/);
+ await expect(verifyStoredReworkDossier({...verify,authorizeVerifiedNoChangeDispute:async revision=>revision===f.head})).resolves.toBeDefined();
+ f.task.reworkResolutions=[proposal];f.outbound[0]!.message.payload={...f.context,input:{...f.context.input as object,baseRevision:f.head}};
+ const view=await f.host.inspectReview(f.binding,{messageId:'request'}) as any;
+ const criteria=[{criterionId:'ac-1',passed:true,summary:'Criterion holds at the unchanged candidate'}];
+ await expect(f.host.completeReview(f.binding,{reviewId:view.reviewId,criteria,summary:'No finding verdicts supplied'})).rejects.toThrow();
+ const result=await f.host.completeReview(f.binding,{reviewId:view.reviewId,criteria,summary:'Independent finding-by-finding adjudication',findingVerdicts:context.findings.map((finding,index)=>({findingId:finding.findingId,verdict:accepted||index>0?'confirmed':'rejected',summary:'Independently checked the exact candidate and evidence'}))});
+ expect(result.result.status).toBe(accepted?'passed':'failed');
 });

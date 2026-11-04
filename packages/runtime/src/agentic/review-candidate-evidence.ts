@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { ArtifactReferenceSchema, QualityGateContextSchema, QualityGateResultSchema, TestStrategySchema, VerificationResultSchema,
+import { ArtifactReferenceSchema, QualityGateContextSchema, QualityGateResultSchema, SpecificationSchema, TestStrategySchema, VerificationResultSchema,
   type ArtifactStore, type QualityGateResult, type VerificationResult } from "@bflow/contracts";
 import { EvidenceDetailsSchema } from "@bflow/test-strategy";
 import { digest, json, record } from "./journal.js";
@@ -12,6 +12,21 @@ const gateMeasurement = z.object({ runId:z.string(), taskId:z.string(), attemptI
   scope:z.literal("task"), independentExecution:z.literal(true), isolated:z.literal(true), executorId:z.literal("bflow-host-behavioral-check"),
   method:z.string(), command:z.string().min(1), exitCode:z.literal(0), testNames:z.array(z.string()),
   criteria:z.array(z.object({criterionId:z.string(),passed:z.literal(true)}).passthrough()) }).passthrough();
+
+/** Shared private context for Developer explanation and controller proposal admission. It is never executed as a gate. */
+export function candidateEvidenceContext(input:{runId:string;taskId:string;attemptId:string;sourceRevision:string;specification:unknown;strategy:unknown}) {
+  const spec=SpecificationSchema.parse(input.specification),strategy=TestStrategySchema.parse(input.strategy);
+  if(spec.runId!==input.runId||strategy.specId!==spec.specId)throw new Error("Candidate evidence specification scope differs");
+  const ids=spec.acceptanceCriteria.filter(c=>c.required!==false&&c.status!=="waived").map(c=>c.id);
+  const names=strategy.criterionMappings.filter(m=>ids.includes(m.criterionId)).flatMap(m=>m.testNames);
+  return QualityGateContextSchema.parse({runId:input.runId,taskId:input.taskId,attemptId:input.attemptId,
+    definition:{id:"host-candidate-context",name:"Existing candidate measurements",evaluator:"read-only-host-context",required:true,timeout:{executionTimeoutMs:1000,onTimeout:"block"},configuration:{kind:"review",method:"manual_review",criterionIds:ids,testNames:names,role:"qa",levels:[]}},artifacts:[],
+    input:{scope:"task",specId:spec.specId,specFingerprint:digest(spec),sourceRevision:input.sourceRevision}});
+}
+/** Only full-spec-fingerprinted behavioral gate receipts can authorize no-change proposal admission. */
+export function hasCandidateGateReceipt(packet:unknown):boolean {
+  const value=object(packet);return value.status==="available"&&list(value.entries).some(e=>object(e).source==="host_behavioral_gate");
+}
 
 /** Read-only provenance view. Reuse retains the original attempt; no record here grants acceptance. */
 export async function reviewCandidateEvidence(input: { context:unknown; state:unknown; store:ArtifactStore;

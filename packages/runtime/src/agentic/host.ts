@@ -1,3 +1,4 @@
+import { nativeImplementationResult } from "./native-implementation-result.js";
 import { encodeNativePluginSelection } from "./native-intent-selection.js";
 import { HostChat } from "../interaction/chat.js";
 import { registeredAssistantHistory, registeredChatAvailable, chatMessageId } from "../interaction/chat-history.js";
@@ -35,7 +36,7 @@ import { z } from "zod";
 import { classifyProviderFailure, codexStartupPrompt } from "@bflow/agent-providers";
 import { readCodexFailure } from "./provider-failure-reader.js";
 import {
-  AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentResultSchema, AgentRoleSchema, ApprovalDecisionSchema, DelegationRequestSchema,
+  AgentBindingReceiptSchema, AgentExecutionHandleSchema, AgentProviderIdSchema, AgentRoleSchema, ApprovalDecisionSchema, DelegationRequestSchema,
   ArtifactReferenceSchema, ArtifactWriteOptionsSchema, JsonValueSchema, MCPToolCallResultSchema, RepositoryToolPolicySchema,
   ResolvedToolGrantSchema, RoleMessageSchema, RunQuerySchema, SessionManifestSchema, SpecificationSchema, ToolActionRequestSchema,
   ToolTriggerSchema, ToolUsageRecordSchema, WorkflowDefinitionSchema,
@@ -51,7 +52,13 @@ import { callHost } from "./host-protocol.js";
 import { effectiveFastPathMode, effectiveRegressionScope, readHostConfiguration, type HostConfiguration, type RoleLaunchDescriptor } from "./host-controller.js";
 import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-index.js";
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
-import { COORDINATOR_TOOLS } from "./tools.js";
+import { COORDINATOR_TOOLS, DIRECTOR_LEGACY_RUN_TOOLS } from "./tools.js";
+import { DirectorEndpoint } from "../director/endpoint.js";
+import { assertManifestLayout, directorCoordinatorPort, directorDefaultAgentKind, ensureDirectorProgressPane, hostRolesFor, recordConversationNotice,
+  startDirectorWork, type DelegationBuilder } from "./host-director-mode.js";
+import { DirectorAuthError } from "../director/store.js";
+import { DIRECTOR_OWNER_METHODS, isDirectorCredential, parseDirectorCredentialCall } from "../director/host-methods.js";
+import { handleHumanDecisionCli } from "./human-decision-cli.js";
 import { USER_DECISION_TOOL, buildDecisionRequestMessage, guardDirectUserInteraction, parseUserDecisionToolInput } from "./decision-routing.js";
 import { AdmissionRejectedError, isNonRetryableDeliveryError, QUIESCED_RECEIPT_DRAIN_OPERATIONS, type AgenticWorkflowRuntime } from "./runtime.js";
 import { guardNativeShell, NATIVE_READ_GUIDANCE, NATIVE_SHELL_TOOLS } from "./read-only-commands.js";
@@ -63,7 +70,7 @@ import { CONVERSATION_CONTEXT_BUDGET, boundConversationContext } from "./convers
 import { openAgenticWorkspace, type AgenticWorkspaceHandle } from "./workspace.js";
 import { unwrap } from "./outbox.js";
 import { HostVerification, HostBehavioralFailure, defaultHostChecks } from "./host-verification.js";
-import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanHookProvenance } from "./host-receipts.js";
+import { AgyNativeAnchorSchema, HostReceiptJournal, MAX_NOTICE_REBLOCKS, deliveryFailureNotice, parseConversationResumeRequest, isCoordinatorTrigger, type AgyNativeTurn, type CoordinatorTurnObservation, type HumanPromptHookProvenance } from "./host-receipts.js";
 import { parseBehavioralCommands, RtkRequiredToolUnavailable, type RtkOutputIntegration } from "./behavioral-runner.js";
 import { parseMutationChecks } from "./mutation-check.js";
 import { parseAppChecks } from "./app-check-config.js";
@@ -127,6 +134,7 @@ export function shouldRunWatchdog(input: {
 
 export interface HostWatchdogWorkspaceLike {
   readonly runtime: Pick<AgenticWorkflowRuntime, "resumeRecoverableRuns" | "watchdogSnapshot" | "reportWorkflowBlocked" | "reportRunStalled"> & {
+    autoParkPass?: AgenticWorkflowRuntime["autoParkPass"];
     readonly ports: { readonly panes: Pick<AgenticRuntimePorts["panes"], "getManifest"> };
   };
   readonly conversation: { reconcileApprovals(): Promise<unknown> };
@@ -150,6 +158,12 @@ export async function executeHostWatchdogPass(deps: {
   watchdogReported: Set<string>;
   observeAgent: (paneId: string) => Promise<{ status: string }>;
   now?: number;
+  /**
+   * Director session (v3): no Conversation pane displays notices, so display-ack evidence is never collected. The pass sees no
+   * notices (no reconcile_notice, resurface or display-ack `blocked` actions); automatic resume and stall reports still run.
+   */
+  directorSession?: boolean;
+  issueQueue?: { autoPark: boolean; maxAutoResumesBeforePark: number };
 }): Promise<void> {
   const activeState = () => {
     const current = deps.readState();
@@ -168,12 +182,15 @@ export async function executeHostWatchdogPass(deps: {
   // Bounded automatic resume pass: `auto_resume` blockers (no-next-action stops, Coordinator blockers, verification
   // delivery/storage escalations) after backoff, and `capability_repair` once the current role session proves the capability.
   // Approvals, user decisions, cancellation, manual blockers and unknown deliveries remain waiting for action.
-  await initial.workspace.runtime.resumeRecoverableRuns();
+  const parkPolicy = { enabled: deps.issueQueue?.autoPark ?? true, maxAutoResumesBeforePark: deps.issueQueue?.maxAutoResumesBeforePark ?? 3 };
+  await initial.workspace.runtime.resumeRecoverableRuns(deps.directorSession ? parkPolicy : undefined);
   const afterResume = activeState();
   if (!afterResume) return;
+  if (deps.directorSession && parkPolicy.enabled) await afterResume.workspace.runtime.autoParkPass?.(parkPolicy);
+  if (!activeState()) return;
   const runs = await afterResume.workspace.runtime.watchdogSnapshot(afterResume.manifest.conversationSessionId);
   if (!activeState() || !runs.some(run => run.live)) return;
-  const notices = await deps.receipts.conversationNoticeStates();
+  const notices = deps.directorSession === true ? [] : await deps.receipts.conversationNoticeStates();
   const beforeManifest = activeState();
   if (!beforeManifest) return;
   const manifestResult = await beforeManifest.workspace.runtime.ports.panes.getManifest();
@@ -187,7 +204,11 @@ export async function executeHostWatchdogPass(deps: {
   })));
   if (!activeState()) return;
   const activeVerificationRunIds = [...deps.activeHostVerifications.entries()].filter(([, count]) => count > 0).map(([id]) => id);
-  for (const action of evaluateWatchdog({ now, runs, notices, panes, activeVerificationRunIds })) {
+  // With no notice states, a pending decision would read as a lost notice (`reconcile_notice`); a Director session has no
+  // display-ack evidence at all, so only stall reports remain.
+  const actions = evaluateWatchdog({ now, runs, notices, panes, activeVerificationRunIds })
+    .filter(action => deps.directorSession !== true || action.kind === "stalled");
+  for (const action of actions) {
     const live = activeState();
     if (!live) return;
     try {
@@ -222,6 +243,7 @@ export async function executeHostWatchdogPass(deps: {
 
 export interface HostIdleCheckWorkspaceLike {
   readonly runtime: Pick<AgenticWorkflowRuntime, "watchdogSnapshot"> & {
+    autoParkPass?: AgenticWorkflowRuntime["autoParkPass"];
     readonly ports: { readonly panes: Pick<AgenticRuntimePorts["panes"], "getManifest"> };
   };
 }
@@ -259,6 +281,9 @@ export async function executeHostIdleCheck(deps: {
   };
   const initial = activeState();
   if (!initial) return;
+  // Director session (manifest v3, which activation already matched to the host layout): there is no Conversation pane to
+  // wake, so no idle notice is written; a stuck run reaches the Director through the watchdog stall report and the mailbox.
+  if (initial.manifest.schemaVersion === 3) return;
   const now = deps.now ?? Date.now();
   const runs = await initial.workspace.runtime.watchdogSnapshot(initial.manifest.conversationSessionId);
   const liveEpisodes = new Set(runs.filter(run => run.live).map(episodeKeyOf));
@@ -267,7 +292,7 @@ export async function executeHostIdleCheck(deps: {
   const beforeManifest = activeState();
   if (!beforeManifest) return;
   const current = SessionManifestSchema.parse(unwrap(await beforeManifest.workspace.runtime.ports.panes.getManifest()));
-  if (!activeState()) return;
+  if (!activeState() || current.schemaVersion === 3) return;
   const panes = await Promise.all(current.panes.filter(pane => pane.role !== "conversation").map(async pane => ({
     role: pane.role,
     paneId: pane.paneId,
@@ -640,6 +665,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   await toolUsage.recoverInterrupted();
   const taskLogPane = new TaskLogPane({ directory: configuration.directory, repositoryPath: configuration.repositoryPath,
     sessionId: configuration.sessionId, logPath: activityLog.path, herdr });
+  // Director layout: the progress pane is reconciled on activation and on every watchdog pass. A failure is recorded once per
+  // failing episode (not every pass); the pane is a viewer only and never gates readiness or work.
+  let progressPaneFailing = false;
+  const ensureProgressPane = async (host: AgenticWorkspaceHandle): Promise<void> => {
+    const reconciled = await ensureDirectorProgressPane(host.runtime.ports.panes, async entry => {
+      if (!progressPaneFailing) await activityLog.record({ ...entry, role: "runtime" });
+    });
+    progressPaneFailing = !reconciled;
+  };
   const roleTokens = new Map<string, AgentRole>();
   const launch: Record<string, RoleLaunchDescriptor> = {};
   /** H1: per prepared role launch with Gateway registrations, what its provider process must prove reachable. */
@@ -658,6 +692,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const publicKey = await readFile(publicPath, "utf8");
   const promptAssets = await import("@bflow/pane-manager");
   const platformRoles = configuration.platform?.roles ?? [];
+  /** ADR 0009: a Director host has no Conversation/Coordinator pane; activation refuses any manifest of the other version. */
+  const directorLayout = configuration.layout === "director";
   const providerForRole = (role: AgentRole): AgentProviderId => platformRoles.find(option => option.role === role)?.provider ?? "claude";
   const hookRunners = new Map<string, string>();
   // Bind short paths to the full host directory (repository + complete session ID).
@@ -674,7 +710,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   } catch {
     useShortHook = false;
   }
-  for (const role of roles) {
+  // Director layout: no token, hook or launch descriptor (and no original prompt) for the replaced Conversation/Coordinator roles.
+  for (const role of hostRolesFor(configuration.layout, roles)) {
     const path = join(configuration.directory, role + ".json");
     const provider: AgentProviderId = platformRoles.find(option => option.role === role)?.provider ?? "claude";
     const hookRunnerPath = useShortHook
@@ -920,7 +957,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   const verification = new HostVerification(() => requireWorkspace().runtime, () => requireWorkspace().runtime.ports.artifactStore, receipts, testRunners, rtkUsageIntegration,
     { scope: effectiveRegressionScope(configuration.policy, true), index: impactIndex }, mutationChecks,
     { suites: appChecks, leaseDirectory: join(configuration.directory, "app-checks") }, hostReviewChecks);
-  const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration);
+  const development = new HostDevelopment(() => requireWorkspace().runtime, testRunners, rtkUsageIntegration, context => verification.candidateEvidenceForDeveloper(context));
   const activePolicyMeasurements = new Set<string>();
   const activeHostVerifications = new Map<string, number>();
   const withActiveHostVerification = async <T>(runId: string | undefined, action: () => Promise<T>): Promise<T> => {
@@ -972,6 +1009,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return principal("conversation", pane.paneId);
   };
   const webChat = new HostChat({directory:join(configuration.directory,"web-chat"),projectId:webProjectId,hostSessionId:configuration.sessionId,
+    // R-B2-7: a Director session has no Conversation pane to chat with; the Web reports chat_adapter_unavailable.
+    unavailable: () => directorLayout,
     session: async () => {
       const b=await chatBinding(), activeManifest=requireManifest(), native=nativeSessions.get(b.paneId);
       const live=record(record(record(JSON.parse(await herdr(["agent","get",b.paneId]))).result).agent);
@@ -1214,9 +1253,11 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const accepted = SessionManifestSchema.parse(input);
     attemptedManifest = accepted;
     if (accepted.sessionId !== configuration.sessionId || accepted.workspaceRoot !== configuration.repositoryPath || accepted.status !== "up") throw new Error("Foreign or unready session manifest");
+    assertManifestLayout(accepted, configuration.layout);
     if (workspace) {
       if (quiesced) throw new Error("Host is quiesced; reconcile and restart after shutdown");
       await taskLogPane.ensure(accepted.herdrWorkspaceId);
+      if (directorLayout) await ensureProgressPane(workspace);
       return null;
     }
     if (preparation || quiesced || closing) throw new Error("Host lifecycle transition prevents activation");
@@ -1234,6 +1275,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const hostChecks = defaultHostChecks(configuration.policy);
     workspace = await openAgenticWorkspace({ storageDirectory: resolve(configuration.directory, "../../agentic"), repositoryPath: configuration.repositoryPath, sessionId: configuration.sessionId, herdrBinary: binary,
       ...(configuration.manifestDirectory ? { manifestDirectory: configuration.manifestDirectory } : {}),
+      ...(configuration.layout ? { layout: configuration.layout } : {}),
+      ...(directorLayout ? {
+        defaultAgentKind: directorDefaultAgentKind(platformRoles),
+        ...(configuration.progressCommand ? { progressCommand: configuration.progressCommand } : {}),
+        // R-B2-5: every outbound for the logical Coordinator goes to the Director mailbox. The endpoint is built once, below.
+        director: { deliver: message => directorEndpoint.deliverRuntimeMessage(message),
+          present: async () => (await directorEndpoint.presence()) !== "absent",
+          upsertIssue: async input => { await directorEndpoint.upsertIssue(input); } }
+      } : {}),
       ...(platformSession ? { developerLaunches: {
         allocate: async request => {
           await readExecutionResolution?.();
@@ -1282,8 +1332,15 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       validateTaskCommands: (specification, strategy, ownedPaths) => verification.assertTaskSupported(specification, strategy, ownedPaths),
       authenticateMessage: authenticateNativeHerdrMessage,
       // Runtime outbox messages reach Conversation in-process; the model learns of them only through hook notices.
-      onConversationNotice: async message => { await receipts.appendConversationNotice(message); },
+      // Director session: the rendered notice is also copied into the Director mailbox for the user audience (R-B2-6).
+      onConversationNotice: message => recordConversationNotice({
+        appendNotice: notice => receipts.appendConversationNoticeReceipt(notice),
+        mirror: directorLayout ? (notice, rendered) => directorEndpoint.mirrorUserNotice(notice, rendered) : undefined,
+        log: async entry => { await activityLog.record({ ...entry, role: "runtime" }); }
+      }, message),
       authenticateResult: async (result, handle, message) => await authenticateNativeHerdrMessage(message) && result.requestId === handle.requestId && result.executionId === handle.executionId,
+      authenticateStoredGate: result => verification.authenticateGate(result),
+      authenticateStoredEvidence: result => verification.authenticateEvidence(result),
       authenticateEvidence: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateEvidence(result),
       authenticateGateResult: async (result, message) => await authenticateNativeHerdrMessage(message) && verification.authenticateGate(result),
       projectApprovalRequired: () => configuration.policy?.sdd.approvalRequired === true,
@@ -1373,9 +1430,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     for (const commandId of await workspace.runtime.recoverUnqueuedWebCancellations(webStore))
       process.stderr.write(`Bflow web cancellation ${commandId}: not enqueued before daemon restart; no command replayed\n`);
     for (const turn of await receipts.recoverAgyNativeTurns()) queueAgyNativePrompt(turn);
-    await workspace.runtime.resumeRecoverableRuns();
+    await workspace.runtime.resumeRecoverableRuns(directorLayout ? { enabled: configuration.policy?.issueQueue?.autoPark ?? true, maxAutoResumesBeforePark: configuration.policy?.issueQueue?.maxAutoResumesBeforePark ?? 3 } : undefined);
     manifest = accepted;
     await taskLogPane.ensure(accepted.herdrWorkspaceId);
+    if (directorLayout) await ensureProgressPane(workspace);
     if (taskLogPane.status().error) await activityLog.record({ kind: "error", role: "runtime", action: "task_log_pane_unavailable", outcome: "Pane reconcile failed; see host_status diagnostic." });
     if (verificationSandbox.status === "unsupported" && (testRunners.profiles.length || behavioralCommands.length)) {
       const id = `verification-sandbox-${configuration.sessionId}`;
@@ -1389,7 +1447,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     return null;
   };
   const deliveredMessageIds = new Set<string>();
-  let humanHookProvenance: HumanHookProvenance | undefined;
+  let humanHookProvenance: HumanPromptHookProvenance | undefined;
   let userQueue: Promise<unknown> = Promise.resolve();
   const preflightRoleCapabilities = async (binding: PaneBinding, required: readonly string[]): Promise<void> => {
     await verifyDispatchPinnedSkills(platformSession, configuration.platform, binding);
@@ -1658,6 +1716,104 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       return json({ invocationId: expectedInvocationId, acknowledged: true, meaning: "Exact result evidence was acknowledged into this role's current task context; this is not semantic use or task acceptance." });
     });
   };
+  /** Coordinator orchestration guards that need no pane binding; shared by Coordinator role_call and the Director endpoint. */
+  const invokeCoordinatorTool = async (name: string, parameters: Record<string, unknown>,
+    principal: { role: AgentRole; principal?: "director" } = { role: "coordinator" }) => {
+    const host = requireWorkspace();
+    if (quiesced && !QUIESCED_RECEIPT_DRAIN_OPERATIONS.includes(name)) throw new Error("Host is quiesced; new work is disabled while existing receipts can drain");
+    // A Director call on a v2 Conversation run is refused before any host-side proposal handling can touch that run (R-B2-12).
+    if (principal.principal === "director" && !DIRECTOR_LEGACY_RUN_TOOLS.includes(name)) {
+      const runId = parameters.runId ?? parameters.run_id;
+      if (typeof runId === "string" && runId.trim() !== "") await host.runtime.assertDirectorRunWritable(runId);
+    }
+    if (name === "propose_workflow") {
+      if (configuration.policy?.verification.maxIterations !== undefined) {
+        if (parameters.maxIterations !== undefined && parameters.maxIterations !== configuration.policy.verification.maxIterations) throw new Error("Verification limit is fixed by the project owner policy");
+        parameters.maxIterations = configuration.policy.verification.maxIterations;
+      }
+      // Lazily retries an unsupported detection, so dependencies installed since the host started are picked up without a restart.
+      await testRunners.refresh();
+      const spec = record(normalizeSpecificationOptionals(parameters.specification)), configuredMethods = verification.configuredMethods();
+      const normalizedDefinition = parameters.definition !== undefined ? normalizeWorkflowDefinitionOptionals(parameters.definition) : undefined;
+      const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
+      const currentRun = runId !== undefined ? await host.runtime.inspect(runId).then(record).catch(() => undefined) : undefined;
+      const delegatedSddLevel = currentRun && typeof record(currentRun.delegation).sddLevel === "string" ? String(record(currentRun.delegation).sddLevel) : undefined;
+      try {
+        // Schema and conditional-TDD assessment errors name the exact fields and stay with the Coordinator, which can correct them.
+        let strategy: unknown;
+        guardWorkflowProposal({ phase: "specification", specification: spec, configuredMethods, check: () => {
+          SpecificationSchema.parse(spec);
+          if (delegatedSddLevel === "full" && spec.level !== "full") {
+            throw new Error("Planning weakens the delegated full SDD specification level; keep specification.level='full' and the full SDD assessment");
+          }
+          if (normalizedDefinition !== undefined) WorkflowDefinitionSchema.parse(normalizedDefinition);
+          strategy = host.runtime.ports.policies.strategy.resolve(spec);
+        } });
+        guardWorkflowProposal({ phase: "policy", specification: spec, configuredMethods, check: () => {
+          if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
+        } });
+        guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
+          verification.assertSupported(spec, strategy, normalizedDefinition) });
+      } catch (error) {
+        // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
+        // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.
+        if (error instanceof WorkflowProposalRejected && runId !== undefined) {
+          try { await host.runtime.recordWorkflowRejected(runId, error.rejection); }
+          catch (reportError) { process.stderr.write(`Bflow could not report workflow rejection: ${redactString(String(reportError))}\n`); }
+        }
+        throw error;
+      }
+    }
+    return host.tools.invoke(name, parameters, principal);
+  };
+  /** Planning guidance needs no pane binding; shared by the Coordinator role tool and the Director endpoint. */
+  const readPlanningReference = async (parameters: Record<string, unknown>) => {
+    const query = PlanningReferenceInputSchema.parse(parameters);
+    await testRunners.refresh();
+    return planningReferenceView(query, {
+      runnerInfo: describeTestRunners(testRunners),
+      verificationSandbox,
+      behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
+        ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" }))
+    });
+  };
+  const directorEndpoint = new DirectorEndpoint({
+    directory: join(configuration.directory, "director"),
+    repositoryRoot: configuration.repositoryPath,
+    feed: webFeed,
+    inspect: () => requireWorkspace().runtime.inspect(),
+    coordinatorGuide: async () => {
+      const guide = record(JsonValueSchema.parse(await promptAssets.readBuiltinRolePrompt("coordinator")));
+      return { source: textField(guide.source), prompt: textField(guide.prompt) };
+    },
+    work: {
+      start: async ({ key, ...delegation }) => {
+        // R-B2-4: a Director session opens the run in Runtime itself; the Conversation bridge remains for v2 sessions only.
+        if (directorLayout) {
+          const conversationModule: { buildDelegationRequest: DelegationBuilder } = await import("@bflow/conversation") as never;
+          return startDirectorWork({ manifest: requireManifest, build: conversationModule.buildDelegationRequest,
+            admitDirectorWork: request => requireWorkspace().runtime.admitDirectorWork(request),
+            log: async entry => { await activityLog.record({ ...entry, role: "coordinator" }); } }, { key, ...delegation });
+        }
+        let outcome: Awaited<ReturnType<ReturnType<typeof requireWorkspace>["conversation"]["delegateDirectorWork"]>>;
+        try {
+          outcome = await requireWorkspace().conversation.delegateDirectorWork({ key, ...delegation });
+        } catch (error) {
+          await activityLog.record({ kind: "error", role: "coordinator", action: "director:start_work:failed", outcome: error instanceof Error ? error.name : "HostToolError" });
+          throw error;
+        }
+        if (!outcome.ok) {
+          await activityLog.record({ kind: "error", role: "coordinator", action: "director:start_work:failed", outcome: outcome.error.code });
+          throw new Error(`start_work refused: ${redactString(outcome.error.message)}`);
+        }
+        await activityLog.record({ kind: "tool", role: "coordinator", action: "director:start_work:completed" });
+        return { runId: outcome.value.runId, correlationId: outcome.value.correlationId, status: "queued" };
+      }
+    },
+    // Director-token calls only: every Coordinator tool runs under the Director principal (R-B2-12 legacy-run guard).
+    coordinator: directorCoordinatorPort({ invoke: invokeCoordinatorTool, planningReference: readPlanningReference,
+      log: async entry => { await activityLog.record({ ...entry, role: "coordinator" }); } })
+  });
   const roleCall = async (role: AgentRole, input: unknown) => {
     const args = record(input); const name = textField(args.name); const parameters = record(JsonValueSchema.parse(args.arguments ?? {}));
     const binding = await principal(role, textField(args.paneId));
@@ -1786,14 +1942,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     }
     if (name === "planning_reference") {
       if (role !== "coordinator") throw new Error("Only Coordinator reads host planning guidance");
-      const query = PlanningReferenceInputSchema.parse(parameters);
-      await testRunners.refresh();
-      return planningReferenceView(query, {
-        runnerInfo: describeTestRunners(testRunners),
-        verificationSandbox,
-        behavioralCommands: behavioralCommands.map(({ id, command, method, levels, testNames, testPaths, reporter }) =>
-          ({ id, command, method, levels, testNames, testPaths, reporter: reporter ?? "node_tap" }))
-      });
+      return readPlanningReference(parameters);
     }
     if (name === "host_status") return json({ active: !!workspace, quiesced, taskLogPane: taskLogPane.status(), ...schedulerStatusReport({ timerAlive: schedulerTimerAlive, quiesced, workspaceOpen: !!workspace, tickInFlight: !!scheduler, lastTickAt: schedulerLastTickAt, error: schedulerError }), inboundError: inboundError ?? null, conversationDeliveryFailures: (await receipts.conversationDeliveryFailures()).slice(-5) });
     if (name === "read_role_pane") {
@@ -1964,11 +2113,10 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       const reworkArtifacts = reworkDossier
         ? [reworkDossier.artifactRef, ...reworkDossier.findingResolutions.map(item => item.evidence.artifactRef)]
         : [];
-      const result = AgentResultSchema.parse({ requestId: handle.requestId, attemptId: handle.attemptId, runId: handle.runId, taskId: handle.taskId, executionId: handle.executionId,
-        status: submissionStatus, verification: { status: "verified", correlation: proof.receipt.correlation, evidence: "Native Herdr host checked the actual assignment/session binding; independent acceptance is pending" },
-        ...(reworkDossier ? { output: json({ reworkResolution: reworkDossier }) } : {}),
-        ...(submissionStatus === "blocked" ? { blockage: { code: "rework_finding_blocked", message: blockedFindings[0]?.blockerReason ?? blockedFindings[0]?.repairSummary ?? "Rework finding blocked", retryable: false } } : {}),
-        artifactProposals: [], retryable: false, startedAt: handle.acceptedAt, completedAt: new Date().toISOString() });
+      const result = nativeImplementationResult({handle,receipt:proof.receipt,status:submissionStatus,
+        ...(reworkDossier ? {output:json({reworkResolution:reworkDossier})} : {}),
+        ...(submissionStatus === "blocked" ? {blocked:{message:blockedFindings[0]?.blockerReason ?? blockedFindings[0]?.repairSummary ?? "Rework finding blocked or disputed",since:reworkDossier!.submittedAt}} : {}),
+        completedAt:new Date().toISOString()});
       return nativeDeliver(envelope("implementation.submitted", result, reworkArtifacts), `implementation:${handle.requestId}`);
     }
     const envelope = (source: RoleMessage, type: RoleMessage["type"], payload: unknown, artifacts: RoleMessage["artifact_references"] = []) => RoleMessageSchema.parse({ schema_version: 2,
@@ -2067,45 +2215,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
         () => runnerBindings.run(binding, () => verification.alternativeEvidence(binding, parameters)));
       return nativeDeliver(envelope(RoleMessageSchema.parse(completed.assignment), "verification.result", completed.result, completed.result.evidenceArtifacts), `alternative:${textField(parameters.observationId)}`);
     }
-    if (name === "propose_workflow") {
-      if (configuration.policy?.verification.maxIterations !== undefined) {
-        if (parameters.maxIterations !== undefined && parameters.maxIterations !== configuration.policy.verification.maxIterations) throw new Error("Verification limit is fixed by the project owner policy");
-        parameters.maxIterations = configuration.policy.verification.maxIterations;
-      }
-      // Lazily retries an unsupported detection, so dependencies installed since the host started are picked up without a restart.
-      await testRunners.refresh();
-      const spec = record(normalizeSpecificationOptionals(parameters.specification)), configuredMethods = verification.configuredMethods();
-      const normalizedDefinition = parameters.definition !== undefined ? normalizeWorkflowDefinitionOptionals(parameters.definition) : undefined;
-      const runId = typeof parameters.runId === "string" ? parameters.runId : undefined;
-      const currentRun = runId !== undefined ? await host.runtime.inspect(runId).then(record).catch(() => undefined) : undefined;
-      const delegatedSddLevel = currentRun && typeof record(currentRun.delegation).sddLevel === "string" ? String(record(currentRun.delegation).sddLevel) : undefined;
-      try {
-        // Schema and conditional-TDD assessment errors name the exact fields and stay with the Coordinator, which can correct them.
-        let strategy: unknown;
-        guardWorkflowProposal({ phase: "specification", specification: spec, configuredMethods, check: () => {
-          SpecificationSchema.parse(spec);
-          if (delegatedSddLevel === "full" && spec.level !== "full") {
-            throw new Error("Planning weakens the delegated full SDD specification level; keep specification.level='full' and the full SDD assessment");
-          }
-          if (normalizedDefinition !== undefined) WorkflowDefinitionSchema.parse(normalizedDefinition);
-          strategy = host.runtime.ports.policies.strategy.resolve(spec);
-        } });
-        guardWorkflowProposal({ phase: "policy", specification: spec, configuredMethods, check: () => {
-          if (configuration.policy?.sdd.minimumLevel === "full" && spec.level !== "full") throw new Error("Project policy requires a full specification");
-        } });
-        guardWorkflowProposal({ phase: "verification", specification: spec, configuredMethods, check: () =>
-          verification.assertSupported(spec, strategy, normalizedDefinition) });
-      } catch (error) {
-        // Outside any journal transaction: Conversation learns why, and the Coordinator receives the same structured reason as its tool error.
-        // Coordinator-fixable refusals stay with the Coordinator (structured tool error only); user notices are for the rest.
-        if (error instanceof WorkflowProposalRejected && runId !== undefined) {
-          try { await host.runtime.recordWorkflowRejected(runId, error.rejection); }
-          catch (reportError) { process.stderr.write(`Bflow could not report workflow rejection: ${redactString(String(reportError))}\n`); }
-        }
-        throw error;
-      }
-    }
-    return host.tools.invoke(name, parameters, { role });
+    return invokeCoordinatorTool(name, parameters, { role });
   };
   /** Best effort: a failure to report is logged, never thrown, so it cannot mask the original error. */
   /** Returns whether Runtime recorded the failure in its run; false means the caller must write a notice receipt itself. */
@@ -2165,6 +2275,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
           throw new Error("Interaction credential/proof scope mismatch");
         const work = userQueue.catch(() => undefined).then(() => webCommands.execute(input.command, input.principal));
         userQueue = work; return work;
+      }
+      if (isDirectorCredential(token, configuration.token)) {
+        const call = parseDirectorCredentialCall(method, params);
+        try { return await directorEndpoint.call(token, call.name, call.arguments ?? {}, operation?.signal); }
+        catch (error) {
+          if (error instanceof DirectorAuthError || (error instanceof Error && error.message.includes(token))) throw new Error("Director authentication failed");
+          throw error;
+        }
       }
       const role = roleTokens.get(token); if (!role) throw new Error("Host authentication failed");
       if (method === "provider_tools_list") {
@@ -2500,6 +2618,26 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       throw new Error("Role cannot call host lifecycle methods");
     }
     switch (method) {
+      case "director_register": return directorEndpoint.register(DIRECTOR_OWNER_METHODS.director_register.parse(params));
+      case "director_revoke": DIRECTOR_OWNER_METHODS.director_revoke.parse(params); await directorEndpoint.revoke(); return { revoked: true };
+      case "director_progress": DIRECTOR_OWNER_METHODS.director_progress.parse(params); return directorEndpoint.progress();
+      case "director_hook_note": return directorEndpoint.noteHookPrompt(DIRECTOR_OWNER_METHODS.director_hook_note.parse(params));
+      case "director_issues": return directorEndpoint.listIssues(DIRECTOR_OWNER_METHODS.director_issues.parse(params).status);
+      case "director_issue": return directorEndpoint.inspectIssue(DIRECTOR_OWNER_METHODS.director_issue.parse(params).issueId);
+      case "director_mailbox": return directorEndpoint.readMailbox(DIRECTOR_OWNER_METHODS.director_mailbox.parse(params));
+      // D-DIR-02: a human decision typed as `bflow approve <#n>`. Owner token only; Director and role tokens never reach this switch.
+      case "human_decision_cli": {
+        const work = userQueue.catch(() => undefined).then(() => handleHumanDecisionCli(params, {
+          conversationSessionId: requireManifest().conversationSessionId, now: () => new Date().toISOString(),
+          aliases: () => receipts.noticeAliases(),
+          pendingApprovals: query => requireWorkspace().runtime.pendingApprovals(query),
+          inspect: () => requireWorkspace().runtime.inspect(),
+          existingDecision: approvalId => receipts.humanDecision(approvalId),
+          recordHuman: (decision, provenance) => receipts.recordHuman(decision, provenance),
+          receiveOwnerDecision: (decision, record) => requireWorkspace().conversation.receiveOwnerDecision(decision, record) }));
+        userQueue = work; return work;
+      }
+      case "director_issue_status": { const input = DIRECTOR_OWNER_METHODS.director_issue_status.parse(params); return directorEndpoint.setIssueStatus(input.issueId, input.status); }
       case "interaction_register": {
         const input = OwnerKeySchema.parse(params), principalId = `local-user-${process.getuid?.() ?? "local"}`;
         if (input.principalId !== principalId) throw new Error("Owner registration must use host-local principal");
@@ -2776,7 +2914,8 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       if (work === "prompts") return;
       // Each unsettled Stop is settled on its own: one bad item never blocks the others or the generation.
       let retryNeeded = false;
-      for (const stopped of await receipts.pendingCoordinatorStops()) {
+      // A Director session has no Coordinator pane, hence no Coordinator Stop receipts to settle.
+      for (const stopped of directorLayout ? [] : await receipts.pendingCoordinatorStops()) {
         const key = digest(["coordinator", stopped.binding.paneId, stopped.message.message_id]);
         try { await settleCoordinatorStop(stopped, key); }
         catch (error) {
@@ -2846,7 +2985,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
   };
   const timer = setInterval(() => {
     if (!workspace || quiesced || closing || scheduler) return;
-    if(!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
+    if(!directorLayout&&!chatPump){chatPump=webChat.pump().catch(error=>{process.stderr.write(`Bflow chat: ${redactString(String(error)).slice(0,500)}\n`);}).finally(()=>{chatPump=undefined;});}
     const task = (async () => { await pumpProviderFailures(); return workspace!.runtime.tick(); })(); scheduler = task;
     void task.then(() => { schedulerError = undefined; }, error => { schedulerError = redactString(String(error)); process.stderr.write(`Bflow scheduler: ${schedulerError}\n`); }).finally(() => { schedulerLastTickAt = new Date().toISOString(); if (scheduler === task) scheduler = undefined; });
   }, 500);
@@ -2880,8 +3019,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
       process.stderr.write(`Bflow inbox delivery failed for ${messageIds.length} notice(s): ${redactString(reason)}\n`);
     },
     now: () => Date.now() };
+  // Director session: no Conversation pane to nudge, so the notifier never runs (R-B2-6).
   const inboxTimer = setInterval(() => {
-    if (!workspace || quiesced || closing || remindingInbox) return;
+    if (directorLayout || !workspace || quiesced || closing || remindingInbox) return;
     remindingInbox = true;
     void inbox.tick(inboxPorts).catch(error => { process.stderr.write(`Bflow inbox: ${redactString(String(error))}\n`); })
       .finally(() => { remindingInbox = false; });
@@ -2897,7 +3037,9 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     inbox,
     activeHostVerifications,
     watchdogReported,
-    observeAgent
+    observeAgent,
+    directorSession: directorLayout,
+    ...(configuration.policy?.issueQueue ? { issueQueue: configuration.policy.issueQueue } : {})
   });
   /**
    * Surfaces native deliveries whose acknowledgement was never observed, once per operation, and never resends them.
@@ -2956,6 +3098,7 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     const task = reconcileRuntimeDeliveries()
       .catch(error => { process.stderr.write(`Bflow delivery reconcile: ${redactString(String(error))}\n`); })
       .then(() => runWatchdog())
+      .then(async () => { if (directorLayout && watchdogReady() && workspace) await ensureProgressPane(workspace); })
       .catch(error => { process.stderr.write(`Bflow watchdog: ${redactString(String(error))}\n`); })
       .finally(() => { if (watchdogTask === task) watchdogTask = undefined; });
     watchdogTask = task;

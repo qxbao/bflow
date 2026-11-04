@@ -87,7 +87,7 @@ export type {
 // P19: durable adaptive Agentic SDLC orchestration through the frozen v2 contracts.
 export { AgenticWorkflowRuntime } from "./agentic/runtime.js";
 export { loadAgenticPolicies } from "./agentic/ports.js";
-export type { AgenticRuntimePorts, AgenticPolicies, AgenticCompositionOptions, PanePolicy } from "./agentic/ports.js";
+export type { AgenticRuntimePorts, AgenticPolicies, AgenticCompositionOptions, DirectorRuntimePort, PanePolicy } from "./agentic/ports.js";
 export { CoordinatorTools, COORDINATOR_TOOLS, COORDINATOR_ROLE_PROFILE } from "./agentic/tools.js";
 export { createAgenticConversationHost } from "./agentic/conversation.js";
 export type { AgenticConversationHost } from "./agentic/conversation.js";
@@ -183,8 +183,17 @@ export { buildSosProviderArguments, newSosAgentName, resolveSosRoleConfig, spawn
   type SpawnedSosAgentResult } from "./agentic/sos-agent.js";
 
 export { openUserInteractionClient, interactionProjectId } from "./interaction/client.js";
-export { registerUserInteractionIssuer } from "./agentic/host-controller.js";
+export { registerUserInteractionIssuer, callDirectorOwnerHost, callDirectorTool, callHumanDecisionHost } from "./agentic/host-controller.js";
+export { HumanDecisionCliValueSchema, type HumanDecisionCliValue } from "./agentic/human-decision-cli.js";
 
 // Opt-in, Runtime-owned data snapshot verification. No daemon/CLI configuration adapter.
 export { DataVerificationHost, specificationContent as dataSpecificationContent } from "./data/host.js";
 export { digest as dataVerificationDigest, contractDigest as dataContractDigest } from "./data/contract.js";
+
+// Director agent facade and state (ADR 0009).
+export * from "./director/index.js";
+// Director-mode host composition pieces (ADR 0009, slice B2a): the same functions the host wires, so a fake-runner E2E can
+// compose a Director session without Herdr. They grant no authority on their own; the host decides what to wire.
+export { startDirectorWork, recordConversationNotice, directorCoordinatorPort, DIRECTOR_TOOL_PRINCIPAL, type DirectorStartWorkDeps, type DirectorNoticeMirrorDeps,
+  type DirectorCoordinatorPortDeps } from "./agentic/host-director-mode.js";
+export { HostReceiptJournal } from "./agentic/host-receipts.js";

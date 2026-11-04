@@ -94,7 +94,8 @@ async function fixture(runs: RunRecord[] = [run("run-1", "specifying")]) {
     outbound: async () => (await f.runtime.inspect() as unknown as { outbound: Outbound[] }).outbound,
     resumeWakes: async () => (await f.outbound()).filter(out => (out.message.payload as { kind?: string }).kind === "resume_run"),
     exhaustedNotices: async () => (await f.outbound() as (Outbound & { message: { payload: { headline?: string } } })[]).filter(out => out.message.recipient.role === "conversation" &&
-      /Automatic resume stopped after 3 attempts/.test(String((out.message.payload as { headline?: string }).headline))),
+      (out.message.payload as { kind?: string }).kind === "workflow_blocked" &&
+      /Runtime đã dừng tự tiếp tục sau 3 lần/.test(String((out.message.payload as { headline?: string }).headline))),
     coordinator: () => panes.bindings.find(pane => pane.role === "coordinator")!,
     /** Deliver a message to the Coordinator pane and report that its turn stopped without a workflow next action. */
     stopWithoutAction: async (message: RoleMessage) => {
@@ -401,7 +402,7 @@ describe("bounded automatic resume", () => {
     expect(exhausted).toMatchObject({ status: "escalated", pendingAction: { recovery: "manual", resumeAttempts: 3, state: "pending" } });
     expect(await f.exhaustedNotices()).toHaveLength(1);
     expect(await f.resumeWakes()).toHaveLength(3);
-    expect(String((await f.exhaustedNotices())[0]!.message.payload.headline)).toContain("Type `tiếp tục run-1` to resume it (3 of 3 user resumes left)");
+    expect(String((await f.exhaustedNotices())[0]!.message.payload.headline)).toContain("Gõ `tiếp tục run-1` để thử lại (còn 3/3 lần do người dùng yêu cầu)");
   });
 
   it("lets the user resume after the automatic budget is spent, re-arms automatic resume, bounds user resumes, and keeps both counters across restart", async () => {
@@ -433,7 +434,7 @@ describe("bounded automatic resume", () => {
       expect(exhausted.pendingAction).toMatchObject({ recovery: "manual", resumeAttempts: 3, manualResumeAttempts: round });
       const notices = await f.exhaustedNotices();
       expect(notices).toHaveLength(round + 1); // one per spent automatic budget
-      expect(String(notices.at(-1)!.message.payload.headline)).toContain(round < 3 ? `(${3 - round} of 3 user resumes left)` : "All 3 user resumes are used");
+      expect(String(notices.at(-1)!.message.payload.headline)).toContain(round < 3 ? `(còn ${3 - round}/3 lần do người dùng yêu cầu)` : "đã dùng hết 3 lần do người dùng yêu cầu");
     }
     f.restart();
     await expect(f.runtime.resumeBlockedRun("run-1", exhausted.pendingAction!.actionId)).rejects.toThrow(/Explicit resume budget is exhausted/);

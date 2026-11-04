@@ -20,7 +20,7 @@ it('CLI public projection and private expected digest agree with the reader afte
  const profile=join(top,'native/profiles/codex--personal');const home=join(profile,'home/.codex');await mkdir(home,{recursive:true});
  await writeFile(join(profile,'profile.env'),'AI_ISOLATOR_TOOL=codex\nAI_ISOLATOR_PROFILE=personal\nAI_ISOLATOR_CREATED_AT=2026-11-02\n');
  const configFile=join(home,'config.toml');await writeFile(configFile,'model = "gpt-6-luna"\n');await ensureCodexWorkspaceTrust(root,configFile);
- const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);config.environment.roles=config.environment.roles.filter(r=>r.role==='conversation'||r.role==='coordinator');
+ const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);config.environment.roles=config.environment.roles.filter(r=>r.role==='planner'||r.role==='architect');
  for(const role of config.environment.roles){role.cli='codex';role['profile-name']='personal';role.model='gpt-6-luna';}
  await writeFile(join(root,'.bflow/config.yml'),renderEnvironmentConfigYaml(config));git(['add','.bflow/config.yml','.bflow/.gitignore']);git(['commit','--quiet','-m','Configure roles']);
  const input={repository,config,env:process.env};const before=await loadHostExecutionResolution(input);

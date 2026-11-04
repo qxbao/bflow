@@ -9,15 +9,21 @@ Lệnh / Commands:
   init            Khởi tạo cấu hình kho mã bflow và quy trình mặc định
   config-migrate  Chuyển đổi tệp cấu hình cũ sang .bflow/config.yml
   setup           Lập kế hoạch và cài đặt môi trường máy cùng các thành phần nền tảng
+  director start  Director: đăng ký phiên Director và in token (--provider, --json)
+  director call   Director: gọi một tool qua BFLOW_DIRECTOR_TOKEN (bflow director call <tool> [argsJson])
+  director mcp    Director: máy chủ MCP qua stdio cho CLI của nhà cung cấp
+  director hook   Director: hook ghi tin nhắn người dùng (bflow director hook claude|codex)
+  progress        Director: xem tiến độ (bflow progress [--follow] [--json])
+  queue           Director: hàng đợi lỗi (bflow queue list|show|retry|dismiss)
   web             Mở web localhost: bflow web [--port N] [--no-open]
-  up              Khởi động/đồng bộ môi trường làm việc của kho mã
+  up              Dựng hạ tầng Bflow (daemon, Herdr, vai chuyên trách, tab tiến trình)
   down            Tạo checkpoint và dừng môi trường làm việc của kho mã
-  attach          Kết nối vào khung trò chuyện (Conversation pane) của kho mã
+  attach          Mở tab tiến trình của phiên Bflow
   doctor          Chẩn đoán môi trường, công cụ phụ thuộc và phiên làm việc
   recover         Khôi phục khóa vòng đời cũ mà không xóa trạng thái dự án
   run             Bắt đầu một lượt chạy quy trình mới từ yêu cầu đầu vào
   status          Hiển thị trạng thái môi trường; truyền mã lượt chạy hoặc bộ lọc để tra cứu lượt chạy
-  approve         Ghi nhận quyết định phê duyệt, từ chối hoặc yêu cầu làm lại của con người cho một tác vụ
+  approve         Ghi quyết định của bạn cho thẻ #n đang chờ (bflow approve '#3'), hoặc cho một tác vụ
   resume          Tiếp tục một lượt chạy quy trình đang hoạt động hoặc đang chờ
   cancel          Hủy một lượt chạy quy trình hoặc tác vụ đang hoạt động
   iso             Chạy hồ sơ nhà cung cấp cô lập thông qua ai-isolator đi kèm
@@ -51,6 +57,7 @@ Ví dụ / Examples:
   bflow agent check codex
   bflow status
   bflow status run-123
+  bflow approve '#3'
   bflow approve qa --decision approved
   bflow resume run-123
   bflow cancel run-123 --reason "Requirements changed"
@@ -60,15 +67,20 @@ Chạy 'bflow help <command>' hoặc 'bflow <command> --help' để xem các tù
 const INIT_HELP = `Cách dùng: bflow init [options] (Usage: bflow init [options])
 
 Khởi tạo .bflow/config.yml tại thư mục gốc chuẩn của kho Git và đăng ký dịch vụ GitNexus của kho mã trên Gateway dùng chung. An toàn khi chạy lặp lại.
+Bộ preset tĩnh của CLI được chọn điền sẵn provider + model cho từng role; terminal tương tác sẽ hỏi chọn CLI (gợi ý CLI đã cài) khi tạo cấu hình mới.
+Thêm '.bflow/' vào <git-common-dir>/info/exclude (không sửa .gitignore của dự án); --remove gỡ đúng dòng Bflow đã thêm.
 
 Tùy chọn (Options):
   --dir <path>          Thư mục đích để khởi tạo (mặc định: thư mục hiện tại)
   --config <path>       Đường dẫn tệp cấu hình tùy chỉnh (mặc định: .bflow/config.yml)
   --name <name>         Tên dự án
-  --provider <kind>     Nhà cung cấp vai trò: claude, codex hoặc agy (mặc định: codex)
+  --provider <kind>     CLI chủ đạo và bộ preset model theo role: claude, codex hoặc agy (mặc định: codex)
+  --preset <kind>       Tên gọi khác của --provider
   --check               Kiểm tra chỉ đọc đối với .bflow/config.yml và mức sẵn sàng GitNexus của kho mã
   --remove              Gỡ đăng ký dịch vụ GitNexus của kho mã này khỏi Gateway dùng chung
   --no-gitnexus         Bỏ qua lập chỉ mục GitNexus và đăng ký dịch vụ trên Gateway
+  --no-director         Không ghi skill/MCP/hook Director vào kho mã nguồn
+  --commit-skills       Giữ skill Director để commit (không thêm khối git exclude)
   -f, --force           Ghi đè cấu hình hiện có bằng các giá trị mặc định mới
   -y, --yes             Tương đương --force, đồng thời chấp nhận giấy phép GitNexus PolyForm-Noncommercial không cần hỏi lại
   --accept-gitnexus-license Chấp nhận giấy phép GitNexus PolyForm-Noncommercial và tạo chỉ mục mà không ghi đè cấu hình hiện có
@@ -85,6 +97,7 @@ Ví dụ / Examples:
   bflow init --update
   bflow init --name my-project
   bflow init --provider claude
+  bflow init --update --preset codex
   bflow init --dir ./subproject --force`;
 
 const CONFIG_MIGRATE_HELP = `Cách dùng: bflow config-migrate [--json] [--debug] (Usage: bflow config-migrate [--json])
@@ -177,8 +190,19 @@ Ví dụ / Examples:
   bflow status --status waiting,blocked
   bflow status --limit 10`;
 
-const APPROVE_HELP = `Cách dùng: bflow approve <task-id> [options] (Usage: bflow approve <task-id> [options])
+const APPROVE_HELP = `Cách dùng: bflow approve '<#n>' [--reject | --changes <lý do> | --choice <n>] [--json]
+          bflow approve <task-id> [options] (Usage: bflow approve <task-id> [options])
 
+Thẻ đang chờ (#n trong Web/tiến trình):
+  Ghi quyết định của bạn cho thẻ #n của phiên Bflow đang chạy. Chỉ bạn gõ lệnh này hoặc dùng Web mới duyệt được; Director không thể duyệt.
+  Quote '#3' trong zsh/bash (dấu # không quote là chú thích). Cũng nhận 3 hoặc n3.
+  (mặc định)            Duyệt thẻ
+  --reject              Từ chối
+  --changes <lý do>     Yêu cầu sửa, kèm lý do (thẻ phê duyệt)
+  --choice <n>          Chọn phương án n (1..6) cho câu hỏi của agent
+  Chỉ chọn một trong --reject, --changes, --choice.
+
+Tác vụ (luồng cũ):
 Ghi nhận quyết định phê duyệt, từ chối hoặc yêu cầu sửa đổi của con người cho một tác vụ.
 
 Tham số (Arguments):
@@ -199,6 +223,10 @@ Tùy chọn (Options):
   -h, --help            Hiển thị trợ giúp cho lệnh approve
 
 Ví dụ / Examples:
+  bflow approve '#3'
+  bflow approve '#3' --changes "Thêm kiểm thử cho lỗi đăng nhập"
+  bflow approve '#4' --choice 2
+  bflow approve 5 --reject
   bflow approve qa
   bflow approve qa --run run-123 --decision approved
   bflow approve review --decision changes_requested --reason "Fix lint issues"
@@ -534,9 +562,9 @@ Examples:
 
 const HELP_MAP: Record<CliCommandName, string> = {
   docs: DOCS_HELP,
-  up: "Cách dùng: bflow up [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow up [--timeout <milliseconds>] [--json])\nKhởi động hoặc đồng bộ phiên làm việc chạy nền của kho mã này và chờ các vai trò bắt buộc sẵn sàng.",
+  up: "Cách dùng: bflow up [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow up [--timeout <milliseconds>] [--json])\nDựng hạ tầng Bflow (daemon, Herdr, vai chuyên trách, tab tiến trình). Không tạo phiên làm việc: mở CLI và chạy /bflow-start.",
   down: "Cách dùng: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json] [--debug] (Usage: bflow down [--yes] [--force] [--timeout <milliseconds>] [--json])\nTạo checkpoint cho công việc đang chạy và dừng an toàn chỉ phiên làm việc của kho mã này. --yes xác nhận dừng khi có công việc chưa an toàn. --force bao gồm xác nhận và dừng trực tiếp phiên làm việc thuộc sở hữu khi việc dọn dẹp pane bị kẹt. Cả hai chế độ đều yêu cầu rào chắn tắt Runtime và các checkpoint hợp lệ; trạng thái dự án và các worktree được giữ nguyên.",
-  attach: "Cách dùng: bflow attach [--json] [--debug] (Usage: bflow attach [--json])\nChuyển tiêu điểm vào khung Trò chuyện (Conversation) và kết nối vào phiên làm việc hiện có của kho mã. Hãy chạy bflow up trước.",
+  attach: "Cách dùng: bflow attach [--json] [--debug] (Usage: bflow attach [--json])\nMở tab tiến trình của phiên Bflow.",
   recover: "Cách dùng: bflow recover --yes [--json] [--debug] (Usage: bflow recover --yes [--json])\nHãy dừng các lệnh Bflow cũ trước. Chỉ chuyển đổi khóa vòng đời cũ đang trống; giữ nguyên trạng thái dự án, các tác nhân và worktree. Sau đó chạy bflow up hoặc bflow down --yes.",
   doctor: "Cách dùng: bflow doctor [--deep] [--json] [--debug] (Usage: bflow doctor [--deep] [--json])\nKiểm tra cấu hình, công cụ phụ thuộc, mức sẵn sàng của nhà cung cấp và phiên tác nhân của kho mã này. Chẩn đoán mặc định không gọi thực thi mô hình. --deep kiểm tra thêm từng nhà cung cấp/hồ sơ/mô hình riêng biệt đã cấu hình; tùy chọn này có thể tiêu tốn hạn mức sử dụng mô hình.",
   init: INIT_HELP,

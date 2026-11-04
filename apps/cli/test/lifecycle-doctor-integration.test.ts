@@ -37,7 +37,7 @@ import {
 const now = "2026-10-17T00:00:00.000Z";
 // EnvironmentLifecycle.up/down use the Linux flock guard; doctor diagnostics stay portable.
 const linuxDescribe = describe.skipIf(process.platform !== "linux");
-const roles = ["conversation", "coordinator", "planner", "architect", "specifier", "reviewer", "qa"] as const;
+const roles = ["planner", "architect", "specifier", "reviewer", "qa"] as const;
 
 function makeConfig(repository: RepositoryIdentity, overrides?: Partial<EnvironmentConfig["environment"]>): string {
   const cfg = defaultEnvironmentConfig(repository, "test-repo", new Date(now), "claude");
@@ -103,7 +103,7 @@ class FakeLifecycleProcessRunner implements EnvironmentProcessRunner {
 function createMockManager(repository: RepositoryIdentity) {
   let current: SessionManifest | null = null;
   const create = (overrides?: Partial<SessionManifest>) => SessionManifestSchema.parse({
-    schemaVersion: 2,
+    schemaVersion: 3,
     sessionId: repository.sessionName,
     projectName: "test-repo",
     workspaceRoot: repository.root,
@@ -121,7 +121,7 @@ function createMockManager(repository: RepositoryIdentity) {
       agentId: `agent-${i}`,
       workspaceId: "w1",
       tabId: "w1:t1",
-      paneId: `w1:p${i}`,
+      paneId: `w1:p${i + 1}`,
       provider: "anthropic",
       agentKind: "claude",
       cwd: repository.root,
@@ -130,7 +130,8 @@ function createMockManager(repository: RepositoryIdentity) {
       transportState: "idle",
       boundAt: now
     })),
-    attachTarget: { role: "conversation", paneId: "w1:p0" },
+    progressPane: { tabId: "w1:t0", paneId: "w1:p0", command: ["/usr/bin/node", "/x/bin.js", "progress", "--follow"], phase: "running", restarts: [] },
+    attachTarget: { role: "progress", tabId: "w1:t0", paneId: "w1:p0" },
     createdAt: now,
     updatedAt: now,
     ...overrides
@@ -558,7 +559,7 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
         codex: { "profile-name": "work" },
         claude: { "profile-name": "personal" }
       } });
-      config.environment.roles = config.environment.roles.map(role => role.role === "coordinator"
+      config.environment.roles = config.environment.roles.map(role => role.role === "planner"
         ? Object.assign({ ...role, cli: "claude", fallbackCli: "codex" as const }, { "profile-name": "claude-lead" })
         : role);
       await writeFile(join(dir, ".bflow/config.yml"), renderEnvironmentConfigYaml(config));
@@ -579,7 +580,7 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
 
       const manifest = await lifecycle.up();
       expect(manifest.status).toBe("up");
-      const coordinator = composedConfig?.environment.roles.find(role => role.role === "coordinator");
+      const coordinator = composedConfig?.environment.roles.find(role => role.role === "planner");
       expect(coordinator).toMatchObject({ cli: "codex" });
       expect(coordinator).not.toHaveProperty("profile-name");
       expect(composedConfig?.environment).toHaveProperty("defaults.codex.profile-name", "work");
@@ -648,7 +649,7 @@ describe("Task 2: Platform v3 Lifecycle & Doctor Integration", () => {
             role: AgentRoleSchema.parse(r),
             cli: "claude",
             required: true,
-            ...(r === "conversation" ? { requiredEnv: ["ANTHROPIC_CUSTOM_KEY"] } : {})
+            ...(r === "planner" ? { requiredEnv: ["ANTHROPIC_CUSTOM_KEY"] } : {})
           }))
         })
       );

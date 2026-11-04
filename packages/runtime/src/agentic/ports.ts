@@ -1,3 +1,4 @@
+import type { IssueInput } from "../director/store.js";
 import type {
   AgentExecutionHandle, AgentRegistry, AgentRequest, AgentResult, AgentRole, AgentTransport, ApprovalDecision,
   ApprovalRequest, ArtifactStore, DeveloperContinuationAllocation, ExecutorLineage, FailoverCandidate, GitChangeSet,
@@ -61,7 +62,7 @@ export interface GitPolicy {
     /** Verified dependency heads; with two or more, Git merges them into the task base (baseRevision is then the run base). */
     dependencyHeads?: string[];
   }): Promise<TaskWorktree>;
-  collectTask(key: string): Promise<GitChangeSet>;
+  collectTask(key: string, options?: {authorizeUnchangedDispute?:(revision:string)=>Promise<boolean>;comparisonBaseRevision?:string}): Promise<GitChangeSet>;
   beginIntegration(request: {
     runId: string; integrationId: string; baseRevision: string;
     tasks: { taskKey: string; dependsOn: string[] }[];
@@ -93,6 +94,8 @@ export interface PanePolicy {
   releaseCancelledDeveloper?: (request: { taskId: string; closePane: boolean; removeWorktree: boolean }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
   /** Closes the exact pane of a cancelled Developer and proves it is gone. Never touches its worktree, even when dirty. */
   closeCancelledDeveloper?: (request: { taskId: string; paneId: string }, options?: OperationOptions) => Promise<OperationResult<unknown>>;
+  /** Director layout only: reconciles the non-LLM progress pane. Never a readiness or task-success signal. */
+  ensureProgressPane?: (options?: OperationOptions) => Promise<OperationResult<unknown>>;
 }
 export interface AgenticPolicies {
   specification: SpecificationPolicy;
@@ -108,7 +111,22 @@ export interface AgenticPolicies {
   assertReadyToImplement(strategy: unknown): void;
   assertEvidenceComplete(strategy: unknown): void;
 }
+/**
+ * Director-mode mailbox (ADR 0009, R-B2-2/R-B2-5). Its presence on the ports is the session mode: the host passes it only
+ * for an activated v3 manifest. Every outbound addressed to the logical `coordinator` (without a parent assignment) is
+ * written here instead of Herdr. A mailbox write is a delivery, never task-success evidence.
+ */
+export interface DirectorRuntimePort {
+  /** Idempotent per message_id; durable before resolve. Never Herdr. */
+  deliver(message: RoleMessage): Promise<void>;
+  /** Director presence is not `absent`; gates automatic resume, which only spends budget when someone can read the wake. */
+  present(): Promise<boolean>;
+  /** Durable, idempotent per park episode key. */
+  upsertIssue(input: IssueInput): Promise<void>;
+}
 export interface AgenticRuntimePorts {
+  /** Director session mode; absent in v2 (Conversation/Coordinator pane) sessions. */
+  director?: DirectorRuntimePort;
   roleProfiles?: readonly ResolvedRoleProfileSnapshot[];
   roleProfileDefaults?: Readonly<Partial<Record<AgentRole, RoleProfilePin>>>;
   preflightRoleProfile?(snapshot: ResolvedRoleProfileSnapshot, role: AgentRole, requiredCapabilities: readonly string[]): Promise<void>;
@@ -142,6 +160,9 @@ export interface AgenticRuntimePorts {
   deliverToConversation(message: RoleMessage): Promise<void>;
   /** Host validates remote correlation/runner identity. Herdr terminal `done` is insufficient. */
   authenticateResult(result: AgentResult, handle: AgentExecutionHandle, message: RoleMessage): Promise<boolean>;
+  /** Immutable host-store lookup, separate from authenticating a newly received native envelope. */
+  authenticateStoredGate?(result: QualityGateResult): Promise<boolean>;
+  authenticateStoredEvidence?(result: VerificationResult): Promise<boolean>;
   authenticateGateResult(result: QualityGateResult, message: RoleMessage): Promise<boolean>;
   authenticateEvidence(result: VerificationResult, message: RoleMessage): Promise<boolean>;
   projectApprovalRequired?(action: string, context: JsonValue): boolean;

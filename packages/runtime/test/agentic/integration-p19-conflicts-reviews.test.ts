@@ -11,6 +11,15 @@ import { cleanups, unwrap, git, fixture } from "../helpers/agentic-integration-f
 
 afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
 
+/**
+ * Harness wall-clock only (controller ruling, Director B2 final fix wave): these two cases drive a real Git conflict through
+ * repeated ticks, each journal transaction re-validating the whole durable state. Measured solo on the Linux verification host
+ * at dce2575d: ~32 s for the escalation case (about 14 journal transactions per tick, ~17 s of a 33 s CPU profile in
+ * parseAgenticJournalState; the new park-settlement recovery pass costs ~0.1 s) and ~26 s for the resolution case, both
+ * completing every assertion. The global 30 s default, resolver attempts, backoff, leases and production timeouts are unchanged.
+ */
+const REAL_GIT_RESOLVER_TIMEOUT_MS = 60_000;
+
 describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () => {
   async function conflictingIntegration() {
     const f = await fixture({ parallel: true, conflict: true });
@@ -59,7 +68,7 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
     expect((await f.ports.policies.git.getIntegration(run.integrationKey)).status).toBe("verified");
     expect(run.conflictResolution.attempts).toMatchObject([{ status: "accepted", settled: true, commitHash: committed.head }]);
     expect((await resolvers()).map((out: any) => out.status)).toEqual(["released"]);
-  });
+  }, REAL_GIT_RESOLVER_TIMEOUT_MS);
   it("escalates the conflict after two resolver attempts end without an accepted resolution", async () => {
     const { f, resolvers, reportFailure } = await conflictingIntegration();
     const [first] = await resolvers();
@@ -77,7 +86,7 @@ describe.skipIf(process.platform === "win32")("P19 integrated Agentic SDLC", () 
     expect(run.error).toMatch(/^Git integration conflict requires an assigned resolver; worktree preserved \(automatic Developer resolver failed 2 attempts: Still ambiguous\)/);
     expect(await resolvers()).toHaveLength(2);
     expect((await f.ports.policies.git.getIntegration(run.integrationKey)).status).toBe("conflict");
-  });
+  }, REAL_GIT_RESOLVER_TIMEOUT_MS);
   // B4: a role without a pane is a synchronous tool refusal, not a run escalation.
   it("routes a security request to the capable Reviewer pane as an explicit fallback", async () => {
     const f = await fixture();

@@ -7,8 +7,11 @@ import {
   type OperationOptions,
   type OperationResult,
   type SessionManifest,
+  type SessionManifestV2,
+  type SessionManifestV3,
   SessionManifestSchema,
-  canonicalReceiptJson
+  canonicalReceiptJson,
+  isDirectorSessionManifest
 } from "@bflow/contracts";
 import type { SessionManifestStore } from "./types.js";
 
@@ -400,4 +403,76 @@ export class FileSessionManifestStore implements SessionManifestStore {
       }
     });
   }
+}
+
+const DIRECTOR_MANIFEST_IN_V2_LAYOUT_MESSAGE = "Director session manifest (schemaVersion 3) is not supported by the role pane topology manager";
+
+/** Topology manager handles only v2 (Conversation/Coordinator) manifests; Director v3 manifests are rejected, never reinterpreted. */
+export interface V2SessionManifestStore {
+  load(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifestV2 | null>>;
+  save(manifest: SessionManifestV2, options?: OperationOptions): Promise<OperationResult<SessionManifestV2>>;
+  delete(sessionId: string, options?: OperationOptions): Promise<OperationResult<boolean>>;
+}
+
+export function v2OnlySessionManifestStore(store: SessionManifestStore): V2SessionManifestStore {
+  const unsupported = (): ContractError => ({ code: "validation", retryable: false, message: DIRECTOR_MANIFEST_IN_V2_LAYOUT_MESSAGE });
+  return {
+    async load(sessionId, options) {
+      const loaded = await store.load(sessionId, options);
+      if (!loaded.ok) return loaded;
+      if (loaded.value !== null && isDirectorSessionManifest(loaded.value)) return { ok: false, error: unsupported() };
+      return { ok: true, value: loaded.value };
+    },
+    async save(manifest, options) {
+      const saved = await store.save(manifest, options);
+      if (!saved.ok) return saved;
+      if (isDirectorSessionManifest(saved.value)) return { ok: false, error: unsupported() };
+      return { ok: true, value: saved.value };
+    },
+    delete: (sessionId, options) => store.delete(sessionId, options)
+  };
+}
+
+/** Director layout handles only v3 manifests; a stored v2 session must be brought down and restarted, never reinterpreted. */
+export interface V3SessionManifestStore {
+  load(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifestV3 | null>>;
+  save(manifest: SessionManifestV3, options?: OperationOptions): Promise<OperationResult<SessionManifestV3>>;
+  delete(sessionId: string, options?: OperationOptions): Promise<OperationResult<boolean>>;
+}
+
+export const V2_SESSION_IN_DIRECTOR_LAYOUT_MESSAGE = "Session is a v2 session; run bflow down then bflow up";
+
+export function v3OnlySessionManifestStore(store: SessionManifestStore): V3SessionManifestStore {
+  const unsupported = (): ContractError => ({ code: "validation", retryable: false, message: V2_SESSION_IN_DIRECTOR_LAYOUT_MESSAGE });
+  return {
+    async load(sessionId, options) {
+      const loaded = await store.load(sessionId, options);
+      if (!loaded.ok) return loaded;
+      if (loaded.value !== null && !isDirectorSessionManifest(loaded.value)) return { ok: false, error: unsupported() };
+      return { ok: true, value: loaded.value };
+    },
+    async save(manifest, options) {
+      const saved = await store.save(manifest, options);
+      if (!saved.ok) return saved;
+      if (!isDirectorSessionManifest(saved.value)) return { ok: false, error: unsupported() };
+      return { ok: true, value: saved.value };
+    },
+    delete: (sessionId, options) => store.delete(sessionId, options)
+  };
+}
+
+/** Union store restricted to the manifest version of one topology layout (v2 for `legacy_v2`, v3 for `director`). */
+export function layoutSessionManifestStore(store: SessionManifestStore, layout: "legacy_v2" | "director"): SessionManifestStore {
+  const v2 = v2OnlySessionManifestStore(store);
+  const v3 = v3OnlySessionManifestStore(store);
+  const mismatch = (message: string): OperationResult<never> => ({ ok: false, error: { code: "validation", retryable: false, message } });
+  return {
+    load: (sessionId, options) => layout === "director" ? v3.load(sessionId, options) : v2.load(sessionId, options),
+    async save(manifest, options) {
+      if (layout === "director")
+        return isDirectorSessionManifest(manifest) ? v3.save(manifest, options) : mismatch(V2_SESSION_IN_DIRECTOR_LAYOUT_MESSAGE);
+      return isDirectorSessionManifest(manifest) ? mismatch(DIRECTOR_MANIFEST_IN_V2_LAYOUT_MESSAGE) : v2.save(manifest, options);
+    },
+    delete: (sessionId, options) => store.delete(sessionId, options)
+  };
 }

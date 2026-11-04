@@ -1,3 +1,5 @@
+import { selectAutoParkCandidates, selectAutoParkStopCandidates, autoParkRelated, autoParkSuggestedAction, exhaustedTaskVerification, STRUCTURAL_DELIVERY_BLOCKERS, VERIFICATION_ATTEMPT_LIMIT, type AutoParkPolicy } from "./auto-park.js";
+import { reviewCandidateEvidence, candidateEvidenceContext, hasCandidateGateReceipt } from "./review-candidate-evidence.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -24,11 +26,11 @@ import {
   CancellationRequestSchema, DelegationRequestSchema, GitChangeSetSchema,
   PaneBindingSchema, QualityGateContextSchema, QualityGateResultSchema, RoleMessageSchema, SessionManifestSchema,
   SpecificationSchema, TestStrategySchema, VerificationCycleSchema, VerificationResultSchema,
-  WorkflowDefinitionSchema, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
+  WorkflowDefinitionSchema, IdentifierSchema, ParkedIssueKindSchema, type ParkedIssueKind, type SdlcWorkStatus, type WorkflowRunSnapshot, type AgentExecutionHandle, type ApprovalDecision, type ApprovalRequest,
   type ArtifactReference, type CancellationRequest, type GitChangeSet, type JsonValue, type RoleMessage, type QualityGate, type QualityGateResult, type Specification, type AcceptanceCriterion,
   type PaneBinding, type TaskDefinition, type AgentRole, type VerificationCycle, type WorkflowDefinition, type DelegationRequest
 } from "@bflow/contracts";
-import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
+import { AgenticJournal, TestIntegrityExceptionBindingSchema, digest, isConversationDelivery, isInProcessDelivery, json, record, strings, textField, type FastPathRecord, type JournalState,
   type ConflictResolverAttempt, type IngressDiagnostic, type Outbound, type ReviewTiming, type RunRecord, type SpecRecord, type TaskRecord, type UserDecisionRecord } from "./journal.js";
 import { evaluateFastPath } from "./fast-path.js";
 import {
@@ -90,7 +92,7 @@ const TEST_INTEGRITY_APPROVE_OPTION = "Approve test-integrity exception";
 const TEST_INTEGRITY_REJECT_OPTION = "Reject test-integrity exception";
 
 const VERIFICATION_GATE = "p19-independent-task-verification";
-const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled", "escalated"];
+const TERMINAL_RUN_STATUSES: readonly string[] = ["completed", "completed_with_parked", "failed", "cancelled", "escalated"];
 /** An escalated run can still resume, so it is not here: its human decisions stay answerable. */
 const ENDED_RUN_STATUSES: readonly string[] = ["completed", "failed", "cancelled"];
 const REPOSITORY_SETUP_LOG_LIMIT = 200;
@@ -183,6 +185,13 @@ function resumablyPaused(run: RunRecord): boolean {
     ["resume_coordinator", "reconcile_delivery"].includes(run.pendingAction.kind);
 }
 const FINAL_TASK = "workflow-verification";
+/** Durable provenance that ties the run's pending action to one task (identity fields or deterministic source IDs), never message text. */
+function pendingActionOwnedByTask(run: RunRecord, taskId: string, related: readonly { message: { message_id: string } }[]): boolean {
+  const action = run.pendingAction;
+  return action !== undefined && (action.verificationTaskId === taskId || action.invalidAssignment?.taskId === taskId ||
+    related.some(out => out.message.message_id === action.sourceMessageId) ||
+    ["verification-retry", "workflow-blocked"].some(prefix => action.sourceMessageId === `${prefix}-${digest([run.runId, taskId, action.reason])}`));
+}
 /** Prefix of run errors that a Coordinator retry_verification can resume. */
 const VERIFICATION_RETRY_PREFIX = "Verification delivery/storage requires reconciliation:";
 /** Informational Conversation traffic never carries resume, approval or task-result authority. */
@@ -193,7 +202,6 @@ function isConversationContext(message: RoleMessage): boolean {
 function isConversationContextWake(message: RoleMessage): boolean {
   return message.sender.role === "runtime" && message.recipient.role === "coordinator" && message.type === "task.status" && record(message.payload).kind === "conversation_context_ready";
 }
-const VERIFICATION_ATTEMPT_LIMIT = 3;
 const RUN_STEP_FAILURE_PREFIX = "Run step failed:";
 /**
  * Stop observations per cancelled execution before it is reported for manual reconciliation. Bounded so an unresponsive pane is
@@ -215,7 +223,6 @@ const UNCERTAIN_DELIVERY_OPTIONS = ["Ask Coordinator to reconcile the uncertain 
 const INBOUND_FAILURE_OPTIONS = ["Ask Coordinator to inspect the failed handoff and request a schema-valid resend from the sender", "Cancel this run"];
 const VERIFICATION_RETRY_OPTIONS = ["Retry verification for this run (Coordinator retry_verification)", "Cancel this run"];
 /** Structural blockers that never clear on their own; the user hears about them at once. */
-const STRUCTURAL_DELIVERY_BLOCKERS = /^(Recipient pane unavailable|No capable agent in recipient pane|Pinned request or recipient changed|Recipient [\w-]+ not ready since )/;
 function conversationRetryDelayMs(attempts: number): number { return Math.min(60_000, 1_000 * 2 ** (attempts - 1)); }
 function objectField(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>)[key] : undefined;
@@ -238,6 +245,8 @@ function specialistBlockage(payload: unknown): string | undefined {
  * Runtime refused an inbound request for a reason that retrying cannot change (stale or foreign revision, terminal run, superseded
  * approval). Hosts must not resend it, and must not report it as an uncertain delivery: its refusal is already a Conversation notice.
  */
+/** R-B2-12: shown whenever a Director session is asked to change a run created by a v2 Conversation. */
+export const DIRECTOR_LEGACY_RUN_MESSAGE = "Run v2 chỉ đọc trong phiên Director; hủy rồi tạo lại bằng start_work";
 export class AdmissionRejectedError extends Error {
   readonly retryable = false;
   constructor(message: string) { super(message); this.name = "AdmissionRejectedError"; }
@@ -360,13 +369,17 @@ export class AgenticWorkflowRuntime {
         runtimeId: `p19-${digest(this.journal.repository).slice(0, 16)}`, configuration: {}, recoveryMode: true, initializedAt: this.now()
       })));
       SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
-      await this.transaction(async (state, save, core) => {
+      await this.transaction(async (state, save, core, outbox) => {
         // These flags describe coroutines owned by the previous process, not durable verification outcomes.
         // Keep a persisted outcome for finishVerification; otherwise the next tick resumes the frozen plan.
         let changed = false;
         for (const run of state.runs) {
           try {
-            if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) {
+            if (run.coreCreated && run.tasks.some(task => task.parked) &&
+                this.completeWithParked(state, outbox, run, await core.snapshot(run.runId))) {
+              changed = true; continue;
+            }
+            if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) {
               if (run.pendingAction) { delete run.pendingAction; changed = true; }
               continue;
             }
@@ -450,7 +463,7 @@ export class AgenticWorkflowRuntime {
         for (const run of state.runs) {
           const before = oldRuns.get(run.runId);
           if (before === undefined) await this.activityLog.record({ kind: "admission", role: "runtime", action: "run_admitted", runId: run.runId, outcome: run.status });
-          else if (before !== run.status) await this.activityLog.record({ kind: run.status === "cancelled" ? "cancellation" : run.status === "awaiting_approval" ? "approval" : ["completed", "failed", "escalated"].includes(run.status) ? "result" : "progress",
+          else if (before !== run.status) await this.activityLog.record({ kind: run.status === "cancelled" ? "cancellation" : run.status === "awaiting_approval" ? "approval" : ["completed", "completed_with_parked", "failed", "escalated"].includes(run.status) ? "result" : "progress",
             role: "runtime", action: "run_status_changed", runId: run.runId, outcome: `${before} -> ${run.status}` });
           const beforeRun = previous.runs.find(item => item.runId === run.runId);
           if (run.error && beforeRun?.error !== run.error)
@@ -507,9 +520,21 @@ export class AgenticWorkflowRuntime {
       const saveAndLog = async () => { await save(); this.refreshTaskLogAssignmentSnapshot(state); await logChanges(); };
       const core = new CoreSession(this.ports, state, saveAndLog, this.coreRestoreCache);
       await core.restore();
-      const outbox = new HerdrOutbox(this.ports, state, saveAndLog);
+      const outbox = new HerdrOutbox(this.ports, state, saveAndLog, { directorMailbox: this.ports.director !== undefined });
       if (recoverPhases) await this.recoverPhaseFailures(state, saveAndLog, outbox);
       return action(state, saveAndLog, core, outbox);
+    });
+  }
+  /** R-B2-12: a run created by a v2 Conversation is read-only in a Director session (inspect, cancel and reconciliation only). */
+  private assertDirectorWritable(run: RunRecord): void {
+    if (this.ports.director && run.delegation.requestedBy !== "director")
+      throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+  }
+  /** Tool-layer guard (Director principal): true when the run was created by a v2 Conversation. */
+  async assertDirectorRunWritable(runId: string): Promise<void> {
+    await this.journal.exclusive(async state => {
+      const run = state.runs.find(item => item.runId === runId);
+      if (run) this.assertDirectorWritable(run);
     });
   }
   private run(state: JournalState, runId: string): RunRecord {
@@ -519,12 +544,12 @@ export class AgenticWorkflowRuntime {
   }
   private live(run: RunRecord): void {
     if (resumablyPaused(run)) throw new Error(`Run ${run.runId} is paused awaiting resume of action ${run.pendingAction!.actionId}; retry this same call after the run resumes`);
-    if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) throw new Error(`Run is ${run.status}`);
+    if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) throw new Error(`Run is ${run.status}`);
   }
   /** Non-terminal guard for Coordinator user-communication tools that must remain usable while a run is escalated or paused. */
   private assertCoordinatorCommunicable(run: RunRecord): void {
     if (run.supersededBy) throw new Error(`Run ${run.runId} continued as follow-up run ${run.supersededBy}`);
-    if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}`);
+    if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}`);
   }
   /** Exact non-throwing mirror of HerdrOutbox.noticeParent preconditions so expired/released writer leases never throw uncaught. */
   private canEnqueueTaskNotice(state: JournalState, parent: Outbound | undefined, allowExpired = false): boolean {
@@ -538,10 +563,10 @@ export class AgenticWorkflowRuntime {
         !allowExpired && Date.parse(parent.lease.expiresAt) <= Date.parse(this.now())) return false;
     const run = state.runs.find(item => item.runId === parent.message.run_id);
     const task = run?.tasks.find(item => item.taskId === parent.taskId);
-    return !!run && !run.cancelled && !["completed", "failed", "cancelled", "escalated"].includes(run.status) && !!task && !task.writerReleased && !task.result;
+    return !!run && !run.cancelled && !["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status) && !!task && !task.writerReleased && !task.result;
   }
   private escalateExpiredWriterNotice(state: JournalState, outbox: HerdrOutbox, run: RunRecord, sourceMessageId: string, reason: string): void {
-    if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) return;
+    if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) return;
     const previousStatus = run.status;
     run.status = "escalated";
     run.error = reason;
@@ -639,18 +664,22 @@ export class AgenticWorkflowRuntime {
       const result = await this.ports.panes?.getManifest?.();
       const sender = result?.ok ? SessionManifestSchema.parse(result.value).panes.find(pane => pane.role === "conversation") : undefined;
       return state.outbound.filter(out => out.message.sender.role === "conversation" && out.message.recipient.role === "coordinator" &&
-        out.message.type === "approval.decision" && out.handle !== undefined && ["accepted", "released"].includes(out.status) &&
+        out.message.type === "approval.decision" && (out.handle !== undefined && ["accepted", "released"].includes(out.status) ||
+          out.delivery === "director_mailbox" && out.status === "delivered") &&
         !state.inbox.some(item => item.message.message_id === out.message.message_id ||
           (out.message.idempotency_key !== undefined && item.message.idempotency_key === out.message.idempotency_key)) &&
         state.runs.some(run => run.runId === out.message.run_id && !run.cancelled &&
           (!TERMINAL_RUN_STATUSES.includes(run.status) || this.acceptsPausedUserDecision(run, out.message))))
-        .map(out => RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
+        .map(out => ({ mailbox: out.delivery === "director_mailbox", message: RoleMessageSchema.parse(sender && (!out.message.sender.pane_id || !out.message.sender.agent_id)
           ? { ...out.message, sender: { ...out.message.sender, pane_id: out.message.sender.pane_id ?? sender.paneId, agent_id: out.message.sender.agent_id ?? sender.agentId } }
-          : out.message));
+          : out.message) }));
     });
-    for (const message of deliveredApprovals) {
+    for (const { message, mailbox } of deliveredApprovals) {
       try {
-        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) continue;
+        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
+          if (mailbox) await this.refuseUnauthenticatedMailboxApproval(message);
+          continue;
+        }
         await withRecoveredHerdrReceipt(message, () => this.applyAuthenticatedHerdrMessage(message, false));
         replayed++;
       }
@@ -684,7 +713,7 @@ export class AgenticWorkflowRuntime {
         const message = RoleMessageSchema.parse(item.message);
         if (!message.run_id) continue;
         const run = state.runs.find(candidate => candidate.runId === message.run_id);
-        if (!run || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) ||
+        if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
             message.correlation_id !== run.delegation.correlationId) continue;
         const wakeId = `p19-wake-${digest([run.runId, message.message_id])}`;
         if (state.outbound.some(out => out.message.message_id === wakeId)) continue;
@@ -731,13 +760,29 @@ export class AgenticWorkflowRuntime {
    * role or report a blocker) as a bounded `auto_resume` action. A pending human gate is never bypassed: the run then only
    * records the reason. Returns whether the run was escalated.
    */
-  private escalateInvalidMessages(run: RunRecord, sourceMessageId: string, reason: string, createdAt = this.now()): boolean {
+  private escalateInvalidMessages(run: RunRecord, sourceMessageId: string, reason: string, createdAt = this.now(), assignment?: Outbound): boolean {
     if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) return false;
     const previousStatus = run.status, inherited = inheritedAutoResume(run);
+    const assignmentTaskId = assignment && taskLogBusinessTaskId(assignment);
+    const implementationAttemptId = assignment?.message.type === "task.assignment" ? assignment.attemptId :
+      objectField(assignment?.message.payload, "implementationAttemptId") ?? objectField(assignment?.message.payload, "attemptId");
     run.error = reason.slice(0, 2000); run.status = "escalated";
     run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-      reason: run.error, sourceMessageId, createdAt, state: "pending", previousStatus, ...inherited, recovery: "auto_resume" };
+      reason: run.error, sourceMessageId, createdAt, state: "pending", previousStatus, ...inherited, recovery: "auto_resume",
+      ...(assignment && assignmentTaskId && typeof implementationAttemptId === "string" && ["task.assignment", "verification.requested"].includes(assignment.message.type) ? { invalidAssignment: {
+        messageId: assignment.message.message_id, taskId: assignmentTaskId, attemptId: assignment.attemptId, implementationAttemptId } } : {}) };
     return true;
+  }
+  /** Refused ingress never guesses an assignment from a role alone or a stale/ambiguous pane history. */
+  private invalidMessageAssignment(state: JournalState, run: RunRecord, message: RoleMessage): Outbound | undefined {
+    if (!message.causation_id && !message.sender.pane_id && !message.sender.agent_id) return undefined;
+    const sources = state.outbound.filter(out => !out.parentAssignmentId && out.handle &&
+      out.message.run_id === run.runId && out.message.correlation_id === message.correlation_id &&
+      out.message.recipient.role === message.sender.role && ["accepted", "released"].includes(out.status) &&
+      (message.causation_id === undefined || out.message.message_id === message.causation_id) &&
+      (message.sender.pane_id === undefined || out.handle.target.paneId === message.sender.pane_id) &&
+      (message.sender.agent_id === undefined || out.handle.target.agentId === message.sender.agent_id));
+    return sources.length === 1 ? sources[0] : undefined;
   }
   /**
    * Returns a refused message's validation error to the agent that sent it, through Herdr, so it can fix and resend. A Developer
@@ -808,7 +853,7 @@ export class AgenticWorkflowRuntime {
           await save(); return;
         }
         this.escalateInvalidMessages(run, data.message_id, `${data.type} from ${data.sender.role} was invalid ${attempt} times for ${sourceId}: ${error}`,
-          data.occurred_at ?? this.now());
+          data.occurred_at ?? this.now(), this.invalidMessageAssignment(state, run, data));
         this.surfaceFailure(state, outbox, run, data.message_id, "inbound_failed",
           `${data.type} from ${data.sender.role} to ${data.recipient.role} (${data.message_id})`, text, INBOUND_FAILURE_OPTIONS);
         await save(); return;
@@ -869,7 +914,7 @@ export class AgenticWorkflowRuntime {
       const attempt = this.countInvalidMessage(run, binding.role, source.message.message_id);
       if (attempt < INVALID_ROLE_MESSAGE_LIMIT) { await save(); return { attempt, limit: INVALID_ROLE_MESSAGE_LIMIT, escalated: false }; }
       const reason = `Rejected invalid ${binding.role} RoleMessage before transport ${attempt} times for ${source.message.message_id}: ${describeValidationError(reasonInput)}`.slice(0, 2000);
-      const escalated = this.escalateInvalidMessages(run, messageId, reason);
+      const escalated = this.escalateInvalidMessages(run, messageId, reason, this.now(), source);
       const automatic = escalated && (run.pendingAction?.resumeAttempts ?? 0) < AUTO_RESUME_LIMIT;
       this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId,
         sdlcStatus: run.status, owner: "coordinator", ...(run.pendingAction === undefined ? {} : { actionId: run.pendingAction.actionId }),
@@ -921,7 +966,7 @@ export class AgenticWorkflowRuntime {
     const allFailures = state.outbound.filter(item => item.status === "failed" && item.error?.includes(RoleCapabilityPreflightError.name));
     for (const failure of allFailures.filter(item => isConversationContextWake(item.message))) {
       const run = state.runs.find(item => item.runId === failure.message.run_id);
-      if (run && !run.cancelled && !["completed", "failed", "cancelled"].includes(run.status))
+      if (run && !run.cancelled && !["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status))
         this.surfaceFailure(state, outbox, run, failure.message.message_id, "undeliverable", "Informational Conversation context", redactString(failure.error ?? "Capability unavailable"));
     }
     const failures = allFailures.filter(item => !isConversationContextWake(item.message));
@@ -930,7 +975,7 @@ export class AgenticWorkflowRuntime {
     for (const runFailures of byRun.values()) {
       const out = runFailures[0]!;
       const run = state.runs.find(item => item.runId === out.message.run_id);
-      if (!run || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) continue;
+      if (!run || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) continue;
       const existing = run.pendingAction?.kind === "resume_coordinator" ? run.pendingAction : undefined;
       if (existing?.state === "pending" && runFailures.every(failure => [existing.sourceMessageId, ...(existing.relatedMessageIds ?? [])].includes(failure.message.message_id))) continue;
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
@@ -999,7 +1044,7 @@ export class AgenticWorkflowRuntime {
       if (isCancellationHandoff(message)) await this.cancellationTarget(state, message);
       if (message.type === "approval.decision") {
         const run = state.runs.find(item => item.runId === message.run_id);
-        if (run && (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)))
+        if (run && (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)))
           throw new AdmissionRejectedError(`Run is ${run.status}; approval is no longer actionable`);
         const approvalId = ApprovalDecisionSchema.parse(message.payload).approvalId;
         const reason = run && (supersededReason(run, approvalId) ?? prototypeDecisionRefusal(run.prototype, approvalId));
@@ -1011,8 +1056,35 @@ export class AgenticWorkflowRuntime {
     });
     // Scheduler verification may be awaiting a specialist; cancellation must reject its waiter and report without another tick.
     // A Gateway inbox callback may itself enqueue this control. Do not await that same in-flight delivery recursively.
-    if (isCancellationHandoff(message)) void this.deliverConversationInbox().catch(() => undefined);
+    if (isCancellationHandoff(message)) void this.deliverInProcessInbox().catch(() => undefined);
     return result;
+  }
+  /**
+   * R-B2-4: the Director opens a run itself. It uses the same admission rules as a Conversation delegation but involves no RoleMessage,
+   * no outbox entry for the Coordinator (the Director is the Coordinator authority) and no rejection notice: the caller sees the error.
+   */
+  async admitDirectorWork(input: unknown): Promise<{ runId: string; correlationId: string; admission: "new" | "duplicate" }> {
+    if (this.quiesced) throw new Error("Runtime is quiesced");
+    const delegation = DelegationRequestSchema.parse(input);
+    if (delegation.requestedBy !== "director" || delegation.targetRole !== "coordinator" || delegation.runId === undefined)
+      throw new Error("Director work envelope mismatch");
+    const runId = delegation.runId;
+    return this.transaction(async (state, save, _core, outbox) => {
+      const manifest = SessionManifestSchema.parse(unwrap(await this.ports.panes.getManifest()));
+      if (manifest.schemaVersion !== 3) throw new Error("Director work requires an active Director session");
+      if (manifest.conversationSessionId !== delegation.sessionId) throw new Error("Cross-session delegation");
+      const admission = this.admitDelegation(state, delegation, []);
+      if (admission.kind === "rejected") throw new AdmissionRejectedError(admission.reason);
+      if (admission.kind === "revision")
+        throw new AdmissionRejectedError("Director requirement revisions are not supported in slice B2; cancel the run and call start_work again");
+      if (admission.kind === "duplicate") return { runId, correlationId: delegation.correlationId, admission: "duplicate" as const };
+      const run: RunRecord = { runId, delegation, status: "intake", tasks: [], coreCreated: false, cancelled: false, maxIterations: 3 };
+      state.runs.push(run);
+      this.emit(state, outbox, run, "delegation.accepted", { delegationId: delegation.delegationId, revision: 1, sdlcStatus: "intake",
+        headline: "Director đã nhận việc" }, "accepted");
+      await save();
+      return { runId, correlationId: delegation.correlationId, admission: "new" as const };
+    });
   }
   /**
    * Decides whether a Conversation delegation opens a run, repeats one already known, revises the run's requirement, or is refused.
@@ -1167,46 +1239,94 @@ export class AgenticWorkflowRuntime {
       this.surfaceCapabilityPreflightFailures(state, outbox);
       await save();
     });
-    await this.deliverConversationInbox();
+    await this.deliverInProcessInbox();
   }
-  private conversationDelivery: Promise<void> | undefined;
+  private inProcessDelivery: Promise<void> | undefined;
   /**
-   * Applies write-ahead Conversation inbox messages outside the journal lock, because the Gateway may drain a queued
-   * user turn that enqueues back into Runtime. The Gateway deduplicates by message_id, so a failure is requeued and retried.
+   * Applies write-ahead in-process inbox messages (Conversation Gateway, Director mailbox) outside the journal lock, because
+   * delivery may drain a queued user turn that enqueues back into Runtime. Both sinks deduplicate by message_id, so a failure
+   * is requeued and retried with the same bounded backoff. A Director mailbox item never falls back to Herdr.
    */
-  private deliverConversationInbox(): Promise<void> {
-    this.conversationDelivery ??= (async () => {
+  private deliverInProcessInbox(): Promise<void> {
+    this.inProcessDelivery ??= (async () => {
       try {
         if (this.quiesced) return;
         const pending = await this.journal.exclusive(async state =>
-          state.outbound.filter(out => isConversationDelivery(out) && out.status === "sending").map(out => out.message));
-        for (const message of pending) {
-          let error: string | undefined;
-          try { await this.ports.deliverToConversation(message); } catch (failure) { error = redactString(String(failure)); }
+          state.outbound.filter(out => isInProcessDelivery(out) && out.status === "sending").map(out => ({ message: out.message, mailbox: out.delivery === "director_mailbox" })));
+        for (const { message, mailbox } of pending) {
+          let error: string | undefined, terminal = false;
+          const director = this.ports.director;
+          if (mailbox && !director) { error = "Director mailbox unavailable in this session"; terminal = true; }
+          else {
+            try { await (mailbox && director ? director.deliver(message) : this.ports.deliverToConversation(message)); }
+            catch (failure) { error = redactString(String(failure)); }
+          }
+          let delivered = false;
           await this.journal.exclusive(async (state, save) => {
             const out = state.outbound.find(item => item.message.message_id === message.message_id);
             if (out?.status !== "sending") return;
-            if (error === undefined) { out.status = "delivered"; delete out.error; delete out.deliveryAttempts; delete out.nextAttemptAt; }
+            if (error === undefined) { out.status = "delivered"; delete out.error; delete out.deliveryAttempts; delete out.nextAttemptAt; delivered = true; }
             else {
               // Bounded: after the limit the write is terminal and the host reports it (failedConversationDeliveries).
               const attempts = (out.deliveryAttempts ?? 0) + 1;
               out.deliveryAttempts = attempts; out.error = error;
-              if (attempts >= CONVERSATION_DELIVERY_MAX_ATTEMPTS) { out.status = "failed"; delete out.nextAttemptAt; }
+              if (terminal || attempts >= CONVERSATION_DELIVERY_MAX_ATTEMPTS) { out.status = "failed"; delete out.nextAttemptAt; }
               else { out.status = "queued"; out.nextAttemptAt = new Date(Date.parse(this.now()) + conversationRetryDelayMs(attempts)).toISOString(); }
             }
             await save();
           });
+          if (delivered && mailbox) await this.applyDeliveredMailboxMessage(message);
         }
-      } finally { this.conversationDelivery = undefined; }
+      } finally { this.inProcessDelivery = undefined; }
     })();
-    return this.conversationDelivery;
+    return this.inProcessDelivery;
+  }
+  /**
+   * The Director reads the mailbox; it never answers a human gate. A human decision from the trusted interaction gateway is
+   * therefore applied here, after its durable delivery and outside the journal lock, through the same path recovery uses for an
+   * already delivered approval. Runtime notices carry no semantics on arrival. Any other Conversation→Coordinator type has no
+   * Director-session meaning and is surfaced, never silently dropped (R-B2-5).
+   */
+  private async applyDeliveredMailboxMessage(message: RoleMessage): Promise<void> {
+    if (message.sender.role === "runtime") return;
+    if (message.sender.role === "conversation" && message.type === "approval.decision") {
+      try {
+        if (!await this.ports.authorizeHuman(ApprovalDecisionSchema.parse(message.payload))) {
+          await this.refuseUnauthenticatedMailboxApproval(message);
+          return;
+        }
+        await withRecoveredHerdrReceipt(message, () => this.applyAuthenticatedHerdrMessage(message, false));
+      } catch (error) {
+        await this.reportInboundFailure(message, String(error));
+      }
+      return;
+    }
+    // A cancellation control is consumed by drainCancellationControls before it can reach the mailbox.
+    if (isCancellationHandoff(message)) return;
+    await this.reportInboundFailure(message, message.sender.role === "conversation"
+      ? "Unsupported Conversation→Coordinator message in Director session"
+      : `Unsupported ${message.sender.role}→Coordinator message in Director session`);
+  }
+  /**
+   * A definitive authorizeHuman refusal of a delivered mailbox approval: surface it once, then journal the exact envelope as
+   * rejected so recovery never re-checks it. A new human decision travels as a new envelope.
+   */
+  private async refuseUnauthenticatedMailboxApproval(message: RoleMessage): Promise<void> {
+    const reason = "Human approval is not authenticated";
+    await this.reportInboundFailure(message, reason);
+    await this.transaction(async (state, save) => {
+      if (state.inbox.some(item => item.message.message_id === message.message_id ||
+          (message.idempotency_key !== undefined && item.message.idempotency_key === message.idempotency_key))) return;
+      state.inbox.push({ message, status: "rejected", reason });
+      await save();
+    });
   }
   /**
    * Read-only: Conversation inbox writes that exhausted their bounded retries. The host writes a notice receipt directly for each
    * (Conversation cannot be reached through the failing inbox) and dedupes by message_id.
    */
   async failedConversationDeliveries(): Promise<{ message: RoleMessage; error: string; attempts: number }[]> {
-    return this.journal.exclusive(async state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out))
+    return this.journal.exclusive(async state => state.outbound.filter(out => out.status === "failed" && isConversationDelivery(out) && out.delivery === undefined)
       .map(out => ({ message: out.message, error: out.error ?? "Conversation delivery failed", attempts: out.deliveryAttempts ?? 0 })));
   }
   private readonly gateWaiters = new Map<string, { runId: string; accept(result: QualityGateResult): void; reject(error: Error): void }>();
@@ -1439,7 +1559,7 @@ export class AgenticWorkflowRuntime {
     const report = await readWorkflowTelemetry(this.ports.runStore, runId, { source: "agentic", asOf,
       supersededApprovalIds: context.supersededApprovalIds, reviewTimings: context.reviewTimings });
     report.hostWorkStatus = context.status ?? null;
-    if (report.coverage.events === 0 && context.status && ["completed", "failed", "cancelled", "escalated"].includes(context.status)) {
+    if (report.coverage.events === 0 && context.status && ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(context.status)) {
       report.outcome = context.status; report.outcomeSource = "host_journal";
     }
     return report;
@@ -1489,7 +1609,9 @@ export class AgenticWorkflowRuntime {
   /** Facts the host watchdog needs about one run. Derived from durable state only; activity ignores Conversation-bound notices. */
   private runFacts(state: JournalState, run: RunRecord): RunFacts & { pendingDecisionRequests: { request: ApprovalRequest; correlationId: string }[] } {
     const now = Date.parse(this.now());
-    const handoffs = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation");
+    // A Director mailbox write is not a role handoff: a queued or delivered wake owes no correlated result (R-B2-5).
+    const handoffs = state.outbound.filter(out => out.message.run_id === run.runId && out.message.recipient.role !== "conversation" &&
+      out.delivery !== "director_mailbox");
     const messages = [...state.outbound.map(out => out.message), ...state.inbox.map(item => item.message)]
       .filter(message => message.run_id === run.runId && message.recipient.role !== "conversation");
     const times = [
@@ -1540,11 +1662,303 @@ export class AgenticWorkflowRuntime {
       catch { return []; }
     }));
   }
+  /** R-B2-15: Core stays blocked; only parked tasks and their pending descendants remain. No integration or cleanup follows. */
+  private completeWithParked(state: JournalState, outbox: HerdrOutbox, run: RunRecord, snapshot: WorkflowRunSnapshot): boolean {
+    if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status) || snapshot.status !== "blocked" ||
+        run.pendingAction?.state === "pending" || run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId ||
+        Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending") ||
+        run.tasks.some(task => task.verificationPending) || run.workflowVerificationPending) return false;
+    const parkedTaskIds = snapshot.tasks.filter(task => task.status === "parked").map(task => task.taskId);
+    if (!parkedTaskIds.length) return false;
+    const behindParked = (taskId: string, seen = new Set<string>()): boolean => {
+      if (parkedTaskIds.includes(taskId)) return true;
+      if (seen.has(taskId)) return false;
+      seen.add(taskId);
+      return run.definition!.dependencies.some(edge => edge.taskId === taskId && behindParked(edge.dependsOnTaskId, seen));
+    };
+    if (!snapshot.tasks.every(task => task.status === "succeeded" || task.status === "parked" || task.status === "pending" && behindParked(task.taskId))) return false;
+    run.status = "completed_with_parked";
+    delete run.error;
+    this.emit(state, outbox, run, "conversation.progress", { kind: "run_completed_with_parked", sdlcStatus: run.status,
+      parkedTaskIds, headline: `Xong một phần: còn ${parkedTaskIds.length} mục trong hàng đợi lỗi` },
+    `completed-with-parked:${digest(run.tasks.flatMap(task => task.parked ? [[task.taskId, task.parked.episode]] : []))}`);
+    return true;
+  }
+
+  /** Bounded stop preparation uses the same write-ahead park intent and exact execution proof as explicit park. */
+  async autoParkPass(policy: AutoParkPolicy): Promise<{ parked: { runId: string; taskId: string; kind: ParkedIssueKind }[] }> {
+    const parked: { runId: string; taskId: string; kind: ParkedIssueKind }[] = [];
+    policy = z.object({ enabled: z.boolean(), maxAutoResumesBeforePark: z.number().int().min(0).max(3) }).strict().parse(policy);
+    if (!this.ports.director || !policy.enabled || this.quiesced) return { parked };
+    await this.initialize();
+    const selected = await this.transaction(async (state, save, core, outbox) => {
+      const snapshots: Record<string, WorkflowRunSnapshot> = {};
+      for (const run of state.runs) if (run.coreCreated && run.delegation.requestedBy === "director" && !run.cancelled)
+        snapshots[run.runId] = await core.snapshot(run.runId);
+      const facts = { ...state, snapshots };
+      for (const candidate of selectAutoParkStopCandidates(facts, policy, Date.parse(this.now()))) {
+        const run = this.run(state, candidate.runId), current = snapshots[run.runId]!.tasks.find(task => task.taskId === candidate.taskId)!;
+        for (const out of autoParkRelated(facts, run, candidate.taskId).filter(out => !out.parentAssignmentId && out.handle &&
+            (out.status === "accepted" || out.handle.executionId === current.agentExecution?.executionId))) {
+          const originalError = out.error;
+          try {
+            await this.requestStop(state, core, outbox, save, run, out, "Task parked", "park");
+            if (originalError === undefined) delete out.error; else out.error = originalError;
+            if (out.parkStop && !out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
+              out.parkStop.observations++; await save();
+              const observed = await this.stopObserved({ ...out });
+              if (observed.proof) out.parkStop.proof = observed.proof;
+              await save();
+            }
+          } catch {
+            // Preserve the durable stop intent and its spent observation budget; other independent tasks may still progress.
+          } finally {
+            if (originalError === undefined) delete out.error; else out.error = originalError;
+          }
+        }
+      }
+      return selectAutoParkCandidates(facts, policy, Date.parse(this.now()));
+    });
+    for (const candidate of selected) {
+      try {
+        const result = await this.parkTask({ runId: candidate.runId, taskId: candidate.taskId, reason: candidate.reason, kind: candidate.kind, episodeKey: candidate.episodeKey, resumeAttempts: candidate.resumeAttempts, source: "auto" });
+        if (!result.parked) continue;
+        parked.push({ runId: candidate.runId, taskId: candidate.taskId, kind: candidate.kind });
+        await this.activityLog.record({ kind: "tool", role: "runtime", action: `auto_park:${candidate.kind}`, runId: candidate.runId, taskId: candidate.taskId });
+      } catch {
+        // A changed fence or an unavailable stop remains waiting. A later pass reselects against current durable facts.
+      }
+    }
+    // Replay after a lost upsert response or host crash: the durable park episode is the receipt, the store key deduplicates it.
+    const issues = await this.journal.exclusive(async state => state.runs.filter(run => run.delegation.requestedBy === "director")
+      .flatMap(run => run.tasks.flatMap(task => task.parked?.source === "auto" ? [{ runId: run.runId, taskId: task.taskId, park: task.parked,
+        evidence: (task.reworkResolutions ?? []).map(item => item.artifactRef.uri) }] : [])));
+    for (const item of issues) await this.ports.director.upsertIssue({ key: `park:${item.park.episodeKey ?? `${item.runId}:${item.taskId}:${item.park.episode}`}`,
+      runId: item.runId, taskKey: item.taskId, kind: item.park.kind, summary: item.park.reason,
+      attempts: item.park.resumeAttempts ?? 0,
+      evidence: item.evidence, suggestedAction: autoParkSuggestedAction[item.park.kind] });
+    return { parked };
+  }
+
+  async parkTask(input: { runId: string; taskId: string; reason: string; kind: ParkedIssueKind; source: "director" | "auto"; episodeKey?: string; resumeAttempts?: number }): Promise<{ parked: boolean; runStatus: SdlcWorkStatus; reason?: string; episode?: number }> {
+    const args = z.object({ runId: IdentifierSchema, taskId: IdentifierSchema, reason: z.string().trim().min(1).max(2000),
+      kind: ParkedIssueKindSchema, source: z.enum(["director", "auto"]), resumeAttempts: z.number().int().min(0).max(3).optional(), episodeKey: z.string().min(1).optional() }).strict().parse(input);
+    await this.initialize();
+    return this.transaction(async (state, save, core, outbox) => {
+      const run = this.run(state, args.runId);
+      this.assertDirectorWritable(run);
+      if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể treo task`);
+      if (args.taskId === FINAL_TASK) throw new Error("Không thể treo kiểm chứng toàn workflow");
+      const task = run.tasks.find(item => item.taskId === args.taskId);
+      if (!task || !run.coreCreated) throw new Error("Không tìm thấy task Core để treo");
+      const snapshot = await core.snapshot(run.runId), current = snapshot.tasks.find(item => item.taskId === task.taskId)!;
+      if (current.status === "parked" && task.parked) return { parked: true, runStatus: run.status, episode: task.parked.episode };
+      if (!["pending", "ready", "blocked", "waiting", "running"].includes(current.status)) throw new Error(`Không thể treo task ở trạng thái ${current.status}`);
+      const related = state.outbound.filter(out => out.message.run_id === run.runId &&
+        (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
+      const queued = related.filter(out => out.status === "queued" || out.status === "cancelled" && !out.handle && out.lease && !out.parentAssignmentId);
+      if (run.nativeDeliveries?.length || related.some(out => ["sending", "unknown_delivery"].includes(out.status)))
+        throw new Error("Có delivery đang gửi hoặc giao chưa rõ; cần đối soát trước khi treo task");
+      if (run.approval?.status === "pending" && run.decision?.approvalId !== run.approval.approvalId &&
+          (run.approval.target.type !== "task" || run.approval.target.taskId === task.taskId) ||
+          Object.values(run.userDecisions ?? {}).some(entry => entry.status === "pending" && entry.taskId === task.taskId))
+        throw new Error("Task đang chờ phê duyệt hoặc quyết định của người dùng");
+      const pendingVerification = state.pendingVerifications.filter(item => pendingRunId(item) === run.runId && pendingTaskId(item) === task.taskId);
+      if (pendingVerification.some(item => !exhaustedTaskVerification(item, run, task, current.attemptId)) || task.verificationPending && !pendingVerification.length)
+        throw new Error("Task còn kiểm chứng đang chạy; cần chờ kiểm chứng kết thúc");
+      const executions = related.filter(out => !out.parentAssignmentId && out.handle &&
+        (out.status === "accepted" || out.handle.executionId === current.agentExecution?.executionId));
+      for (const out of executions) {
+        const originalError = out.error;
+        await this.requestStop(state, core, outbox, save, run, out, "Task parked", "park");
+        if (originalError === undefined) delete out.error; else out.error = originalError;
+        if (!out.parkStop) return { parked: false, runStatus: run.status, reason: "Chưa gửi được yêu cầu dừng; giữ nguyên writer và lease" };
+        if (!out.parkStop.proof && out.parkStop.observations < CANCEL_STOP_OBSERVATION_LIMIT) {
+          out.parkStop.observations++;
+          await save();
+          // Observe a copy: an unconfirmed park does not overwrite the original assignment's diagnostic/error.
+          const observed = await this.stopObserved({ ...out });
+          // Journal validation reconstructs nested proof records on save; always update the currently owned record.
+          if (observed.proof) out.parkStop.proof = observed.proof;
+          await save();
+        }
+        if (!out.parkStop.proof) return { parked: false, runStatus: run.status, reason: "Chưa xác nhận dừng đúng execution; giữ nguyên writer và lease" };
+      }
+      const bound = current.agentExecution && executions.find(out => out.handle!.executionId === current.agentExecution!.executionId);
+      if (current.agentExecution && !bound?.parkStop?.proof) return { parked: false, runStatus: run.status, reason: "Thiếu chứng từ dừng execution đang gắn với Core" };
+      const heldFailovers = (task.failovers ?? []).filter(entry => !["dispatched", "cancelled"].includes(entry.phase));
+      if (heldFailovers.some(entry => !entry.stopProof && !executions.some(out =>
+          out.handle!.executionId === entry.sourceHandle.executionId && out.parkStop?.proof)))
+        return { parked: false, runStatus: run.status, reason: "Failover còn execution cũ chưa xác nhận dừng; giữ nguyên task" };
+      // Allocation precedes enqueue/send. An unsent attempt still owns a pane and capacity even without a Core execution handle.
+      if (task.parkSettlement || !task.writerReleased && !executions.some(out => out.message.recipient.role === "developer") && current.attemptId && task.worktrees.length) {
+        if (!current.attemptId || current.agentExecution || task.parkSettlement && task.parkSettlement.attemptId !== current.attemptId)
+          return { parked: false, runStatus: run.status, reason: "Intent treo không còn khớp attempt chưa giao; cần đối soát" };
+        const tree = task.worktrees.at(-1)!, allocationTaskId = `${run.runId}-${task.taskId}`;
+        const rawManifest = unwrap(await this.ports.panes.getManifest());
+        if (!rawManifest) return { parked: false, runStatus: run.status, reason: "Chưa quan sát được allocation Developer; giữ nguyên task" };
+        const manifest = SessionManifestSchema.parse(rawManifest);
+        const agentId = `dev-${digest([run.runId, current.attemptId]).slice(0, 20)}`;
+        const candidates = manifest.panes.filter(pane => pane.role === "developer" && pane.metadata?.allocationStatus !== "released" &&
+          (pane.metadata?.taskId === allocationTaskId || pane.agentId === agentId || pane.worktreePath === tree.worktreePath));
+        if (manifest.sessionId !== run.delegation.sessionId || candidates.length > 1 || candidates.some(pane =>
+            !ownsCancelledAllocation(run.runId, pane) || pane.metadata?.taskId !== allocationTaskId || pane.agentId !== agentId ||
+            pane.worktreePath !== tree.worktreePath || pane.cwd !== tree.worktreePath))
+          return { parked: false, runStatus: run.status, reason: "Allocation Developer chưa khớp đúng owner, attempt và worktree; cần đối soát" };
+        const settlement = task.parkSettlement;
+        const pane = candidates[0] ?? (settlement ? manifest.panes.find(item => item.bindingId === settlement.binding.bindingId) : undefined);
+        if (settlement && pane && (pane.role !== "developer" || pane.bindingId !== settlement.binding.bindingId || pane.agentId !== settlement.binding.agentId ||
+            pane.paneId !== settlement.binding.paneId || pane.worktreePath !== settlement.binding.worktreePath ||
+            pane.cwd !== settlement.binding.cwd || pane.workspaceId !== settlement.binding.workspaceId || pane.tabId !== settlement.binding.tabId ||
+            pane.terminalId !== settlement.binding.terminalId || pane.provider !== settlement.binding.provider || pane.model !== settlement.binding.model ||
+            !sameRoleProfilePin(pane.roleProfile, settlement.binding.roleProfile) ||
+            pane.metadata?.runId !== run.runId || pane.metadata?.taskId !== allocationTaskId ||
+            pane.metadata?.launchId !== settlement.binding.metadata?.launchId || digest(pane.session) !== digest(settlement.binding.session)))
+          return { parked: false, runStatus: run.status, reason: "Allocation đang settle đã bị thay thế; giữ fence và cần đối soát" };
+        if (pane) {
+          const assignments = related.filter(out => out.message.type === "task.assignment" && out.attemptId === current.attemptId);
+          if (assignments.some(out => out.handle || !["queued", "cancelled", "failed"].includes(out.status) || out.selector !== pane.bindingId ||
+              out.message.recipient.agent_id !== pane.agentId || out.message.recipient.pane_id !== pane.paneId ||
+              out.request && (out.request.target.agentId !== pane.agentId || out.request.target.paneId !== pane.paneId ||
+                out.request.workingDirectory !== tree.worktreePath)) ||
+              state.outbound.some(out => out.message.recipient.role === "developer" && ["sending", "unknown_delivery", "accepted"].includes(out.status) &&
+                (out.handle?.target.paneId === pane.paneId || out.request?.target.paneId === pane.paneId || out.message.recipient.pane_id === pane.paneId)) ||
+              this.uncertainDeliveryTo(state, run, "developer", { paneId: pane.paneId, taskId: allocationTaskId }))
+            return { parked: false, runStatus: run.status, reason: "Allocation Developer chưa có bằng chứng chưa giao; giữ nguyên writer và lease" };
+          if (!task.parkSettlement) {
+            task.parkSettlement = { attemptId: current.attemptId, binding: pane, park: {
+              at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source,
+              episode: Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1,
+              ...(args.resumeAttempts !== undefined ? { resumeAttempts: args.resumeAttempts } : {}),
+              ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) } };
+            for (const out of queued) { out.status = "cancelled"; out.error = "Task parked"; }
+            // Authority and delivery fence must be durable before PaneManager can relinquish capacity (including a lost reply).
+            await save();
+          }
+          if (pane.metadata?.allocationStatus !== "released") await this.releaseCancelledAllocation(allocationTaskId, tree.worktreePath);
+          task.writerReleased = true;
+        } else if (settlement) {
+          // The exact owned allocation has disappeared and no competing owner matched; nothing remains to release.
+          task.writerReleased = true;
+        }
+      }
+      for (const out of executions) {
+        if (out.message.recipient.role === "developer" && !task.writerReleased) {
+          await this.releaseCancelledAllocation(`${run.runId}-${task.taskId}`, out.handle!.target.worktreePath);
+          task.writerReleased = true;
+          await save();
+        }
+        await outbox.release(out);
+        await this.releaseChildNotices(state, outbox, out);
+      }
+      for (const out of queued) {
+        // Fence unsent work before the lease-release write-ahead save can persist an allocation that has been relinquished.
+        out.status = "cancelled"; out.error = "Task parked";
+        if (out.lease && !out.parentAssignmentId) {
+          await outbox.release(out);
+          delete out.lease; delete out.leaseRelease;
+        }
+        out.status = "cancelled"; out.error = "Task parked";
+      }
+      // Parking ends this attempt's continuation, just like cancellation. `retired` would start another provider allocation.
+      // Keep policy, spent budget, source identity and failure reason; a later unpark must not inherit an active hold.
+      for (const entry of heldFailovers) {
+        entry.stopProof ??= executions.find(out => out.handle!.executionId === entry.sourceHandle.executionId)?.parkStop?.proof;
+        entry.phase = "cancelled";
+      }
+      const episode = task.parkSettlement?.park.episode ?? Math.max(0, ...(task.parkHistory ?? []).map(entry => entry.episode)) + 1;
+      task.parked = task.parkSettlement?.park ?? { at: this.now(), reason: redactString(args.reason), kind: args.kind, source: args.source, episode,
+        ...(args.resumeAttempts !== undefined ? { resumeAttempts: args.resumeAttempts } : {}),
+        ...(args.episodeKey ? { episodeKey: args.episodeKey } : {}) };
+      delete task.parkSettlement;
+      // This settlement is part of the park event's write-ahead snapshot, before CoreSession.persist saves pendingCore.
+      // A crash before append must not leave a replayable verification outcome next to a committed park intent.
+      state.pendingVerifications = state.pendingVerifications.filter(item => !pendingVerification.includes(item));
+      if (pendingVerification.length) {
+        task.parkedVerifications = [...(task.parkedVerifications ?? []), ...pendingVerification.map(item => ({
+          episode, settledAt: task.parked!.at, job: item.job, outcome: item.outcome, attempts: item.attempts!,
+          ...(item.lastError !== undefined ? { lastError: item.lastError } : {}) }))].slice(-20);
+        task.verificationPending = false;
+      }
+      const action = run.pendingAction;
+      const ownsAction = action && pendingActionOwnedByTask(run, task.taskId, related);
+      if (ownsAction) {
+        if (run.status === "escalated") run.status = action.previousStatus ?? "implementing";
+        delete run.pendingAction;
+        if (run.error?.slice(0, 2000) === action.reason) delete run.error;
+      }
+      if (pendingVerification.length && run.status === "verifying" && !run.pendingAction) run.status = "implementing";
+      const after = await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId,
+        expectedVersion: snapshot.version, from: current.status, to: "parked", intent: "park", generationFrom: current.generation, generationTo: current.generation,
+        reason: task.parked!.reason, occurredAt: task.parked!.at, idempotencyKey: `park:${run.runId}:${task.taskId}:${episode}`,
+        ...(bound?.parkStop?.proof ? { stopConfirmation: { schemaVersion: 1, cancellationId: `park-${digest([run.runId, task.taskId, episode])}`,
+          executionId: bound.handle!.executionId, stoppedAt: bound.parkStop.proof.observedAt, terminalStatus: "cancelled" } } : {}) }));
+      this.completeWithParked(state, outbox, run, after);
+      await core.checkpoint(run.runId);
+      await save();
+      return { parked: true, runStatus: run.status, episode };
+    }, false);
+  }
+
+  /** One recovery pass over durable, already-authorized park intents. Failed settlement keeps both task and outbound fenced. */
+  private async recoverParkSettlements(): Promise<void> {
+    const pending = await this.journal.exclusive(async state => state.runs.filter(run => !run.cancelled && !ENDED_RUN_STATUSES.includes(run.status))
+      .flatMap(run => run.tasks.flatMap(task => task.parkSettlement ? [{ runId: run.runId, taskId: task.taskId, ...task.parkSettlement.park }] : [])));
+    for (const item of pending) {
+      try { await this.parkTask({ runId: item.runId, taskId: item.taskId, reason: item.reason, kind: item.kind, source: item.source,
+        ...(item.episodeKey ? { episodeKey: item.episodeKey } : {}) }); }
+      catch { /* The durable intent remains; do not manufacture a successful park or dispatch through its relinquished allocation. */ }
+    }
+  }
+
+  async unparkTask(input: { runId: string; taskId: string; source: "director" | "user" }): Promise<{ unparked: boolean; runStatus: SdlcWorkStatus }> {
+    const args = z.object({ runId: IdentifierSchema, taskId: IdentifierSchema, source: z.enum(["director", "user"]) }).strict().parse(input);
+    await this.initialize();
+    const result = await this.transaction(async (state, save, core) => {
+      const run = this.run(state, args.runId);
+      this.assertDirectorWritable(run);
+      if (args.source === "director" && run.delegation.requestedBy !== "director") throw new AdmissionRejectedError(DIRECTOR_LEGACY_RUN_MESSAGE);
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run đang ở trạng thái ${run.status}; không thể mở lại task`);
+      const task = run.tasks.find(item => item.taskId === args.taskId);
+      if (!task?.parked || !run.coreCreated) throw new Error("Task chưa được treo");
+      const current = (await core.snapshot(run.runId)).tasks.find(item => item.taskId === task.taskId)!;
+      if (current.status !== "parked") throw new Error("Task Core chưa ở trạng thái parked");
+      const episode = task.parked.episode;
+      task.parkHistory = [...(task.parkHistory ?? []), task.parked].slice(-20);
+      delete task.parked; delete task.result;
+      task.writerReleased = false; task.verificationPending = false;
+      // The next candidate builds a fresh plan/cycle after its new implementer is known; old evidence cannot authorize it.
+      delete task.cycle; delete task.verificationPlan;
+      // run.error/pendingAction may be another task's control state (e.g. B's verification-retry prefix and auto_resume budget).
+      // Only a partial-completion reopen or provenance owned by this task may clear them; never infer ownership from text.
+      if (run.status === "completed_with_parked") { run.status = "implementing"; delete run.error; }
+      else {
+        const action = run.pendingAction;
+        const related = state.outbound.filter(out => out.message.run_id === run.runId &&
+          (out.taskId === task.taskId || taskLogBusinessTaskId(out) === task.taskId));
+        if (action && pendingActionOwnedByTask(run, task.taskId, related)) {
+          if (run.status === "escalated") run.status = action.previousStatus ?? "implementing";
+          delete run.pendingAction;
+          if (run.error?.slice(0, 2000) === action.reason) delete run.error;
+        }
+      }
+      // Persist reset metadata with the Core event's write-ahead batch, so a restart cannot pair ready with stale parked/result data.
+      await core.mutate(run.runId, snapshot => this.ports.engine.transitionTask({ runId: run.runId, taskId: task.taskId, expectedVersion: snapshot.version,
+        from: "parked", to: "ready", intent: "unpark", generationFrom: current.generation, generationTo: current.generation,
+        occurredAt: this.now(), idempotencyKey: `unpark:${run.runId}:${task.taskId}:${episode}` }));
+      await core.checkpoint(run.runId);
+      await save();
+      return { unparked: true, runStatus: run.status };
+    }, false);
+    void this.tick().catch(() => undefined);
+    return result;
+  }
   /** Cache a typed refusal while the Coordinator can still correct its proposal in the same turn. */
   private recordProposalRejection(state: JournalState, outbox: HerdrOutbox, run: RunRecord, input: WorkflowRejection): boolean {
     if (run.cancelled || run.supersededBy || TERMINAL_RUN_STATUSES.includes(run.status) || run.definition || run.coreCreated ||
         run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId &&
-          !isConversationDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)) ||
+          !isInProcessDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)) ||
         Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
         run.approval && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;
     const rejection: WorkflowRejection = {
@@ -1736,7 +2150,8 @@ export class AgenticWorkflowRuntime {
           throw new AdmissionRejectedError(reason);
         }
         if (run.status !== "awaiting_approval" && !Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) {
-          if (agentSender) this.escalateInvalidMessages(run, message.message_id, `${reason} (${attempt} refused messages for ${sourceId})`);
+          if (agentSender) this.escalateInvalidMessages(run, message.message_id, `${reason} (${attempt} refused messages for ${sourceId})`,
+            this.now(), this.invalidMessageAssignment(state, run, message));
           else {
             const previousStatus = run.status;
             run.error = reason; run.status = "escalated";
@@ -1770,7 +2185,7 @@ export class AgenticWorkflowRuntime {
         // Dialogue-only traffic has no DelegationRequest and must never create a workflow. An answer for a live run must still reach
         // the Coordinator, which yielded its turn after asking: nothing else prompts that pane.
         const dialogueRun = isConversationContext(message) ? state.runs.find(item => item.runId === message.run_id) : undefined;
-        if (dialogueRun && !dialogueRun.cancelled && !ENDED_RUN_STATUSES.includes(dialogueRun.status) && message.correlation_id === dialogueRun.delegation.correlationId) {
+        if (dialogueRun && !dialogueRun.cancelled && !ENDED_RUN_STATUSES.includes(dialogueRun.status) && dialogueRun.status !== "completed_with_parked" && message.correlation_id === dialogueRun.delegation.correlationId) {
           this.wakeCoordinator(state, outbox, dialogueRun, message);
           inbox.status = "applied"; await save(); return json({ accepted: true, informational: true });
         }
@@ -1814,7 +2229,7 @@ export class AgenticWorkflowRuntime {
         const run = this.run(state, message.run_id!);
         if (message.correlation_id !== run.delegation.correlationId) throw new Error("Wrong run correlation");
         if (isConversationContext(message)) {
-          if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; informational context cannot reopen it`);
+          if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; informational context cannot reopen it`);
           this.wakeCoordinator(state, outbox, run, message);
           inbox.status = "applied"; await save(); return json({ accepted: true, informational: true });
         }
@@ -2062,7 +2477,7 @@ export class AgenticWorkflowRuntime {
     return this.transaction(async (state, save, _core, outbox) => {
       await this.refuseFencedDiagnostic(state, save, parsed);
       const run = state.runs.find(item => item.runId === parsed.run_id);
-      if (!run || parsed.correlation_id !== run.delegation.correlationId || run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) return;
+      if (!run || parsed.correlation_id !== run.delegation.correlationId || run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) return;
       const existing = state.inbox.find(item => item.message.message_id === parsed.message_id || (parsed.idempotency_key !== undefined && item.message.idempotency_key === parsed.idempotency_key));
       if (existing && digest(existing.message) !== digest(parsed)) throw new Error("Conflicting Coordinator outcome idempotency key");
       if (existing?.status === "applied") return;
@@ -2175,6 +2590,7 @@ export class AgenticWorkflowRuntime {
     const runId = textField(runIdInput), actionId = textField(actionIdInput);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId), action = run.pendingAction;
+      this.assertDirectorWritable(run);
       if (options.webCommand) {
         const command = WebCommandSchema.parse(options.webCommand);
         if (options.automatic || options.conversationUserMessageId || command.kind !== "resume" || command.runId !== runId || command.actionId !== actionId ||
@@ -2188,10 +2604,10 @@ export class AgenticWorkflowRuntime {
         throw new Error("Expired writer lease requires authenticated explicit owner resume through Conversation or Web UI; do not retry resume_run from Coordinator — call report_progress to inform the user and end your turn");
       const resumeUnmeasured = !options.automatic && !leaseFailure && run.status === "implementing" &&
         action?.kind === "coordinator_continuation" && action.state === "pending" && this.unmeasuredPhaseRequests(state, run).length > 0;
-      if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
+      if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId && ["sending", "unknown_delivery"].includes(item.status) && !isInProcessDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before resume");
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
-      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
       const priorResume = run.resumeReceipts?.find(item => item.actionId === actionId);
       // An automatic wake is not the user's explicit operational request. Keep its immutable delivery,
       // but allow a separately identified manual continuation even while that wake is queued/accepted.
@@ -2261,16 +2677,19 @@ export class AgenticWorkflowRuntime {
       } else if (failedCapabilityDispatches.length !== failureIds.length && failedCapabilityDispatches.length > 0) {
         throw new Error("A recorded capability handoff is missing or no longer safely unsent");
       }
+      // A Coordinator resume in a Director session is a mailbox write: there is no Coordinator pane or capability to prove.
       const resumeBindings = failedCapabilityDispatches.length
         ? await Promise.all(failedCapabilityDispatches.map(async item => ({ item, binding: unwrap(await this.ports.panes.getRoleBinding(item.selector)) })))
-        : [{ item: undefined, binding: unwrap(await this.ports.panes.getRoleBinding(action.requiredRole ?? "coordinator")) }];
-      if (resumeBindings.some(item => !item.binding) || !this.ports.preflightRoleCapabilities)
+        : this.ports.director && run.delegation.requestedBy === "director" && action.requiredRole === undefined ? []
+          : [{ item: undefined, binding: unwrap(await this.ports.panes.getRoleBinding(action.requiredRole ?? "coordinator")) }];
+      if (resumeBindings.length && (resumeBindings.some(item => !item.binding) || !this.ports.preflightRoleCapabilities))
         throw new Error("The current session has no verified role capability preflight");
       const resumeRequirements = action.requiredCapabilities ?? ["repository.read"];
       for (const entry of resumeBindings) {
         const binding = entry.binding;
         if (!binding) throw new RoleCapabilityPreflightError("The required role pane is not bound in this session");
         const requirements = entry.item?.capabilities ?? resumeRequirements;
+        if (!this.ports.preflightRoleCapabilities) throw new Error("The current session has no verified role capability preflight");
         await this.ports.preflightRoleCapabilities(binding, requirements);
         if (requirements.some(capability => !this.ports.roleCapabilities[binding.role]?.includes(capability)))
           throw new RoleCapabilityPreflightError(`${binding.role} required capability is unavailable: ${requirements.join(", ")}`);
@@ -2363,24 +2782,29 @@ export class AgenticWorkflowRuntime {
    * once spent, the action becomes `manual` and Conversation is told once, with how to resume it explicitly. An explicit user
    * resume has its own bound (`manualResumeAttempts`, 3) and grants a fresh automatic budget. Human decisions are never answered here.
    */
-  async resumeRecoverableRuns(): Promise<JsonValue> {
+  async resumeRecoverableRuns(parkPolicy?: AutoParkPolicy): Promise<JsonValue> {
     if (this.quiesced) return json({ resumed: 0, reason: "quiesced" });
     const coordinatorReadable = this.ports.roleCapabilities.coordinator?.includes("repository.read") === true;
     const candidates = await this.transaction(async (state, save, _core, outbox) => {
       const now = Date.parse(this.now());
       const recoverable = state.runs.filter(run => run.status === "escalated" && !run.cancelled && !run.supersededBy &&
+        // A Director session never resumes a run created by a v2 Conversation; it is read-only there (R-B2-12).
+        (!this.ports.director || run.delegation.requestedBy === "director") &&
         run.pendingAction?.kind === "resume_coordinator" && run.pendingAction.state === "pending" &&
         ["auto_resume", "capability_repair"].includes(run.pendingAction.recovery ?? "manual"));
+      const limit = (run: RunRecord) => this.ports.director && parkPolicy?.enabled && run.delegation.requestedBy === "director" &&
+        run.pendingAction?.recovery === "auto_resume" && !run.error?.startsWith(VERIFICATION_RETRY_PREFIX)
+        ? parkPolicy.maxAutoResumesBeforePark : AUTO_RESUME_LIMIT;
       let changed = false;
-      for (const run of recoverable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT)) {
+      for (const run of recoverable.filter(item => (item.pendingAction!.resumeAttempts ?? 0) >= limit(item))) {
         // Budget spent: stop automatic resumes and say so once; an explicit user resume/cancel decides from here.
         const action = run.pendingAction!, actionId = action.actionId, manual = action.manualResumeAttempts ?? 0;
         const manualLeft = Math.max(0, MANUAL_RESUME_LIMIT - manual);
         this.emit(state, outbox, run, "conversation.progress", { kind: "workflow_blocked", runId: run.runId, sdlcStatus: run.status, owner: "coordinator",
           actionId, reason: action.reason, blockageReason: action.reason, manualResumesLeft: manualLeft,
           headline: manualLeft > 0
-            ? `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. Type \`tiếp tục ${run.runId}\` to resume it (${manualLeft} of ${MANUAL_RESUME_LIMIT} user resumes left)`
-            : `Automatic resume stopped after 3 attempts; the same blocker keeps recurring. All ${MANUAL_RESUME_LIMIT} user resumes are used: fix the cause with an operator or cancel`,
+            ? `Runtime đã dừng tự tiếp tục sau ${limit(run)} lần; cùng nguyên nhân vẫn lặp lại. Gõ \`tiếp tục ${run.runId}\` để thử lại (còn ${manualLeft}/${MANUAL_RESUME_LIMIT} lần do người dùng yêu cầu)`
+            : `Runtime đã dừng tự tiếp tục sau ${limit(run)} lần; đã dùng hết ${MANUAL_RESUME_LIMIT} lần do người dùng yêu cầu. Cần khắc phục nguyên nhân với operator hoặc hủy run`,
           options: manualLeft > 0
             ? [`Gõ \`tiếp tục ${run.runId}\` để Runtime tiếp tục run (còn ${manualLeft}/${MANUAL_RESUME_LIMIT} lần)`, "Khắc phục nguyên nhân (capability/pane) với operator", "Hủy run"]
             : ["Khắc phục nguyên nhân (capability/pane) với operator; run không tự tiếp tục nữa", "Hủy run"] },
@@ -2392,12 +2816,12 @@ export class AgenticWorkflowRuntime {
       if (changed) await save();
       return recoverable.filter(run => {
         const action = run.pendingAction!;
-        if ((action.resumeAttempts ?? 0) >= AUTO_RESUME_LIMIT) return false;
+        if ((action.resumeAttempts ?? 0) >= limit(run)) return false;
         // Human gates and unknown deliveries are durable waits: never answered, resent or bypassed automatically.
         if (Object.values(run.userDecisions ?? {}).some(item => item.status === "pending") ||
             run.approval !== undefined && (!run.decision || run.decision.approvalId !== run.approval.approvalId)) return false;
         if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === run.runId &&
-            ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item))) return false;
+            ["sending", "unknown_delivery"].includes(item.status) && !isInProcessDelivery(item))) return false;
         return action.recovery !== "auto_resume" || now >= autoResumeDueAt(action);
       }).map(run => ({ runId: run.runId, actionId: run.pendingAction!.actionId,
         verificationRetry: run.error?.startsWith(VERIFICATION_RETRY_PREFIX) === true && run.pendingAction!.recovery === "auto_resume" }));
@@ -2409,11 +2833,16 @@ export class AgenticWorkflowRuntime {
           // Same transition as the Coordinator's retry_verification tool; Runtime then re-runs the verification itself.
           await this.retryVerification(candidate.runId, { automatic: true, actionId: candidate.actionId }); resumed++; continue;
         }
-        if (!coordinatorReadable) continue;
-        const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
-        if (!pane) continue;
-        const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
-        if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
+        if (this.ports.director) {
+          // A wake written while the Director is absent only spends the bounded budget; it waits until someone can read it.
+          if (!await this.ports.director.present()) continue;
+        } else {
+          if (!coordinatorReadable) continue;
+          const pane = unwrap(await this.ports.panes.getRoleBinding("coordinator"));
+          if (!pane) continue;
+          const health = unwrap(await this.ports.panes.inspectRoleHealth("coordinator"));
+          if (!health.readyForPrompt || !health.occupantMatches || health.paneId !== pane.paneId) continue;
+        }
         await this.resumeBlockedRun(candidate.runId, candidate.actionId, { automatic: true }); resumed++;
       } catch (error) {
         // Unknown delivery, cancellation/approval, stale role binding and capability proof failures remain durable waits.
@@ -2734,7 +3163,8 @@ export class AgenticWorkflowRuntime {
       const started = (item: RunRecord) => item.tasks.some(task => task.worktrees.length > 0) ||
         state.outbound.some(out => out.message.run_id === item.runId && out.message.type === "task.assignment" && out.status !== "queued" && out.status !== "cancelled");
       if (started(run)) throw new Error("Repository setup applies before implementation starts; this run already has Developer work");
-      const busy = state.runs.find(other => other.runId !== runId && !other.cancelled && !ENDED_RUN_STATUSES.includes(other.status) && started(other));
+      const busy = state.runs.find(other => other.runId !== runId && !other.cancelled && !ENDED_RUN_STATUSES.includes(other.status) &&
+        other.status !== "completed_with_parked" && started(other));
       if (busy) throw new Error(`Repository setup would move the base under active run ${busy.runId}; wait for it to finish or cancel it first`);
       const logged = { id: `setup-${digest([runId, input, this.now(), run.repositorySetupLog?.length ?? 0])}`, operation: input.operation,
         input: redactString(JSON.stringify(input)).slice(0, 1000), startedAt: this.now(), status: "started" as const };
@@ -2773,7 +3203,7 @@ export class AgenticWorkflowRuntime {
     const blocked = changed.filter(key => key !== REPOSITORY_SNAPSHOT_COMPONENT);
     if (blocked.length) throw new Error(`Only a repository change can be re-resolved; these accepted inputs also changed: ${blocked.map(key => `inputs.${key}`).join(", ")}. Restore them, or replan through a requirement revision`);
     if (!changed.length) { await assertRunExecutionPlan(run, read); return { rebound: false }; }
-    if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId && !isConversationDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
+    if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === run.runId && !isInProcessDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
       throw new Error("Unknown delivery must be reconciled before re-resolving the run");
     const previousRevision = run.baseRevision, head = textField((await this.ports.policies.git.inspect()).head);
     const started = run.tasks.some(task => task.worktrees.length > 0);
@@ -2809,7 +3239,7 @@ export class AgenticWorkflowRuntime {
       const run = this.run(state, runId); this.live(run);
       if (run.status !== "awaiting_approval" || run.approvalKind !== "design" || !run.approval || run.decision || run.coreCreated)
         throw new Error("Only a design proposal still awaiting its approval can be withdrawn; an accepted plan uses reresolve_execution_plan");
-      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && !isConversationDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
+      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && !isInProcessDelivery(out) && ["sending", "unknown_delivery"].includes(out.status)))
         throw new Error("Unknown delivery must be reconciled before withdrawing the proposal");
       const approvalId = run.approval.approvalId, text = redactString(textField(reason)).slice(0, 300);
       run.supersededApprovals = [...(run.supersededApprovals ?? []), { approvalId, withdrawn: true }];
@@ -2833,8 +3263,9 @@ export class AgenticWorkflowRuntime {
     const userMessageId = textField(conversationUserMessageId);
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId);
+      this.assertDirectorWritable(run);
       if (run.supersededBy) throw new AdmissionRejectedError(`Run ${runId} continued as follow-up run ${run.supersededBy}; resume or inspect ${run.supersededBy}`);
-      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status)) throw new Error(`Run is ${run.status}; it cannot be resumed`);
+      if (run.cancelled || ENDED_RUN_STATUSES.includes(run.status) || run.status === "completed_with_parked") throw new Error(`Run is ${run.status}; it cannot be resumed`);
       if (run.status === "awaiting_approval" || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
         throw new Error("This run is waiting for your answer on its open card; answer that card instead of resuming");
       const waiting = state.outbound.filter(out => out.message.run_id === runId && out.status === "queued" && out.message.recipient.role === "coordinator");
@@ -2887,7 +3318,7 @@ export class AgenticWorkflowRuntime {
   async requestSpecialist(runId: string, requestedRole: string, objective: string, requiredCapabilities: string[], profileInput?: RoleProfilePin): Promise<JsonValue> {
     return this.transaction(async (state, save, _core, outbox) => {
       const run = this.run(state, runId); this.live(run);
-      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isConversationDelivery(out)))
+      if (run.nativeDeliveries?.length || state.outbound.some(out => out.message.run_id === runId && ["sending", "unknown_delivery"].includes(out.status) && !isInProcessDelivery(out)))
         throw new Error("Unknown delivery must be reconciled before requesting another specialist assignment");
       if (!SPECIALIST_ROLES.includes(requestedRole)) return this.specialistUnavailable(requestedRole, `${requestedRole} is not a specialist role`);
       const governanceRole = requestedRole;
@@ -3931,6 +4362,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
                 ownedPaths,
                 forbiddenPaths,
                 expectedStatus: result.status,
+                authorizeVerifiedNoChangeDispute: revision => this.verifiedNoChangeDispute(run,task,result.attemptId,revision),
                 artifactStore: this.ports.artifactStore
               })
             : await validateAndStoreReworkResolution({
@@ -3942,6 +4374,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
                 submissionStatus: result.status,
                 submittedByAgentId: out.handle.target.agentId,
                 submittedAt: result.completedAt,
+                authorizeVerifiedNoChangeDispute: revision => this.verifiedNoChangeDispute(run,task,result.attemptId,revision),
                 artifactStore: this.ports.artifactStore
               });
           task.reworkResolutions ??= [];
@@ -3965,7 +4398,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     if (this.ports.automaticAlternativeEvidence && result.status === "succeeded" && !evidenceComplete && task.spec.strategy.tddDecision.mode !== "required") {
       const requestId = `alternative-${result.requestId}`;
       const behavioral = task.spec.strategy.targetCommands.length > 0;
-      const change = behavioral ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key)) : undefined;
+      const change = behavioral ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key,this.candidateCollectOptions(run,task,result.attemptId))) : undefined;
       if (change && (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== result.attemptId))
         throw new Error("Automatic policy verification source does not match the implementation attempt");
       const recipient = await this.profileEvidenceRecipient(run, "qa", requestId, ["testing"]);
@@ -3997,6 +4430,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const snapshot = await core.snapshot(run.runId);
     for (const taskState of snapshot.tasks.filter(task => task.status === "running" && !task.agentExecution)) {
       const task = run.tasks.find(item => item.taskId === taskState.taskId)!;
+      if (task.parkSettlement) continue;
       const definition = run.definition!.tasks.find(item => item.id === task.taskId)!;
       const rawTaskCaps = definition.metadata?.requiredCapabilities ? strings(definition.metadata.requiredCapabilities) : [];
       const requiredCapabilities = rawTaskCaps.length ? rawTaskCaps : ["implementation"];
@@ -4117,6 +4551,38 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       return json({ authorized: true, decisionId: task.spec.strategy.tddDecision.decisionId });
     });
   }
+  /** Admission of an unchanged all-disputed proposal still leaves every finding and gate to independent verification. */
+  private candidateCollectOptions(run:RunRecord,task:TaskRecord,attemptId:string) {
+    return {authorizeUnchangedDispute:(revision:string)=>this.isSubmittedUnchangedDispute(task,attemptId,revision)
+      ? this.verifiedNoChangeDispute(run,task,attemptId,revision) : Promise.resolve(false),comparisonBaseRevision:task.worktrees[0]!.baseCommitHash};
+  }
+  private isSubmittedUnchangedDispute(task:TaskRecord,attemptId:string,revision:string):boolean {
+    const dossier=task.reworkResolutions?.find(d=>d.attemptId===attemptId);
+    return task.cycle?.status==="rework_required"&&task.result?.status==="succeeded"&&task.result.attemptId===attemptId&&
+      !!dossier&&dossier.submittedRevision===revision&&dossier.failedRevision===revision&&dossier.findingResolutions.every(f=>f.disposition==="disputed");
+  }
+  private async authorizeUnchangedVerification(runId:string,taskId:string,attemptId:string,cycleId:string,revision:string):Promise<boolean> {
+    return this.transaction(async(state,_save,core)=>{
+      const run=this.run(state,runId),task=run.tasks.find(t=>t.taskId===taskId);
+      const dossier=task?.reworkResolutions?.find(d=>d.attemptId===attemptId);
+      if(run.cancelled||run.status!=="verifying"||!task?.writerReleased||task.result?.status!=="succeeded"||task.result.attemptId!==attemptId||task.cycle?.cycleId!==cycleId||
+        !dossier||!this.isSubmittedUnchangedDispute(task,attemptId,revision))return false;
+      const current=(await core.snapshot(runId)).tasks.find(t=>t.taskId===taskId);
+      if(current?.attemptId!==attemptId||current.status!=="waiting")return false;
+      return this.verifiedNoChangeDispute(run,task,attemptId,revision);
+    });
+  }
+  private async verifiedNoChangeDispute(run: RunRecord, task: TaskRecord, attemptId: string, revision: string): Promise<boolean> {
+    try { this.ports.policies.assertEvidenceComplete(task.spec.strategy); } catch { return false; }
+    const packet=record(await reviewCandidateEvidence({context:candidateEvidenceContext({runId:run.runId,taskId:task.taskId,attemptId,sourceRevision:revision,specification:task.spec.specification,strategy:task.spec.strategy}),
+      state:{runs:[run]},store:this.ports.artifactStore,
+      authenticateEvidence:async value=>(await this.ports.authenticateStoredEvidence?.(value))===true,
+      authenticateGate:async value=>(await this.ports.authenticateStoredGate?.(value))===true}));
+    if(!hasCandidateGateReceipt(packet))return false;
+    await this.activityLog.record({kind:"verification",role:"runtime",action:"no_change_dispute_proposal_authorized",runId:run.runId,taskId:task.taskId,attemptId,
+      outcome:`source=${revision}; receipts=${(Array.isArray(packet.entries)?packet.entries:[]).map(entry=>record(entry).receiptId).join(",")}; independent finding verdicts remain required`});
+    return true;
+  }
   async prepareReworkSubmission(
     bindingInput: PaneBinding,
     runIdInput: string,
@@ -4161,6 +4627,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         submissionStatus,
         submittedByAgentId: binding.agentId,
         submittedAt: this.now(),
+        authorizeVerifiedNoChangeDispute: revision => this.verifiedNoChangeDispute(run,task,current.attemptId!,revision),
         artifactStore: this.ports.artifactStore
       });
     });
@@ -4300,7 +4767,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             digest(target.session) === digest(binding.session);
         });
         const associatedRunIds = new Set(associated.map(item => item.message.run_id!));
-        const liveRun = state.runs.some(run => associatedRunIds.has(run.runId) && !["completed", "failed", "cancelled"].includes(run.status));
+        const liveRun = state.runs.some(run => associatedRunIds.has(run.runId) && !["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status));
         const unresolved = associated.some(item => ["sending", "unknown_delivery"].includes(item.status)) ||
           associated.some(item => {
             const run = state.runs.find(candidate => candidate.runId === item.message.run_id);
@@ -4544,7 +5011,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const failures = state.outbound.filter(item => item.message.run_id === run.runId && item.error?.startsWith("policy_phase_failed:") &&
         record(item.message.payload).taskId === task.taskId && record(item.message.payload).phase === payload.phase &&
         record(item.message.payload).implementationAttemptId === payload.implementationAttemptId).length;
-      if (run.cancelled || ["completed", "failed", "cancelled", "escalated"].includes(run.status)) {
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated"].includes(run.status)) {
         // Retain the receipt while preserving a newer terminal decision.
       } else if (!repairable || failures >= run.maxIterations || task.result !== undefined) {
         const previousStatus = run.status;
@@ -4650,7 +5117,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
             const retryRequestId = `alternative-retry-${digest([run.runId, task.taskId, request.message.message_id, String(retryIndex)])}`;
             const behavioral = task.spec.strategy.targetCommands.length > 0;
             const change = behavioral && task.worktrees.at(-1)
-              ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key))
+              ? GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key,this.candidateCollectOptions(run,task,task.result.attemptId)))
               : undefined;
             const recipient = await this.profileEvidenceRecipient(run, "qa", retryRequestId, ["testing"]);
             const evidenceOut = outbox.enqueue(RoleMessageSchema.parse({
@@ -4984,6 +5451,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
   async tick(): Promise<JsonValue> {
     await this.initialize();
     if (this.quiesced) return this.inspect();
+    await this.recoverParkSettlements();
     await this.transaction(async (state, save, core, outbox) => {
       await this.drainCancellationControls(state, save, core, outbox);
       await this.cleanupProfileSpecialists(state, save);
@@ -5004,7 +5472,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           if (run.nativeDeliveries?.length) continue;
           // Legacy delivery blockers can predate nativeDeliveries. Reconciliation and cancellation still run outside this work loop.
           if (run.pendingAction?.state === "pending" && run.pendingAction.recovery === "reconcile_delivery") continue;
-          if (run.cancelled || ["completed", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
+          if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled", "escalated", "awaiting_approval", "intake", "clarifying", "specifying", "planning"].includes(run.status)) continue;
           // One run's failure is recorded on that run; the other runs and the outbox flush below still proceed.
           try {
             if (!run.coreCreated) await core.create(run);
@@ -5071,11 +5539,12 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               }
               await outbox.release(out);
               await this.releaseChildNotices(state, outbox, out);
-              const change = GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key));
+              const change = GitChangeSetSchema.parse(await this.ports.policies.git.collectTask(task.worktrees.at(-1)!.key,this.candidateCollectOptions(run,task,current.attemptId!)));
               if (change.runId !== run.runId || change.taskId !== task.taskId || change.attemptId !== current.attemptId) throw new Error("Git task submission mismatch");
               task.changeSet = change;
               const plan = this.verificationPlan(state, run, task, undefined, outbox);
-              task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan, `cycle-${digest([run.runId, task.taskId])}`));
+              task.cycle ??= VerificationCycleSchema.parse(this.ports.policies.verification.start(plan,
+                `cycle-${digest([run.runId, task.taskId, ...(task.parkHistory?.length ? ["unpark", task.parkHistory.at(-1)!.episode] : [])])}`));
               const latestReworkDossier = task.reworkResolutions?.find(item => item.attemptId === current.attemptId);
               if (hasReworkAssignment(state.outbound, run.runId, task.taskId, current.attemptId!) && !latestReworkDossier) {
                 this.escalateForRetry(state, outbox, run, task.taskId, `${VERIFICATION_RETRY_PREFIX} Missing validated rework resolution dossier for ${current.attemptId}; independent finding evidence remains required`);
@@ -5090,7 +5559,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
               await save();
             }
             const snapshot = await core.snapshot(run.runId);
-            if (snapshot.status === "blocked") {
+            if (snapshot.status === "blocked" && !this.completeWithParked(state, outbox, run, snapshot)) {
               const blockedTask = snapshot.tasks.find(task => ["failed", "blocked", "cancelled"].includes(task.status));
               run.status = "escalated";
               run.error = blockedTask
@@ -5142,16 +5611,19 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         await save(); return jobs;
     });
-    await this.deliverConversationInbox();
+    await this.deliverInProcessInbox();
     for (const job of jobs) {
       // No Runtime lock is held: QA/Reviewer may reply through Herdr while verification awaits them.
       try {
-        const outcome = await this.ports.policies.verification.verify(job.plan, job.cycle, job.change, job.options);
+        const taskId=job.taskId;
+        const options=taskId!==undefined&&taskId!==FINAL_TASK ? {...record(job.options ?? {}),
+          authorizeUnchangedDispute:(revision:string)=>this.authorizeUnchangedVerification(job.runId,taskId,job.change.attemptId,job.cycle.cycleId,revision)} : job.options;
+        const outcome = await this.ports.policies.verification.verify(job.plan, job.cycle, job.change, options);
         await this.finishVerification(job, outcome);
       } catch (error) {
         await this.transaction(async (state, save, _core, outbox) => {
           const run = this.run(state, job.runId);
-          if (!run.cancelled && !["failed", "completed", "cancelled", "escalated"].includes(run.status))
+          if (!run.cancelled && !["failed", "completed", "completed_with_parked", "cancelled", "escalated"].includes(run.status))
             this.escalateForRetry(state, outbox, run, job.taskId, `${VERIFICATION_RETRY_PREFIX} ${redactString(String(error))}`);
           else if (resumablyPaused(run)) { // No outcome exists: release the flag so the frozen plan reruns after resume.
             if (job.taskId === FINAL_TASK) run.workflowVerificationPending = false;
@@ -5172,7 +5644,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       const sourceMessageId = `verification-retry-${digest([run.runId, taskId, reason])}`;
       // Automatic, bounded: Runtime re-runs retry_verification itself after backoff, sharing the inherited budget.
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-        reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
+        reason: reason.slice(0, 2000), sourceMessageId, verificationTaskId: taskId, createdAt: this.now(), state: "pending", previousStatus,
         ...inheritedAutoResume(run), recovery: "auto_resume" };
     }
     const action = run.pendingAction!;
@@ -5203,7 +5675,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
     const sourceMessageId = `workflow-blocked-${digest([run.runId, taskId, reason])}`;
     if (!(run.pendingAction?.state === "pending" && run.pendingAction.kind === "resume_coordinator" && run.pendingAction.sourceMessageId === sourceMessageId)) {
       run.pendingAction = { actionId: `next-${digest([run.runId, sourceMessageId])}`, kind: "resume_coordinator", owner: "coordinator",
-        reason: reason.slice(0, 2000), sourceMessageId, createdAt: this.now(), state: "pending", previousStatus,
+        reason: reason.slice(0, 2000), sourceMessageId, verificationTaskId: taskId, createdAt: this.now(), state: "pending", previousStatus,
         ...inheritedManualResume(run), recovery: "manual" };
     }
     const action = run.pendingAction!;
@@ -5233,7 +5705,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         const runId = pendingRunId(entry), taskId = pendingTaskId(entry) ?? "unknown-task";
         const run = state.runs.find(candidate => candidate.runId === runId);
         // Same liveness rule as finishVerification: an escalated run still resumes its verification outcomes.
-        if (run && !run.cancelled && !["completed", "failed", "cancelled"].includes(run.status)) {
+        if (run && !run.cancelled && !["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status)) {
           entry.stuck = true;
           this.escalateForRetry(state, outbox, run, taskId, `${VERIFICATION_RETRY_PREFIX} ${reason} (failed ${entry.attempts} times)`);
         } else state.pendingVerifications = state.pendingVerifications.filter(candidate => candidate !== entry); // no live run to resume
@@ -5250,7 +5722,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (this.quiesced) throw new Error("Runtime is quiesced");
       const run = this.run(state, runId);
       if (run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === runId &&
-          ["sending", "unknown_delivery"].includes(item.status) && !isConversationDelivery(item)))
+          ["sending", "unknown_delivery"].includes(item.status) && !isInProcessDelivery(item)))
         throw new Error("Unknown delivery must be reconciled before verification retry");
       if (run.cancelled || run.status !== "escalated" || !run.error?.startsWith(VERIFICATION_RETRY_PREFIX))
         throw new Error("No verification awaiting retry for this run");
@@ -5359,7 +5831,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
         return;
       }
-      if (run.cancelled || ["failed", "completed", "cancelled"].includes(run.status) ||
+      if (run.cancelled || ["failed", "completed", "completed_with_parked", "cancelled"].includes(run.status) ||
           run.status === "escalated" && !run.error?.startsWith(VERIFICATION_RETRY_PREFIX)) {
         clearPending(); await save(); return; // late evidence cannot revive a terminal decision
       }
@@ -5477,7 +5949,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       }
       this.emit(state, outbox, run, "verification.result", result, result.verificationId, "conversation", result.evidenceArtifacts);
       if (run.status === "escalated") this.progress(state, outbox, run, run.error!);
-      clearPending(); await save(); await core.checkpoint(run.runId);
+      clearPending();
+      if (run.tasks.some(task => task.parked)) this.completeWithParked(state, outbox, run, await core.snapshot(run.runId));
+      await save(); await core.checkpoint(run.runId);
     });
   }
   private async integrate(state: JournalState, save: () => Promise<void>, outbox: HerdrOutbox, run: RunRecord): Promise<void> {
@@ -5864,8 +6338,8 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
    * interrupt is not confirmation of stop, so the lease, worktree and Core cancelling state wait for stopObserved.
    */
   private async requestStop(state: JournalState, core: CoreSession, outbox: HerdrOutbox, save: () => Promise<void>, run: RunRecord, out: Outbound,
-    reason: string): Promise<void> {
-    if (!out.handle || out.cancelRequested || out.reviewReplacement) return;
+    reason: string, purpose: "cancel" | "park" = "cancel"): Promise<void> {
+    if (!out.handle || (purpose === "park" ? out.parkStop !== undefined : out.cancelRequested) || out.reviewReplacement) return;
     let scopeError: string | undefined;
     if (out.message.recipient.role === "developer" && this.ports.stopDeveloperExecutionScope) {
       try {
@@ -5876,7 +6350,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
           if (proof.source !== "linux_pid_namespace" || digest(proof.handle) !== digest(out.handle) ||
               (Date.parse(proof.observedAt) < Date.parse(out.handle.acceptedAt) || Date.parse(proof.observedAt) > Date.parse(this.now()))) throw new Error("Foreign namespace stop proof");
           // The scope's sealed admission/stop intent is durable before its pidfd signal. No current lease is required to stop owned work.
-          state.version = 6; out.cancelRequested = true; out.cancellationStopProof = proof; out.error = "Namespace stop confirmed; allocation cleanup pending";
+          if (purpose === "park") out.parkStop = { requestedAt: this.now(), observations: 0, proof };
+          else { if (state.version < 6) state.version = 6; out.cancelRequested = true; out.cancellationStopProof = proof; }
+          out.error = "Namespace stop confirmed; allocation cleanup pending";
           await save(); return;
         }
       } catch (error) {
@@ -5925,7 +6401,9 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         }
       }
     }
-    out.cancelRequested = true; await save();
+    if (purpose === "park") out.parkStop = { requestedAt: this.now(), observations: 0 };
+    else out.cancelRequested = true;
+    await save();
     const version = run.coreCreated ? (await core.snapshot(run.runId)).version : 0;
     const request = CancellationRequestSchema.parse({ schemaVersion: 1, cancellationId: `cancel-${digest(out.message.message_id)}`,
       runId: run.runId, taskId: out.taskId, requestedBy: "runtime", requestedAt: this.now(), expectedVersion: version,
@@ -6420,7 +6898,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
       if (candidates.length !== 1) throw new Error("No unique unresolved native operation with this ID");
       const run = candidates[0]!;
       if (run.delegation.sessionId !== authority.sessionId) throw new Error("Cross-session diagnostic fence");
-      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) ||
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) ||
           run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId ||
           Object.values(run.userDecisions ?? {}).some(item => item.status === "pending")) throw new Error("A pending human gate must be resolved before diagnostic fencing");
       const intent = run.nativeDeliveries!.find(entry => entry.operationId === authority.operationId)!;
@@ -6503,7 +6981,7 @@ Human feedback on ${approvalKind} approval (${decision.approvalId}): ${feedback}
         await this.recoverPolicyPhaseRetirements(state, save, outbox);
         return json({ alreadyRetired: true, operationId: authority.operationId, disposition: request.phaseRetirement.disposition });
       }
-      if (run.cancelled || ["completed", "failed", "cancelled"].includes(run.status) || !["accepted", "released"].includes(request.status) || request.phaseFailure ||
+      if (run.cancelled || ["completed", "completed_with_parked", "failed", "cancelled"].includes(run.status) || !["accepted", "released"].includes(request.status) || request.phaseFailure ||
           run.nativeDeliveries?.length || state.outbound.some(item => item.message.run_id === run.runId && ["sending", "unknown_delivery"].includes(item.status)) ||
           run.approval !== undefined && run.decision?.approvalId !== run.approval.approvalId || Object.values(run.userDecisions ?? {}).some(item => item.status === "pending"))
         throw new Error("Pending governance or uncertain delivery prevents phase retirement");

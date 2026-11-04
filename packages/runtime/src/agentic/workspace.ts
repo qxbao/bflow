@@ -12,6 +12,7 @@ import { CoordinatorTools } from "./tools.js";
 import { record } from "./journal.js";
 import { unwrap } from "./outbox.js";
 import type { ReachabilityVerdict } from "./tool-reachability.js";
+import { assertManifestLayout, directorProgressCommand, workspaceDefaultAgentKind, type HostLayout } from "./host-director-mode.js";
 
 export interface OpenAgenticWorkspaceOptions {
   roleProfiles?: AgenticRuntimePorts["roleProfiles"];
@@ -50,6 +51,8 @@ export interface OpenAgenticWorkspaceOptions {
   /** Called after Conversation applied a Runtime outbox message; the host records it as a durable notice for the model. */
   onConversationNotice?: (message: RoleMessage) => Promise<void>;
   authenticateResult: AgenticRuntimePorts["authenticateResult"];
+  authenticateStoredGate?: AgenticRuntimePorts["authenticateStoredGate"];
+  authenticateStoredEvidence?: AgenticRuntimePorts["authenticateStoredEvidence"];
   authenticateEvidence: AgenticRuntimePorts["authenticateEvidence"];
   authenticateGateResult: AgenticRuntimePorts["authenticateGateResult"];
   authorizeHuman: AgenticRuntimePorts["authorizeHuman"];
@@ -65,6 +68,14 @@ export interface OpenAgenticWorkspaceOptions {
   roleLaunch?: Record<string, { systemPrompt: string; mcpConfigFile: string; hooksSettingsFile: string }>;
   /** P30: per-task Developer launch material from the platform readiness service; absent for legacy hosts. */
   developerLaunches?: DeveloperLaunchPort;
+  /** Host layout; must match the stored manifest version (v3 for `director`). Absent means `legacy_v2`. */
+  layout?: HostLayout;
+  /** Director layout fallback when the manifest records no progress pane command yet. */
+  progressCommand?: readonly string[];
+  /** Pane Manager default agent kind for a v3 manifest (no Coordinator pane); v2 keeps the Coordinator pane's kind. */
+  defaultAgentKind?: string;
+  /** Director mailbox port; passed to Runtime only for a v3 manifest (R-B2-2). */
+  director?: AgenticRuntimePorts["director"];
 }
 
 /** Authenticated host-ingress order: persist Coordinator semantics, then deliver the original signed envelope to Conversation. */
@@ -144,6 +155,7 @@ export function withDeveloperLaunches(base: PanePolicy, launches: DeveloperLaunc
   return {
     ...(base.allocateSpecialist ? { allocateSpecialist: base.allocateSpecialist.bind(base) } : {}),
     ...(base.releaseSpecialist ? { releaseSpecialist: base.releaseSpecialist.bind(base) } : {}),
+    ...(base.ensureProgressPane ? { ensureProgressPane: base.ensureProgressPane.bind(base) } : {}),
     getManifest: options => base.getManifest(options),
     getRoleBinding: (role, options) => base.getRoleBinding(role, options),
     // A degraded launch (Gateway registration lost) stays unready: the outbox keeps its messages queued, never drops them.
@@ -265,6 +277,10 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
   const manifest = SessionManifestSchema.parse(unwrap(await manifestStore.load(options.sessionId)));
   if (manifest.workspaceRoot !== repository || manifest.sessionId !== options.sessionId || manifest.status !== "up")
     throw new Error("Run bflow up for this repository/session before opening its Agentic Runtime");
+  assertManifestLayout(manifest, options.layout);
+  const directorSession = manifest.schemaVersion === 3;
+  if (directorSession && !options.director) throw new Error("A Director session requires the Director mailbox port");
+  const defaultAgentKind = workspaceDefaultAgentKind(manifest, options.defaultAgentKind);
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith("HERDR_") && key !== "HERDR_CONFIG_PATH") delete env[key];
   env.HERDR_SESSION = options.sessionId;
@@ -278,13 +294,14 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
   for (const [role, launch] of Object.entries(options.developerLaunches ? {} : options.roleLaunch ?? {})) {
     const topology = paneModule.getRoleTopologySpec(role);
     if (!topology || topology.contractRole !== role) continue;
-    const args = await paneModule.buildProviderRoleLaunchFromFiles({ ...launch, agentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind, role });
+    const args = await paneModule.buildProviderRoleLaunchFromFiles({ ...launch, agentKind: defaultAgentKind, role });
     roleConfigs[topology.topologyRole] = { args };
   }
   const rolePanes = new paneModule.RolePaneManager({ config: { sessionId: options.sessionId,
     projectName: manifest.projectName, workspaceRoot: repository, conversationSessionId: manifest.conversationSessionId,
     maxDeveloperCapacity: options.maxDeveloperCapacity ?? 2,
-    defaultAgentKind: manifest.panes.find(p => p.role === "coordinator")!.agentKind,
+    defaultAgentKind,
+    ...(directorSession ? { layout: "director", progressCommand: directorProgressCommand(manifest, options.progressCommand) } : {}),
     roleConfigs }, runner, store: manifestStore,
     ...(options.authorizeStoppedRetainedRelease ? { authorizeStoppedRetainedRelease: options.authorizeStoppedRetainedRelease } : {}),
     // Dynamic Developer launches carry Gateway env, which Herdr accepts only at pane creation over its socket.
@@ -405,7 +422,7 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
         return source?.decision === "approved" && source.runId === decision.runId && source.sessionId === decision.sessionId &&
           source.decidedBy === decision.decidedBy && source.decidedAt === decision.decidedAt;
       } });
-    runtime = new AgenticWorkflowRuntime({ engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
+    runtime = new AgenticWorkflowRuntime({ ...(directorSession && options.director ? { director: options.director } : {}), engine: new coreModule.DeterministicWorkflowEngine({ bindingReceiptKeys: options.bindingReceiptKeys }), runStore, artifactStore,
       ...(options.providerFailover ? { providerFailover: options.providerFailover } : {}),
       registry: new registryModule.FileAgentRegistry({ stateFile: resolve(directory, "registry.json") }), transport, panes, policies,
       ...(options.pinDeveloperDispatch ? { pinDeveloperDispatch: options.pinDeveloperDispatch } : {}),
@@ -429,6 +446,8 @@ export async function openAgenticWorkspace(options: OpenAgenticWorkspaceOptions)
         if (!conversation) throw new Error("Conversation host is not ready");
         await conversation.receiveRuntime(message); await options.onConversationNotice?.(message);
       }, authenticateResult: options.authenticateResult,
+      ...(options.authenticateStoredGate ? {authenticateStoredGate:options.authenticateStoredGate} : {}),
+      ...(options.authenticateStoredEvidence ? {authenticateStoredEvidence:options.authenticateStoredEvidence} : {}),
       authenticateEvidence: options.authenticateEvidence, authenticateGateResult: options.authenticateGateResult,
       authorizeHuman: async decision => { const authorized = await options.authorizeHuman(decision);
         if (authorized) approvedBundles.set(decision.approvalId, decision); return authorized; },

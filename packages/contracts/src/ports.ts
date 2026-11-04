@@ -229,6 +229,8 @@ export interface SessionLifecycleManager {
   up(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest>>;
   down(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest>>;
   attach(sessionId: string, options?: OperationOptions): Promise<OperationResult<PaneBinding>>;
+  /** Director-mode sessions (manifest v3) attach to the progress pane instead of a Conversation pane. */
+  attachProgress?(sessionId: string, options?: OperationOptions): Promise<OperationResult<{ tabId: string; paneId: string; terminalId?: string }>>;
   getManifest(sessionId: string, options?: OperationOptions): Promise<OperationResult<SessionManifest | null>>;
   doctorSession(options: { workspaceRoot: string }): Promise<EnvironmentDoctorReport>;
 }

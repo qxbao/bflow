@@ -51,7 +51,7 @@ it('saved preview expectation detects meaningful drift before creating a lock or
  const plan=await loadExecutionPreview(root);await writeFile(join(root,'.bflow/preview.json'),JSON.stringify(plan));
  const guard=await prepareExecutionExpectation(root,'.bflow/preview.json');await guard();
  const repository=await identifyRepository(root);const config=await readEnvironmentConfig(repository);
- config.environment.roles.find(role=>role.role==='coordinator')!.model='changed-model';
+ config.environment.roles.find(role=>role.role==='planner')!.model='changed-model';
  await writeFile(join(root,'.bflow/config.yml'),renderEnvironmentConfigYaml(config));
  await expect(guard()).rejects.toMatchObject({contractError:{code:'conflict',details:{reason:'execution_plan_drift',diff:{changed:true}}}});
  const before=await readdir(root);

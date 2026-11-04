@@ -17,7 +17,10 @@ export const TaskStatusSchema = z.enum([
   "succeeded",
   "failed",
   "cancelling",
-  "cancelled"
+  "cancelled",
+  // B2b (R-B2-14): an issue-queue hold. Takes no capacity, is neither terminal nor success; entered only by
+  // the `park` intent and left only by `unpark` (to ready) or `cancel` (to cancelled).
+  "parked"
 ]);
 
 export const RunStatusSchema = z.enum([
@@ -190,7 +193,7 @@ export const RecoveryCheckpointSchema = z
     checkpointSchemaVersion: z.literal(1),
     codec: z.discriminatedUnion("name", [
       z.object({ name: z.literal("bflow.workflow-run-snapshot+json"), version: z.literal(1) }).strict(),
-      z.object({ name: z.literal("bflow.workflow-aggregate+json"), version: z.union([z.literal(1), z.literal(2)]) }).strict()
+      z.object({ name: z.literal("bflow.workflow-aggregate+json"), version: z.union([z.literal(1), z.literal(2), z.literal(3)]) }).strict()
     ]),
     checkpointId: IdentifierSchema,
     runId: IdentifierSchema,

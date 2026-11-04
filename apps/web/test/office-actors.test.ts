@@ -30,7 +30,7 @@ describe('models', () => {
   test('character.glb has the rig nodes, the role-colour material and exactly the nine clips, and no embedded images', () => {
     const glb = readGlb('character.glb');
     const names = glb.nodes.map(n => n.name);
-    for (const n of ['character', 'hips', 'torso', 'head', 'arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'shin_l', 'shin_r', 'paper']) expect(names).toContain(n);
+    for (const n of ['character', 'hips', 'torso', 'head', 'arm_l', 'arm_r', 'thigh_l', 'thigh_r', 'shin_l', 'shin_r', 'paper', 'hoodie', 'suit']) expect(names).toContain(n);
     expect(glb.materials.map(m => m.name)).toEqual(expect.arrayContaining(['outfit', 'skin', 'hair', 'tag']));
     expect(glb.animations.map(a => a.name).sort()).toEqual([...CLIPS].sort());
     expect(glb.images ?? []).toEqual([]);
@@ -42,7 +42,7 @@ describe('models', () => {
   test('furniture.glb carries every node the scene instantiates and no images', () => {
     const glb = readGlb('furniture.glb');
     const names = glb.nodes.map(n => n.name);
-    for (const n of ['floor_tile', 'wall', 'wall_led', 'spot', 'trim_bar', 'desk', 'chair', 'counter', 'board', 'server', 'cabinet', 'mailbox', 'settings', 'door', 'plant']) expect(names).toContain(n);
+    for (const n of ['floor_tile', 'wall', 'wall_led', 'spot', 'trim_bar', 'desk', 'chair', 'counter', 'exec_chair', 'board', 'server', 'cabinet', 'mailbox', 'settings', 'door', 'plant']) expect(names).toContain(n);
     expect(glb.images ?? []).toEqual([]);
   });
 });

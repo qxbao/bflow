@@ -108,12 +108,14 @@ export function decodeWorkflowRunCheckpointState(
 export function decodeWorkflowAggregateCheckpointState(
   checkpoint: RecoveryCheckpoint
 ): OperationResult<WorkflowAggregateCheckpointState> {
-  if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2].includes(checkpoint.codec.version)) {
+  if (checkpoint.codec.name !== "bflow.workflow-aggregate+json" || ![1, 2, 3].includes(checkpoint.codec.version)) {
     return validationFailure("checkpoint codec is not supported by the workflow aggregate decoder");
   }
   const parsed = WorkflowAggregateCheckpointStateSchema.safeParse(checkpoint.state);
   if (parsed.success && checkpoint.codec.version === 1 && requiresAuthenticatedBindingCodec(parsed.data))
     return validationFailure("Authenticated bindings require aggregate codec 2");
+  if (parsed.success && checkpoint.codec.version < 3 && requiresParkedTaskCodec(parsed.data))
+    return validationFailure("Parked tasks require aggregate codec 3");
   return parsed.success
     ? { ok: true, value: parsed.data }
     : { ok: false, error: {
@@ -126,4 +128,11 @@ export function requiresAuthenticatedBindingCodec(state: WorkflowAggregateCheckp
   return state.snapshot.tasks.some(task => !!task.bindingVerification) || state.commands.some(command =>
     command.result.snapshot.tasks.some(task => !!task.bindingVerification) ||
     command.result.emittedEvents.some(event => event.type === "agent.binding_verified"));
+}
+
+/** B2b (R-B2-14): a parked task anywhere in the aggregate (snapshot, cached command results or their events) needs codec 3. */
+export function requiresParkedTaskCodec(state: WorkflowAggregateCheckpointState): boolean {
+  return state.snapshot.tasks.some(task => task.status === "parked") || state.commands.some(command =>
+    command.result.snapshot.tasks.some(task => task.status === "parked") ||
+    command.result.emittedEvents.some(event => event.type === "task.status_changed" && event.payload.to === "parked"));
 }

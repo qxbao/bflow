@@ -11,6 +11,7 @@ import { isHumanApprover } from "@bflow/runtime";
 import type {
   AgentCheckCommandArgs,
   ApproveCommandArgs,
+  ApproveCardCommandArgs,
   CancelCommandArgs,
   ConfigMigrateCommandArgs,
   CliCommandName,
@@ -140,6 +141,53 @@ function makeValidationError(
 interface ParsedOptions {
   readonly flags: Map<string, string | true>;
   readonly positional: readonly string[];
+}
+
+/** Value-taking options of both `approve` forms; their values are never the card argument. */
+const APPROVE_VALUE_FLAGS: ReadonlySet<string> = new Set(["--run", "--run-id", "--by", "--decided-by", "--actor", "--decision", "--reason",
+  "--approval-id", "--revision", "--generation", "--idempotency-key", "--changes", "--choice"]);
+/** `#3`, `3` or `n3` (an unquoted `#` starts a shell comment) name a card; anything else keeps `approve <task-id>`. */
+const APPROVE_CARD_PATTERN = /^(?:#|[nN])?([1-9]\d*)$/;
+export const APPROVE_CARD_CONFLICT_MESSAGE = "Chỉ chọn một: --reject, --changes hoặc --choice";
+
+function approveCardCandidate(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--") return APPROVE_CARD_PATTERN.test(args[i + 1] ?? "") ? args[i + 1] : undefined;
+    if (isFlag(arg)) { if (!arg.includes("=") && APPROVE_VALUE_FLAGS.has(arg)) i++; continue; }
+    return APPROVE_CARD_PATTERN.test(arg) ? arg : undefined;
+  }
+  return undefined;
+}
+
+function parseApproveCard(args: readonly string[], json: boolean): ParseCliResult {
+  const booleanFlags = new Set(["--json", "-j", "--help", "-h", "--reject"]);
+  const allowedFlags = new Set(["--reject", "--changes", "--choice", "--json", "-j", "--help", "-h"]);
+  const optRes = extractOptionsAndPositional(args, booleanFlags, allowedFlags, "approve", json);
+  if (!optRes.ok) return optRes.result;
+  const { flags, positional } = optRes.value;
+  if (positional.length > 1)
+    return makeValidationError(`Unexpected positional argument '${positional[1]}' for 'bflow approve'.`, json, "approve");
+  const card = `#${APPROVE_CARD_PATTERN.exec(positional[0] ?? "")![1]}`;
+  const chosen = ["--reject", "--changes", "--choice"].filter(flag => flags.has(flag));
+  if (chosen.length > 1) return makeValidationError(APPROVE_CARD_CONFLICT_MESSAGE, json, "approve");
+  const rawReason = flags.get("--changes") as string | undefined;
+  if (rawReason !== undefined && (rawReason.trim().length === 0 || rawReason.trim().length > 2000))
+    return makeValidationError("Lý do --changes phải có từ 1 đến 2000 ký tự.", json, "approve");
+  const rawChoice = flags.get("--choice") as string | undefined;
+  let choice: number | undefined;
+  if (rawChoice !== undefined) {
+    if (!/^[1-6]$/.test(rawChoice.trim())) return makeValidationError("--choice phải là số phương án từ 1 đến 6.", json, "approve");
+    choice = Number(rawChoice.trim());
+  }
+  const value: ApproveCardCommandArgs = {
+    command: "approve", card,
+    outcome: flags.has("--reject") ? "rejected" : rawReason !== undefined ? "changes_requested" : choice !== undefined ? "answer" : "approved",
+    ...(rawReason !== undefined ? { reason: rawReason.trim() } : {}),
+    ...(choice !== undefined ? { choice } : {}),
+    json, help: false
+  };
+  return { ok: true, value };
 }
 
 function extractOptionsAndPositional(
@@ -1715,6 +1763,8 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--check",
         "--remove",
         "--no-gitnexus",
+        "--no-director",
+        "--commit-skills",
         "--accept-gitnexus-license",
         "--json",
         "-j",
@@ -1726,6 +1776,7 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--config",
         "--name",
         "--provider",
+        "--preset",
         "--force",
         "-f",
         "--yes",
@@ -1735,6 +1786,8 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         "--check",
         "--remove",
         "--no-gitnexus",
+        "--no-director",
+        "--commit-skills",
         "--accept-gitnexus-license",
         "--json",
         "-j",
@@ -1770,11 +1823,16 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         return makeValidationError("Option '--name' cannot be empty.", json, "init");
       }
       const projectName = rawName?.trim();
-      const rawProvider = optRes.value.flags.get("--provider");
+      const providerFlag = optRes.value.flags.get("--provider");
+      const presetFlag = optRes.value.flags.get("--preset");
+      if (providerFlag !== undefined && presetFlag !== undefined && providerFlag !== presetFlag) {
+        return makeValidationError("Options '--provider' and '--preset' select the same CLI preset and must not differ.", json, "init");
+      }
+      const rawProvider = providerFlag ?? presetFlag;
       let provider: "claude" | "codex" | "agy" | undefined;
       if (rawProvider !== undefined) {
         if (rawProvider !== "claude" && rawProvider !== "codex" && rawProvider !== "agy") {
-          return makeValidationError("--provider must be 'claude', 'codex', or 'agy'.", json, "init");
+          return makeValidationError(`${providerFlag !== undefined ? "--provider" : "--preset"} must be 'claude', 'codex', or 'agy'.`, json, "init");
         }
         provider = rawProvider;
       }
@@ -1790,6 +1848,8 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       const check = optRes.value.flags.has("--check");
       const remove = optRes.value.flags.has("--remove");
       const noGitnexus = optRes.value.flags.has("--no-gitnexus");
+      const noDirector = optRes.value.flags.has("--no-director");
+      const commitSkills = optRes.value.flags.has("--commit-skills");
       const yes = optRes.value.flags.has("--yes") || optRes.value.flags.has("-y");
       const acceptGitnexusLicense = optRes.value.flags.has("--accept-gitnexus-license");
 
@@ -1799,9 +1859,9 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
       if (acceptGitnexusLicense && noGitnexus) {
         return makeValidationError("Option '--accept-gitnexus-license' cannot be combined with '--no-gitnexus'.", json, "init");
       }
-      if ((check || remove) && (force || update || noGitnexus || acceptGitnexusLicense || projectName !== undefined || provider !== undefined)) {
+      if ((check || remove) && (force || update || noGitnexus || noDirector || commitSkills || acceptGitnexusLicense || projectName !== undefined || provider !== undefined)) {
         return makeValidationError(
-          `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--accept-gitnexus-license', '--name', or '--provider'.`,
+          `Option '${check ? "--check" : "--remove"}' cannot be combined with '--force', '--update', '--no-gitnexus', '--accept-gitnexus-license', '--name', '--provider', or '--preset'.`,
           json,
           "init"
         );
@@ -1818,6 +1878,8 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
         ...(check ? { check: true } : {}),
         ...(remove ? { remove: true } : {}),
         ...(noGitnexus ? { noGitnexus: true } : {}),
+        ...(noDirector ? { noDirector: true } : {}),
+        ...(commitSkills ? { commitSkills: true } : {}),
         ...(yes ? { yes: true } : {}),
         ...(acceptGitnexusLicense ? { acceptGitnexusLicense: true } : {}),
         json,
@@ -2150,6 +2212,8 @@ function parseCliArgsCore(argv: readonly string[], json: boolean): ParseCliResul
     }
 
     case "approve": {
+      const card = approveCardCandidate(commandArgs);
+      if (card !== undefined) return parseApproveCard(commandArgs, json);
       const booleanFlags = new Set(["--json", "-j", "--help", "-h"]);
       const allowedFlags = new Set([
         "--run",

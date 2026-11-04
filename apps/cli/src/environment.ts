@@ -20,6 +20,8 @@ import type { ExecutionExpectationGuard } from "./execution-expectation.js";
 import { readEnvironmentConfig, type EnvironmentConfig, type EnvironmentRoleConfig } from "./environment-config.js";
 import { environmentProcessRunner, namedSessionEnvironment, type EnvironmentProcessRunner } from "./environment-process.js";
 import { identifyRepository, type RepositoryIdentity } from "./repository.js";
+import { resolveBflowCommand } from "./init-director.js";
+import { V2_SESSION_RUNNING_MESSAGE } from "./director-messages.js";
 import { openPaneManagerEnvironment } from "./pane-manager-integration.js";
 import { lifecycleLockStatus, withLifecycleLock } from "./lifecycle-lock.js";
 import { runDoctorDiagnostics } from "./doctor-integration.js";
@@ -86,6 +88,8 @@ export interface EnvironmentCompositionInput {
   readonly sourceConfig?: EnvironmentConfig | undefined;
   /** In-process CLI guard: confirm actual resolution before host creation, never serialized to the daemon. */
   readonly validateExecutionPlan?: ((input: ExecutionPlanInput) => Promise<void>) | undefined;
+  /** Absolute argv of the Director progress pane (`bflow progress --follow`); resolved once by the lifecycle. */
+  readonly progressCommand?: readonly string[] | undefined;
 }
 export interface EnvironmentDependencies {
   /** Explicit opt-in model diagnostics; the default implementation uses the Runtime facade. */
@@ -200,6 +204,7 @@ export function requiredRolesReady(manifest: SessionManifest, roles: Environment
     return permanent.length === 1 && readyPane(permanent[0]!);
   });
 }
+export { V2_SESSION_RUNNING_MESSAGE, DIRECTOR_INFRASTRUCTURE_READY_MESSAGE } from "./director-messages.js";
 export class EnvironmentLifecycle {
   private readonly runner: EnvironmentProcessRunner;
   private readonly env: NodeJS.ProcessEnv;
@@ -282,7 +287,8 @@ export class EnvironmentLifecycle {
   private async integration(repository: RepositoryIdentity, config: EnvironmentConfig,
     validateExecutionPlan?: (input: ExecutionPlanInput) => Promise<void>, sourceConfig?: EnvironmentConfig): Promise<EnvironmentIntegration | undefined> {
     if (this.dependencies.integration) return this.dependencies.integration;
-    const input = { repository, config, env: namedSessionEnvironment(repository.sessionName), ...(validateExecutionPlan ? { validateExecutionPlan } : {}),
+    const progressCommand = [...await resolveBflowCommand(), "progress", "--follow"];
+    const input = { repository, config, env: namedSessionEnvironment(repository.sessionName), progressCommand, ...(validateExecutionPlan ? { validateExecutionPlan } : {}),
       ...(sourceConfig && sourceConfig !== config ? { sourceConfig } : {}) };
     if (this.dependencies.openIntegration) return this.dependencies.openIntegration(input);
     // Explicit operator-selected composition module; never execute a module named in repository data.
@@ -359,10 +365,15 @@ export class EnvironmentLifecycle {
     this.progress("Đang kiểm tra kho mã nguồn và cấu hình...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
+    for (const warning of config.diagnostics ?? []) this.progress(warning);
     await checkExpectation?.();
     if (checkExpectation && (this.dependencies.integration || this.dependencies.openIntegration || process.env.BFLOW_ENVIRONMENT_MODULE))
       fail("Execution expectations require the default Runtime composition; custom composition cannot confirm the shared resolver.");
     return this.locked(repository, async () => {
+      // A running v2 session (Conversation/Coordinator panes) is never adopted by the Director layout.
+      const storedSession = await this.savedManifest(repository);
+      if (storedSession?.schemaVersion === 2 && storedSession.status !== "down")
+        fail(V2_SESSION_RUNNING_MESSAGE, { component: "session", remediation: "bflow down" });
       const deadline = new Deadline(timeoutMs ?? config.environment.startupTimeoutMs, this.dependencies.signal);
       this.progress("Đang xác minh các phụ thuộc và xác thực provider...");
 
@@ -912,10 +923,11 @@ export class EnvironmentLifecycle {
     });
   }
   async attach(): Promise<SessionManifest> {
-    this.progress("Đang xác thực phiên và chuyển tiêu điểm tới khung chat Conversation...");
     const repository = await identifyRepository(this.cwd, this.runner);
     const config = await readEnvironmentConfig(repository);
     const manifest = await this.savedManifest(repository);
+    this.progress(manifest?.schemaVersion === 3 ? "Đang mở tab tiến trình Bflow..."
+      : "Đang xác thực phiên và chuyển tiêu điểm tới khung chat Conversation...");
     if (!manifest || manifest.status === "down") fail("No active repository session. Run bflow up before attach.");
     const deadline = new Deadline(config.environment.startupTimeoutMs);
     if (!await this.probe(repository, config, deadline)) fail("Repository session is stopped. Run bflow up before attach.");
@@ -926,9 +938,16 @@ export class EnvironmentLifecycle {
       if (live === null) fail("No live manifest for repository session");
       const current = this.validateManifest(live, repository);
       if (current.status !== "up" && current.status !== "degraded") fail("Repository session is not attachable");
+      if (current.schemaVersion === 3) {
+        if (!integration.manager.attachProgress) fail("Lifecycle manager cannot focus the Director progress tab; state was preserved. Run bflow doctor.");
+        const target = unwrap(await deadline.call((opts) => integration.manager.attachProgress!(repository.sessionName, opts)));
+        if (target.tabId !== current.attachTarget.tabId || target.paneId !== current.attachTarget.paneId)
+          fail("Manager returned an incorrect progress attach target");
+      } else {
       const pane = PaneBindingSchema.parse(unwrap(await deadline.call((opts) => integration.manager.attach(repository.sessionName, opts))));
       if (pane.sessionId !== repository.sessionName || pane.role !== "conversation" || pane.paneId !== current.attachTarget.paneId ||
         !current.panes.some((p) => p.paneId === pane.paneId && p.agentId === pane.agentId && p.workspaceId === pane.workspaceId && p.tabId === pane.tabId)) fail("Manager returned an incorrect Conversation attach target");
+      }
       if (!await this.probe(repository, config, deadline)) fail("Session stopped before attach");
       this.progress("Đang mở giao diện kết nối trực tiếp Herdr...");
       // session attach NAME is allowed only after positive live-session checks above.

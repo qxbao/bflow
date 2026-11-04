@@ -6,7 +6,7 @@ import { mkdir, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { RoleProfileCatalogSchema, RoleProfilePinSchema, ExecutorLineageSchema, sameRoleProfilePin, type RoleProfilePin, type ResolvedRoleProfileSnapshot, type ExecutorLineage } from "@bflow/contracts";
+import { RoleProfileCatalogSchema, RoleProfilePinSchema, ExecutorLineageSchema, ParkedIssueKindSchema, sameRoleProfilePin, type RoleProfilePin, type ResolvedRoleProfileSnapshot, type ExecutorLineage } from "@bflow/contracts";
 import {
   AcquireAgentLeaseRequestSchema, AgentAssignmentSchema, AgentExecutionHandleSchema, AgentLeaseSchema, AgentRequestSchema, AgentRoleSchema,
   AgentResultSchema, AppendEventsRequestSchema, ApprovalDecisionSchema, ApprovalRequestSchema, ArtifactReferenceSchema, PaneBindingSchema,
@@ -49,7 +49,27 @@ export function strings(value: unknown): string[] {
 export interface SpecRecord {
   specification: Specification; request: ApprovalRequest; decision?: ApprovalDecision; strategy: TestStrategy;
 }
+const TaskParkSchema = z.object({
+  at: IsoDateTimeSchema, reason: z.string().trim().min(1).max(2000), kind: ParkedIssueKindSchema,
+  source: z.enum(["director", "auto"]), episode: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  resumeAttempts: z.number().int().min(0).max(3).optional(),
+  episodeKey: z.string().min(1).optional()
+}).strict();
+export type TaskPark = z.infer<typeof TaskParkSchema>;
+const TaskParkSettlementSchema = z.object({
+  attemptId: z.string().min(1), binding: PaneBindingSchema, park: TaskParkSchema
+}).strict();
+const ParkedVerificationSchema = z.object({
+  episode: z.number().int().positive(), settledAt: IsoDateTimeSchema,
+  job: JsonValueSchema, outcome: JsonValueSchema, attempts: z.number().int().min(3), lastError: z.string().optional()
+}).strict();
 export interface TaskRecord {
+  /** Durable audit of exhausted verification outcomes settled by park; never replayed as pending work. */
+  parkedVerifications?: z.infer<typeof ParkedVerificationSchema>[];
+  parked?: TaskPark;
+  parkHistory?: TaskPark[];
+  /** Private v8 write-ahead authority to settle an unsent allocation; dispatch stays fenced until park commits. */
+  parkSettlement?: z.infer<typeof TaskParkSettlementSchema>;
   failovers?: TaskFailover[];
   taskId: string; spec: SpecRecord; worktrees: TaskWorktree[]; outboundIds: string[];
   changeSet?: GitChangeSet; cycle?: VerificationCycle; result?: AgentResult;
@@ -90,6 +110,10 @@ export interface RunRecord {
     actionId: string; kind: "coordinator_continuation" | "resume_coordinator" | "reconcile_delivery"; owner: "coordinator";
     reason: string; sourceMessageId: string; createdAt: string; state: "pending" | "queued"; previousStatus?: SdlcWorkStatus; resumeAttempts?: number;
     relatedMessageIds?: string[];
+    /** Exact authenticated assignment responsible for refused messages; sourceMessageId remains the refused envelope. */
+    invalidAssignment?: { messageId: string; taskId: string; attemptId: string; implementationAttemptId: string };
+    /** Task owning a verification pause; never authorizes clearing another task's approval or action. */
+    verificationTaskId?: string;
     /**
      * `auto_resume`: Runtime resumes this blocker itself with backoff, sharing the bounded `resumeAttempts` budget; once spent it
      * becomes `manual`. `capability_repair` resumes only after a positive capability proof. Absent/`manual`: waits for a human.
@@ -241,6 +265,8 @@ function parseUserDecisions(value: unknown, runId: string): void {
   }
 }
 export interface Outbound {
+  /** Private v8 park-scoped stop intent/proof. Does not cancel the run or create a task-success receipt. */
+  parkStop?: { requestedAt: string; observations: number; proof?: CancellationStopProof | undefined };
   roleProfile?: RoleProfilePin;
   profileAllocationTaskId?: string;
   profileAllocationReleased?: boolean;
@@ -253,6 +279,11 @@ export interface Outbound {
   deliveryAttempts?: number;
   /** Earliest time a failed Conversation inbox write may be retried (backoff). */
   nextAttemptAt?: string;
+  /**
+   * Director mode only (private journal v8): this Coordinator-bound outbound goes to the in-process Director mailbox, never
+   * Herdr. Like a Conversation inbox write it has no lease, capability check, dispatch request or `unknown_delivery`.
+   */
+  delivery?: "director_mailbox";
   /** Conversation-bound notices are delivered through the trusted inbox: terminal, with no dispatch handle, lease or request. */
   selector: string; taskId: string; attemptId: string; capabilities: string[];
   assignment?: AgentAssignment; lease?: AgentLease; request?: AgentRequest; handle?: AgentExecutionHandle;
@@ -288,7 +319,7 @@ export interface Outbound {
   leaseRelease?: ReleaseAgentLeaseRequest;
 }
 export interface JournalState {
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7; repository: string; runs: RunRecord[]; outbound: Outbound[];
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8; repository: string; runs: RunRecord[]; outbound: Outbound[];
   /** "rejected" is terminal and carries Runtime's reason: the message was refused by admission and must never be retried. */
   inbox: { message: RoleMessage; status: "received" | "applied" | "rejected"; reason?: string }[];
   pendingCore: AppendEventsRequest[];
@@ -299,16 +330,28 @@ export interface JournalState {
 export function isConversationDelivery(out: Outbound): boolean {
   return !out.parentAssignmentId && out.message.recipient.role === "conversation";
 }
+/** Any in-process inbox write (Conversation Gateway or Director mailbox): `sending` is a local write-ahead, never an uncertain delivery. */
+export function isInProcessDelivery(out: Outbound): boolean {
+  return isConversationDelivery(out) || out.delivery === "director_mailbox";
+}
+/** Fields only a Director-mode host writes; their presence requires private journal v8 (R-B2-5, B2b `completed_with_parked`). */
+export function requiresDirectorJournal(state: Pick<JournalState, "runs" | "outbound">): boolean {
+  return state.outbound.some(out => out.delivery !== undefined || out.parkStop !== undefined) ||
+    state.runs.some(run => run.delegation.requestedBy === "director" || run.delegationHistory?.some(item => item.requestedBy === "director") ||
+      run.status === "completed_with_parked" || run.tasks.some(task => task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined));
+}
 /** Private storage codec; exported schemas validate every persisted boundary value. */
 export function parseAgenticJournalState(input: unknown, repository: string): JournalState {
   const root = record(input);
-  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
+  if (typeof root.version !== "number" || ![1, 2, 3, 4, 5, 6, 7, 8].includes(root.version) || root.repository !== repository) throw new Error("Unsupported or foreign P19 journal");
   for (const key of ["runs", "outbound", "inbox", "pendingCore", "pendingVerifications"]) if (!Array.isArray(root[key])) throw new Error(`Invalid journal ${key}`);
   const state = root as unknown as JournalState;
   for (const run of state.runs) {
     textField(run.runId); run.delegation = DelegationRequestSchema.parse(run.delegation);
     if (run.delegation.runId !== run.runId) throw new Error("Journal run/delegation mismatch");
+    if (state.version < 8 && run.delegation.requestedBy === "director") throw new Error("Director journal fields require private journal v8");
     run.status = SdlcWorkStatusSchema.parse(run.status);
+    if (state.version < 8 && run.status === "completed_with_parked") throw new Error("Director journal fields require private journal v8");
     if (run.lastWorkflowRejection !== undefined) {
       const proof = ProposalRejectionSchema.parse(run.lastWorkflowRejection);
       const revisionValue = run.delegation.metadata?.revision;
@@ -363,6 +406,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       }
     }
     if (run.delegationHistory !== undefined) run.delegationHistory = run.delegationHistory.map(item => DelegationRequestSchema.parse(item));
+    if (state.version < 8 && run.delegationHistory?.some(item => item.requestedBy === "director")) throw new Error("Director journal fields require private journal v8");
     if (run.cancelReconciled !== undefined && typeof run.cancelReconciled !== "boolean") throw new Error("Invalid cancellation reconciliation flag");
     if (run.cancelledAllocations !== undefined) {
       const records = z.array(z.object({ binding: PaneBindingSchema, proof: NamespaceExitProofSchema, released: z.boolean().optional() }).strict()).parse(run.cancelledAllocations);
@@ -374,7 +418,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       throw new Error("Invalid follow-up supersession");
     if (run.pendingAction !== undefined) {
       const action = record(run.pendingAction);
-      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "lastResumedAt", "manualResumeAttempts", "requiredRole", "requiredCapabilities"]);
+      const allowed = new Set(["actionId", "kind", "owner", "reason", "sourceMessageId", "createdAt", "state", "previousStatus", "resumeAttempts", "relatedMessageIds", "recovery", "lastResumedAt", "manualResumeAttempts", "requiredRole", "requiredCapabilities", "invalidAssignment", "verificationTaskId"]);
       if (Object.keys(action).some(key => !allowed.has(key))) throw new Error("Invalid durable workflow next action fields");
       textField(action.actionId); textField(action.reason); textField(action.sourceMessageId); textField(action.createdAt);
       if (String(action.reason).length > 2000 || !Number.isFinite(Date.parse(String(action.createdAt))) ||
@@ -395,6 +439,10 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
         throw new Error("Invalid durable workflow resume time");
       if (action.manualResumeAttempts !== undefined && (!Number.isInteger(action.manualResumeAttempts) || Number(action.manualResumeAttempts) < 0 ||
           Number(action.manualResumeAttempts) > 3)) throw new Error("Invalid durable workflow user resume limit");
+      if (action.invalidAssignment !== undefined) action.invalidAssignment = z.object({
+        messageId: z.string().min(1), taskId: z.string().min(1), attemptId: z.string().min(1), implementationAttemptId: z.string().min(1)
+      }).strict().parse(action.invalidAssignment);
+      if (action.verificationTaskId !== undefined) textField(action.verificationTaskId);
       if (action.requiredRole !== undefined) AgentRoleSchema.parse(action.requiredRole);
       if (action.requiredCapabilities !== undefined) strings(action.requiredCapabilities);
     }
@@ -430,6 +478,17 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (run.decision) run.decision = ApprovalDecisionSchema.parse(run.decision);
     if (run.approvalKind && !["design", "delivery", "action", "task"].includes(run.approvalKind)) throw new Error("Invalid approval kind");
     for (const task of run.tasks) {
+      if (task.parked !== undefined || task.parkHistory !== undefined || task.parkSettlement !== undefined || task.parkedVerifications !== undefined) {
+        if (state.version < 8) throw new Error("Task parking requires private journal v8");
+        if (task.parkedVerifications !== undefined) task.parkedVerifications = z.array(ParkedVerificationSchema).max(20).parse(task.parkedVerifications);
+        if (task.parked !== undefined) task.parked = TaskParkSchema.parse(task.parked);
+        if (task.parkHistory !== undefined) task.parkHistory = z.array(TaskParkSchema).max(20).parse(task.parkHistory);
+        if (task.parkSettlement !== undefined) task.parkSettlement = TaskParkSettlementSchema.parse(task.parkSettlement);
+        if (task.parked && task.parkSettlement) throw new Error("Task park and allocation settlement cannot coexist");
+        const pendingPark = task.parked ?? task.parkSettlement?.park;
+        const episodes = [...(task.parkHistory ?? []), ...(pendingPark ? [pendingPark] : [])].map(entry => entry.episode);
+        if (episodes.some((episode, i) => i > 0 && episode <= episodes[i - 1]!)) throw new Error("Invalid task park episode history");
+      }
       if (task.failovers !== undefined) {
         z.array(TaskFailoverSchema).max(17).parse(task.failovers);
         if (new Set(task.failovers.map(entry => entry.switchId)).size !== task.failovers.length || task.failovers.some(entry =>
@@ -439,6 +498,14 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
       textField(task.taskId); parseSpec(task.spec); strings(task.outboundIds);
       if (!Array.isArray(task.worktrees)) throw new Error("Invalid worktree history");
       for (const tree of task.worktrees) { textField(tree.key); textField(tree.worktreePath); textField(tree.branchName); textField(tree.baseCommitHash); }
+      if (task.parkSettlement) {
+        const binding = task.parkSettlement.binding;
+        if (binding.role !== "developer" || binding.sessionId !== run.delegation.sessionId || binding.metadata?.runId !== run.runId ||
+            binding.metadata?.taskId !== `${run.runId}-${task.taskId}` || !binding.worktreePath || binding.cwd !== binding.worktreePath ||
+            !task.worktrees.some(tree => tree.worktreePath === binding.worktreePath) ||
+            binding.agentId !== `dev-${digest([run.runId, task.parkSettlement.attemptId]).slice(0, 20)}`)
+          throw new Error("Invalid unsent park allocation settlement ownership");
+      }
       if (task.changeSet) task.changeSet = GitChangeSetSchema.parse(task.changeSet);
       if (task.cycle) task.cycle = VerificationCycleSchema.parse(task.cycle);
       if (task.result) task.result = AgentResultSchema.parse(task.result);
@@ -471,6 +538,13 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     if (out.executorLineage !== undefined) out.executorLineage = ExecutorLineageSchema.parse(out.executorLineage);
     if (state.version < 7 && (out.roleProfile || out.executorLineage || out.profileAllocationTaskId))
       throw new Error("Profile authority requires private journal v7");
+    if (out.delivery !== undefined) {
+      if (state.version < 8) throw new Error("Director journal fields require private journal v8");
+      if (out.delivery !== "director_mailbox" || out.message.recipient.role !== "coordinator" || out.parentAssignmentId !== undefined ||
+          out.handle !== undefined || out.lease !== undefined || out.request !== undefined || out.capabilities.length > 0 ||
+          ["accepted", "unknown_delivery"].includes(out.status))
+        throw new Error("Invalid Director mailbox outbound");
+    }
     if (out.request) out.request = AgentRequestSchema.parse(out.request);
     if (out.prelaunchFailure) {
       out.prelaunchFailure = { request: AgentRequestSchema.parse(out.prelaunchFailure.request), reconciledAt: IsoDateTimeSchema.parse(out.prelaunchFailure.reconciledAt),
@@ -482,6 +556,13 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
     }
     if (out.lease) out.lease = AgentLeaseSchema.parse(out.lease);
     if (out.handle) out.handle = AgentExecutionHandleSchema.parse(out.handle);
+    if (out.parkStop !== undefined) {
+      out.parkStop = z.object({ requestedAt: IsoDateTimeSchema, observations: z.number().int().min(0).max(5),
+        proof: CancellationStopProofSchema.optional() }).strict().parse(out.parkStop);
+      if (state.version < 8 || !out.handle || out.parentAssignmentId ||
+          out.parkStop.proof && (digest(out.parkStop.proof.handle) !== digest(out.handle) ||
+            Date.parse(out.parkStop.proof.observedAt) < Date.parse(out.handle.acceptedAt))) throw new Error("Invalid park stop proof");
+    }
     const profileRun = state.runs.find(run => run.runId === out.message.run_id);
     const expectedPin = out.message.type === "task.assignment" ? profileRun?.definition?.tasks.find(task => task.id === out.taskId)?.roleProfile ??
       (profileRun?.conflictResolution?.attempts.some(attempt => attempt.messageId === out.message.message_id) ? profileRun.conflictResolution.roleProfile : undefined) :
@@ -574,7 +655,7 @@ export function parseAgenticJournalState(input: unknown, repository: string): Jo
           out.leaseRelease.expectedVersion !== out.lease.version) throw new Error("Invalid pending outbound lease release");
     }
     // An inbox delivery's write-ahead intent is the message itself; it never has a transport request.
-    if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request && !(isConversationDelivery(out) && out.status !== "accepted"))
+    if (["sending", "unknown_delivery", "accepted"].includes(out.status) && !out.request && !(isInProcessDelivery(out) && out.status !== "accepted"))
       throw new Error("Missing outbound dispatch intent");
     if (out.status === "accepted" && (!out.handle || !out.lease)) throw new Error("Missing outbound binding/lease");
   }
@@ -695,8 +776,10 @@ export class AgenticJournal {
         state = { version: 1, repository: this.repository, runs: [], outbound: [], inbox: [], pendingCore: [], pendingVerifications: [] };
       }
       return await action(state, async () => {
-        if (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
-            state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId)) state.version = 7;
+        // Only ever raised: a v8 journal written by a Director host must not be relabelled v7 by a later profile write.
+        if (state.version < 7 && (state.runs.some(run => run.roleProfiles?.length || Object.keys(run.roleProfileDefaults ?? {}).length) ||
+            state.outbound.some(out => out.roleProfile || out.executorLineage || out.profileAllocationTaskId))) state.version = 7;
+        if (state.version < 8 && requiresDirectorJournal(state)) state.version = 8;
         // Equality covers invalid values that JSON.stringify would omit. Re-read under flock before acknowledging unchanged durable bytes.
         if (baseline && durableBytes && isDeepStrictEqual(state, baseline)) {
           try { if ((await readRegularJournalFile(statePath)).equals(durableBytes)) return; }
