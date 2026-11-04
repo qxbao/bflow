@@ -365,6 +365,12 @@ export class AnalysisWorkflowRuntime {
       const outcome = await executeExtension({ execution: record.native!, port: this.ports.roles.native!, save: () => this.save(),
         bind: async handle => {
           record.executionId = handle.executionId; await this.save();
+          const current = (await this.snapshot(run.runId)).tasks.find(item => item.taskId === kind)!;
+          if (current.agentExecution) {
+            if (canonicalReceiptJson(current.agentExecution) !== canonicalReceiptJson(handle))
+              throw new Error("Recovered native Core binding differs from its accepted handle");
+            return;
+          }
           await this.mutate(run.runId, version => engine.bindAgentExecution({ runId: run.runId, taskId: kind, attempt: task.attempt,
             handle, expectedVersion: version, idempotencyKey: `analysis:bind:${handle.executionId}`, occurredAt: handle.acceptedAt }));
         } });
@@ -372,7 +378,10 @@ export class AnalysisWorkflowRuntime {
         verifiedAt: this.ports.now() });
       await this.save();
       const proof = AgentBindingVerificationSchema.parse(record.native!.verification);
-      await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
+      const verified = (await this.snapshot(run.runId)).tasks.find(item => item.taskId === kind)!.bindingVerification;
+      if (verified) {
+        if (canonicalReceiptJson(verified) !== canonicalReceiptJson(proof)) throw new Error("Recovered native binding proof changed");
+      } else await this.mutate(run.runId, version => engine.verifyAgentBinding({ runId: run.runId, taskId: kind, expectedVersion: version,
         verification: proof, occurredAt: proof.verifiedAt, idempotencyKey: `analysis:verify-binding:${outcome.handle.executionId}` }));
       await this.complete(run, record, { agentId: outcome.sender.agent_id!, output: outcome.output });
       await clearNativeBlocker();

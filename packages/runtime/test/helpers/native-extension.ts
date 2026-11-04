@@ -114,7 +114,7 @@ export async function nativeExtensionFixture(family: "analysis" | "qa", sessionI
       criteria: [{ id: "AC-1", description: "Health returns HTTP 200" }], allowedActions: ["http_read"], accountPolicy: { accounts: [] },
       dataPolicy: { fixturePrefix: "native-qa", redactKeys: [] }, cleanup: { required: true }, workspace: { assetRoot: "qa" }, protectedPaths: [] } });
   };
-  return { root, repo, runStore, artifactStore, native, open, start, transport, handles, journalPath, panes,
+  return { root, repo, runStore, artifactStore, native, open, start, transport, registry, handles, journalPath, panes,
     setOutput: (fn: NonNullable<typeof outputFor>) => { outputFor = fn; },
     setAuthorize: (fn: typeof authorize) => { authorize = fn; }, loseAck: () => { loseAck = true; }, omitReceipt: () => { missingReceipt = true; } };
 }

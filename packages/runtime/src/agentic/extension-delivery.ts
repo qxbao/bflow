@@ -368,6 +368,53 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
     });
   }
 
+  /** A new, same-attempt Registry lease proves the expired execution no longer reserves capacity.
+   * It grants no delivery/result authority and is never renewed. All intents precede side effects. */
+  private async retireExpiredCancellation(state: JournalState, out: Outbound, cancellation: CancellationRequest,
+    stop: { executionId: string; stoppedAt: string }, save: () => Promise<void>): Promise<boolean> {
+    const requestId = out.request!.requestId;
+    const intentKind = "extension.expired-stop-lease.requested", receiptKind = "extension.expired-stop-lease.acquired";
+    let intent = this.projection(state, requestId, intentKind);
+    if (!intent) {
+      const acquire = AcquireAgentLeaseRequestSchema.parse({ leaseId: `ext-stop-${digest(requestId)}`,
+        agentId: out.lease!.agentId, runId: out.request!.runId, taskId: out.request!.taskId, attemptId: out.request!.attemptId,
+        ttlMs: 300_000, requestedAt: cancellation.requestedAt, idempotencyKey: `ext-stop-acquire:${requestId}` });
+      this.recordProjection(state, out, out.message, intentKind, acquire, []); await save();
+      intent = this.projection(state, requestId, intentKind)!;
+    }
+    const acquire = AcquireAgentLeaseRequestSchema.parse(record(intent.payload).data);
+    if (acquire.agentId !== out.lease!.agentId || acquire.runId !== out.request!.runId || acquire.taskId !== out.request!.taskId ||
+        acquire.attemptId !== out.request!.attemptId) throw new Error("Expired cancellation lease ownership mismatch");
+    let receipt = this.projection(state, requestId, receiptKind);
+    if (!receipt) {
+      const acquired = await this.options.registry.acquireLease(acquire);
+      if (!acquired.ok) { out.error = redactString(acquired.error.message); await save(); return false; }
+      this.recordProjection(state, out, out.message, receiptKind, AgentLeaseSchema.parse(acquired.value), []); await save();
+      receipt = this.projection(state, requestId, receiptKind)!;
+    }
+    const lease = AgentLeaseSchema.parse(record(receipt.payload).data);
+    if (lease.leaseId !== acquire.leaseId || lease.agentId !== acquire.agentId || lease.runId !== acquire.runId ||
+        lease.taskId !== acquire.taskId || lease.attemptId !== acquire.attemptId || lease.fencingToken <= out.lease!.fencingToken)
+      throw new Error("Expired cancellation did not acquire a fresh same-attempt fence");
+    if (!this.projection(state, requestId, "extension.stop.recorded")) {
+      this.recordProjection(state, out, out.message, "extension.stop.recorded", stop, []); await save();
+    }
+    const releaseKind = "extension.expired-stop-lease.release_requested";
+    let releasing = this.projection(state, requestId, releaseKind);
+    if (!releasing) {
+      const release = ReleaseAgentLeaseRequestSchema.parse({ leaseId: lease.leaseId, fencingToken: lease.fencingToken,
+        expectedVersion: lease.version, releasedAt: this.now(), idempotencyKey: `ext-stop-release:${requestId}` });
+      this.recordProjection(state, out, out.message, releaseKind, release, []); await save();
+      releasing = this.projection(state, requestId, releaseKind)!;
+    }
+    // An acknowledged cleanup acquisition is never renewed. Expiry also retires it after an interrupted cleanup.
+    if (Date.parse(lease.expiresAt) > Date.parse(this.now())) {
+      const released = await this.options.registry.releaseLease(ReleaseAgentLeaseRequestSchema.parse(record(releasing.payload).data));
+      if (!released.ok) { out.error = redactString(released.error.message); await save(); return false; }
+    }
+    out.cancelRequested = true; out.status = "cancelled"; await save(); return true;
+  }
+
   async cancel(input: CancellationRequest) {
     const request = CancellationRequestSchema.parse(input);
     const result = await this.journal.exclusive(async (state, save) => {
@@ -383,7 +430,7 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
         if (proof) {
           const stop = z.object({ executionId: IdentifierSchema, stoppedAt: z.string().datetime({ offset: true }) }).strict().parse(record(proof.payload).data);
           if (stop.executionId !== out.handle?.executionId) throw new Error("Native stop proof ownership mismatch");
-          stopped.push(stop);
+          if (out.status === "cancelled" || out.status === "released") stopped.push(stop);
         }
         if (out.status === "cancelled" || out.status === "released") continue;
         if (["sending", "unknown_delivery"].includes(out.status)) {
@@ -399,6 +446,29 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
           out.status = "cancelled"; await save(); continue;
         }
         if (out.status !== "accepted" || !out.handle) { unresolvedRequestIds.push(id); continue; }
+        if (out.lease && Date.parse(out.lease.expiresAt) <= Date.parse(this.now())) {
+          // Observation is read-only. An expired fence must never authorize an interrupt or a new assignment.
+          let stop: { executionId: string; stoppedAt: string } | undefined;
+          if (proof) stop = z.object({ executionId: IdentifierSchema, stoppedAt: z.string().datetime({ offset: true }) }).strict().parse(record(proof.payload).data);
+          else {
+            const binding = value(await this.options.panes.getRoleBinding(this.intent(out).message.recipient.role));
+            if (!binding || !same(this.target(PaneBindingSchema.parse(binding)), out.handle.target)) { unresolvedRequestIds.push(id); continue; }
+            const observed = await this.options.transport.wait(out.handle, { until: ["idle", "done", "cancelled"], timeoutMs: 1000 });
+            if (observed.ok) {
+              const observation = AgentTransportObservationSchema.parse(observed.value);
+              // A finished transport turn is stop evidence only; it is never a successful task result.
+              if (["idle", "done", "cancelled"].includes(observation.state) && observation.correlationVerified === true &&
+                  same(observation.handle, out.handle) && Date.parse(observation.observedAt) >= Date.parse(request.requestedAt) &&
+                  Date.parse(observation.observedAt) <= Date.parse(this.now()))
+                stop = { executionId: out.handle.executionId, stoppedAt: observation.observedAt };
+            }
+          }
+          if (!stop || Date.parse(stop.stoppedAt) < Date.parse(request.requestedAt) ||
+              Date.parse(stop.stoppedAt) < Date.parse(out.handle.acceptedAt) || Date.parse(stop.stoppedAt) > Date.parse(this.now()) ||
+              !await this.retireExpiredCancellation(state, out, request, stop, save)) { unresolvedRequestIds.push(id); continue; }
+          if (!stopped.some(item => item.executionId === stop.executionId)) stopped.push(stop);
+          continue;
+        }
         if (!out.cancelRequested) {
           // Stop only this still-owned target, never a replacement occupant after lease expiry.
           const binding = value(await this.options.panes.getRoleBinding(this.intent(out).message.recipient.role));
@@ -415,6 +485,7 @@ class NativeExtensionDelivery implements NativeExtensionRolePort {
         const observation = AgentTransportObservationSchema.parse(observed.value);
         if (!["idle", "cancelled"].includes(observation.state) || observation.correlationVerified !== true ||
             !same(observation.handle, out.handle) || Date.parse(observation.observedAt) < Date.parse(out.handle.acceptedAt) ||
+            Date.parse(observation.observedAt) < Date.parse(request.requestedAt) ||
             Date.parse(observation.observedAt) > Date.parse(this.now())) { unresolvedRequestIds.push(id); continue; }
         const stop = { executionId: out.handle.executionId, stoppedAt: observation.observedAt };
         this.recordProjection(state, out, out.message, "extension.stop.recorded", stop, []); await save();

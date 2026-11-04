@@ -68,4 +68,47 @@ describe.each(["analysis", "qa"] as const)("%s SDK native lifecycle", family => 
     }
     expect(f.transport.sentRequests).toHaveLength(1);
   });
+
+  it("resumes an already Core-bound execution after a provider failure without rebinding or resending", async () => {
+    const f = await nativeExtensionFixture(family); let current = await f.open(); await f.start(current.sdk);
+    const original = f.native.waitResult;
+    f.native.waitResult = async () => { throw new Error("provider unavailable after native binding"); };
+    await expect(current.sdk.drive("run-native")).rejects.toThrow("provider unavailable");
+    const taskId = family === "analysis" ? "survey" : "design";
+    const before = value(await current.engine.getSnapshot("run-native"))!.tasks.find(t => t.taskId === taskId)!;
+    expect(before.agentExecution?.executionId).toBe(`herdr-${taskId}`);
+    expect(before.result).toBeUndefined();
+    f.native.waitResult = original;
+    current = await f.open();
+    await expect(current.sdk.drive("run-native")).resolves.toMatchObject({
+      status: family === "analysis" ? "awaiting_business_decision" : "awaiting_design_approval"
+    });
+    const after = value(await current.engine.getSnapshot("run-native"))!.tasks.find(t => t.taskId === taskId)!;
+    expect(after.agentExecution).toEqual(before.agentExecution);
+    expect(after.bindingVerification?.receipt.handle).toEqual(before.agentExecution);
+    expect(f.transport.sentRequests.filter(r => r.taskId === taskId)).toHaveLength(1);
+  });
+
+  it("recovers a committed binding-verification receipt whose persistence acknowledgement was lost", async () => {
+    const f = await nativeExtensionFixture(family); let current = await f.open(); await f.start(current.sdk);
+    const append = f.runStore.appendEvents.bind(f.runStore); let lost = false;
+    f.runStore.appendEvents = async (input, options) => {
+      const result = await append(input, options);
+      if (!lost && result.ok && input.events.some(event => event.type === "agent.binding_verified")) {
+        lost = true; throw new Error("lost binding-verification commit acknowledgement");
+      }
+      return result;
+    };
+    await expect(current.sdk.drive("run-native")).rejects.toThrow("lost binding-verification commit acknowledgement");
+    const taskId = family === "analysis" ? "survey" : "design";
+    const before = value(await current.engine.getSnapshot("run-native"))!.tasks.find(t => t.taskId === taskId)!;
+    expect(before.bindingVerification?.receipt.handle).toEqual(before.agentExecution);
+    current = await f.open();
+    await expect(current.sdk.drive("run-native")).resolves.toMatchObject({
+      status: family === "analysis" ? "awaiting_business_decision" : "awaiting_design_approval"
+    });
+    const after = value(await current.engine.getSnapshot("run-native"))!.tasks.find(t => t.taskId === taskId)!;
+    expect(after.bindingVerification).toEqual(before.bindingVerification);
+    expect(f.transport.sentRequests.filter(r => r.taskId === taskId)).toHaveLength(1);
+  });
 });

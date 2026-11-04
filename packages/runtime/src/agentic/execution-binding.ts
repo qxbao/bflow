@@ -139,7 +139,7 @@ function privateSourceDrift(fingerprint: string, components: readonly string[]):
 export const REPOSITORY_SNAPSHOT_COMPONENT = 'repository-snapshot';
 
 /** @internal Read-only normalization shared with CLI capture. No trust is granted here. */
-export async function normalizeManagedCodexWorkspaceTrust(text: string, repositoryRoot: string): Promise<string> {
+async function normalizeManagedCodexTrustTables(text: string, repositoryRoot: string): Promise<string> {
   const table = (path: string) => `[projects.${JSON.stringify(path).replace(/\u007f/g, '\\u007f')}]\ntrust_level = "trusted"\n`;
   const atLine = (source: string, entry: string) => {
     const at = source.indexOf(entry);
@@ -197,6 +197,23 @@ export async function normalizeManagedCodexWorkspaceTrust(text: string, reposito
   }
 }
 
+/** Codex appends these two presentation-only tables during native startup. Unknown syntax stays byte guarded. */
+export async function normalizeManagedCodexWorkspaceTrust(text: string, repositoryRoot: string, acceptedDigest?: string): Promise<string> {
+  const trusted = await normalizeManagedCodexTrustTables(text, repositoryRoot);
+  // Preserve exact legacy receipts captured before presentation-state projection existed.
+  if (acceptedDigest !== undefined && createHash('sha256').update(trusted).digest('hex') === acceptedDigest) return trusted;
+  // A table-looking suffix inside a TOML multiline string must never acquire an exception.
+  if (trusted.includes('"""') || trusted.includes("'''")) return trusted;
+  const suffix = /\n\[tui\]\nscreen_reader_detection_done = (?:true|false)\n\n\[tui\.model_availability_nux\]\n(?:"[A-Za-z0-9._-]+" = [0-4]\n)+$/.exec(trusted);
+  if (!suffix) return trusted;
+  const prefix = trusted.slice(0, suffix.index);
+  // Ambiguous/escaped earlier definitions cannot be proven to be generated native tables.
+  if (/\btui\b/.test(prefix) || prefix.includes('\\u') || prefix.includes('\\U')) return trusted;
+  const keys = [...suffix[0].matchAll(/^"([A-Za-z0-9._-]+)" = [0-4]$/gm)].map(match => match[1]);
+  if (new Set(keys).size !== keys.length) return trusted;
+  return prefix;
+}
+
 /**
  * Private watches are conservative; non-JSON changes require a new read-only semantic resolution.
  * Host inputs (config, policy, skills, profiles) are compared with the host baseline. The repository is live: a run pins its own
@@ -217,7 +234,7 @@ export async function createExecutionResolutionReader(input: unknown): Promise<E
           file.path.endsWith('/home/.codex/config.toml')) {
           const text = bytes.toString('utf8');
           // Invalid encodings must retain their original bytes, not collapse to replacement characters.
-          if (Buffer.from(text).equals(bytes)) bytes = Buffer.from(await normalizeManagedCodexWorkspaceTrust(text, source.repositoryRoot));
+          if (Buffer.from(text).equals(bytes)) bytes = Buffer.from(await normalizeManagedCodexWorkspaceTrust(text, source.repositoryRoot, file.expectedDigest));
         }
         snapshots[file.component] = file.format === 'json'
           ? canonicalPlanDigest(JSON.parse(bytes.toString('utf8')))
