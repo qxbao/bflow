@@ -3,3 +3,4 @@ export { createLocalWebServer } from './server.js';
 export type { LocalWebServerOptions, LocalWebServer, LocalWebServices, LocalWebCompositionContext } from './server.js';
 export { ProjectRegistry } from './project-registry.js';
 export { privateStateIsFree } from './operation-index.js';
+export type { LocalWebDirectorServices, DirectorLaunchOutcome } from './director.js';

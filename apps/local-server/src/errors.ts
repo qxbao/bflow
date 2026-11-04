@@ -3,11 +3,13 @@ import { WebApiErrorSchema, WebApiErrorStatus, type WebApiError } from '@bflow/c
 import type { ContractError, OperationResult } from '@bflow/contracts';
 
 export class HttpError extends Error {
-  constructor(readonly code: WebApiError['code'], readonly operationId?: string) { super(code); }
+  /** `detail` is a fixed, owner-authored actionable message (never backend or browser text). */
+  constructor(readonly code: WebApiError['code'], readonly operationId?: string, readonly detail?: string) { super(code); }
 }
 export function publicError(error: unknown): WebApiError {
   const code = error instanceof HttpError ? error.code : 'unavailable';
-  return WebApiErrorSchema.parse({ apiVersion: 1, code, message: {
+  const detail = error instanceof HttpError ? error.detail : undefined;
+  return WebApiErrorSchema.parse({ apiVersion: 1, code, message: detail ?? {
     invalid_request: 'Yêu cầu không hợp lệ.', session_required: 'Vui lòng mở lại phiên web.', forbidden: 'Yêu cầu không được phép.',
     not_found: 'Không tìm thấy tài nguyên.', stale_version: 'Dữ liệu đã thay đổi. Vui lòng tải lại.', operation_conflict: 'Mã thao tác đã được sử dụng.',
     payload_too_large: 'Yêu cầu vượt quá giới hạn.', operation_not_allowed: 'Thao tác chưa được hỗ trợ.', unavailable: 'Dịch vụ hiện không khả dụng.',

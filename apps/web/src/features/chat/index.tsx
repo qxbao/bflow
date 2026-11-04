@@ -37,13 +37,14 @@ function Status({value}:{value:Delivery}){
   return <span className={`inline-flex items-center gap-1 ${status.tone}`}><span aria-hidden="true">{status.icon}</span><span>{status.label}</span></span>;
 }
 /** Normalized session history narrowed to one run; the host rechecks send authority independently. */
-export function ChatHistory({api,projectId,sessionId,runId,revision,title,initialDraft}:{
-  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string;initialDraft?:string;
+/** `readOnly`: legacy v2 history shown under a Director layout; nothing can be sent from it. */
+export function ChatHistory({api,projectId,sessionId,runId,revision,title,initialDraft,readOnly=false}:{
+  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string;initialDraft?:string;readOnly?:boolean;
 }) {
-  return <RunThread key={JSON.stringify([projectId,sessionId,runId])} api={api} projectId={projectId} sessionId={sessionId} runId={runId} revision={revision} title={title} {...(initialDraft?{initialDraft}:{})}/>;
+  return <RunThread key={JSON.stringify([projectId,sessionId,runId])} api={api} projectId={projectId} sessionId={sessionId} runId={runId} revision={revision} title={title} readOnly={readOnly} {...(initialDraft?{initialDraft}:{})}/>;
 }
-function RunThread({api,projectId,sessionId,runId,revision,title,initialDraft}:{
-  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string|undefined;initialDraft?:string|undefined;
+function RunThread({api,projectId,sessionId,runId,revision,title,initialDraft,readOnly}:{
+  api:ApiClient;projectId:string;sessionId:string;runId:string;revision:number;title?:string|undefined;initialDraft?:string|undefined;readOnly:boolean;
 }) {
   const [reload,setReload]=useState(0),[limit,setLimit]=useState(PAGE_MESSAGES),[pending,setPending]=useState<PendingMessage>(),[clock,setClock]=useState(()=>Date.now());
   const refresh=()=>setReload(value=>value+1);
@@ -67,9 +68,9 @@ function RunThread({api,projectId,sessionId,runId,revision,title,initialDraft}:{
   const shown=relevant.slice(-limit),last=relevant.at(-1);
   const unsettled=settling(last,clock);
   // Inferred, not a provider signal: Conversation holds a delivered message and has not answered yet.
-  const composing=unsettled&&last?.delivery==='delivered'&&ready&&!result.error;
+  const composing=!readOnly&&unsettled&&last?.delivery==='delivered'&&ready&&!result.error;
   const optimistic=pending&&!relevant.some(message=>message.messageId===pending.messageId)?pending:undefined;
-  const shouldPoll=unsettled || Boolean(optimistic && optimistic.delivery!=='failed');
+  const shouldPoll=!readOnly&&(unsettled || Boolean(optimistic && optimistic.delivery!=='failed'));
   useEffect(()=>{
     if(!shouldPoll)return;
     const poll=setInterval(()=>{setClock(Date.now());setReload(value=>value+1);},REPLY_POLL_MS);
@@ -86,7 +87,7 @@ function RunThread({api,projectId,sessionId,runId,revision,title,initialDraft}:{
   return <section className="m-0 flex h-[calc(100dvh-20rem)] lg:h-[calc(100dvh-15rem)] min-h-[26rem] min-w-0 flex-col bg-surface" aria-label="Trò chuyện của công việc">
     <header className="flex flex-wrap items-center gap-3 border-b border-line px-4 py-3">
       <span aria-hidden="true" className="flex size-10 shrink-0 items-center justify-center rounded-full bg-steel font-data font-semibold text-surface">C</span>
-      <div className="min-w-0 grow basis-40"><h2 className="m-0 truncate text-base">{title??'Conversation'}</h2><p className="m-0 font-data text-xs text-muted">{ready?'Conversation sẵn sàng nhận tin':'Conversation chưa sẵn sàng'}</p></div>
+      <div className="min-w-0 grow basis-40"><h2 className="m-0 truncate text-base">{title??'Conversation'}</h2><p className="m-0 font-data text-xs text-muted">{readOnly?'Lịch sử Conversation cũ · chỉ đọc':ready?'Conversation sẵn sàng nhận tin':'Conversation chưa sẵn sàng'}</p></div>
       <Link className="font-data text-sm" to={`/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}`}>Xem công việc →</Link>
       <button onClick={refresh}>Đọc lại lịch sử</button>
     </header>
@@ -116,6 +117,6 @@ function RunThread({api,projectId,sessionId,runId,revision,title,initialDraft}:{
       </ol>
       {composing&&<div role="status" className="mt-2 inline-flex items-center gap-2 rounded-2xl rounded-bl-sm bg-faint px-3 py-2 font-data text-xs text-muted"><span aria-hidden="true" className="flex gap-1">{['','[animation-delay:150ms]','[animation-delay:300ms]'].map((delay,index)=><span key={index} className={`size-1.5 animate-bounce rounded-full bg-muted ${delay}`.trim()}/>)}</span>Đang soạn tin</div>}
     </div>
-    <ChatComposer {...(initialDraft?{initialDraft}:{})} api={api} projectId={projectId} sessionId={sessionId} runId={runId} ready={ready} sessionFresh={Boolean(session.data && !session.error)} refresh={refresh} onPending={value=>{if(value)pinned.current=true;setPending(value);}}/>
+    {readOnly?<p className="m-0 border-t border-line bg-surface px-4 py-3 text-sm text-muted">Đây là lịch sử Conversation của bố cục cũ, chỉ để đọc. Trò chuyện mới dùng Director.</p>:<ChatComposer {...(initialDraft?{initialDraft}:{})} api={api} projectId={projectId} sessionId={sessionId} runId={runId} ready={ready} sessionFresh={Boolean(session.data && !session.error)} refresh={refresh} onPending={value=>{if(value)pinned.current=true;setPending(value);}}/>}
   </section>;
 }

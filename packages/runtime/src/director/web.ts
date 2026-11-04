@@ -261,7 +261,9 @@ export class DirectorWebBridge {
     if (this.options.layout() !== "director") return "operation_not_allowed";
     if (!this.options.ready()) return "unavailable";
     if (command.projectId !== this.options.projectId) return "forbidden";
-    if (await this.options.runSession(command.runId).catch(() => undefined) === undefined) return "forbidden";
+    // The run must belong to this host's current Conversation session, not merely exist (host-session scope).
+    const sessionId = this.options.sessionId();
+    if (sessionId === undefined || await this.options.runSession(command.runId).catch(() => undefined) !== sessionId) return "forbidden";
     try {
       await this.options.endpoint.checkIssueStatus(command.issueId, DirectorWebBridge.target(command), this.guard(command));
       return undefined;
@@ -305,13 +307,28 @@ export class DirectorWebBridge {
       const matches = (entry: DirectorParkEpisode) => parkEpisodeIssueIds(issue.runId, issue.taskKey!, entry).includes(issue.issueId);
       // Still parked (this episode or a newer one): the unpark did not happen in this serial-ordered host.
       if (park.current !== undefined) return { kind: "failed" as const };
-      return park.history.some(matches) ? { kind: "unparked" as const } : { kind: "unknown" as const };
+      return park.history.some(matches) ? { kind: "unparked" as const, issue } : { kind: "unknown" as const };
     });
     if (outcome.kind === "applied") return ok({ kind: "issue", issueId: outcome.issue.issueId, status: outcome.issue.status });
     if (outcome.kind === "unparked") {
-      // Runtime already reopened this episode; only the local status record is missing. setIssueStatus observes and does not unpark.
-      const issue = await this.options.endpoint.setIssueStatus(command.issueId, "retrying");
-      return ok({ kind: "issue", issueId: issue.issueId, status: issue.status });
+      // Runtime already reopened this episode; only the local status record is missing. recordOnly: setIssueStatus never unparks.
+      // The write runs in its own issue serial step, so it re-checks that the issue is still exactly what was observed (same run,
+      // still open, same updatedAt); setIssueStatus itself re-checks the park episode. A concurrent dismiss or newer episode wins
+      // and the outcome stays unknown (reconciliation_required): a dismissed issue is never resurrected.
+      const observed = outcome.issue;
+      try {
+        const issue = await this.options.endpoint.setIssueStatus(command.issueId, "retrying", current => {
+          if (current.runId !== observed.runId) throw new DirectorIssueRefusal("stale_version", "Issue changed while reconciling");
+          // Already recorded as retrying (e.g. by the Director tool): setIssueStatus returns it unchanged.
+          if (current.status === "retrying") return;
+          if (current.status !== "open" || current.updatedAt !== observed.updatedAt)
+            throw new DirectorIssueRefusal("stale_version", "Issue changed while reconciling");
+        }, { recordOnly: true });
+        return ok({ kind: "issue", issueId: issue.issueId, status: issue.status });
+      } catch (error) {
+        if (error instanceof DirectorIssueRefusal) return undefined;
+        throw error;
+      }
     }
     if (outcome.kind === "failed") return refusal("operation_not_allowed", "Issue command was not applied.");
     return undefined;

@@ -7,7 +7,7 @@ import type { UiMode } from '../mode';
 import type { OfficeFocusZone, OfficeModel, OfficePose } from '../model/types';
 
 /** Terminal runs are not "being worked on". */
-const FINISHED = new Set(['completed', 'failed', 'cancelled']);
+const FINISHED = new Set(['completed', 'completed_with_parked', 'failed', 'cancelled']);
 const SESSION: Record<string, string> = { ready: 'Phiên sẵn sàng', starting: 'Phiên đang khởi động', stopping: 'Phiên đang dừng', stopped: 'Phiên đã dừng', unavailable: 'Phiên chưa sẵn sàng' };
 
 /** The run the "Đang làm" block shows: the most recently updated run that has not reached a terminal state. */
