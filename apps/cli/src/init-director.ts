@@ -75,11 +75,14 @@ export async function installDirectorFiles(
 ): Promise<{ report: InitDirectorReport; diagnostics: string[] }> {
   try {
     const bflowCommand = await resolveBflowCommand(options.deps);
-    const { written } = await applyDirectorRepoFiles({
+    const { written, backedUp } = await applyDirectorRepoFiles({
       repositoryRoot, bflowCommand, providers: DIRECTOR_PROVIDERS, ...(options.commitSkills ? { commitSkills: true } : {})
     });
     const report: InitDirectorReport = { status: "installed", files: written.map(path => ({ path, action: "written" })) };
-    return { report, diagnostics: [] };
+    const diagnostics = backedUp.length > 0
+      ? [`Đã sao lưu tệp tuỳ chỉnh trước khi thay bằng skill Director: ${backedUp.join(", ")}.`]
+      : [];
+    return { report, diagnostics };
   } catch (error) {
     return {
       report: { status: "failed", files: [] },

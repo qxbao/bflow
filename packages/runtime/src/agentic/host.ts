@@ -54,6 +54,7 @@ import { createGitNexusImpactIndex, unconfiguredImpactIndex } from "./impact-ind
 import { AgenticJournal, digest, json, record, textField } from "./journal.js";
 import { COORDINATOR_TOOLS, DIRECTOR_LEGACY_RUN_TOOLS } from "./tools.js";
 import { DirectorEndpoint } from "../director/endpoint.js";
+import { createDirectorGuideSource } from "../director/guide.js";
 import { assertManifestLayout, directorCoordinatorPort, directorDefaultAgentKind, ensureDirectorProgressPane, hostRolesFor, recordConversationNotice,
   startDirectorWork, type DelegationBuilder } from "./host-director-mode.js";
 import { DirectorAuthError } from "../director/store.js";
@@ -1782,10 +1783,14 @@ export async function runAgenticHost(configuration: HostConfiguration): Promise<
     repositoryRoot: configuration.repositoryPath,
     feed: webFeed,
     inspect: () => requireWorkspace().runtime.inspect(),
-    coordinatorGuide: async () => {
-      const guide = record(JsonValueSchema.parse(await promptAssets.readBuiltinRolePrompt("coordinator")));
-      return { source: textField(guide.source), prompt: textField(guide.prompt) };
-    },
+    // read_coordinator_guide: the Director guide in the Director layout, the unchanged Coordinator guide for v2 sessions.
+    coordinatorGuide: createDirectorGuideSource({
+      directorLayout,
+      readCoordinatorGuide: async () => {
+        const guide = record(JsonValueSchema.parse(await promptAssets.readBuiltinRolePrompt("coordinator")));
+        return { source: textField(guide.source), prompt: textField(guide.prompt) };
+      }
+    }),
     work: {
       start: async ({ key, ...delegation }) => {
         // R-B2-4: a Director session opens the run in Runtime itself; the Conversation bridge remains for v2 sessions only.

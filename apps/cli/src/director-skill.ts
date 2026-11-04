@@ -1,6 +1,10 @@
 import { isAbsolute } from "node:path";
 
-export const BFLOW_START_SKILL_VERSION = "1.3.0";
+export const BFLOW_START_SKILL_VERSION = "1.4.0";
+export const BFLOW_STATUS_SKILL_VERSION = "1.0.0";
+export const BFLOW_QUEUE_SKILL_VERSION = "1.0.0";
+/** Upper bound of each generated helper skill (bflow-status, bflow-queue), in UTF-8 bytes. */
+export const DIRECTOR_HELPER_SKILL_MAX_BYTES = 4096;
 
 export interface BflowStartSkillInput {
   readonly bflowCommand: readonly string[];
@@ -40,37 +44,101 @@ Repeat until the user tells you to stop:
 
 1. Call \`director_wait\` with the latest \`cursor\`. It returns user messages, issue-queue changes, Runtime events and mailbox items. Each mailbox item has an \`audience\`: \`director\` means the item is for you to act on, \`user\` means the user must see it.
 2. New work from the user: clarify the request only where it is ambiguous, and agree the acceptance criteria with the user before creating anything. Then call \`start_work\` with title, objective, acceptanceCriteria, sddLevel and \`userMessageSeq\`, the seq of the user message that asked for the work (it is on each message from \`director_wait\`; \`director_note_user_message\` also returns it, for a duplicate too). The tool refuses a seq that is not a real user message, and calling it again with the same seq returns the same run.
-3. Planning for a new run: once per session, before the first plan, call \`planning_reference\` and \`read_coordinator_guide\`. Then call \`assess\`, \`propose_workflow\` and \`tick\`, and return to \`director_wait\`. Specialist results arrive later as mailbox items.
+3. Planning for a new run: once per session, before the first plan, call \`planning_reference\` and \`read_coordinator_guide\` (in a Director session it returns the Director guide: follow it in full). Then call \`assess\`, \`propose_workflow\` and \`tick\`, and return to \`director_wait\`. Specialist results arrive later as mailbox items.
 4. A mailbox item with \`audience\` \`director\`: call \`inspect\` for its run and decide the next step. Usually that is \`request_specialist\` for the next assignment, \`propose_workflow\` again when the decomposition must change, \`retry_verification\` when a verification must run again, or \`tick\` to let the run advance. Use \`read_mailbox\` to page through older items when you need them.
 5. A mailbox item with \`audience\` \`user\`: pass its \`text\` to the user through \`director_say\`. Keep the card code of the item (such as #3) exactly as it is, so the user can match the card to the approval they give.
 6. Approval: you cannot approve. When a run is waiting for a human approval, tell the user that it is waiting and give them the two ways to approve it: press the approve button in Bflow Web, or type \`! bflow approve '#n'\` in this CLI themselves. Do not run that command yourself.
 7. Send every answer meant for the user through \`director_say\` as well as writing it here, so the shared transcript keeps the same conversation.
 8. When the user types a message in this CLI, call \`director_note_user_message\` with it before acting, unless a hook already recorded it (a duplicate is ignored safely).
-9. Keep the latest \`cursor\` from each result.
+9. Keep the latest \`cursor\` from each result. Never invent one.
+10. When \`director_wait\` times out and nothing needs action, call it again with the returned cursor. Never stop the loop to wait for the user: Bflow Web messages only reach you through \`director_wait\`.
 
 ## 3. Keep the flow moving
 
 - A stuck task must not stop unrelated work. Use \`inspect\`, \`reconcile_delivery\`, \`retry_verification\` and \`request_specialist\` to unblock it.
 - When you cannot unblock a task in reasonable time, leave it in the issue queue (\`list_issues\`, \`inspect_issue\`, \`set_issue_status\`), tell the user in one line, and continue with the rest of the workflow.
 - Never resend a message whose delivery is uncertain until \`reconcile_delivery\` proves it was not delivered.
+- A tool error is information: read the message, tell the user in one line when it blocks them, and take the smallest safe next step. Do not repeat an identical failing call more than twice.
+- Send whole messages through \`director_say\`, one per real change. There is no token streaming and Bflow Web is refreshed message by message.
+- A run that finished with parked tasks is not fully done: say so and name the parked tasks.
 - Runs created before this Director session are read-only: for them you can only use \`inspect\`, \`cancel\`, \`reconcile_cancellation\` and \`reconcile_delivery\`. To change such work, cancel it and start new work with \`start_work\`.
 
 ## 4. Rules
 
-- Do not edit source code, tests or documentation yourself. Give implementation and fixes to a Developer through the workflow, even for a one-line change. Independent verification only works when the author is not the reviewer.
+- Do not edit source code, tests or documentation yourself. Give implementation and fixes to a Developer through the workflow, even for a one-line change: tell the user a Developer will make it and call \`start_work\`. Independent verification only works when the author is not the reviewer.
 - Do not write evidence or mark a quality gate as passed.
 - You cannot approve on the user's behalf. When the Runtime needs a human approval, show the user the approval card and give them the two ways to approve it: the approve button in Bflow Web, or typing \`! bflow approve '#n'\` in this CLI themselves.
 - Answer in the user's language. Keep updates short and concrete.
 `;
 
-/** Renders the `bflow-start` Director skill markdown for a repository. */
-export function renderBflowStartSkill(input: BflowStartSkillInput): string {
-  const argv = input.bflowCommand;
+const STATUS_TEMPLATE = `---
+name: bflow-status
+description: Show the current Bflow status of this repository: runs, tasks, parked issues and what is waiting for the user. Use when the user types /bflow-status or $bflow-status, or asks what Bflow is doing.
+---
+
+<!-- bflow-status {{VERSION}} — generated by \`bflow init\`; edit through \`bflow init --update\`. -->
+
+# Bflow status
+
+Read-only. This skill changes nothing.
+
+1. You need the Director \`token\` from /bflow-start. If this session has none, tell the user to run /bflow-start first and stop.
+2. Call \`inspect\` with view summary, and \`list_issues\`, using the Bflow MCP tools, or through the shell:
+
+   BFLOW_DIRECTOR_TOKEN=<token> {{CMD}} director call inspect --json '{"view":"summary"}'
+
+3. Report in the user's language, short, with one line per active run: title, phase, tasks done and total, and what it waits for.
+4. Say plainly what is verified and what is only reported. A Developer saying "done" is not verification, and a Herdr "done" never proves a task succeeded.
+5. A run that finished with parked tasks is not fully done: name the parked tasks and point to /bflow-queue.
+6. A run waiting for a human approval: show its card code exactly (such as #3) and say the user approves with the approve button in Bflow Web, or by typing \`! bflow approve '#n'\` in this CLI themselves. Do not run that command yourself.
+7. Also send the report with \`director_say\` so the Web chat shows it. Never show the token.
+`;
+
+const QUEUE_TEMPLATE = `---
+name: bflow-queue
+description: Review the Bflow issue queue of parked or failed tasks and decide what to do with each. Use when the user types /bflow-queue or $bflow-queue, or asks about stuck, parked or failed work.
+---
+
+<!-- bflow-queue {{VERSION}} — generated by \`bflow init\`; edit through \`bflow init --update\`. -->
+
+# Bflow issue queue
+
+You need the Director \`token\` from /bflow-start. If this session has none, tell the user to run /bflow-start first and stop.
+
+1. Call \`list_issues\` (default: open and retrying). Through the shell:
+
+   BFLOW_DIRECTOR_TOKEN=<token> {{CMD}} director call list_issues --json '{}'
+
+2. For each issue worth acting on call \`inspect_issue\`. Tell the user in their language: what failed, how many attempts, the suggested action, and which evidence exists. Keep it to a few lines per issue.
+3. Act only on what the user asked for or what you can safely do:
+   - Retry: \`unpark_task\` for its run and task, then \`set_issue_status\` retrying. If the Runtime refuses, the issue stays open: say so.
+   - Resolved: only when the Runtime shows the task finished.
+   - Dismissed: records a decision only. It does not unpark the task and does not fix anything.
+   - A user_decision_pending issue is a question for the user: ask it with the options and wait. Never choose for them.
+4. Never edit code to clear an issue. Fixes go to a Developer through \`start_work\`, even a one-line change.
+5. You cannot approve. If something waits for approval, show its card and say the user approves in Bflow Web or types \`! bflow approve '#n'\` themselves.
+6. Send the summary with \`director_say\` too. Never show the token.
+`;
+
+function renderTemplate(template: string, version: string, argv: readonly string[]): string {
   if (argv.length === 0 || !isAbsolute(argv[0]!)) {
     throw new Error("bflowCommand must start with an absolute executable path");
   }
   const cmd = shellQuoteArgv(argv);
-  return SKILL_TEMPLATE.replace(/\{\{(CMD|VERSION)\}\}/g, (_match, key: string) =>
-    key === "CMD" ? cmd : BFLOW_START_SKILL_VERSION,
-  );
+  return template.replace(/\{\{(CMD|VERSION)\}\}/g, (_match, key: string) => (key === "CMD" ? cmd : version));
+}
+
+/** Renders the `bflow-start` Director skill markdown for a repository. */
+export function renderBflowStartSkill(input: BflowStartSkillInput): string {
+  return renderTemplate(SKILL_TEMPLATE, BFLOW_START_SKILL_VERSION, input.bflowCommand);
+}
+
+/** Renders the read-only `bflow-status` helper skill. At most DIRECTOR_HELPER_SKILL_MAX_BYTES. */
+export function renderBflowStatusSkill(input: BflowStartSkillInput): string {
+  return renderTemplate(STATUS_TEMPLATE, BFLOW_STATUS_SKILL_VERSION, input.bflowCommand);
+}
+
+/** Renders the `bflow-queue` helper skill. At most DIRECTOR_HELPER_SKILL_MAX_BYTES. */
+export function renderBflowQueueSkill(input: BflowStartSkillInput): string {
+  return renderTemplate(QUEUE_TEMPLATE, BFLOW_QUEUE_SKILL_VERSION, input.bflowCommand);
 }

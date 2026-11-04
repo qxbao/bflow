@@ -48,7 +48,7 @@ export interface DirectorToolsOptions {
   readonly runtimeEvents?: DirectorRuntimeEventsPort;
   readonly work?: DirectorWorkPort;
   /** Host-provided Coordinator planning guide (the host reads it from pane-manager; this module does not import it). */
-  readonly coordinatorGuide?: () => Promise<{ source: string; prompt: string }>;
+  readonly coordinatorGuide?: () => Promise<{ source: string; prompt: string; framing?: "director" | "coordinator_v2" }>;
   /** Provider-specific upper bound; clamped to [DIRECTOR_LIMITS.waitMinMs, DIRECTOR_LIMITS.waitMaxMs]. Default DIRECTOR_LIMITS.waitDefaultMs. */
   readonly maxWaitMs?: number;
   readonly now?: () => Date;
@@ -224,7 +224,8 @@ export class DirectorTools {
   private async readCoordinatorGuide(): Promise<JsonValue> {
     if (!this.coordinatorGuide) throw new Error("read_coordinator_guide is unavailable: the host has no Coordinator guide");
     const guide = await this.coordinatorGuide();
-    let prompt = `${COORDINATOR_GUIDE_PREFIX}\n\n${guide.prompt}`;
+    // The Director's own guide is returned as written; only the legacy Coordinator guide needs the "skip pane/Herdr" prefix.
+    let prompt = guide.framing === "director" ? guide.prompt : `${COORDINATOR_GUIDE_PREFIX}\n\n${guide.prompt}`;
     if (Buffer.byteLength(prompt, "utf8") > COORDINATOR_GUIDE_MAX_BYTES) {
       // Cut on bytes, then drop a trailing partial UTF-8 sequence.
       prompt = Buffer.from(prompt, "utf8").subarray(0, COORDINATOR_GUIDE_MAX_BYTES).toString("utf8").replace(/\uFFFD+$/, "");

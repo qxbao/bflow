@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   BFLOW_START_SKILL_VERSION,
+  DIRECTOR_HELPER_SKILL_MAX_BYTES,
+  renderBflowQueueSkill,
   renderBflowStartSkill,
+  renderBflowStatusSkill,
   shellQuoteArgv,
 } from "../src/director-skill.js";
 
@@ -31,9 +34,9 @@ describe("bflow-start director skill", () => {
   });
 
   it("embeds the skill version", () => {
-    expect(BFLOW_START_SKILL_VERSION).toBe("1.3.0");
+    expect(BFLOW_START_SKILL_VERSION).toBe("1.4.0");
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
-    expect(text).toContain("1.3.0");
+    expect(text).toContain("1.4.0");
     expect(text).toContain("BFLOW_DIRECTOR_TOKEN=<token> '/usr/bin/node' director call <tool> --json");
     expect(text).not.toContain("--token");
   });
@@ -77,5 +80,88 @@ describe("bflow-start director skill", () => {
     const text = renderBflowStartSkill({ bflowCommand: ["/usr/bin/node"] });
     const spans = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1]!);
     expect(spans.filter(span => /[\\/]|\.(md|ts|js|json|yml|yaml)$/.test(span.replace(/^! /, "")))).toEqual([]);
+  });
+});
+
+const argv = ["/usr/bin/node", "/opt/b flow/bin.js"] as const;
+const renderers = [
+  ["bflow-start", renderBflowStartSkill],
+  ["bflow-status", renderBflowStatusSkill],
+  ["bflow-queue", renderBflowQueueSkill],
+] as const;
+
+// Instruction coverage only: these checks show what the generated text says, not that a model obeys it.
+describe("generated Director skills", () => {
+  it.each(renderers)("%s has frontmatter, a quoted command and no leftover placeholder", (name, render) => {
+    const text = render({ bflowCommand: argv });
+    expect(text.startsWith(`---\nname: ${name}\n`)).toBe(true);
+    expect(text).toContain("description: ");
+    expect(text).not.toContain("{{");
+    expect(text.endsWith("\n")).toBe(true);
+    expect(() => render({ bflowCommand: ["node"] })).toThrow("absolute executable path");
+    expect(render({ bflowCommand: argv })).toBe(text);
+  });
+
+  it("keeps the helper skills within 4096 bytes and the start skill reasonably small", () => {
+    expect(DIRECTOR_HELPER_SKILL_MAX_BYTES).toBe(4096);
+    for (const render of [renderBflowStatusSkill, renderBflowQueueSkill]) {
+      expect(Buffer.byteLength(render({ bflowCommand: argv }), "utf8")).toBeLessThanOrEqual(4096);
+    }
+    expect(Buffer.byteLength(renderBflowStartSkill({ bflowCommand: argv }), "utf8")).toBeLessThanOrEqual(8192);
+  });
+
+  it("never gives the Director code editing, approval or evidence authority", () => {
+    for (const [, render] of renderers) {
+      const text = render({ bflowCommand: argv });
+      expect(text).not.toMatch(/Run `[^`]*bflow approve/);
+      expect(text).not.toMatch(/\bbflow open\b/);
+    }
+    expect(renderBflowStartSkill({ bflowCommand: argv })).toContain("Do not write evidence or mark a quality gate as passed");
+    const queue = renderBflowQueueSkill({ bflowCommand: argv });
+    expect(queue).toContain("Never edit code to clear an issue");
+    expect(queue).toContain("You cannot approve");
+    expect(queue).toContain("Dismissed: records a decision only");
+    const status = renderBflowStatusSkill({ bflowCommand: argv });
+    expect(status).toContain("Read-only");
+    expect(status).toContain("not fully done");
+    expect(status).toContain("Do not run that command yourself");
+  });
+
+  it("tells the Director to delegate a quick one-line edit, wait when idle and handle errors", () => {
+    const text = renderBflowStartSkill({ bflowCommand: argv });
+    expect(text).toMatch(/even for a one-line change: tell the user a Developer will make it and call `start_work`/);
+    expect(text).toMatch(/Never stop the loop to wait for the user/);
+    expect(text).toMatch(/Bflow Web messages only reach you through `director_wait`/);
+    expect(text).toMatch(/A tool error is information/);
+    expect(text).toMatch(/no token streaming/);
+    expect(text).toMatch(/not fully done/);
+    expect(text).toMatch(/Never invent one/);
+  });
+
+  it("keeps file paths out of backticks in the helper skills", () => {
+    for (const render of [renderBflowStatusSkill, renderBflowQueueSkill]) {
+      const spans = [...render({ bflowCommand: argv }).matchAll(/`([^`\n]+)`/g)].map(match => match[1]!);
+      expect(spans.filter(span => /[\\/]|\.(md|ts|js|json|yml|yaml)$/.test(span.replace(/^! /, "")))).toEqual([]);
+    }
+  });
+
+  it("keeps the start skill and the Director guide on the same invariants", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const guide = await readFile(new URL("../../../agents/director/system-prompt.md", import.meta.url), "utf8");
+    const skill = renderBflowStartSkill({ bflowCommand: argv });
+    for (const shared of ["director_wait", "director_say", "start_work", "reconcile_delivery", "! bflow approve '#n'", "Bflow Web"]) {
+      expect(guide, `guide ${shared}`).toContain(shared);
+      expect(skill, `skill ${shared}`).toContain(shared);
+    }
+    expect(Buffer.byteLength(guide, "utf8")).toBeLessThanOrEqual(16384);
+  });
+
+  it("uses only Director tool names that the Runtime exposes", { timeout: 60_000 }, async () => {
+    const { DIRECTOR_TOOLS } = await import("@bflow/runtime");
+    const known = new Set(DIRECTOR_TOOLS.map((tool: { name: string }) => tool.name));
+    for (const [, render] of renderers) {
+      const names = [...render({ bflowCommand: argv }).matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map(match => match[1]!);
+      expect(names.filter(name => !known.has(name) && name !== "user_decision_pending")).toEqual([]);
+    }
   });
 });

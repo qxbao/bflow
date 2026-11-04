@@ -28,7 +28,7 @@ export interface DirectorEndpointOptions {
   readonly repositoryRoot: string;
   readonly coordinator: DirectorCoordinatorPort;
   readonly work?: DirectorWorkPort;
-  readonly coordinatorGuide?: () => Promise<{ source: string; prompt: string }>;
+  readonly coordinatorGuide?: () => Promise<{ source: string; prompt: string; framing?: "director" | "coordinator_v2" }>;
   readonly feed: DirectorFeedPort;
   readonly inspect: () => Promise<unknown>;
   readonly maxWaitMs?: number;

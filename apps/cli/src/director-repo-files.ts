@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveGitExcludePath } from "./git-exclude.js";
-import { BFLOW_START_SKILL_VERSION, renderBflowStartSkill, shellQuoteArgv } from "./director-skill.js";
+import {
+  BFLOW_START_SKILL_VERSION,
+  renderBflowQueueSkill,
+  renderBflowStartSkill,
+  renderBflowStatusSkill,
+  shellQuoteArgv,
+} from "./director-skill.js";
 
 export type DirectorProvider = "claude" | "codex" | "agy";
 export interface DirectorRepoFilesInput {
@@ -40,8 +46,12 @@ const EXCLUDE_LOGICAL_PATH = ".git/info/exclude";
 const START = "# >>> bflow director >>>";
 const END = "# <<< bflow director <<<";
 const ALL_PROVIDERS: readonly DirectorProvider[] = ["claude", "codex", "agy"];
-const CLAUDE_SKILL = ".claude/skills/bflow-start/SKILL.md";
-const AGENTS_SKILL = ".agents/skills/bflow-start/SKILL.md";
+/** Generated skills, each rendered once from one template for every provider. */
+const SKILL_NAMES = ["bflow-start", "bflow-status", "bflow-queue"] as const;
+const claudeSkill = (name: string): string => `.claude/skills/${name}/SKILL.md`;
+const agentsSkill = (name: string): string => `.agents/skills/${name}/SKILL.md`;
+/** Custom or hand-edited files are copied here (mode 0600) before Bflow replaces them. */
+const BACKUP_DIR = ".bflow/director-backups";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -62,15 +72,15 @@ export function directorRepoFilePaths(providers: readonly DirectorProvider[]): s
   const paths = new Set<string>();
   for (const provider of canonicalProviders(providers)) {
     if (provider === "claude") {
-      paths.add(CLAUDE_SKILL);
+      for (const name of SKILL_NAMES) paths.add(claudeSkill(name));
       paths.add(".mcp.json");
       paths.add(".claude/settings.local.json");
     } else if (provider === "codex") {
-      paths.add(AGENTS_SKILL);
+      for (const name of SKILL_NAMES) paths.add(agentsSkill(name));
       paths.add(".codex/config.toml");
       paths.add(".codex/hooks.json");
     } else {
-      paths.add(AGENTS_SKILL);
+      for (const name of SKILL_NAMES) paths.add(agentsSkill(name));
     }
   }
   return [...paths].sort();
@@ -330,14 +340,20 @@ function jsonSpec(path: string, defs: readonly JsonUnitDef[]): FileSpec {
 function buildSpecs(providers: readonly DirectorProvider[], bflowCommand: readonly string[], commitSkills = false): FileSpec[] {
   const selected = canonicalProviders(providers);
   const specs: FileSpec[] = [];
-  const skill = renderBflowStartSkill({ bflowCommand });
+  const skills: Record<(typeof SKILL_NAMES)[number], string> = {
+    "bflow-start": renderBflowStartSkill({ bflowCommand }),
+    "bflow-status": renderBflowStatusSkill({ bflowCommand }),
+    "bflow-queue": renderBflowQueueSkill({ bflowCommand }),
+  };
   const mcpArgs = [...bflowCommand.slice(1), "director", "mcp"].map(tomlString).join(", ");
   if (selected.includes("claude")) {
-    specs.push(fileSpec(CLAUDE_SKILL, skill));
+    for (const name of SKILL_NAMES) specs.push(fileSpec(claudeSkill(name), skills[name]));
     specs.push(jsonSpec(".mcp.json", [mcpServerDef(bflowCommand)]));
     specs.push(jsonSpec(".claude/settings.local.json", [enabledServerDef(), hookDef(bflowCommand, "claude")]));
   }
-  if (selected.includes("codex") || selected.includes("agy")) specs.push(fileSpec(AGENTS_SKILL, skill));
+  if (selected.includes("codex") || selected.includes("agy")) {
+    for (const name of SKILL_NAMES) specs.push(fileSpec(agentsSkill(name), skills[name]));
+  }
   if (selected.includes("codex")) {
     specs.push(
       blockSpec(
@@ -354,7 +370,7 @@ function buildSpecs(providers: readonly DirectorProvider[], bflowCommand: readon
     );
     specs.push(jsonSpec(".codex/hooks.json", [hookDef(bflowCommand, "codex")]));
   }
-  const ignored = [...directorRepoFilePaths(selected), RECEIPT_PATH].sort();
+  const ignored = [...directorRepoFilePaths(selected), RECEIPT_PATH, `${BACKUP_DIR}/`].sort();
   if (!commitSkills) specs.push(blockSpec(EXCLUDE_LOGICAL_PATH, "exclude-block", ignored.join("\n")));
   return specs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
@@ -432,19 +448,49 @@ function allKnownSpecs(): Map<string, FileSpec> {
 
 // ---------- public API ----------
 
-export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<{ written: string[] }> {
+function skillDirs(): string[] {
+  return SKILL_NAMES.flatMap(name => [`.claude/skills/${name}`, `.agents/skills/${name}`]);
+}
+
+function backupPath(path: string, text: string): string {
+  return `${BACKUP_DIR}/${path.replace(/\//g, "__")}.${sha256(text).slice(0, 12)}.bak`;
+}
+
+export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<{ written: string[]; backedUp: string[] }> {
   const { repositoryRoot: root } = input;
   const specs = buildSpecs(input.providers, input.bflowCommand, input.commitSkills === true);
   const locate = await makeLocator(root);
 
   // Plan phase: check every path and compute every new text before the first write.
   await assertNoSymlink(root, RECEIPT_PATH, locate);
+  const previousText = await readIfExists(locate, RECEIPT_PATH);
+  let owned: ReceiptUnit[] = [];
+  if (previousText !== null) {
+    try {
+      owned = parseReceipt(previousText);
+    } catch {
+      owned = [];
+    }
+  }
   const pending: { path: string; text: string }[] = [];
+  const backups: { path: string; text: string }[] = [];
   for (const spec of specs) {
     await assertNoSymlink(root, spec.path, locate);
     const existing = await readIfExists(locate, spec.path);
     const next = spec.merge(existing);
-    if (next !== existing) pending.push({ path: spec.path, text: next });
+    if (next !== existing) {
+      // A whole-file unit is replaced without asking only when the current bytes are exactly what Bflow recorded
+      // writing (a previous Bflow version). Anything else is somebody's file: keep a copy before replacing it.
+      if (existing !== null && spec.expected[0]?.kind === "file") {
+        const hash = sha256(existing);
+        if (!owned.some(unit => unit.path === spec.path && unit.kind === "file" && unit.sha256 === hash)) {
+          const rel = backupPath(spec.path, existing);
+          await assertNoSymlink(root, rel, locate);
+          backups.push({ path: rel, text: existing });
+        }
+      }
+      pending.push({ path: spec.path, text: next });
+    }
   }
   const units: ReceiptUnit[] = specs
     .flatMap(spec => spec.expected.map(unit => ({ path: spec.path, ...unit })))
@@ -454,7 +500,6 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
     null,
     2,
   )}\n`;
-  const previousText = await readIfExists(locate, RECEIPT_PATH);
   const unitId = (u: ReceiptUnit): string => `${u.path}\0${u.kind}\0${u.key ?? ""}`;
   const newIds = new Set(units.map(unitId));
   const specPaths = new Set(specs.map(spec => spec.path));
@@ -491,18 +536,25 @@ export async function applyDirectorRepoFiles(input: DirectorRepoFilesInput): Pro
   }
   const receiptChanged = (await readIfExists(locate, RECEIPT_PATH)) !== finalReceipt;
 
+  for (const item of backups) {
+    await mkdir(join(root, BACKUP_DIR), { recursive: true, mode: 0o700 });
+    if ((await readIfExists(locate, item.path)) !== item.text) await writeText(locate, item.path, item.text, 0o600);
+  }
   for (const item of pending) await writeText(locate, item.path, item.text);
   for (const item of orphans) {
     if (item.text === null) await unlink(locate(item.path));
     else await writeText(locate, item.path, item.text);
   }
   if (orphans.length > 0) {
-    for (const dir of [".claude/skills/bflow-start", ".agents/skills/bflow-start", ".codex", ".claude"]) {
+    for (const dir of [...skillDirs(), ".codex", ".claude"]) {
       await rmdir(join(root, dir)).catch(() => undefined);
     }
   }
   if (receiptChanged) await writeText(locate, RECEIPT_PATH, finalReceipt, 0o644);
-  return { written: [...pending.map(item => item.path), ...orphans.map(item => item.path)].sort() };
+  return {
+    written: [...pending.map(item => item.path), ...orphans.map(item => item.path)].sort(),
+    backedUp: backups.map(item => item.path).sort(),
+  };
 }
 
 export async function checkDirectorRepoFiles(input: DirectorRepoFilesInput): Promise<DirectorRepoFileCheck[]> {
@@ -599,7 +651,7 @@ export async function removeDirectorRepoFiles(repositoryRoot: string): Promise<{
     else await writeText(locate, plan.path, plan.text);
   }
   await unlink(join(root, RECEIPT_PATH)).catch(() => undefined);
-  for (const dir of [".claude/skills/bflow-start", ".agents/skills/bflow-start", ".bflow"]) {
+  for (const dir of [...skillDirs(), `${BACKUP_DIR}`, ".bflow"]) {
     await rmdir(join(root, dir)).catch(() => undefined);
   }
   return { removed: [...removed].sort(), kept: [...kept].sort() };
