@@ -97,6 +97,9 @@ export async function defaultDirectorDeps(cwd: string): Promise<DirectorCommandD
 }
 
 export function detectProvider(env: Readonly<Record<string, string | undefined>>): DirectorProvider {
+  // Set only by the Director launcher (`bflow open` / Web) for the CLI it opens; never a repo role.
+  const hint = env.BFLOW_DIRECTOR_PROVIDER;
+  if (hint !== undefined && PROVIDERS.includes(hint as DirectorProvider)) return hint as DirectorProvider;
   if (env.CLAUDECODE === "1") return "claude";
   if (env.CODEX_SANDBOX || env.CODEX_HOME) return "codex";
   if (env.ANTIGRAVITY_AGENT || Object.keys(env).some(k => k.startsWith("AGY_"))) return "agy";
