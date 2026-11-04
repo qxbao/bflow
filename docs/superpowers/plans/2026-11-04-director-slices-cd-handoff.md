@@ -178,3 +178,94 @@ Bước tiếp: (1) scoped re-review độc lập 0bdbbe34..2a56fa7e cho item1 t
 
 Không sửa contracts/root config/lockfile/docs ngoài plan/handoff. Không tuyên bố full test pass hay live acceptance khi chưa có bằng chứng. Không merge main khi chủ dự án chưa yêu cầu. Nếu quota nguy hiểm: chốt mốc an toàn, cập nhật handoff, push lên dele (không force), soạn prompt mới.
 ```
+
+
+## Bàn giao đợt 3 (2026-11-04, Linux — validation và sửa fixture)
+
+### Baseline và phạm vi
+
+Fetch thành công; baseline `origin/main` **`1a68b31e`** (đã merge PR #83), xác minh `2a56fa7e` và merge `5e545ee0` là ancestors. Worktree mới `.worktrees/director-slice-cd-cont2`, branch `agent/director/slice-cd-cont2`. Giữ nguyên worktrees cũ và user-untracked `docs/superpowers/plans/2026-11-04-pr82-director-extension-admission.md` trong main. Không reset/force/remove worktree, không push/merge.
+
+Task 1–9 kế thừa complete theo đợt 2; Task 10 **chưa được đóng full validation**. Plan C/D chỉ có 10 task. Task 11/12 của **plan B2 cũ** đã complete; các commits `7237534f`, `97f4b176`, `484c2103`, `d0a0e1d6`, `fc7ed2b5` đều được kiểm tra là ancestors của HEAD; không làm lại.
+
+### Review và commits mới
+
+- Scoped independent re-review `0bdbbe34..2a56fa7e`: **item1 ADDRESSED**, không Critical/Important mới. Không làm lại whole-branch review đã xong ở đợt 2.
+- **`ea17df03`**: sửa hai browser assertions lỗi thời, không sửa UI: `Model (planner)` thay role Conversation đã vắng trong default Director; kiểm auto-navigation tới follow-up, receipt link và history/current-work link. Controller Playwright **2/2 PASS**, 27.3s; independent Spec/Quality **PASS**.
+- **`f7554c93`**: sửa E16-D và một dòng helper receipt session. Chấp nhận duy nhất enrichment đúng 12 completion steps sau activation, deep equality mọi trường còn lại + persisted manifest; giữ đúng fake Developer binding/execution handle qua fixture reopen; khai báo rõ fake catalog không chứng minh process thật sống qua down; approval qua fake human actor trên structured Web gateway sẵn có, kiểm chat/Director không thể approve. Helper lấy host sessionId từ actual manifest thay hardcode session-1. Không đổi production, contracts, root config hay lockfile.
+- E16-D đã chạy thật trên Linux: initial RED metadata → RED missing fake allocation (`selectorPresent=false`, writer chưa release) → RED mandatory human approval → GREEN sau sửa fixture/plumbing đúng scope. Không tăng vòng, không nới quality/approval/health/no-resend gates.
+- Final code focused regression **E16-D/E17/E18: 3 files, 9/9 PASS**, 244.83s; E2E tsc sau sửa exit0. Independent E16-D Spec/Quality **PASS**, không Critical/Important/Minor; chỉ fake-harness evidence, không live acceptance.
+
+### Bằng chứng validation — giữ nguyên lỗi lần đầu, không gọi full pass
+
+Install `pnpm install --frozen-lockfile` exit0; `./node_modules/.bin/tsc -b` exit0; `pnpm check:deps`, `pnpm typecheck`, E2E tsc, Web build đều exit0. Root suite được chia đủ configured files: ngoài Runtime/CLI, Runtime riêng, CLI 7 batch ≤15files; Web config và E2E config chạy riêng. Vitest workers1..2, tổng concurrent workers tối đa3; HOME/BFLOW_HOME/XDG/TMPDIR đầu tiên dưới `/tmp/bcd-v-q526pd9u`, ambient provider/ORCA/AI_ISOLATOR hints bị loại. Source package implementations không bị sửa trong đợt này.
+
+| Lượt | Kết quả lần đầu |
+| --- | --- |
+| Root ngoài Runtime/CLI (gồm Local Server) | exit0; 213files PASS/2skip; 2823tests PASS/3skip |
+| Runtime full | exit1; 288files PASS/6fail/3skip; 3974tests PASS/8fail/79skip; 3002.45s |
+| CLI đủ 94files, batches≤15 | 87files PASS/5fail/2skip; 1330tests PASS/12fail/7skip |
+| Web unit | exit0; 51files, 533/533tests PASS |
+| E2E đủ 21files | exit1; 20files PASS/1fail; 95tests PASS/2fail/7skip; 267.30s. E16-D/E17/E18 đều PASS; 2fail thuộc E11 |
+| Playwright với Chrome hệ thống, profile riêng | 32PASS/2fail/1skip, 35ca; 11.7m. Hai ca fail được sửa và rerun 2/2 PASS ở ea17df03; chưa chạy lại nguyên 35ca sau fix |
+| E16 Linux, bật BFLOW_TEST_LIVE_HERDR=1 | E16 harness + actual named Herdr daemon/scripted actor đều PASS; không model inference/live SDLC |
+
+Lượt Playwright mặc định trong driver không tìm thấy browser cache ở HOME cô lập và exit1; đây không phải UI proof. Bằng chứng browser hợp lệ là lượt **BFLOW_WEB_TEST_BROWSER=/usr/bin/google-chrome** ở trên và rerun hai spec. Không cộng các lượt/subsets thành số test unique hoặc full final-HEAD pass.
+
+### Residual cần tiếp tục để đóng Task 10
+
+Rerun riêng các ca/file fail, state mới, TMPDIR riêng **rất ngắn** (ví dụ `/tmp/cXXXXXX`, realpath), workers1, sau reviewed clean commit. Với tests inject HOME/XDG/platform, **unset BFLOW_HOME** nhưng HOME/XDG vẫn cô lập để default Bflow state cũng cô lập. Không dùng HOME thật.
+
+- CLI `director-web-host.test.ts`: SSE reset sau restart timeout15s dưới tải; rerun riêng.
+- CLI `high-level/commands.integration.test.ts`: runner BFLOW_HOME có precedence cao hơn XDG fixture; backend rỗng. Không sửa production/assertion để xanh.
+- CLI `round2-slice01-git-and-runtime.test.ts`: fixture dead socket với TMPDIR đầu tiên dài110byte; thử TMPDIR ngắn trước sửa source.
+- CLI `setup-gateway.test.ts`, `setup-outcomes.test.ts`: evidence chỉ rõ BFLOW_HOME runner override fixture platform/config/state; rerun clean env.
+- Runtime `host-recovery.test.ts`: fixture native socket114byte vượt Linux107; một test restart sau socket unlink nhưng chưa đợi owner PID chết, trong khi fixture tương đương có owner-death barrier. Giữ guard.
+- Runtime `runner-detection.test.ts`: từ chối đúng vì E16-D `tests/**` đang dirty lúc full suite chạy. Runner provenance kiểm blob HEAD; rerun reviewed clean tree, không nới guard.
+- Runtime `flow04-platform-gateway-trust.test.ts`: `devNative.ok=false` tại line203; **chưa xác định nguyên nhân**, cần xem verdict trong rerun sạch.
+- Runtime `lifecycle-fault-matrix-extended-interventions.test.ts`, `round4-slice07-verification-git.test.ts`, `developer-candidate-context.test.ts`: rerun riêng lỗi/timeout tải nặng trước kết luận source.
+- E11 `e11-group-a-setup.e2e.test.ts`: doctor structured checks và real systemd-user unit test fail trong env cô lập; chưa coi host/platform acceptance đạt. Không chuyển sang HOME thật hay cấu hình provider-global để vượt lỗi.
+
+Raw scripts/logs/reports nằm trong git-ignored `.superpowers/sdd/2026-11-04-director-slices-cd/`: `validation/*.log|json`, `progress.md`, review packages và reports. Chúng không đi theo pull; dựng lại ledger từ handoff. Script rerun đã chuẩn bị nhưng chờ marker `validation/reviewed-source-ready`; **không suy ra đã thực thi rerun khi chỉ thấy script**.
+
+### Scoped native probes (không phải full live acceptance)
+
+Herdr **0.9.5**, protocol22/schema1: named headless session riêng `cdprobe-im30ectg`, snapshot/workspace create/pane run+read printf marker đạt; session đã stop, socket và PID không còn. Claude **2.1.318**, Codex **0.166.0**, Agy **1.4.12**: version/help/auth-status trong private HOME/config; cả ba thiếu auth cô lập. Model/Director/specialist/permission enforcement và live fault workflow **blocked/unverified**. VSCode **1.127.0** chỉ help/version với user-data/extensions riêng; IDE/desktop integration chưa kiểm. DISPLAY/WAYLAND không được chuyển vào probe, không kết luận máy vật lý không có desktop. Không setup hay sửa provider-global settings, không start_work/real run/owner approval. Campaign không có full live SDLC evidence.
+
+### Rulings đợt 3
+
+1. Completion report metadata được bổ sung sau activation/probe đúng thứ tự lifecycle: test deep-equal mọi field khác và exact12steps + disk equality. Không đưa report_success lên trước gate chỉ để hai snapshot giống nhau. Chi phí nếu sai: phải xét lại semantics diagnostic metadata, không được nới identity/catalog.
+2. Fake Developer allocation thuộc fixture transport phải giữ đúng binding/selector/execution handle qua reopen; không allocate/send lại, không bỏ writer health. Chỉ chứng minh fake allocation continuity, không process thật sống qua down. Chi phí nếu sai: cần thay bằng fixture dynamic wire đầy đủ hơn, không được quảng bá thành live lifecycle acceptance.
+
+
+### Chốt theo yêu cầu giữ usage — kết quả cuối đợt 3
+
+Chủ dự án đã chọn **“Chốt commit và bàn giao ngay” / “Chốt bàn giao”**. Dừng rerun đang chạy bằng SIGINT đúng process group của controller (exit130), không gọi đó là source failure. Không có worker/child thuộc môi trường test đang dừng còn chạy; không force-kill/global teardown. Không mở thêm campaign. **Task 10 vẫn in_progress**, chưa full test pass/chưa live acceptance.
+
+Hai source/test commits **đã independent Spec/Quality PASS**: `ea17df03`, `f7554c93`. Final E16-D/E17/E18 **9/9 PASS**; hai browser fixes **2/2 PASS**. E2E tsc cuối exit0; `git diff --check` đạt. Không có thay đổi production cần review, chỉ hai browser specs, E16-D/helper và handoff này.
+
+Rerun từng **ca lỗi** trên tree đã commit, state mới, HOME/XDG riêng, BFLOW_HOME unset và TMPDIR ngắn, workers1, trước khi người dùng yêu cầu dừng:
+
+| Ca/file lỗi ban đầu | Kết quả rerun |
+| --- | --- |
+| CLI director-web-host (SSE host restart) | **FAIL**: line206 chờ event mới15s; không nhận reset. Không còn được quy cho tải vì đã fail khi chạy riêng. |
+| CLI high-level/commands.integration (MCP/XDG) | **1/1 PASS** (44 ca khác không chạy trong rerun) |
+| CLI round2-slice01 (cancel/dead socket) | **1/1 PASS** (3 ca khác không chạy) |
+| CLI setup-gateway | **8/8 PASS** (23 ca khác không chạy) |
+| CLI setup-outcomes | **1/1 PASS** (6 ca khác không chạy) |
+| Runtime developer-candidate-context | **1/1 PASS** (1 ca khác không chạy) |
+| Runtime host-recovery | **1 PASS / 1 FAIL**: native fastPath/socket fixture đã pass với TMPDIR ngắn; source refresh vẫn fail `Startup source refresh requires the recorded host owner to be stopped` (host-controller.ts334, test430). Không bỏ guard. |
+| Runtime lifecycle-fault-matrix-extended-interventions | Đang chạy thì **user-requested cancellation**; chưa có verdict rerun. |
+| Runtime round4-slice07, runner-detection, flow04; E11 | Chưa bắt đầu rerun trước khi dừng. |
+
+Các ca không chạy trong focused rerun là do `-t` filter, không phải sửa skip/config. Bảng initial full suite bên trên giữ nguyên số pass/fail/skip của lần đầu. Không cộng focused passes thành full final-HEAD pass.
+
+**Việc còn lại của Task 10, theo thứ tự:**
+
+1. Điều tra/sửa lỗi SSE reset trên activated real-host composition: `apps/cli/test/director-web-host.test.ts:206`. Cả full batch và isolated rerun đều timeout15s sau host restart. Giữ requirement epoch reset/no replay/auth; chưa được đổi expected để xanh.
+2. Điều tra owner-stop/restart boundary: `packages/runtime/test/agentic/host-recovery.test.ts:430` và `host-controller.ts:334`. Xác định promise shutdown và liveness/barrier đúng trước chọn test hay production fix; không nới owner guard.
+3. Tiếp tục rerun riêng `lifecycle-fault-matrix-extended-interventions`, `round4-slice07-verification-git`, `runner-detection` (clean tree), `flow04-platform-gateway-trust` (devNative.ok line203), rồi xử lý findings bằng root-cause evidence. Không chạy lại tất cả 297files chỉ để bắt đầu lại công việc.
+4. Xử lý/phân loại hai E11 doctor/systemd failures trong HOME cô lập. Không dùng HOME thật/setup global để vượt yêu cầu môi trường. Ghi blocked/unverified nếu host không đủ capability.
+5. Review các sửa tiếp theo và cập nhật bảng validation/rulings; chỉ chốt Task 10 khi local residuals đã được xử lý/định đoạt minh bạch. Native provider/IDE/live workflow thiếu auth/desktop tiếp tục ghi blocked/unverified; không phải tự tạo human approval hay chứng nhận full acceptance.
+
+Không làm lại Task1–9, item1 re-review, hai browser fixes, E16-D fixture, E17/E18 regression hoặc B2 Task11/12 đã xong. Không push/merge ở đợt3; muốn tiếp tục ở máy khác phải mang theo hai commits source/test và commit handoff này qua kênh Git được chủ dự án cho phép. Raw ignored logs không được mặc định tồn tại ở máy khác.
