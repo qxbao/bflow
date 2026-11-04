@@ -62,11 +62,13 @@
 ### Task 1: Contract integration + browser portability
 
 **Files:** modify `packages/contracts/src/{director,web,web-host}.ts`; create `packages/contracts/test/director-web.test.ts`; modify `apps/web/test/browser-contract.test.tsx`.
-**Interfaces:** produces D-CD-01 schemas/routes/kinds, unchanged existing contracts.
-- [ ] Chỉ bắt đầu sau owner approvalD-CD-01; controller/integration sở hữu task, implementer được giao scope cụ thể.
-- [ ] Test Buffer absent, tiếng Việt/emoji/lone surrogate tại16384byte boundary; invalid shape/version/provider; strict extra fields rejected; old receipt round-trip; ownership resultkind cross-call rejected.
-- [ ] Add approved shapes only; browser import qua/web không Node globals.
-- [ ] Build contracts/runtime/CLI/local-server/Web; tests contracts/browser. Controller commit sau report + review.
+**Interfaces:** produces D-CD-01 schemas/routes/kinds, unchanged existing contracts. Minimal nonprotected build ripple authorized: fail-closed issue guard in runtime interaction/commands.ts + focused test; add Vietnamese operation labels in Web OperationStatus.tsx. Task2 owns replacing the temporary guard with actual issue admission. Keep legacy WebAction kind lists unchanged; new issue kinds are a separate command union.
+- [x] Chỉ bắt đầu sau owner approvalD-CD-01; controller/integration sở hữu task, implementer được giao scope cụ thể.
+- [x] Test Buffer absent, tiếng Việt/emoji/lone surrogate tại16384byte boundary; invalid shape/version/provider; strict extra fields rejected; old receipt round-trip; ownership resultkind cross-call rejected.
+- [x] Add approved shapes only; browser import qua/web không Node globals.
+- [x] Build contracts/runtime/CLI/local-server/Web; tests contracts/browser. Controller commit sau report + review.
+
+**Status:** complete source/local `afdfb797`, independent Spec/Quality review approved; deferred minors in ledger/handoff.
 
 ### Task 2: Runtime Director Web bridge, durable transcript và issue admission
 

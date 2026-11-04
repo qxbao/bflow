@@ -5,13 +5,13 @@ Baseline: local main `80c123fc` (B2 đã merge cục bộ theo yêu cầu owner;
 
 ## Trạng thái
 
-C/D chưa hoàn tất, chưa merge/push. **Task 8: complete** (commits `a8fa2f91..1f4c6a04`; source `1fd89b68`, fix `1f4c6a04`). Independent Opus review Spec PASS/Quality needs fix → original implementer sửa double-unpark guidance → independent scoped Sonnet review Spec PASS/Quality PASS, không Critical/Important mở. Task 1–7 chờ owner duyệt D-CD-01 trong plan. Task 9–10 chưa bắt đầu.
+C/D chưa hoàn tất, chưa merge/push. **Task 8: complete** (commits `a8fa2f91..1f4c6a04`; source `1fd89b68`, fix `1f4c6a04`). Independent Opus review Spec PASS/Quality needs fix → original implementer sửa double-unpark guidance → independent scoped Sonnet review Spec PASS/Quality PASS, không Critical/Important mở. D-CD-01 đã được chủ dự án duyệt bằng tin nhắn “Duyệt” ngày 2026-11-04; Task1 complete `afdfb797` (Spec/Quality approved, 1413 local tests; full evidence in Task1 SDD report/logs). Task2 tiếp tục bridge/recovery, Task3–7 chờ prerequisite/review. Task 9–10 chưa bắt đầu.
 
 Đã chạy baseline install frozen và tsc -b thành công. Task 8 có source/local tests: Vitest 197 + 70 + 50 = 317 pass, 22 file, không skip/fail. Worker chạy lại với exit code trực tiếp; controller xác nhận build tsc -b exit0 và git diff --check exit0. Log đầy đủ `.superpowers/sdd/2026-11-04-director-slices-cd/task-8-logs/`. Sau fix: tsc -b exit0, check:deps exit0, 6 file/111 test liên quan pass (log `task-8-fix-1-*.log`). Controller smoke import bản build `@bflow/runtime.readDirectorGuide` exit0, guide 9989 byte, logical source/framing đúng; chỉ checkout build, không distribution evidence. Chưa chạy bộ test cuối C/D, chưa có live Herdr/provider evidence cho C/D.
 
 ## Quyết định và phần chờ
 
-D-CD-01 bổ sung DTO/routes/operation kinds Web, sửa UTF-8 validator browser bằng TextEncoder, giữ schema/role/interface cũ. Phạm vi, consumer và downgrade receipt compatibility ghi trong plan. Chưa có explicit owner approval; chưa sửa contracts hoặc triển khai phần phụ thuộc. AGENTS yêu cầu public contract change có integration decision và approving owner.
+D-CD-01 bổ sung DTO/routes/operation kinds Web, sửa UTF-8 validator browser bằng TextEncoder, giữ schema/role/interface cũ. Phạm vi, consumer và downgrade receipt compatibility ghi trong plan. Owner approval đã ghi tại commit `466f009b`; Task1 được phép sửa đúng contract scope, và có ruling cho build ripple tối thiểu ở Runtime/Web consumer. Chưa được suy ra quyền merge/push C/D từ phê duyệt này. AGENTS yêu cầu public contract change có integration decision và approving owner.
 
 Ruling: issue retry/dismiss qua signed WebCommand và durable receipt; optional Director port riêng, không đổi UserInteractionClient cũ. Nếu sai, backend chưa hỗ trợ phải trả operation_not_allowed rõ.
 
